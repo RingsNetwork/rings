@@ -335,10 +335,8 @@ pub struct OnionExitPolicyInfo {
     pub allowed_targets: Vec<String>,
     /// Denied target patterns for the exit.
     pub denied_targets: Vec<String>,
-    /// Maximum concurrent circuits allowed by the exit.
-    pub max_circuits: u32,
-    /// Maximum concurrent streams allowed per circuit.
-    pub max_streams_per_circuit: u32,
+    /// Maximum concurrent sessions allowed by the exit.
+    pub max_sessions: u32,
     /// Maximum bytes per minute allowed by the exit.
     pub max_bytes_per_minute: u64,
 }

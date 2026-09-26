@@ -5,9 +5,11 @@
 //! value opens under, the loop's expiry, and the session that awaits the value:
 //!
 //! ```text
-//! register(t, k, x, s)   T ← purge(T) ∪ {t ↦ (k, x, s)}
-//! deliver(t, cell, now)  (k, x, s) ← T[t], removed;   x > now ?   v ← open_k(cell);   s ! dec(v)
-//! purge(T, now)          T ← { t ↦ e | x_e > now }
+//! register(t, g, k, x, s)   T ← purge(T) ∪ {t ↦ (g, k, x, s)}
+//! expects(p, t)             t ∈ T ∧ T[t].g = p
+//! deliver(p, t, cell, now)  T[t].g = p ?  (k, x, s) ← T[t], removed;  x > now ?  v ← open_k(cell);
+//!                           s ! dec(v)
+//! purge(T, now)             T ← { t ↦ e | x_e > now }
 //! ```
 //!
 //! Laws (tested in `circuit::tests::test_tags`):
@@ -16,14 +18,18 @@
 //!   replayed reply finds no entry and is dropped.
 //! - **Expiry.** An entry whose `x` has passed delivers nothing, and after `purge(now)` the table
 //!   holds no entry with `x ≤ now`: `T` is empty once every `x` has passed.
-//! - **Unknown tags** are dropped: [`OnionClientTags::contains`] is how the hop step tells the
+//! - **Unknown tags** are dropped: [`OnionClientTags::expects`] is how the hop step tells the
 //!   client's cells from a relay's.
+//! - **Guard binding.** An entry is recognised only on a cell from the guard `g` its loop returns
+//!   through, the only peer that sees `t_⋄`; a cell from any other peer is a relay's, and the
+//!   entry stays.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use futures::channel::mpsc;
+use rings_core::dht::Did;
 
 use super::OnionExpiry;
 use crate::error::Result;
@@ -62,6 +68,8 @@ pub(crate) enum OnionReplyDropped {
 
 /// One entry of `T`.
 struct OnionTagEntry {
+    /// `g`, the guard the loop returns through.
+    guard: Did,
     /// `k_{c_n}`.
     key: OnionCarryKey,
     /// `x` of the loop.
@@ -74,20 +82,23 @@ struct OnionTagEntry {
 /// sessions (which register).
 #[derive(Clone, Default)]
 pub(crate) struct OnionClientTags {
+    /// The entries, keyed by tag.
     entries: Arc<Mutex<HashMap<OnionLoopTag, OnionTagEntry>>>,
 }
 
 impl OnionClientTags {
-    /// Register the reply key of one loop for `sink` at `now`.
+    /// Register at `now` the reply key of one loop returning through `guard`, for `sink`.
     pub(crate) fn register(
         &self,
         now_ms: u128,
+        guard: Did,
         reply: OnionReplyKey,
         sink: OnionReplySink,
     ) -> Result<()> {
         let mut entries = lock(&self.entries)?;
         Self::purge_expired(&mut entries, now_ms);
         entries.insert(reply.tag, OnionTagEntry {
+            guard,
             key: reply.key,
             expiry: reply.expiry,
             sink,
@@ -95,12 +106,15 @@ impl OnionClientTags {
         Ok(())
     }
 
-    /// Whether `tag` names an entry: the hop step's test for a cell at position `H + 1`.
-    pub(crate) fn contains(&self, tag: &OnionLoopTag) -> bool {
-        lock(&self.entries).is_ok_and(|entries| entries.contains_key(tag))
+    /// Whether a cell from `from` with tag `tag` is one of this node's returning loops: the hop
+    /// step's test for a cell at position `H + 1`.
+    pub(crate) fn expects(&self, from: Did, tag: &OnionLoopTag) -> bool {
+        lock(&self.entries)
+            .is_ok_and(|entries| entries.get(tag).is_some_and(|entry| entry.guard == from))
     }
 
-    /// Deliver the returning `cell` of `tag` at `now` to its session, spending the entry.
+    /// Deliver the returning `cell` of `tag` from `from` at `now` to its session, spending the
+    /// entry if `from` is its guard.
     ///
     /// # Errors
     ///
@@ -108,12 +122,16 @@ impl OnionClientTags {
     pub(crate) fn deliver(
         &self,
         now_ms: u128,
+        from: Did,
         tag: &OnionLoopTag,
         cell: OnionCell,
     ) -> std::result::Result<(), OnionReplyDropped> {
         let entry = lock(&self.entries)
             .ok()
-            .and_then(|mut entries| entries.remove(tag))
+            .and_then(|mut entries| {
+                let guarded = entries.get(tag).is_some_and(|entry| entry.guard == from);
+                guarded.then(|| entries.remove(tag)).flatten()
+            })
             .filter(|entry| !entry.expiry.has_passed_at(now_ms))
             .ok_or(OnionReplyDropped::UnknownTag)?;
         let class = cell.class();

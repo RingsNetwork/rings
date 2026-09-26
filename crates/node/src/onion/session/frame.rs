@@ -24,6 +24,7 @@
 //!   length is not a whole number of blocks, and trailing bytes after `fin` are rejected.
 
 use bytes::Bytes;
+use zeroize::Zeroizing;
 
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::cell::ONION_SURB_BYTES;
@@ -94,14 +95,20 @@ pub(crate) enum OnionFrame {
     Credit(Vec<OnionSurb>),
 }
 
-/// Why a frame was not encoded: it does not fit the class, so it must not be sent (L3).
+/// Why a frame was not encoded, so it must not be sent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("session frame of {length} bytes exceeds the {capacity}-byte carry of its class")]
-pub(crate) struct OnionFrameTooWide {
-    /// `|enc(frame)|`.
-    pub(crate) length: usize,
-    /// `C₀ − 1`, the widest carried value.
-    pub(crate) capacity: usize,
+pub(crate) enum OnionFrameUnencodable {
+    /// It does not fit the class (L3).
+    #[error("session frame of {length} bytes exceeds the {capacity}-byte carry of its class")]
+    TooWide {
+        /// `|enc(frame)|`.
+        length: usize,
+        /// `C₀ − 1`, the widest carried value.
+        capacity: usize,
+    },
+    /// A `credit` frame of no block, which no decoder accepts.
+    #[error("credit frame of no reply block")]
+    EmptyCredit,
 }
 
 /// Why a carried value is not a frame; the loop is dropped.
@@ -141,14 +148,19 @@ impl OnionFrame {
         (class.value_capacity() - 1) / ONION_SURB_BYTES
     }
 
-    /// `enc(frame)`, refusing a frame wider than the carry of `class`.
+    /// `enc(frame)`, refusing a frame wider than the carry of `class`, or a `credit` frame of no
+    /// block. The encoding is zeroized on drop: a `credit` frame holds its blocks' seeds `σ_υ`.
     ///
     /// # Errors
     ///
-    /// [`OnionFrameTooWide`] if `|enc(frame)| > C₀ − 1`, or a target longer than `u16::MAX`.
-    pub(crate) fn encode(&self, class: OnionLoopClass) -> Result<Vec<u8>, OnionFrameTooWide> {
+    /// [`OnionFrameUnencodable`] if `|enc(frame)| > C₀ − 1`, a target longer than `u16::MAX`, or an
+    /// empty `credit`.
+    pub(crate) fn encode(
+        &self,
+        class: OnionLoopClass,
+    ) -> Result<Zeroizing<Vec<u8>>, OnionFrameUnencodable> {
         let capacity = class.value_capacity();
-        let mut bytes = Vec::with_capacity(capacity);
+        let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
         match self {
             Self::Data {
                 sequence,
@@ -159,11 +171,12 @@ impl OnionFrame {
                 bytes.extend_from_slice(&sequence.value().to_be_bytes());
                 match target {
                     Some(target) => {
-                        let length =
-                            u16::try_from(target.len()).map_err(|_| OnionFrameTooWide {
+                        let length = u16::try_from(target.len()).map_err(|_| {
+                            OnionFrameUnencodable::TooWide {
                                 length: target.len(),
                                 capacity,
-                            })?;
+                            }
+                        })?;
                         bytes.push(TARGET_FLAG);
                         bytes.extend_from_slice(&length.to_be_bytes());
                         bytes.extend_from_slice(target);
@@ -176,13 +189,16 @@ impl OnionFrame {
                 bytes.push(FIN_TAG);
                 bytes.extend_from_slice(&sequence.value().to_be_bytes());
             }
+            Self::Credit(surbs) if surbs.is_empty() => {
+                return Err(OnionFrameUnencodable::EmptyCredit);
+            }
             Self::Credit(surbs) => {
                 bytes.push(CREDIT_TAG);
                 surbs.iter().for_each(|surb| surb.encode_into(&mut bytes));
             }
         }
         if bytes.len() > capacity {
-            return Err(OnionFrameTooWide {
+            return Err(OnionFrameUnencodable::TooWide {
                 length: bytes.len(),
                 capacity,
             });

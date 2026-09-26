@@ -1,22 +1,18 @@
 //! The cell size classes of the onion data plane.
 //!
-//! A loop's class `b` is one of these buckets above 4 KiB (#834 D6), and a cell of the loop is
-//! exactly `b` bytes: the class is the cell's length, visible to every hop, and the only size a
-//! hop can observe.
+//! A loop's class `b` is one of these buckets (#834 D6), and a cell of the loop is exactly `b`
+//! bytes: the class is the cell's length, visible to every hop, and the only size a hop can
+//! observe.
 
-use serde::Deserialize;
-use serde::Serialize;
-
-/// Public size classes of onion cells.
+/// Public size classes of onion cells, `16 KiB … 12 MiB`: exactly the loop classes.
 ///
 /// The class is intentionally visible while everything inside the cell is not. A small class
-/// set bounds padding overhead without exposing a byte-accurate traffic fingerprint.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// set bounds padding overhead without exposing a byte-accurate traffic fingerprint. The
+/// discriminant is the one-byte label the header MAC binds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum OnionCellBucket {
-    /// Four KiB; below every loop class, since the fixed header alone is 2919 bytes.
-    KiB4,
-    /// Sixteen KiB, the default loop class.
+    /// Sixteen KiB, the default and least class: one admission unit.
     KiB16,
     /// Sixty-four KiB.
     KiB64,
@@ -32,8 +28,7 @@ pub enum OnionCellBucket {
 
 impl OnionCellBucket {
     /// Every bucket, in increasing size.
-    pub(crate) const ALL: [Self; 7] = [
-        Self::KiB4,
+    pub(crate) const ALL: [Self; 6] = [
         Self::KiB16,
         Self::KiB64,
         Self::KiB256,
@@ -45,7 +40,6 @@ impl OnionCellBucket {
     /// Return the cell length `b` of this class.
     pub const fn cell_bytes(self) -> usize {
         match self {
-            Self::KiB4 => 4 * 1024,
             Self::KiB16 => 16 * 1024,
             Self::KiB64 => 64 * 1024,
             Self::KiB256 => 256 * 1024,

@@ -44,7 +44,7 @@ fn fixture_header(seed: u64, keys: &[DelegateeKey]) -> (OnionHeader, OnionLoopTa
 
 /// A header's bytes decoded back, as the cell parser does.
 fn decode(bytes: &[u8]) -> OnionHeader {
-    OnionHeader::decode(bytes).expect("header width")
+    OnionHeader::of(bytes.try_into().expect("header width"))
 }
 
 /// For every `1 ≤ H ≤ Ĥ` and every position `1 ≤ i ≤ H`, `i = H` included, peeling `χ_i` under
@@ -105,7 +105,7 @@ fn test_relabelled_cell_dies_at_the_next_honest_hop() {
         panic!("position 1 is a relay");
     };
     let honest = forwarded.into_bytes();
-    let large = OnionLoopClass::try_from(OnionCellBucket::MiB12).expect("a loop class");
+    let large = OnionLoopClass::from(OnionCellBucket::MiB12);
     let mut relabelled = honest.clone();
     relabelled.resize(large.cell_bytes(), 0);
 
@@ -132,13 +132,13 @@ fn test_cell_parser_admits_exactly_the_class_lengths() {
         16 * 1024 + 1,
     ] {
         assert_eq!(
-            OnionCell::parse(vec![0; width]).err(),
+            OnionCell::parse(&vec![0; width]).err(),
             Some(OnionCellWidth(width))
         );
     }
     let mut bytes = vec![0; 16 * 1024];
     fixture_rng(26).fill_bytes(&mut bytes);
-    let cell = OnionCell::parse(bytes.clone()).expect("a 16 KiB cell");
+    let cell = OnionCell::parse(&bytes).expect("a 16 KiB cell");
     assert_eq!(cell.class(), OnionLoopClass::DEFAULT);
     assert_eq!(cell.into_bytes(), bytes);
 }

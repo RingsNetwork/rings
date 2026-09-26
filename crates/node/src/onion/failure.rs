@@ -113,7 +113,7 @@ pub enum OnionRouteError {
     /// An HTTPS response channel closed before the exit's outcome was delivered.
     #[error("onion HTTPS response channel closed")]
     HttpsResponseClosed,
-    /// A TCP open request timed out before the exit answered.
+    /// The exit's connect to a `tcp` target did not complete within its open timeout.
     #[error("onion TCP open timed out")]
     TcpOpenTimedOut,
     /// A session's driver has already ended.

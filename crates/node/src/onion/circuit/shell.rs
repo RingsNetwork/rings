@@ -3,22 +3,26 @@
 //!
 //! ```text
 //! Hop(from, cell):  now ← clock
-//!                   now < clock_A − X₀ ?  ⇒ renew(fresh e′, key, admitted links), publish e′
-//!                   outcome ← hop(A, d, relays, T.contains, from, now, cell)          (pure)
-//!                     Relayed(next, c)         ⇒ link sender ← (next, c)
+//!                   now < clock_A − X₀ ?  ⇒ renew(fresh e′, key, A's live links); the epoch
+//!                                            cell ← e′, published at the next heartbeat
+//!                   outcome ← hop(A, d, relays, T.expects(from), from, now, cell)     (pure)
+//!                     Relayed(next, c)         ⇒ link sender ← (next, c)       (next is live)
 //!                     Consumed(f, ā, v, υ)     ⇒ ⟦f⟧(from, ā, v, υ) in the algebra
 //!                     Returned(t_⋄, c)         ⇒ T.deliver(t_⋄, c)
 //!                     Refused | Dropped        ⇒ nothing (the cell was paid for, or not decrypted)
 //! Link(Opened(l))   A.link_opened(l); a full table ⇒ close l; else the emitter opens l's lane
-//! Link(Closed(l))   A.link_closed(l); the emitter closes l's lane
-//! Link(Reconcile)   refused ← A.reconcile(core's admitted links, read here); close refused;
-//!                   the emitter's lanes ← those links; T.purge(now)
+//! Link(Closed(l))   A.link_closed(l); no generation of l's peer live ⇒ the emitter closes its lane
+//! Link(Reconcile(L)) refused ← A.reconcile(L); close refused; lanes ← A's live peers;
+//!                   T.purge(now)
 //! ```
 //!
 //! Every effect runs under the protocol's transition gate, so cells and link facts reach the
-//! admission state in one linear order, and the reconcile snapshot is read and applied at that
-//! order's drain point: the linearisation obligation of admission (#844). A renewal draws the new
-//! epoch independently and uniformly, retrying on the negligible collision with the current one.
+//! admission state in one linear order. A reconcile snapshot `L` travels in the feed's FIFO, read
+//! at its place there (`feed`), so it is linearised with the facts around it: the linearisation
+//! obligation of admission (#844). A renewal keeps the table's own live links, which are
+//! linearised by construction, and draws the new epoch independently and uniformly, retrying on
+//! the negligible collision with the current one. Lanes change only after the table, and only
+//! toward the links the table holds live.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -32,7 +36,6 @@ use rings_core::swarm::callback::PeerLink;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
 
-use super::admission::OnionAdmissionLink;
 use super::admission::OnionAdmissionState;
 use super::admission::OnionReplayFilterKey;
 use super::codec::OnionLinkFact;
@@ -244,7 +247,7 @@ impl OnionCircuitShell {
         cell: crate::onion::sphinx::cell::OnionCell,
     ) -> Result<()> {
         let now_ms = get_epoch_ms();
-        let refused = self.renew_if_rolled_back(scope, now_ms)?;
+        let refused = self.renew_if_rolled_back(now_ms)?;
         self.close(scope, refused).await;
         let outcome = {
             let mut admission = lock(&self.admission)?;
@@ -252,18 +255,24 @@ impl OnionCircuitShell {
                 &mut admission,
                 &self.key,
                 self.relays,
-                |tag| self.tags.contains(tag),
+                |tag| self.tags.expects(from, tag),
                 from,
                 now_ms,
                 cell,
             )
         };
         match outcome {
-            OnionHopOutcome::Relayed { next, cell } => self.link_sender.enqueue(
-                scope.lifecycle(),
-                OnionLink::new(next),
-                Bytes::from(cell.into_bytes()),
-            ),
+            OnionHopOutcome::Relayed { next, cell } => {
+                // A full lane drops the cell: the loop's session sees a gap and fails closed.
+                if let Err(error) = self.link_sender.enqueue(
+                    scope.lifecycle(),
+                    OnionLink::new(next),
+                    Bytes::from(cell.into_bytes()),
+                ) {
+                    tracing::debug!(%next, %error, "drop a relayed onion cell");
+                }
+                Ok(())
+            }
             OnionHopOutcome::Consumed {
                 symbol,
                 arguments,
@@ -282,7 +291,7 @@ impl OnionCircuitShell {
                     .await
             }
             OnionHopOutcome::Returned { tag, cell } => {
-                if let Err(dropped) = self.tags.deliver(now_ms, &tag, cell) {
+                if let Err(dropped) = self.tags.deliver(now_ms, from, &tag, cell) {
                     tracing::debug!(%from, %dropped, "drop a returning onion cell");
                 }
                 Ok(())
@@ -298,48 +307,44 @@ impl OnionCircuitShell {
         }
     }
 
-    /// Apply one link fact (see the module diagram): to the admission table, and to the link
-    /// emitter, whose lanes follow the links that are up.
+    /// Apply one link fact (see the module diagram): first to the admission table, then to the
+    /// link emitter, whose lanes follow the links the table holds live.
     async fn link(&self, scope: &EffectScope, fact: OnionLinkFact) -> Result<()> {
         let now_ms = get_epoch_ms();
         let lifecycle = scope.lifecycle();
-        let refused = match fact {
-            OnionLinkFact::Opened { did, generation } => {
-                let link = OnionAdmissionLink { did, generation };
-                match lock(&self.admission)?.link_opened(now_ms, link) {
-                    Ok(()) => {
-                        self.link_sender.open(lifecycle, OnionLink::new(did))?;
-                        Vec::new()
-                    }
-                    Err(_) => vec![link],
+        let (refused, lanes) = {
+            let mut admission = lock(&self.admission)?;
+            match fact {
+                OnionLinkFact::Opened(link) => match admission.link_opened(now_ms, link) {
+                    Ok(()) => (Vec::new(), OnionLaneChange::Open(link.peer())),
+                    Err(_) => (vec![link], OnionLaneChange::Keep),
+                },
+                OnionLinkFact::Closed(link) => {
+                    admission.link_closed(now_ms, link);
+                    // A close is generation-exact: the lane goes only when no generation of the
+                    // peer is live any more.
+                    let lanes = match admission.live_link(link.peer()) {
+                        Some(_) => OnionLaneChange::Keep,
+                        None => OnionLaneChange::Close(link.peer()),
+                    };
+                    (Vec::new(), lanes)
+                }
+                OnionLinkFact::Reconcile(snapshot) => {
+                    self.tags.purge(now_ms);
+                    let refused = admission.reconcile(now_ms, snapshot).links().to_vec();
+                    (refused, OnionLaneChange::Follow(live_peers(&admission)))
                 }
             }
-            OnionLinkFact::Closed { did, generation } => {
-                lock(&self.admission)?.link_closed(now_ms, OnionAdmissionLink { did, generation });
-                self.link_sender.close(OnionLink::new(did))?;
-                Vec::new()
-            }
-            OnionLinkFact::Reconcile => {
-                self.tags.purge(now_ms);
-                let snapshot = lifecycle.admitted_links()?;
-                let up = snapshot
-                    .iter()
-                    .copied()
-                    .map(PeerLink::peer)
-                    .collect::<Vec<_>>();
-                self.link_sender.reconcile(&lifecycle, &up)?;
-                lock(&self.admission)?
-                    .reconcile(
-                        now_ms,
-                        snapshot.into_iter().map(|link| OnionAdmissionLink {
-                            did: link.peer(),
-                            generation: link.generation(),
-                        }),
-                    )
-                    .links()
-                    .to_vec()
-            }
         };
+        let applied = match lanes {
+            OnionLaneChange::Keep => Ok(()),
+            OnionLaneChange::Open(peer) => self.link_sender.open(lifecycle, OnionLink::new(peer)),
+            OnionLaneChange::Close(peer) => self.link_sender.close(OnionLink::new(peer)),
+            OnionLaneChange::Follow(up) => self.link_sender.reconcile(&lifecycle, &up),
+        };
+        if let Err(error) = applied {
+            tracing::debug!(%error, "onion link lanes did not follow a link fact");
+        }
         #[cfg(all(test, rings_native))]
         if let Ok(mut waiters) = lock(&self.link_waiters) {
             waiters.drain(..).for_each(|waiter| {
@@ -350,30 +355,20 @@ impl OnionCircuitShell {
         Ok(())
     }
 
-    /// Renew `A` into a fresh epoch if the clock has rolled back beyond `X₀`, publishing the
-    /// epoch; return the links the renewed table refuses.
-    fn renew_if_rolled_back(
-        &self,
-        scope: &EffectScope,
-        now_ms: u128,
-    ) -> Result<Vec<OnionAdmissionLink>> {
+    /// Renew `A` into a fresh epoch if the clock has rolled back beyond `X₀`, and set the
+    /// node's epoch cell to it, which the registrations publish at their next heartbeat; return
+    /// the links the renewed table refuses. The renewed table keeps the links the table holds
+    /// live, its own view linearised with the facts it has applied.
+    fn renew_if_rolled_back(&self, now_ms: u128) -> Result<Vec<PeerLink>> {
         let mut admission = lock(&self.admission)?;
         if !admission.is_rolled_back_at(now_ms) {
             return Ok(Vec::new());
         }
-        let snapshot = scope
-            .lifecycle()
-            .admitted_links()?
-            .into_iter()
-            .map(|link| OnionAdmissionLink {
-                did: link.peer(),
-                generation: link.generation(),
-            })
-            .collect::<Vec<_>>();
+        let live = admission.live_links();
         loop {
             let epoch = OnionProcessEpoch::random();
             let key = OnionReplayFilterKey::new(rand::random());
-            match admission.renew(epoch, key, snapshot.iter().copied()) {
+            match admission.renew(epoch, key, live.iter().copied()) {
                 Ok(refused) => {
                     self.epoch.renew(epoch);
                     tracing::warn!("onion admission renewed its epoch after a clock rollback");
@@ -386,15 +381,37 @@ impl OnionCircuitShell {
     }
 
     /// Close every link in `links`, generation-exactly: the table refused it (fail closed).
-    async fn close(&self, scope: &EffectScope, links: Vec<OnionAdmissionLink>) {
+    async fn close(&self, scope: &EffectScope, links: Vec<PeerLink>) {
         let lifecycle = scope.lifecycle();
         for link in links {
-            let peer = PeerLink::new(link.did, link.generation);
-            if let Err(error) = lifecycle.disconnect_link(peer).await {
-                tracing::debug!(did = %link.did, %error, "failed to close a refused onion link");
+            if let Err(error) = lifecycle.disconnect_link(link).await {
+                tracing::debug!(did = %link.peer(), %error, "failed to close a refused onion link");
             }
         }
     }
+}
+
+/// What one link fact does to the emitter's lanes.
+enum OnionLaneChange {
+    /// Nothing.
+    Keep,
+    /// The peer's link is up.
+    Open(Did),
+    /// No generation of the peer's link is live.
+    Close(Did),
+    /// Exactly these peers' links are up.
+    Follow(Vec<Did>),
+}
+
+/// The peers with a live link in `admission`, each once.
+fn live_peers(admission: &OnionAdmissionState) -> Vec<Did> {
+    let mut peers = admission
+        .live_links()
+        .into_iter()
+        .map(PeerLink::peer)
+        .collect::<Vec<_>>();
+    peers.dedup();
+    peers
 }
 
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]

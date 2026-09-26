@@ -24,10 +24,8 @@ use super::FetchResponse;
 use super::OnionHttpsRequest;
 use crate::error::Error;
 use crate::error::Result;
-use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::target::validate_public_ip_literal;
-use crate::onion::OnionExitPolicy;
 
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -36,8 +34,6 @@ pub(super) async fn execute_https_request(
     target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
-    accounting: &OnionExitAccounting,
-    policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
     validate_public_ip_literal(target)?;
     let global = js_sys::global();
@@ -68,7 +64,7 @@ pub(super) async fn execute_https_request(
             .and_then(checked_status_code)?;
         let headers = collect_headers(&response)?;
         reject_content_length_over_limit(&headers, max_body_bytes)?;
-        let body = response_body(&response, max_body_bytes, accounting, policy).await?;
+        let body = response_body(&response, max_body_bytes).await?;
         Ok::<FetchResponse, Error>(FetchResponse {
             status,
             headers,
@@ -164,12 +160,7 @@ fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
     Ok(collected)
 }
 
-async fn response_body(
-    response: &JsValue,
-    max_body_bytes: u64,
-    accounting: &OnionExitAccounting,
-    policy: &OnionExitPolicy,
-) -> Result<Vec<u8>> {
+async fn response_body(response: &JsValue, max_body_bytes: u64) -> Result<Vec<u8>> {
     let body = Reflect::get(response, JsValue::from_str("body").as_ref()).map_err(js_error)?;
     if body.is_null() || body.is_undefined() {
         return Ok(Vec::new());
@@ -213,12 +204,6 @@ async fn response_body(
                 let _ = cancel.call0(reader.as_ref());
             }
             return Err(Error::NoPermission);
-        }
-        if let Err(error) = accounting.record_bytes(policy, bytes_len) {
-            if let Some(cancel) = &cancel {
-                let _ = cancel.call0(reader.as_ref());
-            }
-            return Err(error);
         }
         body.extend_from_slice(bytes.as_slice());
     }

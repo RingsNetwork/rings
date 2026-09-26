@@ -14,8 +14,8 @@ use rand::SeedableRng;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
+use rings_core::swarm::callback::PeerLink;
 
-use super::admission::OnionAdmissionLink;
 use super::admission::OnionAdmissionState;
 use super::admission::OnionReplayFilterKey;
 use super::hop::hop;
@@ -58,25 +58,28 @@ struct Hop {
 }
 
 impl Hop {
-    /// The hop with the fixed scalar `(seed)·0x0101…01`, receiving from `from`.
-    fn new(seed: u8, from: Did) -> Self {
+    /// The hop with the fixed scalar `(seed)·0x0101…01`, with no link live yet.
+    fn new(seed: u8) -> Self {
         let secret =
             SecretKey::try_from(format!("{seed:02x}").repeat(32).as_str()).expect("fixture scalar");
-        let mut admission = OnionAdmissionState::new(
-            EPOCH,
-            OnionReplayFilterKey::new([seed; 32]),
-            NonZeroUsize::MIN,
-        );
-        admission
-            .link_opened(NOW_MS, OnionAdmissionLink {
-                did: from,
-                generation: 0,
-            })
-            .expect("an empty table admits a link");
         Self {
             key: DelegateeKey::new_with_seckey(&secret).expect("fixture delegation"),
-            admission,
+            admission: OnionAdmissionState::new(
+                EPOCH,
+                OnionReplayFilterKey::new([seed; 32]),
+                NonZeroUsize::new(2).expect("non-zero"),
+            ),
         }
+    }
+
+    /// The hop, with a live link to each of `peers`.
+    fn linked(mut self, peers: &[Did]) -> Self {
+        for peer in peers {
+            self.admission
+                .link_opened(NOW_MS, PeerLink::new(*peer, 0))
+                .expect("the fixture's table holds its links");
+        }
+        self
     }
 
     /// The hop's DID.
@@ -104,8 +107,8 @@ impl Hop {
 }
 
 /// The fixture loop `client → g → r₀₂ → h → r₁₁ → g → client`: its four hops, `[g, r₀₂, h,
-/// r₁₁]`, each with its predecessor's link live. The guard receives from both the client and
-/// `r₁₁`, so its table holds both links.
+/// r₁₁]`, each with its predecessor's and its successor's link live (a relay forwards only to a
+/// live link). The guard has three neighbours: the client, `r₀₂` and `r₁₁`.
 struct Fixture {
     /// `[g, r₀₂, h, r₁₁]`.
     hops: [Hop; 4],
@@ -115,19 +118,15 @@ impl Fixture {
     /// The fixture's hops.
     fn new() -> Self {
         let client = Did::from(CLIENT);
-        let mut guard = Hop::new(1, client);
-        let r02 = Hop::new(2, guard.did());
-        let h = Hop::new(3, r02.did());
-        let r11 = Hop::new(4, h.did());
-        guard
-            .admission
-            .link_opened(NOW_MS, OnionAdmissionLink {
-                did: r11.did(),
-                generation: 0,
-            })
-            .expect("the guard's table holds two links");
+        let [g, r02, h, r11] = [1, 2, 3, 4].map(Hop::new);
+        let dids = [g.did(), r02.did(), h.did(), r11.did()];
         Self {
-            hops: [guard, r02, h, r11],
+            hops: [
+                g.linked(&[client, dids[1], dids[3]]),
+                r02.linked(&[dids[0], dids[2]]),
+                h.linked(&[dids[1], dids[3]]),
+                r11.linked(&[dids[2], dids[0]]),
+            ],
         }
     }
 

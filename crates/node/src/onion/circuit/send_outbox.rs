@@ -28,7 +28,10 @@
 //!   of `u` units, whatever the phase, so every interval of length `V` carries at most
 //!   `r·V + u_max = ρ·B + u_max` units, which is `< B` (`u_max = 768` at 12 MiB,
 //!   `(1 − ρ)·B ≈ 1638`). An honest sender is therefore never refused by its receiver's
-//!   admission, and no real cell is lost to it.
+//!   admission, and no real cell is lost to it, assuming the receiver's arrival spacing follows
+//!   the sender's start spacing: the margin after `u_max`, `(1 − ρ)·B − 768 ≈ 870` units at
+//!   12 MiB and `≈ 1637` units (`≈ 16.6 s` of `r`) at 16 KiB, absorbs transport jitter and window
+//!   misalignment beyond that.
 //! - **Floor.** While a link is up its rate is at least `r_idle`: an idle link emits exactly the
 //!   floor.
 //! - **Dwell.** A real cell at `t` keeps the link at `r` on `[t, t + D)`; the link returns to the
@@ -61,11 +64,13 @@ use super::OnionLink;
 use super::ONION_ADMISSION_SENDER_UNITS;
 use super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use super::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::error::Error;
 use crate::error::OnionQueueAdmissionReason;
 use crate::error::OnionQueueKind;
 use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::sphinx::class::OnionLoopClass;
+use crate::onion::OnionRouteError;
 use crate::peer_quota::PeerQuota;
 use crate::sync_lock::lock;
 
@@ -218,10 +223,23 @@ struct OverlaySend {
     completion: Option<oneshot::Sender<Result<()>>>,
 }
 
+/// One queued real cell with its byte size and class: the emission of a real cell is charged
+/// its own units.
+struct Queued<T> {
+    /// The cell.
+    item: T,
+    /// Its bytes.
+    bytes: usize,
+    /// Its class.
+    class: OnionLoopClass,
+}
+
 /// The queue and emission state of one up link.
 struct PeerLane<T> {
-    /// Cells waiting, with their byte sizes.
-    queued: VecDeque<(T, usize)>,
+    /// The epoch of the lane's one emitter: an emitter of another epoch stops.
+    epoch: u64,
+    /// Cells waiting.
+    queued: VecDeque<Queued<T>>,
     /// Bytes of `queued` plus the cell in flight.
     pending_bytes: usize,
     /// The byte size of the cell being sent, if any.
@@ -235,9 +253,10 @@ struct PeerLane<T> {
 }
 
 impl<T> PeerLane<T> {
-    /// A lane with nothing queued and nothing emitted.
-    fn new() -> Self {
+    /// A lane of emitter epoch `epoch` with nothing queued and nothing emitted.
+    fn new(epoch: u64) -> Self {
         Self {
+            epoch,
             queued: VecDeque::new(),
             pending_bytes: 0,
             in_flight_bytes: None,
@@ -262,20 +281,27 @@ enum EmitterStep<T> {
     Emit(Emission<T>),
     /// Sleep until this instant, or until the wake-up fires.
     Wait(u128, oneshot::Receiver<()>),
-    /// The link is down: its lane is gone and the emitter returns.
+    /// The link is down, or the lane belongs to a newer emitter: the emitter returns.
     Stop,
 }
 
 /// The pure queue algebra of every link; see the module laws.
 ///
-/// Invariant: `quota.total()` and `pending_bytes` equal the queued cells plus the in-flight cell
-/// of every lane, and a lane has at most one cell in flight, the witness of per-link order.
-/// A lane exists exactly while its link is up (opened and not closed), or since a cell was
-/// queued for it.
+/// Invariants:
+/// - `quota.total()` and `pending_bytes` equal the queued cells plus the in-flight cell of every
+///   lane, and a lane has at most one cell in flight, the witness of per-link order;
+/// - a lane exists exactly while its link is up: [`Self::open`] is its only constructor and
+///   [`Self::close`] its only destructor, so a cell for a peer with no up link is refused;
+/// - every lane has exactly one emitter, the one of its epoch: an emitter of a closed lane's
+///   epoch meets `Stop` even after the lane is reopened.
 struct OrderedSendState<T> {
     quota: PeerQuota,
     pending_bytes: usize,
     lanes: HashMap<Did, PeerLane<T>>,
+    /// The epoch of the next lane opened.
+    next_epoch: u64,
+    /// Senders waiting for queue space, woken by every completion and close.
+    space: Vec<oneshot::Sender<()>>,
 }
 
 impl<T> Default for OrderedSendState<T> {
@@ -284,25 +310,33 @@ impl<T> Default for OrderedSendState<T> {
             quota: PeerQuota::new(MAX_PENDING_ONION_SENDS, MAX_PENDING_ONION_SENDS_PER_PEER),
             pending_bytes: 0,
             lanes: HashMap::new(),
+            next_epoch: 0,
+            space: Vec::new(),
         }
     }
 }
 
 impl<T> OrderedSendState<T> {
-    /// The link to `peer` is up: give it a lane, and return whether it needs an emitter (it had
-    /// no lane).
-    fn open(&mut self, peer: Did) -> bool {
+    /// The link to `peer` is up: give it a lane, and return the epoch of the emitter to spawn if
+    /// it had none.
+    fn open(&mut self, peer: Did) -> Option<u64> {
         match self.lanes.entry(peer) {
-            Entry::Occupied(_) => false,
+            Entry::Occupied(_) => None,
             Entry::Vacant(lane) => {
-                lane.insert(PeerLane::new());
-                true
+                let epoch = self.next_epoch;
+                self.next_epoch = self.next_epoch.wrapping_add(1);
+                lane.insert(PeerLane::new(epoch));
+                Some(epoch)
             }
         }
     }
 
-    /// Queue one cell of `class` for `peer` at `now` and return whether the link needs a new
-    /// emitter (it had no lane). The cell makes the link active.
+    /// Queue one cell of `class` for `peer` at `now`; the cell makes the link active.
+    ///
+    /// # Errors
+    ///
+    /// `LinkDown` if `peer` has no up link, or the bound the cell would exceed; the cell is
+    /// handed back.
     fn enqueue(
         &mut self,
         peer: Did,
@@ -310,8 +344,36 @@ impl<T> OrderedSendState<T> {
         item_bytes: usize,
         class: OnionLoopClass,
         now_us: u128,
-    ) -> std::result::Result<bool, OnionQueueAdmissionReason> {
-        let peer_pending_bytes = self.lanes.get(&peer).map_or(0, |lane| lane.pending_bytes);
+    ) -> std::result::Result<(), (OnionQueueAdmissionReason, T)> {
+        match self.admit(peer, item_bytes) {
+            Ok(()) => {}
+            Err(reason) => return Err((reason, item)),
+        }
+        let Some(lane) = self.lanes.get_mut(&peer) else {
+            return Err((OnionQueueAdmissionReason::LinkDown, item));
+        };
+        lane.queued.push_back(Queued {
+            item,
+            bytes: item_bytes,
+            class,
+        });
+        lane.class = class;
+        lane.clock.last_real_us = Some(now_us);
+        lane.wake();
+        Ok(())
+    }
+
+    /// Reserve the quota and bytes of one cell of `item_bytes` for `peer`'s up lane.
+    fn admit(
+        &mut self,
+        peer: Did,
+        item_bytes: usize,
+    ) -> std::result::Result<(), OnionQueueAdmissionReason> {
+        let peer_pending_bytes = self
+            .lanes
+            .get(&peer)
+            .ok_or(OnionQueueAdmissionReason::LinkDown)?
+            .pending_bytes;
         self.quota.can_reserve(peer)?;
         let next_peer_bytes = peer_pending_bytes
             .checked_add(item_bytes)
@@ -326,25 +388,42 @@ impl<T> OrderedSendState<T> {
         if next_peer_bytes > MAX_PENDING_ONION_SEND_BYTES_PER_PEER {
             return Err(OnionQueueAdmissionReason::PeerFull);
         }
+        let Some(lane) = self.lanes.get_mut(&peer) else {
+            return Err(OnionQueueAdmissionReason::LinkDown);
+        };
         self.quota.reserve(peer)?;
         self.pending_bytes = next_pending_bytes;
-        let spawn = self.open(peer);
-        let Some(lane) = self.lanes.get_mut(&peer) else {
-            return Err(OnionQueueAdmissionReason::CounterOverflow);
-        };
-        lane.queued.push_back((item, item_bytes));
         lane.pending_bytes = next_peer_bytes;
-        lane.class = class;
-        lane.clock.last_real_us = Some(now_us);
-        lane.wake();
-        Ok(spawn)
+        Ok(())
     }
 
-    /// The emitter's next step at `now` under `floor`: [`plan`] over the lane, taking the next
-    /// queued cell when it emits. A wait arms the lane's wake-up under the same lock, so no
-    /// enqueue is missed. A lane with a cell in flight emits cover until [`Self::complete`].
-    fn next(&mut self, peer: Did, floor: OnionIdleFloor, now_us: u128) -> EmitterStep<T> {
-        let Some(lane) = self.lanes.get_mut(&peer) else {
+    /// Wait for queue space: the receiver fires at the next completion or close.
+    fn await_space(&mut self) -> oneshot::Receiver<()> {
+        let (waiter, woken) = oneshot::channel();
+        self.space.push(waiter);
+        woken
+    }
+
+    /// Wake every sender waiting for queue space.
+    fn wake_space(&mut self) {
+        self.space.drain(..).for_each(|waiter| {
+            let _ = waiter.send(());
+        });
+    }
+
+    /// The next step at `now` under `floor` of the emitter of epoch `epoch`: [`plan`] over the
+    /// lane, taking the next queued cell when it emits and charging the emission the units of
+    /// what it sends. A wait arms the lane's wake-up under the same lock, so no enqueue is
+    /// missed. While a real cell is in flight nothing is taken from the queue, so real cells
+    /// leave in order.
+    fn next(
+        &mut self,
+        peer: Did,
+        epoch: u64,
+        floor: OnionIdleFloor,
+        now_us: u128,
+    ) -> EmitterStep<T> {
+        let Some(lane) = self.lanes.get_mut(&peer).filter(|lane| lane.epoch == epoch) else {
             return EmitterStep::Stop;
         };
         let queued = !lane.queued.is_empty() || lane.in_flight_bytes.is_some();
@@ -355,27 +434,24 @@ impl<T> OrderedSendState<T> {
                 EmitterStep::Wait(due_us, woken)
             }
             Plan::Emit => {
-                let emission = match lane.in_flight_bytes {
-                    None => lane.queued.pop_front().map(|(item, item_bytes)| {
-                        lane.in_flight_bytes = Some(item_bytes);
-                        Emission::Real(item)
+                let (emission, class) = match lane.in_flight_bytes {
+                    None => lane.queued.pop_front().map(|queued| {
+                        lane.in_flight_bytes = Some(queued.bytes);
+                        (Emission::Real(queued.item), queued.class)
                     }),
                     Some(_) => None,
                 }
-                .unwrap_or(Emission::Cover(lane.class));
-                let class = match &emission {
-                    Emission::Real(_) => lane.class,
-                    Emission::Cover(class) => *class,
-                };
+                .unwrap_or((Emission::Cover(lane.class), lane.class));
                 lane.clock.last_start = Some((now_us, units_of(class)));
                 EmitterStep::Emit(emission)
             }
         }
     }
 
-    /// Retire the cell in flight on `peer`'s lane, releasing its quota and bytes.
-    fn complete(&mut self, peer: Did) {
-        let Some(lane) = self.lanes.get_mut(&peer) else {
+    /// Retire the cell in flight on `peer`'s lane of epoch `epoch`, releasing its quota and
+    /// bytes.
+    fn complete(&mut self, peer: Did, epoch: u64) {
+        let Some(lane) = self.lanes.get_mut(&peer).filter(|lane| lane.epoch == epoch) else {
             return;
         };
         let Some(bytes) = lane.in_flight_bytes.take() else {
@@ -385,6 +461,7 @@ impl<T> OrderedSendState<T> {
             lane.pending_bytes = lane.pending_bytes.saturating_sub(bytes);
             self.pending_bytes = self.pending_bytes.saturating_sub(bytes);
         }
+        self.wake_space();
     }
 
     /// The link to `peer` is down, or its emitter cannot run: drop its lane and every queued
@@ -396,7 +473,8 @@ impl<T> OrderedSendState<T> {
         lane.wake();
         self.quota.release_peer(peer);
         self.pending_bytes = self.pending_bytes.saturating_sub(lane.pending_bytes);
-        lane.queued.into_iter().map(|(item, _)| item).collect()
+        self.wake_space();
+        lane.queued.into_iter().map(|queued| queued.item).collect()
     }
 
     /// The links whose lanes are not in `up`.
@@ -412,8 +490,9 @@ impl<T> OrderedSendState<T> {
 /// Shared endpoint and relay capability for one node's constant-rate onion link traffic.
 ///
 /// Clones share the same lanes and clock. This is the single effect boundary through which
-/// cells enter the overlay: relays enqueue without waiting, endpoint adapters may await the send
-/// of their own cell, and the data plane's link facts open and close the lanes.
+/// cells enter the overlay: the data plane's link facts open and close the lanes, relays and
+/// control loops enqueue without waiting, and endpoint adapters wait for queue space and for
+/// their own cell to leave.
 #[derive(Clone)]
 pub(crate) struct OnionLinkSender {
     state: Arc<Mutex<OrderedSendState<OverlaySend>>>,
@@ -445,21 +524,47 @@ impl OnionLinkSender {
     }
 
     /// The link to `link` is up: it emits at least the floor from now on.
+    ///
+    /// # Errors
+    ///
+    /// No runtime to spawn the emitter on, or a poisoned lock.
     pub(crate) fn open(&self, scope: Scope, link: OnionLink) -> Result<()> {
         let spawner = Spawner::current()?;
-        if lock(&self.state)?.open(link.peer) {
-            spawner.spawn(emit(self.clone(), link.peer, scope));
+        if let Some(epoch) = lock(&self.state)?.open(link.peer) {
+            spawner.spawn(emit(self.clone(), link.peer, epoch, scope));
         }
         Ok(())
     }
 
     /// The link to `link` is down: its queued cells are dropped and its emitter stops.
+    ///
+    /// # Errors
+    ///
+    /// A poisoned lock.
     pub(crate) fn close(&self, link: OnionLink) -> Result<()> {
         lock(&self.state)?.close(link.peer);
         Ok(())
     }
 
+    /// Every link is down: close every lane, which stops every emitter.
+    ///
+    /// # Errors
+    ///
+    /// A poisoned lock.
+    pub(crate) fn close_all(&self) -> Result<()> {
+        let mut state = lock(&self.state)?;
+        let peers = state.lanes_outside(&[]);
+        for peer in peers {
+            state.close(peer);
+        }
+        Ok(())
+    }
+
     /// Exactly the links `up` are up: close every other lane and open the missing ones.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::open`].
     pub(crate) fn reconcile(&self, scope: &Scope, up: &[Did]) -> Result<()> {
         let outside = lock(&self.state)?.lanes_outside(up);
         for peer in outside {
@@ -471,60 +576,106 @@ impl OnionLinkSender {
         Ok(())
     }
 
-    /// Queue one cell for `link` without waiting for it to leave.
+    /// Queue one cell for the up link `link` without waiting.
+    ///
+    /// # Errors
+    ///
+    /// A payload of no class length, or the queue's refusal: `LinkDown` with no up link, or a
+    /// full bound.
     pub(crate) fn enqueue(&self, scope: Scope, link: OnionLink, payload: Bytes) -> Result<()> {
-        self.enqueue_with(scope, link, payload, None)
+        let class = class_of(&payload)?;
+        let send = OverlaySend {
+            scope,
+            payload,
+            completion: None,
+        };
+        self.try_enqueue(link, class, send)?
+            .map_err(|refusal| refusal.into_error(link))
     }
 
-    /// Queue one cell for `link` and wait until its direct-edge send has completed.
+    /// Queue one cell for the up link `link`, waiting for queue space while a bound is full, and
+    /// then wait until its direct-edge send has completed: an endpoint's backpressure.
+    ///
+    /// # Errors
+    ///
+    /// A payload of no class length, `LinkDown`, the send's own error, or the lane's close
+    /// before the send.
     pub(crate) async fn send(&self, scope: Scope, link: OnionLink, payload: Bytes) -> Result<()> {
+        let class = class_of(&payload)?;
         let (completion, completed) = oneshot::channel();
-        self.enqueue_with(scope, link, payload, Some(completion))?;
-        completed.await.map_err(|_| {
-            crate::error::Error::OnionRouteError(crate::onion::OnionRouteError::LinkSendCancelled)
-        })?
+        let mut send = OverlaySend {
+            scope,
+            payload,
+            completion: Some(completion),
+        };
+        loop {
+            let space = match self.try_enqueue(link, class, send)? {
+                Ok(()) => break,
+                Err(refusal) if refusal.reason.is_full() => {
+                    send = refusal.send;
+                    lock(&self.state)?.await_space()
+                }
+                Err(refusal) => return Err(refusal.into_error(link)),
+            };
+            let _ = space.await;
+        }
+        completed
+            .await
+            .map_err(|_| Error::OnionRouteError(OnionRouteError::LinkSendCancelled))?
     }
 
-    /// Queue one cell, spawning the link's emitter if the link had none.
-    fn enqueue_with(
+    /// Queue `send`, of class `class`, on `link`'s lane; a refused cell comes back in the
+    /// refusal.
+    ///
+    /// # Errors
+    ///
+    /// A poisoned lock (the outer error).
+    fn try_enqueue(
         &self,
-        scope: Scope,
         link: OnionLink,
-        payload: Bytes,
-        completion: Option<oneshot::Sender<Result<()>>>,
-    ) -> Result<()> {
-        let class = OnionLoopClass::from_cell_bytes(payload.len()).ok_or(
-            crate::error::Error::OnionRouteError(crate::onion::OnionRouteError::InvalidCell),
-        )?;
-        // Acquired before the lane is claimed, so a missing runtime leaves no lane unemitted.
-        let spawner = Spawner::current()?;
-        let item_bytes = payload.len();
-        let peer = link.peer;
-        let should_spawn = lock(&self.state)?
-            .enqueue(
-                peer,
-                OverlaySend {
-                    scope: scope.clone(),
-                    payload,
-                    completion,
-                },
-                item_bytes,
-                class,
-                self.now_us(),
-            )
-            .map_err(|reason| OnionQueueKind::CircuitData.admission(peer, reason))?;
-        if should_spawn {
-            spawner.spawn(emit(self.clone(), peer, scope));
-        }
-        Ok(())
+        class: OnionLoopClass,
+        send: OverlaySend,
+    ) -> Result<std::result::Result<(), OnionSendRefusal>> {
+        let bytes = send.payload.len();
+        let now_us = self.now_us();
+        Ok(lock(&self.state)?
+            .enqueue(link.peer, send, bytes, class, now_us)
+            .map_err(|(reason, send)| OnionSendRefusal { reason, send }))
     }
 }
 
-/// The emitter of one up link: the effectful shell of [`plan`] (see the module diagram).
-async fn emit(sender: OnionLinkSender, peer: Did, scope: Scope) {
+/// The class of a cell payload.
+///
+/// # Errors
+///
+/// [`OnionRouteError::InvalidCell`] for a length of no class.
+fn class_of(payload: &Bytes) -> Result<OnionLoopClass> {
+    OnionLoopClass::from_cell_bytes(payload.len())
+        .ok_or(Error::OnionRouteError(OnionRouteError::InvalidCell))
+}
+
+/// A cell the queue refused, handed back with the reason.
+struct OnionSendRefusal {
+    /// Why.
+    reason: OnionQueueAdmissionReason,
+    /// The cell, for a retry.
+    send: OverlaySend,
+}
+
+impl OnionSendRefusal {
+    /// The refusal as the node's error for `link`.
+    fn into_error(self, link: OnionLink) -> Error {
+        OnionQueueKind::CircuitData.admission(link.peer, self.reason)
+    }
+}
+
+/// The emitter of epoch `epoch` of one up link: the effectful shell of [`plan`] (see the module
+/// diagram). It returns when the lane is closed or belongs to a newer epoch.
+async fn emit(sender: OnionLinkSender, peer: Did, epoch: u64, scope: Scope) {
     loop {
         let now_us = sender.now_us();
-        let Ok(step) = lock(&sender.state).map(|mut state| state.next(peer, sender.floor, now_us))
+        let Ok(step) =
+            lock(&sender.state).map(|mut state| state.next(peer, epoch, sender.floor, now_us))
         else {
             tracing::debug!(%peer, "onion link emitter lost its lane state");
             return;
@@ -539,13 +690,14 @@ async fn emit(sender: OnionLinkSender, peer: Did, scope: Scope) {
                 futures::pin_mut!(timer);
                 let woken = woken.fuse();
                 futures::pin_mut!(woken);
-                futures::select! {
-                    slept = timer => if let Err(error) = slept {
-                        let cancelled = lock(&sender.state).map(|mut state| state.close(peer).len());
-                        tracing::debug!(%peer, ?error, ?cancelled, "onion link emitter has no timer");
-                        return;
-                    },
-                    _ = woken => {},
+                let slept = futures::select! {
+                    slept = timer => slept,
+                    _ = woken => Ok(()),
+                };
+                if let Err(error) = slept {
+                    let cancelled = lock(&sender.state).map(|mut state| state.close(peer).len());
+                    tracing::debug!(%peer, ?error, ?cancelled, "onion link emitter has no timer");
+                    return;
                 }
             }
             EmitterStep::Emit(Emission::Real(send)) => {
@@ -568,7 +720,7 @@ async fn emit(sender: OnionLinkSender, peer: Did, scope: Scope) {
                     }
                 }
                 if let Ok(mut state) = lock(&sender.state) {
-                    state.complete(peer);
+                    state.complete(peer, epoch);
                 }
             }
             EmitterStep::Emit(Emission::Cover(class)) => {
@@ -602,8 +754,10 @@ mod tests {
     use super::MAX_PENDING_ONION_SEND_BYTES_PER_PEER;
     use super::ONION_LINK_BUDGET_UNITS;
     use super::ONION_LINK_DWELL_US;
+    use crate::error::Error;
     use crate::error::OnionQueueAdmissionReason;
     use crate::error::Result;
+    use crate::onion::circuit::OnionCellBucket;
     use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
     use crate::onion::sphinx::class::OnionLoopClass;
 
@@ -779,39 +933,112 @@ mod tests {
         let class = OnionLoopClass::DEFAULT;
         let floor = OnionIdleFloor::DEFAULT;
         let mut state = OrderedSendState::default();
+        let epoch = state.open(peer).expect("a new lane");
 
-        assert_eq!(state.enqueue(peer, 1, 7, class, 0), Ok(true));
-        assert_eq!(state.enqueue(peer, 2, 7, class, 0), Ok(false));
+        assert!(state.enqueue(peer, 1, 7, class, 0).is_ok());
+        assert!(state.enqueue(peer, 2, 7, class, 0).is_ok());
         assert!(matches!(
-            state.next(peer, floor, 0),
+            state.next(peer, epoch, floor, 0),
             EmitterStep::Emit(Emission::Real(1))
         ));
         // One slot later, with the first cell still in flight: cover.
         let slot_us = slot_micros(1);
         assert!(matches!(
-            state.next(peer, floor, 1),
+            state.next(peer, epoch, floor, 1),
             EmitterStep::Wait(due, _) if due == slot_us
         ));
         assert!(matches!(
-            state.next(peer, floor, slot_us),
+            state.next(peer, epoch, floor, slot_us),
             EmitterStep::Emit(Emission::Cover(_))
         ));
-        state.complete(peer);
+        state.complete(peer, epoch);
         assert!(matches!(
-            state.next(peer, floor, 2 * slot_us),
+            state.next(peer, epoch, floor, 2 * slot_us),
             EmitterStep::Emit(Emission::Real(2))
         ));
-        state.complete(peer);
+        state.complete(peer, epoch);
 
-        assert_eq!(state.close(peer), Vec::<i32>::new());
+        assert!(state.close(peer).is_empty());
         assert!(matches!(
-            state.next(peer, floor, 3 * slot_us),
+            state.next(peer, epoch, floor, 3 * slot_us),
             EmitterStep::Stop
         ));
         assert_eq!(state.quota.total(), 0);
         assert_eq!(state.pending_bytes, 0);
-        assert!(state.open(peer));
-        assert!(!state.open(peer));
+    }
+
+    /// Lanes follow the links (#895 H1): a cell for a peer with no up link is refused and handed
+    /// back, and creates no lane.
+    #[test]
+    fn test_only_an_open_link_has_a_lane() {
+        let peer = Did::from(6_u32);
+        let mut state = OrderedSendState::<u32>::default();
+
+        assert!(matches!(
+            state.enqueue(peer, 7, 1, OnionLoopClass::DEFAULT, 0),
+            Err((OnionQueueAdmissionReason::LinkDown, 7))
+        ));
+        assert!(state.lanes.is_empty());
+        assert!(state.open(peer).is_some());
+        assert!(state.open(peer).is_none());
+        assert!(state
+            .enqueue(peer, 8, 1, OnionLoopClass::DEFAULT, 0)
+            .is_ok());
+    }
+
+    /// A reopened lane has a new epoch (#895 H3): the emitter of the closed lane meets `Stop`,
+    /// so a lane never has two emitters.
+    #[test]
+    fn test_an_emitter_of_a_closed_lane_stops_on_its_reopened_successor() {
+        let peer = Did::from(7_u32);
+        let floor = OnionIdleFloor::DEFAULT;
+        let mut state = OrderedSendState::<u32>::default();
+        let first = state.open(peer).expect("a new lane");
+        state.close(peer);
+        let second = state.open(peer).expect("a new lane");
+
+        assert_ne!(first, second);
+        assert!(matches!(
+            state.next(peer, first, floor, 0),
+            EmitterStep::Stop
+        ));
+        assert!(matches!(
+            state.next(peer, second, floor, 0),
+            EmitterStep::Emit(Emission::Cover(_))
+        ));
+    }
+
+    /// A real emission is charged its own class (#895 H2): a large cell queued before a small
+    /// one delays the next start by the large cell's slot, whatever was enqueued last.
+    #[test]
+    fn test_a_real_emission_is_charged_its_own_class() -> Result<()> {
+        let peer = Did::from(8_u32);
+        let large = OnionLoopClass::from(OnionCellBucket::MiB1);
+        let floor = OnionIdleFloor::DEFAULT;
+        let mut state = OrderedSendState::default();
+        let epoch = state.open(peer).ok_or(Error::InvalidData)?;
+        state
+            .enqueue(peer, 1, large.cell_bytes(), large, 0)
+            .map_err(|_| Error::InvalidData)?;
+        state
+            .enqueue(peer, 2, 1, OnionLoopClass::DEFAULT, 0)
+            .map_err(|_| Error::InvalidData)?;
+
+        assert!(matches!(
+            state.next(peer, epoch, floor, 0),
+            EmitterStep::Emit(Emission::Real(1))
+        ));
+        state.complete(peer, epoch);
+        let large_slot = slot_micros(units_of(large));
+        assert!(matches!(
+            state.next(peer, epoch, floor, slot_micros(1)),
+            EmitterStep::Wait(due, _) if due == large_slot
+        ));
+        assert!(matches!(
+            state.next(peer, epoch, floor, large_slot),
+            EmitterStep::Emit(Emission::Real(2))
+        ));
+        Ok(())
     }
 
     /// No lost wake-up: an enqueue during the emitter's wait fires its wake-up, and the cell is
@@ -822,42 +1049,72 @@ mod tests {
         let class = OnionLoopClass::DEFAULT;
         let floor = OnionIdleFloor::DEFAULT;
         let mut state = OrderedSendState::<u32>::default();
-        assert!(state.open(peer));
+        let epoch = state.open(peer).expect("a new lane");
         assert!(matches!(
-            state.next(peer, floor, 0),
+            state.next(peer, epoch, floor, 0),
             EmitterStep::Emit(Emission::Cover(_))
         ));
-        let EmitterStep::Wait(due, mut woken) = state.next(peer, floor, 1) else {
+        let EmitterStep::Wait(due, mut woken) = state.next(peer, epoch, floor, 1) else {
             panic!("an idle link waits for its floor");
         };
         assert_eq!(due, floor.slot_micros(1));
 
-        assert_eq!(state.enqueue(peer, 9, 1, class, 20_000), Ok(false));
+        assert!(state.enqueue(peer, 9, 1, class, 20_000).is_ok());
         assert_eq!(woken.try_recv(), Ok(Some(())));
         assert!(matches!(
-            state.next(peer, floor, 20_000),
+            state.next(peer, epoch, floor, 20_000),
             EmitterStep::Emit(Emission::Real(9))
         ));
+    }
+
+    /// A sender waiting for queue space is woken by the next completion (#895 C-M2).
+    #[test]
+    fn test_a_completion_wakes_a_sender_waiting_for_space() {
+        let peer = Did::from(10_u32);
+        let floor = OnionIdleFloor::DEFAULT;
+        let mut state = OrderedSendState::<usize>::default();
+        let epoch = state.open(peer).expect("a new lane");
+        for item in 0..MAX_PENDING_ONION_SENDS_PER_PEER {
+            assert!(state
+                .enqueue(peer, item, 1, OnionLoopClass::DEFAULT, 0)
+                .is_ok());
+        }
+        assert!(matches!(
+            state.enqueue(peer, 999, 1, OnionLoopClass::DEFAULT, 0),
+            Err((OnionQueueAdmissionReason::PeerFull, 999))
+        ));
+        let mut space = state.await_space();
+
+        assert!(matches!(
+            state.next(peer, epoch, floor, 0),
+            EmitterStep::Emit(Emission::Real(0))
+        ));
+        assert_eq!(space.try_recv(), Ok(None));
+        state.complete(peer, epoch);
+        assert_eq!(space.try_recv(), Ok(Some(())));
+        assert!(state
+            .enqueue(peer, 999, 1, OnionLoopClass::DEFAULT, 0)
+            .is_ok());
     }
 
     /// Cover takes the class of the link's last real cell.
     #[test]
     fn test_cover_takes_the_class_of_the_last_real_cell() -> Result<()> {
         let peer = Did::from(2_u32);
-        let large = OnionLoopClass::try_from(crate::onion::circuit::OnionCellBucket::MiB1)
-            .map_err(|_| crate::error::Error::InvalidData)?;
+        let large = OnionLoopClass::from(OnionCellBucket::MiB1);
         let floor = OnionIdleFloor::DEFAULT;
         let mut state = OrderedSendState::default();
+        let epoch = state.open(peer).ok_or(Error::InvalidData)?;
         state
             .enqueue(peer, 1, 1, large, 0)
-            .map_err(|_| crate::error::Error::InvalidData)?;
+            .map_err(|_| Error::InvalidData)?;
         assert!(matches!(
-            state.next(peer, floor, 0),
+            state.next(peer, epoch, floor, 0),
             EmitterStep::Emit(Emission::Real(1))
         ));
-        state.complete(peer);
+        state.complete(peer, epoch);
         assert!(matches!(
-            state.next(peer, floor, slot_micros(units_of(large))),
+            state.next(peer, epoch, floor, slot_micros(units_of(large))),
             EmitterStep::Emit(Emission::Cover(class)) if class == large
         ));
         Ok(())
@@ -870,16 +1127,21 @@ mod tests {
         let peer = Did::from(3_u32);
         let other = Did::from(4_u32);
         let mut state = OrderedSendState::default();
+        state.open(peer);
+        state.open(other);
         for value in 0..MAX_PENDING_ONION_SENDS_PER_PEER {
             assert!(state.enqueue(peer, value, 1, class, 0).is_ok());
         }
-        assert_eq!(
+        assert!(matches!(
             state.enqueue(peer, 200, 1, class, 0),
-            Err(OnionQueueAdmissionReason::PeerFull)
-        );
-        assert_eq!(state.enqueue(other, 201, 1, class, 0), Ok(true));
+            Err((OnionQueueAdmissionReason::PeerFull, 200))
+        ));
+        assert!(state.enqueue(other, 201, 1, class, 0).is_ok());
 
         let mut global = OrderedSendState::default();
+        for peer_id in 20_u32..25 {
+            global.open(Did::from(peer_id));
+        }
         for peer_id in 20_u32..24 {
             assert!(global
                 .enqueue(
@@ -891,11 +1153,11 @@ mod tests {
                 )
                 .is_ok());
         }
-        assert_eq!(
+        assert!(matches!(
             global.enqueue(Did::from(24_u32), 24, 1, class, 0),
-            Err(OnionQueueAdmissionReason::GlobalFull)
-        );
+            Err((OnionQueueAdmissionReason::GlobalFull, 24))
+        ));
         assert_eq!(global.close(Did::from(20_u32)), vec![20]);
-        assert_eq!(global.enqueue(Did::from(24_u32), 24, 1, class, 0), Ok(true));
+        assert!(global.enqueue(Did::from(24_u32), 24, 1, class, 0).is_ok());
     }
 }

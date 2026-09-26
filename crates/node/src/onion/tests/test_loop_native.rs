@@ -81,7 +81,7 @@ async fn collect(receiver: &mut OnionStreamReceiver) -> Result<Vec<u8>> {
 /// `relay^4 ⋙ tcp` over an echo: the stream returns byte for byte, across several frames, and
 /// the client's `fin` ends the echo's stream.
 #[tokio::test]
-#[ignore = "five real-WebRTC processors: until #887 each hop-send blocks ~290 ms, so a loaded suite run exceeds the 30 s session bounds (#883); run with --ignored"]
+#[ignore = "five real-WebRTC nodes; ~290 ms per send until #887 overruns 30 s bounds (#883)"]
 async fn test_tcp_loop_echoes_a_multi_frame_stream() -> Result<()> {
     let network = network(OnionServiceName::tcp(), EchoWorld, open_policy()).await?;
     let stream = network
@@ -107,7 +107,7 @@ async fn test_tcp_loop_echoes_a_multi_frame_stream() -> Result<()> {
 /// A target the exit policy denies is refused at the open: `fin` before any data, and no
 /// reason on the wire (#843 Q5).
 #[tokio::test]
-#[ignore = "five real-WebRTC processors: until #887 each hop-send blocks ~290 ms, so a loaded suite run exceeds the 30 s session bounds (#883); run with --ignored"]
+#[ignore = "five real-WebRTC nodes; ~290 ms per send until #887 overruns 30 s bounds (#883)"]
 async fn test_a_denied_target_is_refused_at_the_open() -> Result<()> {
     let deny = OnionExitPolicy::from_target_strings(vec!["other.example:443".to_string()], vec![])?;
     let network = network(OnionServiceName::tcp(), EchoWorld, deny).await?;
@@ -146,7 +146,7 @@ fn respond(target: &OnionProxyTarget, request: &OnionHttpsRequest) -> OnionHttps
 /// `relay^4 ⋙ https` through the fetch world over a test egress: the request's authority is
 /// the session's target, and the response returns whole.
 #[tokio::test]
-#[ignore = "five real-WebRTC processors: until #887 each hop-send blocks ~290 ms, so a loaded suite run exceeds the 30 s session bounds (#883); run with --ignored"]
+#[ignore = "five real-WebRTC nodes; ~290 ms per send until #887 overruns 30 s bounds (#883)"]
 async fn test_https_loop_fetches_through_the_session_target() -> Result<()> {
     let network = LoopNetwork::new(|accounting, link_sender| {
         OnionAlgebra::default().register(

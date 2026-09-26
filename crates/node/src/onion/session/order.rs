@@ -53,6 +53,7 @@ pub(crate) struct OnionReorder<F> {
 }
 
 impl<F> Default for OnionReorder<F> {
+    /// A direction at its first sequence, with nothing pending.
     fn default() -> Self {
         Self {
             next: OnionSequence::FIRST,
@@ -88,10 +89,22 @@ impl<F> OnionReorder<F> {
             released.push(frame);
             match self.next.next() {
                 Some(next) => self.next = next,
-                None => return Err(self.fail()),
+                // The last sequence is released; the direction can take nothing more, so the
+                // next frame fails it, but what was released stands.
+                None => {
+                    self.pending.clear();
+                    self.failed = Some(OnionSequenceGap { missing: u32::MAX });
+                    break;
+                }
             }
         }
         Ok(released)
+    }
+
+    /// Start the direction at `next`, for tests at the end of the sequence space.
+    #[cfg(test)]
+    pub(crate) fn next_for_test(&mut self, next: OnionSequence) {
+        self.next = next;
     }
 
     /// Fail closed if the missing `next` has been awaited for `V` since a later frame arrived.

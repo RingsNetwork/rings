@@ -29,9 +29,9 @@ use tokio::sync::oneshot;
 
 use super::config::NativeGatewayConfig;
 use crate::onion::native::NativeOnionCircuitHandle;
-use crate::onion::proxy::OnionProxyConfig;
-use crate::onion::proxy::ONION_PROXY_TCP_SERVICE;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::NativeOnionGatewayConnector;
+use crate::onion::OnionServiceName;
 use crate::prelude::StopSource;
 use crate::prelude::StopToken;
 use crate::processor::Processor;
@@ -62,7 +62,7 @@ impl NativeGatewayRunner {
         config: NativeGatewayConfig,
     ) -> anyhow::Result<Self> {
         validate_status_refresh_secs(config.status_refresh_secs)?;
-        let proxy = OnionProxyConfig::tcp_connect();
+        let proxy = OnionProxyProtocol::TcpConnect;
         let connector = Arc::new(NativeOnionGatewayConnector::new(
             processor.clone(),
             onion,
@@ -260,13 +260,14 @@ async fn refresh_exit_availability(refresh: GatewayRefresh) -> Result<(), Gatewa
         }
         let (availability, reason) = match refresh
             .processor
-            .lookup_onion_exits(ONION_PROXY_TCP_SERVICE, false)
+            .lookup_onion_exits(OnionServiceName::tcp().as_str(), false)
             .await
         {
             Ok(exits) if exits.is_empty() => (
                 ExitAvailability::Unavailable,
                 Some(format!(
-                    "no live Onion TCP exit advertises {ONION_PROXY_TCP_SERVICE}"
+                    "no live Onion TCP exit advertises {}",
+                    OnionServiceName::tcp().as_str()
                 )),
             ),
             Ok(_) => (ExitAvailability::Available, None),

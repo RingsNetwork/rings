@@ -1,6 +1,7 @@
 //! Laws of `Hop_i` (`circuit::hop`): paid, at most once, identity, and the client position.
 
 use rings_core::dht::Did;
+use rings_core::swarm::callback::PeerLink;
 
 use super::super::admission::OnionAdmissionRejection;
 use super::super::admission::OnionChargeRejection;
@@ -34,12 +35,41 @@ fn test_a_cell_off_a_live_link_is_refused_unpeeled() {
 #[test]
 fn test_noise_of_a_class_width_is_charged_then_dropped_at_the_peel() {
     let mut fixture = Fixture::new();
-    let noise = OnionCell::parse(vec![0x5a; OnionLoopClass::DEFAULT.cell_bytes()]).expect("width");
+    let noise = OnionCell::parse(&vec![0x5a; OnionLoopClass::DEFAULT.cell_bytes()]).expect("width");
 
     assert!(matches!(
         fixture.hops[0].step(Did::from(CLIENT), noise),
         OnionHopOutcome::Dropped(OnionHopDrop::Peel(_))
     ));
+    assert_eq!(
+        fixture.hops[0].admission.sender_units(Did::from(CLIENT)),
+        1,
+        "charged u(b) exactly once"
+    );
+}
+
+/// Paid, per class (#834 Tests): a class-`b` cell is charged `b / 16 KiB` units before its
+/// header is read, and a refused one nothing.
+#[test]
+fn test_a_cell_is_charged_the_units_of_its_class() {
+    let mut fixture = Fixture::new();
+    let class = OnionLoopClass::from(crate::onion::circuit::OnionCellBucket::MiB1);
+    let noise = OnionCell::parse(&vec![0x5a; class.cell_bytes()]).expect("width");
+
+    assert!(matches!(
+        fixture.hops[0].step(Did::from(CLIENT), noise),
+        OnionHopOutcome::Dropped(OnionHopDrop::Peel(_))
+    ));
+    assert_eq!(
+        fixture.hops[0].admission.sender_units(Did::from(CLIENT)),
+        class.units()
+    );
+    let refused = OnionCell::parse(&vec![0; OnionLoopClass::DEFAULT.cell_bytes()]).expect("width");
+    assert!(matches!(
+        fixture.hops[0].step(Did::from(7_u32), refused),
+        OnionHopOutcome::Refused(_)
+    ));
+    assert_eq!(fixture.hops[0].admission.sender_units(Did::from(7_u32)), 0);
 }
 
 /// A layer is relayed once; the same cell again is its replay, charged and dropped (L9), and
@@ -48,7 +78,7 @@ fn test_noise_of_a_class_width_is_charged_then_dropped_at_the_peel() {
 fn test_a_relayed_layer_is_admitted_at_most_once_and_keeps_its_width() {
     let mut fixture = Fixture::new();
     let bytes = fixture.build(2, b"value").cell.into_bytes();
-    let received = OnionCell::parse(bytes.clone()).expect("width");
+    let received = OnionCell::parse(&bytes).expect("width");
     let class = received.class();
 
     let OnionHopOutcome::Relayed { next, cell } = fixture.hops[0].step(Did::from(CLIENT), received)
@@ -59,7 +89,7 @@ fn test_a_relayed_layer_is_admitted_at_most_once_and_keeps_its_width() {
     assert_eq!(cell.class(), class);
     assert_eq!(cell.into_bytes().len(), bytes.len());
     assert!(matches!(
-        fixture.hops[0].step(Did::from(CLIENT), OnionCell::parse(bytes).expect("width")),
+        fixture.hops[0].step(Did::from(CLIENT), OnionCell::parse(&bytes).expect("width")),
         OnionHopOutcome::Dropped(OnionHopDrop::Admission(OnionAdmissionRejection::Replayed))
     ));
 }
@@ -114,7 +144,7 @@ fn test_a_loop_runs_to_its_symbol_and_returns_to_the_client() {
 
     // The client, as a node, sees the cell arrive from its guard with a live tag: `Returned`,
     // even under a key that could not peel it.
-    let mut client = super::Hop::new(0x63, fixture.hops[0].did());
+    let mut client = super::Hop::new(0x63).linked(&[fixture.hops[0].did()]);
     let guard = fixture.hops[0].did();
     let OnionHopOutcome::Returned { tag, cell } = hop(
         &mut client.admission,
@@ -132,4 +162,20 @@ fn test_a_loop_runs_to_its_symbol_and_returns_to_the_client() {
         cell.open(&built.reply.key).expect("opens").as_slice(),
         b"reply value"
     );
+}
+
+/// Adjacency: a relay layer whose `next` is not a live link of the hop is dropped after
+/// admission, so a layer cannot make a node emit toward a peer it has no link to (#895 H1).
+#[test]
+fn test_a_relay_layer_to_a_peer_with_no_link_is_dropped() {
+    let mut fixture = Fixture::new();
+    let built = fixture.build(5, b"value");
+    let r02 = fixture.hops[1].did();
+    let guard = &mut fixture.hops[0];
+    guard.admission.link_closed(NOW_MS, PeerLink::new(r02, 0));
+
+    assert!(matches!(
+        guard.step(Did::from(CLIENT), built.cell),
+        OnionHopOutcome::Dropped(OnionHopDrop::NextNotLive)
+    ));
 }

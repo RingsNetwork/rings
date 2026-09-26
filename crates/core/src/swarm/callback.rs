@@ -9,6 +9,8 @@ use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::InboundFrameCapacityLease;
 use rings_transport::core::transport::WebrtcConnectionState;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
@@ -198,7 +200,7 @@ pub enum SwarmEvent {
 ///
 /// Law: at most one generation of a peer is admitted at a time, and a peer's generations
 /// increase strictly, so `(peer, generation)` names one admission for the life of the swarm.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct PeerLink {
     peer: Did,
     generation: u64,
@@ -245,6 +247,17 @@ impl SwarmEvent {
             } => Some((PeerLink::new(peer, generation), PeerTransition::Admitted)),
             Self::PeerRetired { peer, generation } => {
                 Some((PeerLink::new(peer, generation), PeerTransition::Retired))
+            }
+            // The one emitter of `Connected` names its generation, so this arm is a broken
+            // invariant: surface it rather than lose the admission silently.
+            Self::ConnectionStateChange {
+                peer,
+                state: WebrtcConnectionState::Connected,
+                generation: None,
+            } => {
+                debug_assert!(false, "Connected without a generation for {peer}");
+                tracing::error!(%peer, "a Connected event carries no generation; admission lost");
+                None
             }
             Self::ConnectionStateChange { .. } => None,
         }

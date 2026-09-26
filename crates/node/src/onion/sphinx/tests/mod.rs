@@ -20,6 +20,7 @@ use rand::SeedableRng;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
+use rings_core::swarm::callback::PeerLink;
 
 use super::cell::Charged;
 use super::cell::OnionAdmittedCell;
@@ -33,7 +34,6 @@ use super::layer::OnionLayerHead;
 use super::layer::ONION_ARGUMENT_BYTES;
 use super::seed::OnionCarrySeed;
 use super::seed::OnionSegmentSeed;
-use crate::onion::circuit::OnionAdmissionLink;
 use crate::onion::circuit::OnionAdmissionState;
 use crate::onion::circuit::OnionExpiry;
 use crate::onion::circuit::OnionReplayFilterKey;
@@ -49,11 +49,8 @@ const FIXTURE_EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([1; 16]);
 const FIXTURE_ARRIVAL_MS: u128 = 60_000;
 
 /// The one link every fixture cell arrives on.
-fn fixture_link() -> OnionAdmissionLink {
-    OnionAdmissionLink {
-        did: Did::from(1_u32),
-        generation: 0,
-    }
+fn fixture_link() -> PeerLink {
+    PeerLink::new(Did::from(1_u32), 0)
 }
 
 /// The expiry `x = (3 + offset)·Q` of a fixture layer, admissible at [`FIXTURE_ARRIVAL_MS`] for
@@ -81,7 +78,7 @@ fn charged(bytes: Vec<u8>) -> Charged<OnionCell> {
         .charge(
             FIXTURE_ARRIVAL_MS,
             fixture_link(),
-            OnionCell::parse(bytes).expect("a cell"),
+            OnionCell::parse(&bytes).expect("a cell"),
         )
         .expect("the fixture link has budget")
 }
@@ -93,7 +90,7 @@ fn admitted(bytes: Vec<u8>, key: &DelegateeKey) -> OnionAdmittedCell {
         .charge(
             FIXTURE_ARRIVAL_MS,
             fixture_link(),
-            OnionCell::parse(bytes).expect("a cell"),
+            OnionCell::parse(&bytes).expect("a cell"),
         )
         .expect("the fixture link has budget")
         .peel(key)

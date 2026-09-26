@@ -27,8 +27,7 @@ onion_exit_services:
 onion_exit_policy:
   allowed_targets: []
   denied_targets: []
-  max_circuits: 0
-  max_streams_per_circuit: 0
+  max_sessions: 0
   max_bytes_per_minute: 0
 onion_http_proxy_header_timeout_secs: 10
 onion_http_proxy_max_connections: 1024
@@ -149,12 +148,19 @@ where noted.
   A policy target is `host:port`, `*:port` (any host on that port) or `*:*` (any target).
   An empty `allowed_targets` list is a closed policy that admits no target, so advertising an
   exit requires at least one allowed target; deny entries override allows; a `0` limit is
-  unspecified.
+  unspecified. A `*` is recognised only as a whole host (`*:port`, `*:*`); any other `*` in a
+  host is refused. Deny entries match the requested authority, not the addresses it resolves
+  to: an IP literal or another name for a denied host is not denied by a name entry, so deny
+  by the name the client requests, and rely on the exit's public-address floor for private
+  and loopback ranges.
 
 ## HTTP CONNECT proxy
 
 * `onion_http_proxy_addr`: optional local HTTP CONNECT listener that routes client TCP streams
-  through onion exits; absent means no proxy.
+  through onion exits; absent means no proxy. The CONNECT exit service is always `tcp`, so the
+  former `onion_http_proxy_service` key (and its `ONION_HTTP_PROXY_SERVICE` variable) is
+  removed: a config naming it is refused as an unknown field. A refused CONNECT answers
+  `502 Bad Gateway` with no reason.
 * `onion_http_proxy_header_timeout_secs`, `onion_http_proxy_max_connections`: limits of that
   proxy. A CONNECT tunnel is a byte stream, so it always uses a `tcp` exit; there is no service
   to choose.

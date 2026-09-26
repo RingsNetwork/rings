@@ -45,8 +45,7 @@ fn signed_exit_for_session_at(
             policy: OnionExitPolicy {
                 allowed_targets: vec![OnionExitTarget::parse("example.com:443")?],
                 denied_targets: vec![],
-                max_circuits: 16,
-                max_streams_per_circuit: 4,
+                max_sessions: 16,
                 max_bytes_per_minute: 1024,
             },
             started_at_ms: 1,
@@ -161,10 +160,58 @@ fn test_exit_target_patterns_round_trip_canonically() -> Result<()> {
         let encoded = serde_json::to_string(&target).map_err(|_| Error::EncodeError)?;
         assert_eq!(encoded, format!("{canonical:?}"));
     }
-    for invalid in ["*:0", "*:https", "*:", "*:65536"] {
+    for invalid in [
+        "*:0",
+        "*:https",
+        "*:",
+        "*:65536",
+        "*.a:443",
+        "* :443",
+        "[*]:443",
+        "*.:443",
+        "a.*.b:443",
+    ] {
         assert!(OnionExitTarget::parse(invalid).is_err(), "{invalid}");
     }
     Ok(())
+}
+
+/// `parse ∘ encode = id` on every pattern that parses (#895 D-M1): over hosts, wildcards,
+/// cases, trailing dots, brackets and ports, every accepted input's encoding parses back to the
+/// same pattern, so the advertised policy is the enforced one.
+#[test]
+fn test_every_parsed_exit_target_round_trips() {
+    let hosts = [
+        "*",
+        "Example.COM",
+        "example.com.",
+        "*.example.com",
+        "x*y",
+        "[2001:DB8::1]",
+        "[*]",
+        "10.0.0.1",
+        " spaced ",
+        "",
+    ];
+    let ports = ["*", "443", "0", "65535", "65536", "https", ""];
+    let mut parsed = 0;
+    for host in hosts {
+        for port in ports {
+            for raw in [format!("{host}:{port}"), host.to_string()] {
+                if let Ok(pattern) = OnionExitTarget::parse(&raw) {
+                    parsed += 1;
+                    let encoded = pattern.to_string();
+                    assert!(!encoded.contains('*') || encoded.starts_with("*:"), "{raw}");
+                    assert_eq!(
+                        OnionExitTarget::parse(&encoded).ok().as_ref(),
+                        Some(&pattern),
+                        "{raw}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(parsed > 0);
 }
 
 #[test]
@@ -204,7 +251,7 @@ fn test_exit_descriptor_signature_covers_policy() -> Result<()> {
     let mut descriptor = signed_exit_at(20, 100)?;
     assert!(descriptor.verify_signature(TEST_NETWORK_ID));
 
-    descriptor.policy.max_circuits = 32;
+    descriptor.policy.max_sessions = 32;
 
     assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
     Ok(())

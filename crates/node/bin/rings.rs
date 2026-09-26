@@ -375,15 +375,8 @@ struct RunCommand {
     )]
     pub onion_exit_deny_target: Vec<String>,
 
-    #[arg(long, help = "Maximum onion circuits this exit will serve", env)]
-    pub onion_exit_max_circuits: Option<u32>,
-
-    #[arg(
-        long,
-        help = "Maximum streams per onion circuit this exit will serve",
-        env
-    )]
-    pub onion_exit_max_streams_per_circuit: Option<u32>,
+    #[arg(long, help = "Maximum onion sessions this exit will serve", env)]
+    pub onion_exit_max_sessions: Option<u32>,
 
     #[arg(long, help = "Maximum bytes per minute this exit will serve", env)]
     pub onion_exit_max_bytes_per_minute: Option<u64>,
@@ -765,11 +758,8 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     if !args.onion_exit_deny_target.is_empty() {
         c.onion_exit_policy.denied_targets = parse_onion_exit_targets(args.onion_exit_deny_target)?;
     }
-    if let Some(max_circuits) = args.onion_exit_max_circuits {
-        c.onion_exit_policy.max_circuits = max_circuits;
-    }
-    if let Some(max_streams_per_circuit) = args.onion_exit_max_streams_per_circuit {
-        c.onion_exit_policy.max_streams_per_circuit = max_streams_per_circuit;
+    if let Some(max_sessions) = args.onion_exit_max_sessions {
+        c.onion_exit_policy.max_sessions = max_sessions;
     }
     if let Some(max_bytes_per_minute) = args.onion_exit_max_bytes_per_minute {
         c.onion_exit_policy.max_bytes_per_minute = max_bytes_per_minute;

@@ -33,8 +33,8 @@ impl OnionExpiry {
         )
     }
 
-    /// Parse a wire expiry: `Some` iff `ms` lies on the grid `Q·ℕ`. This is the shell's only way
-    /// from a layer's raw `expires_at_ms` to an [`OnionExpiry`].
+    /// An expiry of `ms` milliseconds: `Some` iff `ms` lies on the grid `Q·ℕ`. The wire decoders
+    /// use [`Self::from_wire_ms`]; this is the constructor of a time already in milliseconds.
     pub(crate) fn from_ms(ms: u128) -> Option<Self> {
         ms.is_multiple_of(ONION_FORWARD_EXPIRY_QUANTUM_MS)
             .then_some(Self(ms / ONION_FORWARD_EXPIRY_QUANTUM_MS))

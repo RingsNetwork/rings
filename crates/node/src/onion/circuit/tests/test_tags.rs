@@ -3,6 +3,7 @@
 
 use bytes::Bytes;
 use futures::channel::mpsc;
+use rings_core::dht::Did;
 
 use super::super::tags::OnionReplyDropped;
 use super::super::OnionClientTags;
@@ -27,7 +28,7 @@ fn reply_frame() -> OnionFrame {
 }
 
 /// Run a fixture loop to `h`, reply with [`reply_frame`], and return the loop's reply key and
-/// the cell the client receives.
+/// the cell the client receives from its guard, [`guard`].
 fn returned(seed: u64) -> (OnionReplyKey, OnionCell) {
     let mut fixture = Fixture::new();
     let built = fixture.build(seed, b"value");
@@ -41,11 +42,17 @@ fn returned(seed: u64) -> (OnionReplyKey, OnionCell) {
     (built.reply, fixture.run_return_segment(reply))
 }
 
+/// The fixture loop's guard, the peer every returning cell arrives from.
+fn guard() -> Did {
+    Fixture::new().hops[0].did()
+}
+
 /// A tag table with the reply key of `reply` registered at [`NOW_MS`], and its session's queue.
 fn registered(reply: OnionReplyKey) -> (OnionClientTags, mpsc::Receiver<OnionReply>) {
     let tags = OnionClientTags::default();
     let (sink, replies) = mpsc::channel(4);
-    tags.register(NOW_MS, reply, sink).expect("register");
+    tags.register(NOW_MS, guard(), reply, sink)
+        .expect("register");
     (tags, replies)
 }
 
@@ -55,12 +62,12 @@ fn test_a_reply_is_delivered_once() {
     let (reply, cell) = returned(10);
     let tag = reply.tag;
     let bytes = cell.into_bytes();
-    let cell = OnionCell::parse(bytes.clone()).expect("width");
-    let replay = OnionCell::parse(bytes).expect("width");
+    let cell = OnionCell::parse(&bytes).expect("width");
+    let replay = OnionCell::parse(&bytes).expect("width");
     let (tags, mut replies) = registered(reply);
 
-    assert!(tags.contains(&tag));
-    assert_eq!(tags.deliver(NOW_MS, &tag, cell), Ok(()));
+    assert!(tags.expects(guard(), &tag));
+    assert_eq!(tags.deliver(NOW_MS, guard(), &tag, cell), Ok(()));
     let OnionReply {
         frame,
         received_at_ms,
@@ -70,9 +77,9 @@ fn test_a_reply_is_delivered_once() {
         frame.encode(OnionLoopClass::DEFAULT),
         reply_frame().encode(OnionLoopClass::DEFAULT)
     );
-    assert!(!tags.contains(&tag));
+    assert!(!tags.expects(guard(), &tag));
     assert_eq!(
-        tags.deliver(NOW_MS, &tag, replay),
+        tags.deliver(NOW_MS, guard(), &tag, replay),
         Err(OnionReplyDropped::UnknownTag)
     );
 }
@@ -90,10 +97,15 @@ fn test_a_one_bit_flip_of_the_carry_is_inauthentic() {
         let (tags, _replies) = registered(reply);
 
         assert_eq!(
-            tags.deliver(NOW_MS, &tag, OnionCell::parse(bytes).expect("width")),
+            tags.deliver(
+                NOW_MS,
+                guard(),
+                &tag,
+                OnionCell::parse(&bytes).expect("width")
+            ),
             Err(OnionReplyDropped::Inauthentic)
         );
-        assert!(!tags.contains(&tag));
+        assert!(!tags.expects(guard(), &tag));
     }
 }
 
@@ -108,7 +120,7 @@ fn test_expired_entries_deliver_nothing_and_are_purged() {
     tags.purge(x - 1);
     assert_eq!(tags.len(), 1);
     assert_eq!(
-        tags.deliver(x, &tag, cell),
+        tags.deliver(x, guard(), &tag, cell),
         Err(OnionReplyDropped::UnknownTag)
     );
 
@@ -127,8 +139,40 @@ fn test_a_reply_to_a_gone_session_is_dropped() {
     drop(replies);
 
     assert_eq!(
-        tags.deliver(NOW_MS, &tag, cell),
+        tags.deliver(NOW_MS, guard(), &tag, cell),
         Err(OnionReplyDropped::SessionGone)
     );
-    assert!(!tags.contains(&tag));
+    assert!(!tags.expects(guard(), &tag));
+}
+
+/// Guard binding: a cell with a live tag from any peer but the loop's guard is not the client's,
+/// and it leaves the entry for the real reply.
+#[test]
+fn test_a_tag_from_another_peer_is_not_the_clients() {
+    let (reply, cell) = returned(15);
+    let tag = reply.tag;
+    let (tags, _replies) = registered(reply);
+    let other = Did::from(7_u32);
+
+    assert!(!tags.expects(other, &tag));
+    let bytes = cell.into_bytes();
+    assert_eq!(
+        tags.deliver(
+            NOW_MS,
+            other,
+            &tag,
+            OnionCell::parse(&bytes).expect("width")
+        ),
+        Err(OnionReplyDropped::UnknownTag)
+    );
+    assert!(tags.expects(guard(), &tag));
+    assert_eq!(
+        tags.deliver(
+            NOW_MS,
+            guard(),
+            &tag,
+            OnionCell::parse(&bytes).expect("width")
+        ),
+        Ok(())
+    );
 }

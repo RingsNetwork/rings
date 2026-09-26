@@ -36,3 +36,10 @@ fn test_proxy_options_reject_unbounded_connection_model() {
         Err(Error::InvalidConfig(_))
     ));
 }
+
+/// A CONNECT answers 200 once the session opened, and 502 with no reason for any refusal.
+#[test]
+fn test_connect_answers_502_for_a_refusal() {
+    assert_eq!(connect_status(true), "200 Connection Established");
+    assert_eq!(connect_status(false), "502 Bad Gateway");
+}

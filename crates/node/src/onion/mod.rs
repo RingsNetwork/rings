@@ -226,9 +226,7 @@ pub struct OnionExitPolicy {
     /// Target deny-list entries understood by the exit implementation. Deny entries override allows.
     pub denied_targets: Vec<OnionExitTarget>,
     /// Maximum concurrent sessions this exit wants to serve. `0` means unspecified.
-    pub max_circuits: u32,
-    /// Maximum streams per session. `0` means unspecified.
-    pub max_streams_per_circuit: u32,
+    pub max_sessions: u32,
     /// Maximum bytes per minute. `0` means unspecified.
     pub max_bytes_per_minute: u64,
 }
@@ -238,7 +236,8 @@ pub struct OnionExitPolicy {
 /// ```text
 /// OnionExitTarget = Any | AnyHost(port) | Authority(host, port)
 /// encode:  *:*      *:port          host:port | [ipv6]:port        (canonical, lowercase)
-/// matches(Any, t) = ⊤    matches(AnyHost(p), t) = (port(t) = p)    matches(Authority(a), t) = (a = t)
+/// matches(Any, t) = ⊤    matches(AnyHost(p), t) = (port(t) = p)
+/// matches(Authority(a), t) = (a = t)
 /// ```
 ///
 /// Laws: `parse ∘ encode = Ok` on every pattern, `encode ∘ parse` is canonicalisation, and

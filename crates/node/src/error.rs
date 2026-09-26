@@ -34,6 +34,16 @@ pub enum OnionQueueAdmissionReason {
     PeerFull,
     /// A resource counter could not represent its successor.
     CounterOverflow,
+    /// The peer has no up link, so nothing may be queued for it.
+    LinkDown,
+}
+
+impl OnionQueueAdmissionReason {
+    /// Whether the refusal is a bound, which a later completion lifts: `GlobalFull` or
+    /// `PeerFull`.
+    pub const fn is_full(self) -> bool {
+        matches!(self, Self::GlobalFull | Self::PeerFull)
+    }
 }
 
 /// A wrap `Result` contains custom errors.

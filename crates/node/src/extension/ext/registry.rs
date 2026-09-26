@@ -16,6 +16,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::Weak;
 
 use bytes::Bytes;
 use futures::lock::Mutex as AsyncMutex;
@@ -67,7 +68,9 @@ pub(crate) trait LinkObserver: MaybeSendSync {
 /// A registered link observer, `Send + Sync` natively and not in the browser.
 pub(crate) type DynLinkObserver = rings_runtime::maybe_send_sync!(dyn LinkObserver);
 
-type LinkObservers = RwLock<Vec<Arc<DynLinkObserver>>>;
+/// The registered link observers, held weakly: an observer lives as long as its owner holds
+/// it, and a dropped observer is skipped and pruned.
+type LinkObservers = RwLock<Vec<Weak<DynLinkObserver>>>;
 
 /// Erased, runtime-facing handler — the router-internal ABI. Implemented once, generically, by
 /// `Runner`; protocol authors never name it (they write `Protocol` + `Interpret`).
@@ -563,13 +566,14 @@ impl Extensions {
             .unwrap_or(false)
     }
 
-    /// Register an observer of the swarm's link facts.
-    pub(crate) fn observe_links(&self, observer: Arc<DynLinkObserver>) -> Result<()> {
+    /// Register an observer of the swarm's link facts. The registry holds it weakly, so the
+    /// observer's owner decides its lifetime.
+    pub(crate) fn observe_links(&self, observer: &Arc<DynLinkObserver>) -> Result<()> {
         self.core
             .link_observers
             .write()
             .map_err(|_| Error::Lock)?
-            .push(observer);
+            .push(Arc::downgrade(observer));
         Ok(())
     }
 
@@ -585,10 +589,22 @@ impl Extensions {
         Ok(())
     }
 
-    /// Hand `fact` to every link observer, synchronously and in registration order.
-    pub(crate) fn link_fact(&self, fact: LinkFact) {
+    /// Hand `fact` to every live link observer, synchronously and in registration order, and
+    /// prune the dropped ones.
+    pub(in crate::extension) fn link_fact(&self, fact: LinkFact) {
+        let mut dropped = false;
         if let Ok(observers) = self.core.link_observers.read() {
-            observers.iter().for_each(|observer| observer.observe(fact));
+            observers
+                .iter()
+                .for_each(|observer| match observer.upgrade() {
+                    Some(observer) => observer.observe(fact),
+                    None => dropped = true,
+                });
+        }
+        if dropped {
+            if let Ok(mut observers) = self.core.link_observers.write() {
+                observers.retain(|observer| observer.strong_count() > 0);
+            }
         }
     }
 

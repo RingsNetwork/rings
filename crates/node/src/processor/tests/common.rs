@@ -212,8 +212,7 @@ pub(super) fn onion_exit_descriptor_for_processor(
 ) -> Result<OnionExitDescriptor> {
     onion_exit_descriptor_for_processor_with_policy(processor, service, now_ms, {
         let mut policy = onion_policy(&["127.0.0.1:8080", "example.com:443"], &[])?;
-        policy.max_circuits = 8;
-        policy.max_streams_per_circuit = 2;
+        policy.max_sessions = 8;
         policy.max_bytes_per_minute = 4096;
         policy
     })

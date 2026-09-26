@@ -8,12 +8,10 @@ use super::FetchResponse;
 use super::OnionHttpsRequest;
 use crate::error::Error;
 use crate::error::Result;
-use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::target::resolve_target_addresses;
 use crate::onion::target::select_public_exit_addresses;
 use crate::onion::target::PublicAddressSelection;
-use crate::onion::OnionExitPolicy;
 
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -67,8 +65,6 @@ pub(super) async fn execute_https_request(
     target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
-    accounting: &OnionExitAccounting,
-    policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
     let addresses = resolve_target_addresses(target).await?;
     let egress = select_native_https_egress(target, addresses)?;
@@ -78,7 +74,6 @@ pub(super) async fn execute_https_request(
         max_body_bytes,
         HTTPS_EXIT_REQUEST_TIMEOUT,
         &egress,
-        |bytes| accounting.record_bytes(policy, bytes),
     )
     .await
 }
@@ -116,7 +111,6 @@ pub(super) async fn native_fetch_with_timeout(
     max_body_bytes: u64,
     timeout: Duration,
     egress: &NativeHttpsEgress,
-    record_bytes: impl Fn(u64) -> Result<()>,
 ) -> Result<FetchResponse> {
     let method = reqwest::Method::from_bytes(normalize_method(&request.method).as_bytes())
         .map_err(|error| Error::HttpRequestError(format!("invalid HTTPS proxy method: {error}")))?;
@@ -164,7 +158,6 @@ pub(super) async fn native_fetch_with_timeout(
         if max_body_bytes > 0 && body_len.saturating_add(chunk_len) > max_body_bytes {
             return Err(Error::NoPermission);
         }
-        record_bytes(chunk_len)?;
         body.extend_from_slice(chunk.as_ref());
     }
     Ok(FetchResponse {

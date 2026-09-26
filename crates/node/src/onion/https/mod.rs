@@ -254,7 +254,9 @@ impl OnionHttpsReader {
     }
 }
 
-/// Fetch `request` at `target`, the session's authority, within the policy's byte budget.
+/// Fetch `request` at `target`, the session's authority, with its body bounded by what is left
+/// of the policy's byte budget. The fetch records nothing itself: the session shell records
+/// every byte of the encoded outcome once, as it reads it.
 async fn fetch(
     target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
@@ -270,8 +272,7 @@ async fn fetch(
         target.authority(),
         normalize_path(&request.path)?
     );
-    let response =
-        execute_https_request(&url, target, request, body_limit, accounting, policy).await?;
+    let response = execute_https_request(&url, target, request, body_limit).await?;
     Ok(OnionHttpsResponse {
         status: response.status,
         headers: response.headers,

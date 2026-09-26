@@ -290,8 +290,9 @@ async fn test_admitted_snapshot_is_linearised_with_admission_and_retirement() ->
     Ok(())
 }
 
-/// `disconnect_link` retires only the generation it names: a stale generation of the same peer
-/// changes nothing, the named one is retired and reported once.
+/// `disconnect_link` retires only the generation it names: a future generation of the same peer
+/// changes nothing, the named one is retired and reported once, and after the peer reconnects
+/// the older, retired generation cannot retire the newer one.
 #[tokio::test]
 async fn test_disconnect_link_retires_only_its_own_generation() -> Result<()> {
     let (transport, log) = transport_with_log()?;
@@ -299,16 +300,30 @@ async fn test_disconnect_link_retires_only_its_own_generation() -> Result<()> {
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
     assert!(transport.mark_admission_announced(attempt)?);
-    let stale = PeerLink::new(peer, attempt.generation().wrapping_add(1));
+    let future = PeerLink::new(peer, attempt.generation().wrapping_add(1));
 
-    assert!(!transport.disconnect_link(stale).await?);
+    assert!(!transport.disconnect_link(future).await?);
     assert!(transport.is_active_connection_attempt(attempt));
     assert!(log.retired().is_empty());
 
-    let link = PeerLink::new(peer, attempt.generation());
-    assert!(transport.disconnect_link(link).await?);
+    let older = PeerLink::new(peer, attempt.generation());
+    assert!(transport.disconnect_link(older).await?);
     assert_eq!(log.retired(), vec![peer]);
-    assert!(!transport.disconnect_link(link).await?);
+    assert!(!transport.disconnect_link(older).await?);
+
+    let reconnected = transport.reserve_pending_connection(peer).await?;
+    assert!(transport.activate_connection_for_test(reconnected)?);
+    assert!(transport.mark_admission_announced(reconnected)?);
+    assert!(reconnected.generation() > older.generation());
+    assert!(!transport.disconnect_link(older).await?);
+    assert!(transport.is_active_connection_attempt(reconnected));
+    assert_eq!(log.retired(), vec![peer]);
+    assert!(
+        transport
+            .disconnect_link(PeerLink::new(peer, reconnected.generation()))
+            .await?
+    );
+    assert_eq!(log.retired(), vec![peer, peer]);
     Ok(())
 }
 

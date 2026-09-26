@@ -2,8 +2,9 @@
 //!
 //! This module is runtime-neutral: native can bind it to a local HTTP CONNECT listener, while
 //! browser callers can use the same target and service mapping before handing requests to a
-//! browser-specific adapter. A proxy configuration is target-agnostic; each request supplies its
-//! own target authority.
+//! browser-specific adapter. A proxy protocol is target-agnostic: it fixes the symbol, each
+//! request supplies its own target authority, and the pipeline's loop shape fixes the route
+//! length (#834 D5).
 
 use rings_core::dht::Did;
 
@@ -15,12 +16,6 @@ use crate::online::OnlineNodeType;
 
 #[cfg(rings_native)]
 pub mod http;
-
-/// Exit service used by native HTTP CONNECT/SOCKS-style byte tunnels: the `tcp` symbol.
-pub const ONION_PROXY_TCP_SERVICE: &str = OnionServiceName::tcp().as_str();
-
-/// Exit service used by HTTPS fetch proxying: the `https` symbol.
-pub const ONION_PROXY_HTTPS_SERVICE: &str = OnionServiceName::https().as_str();
 
 /// Proxy protocol requested by the client ingress.
 ///
@@ -36,11 +31,6 @@ pub enum OnionProxyProtocol {
 }
 
 impl OnionProxyProtocol {
-    /// Return the onion-exit service name required by this proxy protocol.
-    pub const fn exit_service(self) -> &'static str {
-        self.exit_service_name().as_str()
-    }
-
     /// Return the world-facing symbol this protocol applies.
     pub const fn exit_service_name(self) -> OnionServiceName {
         match self {
@@ -56,55 +46,16 @@ impl OnionProxyProtocol {
             Self::HttpsProxy => "https-proxy",
         }
     }
-}
 
-/// Target-agnostic onion proxy configuration.
-///
-/// A client owns one proxy configuration per ingress style, then resolves one route per target
-/// authority. This keeps browser proxy APIs from becoming one-off URL fetch wrappers. Neither the
-/// exit service nor the route length is configurable: the protocol fixes the symbol, and the
-/// pipeline's loop shape fixes the length (#834 D5).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OnionProxyConfig {
-    /// Requested ingress protocol.
-    pub protocol: OnionProxyProtocol,
-}
-
-impl OnionProxyConfig {
-    /// Create a proxy configuration for `protocol`.
-    pub const fn new(protocol: OnionProxyProtocol) -> Self {
-        Self { protocol }
-    }
-
-    /// Create a native TCP CONNECT proxy configuration.
-    pub const fn tcp_connect() -> Self {
-        Self::new(OnionProxyProtocol::TcpConnect)
-    }
-
-    /// Create an HTTPS proxy configuration.
-    pub const fn https_proxy() -> Self {
-        Self::new(OnionProxyProtocol::HttpsProxy)
-    }
-
-    /// Return the onion-exit service name required by this proxy.
-    pub const fn exit_service(&self) -> &'static str {
-        self.protocol.exit_service()
-    }
-
-    /// Return the canonical onion-exit service required by this proxy.
-    pub const fn exit_service_name(&self) -> OnionServiceName {
-        self.protocol.exit_service_name()
-    }
-
-    /// Whether `descriptor` registers this proxy's symbol, on a runtime able to interpret it:
+    /// Whether `descriptor` registers this protocol's symbol, on a runtime able to interpret it:
     /// only native and FFI nodes have sockets, so only they serve `tcp`.
-    pub(crate) fn accepts_exit_descriptor(&self, descriptor: &OnionExitDescriptor) -> bool {
-        let runtime_serves = match self.protocol {
-            OnionProxyProtocol::TcpConnect => matches!(
+    pub(crate) fn accepts_exit_descriptor(self, descriptor: &OnionExitDescriptor) -> bool {
+        let runtime_serves = match self {
+            Self::TcpConnect => matches!(
                 descriptor.node_type,
                 OnlineNodeType::Native | OnlineNodeType::Ffi
             ),
-            OnionProxyProtocol::HttpsProxy => true,
+            Self::HttpsProxy => true,
         };
         runtime_serves && descriptor.service == self.exit_service_name()
     }
@@ -139,26 +90,17 @@ mod tests {
     use crate::error::Error;
     use crate::error::Result;
 
+    /// The protocol alone fixes the symbol: a byte tunnel is always `tcp`, a fetch `https`.
     #[test]
-    fn test_proxy_protocol_maps_to_exit_service() {
-        assert_eq!(OnionProxyProtocol::TcpConnect.exit_service(), "tcp");
-        assert_eq!(OnionProxyProtocol::HttpsProxy.exit_service(), "https");
-    }
-
-    #[test]
-    fn test_proxy_config_is_target_agnostic() {
-        let proxy = OnionProxyConfig::https_proxy();
-
-        assert_eq!(proxy.exit_service(), "https");
-    }
-
-    /// The protocol alone fixes the symbol: a byte tunnel is always `tcp`, never `https`.
-    #[test]
-    fn test_tcp_proxy_config_always_selects_tcp() {
-        let proxy = OnionProxyConfig::tcp_connect();
-
-        assert_eq!(proxy.exit_service_name(), OnionServiceName::tcp());
-        assert_ne!(proxy.exit_service_name(), OnionServiceName::https());
+    fn test_proxy_protocol_fixes_its_symbol() {
+        assert_eq!(
+            OnionProxyProtocol::TcpConnect.exit_service_name(),
+            OnionServiceName::tcp()
+        );
+        assert_eq!(
+            OnionProxyProtocol::HttpsProxy.exit_service_name(),
+            OnionServiceName::https()
+        );
     }
 
     #[test]

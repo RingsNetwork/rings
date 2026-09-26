@@ -22,7 +22,7 @@ The threat model and the contract of each layer are documented in
 [SECURITY.md](./SECURITY.md). DID authentication proves key control; it is not, by
 itself, Sybil or eclipse resistance for permissionless public membership. The overlay
 routes and, after an E2E handshake, encrypts; it does not hide who is talking to whom.
-That is the job of the privacy layer, the onion circuits in `crates/node/src/onion`.
+That is the job of the privacy layer, the onion loops in `crates/node/src/onion`.
 
 At the application layer, Rings gives developers a namespace-scoped protocol runtime:
 write a pure state machine, attach an interpreter shell, and run it over a decentralized
@@ -118,12 +118,13 @@ membership model; see [the overlay threat model](./SECURITY.md#chord-routing).
 
 ### Privacy layer
 
-Onion circuits in [`crates/node/src/onion`](./crates/node/src/onion) carry traffic over
-direct edges through layered ElGamal-AEAD frames, fixed-batch cover cells with pacing,
-and fixed cell size classes. A circuit hides the route's hops from one another and hides
-the client from the exit. It does not hide the client from its first hop, does not hide
-overlay membership, and does not hide activity timing from an observer that watches
-every link. The plain overlay relay offers none of this: it minimizes what it leaks, and
+Onion loops in [`crates/node/src/onion`](./crates/node/src/onion) carry traffic over
+direct edges as client-sealed loops of fixed-width Sphinx cells, with constant-rate link
+emission that substitutes real cells for cover, paid admission, and fixed cell size
+classes. A loop hides the route's hops from one another and hides the client from the
+exit, whose reply returns through the loop. It does not hide the client from its first
+hop, does not hide overlay membership, and does not hide each link's active/idle phase
+from an observer that watches it. The plain overlay relay offers none of this: it minimizes what it leaks, and
 the privacy layer is where privacy is provided. See
 [the layer contracts](./SECURITY.md#layer-contracts).
 
@@ -246,7 +247,7 @@ execute, or maintain a proving backend.
 
 ## Architecture
 
-Rings separates peer connectivity, overlay routing, privacy circuits, and application
+Rings separates peer connectivity, overlay routing, privacy loops, and application
 protocols. Direct WebRTC connections can carry traffic without an application server;
 bootstrap, signaling, and ICE infrastructure still matter, and a selected TURN relay
 carries transport traffic. This does not establish permissionless Sybil resistance;
@@ -262,8 +263,8 @@ see [SECURITY.md](./SECURITY.md). Each layer maps to a crate or module:
 │  Extension      pure `Protocol::step` → `Effect` → `Interpret` shell   │  node::extension::ext
 │  runtime        over a namespace-scoped `Scope` (send / self-inject)   │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Privacy        onion circuits: layered ElGamal-AEAD over direct       │  crates/node/src/onion
-│  (circuits)     edges, fixed-batch cover + pacing, exit registry       │
+│  Privacy        onion loops: Sphinx cells over direct edges,           │  crates/node/src/onion
+│  (loops)        constant-rate cover, paid admission, exit registry     │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Overlay        Chord DHT: successor / finger tables, stabilization,   │  crates/core
 │  (routing +     DID addressing, message relay, network_id isolation,   │
@@ -289,10 +290,11 @@ see [SECURITY.md](./SECURITY.md). Each layer maps to a crate or module:
   encrypted to the destination's account key once the E2E handshake has supplied that key, but
   every hop sees the origin DID by signature and the destination DID by routing. The overlay
   minimizes what it leaks; it does not provide privacy.
-- **Privacy** is the onion circuit data plane: layered ElGamal-AEAD frames over direct edges,
-  fixed-batch cover cells with pacing, fixed cell size classes, and route selection from the
-  onion-relay and onion-exit registries. Each relay learns its predecessor and its successor and
-  nothing else about the route. See [SECURITY.md](./SECURITY.md#layer-contracts).
+- **Privacy** is the onion loop data plane: client-sealed loops of fixed-width Sphinx cells
+  over direct edges, constant-rate link emission with real cells substituted for cover, paid
+  admission, fixed cell size classes, and route selection from the onion-relay and onion-exit
+  registries. Each position learns its predecessor and its successor and nothing else about the
+  route. See [SECURITY.md](./SECURITY.md#layer-contracts).
 - **Extension runtime** is a *functional core / imperative shell*: a protocol's state transition
   is pure (`step`), and all IO happens in its `Interpret` shell, which only ever receives a
   **namespace-scoped capability** (`Scope`). The core owns no global effect/command bus — adding

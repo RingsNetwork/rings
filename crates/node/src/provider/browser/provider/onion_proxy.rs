@@ -11,7 +11,7 @@ impl BrowserOnionProxy {
     async fn build_route(&self, target: OnionProxyTarget) -> NodeResult<OnionProxyRoute> {
         build_browser_onion_proxy_route(
             self.processor.clone(),
-            self.config.clone(),
+            self.config,
             target,
             self.directory_endpoint.clone(),
         )

@@ -1,5 +1,3 @@
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
@@ -197,7 +195,6 @@ async fn test_native_fetch_times_out_stalled_response() {
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_millis(25),
         &egress,
-        |_| Ok(()),
     )
     .await;
 
@@ -208,7 +205,7 @@ async fn test_native_fetch_times_out_stalled_response() {
 }
 
 #[tokio::test]
-async fn test_native_fetch_records_response_bytes_as_chunks_arrive() {
+async fn test_native_fetch_reads_a_chunked_body_whole() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -228,8 +225,6 @@ async fn test_native_fetch_records_response_bytes_as_chunks_arrive() {
         headers: Vec::new(),
         body: Vec::new(),
     };
-    let recorded = std::sync::Arc::new(AtomicU64::new(0));
-    let recorded_for_fetch = recorded.clone();
     let egress = NativeHttpsEgress {
         host: address.ip().to_string(),
         addresses: vec![address],
@@ -241,17 +236,12 @@ async fn test_native_fetch_records_response_bytes_as_chunks_arrive() {
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_secs(1),
         &egress,
-        move |bytes| {
-            recorded_for_fetch.fetch_add(bytes, Ordering::SeqCst);
-            Ok(())
-        },
     )
     .await
     .unwrap();
 
     server.await.unwrap();
     assert_eq!(response.body, b"abcde");
-    assert_eq!(recorded.load(Ordering::SeqCst), 5);
 }
 
 #[test]
@@ -329,7 +319,6 @@ async fn test_native_fetch_uses_validated_url_authority_instead_of_caller_host()
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_secs(1),
         &egress,
-        |_| Ok(()),
     )
     .await
     .unwrap();
@@ -363,4 +352,65 @@ fn test_native_egress_selection_pins_public_addresses_and_denies_the_rest() {
             Err(Error::NoPermission),
         ));
     }
+}
+
+/// Render bytes as lowercase hex.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The `https` symbol's carry payloads are wire bytes (#834 L10): one request, one response and
+/// every failure, each pinned byte for byte, so a reordered field or variant is a visible cutover.
+#[test]
+fn test_https_session_encodings_are_pinned() {
+    let request = OnionHttpsRequest {
+        method: "POST".to_string(),
+        path: "/p?q".to_string(),
+        headers: vec![("a".to_string(), "b".to_string())],
+        body: b"xy".to_vec(),
+    };
+    let response = OnionHttpsOutcome::Response(OnionHttpsResponse {
+        status: 201,
+        headers: vec![("c".to_string(), "d".to_string())],
+        body: b"z".to_vec(),
+    });
+    let pinned = [
+        (
+            hex(&encode_request(&request).expect("encode")),
+            "04504f5354042f703f710101610162027879",
+        ),
+        (
+            hex(&encode_outcome(&response).expect("encode")),
+            "00c9010101630164017a",
+        ),
+        (
+            hex(&encode_outcome(&OnionHttpsOutcome::Error(
+                OnionExitFailure::PermissionDenied,
+            ))
+            .expect("encode")),
+            "0100",
+        ),
+        (
+            hex(&encode_outcome(&OnionHttpsOutcome::Error(
+                OnionExitFailure::MalformedRequest,
+            ))
+            .expect("encode")),
+            "0101",
+        ),
+        (
+            hex(
+                &encode_outcome(&OnionHttpsOutcome::Error(OnionExitFailure::Internal))
+                    .expect("encode"),
+            ),
+            "0102",
+        ),
+    ];
+
+    for (encoded, golden) in pinned {
+        assert_eq!(encoded, golden);
+    }
+    assert_eq!(
+        decode_outcome(&encode_outcome(&response).expect("encode")).expect("decode"),
+        response
+    );
 }

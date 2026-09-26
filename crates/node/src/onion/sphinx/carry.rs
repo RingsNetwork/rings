@@ -60,7 +60,9 @@ pub(crate) enum OnionOpenError {
 }
 
 /// An opened carry value `v`: a view into the buffer of the cell it arrived in, which is
-/// zeroized on drop, so opening copies nothing and leaves no plaintext behind.
+/// zeroized on drop, so opening copies nothing and leaves no plaintext behind in the cell.
+/// A decoder that copies out of the view owns its copy: the session frames copy stream bytes,
+/// which are the world's data from then on, and keep reply-block seeds zeroizing.
 pub(crate) struct OnionCarryValue {
     /// The cell buffer, holding `v` at `range` after the in-place decryption.
     buffer: Zeroizing<Vec<u8>>,

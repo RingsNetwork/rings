@@ -16,9 +16,9 @@ use std::ops::Range;
 use rand::rngs::StdRng;
 use rand::Rng;
 use rings_core::dht::Did;
+use rings_core::swarm::callback::PeerLink;
 
 use super::OnionAdmissionLayer;
-use super::OnionAdmissionLink;
 use super::OnionAdmissionRejection;
 use super::OnionAdmissionState;
 use super::OnionAdmissionUnits;
@@ -56,15 +56,12 @@ pub(super) fn registry(r: usize) -> NonZeroUsize {
 }
 
 /// Generation `generation` of a link from DID `did`.
-pub(super) fn generation(did: u32, generation: u64) -> OnionAdmissionLink {
-    OnionAdmissionLink {
-        did: Did::from(did),
-        generation,
-    }
+pub(super) fn generation(did: u32, generation: u64) -> PeerLink {
+    PeerLink::new(Did::from(did), generation)
 }
 
 /// The first generation of a link from DID `did`.
-pub(super) fn link(did: u32) -> OnionAdmissionLink {
+pub(super) fn link(did: u32) -> PeerLink {
     generation(did, 0)
 }
 
@@ -90,7 +87,7 @@ pub(super) fn state(rng: &mut StdRng) -> OnionAdmissionState {
 }
 
 /// Open `link` at `now_ms`, which the test expects the table to accept.
-pub(super) fn open(admission: &mut OnionAdmissionState, now_ms: u128, link: OnionAdmissionLink) {
+pub(super) fn open(admission: &mut OnionAdmissionState, now_ms: u128, link: PeerLink) {
     admission
         .link_opened(now_ms, link)
         .expect("the table has room for this link");
@@ -125,7 +122,7 @@ pub(super) fn layer(expiry: OnionExpiry, tag: u128) -> OnionAdmissionLayer {
 pub(super) fn send_on(
     admission: &mut OnionAdmissionState,
     now_ms: u128,
-    link: OnionAdmissionLink,
+    link: PeerLink,
     n: u32,
     layer: OnionAdmissionLayer,
 ) -> Verdict {

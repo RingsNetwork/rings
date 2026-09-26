@@ -59,7 +59,7 @@ impl OnionSessionId {
     }
 
     /// The session id with `bytes`.
-    #[cfg(test)]
+    #[cfg(all(test, rings_native))]
     pub(crate) const fn new(bytes: [u8; ONION_SESSION_ID_BYTES]) -> Self {
         Self(bytes)
     }

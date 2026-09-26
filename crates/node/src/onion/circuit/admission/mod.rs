@@ -44,11 +44,12 @@
 //!   stale-epoch cells pay too. A charge on a link that is not live, or without headroom, is
 //!   refused and charges nothing.
 //!
-//!   What the types guarantee: a charge requires a live link, admission requires a paid token, and
-//!   one token admits at most once. What they do not guarantee: the token is not bound to a cell or
-//!   to its units, and peeling does not require one. The 2a-4 shell owes these: charge every
-//!   received cell once, on the link it arrived on and with its class's units, and peel only a
-//!   cell whose charge succeeded.
+//!   What the types guarantee: a charge requires a live link, [`OnionAdmissionState::charge`]
+//!   takes the received [`OnionCell`](crate::onion::sphinx::cell::OnionCell) and charges its own
+//!   class's units, and returns it paired with its token as a `Charged` cell, the only value
+//!   that can be peeled; admission requires that token, and one token admits at most once. So a
+//!   cell is charged once, with its class's units, before its header is read, by construction
+//!   (the hop step, `circuit::hop`, is the one caller).
 //! * **Clock: safety.** The state's clock is the join of every `now` it has seen,
 //!   `now := max(now, clock)`. A wall-clock rollback therefore cannot refund budget or revive a
 //!   dropped filter. The window is judged at the cell's arrival `token.arr`, which is the clock at
@@ -59,13 +60,13 @@
 //!   future instant. Honest layers start failing the window once `Δ ≥ X₀ = 4Q`, and all of them
 //!   fail once `Δ ≥ V`, until the wall clock catches up. Safety and liveness cannot both be kept
 //!   inside one epoch: recovering early would mean forgetting filters that may still be live. So
-//!   the effectful shell (#834 2a-4), when [`OnionAdmissionState::is_rolled_back_at`] holds
+//!   the shell (`circuit::shell`), when [`OnionAdmissionState::is_rolled_back_at`] holds
 //!   (`now < clock − X₀`), must move to a fresh process epoch with
 //!   [`OnionAdmissionState::renew`]. That clears the ledgers, the clock and the replay store, and
-//!   then reconciles the cleared state with core's snapshot, `ρ = reconcile ∘ clear`, so the live
-//!   links are the snapshot up to refusals. It is safe by the epoch law, but it invalidates
+//!   then reconciles the cleared state with the table's own live links, `ρ = reconcile ∘ clear`,
+//!   so the live links are kept up to refusals. It is safe by the epoch law, but it invalidates
 //!   every loop in flight through this hop.
-//! * **Skew (for 2a-4).** The window has no skew tolerance. A hop whose clock runs `δ < Q` behind
+//! * **Skew.** The window has no skew tolerance. A hop whose clock runs `δ < Q` behind
 //!   or ahead of the builder's rejects about `δ / Q` of loops at the window's edges.
 //! * **Epoch (D2).** Only layers sealed for the current process epoch are admitted. A restarted
 //!   process draws a fresh epoch, so every layer of the previous process is rejected, although the
@@ -76,7 +77,8 @@
 //!   A live filter has no false negatives, and once `x` has passed the window rejects `x`. Hence a
 //!   pair `(x, ν)` is admitted at most once. At most `V / Q = 5` filters are live, namely the grid
 //!   points of `(clock, clock + V]`. An idle hop keeps its filters until its next step. They stay
-//!   within the memory bound below, and the 2a-4 shell decides whether to drive a step on a timer.
+//!   within the memory bound below; the shell's reconcile tick (`circuit::feed`, every `V/2`) is
+//!   such a step.
 //! * **Five quanta per filter.** `arr < x ≤ arr + V` gives `arr ∈ [x − V, x)`. With `x = kQ` and `V
 //!   = 5Q`, the arrival quanta are exactly `{k − 5, …, k − 1}`, five consecutive aligned quanta.
 //!   The window is judged at `token.arr`, the instant of the charge, so these are also the charging
@@ -94,13 +96,13 @@
 //!   just over `4Q` can straddle two windows and carry up to `2·B` (a burst at the end of quantum
 //!   `s` and another at the start of `s + 5`). The long-run rate is `B / V ≈ 109` units/s per
 //!   sender and `≈ 6990` units/s in total. `G` is one pool shared by all links, which `γ`-failing
-//!   cover cells also consume (for 2a-4).
+//!   cover cells also consume.
 //! * **Links and ledgers.** A link is one generation of an authenticated link to a DID,
-//!   [`OnionAdmissionLink`] `= (did, generation)`: plain data, fed by the 2a-4 shell from core's
-//!   `Admitted`/`Retired` events. The state keeps the set of live links, and one budget ledger per
-//!   DID with at least one live link or some load.
-//!   * **Event-pairing obligation (2a-4).** Between resets the live set shrinks only through
-//!     `link_closed` and `reconcile`. A lost `Retired` therefore pins a live link, and a ledger
+//!   core's [`PeerLink`] `= (did, generation)`: plain data, fed by the link feed
+//!   (`circuit::feed`) from core's `Admitted`/`Retired` events. The state keeps the set of live
+//!   links, and one budget ledger per DID with at least one live link or some load.
+//!   * **Event-pairing obligation** (met by `circuit::feed`). Between resets the live set
+//!     shrinks only through `link_closed` and `reconcile`. A lost `Retired` therefore pins a live link, and a ledger
 //!     slot, until a reconciliation repairs it. Core itself splits an `Admitted`/`Retired` pair
 //!     when the callback is replaced, and a bounded shell queue may drop events. The shell must
 //!     call [`OnionAdmissionState::reconcile`] with core's registry snapshot of live links whenever
@@ -108,8 +110,8 @@
 //!     every live link absent from the snapshot and opens every snapshot link that is not live,
 //!     so afterwards the live set is `L \ refused` for the snapshot `L`. The leak lasts at most one
 //!     tick.
-//!   * **Linearisation obligation (2a-4).** `reconcile` and `renew` both treat their snapshot as
-//!     authoritative, so each snapshot must be linearised with the event stream it repairs. It must
+//!   * **Linearisation obligation** (met by `circuit::feed`: the snapshot travels in the FIFO).
+//!     `reconcile` and `renew` both treat their snapshot as authoritative, so each snapshot must be linearised with the event stream it repairs. It must
 //!     be delivered through the same ordered channel as `Admitted`/`Retired`, or read and applied
 //!     atomically at the shell's queue-drain point. Under this obligation, after `reconcile` or
 //!     `renew` the live set is exactly core's registry minus the refused links. Without it, a
@@ -168,6 +170,7 @@ use std::num::NonZeroU32;
 use std::num::NonZeroUsize;
 
 use rings_core::dht::Did;
+use rings_core::swarm::callback::PeerLink;
 
 pub(crate) use self::bloom::OnionReplayFilterKey;
 use self::bloom::ReplayStore;
@@ -241,17 +244,6 @@ pub(crate) struct OnionAdmissionCharge {
     epoch: OnionProcessEpoch,
 }
 
-/// One generation of an authenticated link from a sender DID, as core admits and retires it. It
-/// is plain data, not a capability: the state keeps the set of live links, and the 2a-4 shell
-/// feeds it from core's `Admitted`/`Retired` events.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct OnionAdmissionLink {
-    /// The link's sender DID, which owns the budget ledger.
-    pub(crate) did: Did,
-    /// Core's generation of the link to `did`.
-    pub(crate) generation: u64,
-}
-
 /// The authenticated fields of a peeled layer that admission decides on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OnionAdmissionLayer {
@@ -294,11 +286,11 @@ pub(crate) struct OnionLinkTableFull;
 /// [`OnionAdmissionState::reconcile`] and [`OnionAdmissionState::renew`].
 #[must_use = "refused links must be closed by the shell"]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct OnionRefusedLinks(Vec<OnionAdmissionLink>);
+pub(crate) struct OnionRefusedLinks(Vec<PeerLink>);
 
 impl OnionRefusedLinks {
     /// The refused links, in DID order.
-    pub(crate) fn links(&self) -> &[OnionAdmissionLink] {
+    pub(crate) fn links(&self) -> &[PeerLink] {
         self.0.as_slice()
     }
 }
@@ -378,7 +370,7 @@ impl OnionAdmissionState {
         &mut self,
         epoch: OnionProcessEpoch,
         filter_key: OnionReplayFilterKey,
-        live: impl IntoIterator<Item = OnionAdmissionLink>,
+        live: impl IntoIterator<Item = PeerLink>,
     ) -> Result<OnionRefusedLinks, OnionEpochNotFresh> {
         if epoch == self.epoch {
             return Err(OnionEpochNotFresh);
@@ -405,15 +397,15 @@ impl OnionAdmissionState {
     pub(crate) fn reconcile(
         &mut self,
         now_ms: u128,
-        live: impl IntoIterator<Item = OnionAdmissionLink>,
+        live: impl IntoIterator<Item = PeerLink>,
     ) -> OnionRefusedLinks {
         self.advance(now_ms);
         let mut snapshot = BTreeMap::<Did, BTreeSet<u64>>::new();
         for link in live {
             snapshot
-                .entry(link.did)
+                .entry(link.peer())
                 .or_default()
-                .insert(link.generation);
+                .insert(link.generation());
         }
         let absent = self
             .senders
@@ -427,7 +419,7 @@ impl OnionAdmissionState {
                     .filter(move |generation| {
                         !kept.is_some_and(|generations| generations.contains(generation))
                     })
-                    .map(move |generation| OnionAdmissionLink { did, generation })
+                    .map(move |generation| PeerLink::new(did, generation))
             })
             .collect::<Vec<_>>();
         for link in absent {
@@ -436,7 +428,7 @@ impl OnionAdmissionState {
         let mut refused = Vec::new();
         for (did, generations) in snapshot {
             for generation in generations {
-                let link = OnionAdmissionLink { did, generation };
+                let link = PeerLink::new(did, generation);
                 if self.link_opened(now_ms, link).is_err() {
                     refused.push(link);
                 }
@@ -451,14 +443,14 @@ impl OnionAdmissionState {
     pub(crate) fn link_opened(
         &mut self,
         now_ms: u128,
-        link: OnionAdmissionLink,
+        link: PeerLink,
     ) -> Result<(), OnionLinkTableFull> {
         self.advance(now_ms);
         let live_links = self.live_link_count();
         let ledgers = self.senders.len();
         let capacity = self.capacity;
-        let sender = match self.senders.entry(link.did) {
-            Entry::Occupied(occupied) if occupied.get().live.contains(&link.generation) => {
+        let sender = match self.senders.entry(link.peer()) {
+            Entry::Occupied(occupied) if occupied.get().live.contains(&link.generation()) => {
                 return Ok(());
             }
             Entry::Occupied(occupied) if live_links < capacity => occupied.into_mut(),
@@ -470,7 +462,7 @@ impl OnionAdmissionState {
             }
             Entry::Occupied(_) | Entry::Vacant(_) => return Err(OnionLinkTableFull),
         };
-        sender.live.insert(link.generation);
+        sender.live.insert(link.generation());
         Ok(())
     }
 
@@ -478,10 +470,10 @@ impl OnionAdmissionState {
     /// at once if that leaves it releasable. It is idempotent: closing a link that is not live
     /// (unknown, refused, or already closed) changes nothing, so a close can never take another
     /// generation's liveness away.
-    pub(crate) fn link_closed(&mut self, now_ms: u128, link: OnionAdmissionLink) {
+    pub(crate) fn link_closed(&mut self, now_ms: u128, link: PeerLink) {
         let quantum = self.advance(now_ms);
-        if let Entry::Occupied(mut occupied) = self.senders.entry(link.did) {
-            occupied.get_mut().live.remove(&link.generation);
+        if let Entry::Occupied(mut occupied) = self.senders.entry(link.peer()) {
+            occupied.get_mut().live.remove(&link.generation());
             if occupied.get().is_releasable_at(quantum) {
                 occupied.remove();
             }
@@ -500,7 +492,7 @@ impl OnionAdmissionState {
     pub(crate) fn charge(
         &mut self,
         now_ms: u128,
-        link: OnionAdmissionLink,
+        link: PeerLink,
         cell: OnionCell,
     ) -> Result<Charged<OnionCell>, OnionChargeRejection> {
         let units = OnionAdmissionUnits::of_class(cell.class());
@@ -522,14 +514,14 @@ impl OnionAdmissionState {
     fn charge_units(
         &mut self,
         now_ms: u128,
-        link: OnionAdmissionLink,
+        link: PeerLink,
         units: OnionAdmissionUnits,
     ) -> Result<OnionAdmissionCharge, OnionChargeRejection> {
         let quantum = self.advance(now_ms);
         let sender = self
             .senders
-            .get_mut(&link.did)
-            .filter(|sender| sender.live.contains(&link.generation))
+            .get_mut(&link.peer())
+            .filter(|sender| sender.live.contains(&link.generation()))
             .ok_or(OnionChargeRejection::LinkNotLive)?;
         let charged_sender = sender
             .ledger
@@ -551,11 +543,35 @@ impl OnionAdmissionState {
     /// generation of a DID at a time, so this is that generation. If a lost `Retired` has left
     /// two live until the next reconciliation, the newest is taken, since core's generations
     /// increase.
-    pub(crate) fn live_link(&self, did: Did) -> Option<OnionAdmissionLink> {
+    pub(crate) fn live_link(&self, did: Did) -> Option<PeerLink> {
         self.senders
             .get(&did)
             .and_then(|sender| sender.live.last().copied())
-            .map(|generation| OnionAdmissionLink { did, generation })
+            .map(|generation| PeerLink::new(did, generation))
+    }
+
+    /// The units charged to `did` in the window of the state's clock, for tests of the Paid law.
+    #[cfg(all(test, rings_native))]
+    pub(crate) fn sender_units(&self, did: Did) -> u32 {
+        self.senders.get(&did).map_or(0, |sender| {
+            sender
+                .ledger
+                .load(self.clock_ms / ONION_FORWARD_EXPIRY_QUANTUM_MS)
+        })
+    }
+
+    /// Every live link, in DID and generation order: the table's own view, linearised with the
+    /// facts it has applied.
+    pub(crate) fn live_links(&self) -> Vec<PeerLink> {
+        self.senders
+            .iter()
+            .flat_map(|(&did, sender)| {
+                sender
+                    .live
+                    .iter()
+                    .map(move |&generation| PeerLink::new(did, generation))
+            })
+            .collect()
     }
 
     /// The number of live links, `Σ_d |live(d)|`, derived rather than stored.
@@ -574,8 +590,8 @@ impl OnionAdmissionState {
     ///   └─ R[x] ← R[x] ∪ {ν} ────────────────────────→ Ok
     /// ```
     ///
-    /// A wire expiry off the grid never reaches this step: the shell parses it with
-    /// `OnionExpiry::from_ms`, and `None` drops the cell, which is already charged.
+    /// A wire expiry off the grid never reaches this step: the layer decoder parses it with
+    /// `OnionExpiry::from_wire_ms`, and `None` drops the cell, which is already charged.
     pub(crate) fn admit(
         &mut self,
         now_ms: u128,

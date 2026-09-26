@@ -112,19 +112,18 @@ fn test_decode_rejects_non_canonical_strings() {
     }
 }
 
-/// Every bucket but `KiB4` is a class with `C_b = b − |χ| − F` (`C_16KiB = 13465`), the class is
-/// the cell length, and distinct classes have distinct MAC labels.
+/// Every bucket is a class with `C_b = b − |χ| − F` (`C_16KiB = 13465`), the class is the cell
+/// length, a length of no bucket (4 KiB, below the header's reach) is no class, and distinct
+/// classes have distinct MAC labels.
 #[test]
 fn test_carry_width_per_class() {
     assert_eq!(ONION_CELL_FRAMING_BYTES, 0);
     assert_eq!(OnionLoopClass::DEFAULT.carry_bytes(), 13_465);
-    assert!(OnionLoopClass::try_from(OnionCellBucket::KiB4).is_err());
     let classes = OnionCellBucket::ALL
         .into_iter()
-        .filter_map(|bucket| OnionLoopClass::try_from(bucket).ok())
+        .map(OnionLoopClass::from)
         .collect::<Vec<_>>();
 
-    assert_eq!(classes.len(), OnionCellBucket::ALL.len() - 1);
     for class in classes.iter().copied() {
         assert_eq!(class.carry_bytes(), class.cell_bytes() - ONION_HEADER_BYTES);
         assert_eq!(class.carry_value_bytes(), class.carry_bytes() - 16);

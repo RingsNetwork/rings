@@ -1,9 +1,9 @@
 //! Loop classes `b` and the carry width `C_b` (#834 D6, L3).
 //!
-//! A loop's class is one of today's cell buckets above 4 KiB (#834 D6: `16 KiB … 12 MiB`):
+//! A loop's class is one of the cell buckets (#834 D6: `16 KiB … 12 MiB`):
 //!
 //! ```text
-//! 𝔅 = OnionCellBucket ∖ {KiB4} ≅ OnionLoopClass            (TryFrom rejects KiB4)
+//! 𝔅 = OnionCellBucket ≅ OnionLoopClass                      (From, and back by cell_bytes)
 //! C_b = b − |χ| − F          carry slot                     F = 0: a cell's class is its length
 //! C₀  = C_b − τ              padded value width             τ = 16
 //! ```
@@ -25,11 +25,6 @@ pub(crate) const ONION_UNIT_BYTES: usize = 16 * 1024;
 /// replies included, is exactly `b` bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OnionLoopClass(OnionCellBucket);
-
-/// The cell bucket below every loop class: D6 draws classes from the buckets above 4 KiB.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("cell bucket {0:?} is not an onion loop class")]
-pub(crate) struct OnionLoopClassError(OnionCellBucket);
 
 impl OnionLoopClass {
     /// The default class, `b = 16 KiB`.
@@ -72,23 +67,18 @@ impl OnionLoopClass {
         OnionCellBucket::ALL
             .into_iter()
             .find(|bucket| bucket.cell_bytes() == length)
-            .and_then(|bucket| Self::try_from(bucket).ok())
+            .map(Self::from)
     }
 }
 
-impl TryFrom<OnionCellBucket> for OnionLoopClass {
-    type Error = OnionLoopClassError;
-
-    /// Admit every bucket above 4 KiB, that is every bucket but `KiB4` (D6).
-    fn try_from(bucket: OnionCellBucket) -> Result<Self, Self::Error> {
-        match bucket {
-            OnionCellBucket::KiB4 => Err(OnionLoopClassError(bucket)),
-            _ => Ok(Self(bucket)),
-        }
+impl From<OnionCellBucket> for OnionLoopClass {
+    /// Every bucket is a loop class (D6).
+    fn from(bucket: OnionCellBucket) -> Self {
+        Self(bucket)
     }
 }
 
-// `DEFAULT` is the least class, `KiB16`, the bucket after the excluded `KiB4`; it leaves an
+// `DEFAULT` is the least class, `KiB16`; it leaves an
 // AEZ-core carry slot (`C_b ≥ 32`) and room for the padding marker, and every larger class leaves
 // more.
 const _: () = assert!(

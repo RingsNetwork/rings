@@ -8,6 +8,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
 use rings_core::dht::Did;
+use rings_core::swarm::callback::PeerLink;
 
 use super::generation;
 use super::latest_expiry;
@@ -27,7 +28,6 @@ use super::EPOCH;
 use super::ORIGIN_MS;
 use super::Q;
 use crate::onion::circuit::admission::OnionAdmissionLayer;
-use crate::onion::circuit::admission::OnionAdmissionLink;
 use crate::onion::circuit::admission::OnionAdmissionRejection;
 use crate::onion::circuit::admission::OnionAdmissionState;
 use crate::onion::circuit::admission::OnionChargeRejection;
@@ -567,13 +567,9 @@ fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
 /// Whether the table has no room for `link`, given the modelled number of live links: the live-link
 /// set is full, or `link`'s DID has no ledger and the ledger table is full. This is the only
 /// justification for a refusal.
-fn is_full_for(
-    admission: &OnionAdmissionState,
-    live_links: usize,
-    link: &OnionAdmissionLink,
-) -> bool {
+fn is_full_for(admission: &OnionAdmissionState, live_links: usize, link: &PeerLink) -> bool {
     live_links >= admission.capacity
-        || (!admission.senders.contains_key(&link.did)
+        || (!admission.senders.contains_key(&link.peer())
             && admission.senders.len() >= admission.capacity)
 }
 
@@ -633,11 +629,8 @@ impl Lockstep {
     /// states open it; a refusal must be justified, and the shell then closes the link in core.
     fn open(&mut self, now_ms: u128, did: Did) {
         self.next_generation += 1;
-        let opened = OnionAdmissionLink {
-            did,
-            generation: self.next_generation,
-        };
-        self.truth.insert((did, opened.generation));
+        let opened = PeerLink::new(did, self.next_generation);
+        self.truth.insert((did, opened.generation()));
         if self.rng.gen_ratio(1, 6) {
             self.lost += 1;
             return;
@@ -647,12 +640,12 @@ impl Lockstep {
         match verdict {
             Ok(()) => {
                 self.occurred[0] += 1;
-                self.modelled.insert((did, opened.generation));
+                self.modelled.insert((did, opened.generation()));
             }
             Err(OnionLinkTableFull) => {
                 self.occurred[2] += 1;
                 assert!(is_full_for(&self.sorted, self.modelled.len(), &opened));
-                self.truth.remove(&(did, opened.generation));
+                self.truth.remove(&(did, opened.generation()));
             }
         }
     }
@@ -669,7 +662,7 @@ impl Lockstep {
             self.lost += 1;
             return;
         }
-        let closed = OnionAdmissionLink { did, generation };
+        let closed = PeerLink::new(did, generation);
         self.sorted.link_closed(now_ms, closed);
         self.shuffled.link_closed(now_ms, closed);
         self.occurred[1] += 1;
@@ -684,7 +677,7 @@ impl Lockstep {
         let snapshot = self
             .truth
             .iter()
-            .map(|&(did, generation)| OnionAdmissionLink { did, generation })
+            .map(|&(did, generation)| PeerLink::new(did, generation))
             .collect::<Vec<_>>();
         let mut permuted = snapshot.clone();
         permuted.shuffle(&mut self.rng);
@@ -697,7 +690,7 @@ impl Lockstep {
         let refused_set = refused
             .links()
             .iter()
-            .map(|link| (link.did, link.generation))
+            .map(|link| (link.peer(), link.generation()))
             .collect::<BTreeSet<_>>();
         let expected = self
             .truth
@@ -733,13 +726,8 @@ impl Lockstep {
     fn charge(&mut self, now_ms: u128, did: Did, tag: u128) {
         let index = self.rng.gen_range(0..self.modelled.len().max(1));
         let on = match self.modelled.iter().nth(index) {
-            Some(&(did, generation)) if !self.rng.gen_ratio(1, 4) => {
-                OnionAdmissionLink { did, generation }
-            }
-            _ => OnionAdmissionLink {
-                did,
-                generation: self.rng.gen_range(0..=self.next_generation),
-            },
+            Some(&(did, generation)) if !self.rng.gen_ratio(1, 4) => PeerLink::new(did, generation),
+            _ => PeerLink::new(did, self.rng.gen_range(0..=self.next_generation)),
         };
         let cost = self.rng.gen_range(1..=64_u32);
         let x = layer(latest_expiry(now_ms), tag);
@@ -747,7 +735,7 @@ impl Lockstep {
         assert_eq!(send_on(&mut self.shuffled, now_ms, on, cost, x), verdict);
         assert_eq!(
             verdict == Verdict::Unpaid(OnionChargeRejection::LinkNotLive),
-            !self.modelled.contains(&(on.did, on.generation))
+            !self.modelled.contains(&(on.peer(), on.generation()))
         );
     }
 }

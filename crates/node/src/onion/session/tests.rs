@@ -10,6 +10,7 @@ use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 
+use super::client::OnionClientCredit;
 use super::client::OnionClientEvent;
 use super::client::OnionClientSession;
 use super::client::OnionCreditWindow;
@@ -94,11 +95,11 @@ fn arguments() -> OnionSessionArguments {
 
 /// The encoding round trip of `frame`: `decode ∘ encode` and, for the result, `encode` again.
 fn round_trip(frame: &OnionFrame) -> Vec<u8> {
-    let bytes = frame.encode(CLASS).expect("the frame fits");
+    let bytes = frame.encode(CLASS).expect("the frame fits").to_vec();
     let decoded = OnionFrame::decode(CLASS, &bytes).expect("decodes");
     assert_eq!(
-        decoded.encode(CLASS).expect("re-encodes"),
-        bytes,
+        decoded.encode(CLASS).expect("re-encodes").as_slice(),
+        bytes.as_slice(),
         "canonical"
     );
     bytes
@@ -150,7 +151,8 @@ fn test_malformed_frames_are_rejected() {
     .expect("fits");
     let mut credit = OnionFrame::Credit(surbs(12, 1, 0))
         .encode(CLASS)
-        .expect("fits");
+        .expect("fits")
+        .to_vec();
     credit.pop();
     for (bytes, error) in [
         (Vec::new(), OnionFrameError::Tag),
@@ -347,6 +349,131 @@ fn test_exit_session_opens_acks_replies_and_closes() {
     assert!(session.is_closed());
 }
 
+/// An opened and acked session over `blocks`: the `T` loop and a credit loop of one block leave
+/// three blocks, and the ack spends one.
+fn acked(blocks: &mut impl Iterator<Item = OnionSurb>) -> OnionExitSession {
+    let mut session = OnionExitSession::new(arguments().digest, NOW_MS);
+    let mut next = || blocks.next().expect("a fixture block");
+    session.forward(NOW_MS, opening(0, b""), next());
+    session.forward(NOW_MS, OnionFrame::Credit(vec![next()]), next());
+    assert_eq!(kinds(&session.opened(NOW_MS, true)), ["reply"]);
+    session
+}
+
+/// Totality (#895 B-H1): world bytes that arrive after every block has expired are held, not
+/// dropped, the world is not read meanwhile, and the held bytes are replied, in order, as soon
+/// as credit returns.
+#[test]
+fn test_exit_session_holds_world_bytes_until_credit_returns() {
+    let mut blocks = surbs(45, 3, 0).into_iter();
+    let mut session = acked(&mut blocks);
+    let expired_ms = 3 * QUANTUM_MS;
+
+    assert!(session.reply_capacity(NOW_MS).is_some());
+    assert!(kinds(&session.world(
+        expired_ms,
+        OnionWorldRead::Bytes(Bytes::from_static(b"late"))
+    ))
+    .is_empty());
+    assert!(!session.is_closed());
+    assert_eq!(
+        session.reply_capacity(expired_ms),
+        None,
+        "held bytes pause reads"
+    );
+
+    let mut fresh = surbs(46, 2, 2).into_iter();
+    let credit = OnionFrame::Credit(vec![fresh.next().expect("a block")]);
+    assert_eq!(
+        kinds(&session.forward(expired_ms, credit, fresh.next().expect("a block"))),
+        ["reply"]
+    );
+    assert!(session.reply_capacity(expired_ms).is_some());
+}
+
+/// Fail closed (#895 B-M2): a gap spends a remaining block on `fin` before the session closes.
+#[test]
+fn test_exit_session_aborts_a_gap_with_fin() {
+    let mut blocks = surbs(47, 4, 0).into_iter();
+    let mut session = acked(&mut blocks);
+    let far = OnionFrame::Data {
+        sequence: OnionSequence::new(10_000),
+        target: None,
+        payload: Bytes::from_static(b"x"),
+    };
+
+    assert_eq!(
+        kinds(&session.forward(NOW_MS, far, blocks.next().expect("a block"))),
+        ["reply", "close"]
+    );
+    assert!(session.is_closed());
+}
+
+/// Fail closed (#895 C-M4): a world failure replies `fin` if a block is left, and closes either
+/// way.
+#[test]
+fn test_exit_session_fails_closed_with_fin_while_credit_lasts() {
+    let mut blocks = surbs(48, 3, 0).into_iter();
+    let mut session = acked(&mut blocks);
+    assert_eq!(kinds(&session.fail(NOW_MS)), ["reply", "close"]);
+
+    let mut blocks = surbs(49, 3, 0).into_iter();
+    let mut drained = acked(&mut blocks);
+    for chunk in [b"y", b"z"] {
+        assert_eq!(
+            kinds(&drained.world(NOW_MS, OnionWorldRead::Bytes(Bytes::from_static(chunk)))),
+            ["reply"]
+        );
+    }
+    assert_eq!(kinds(&drained.fail(NOW_MS)), ["close"]);
+}
+
+/// Binding (#895 C-L4): a later `T` frame naming another target aborts a bound session.
+#[test]
+fn test_exit_session_refuses_to_rebind_its_target() {
+    let mut blocks = surbs(50, 4, 0).into_iter();
+    let mut session = acked(&mut blocks);
+    let other = OnionFrame::Data {
+        sequence: OnionSequence::new(1),
+        target: Some(Bytes::from_static(b"other.example:443")),
+        payload: Bytes::from_static(b"x"),
+    };
+
+    assert_eq!(
+        kinds(&session.forward(NOW_MS, other, blocks.next().expect("a block"))),
+        ["reply", "close"]
+    );
+}
+
+/// The pool refuses a block whose expiry is not admissible now (#895 B-L2): passed, or beyond
+/// `now + V`, whose reply the first relay would refuse.
+#[test]
+fn test_surb_pool_refuses_inadmissible_expiries() {
+    let mut pool = OnionSurbPool::default();
+    let beyond = surbs(51, 1, 10).pop().expect("a block");
+    let passed = surb(52);
+
+    assert!(!pool.add(NOW_MS, beyond));
+    assert!(!pool.add(4 * QUANTUM_MS, passed));
+    assert!(pool.add(NOW_MS, surb(53)));
+}
+
+/// The sequence space ends cleanly (#895 B-L1): the frame at `u32::MAX` is released, and only
+/// the next one fails the direction.
+#[test]
+fn test_reorder_releases_the_last_sequence_then_fails() {
+    let mut reorder = OnionReorder::<u32>::default();
+    reorder.next_for_test(OnionSequence::new(u32::MAX));
+
+    assert_eq!(
+        reorder.accept(NOW_MS, OnionSequence::new(u32::MAX), 7),
+        Ok(vec![7])
+    );
+    assert!(reorder
+        .accept(NOW_MS, OnionSequence::new(u32::MAX), 8)
+        .is_err());
+}
+
 /// Forward frames reach the world in sequence order although their loops arrive reversed, and
 /// the target is bound by the first released `T` frame.
 #[test]
@@ -494,17 +621,46 @@ fn test_client_session_reads_a_first_fin_as_a_refusal() {
     );
 }
 
-/// The credit window asks `⌈(W − outstanding) / (k + 1)⌉` loops and never more than `Q_max`
-/// blocks.
+/// The credit window asks `⌊D / (k + 1)⌋` full loops and one partial loop for a remainder
+/// `r ≥ 2`, leaving exactly the deficit `D` (or `D − 1` when `r = 1`) and never more than
+/// `min(W, Q_max)` blocks at `h` (#895 C-L2).
 #[test]
 fn test_credit_window_fills_to_its_target() {
     let window = OnionCreditWindow::DEFAULT;
-    assert_eq!(window.loops_wanted(0, CLASS), 13);
-    assert_eq!(window.loops_wanted(60, CLASS), 1);
-    assert_eq!(window.loops_wanted(64, CLASS), 0);
-    assert_eq!(window.loops_wanted(300, CLASS), 0);
+    let left = |loops: &[usize]| loops.iter().map(|blocks| blocks + 1).sum::<usize>();
+
     assert_eq!(
-        OnionCreditWindow::new(10_000).loops_wanted(0, CLASS),
-        ONION_SURB_POOL_CAPACITY.div_ceil(5)
+        window.credit_loops(0, CLASS),
+        [vec![4; 12], vec![3]].concat()
     );
+    assert_eq!(left(&window.credit_loops(0, CLASS)), 64);
+    assert_eq!(window.credit_loops(60, CLASS), vec![3]);
+    assert_eq!(window.credit_loops(62, CLASS), vec![1]);
+    assert!(window.credit_loops(63, CLASS).is_empty());
+    assert!(window.credit_loops(64, CLASS).is_empty());
+    assert!(window.credit_loops(300, CLASS).is_empty());
+    let wide = OnionCreditWindow::new(10_000).credit_loops(0, CLASS);
+    assert!(left(&wide) <= ONION_SURB_POOL_CAPACITY);
+    assert_eq!(left(&wide), ONION_SURB_POOL_CAPACITY - 1);
+}
+
+/// The ledger saturates at `Q_max`, where `h`'s pool refuses further blocks (#895 H4): a long
+/// upload does not leave phantom credit behind, so the following download is topped up again
+/// once `h` has spent its blocks.
+#[test]
+fn test_credit_ledger_saturates_at_the_pool_bound() {
+    let mut credit = OnionClientCredit::default();
+    let x = OnionExpiry::from_ms(150_000).expect("on the grid");
+
+    for _ in 0..700 {
+        credit.sent(NOW_MS, x, 1);
+    }
+    assert_eq!(credit.count(NOW_MS), ONION_SURB_POOL_CAPACITY);
+    for _ in 0..ONION_SURB_POOL_CAPACITY {
+        credit.replied(NOW_MS);
+    }
+    assert_eq!(credit.count(NOW_MS), 0);
+    assert!(!OnionCreditWindow::DEFAULT
+        .credit_loops(credit.count(NOW_MS), CLASS)
+        .is_empty());
 }

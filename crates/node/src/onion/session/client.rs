@@ -6,8 +6,9 @@
 //! reply(f):  replied ← ⊤;  reorder f, then per released frame, in order:
 //!   first frame   data(0, ε) ⇒ Opened      fin ⇒ Refused (a fin before any data: no reason given)
 //!   later frames  data(w)    ⇒ Data(w)     fin ⇒ Fin
-//! credit:    want W reply blocks outstanding at h; each forward loop leaves one and each credit
-//!            loop k + 1, so the deficit W − outstanding asks ⌈deficit / (k + 1)⌉ credit loops
+//! credit:    want min(W, Q_max) reply blocks outstanding at h; each forward loop leaves one and a
+//!            credit loop of j ≤ k blocks leaves j + 1, so the deficit D asks ⌊D / (k + 1)⌋ full
+//!            credit loops and, for a remainder r ≥ 2, one of r − 1 blocks
 //! ```
 //!
 //! Laws (tested in `session::tests`):
@@ -18,9 +19,11 @@
 //! - **Sequence.** Forward frames carry `n = 0, 1, …`; replies are released in their order.
 //! - **Open result.** The first released reply decides the open: `data(0, ε)` is the ack, `fin`
 //!   is a refusal (#843 Q5).
-//! - **Credit.** The window never asks for more than `W ≤ Q_max` outstanding blocks, and the
-//!   client's count of blocks outstanding at `h` is exact: `h` spends the block of least expiry
-//!   first, and so does [`OnionClientCredit`], and both drop a block at its expiry.
+//! - **Credit.** The window never asks for more than `min(W, Q_max)` outstanding blocks, and
+//!   the client's count bounds the blocks at `h` from above, with equality absent loss and up to
+//!   clock skew at an expiry: `h` spends the block of least expiry first, and so does
+//!   [`OnionClientCredit`]; both drop a block at its expiry; and the count saturates at `Q_max`,
+//!   where `h` refuses further blocks.
 
 use std::collections::BTreeMap;
 
@@ -195,23 +198,31 @@ impl OnionCreditWindow {
         Self { target }
     }
 
-    /// The credit loops to send when `outstanding` blocks are live at `h`, each leaving
-    /// `k + 1` blocks in class `class`: `⌈(min(W, Q_max) − outstanding) / (k + 1)⌉`, and none once
-    /// the window is full. The window is capped at `h`'s pool bound `Q_max`, since a block past it
-    /// is dropped at `h` and its loop wasted.
-    pub(crate) fn loops_wanted(self, outstanding: usize, class: OnionLoopClass) -> usize {
-        let per_loop = OnionFrame::credit_capacity(class) + 1;
-        self.target
+    /// The credit loops to send when `outstanding` blocks are live at `h`, as the number of
+    /// blocks each carries in class `class` (see the module diagram): a loop of `j` blocks
+    /// leaves `j + 1`, so together they leave at most `min(W, Q_max) − outstanding`, and none
+    /// once the window is full. The window is capped at `h`'s pool bound `Q_max`, since a block
+    /// past it is dropped at `h` and its loop wasted.
+    pub(crate) fn credit_loops(self, outstanding: usize, class: OnionLoopClass) -> Vec<usize> {
+        let blocks_per_frame = OnionFrame::credit_capacity(class);
+        let deficit = self
+            .target
             .min(ONION_SURB_POOL_CAPACITY)
-            .saturating_sub(outstanding)
-            .div_ceil(per_loop)
+            .saturating_sub(outstanding);
+        let full = deficit / (blocks_per_frame + 1);
+        let remainder = deficit % (blocks_per_frame + 1);
+        let mut loops = vec![blocks_per_frame; full];
+        if remainder >= 2 {
+            loops.push(remainder - 1);
+        }
+        loops
     }
 }
 
 /// The client's ledger of the reply blocks outstanding at `h` for one session, by expiry.
 ///
 /// ```text
-/// sent(x, n):   L[x] ← L[x] + n
+/// sent(t, x, n): L[x] ← L[x] + min(n, Q_max − count(t))                 (h refuses past Q_max)
 /// replied(t):   L[x] ← L[x] − 1 for the least x > t with L[x] > 0      (h spends least x first)
 /// count(t):     Σ_{x > t} L[x]                                         (h drops a block at x)
 /// ```
@@ -222,9 +233,14 @@ pub(crate) struct OnionClientCredit {
 }
 
 impl OnionClientCredit {
-    /// Count `count` blocks sent with expiry `expiry`.
-    pub(crate) fn sent(&mut self, expiry: OnionExpiry, count: usize) {
-        *self.outstanding.entry(expiry).or_default() += count;
+    /// Count `count` blocks sent at `now` with expiry `expiry`, of which `h` keeps at most what
+    /// its pool has room for.
+    pub(crate) fn sent(&mut self, now_ms: u128, expiry: OnionExpiry, count: usize) {
+        let room = ONION_SURB_POOL_CAPACITY.saturating_sub(self.count(now_ms));
+        let kept = count.min(room);
+        if kept > 0 {
+            *self.outstanding.entry(expiry).or_default() += kept;
+        }
     }
 
     /// A reply arrived at `now`: `h` spent its block of least expiry.

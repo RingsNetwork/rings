@@ -150,7 +150,7 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
     let (next, cell) = surb.produce(&output).expect("produce");
     assert_eq!(next, Did::from(102_u32));
     let cell = relay(relay(cell.into_bytes(), 3), 4);
-    let returned = OnionCell::parse(cell).expect("cell");
+    let returned = OnionCell::parse(&cell).expect("cell");
 
     assert_eq!(returned.loop_tag(), tag);
     assert_eq!(

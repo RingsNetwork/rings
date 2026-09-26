@@ -5,11 +5,18 @@
 //! `enc(v₀) = golden`, with `dec ∘ enc (v₀) = v₀` where a decoder exists. A cell is pinned by its
 //! SHA-256 digest `H(enc(v₀))` and its width, since it is `b` bytes.
 //!
+//! The generator is ChaCha20 from a fixed seed, which is portable across `rand` releases. The
+//! frames, `ā`, the uniform layers and the descriptor are pure functions of constants, so they
+//! pin the wire alone; the digests of a built loop cell, of a reply block and of its reply cell
+//! also pin the order in which the builder draws its secrets, which is part of a reproducible
+//! build of a cell, not of the wire, so a change there that keeps every other golden is a
+//! refactor of the builder and is re-pinned with it.
+//!
 //! A failing test here is a wire cutover, never a fixture to refresh: there is no protocol
 //! versioning, so a change to any of these bytes is a total cutover of the network.
 
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
@@ -20,6 +27,7 @@ use sha2::Digest;
 use sha2::Sha256;
 
 use super::super::OnionExpiry;
+use super::super::OnionReplayNonce;
 use super::super::ONION_CIRCUIT_NAMESPACE;
 use crate::descriptor::SignedDescriptor;
 use crate::descriptor::SignedDescriptorBody;
@@ -32,6 +40,12 @@ use crate::onion::sphinx::builder::build_loop;
 use crate::onion::sphinx::builder::build_surb;
 use crate::onion::sphinx::builder::OnionApplication;
 use crate::onion::sphinx::class::OnionLoopClass;
+use crate::onion::sphinx::header::OnionHeaderMac;
+use crate::onion::sphinx::layer::OnionLayer;
+use crate::onion::sphinx::layer::OnionLayerApplication;
+use crate::onion::sphinx::layer::OnionLayerHead;
+use crate::onion::sphinx::seed::OnionCarrySeed;
+use crate::onion::sphinx::seed::OnionSegmentSeed;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
@@ -51,18 +65,30 @@ const GOLDEN_DATA: &str = "00000000060078797a";
 const GOLDEN_FIN: &str = "0100000007";
 /// Pinned `H(enc(credit(υ)))` of the fixture reply block.
 const GOLDEN_CREDIT_DIGEST: &str =
-    "c6f5a52476199519d2ad18dcdb02116cd0d9b1b705734fe03ea7ad82b54bf68c";
+    "fb3590462a35db66bf2deca51264d9a42f97d35c4ce2b915cd2fd9d696c19957";
 /// Pinned `ā = ς ‖ SHA-256(t) ‖ 0^16` of the fixture session.
 const GOLDEN_SESSION_ARGUMENTS: &str =
     "515151515151515151515151515151512d92752e69614799ea8467c10d252c76f79c85845cf23d54406ef49ab463ff0c00000000000000000000000000000000";
 /// Pinned `H(χ₁ ‖ y₀)` of the fixture loop's first cell.
 const GOLDEN_LOOP_CELL_DIGEST: &str =
-    "4a135348f22224f7f2caf3cc469f5bb8f6fcd84adcc85691086e1c70b353f756";
+    "cd0d86042450d02c24fd2465e9a79bc61ae8f2aa924df057ac04ca91566d48d9";
 /// Pinned `t_⋄` of the fixture loop.
-const GOLDEN_LOOP_REPLY_TAG: &str = "3e5eef7ce8cf481099959ffd78fbcf1a";
+const GOLDEN_LOOP_REPLY_TAG: &str = "64542fdd8b597b71e4d95d989f31d1d0";
 /// Pinned signing data of [`exit_descriptor_body`].
 const GOLDEN_EXIT_DESCRIPTOR_SIGNING_DATA: &str =
-    "2a30783030303030303030303030303030303030303030303030303030303030303030306130623063306400333231534779334657326237323153477933465732623732315347793346573262373231534779334657326237316a39514a674e33324242397869487643583832424239786948764358383242423978694876435838324242397869487643583831745a374d7676313131313131313131313131313131310101056874747073020f6578616d706c652e636f6d3a343433052a3a343433010b31302e302e302e313a3232100480804080d095ffbc31909e96ffbc31a0dd9bffbc310c302e302e302d676f6c64656e";
+    "2a30783030303030303030303030303030303030303030303030303030303030303030306130623063306400333231534779334657326237323153477933465732623732315347793346573262373231534779334657326237316a39514a674e33324242397869487643583832424239786948764358383242423978694876435838324242397869487643583831745a374d7676313131313131313131313131313131310101056874747073020f6578616d706c652e636f6d3a343433052a3a343433010b31302e302e302e313a32321080804080d095ffbc31909e96ffbc31a0dd9bffbc310c302e302e302d676f6c64656e";
+
+/// The generator seed of every seeded golden.
+const GOLDEN_SEED: [u8; 32] = [0x43; 32];
+/// Pinned `enc(λ)` of a relay layer, before the header's stream cipher.
+const GOLDEN_RELAY_LAYER: &str =
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010203043131313131313131313131313131313100000000000249f0232323232323232323232323232323232424242424242424242424242424242424242424242424242424242424242424252525252525252525252525252525252525252525252525252525252525252526262626262626262626262626262626";
+/// Pinned `enc(λ)` of a symbol layer applying `tcp` to the fixture session.
+const GOLDEN_SYMBOL_LAYER: &str =
+    "01515151515151515151515151515151512d92752e69614799ea8467c10d252c76f79c85845cf23d54406ef49ab463ff0c0000000000000000000000000000000000000000000000000000000000000000010203043131313131313131313131313131313100000000000249f0232323232323232323232323232323232424242424242424242424242424242424242424242424242424242424242424252525252525252525252525252525252525252525252525252525252525252526262626262626262626262626262626";
+/// Pinned `H(reply cell)` of the fixture reply block producing `golden reply`.
+const GOLDEN_SURB_REPLY_DIGEST: &str =
+    "71be2f7a4740097761b051fe3d4ce836c071c534711c2a507dccadd9d8c18a9a";
 
 /// Frozen signing domain of onion-exit descriptors.
 const EXIT_DESCRIPTOR_DOMAIN_TAG: &[u8] = b"rings-node:onion-exit-descriptor";
@@ -159,6 +185,59 @@ fn test_session_frames_are_pinned() {
     );
 }
 
+/// The uniform layer of `next`, applying `application`, with every other field a constant.
+fn layer(application: OnionLayerApplication) -> OnionLayer {
+    OnionLayer {
+        head: OnionLayerHead {
+            application,
+            next: Did::from(0x0102_0304_u32),
+            epoch: FIXTURE_EPOCH,
+            expiry: fixture_expiry(),
+            nonce: OnionReplayNonce::new([0x23; 16]),
+        },
+        inbound: OnionCarrySeed::new([0x24; 32]),
+        outbound: OnionSegmentSeed::new([0x25; 32]),
+    }
+}
+
+/// The plaintext uniform layer `λ` (#834 D6″), field by field, for a relay and for a symbol:
+/// the one encoding every hop decodes.
+#[test]
+fn test_uniform_layers_are_pinned() {
+    let mac = OnionHeaderMac::new([0x26; 16]);
+    let relay = layer(OnionLayerApplication::Relay).encode(&mac);
+    let symbol = layer(OnionLayerApplication::Apply {
+        symbol: OnionServiceName::tcp(),
+        arguments: session_arguments().encode(),
+    })
+    .encode(&mac);
+
+    assert_eq!(hex(relay.as_slice()), GOLDEN_RELAY_LAYER);
+    assert_eq!(hex(symbol.as_slice()), GOLDEN_SYMBOL_LAYER);
+    let (decoded, decoded_mac) = OnionLayer::decode(symbol.as_slice()).expect("decodes");
+    assert_eq!(decoded.encode(&decoded_mac).as_slice(), symbol.as_slice());
+}
+
+/// The reply cell a reply block produces from a fixed value.
+#[test]
+fn test_surb_reply_cell_is_pinned() {
+    let (surb, _) = build_surb(
+        fixture_loop().return_path(),
+        Did::from(99_u32),
+        OnionLoopClass::DEFAULT,
+        fixture_expiry(),
+        &mut ChaCha20Rng::from_seed(GOLDEN_SEED),
+    )
+    .expect("build the reply block");
+    let (next, cell) = surb.produce(b"golden reply").expect("produce");
+
+    assert_eq!(next, Did::from(4_u32));
+    assert_eq!(
+        digest(cell.into_bytes().as_slice()),
+        GOLDEN_SURB_REPLY_DIGEST
+    );
+}
+
 #[test]
 fn test_credit_frame_is_pinned() {
     let (surb, _) = build_surb(
@@ -166,7 +245,7 @@ fn test_credit_frame_is_pinned() {
         Did::from(99_u32),
         OnionLoopClass::DEFAULT,
         fixture_expiry(),
-        &mut StdRng::seed_from_u64(0x843),
+        &mut ChaCha20Rng::from_seed(GOLDEN_SEED),
     )
     .expect("build the reply block");
     let encoded = OnionFrame::Credit(vec![surb])
@@ -205,7 +284,7 @@ fn test_loop_cell_is_pinned() {
         OnionLoopClass::DEFAULT,
         fixture_expiry(),
         b"golden value",
-        &mut StdRng::seed_from_u64(0x843),
+        &mut ChaCha20Rng::from_seed(GOLDEN_SEED),
     )
     .expect("build the loop");
 
@@ -232,8 +311,7 @@ fn exit_descriptor_body() -> OnionExitDescriptorBody {
                 OnionExitTarget::parse("*:443").expect("target"),
             ],
             denied_targets: vec![OnionExitTarget::parse("10.0.0.1:22").expect("target")],
-            max_circuits: 16,
-            max_streams_per_circuit: 4,
+            max_sessions: 16,
             max_bytes_per_minute: 1_048_576,
         },
         started_at_ms: 1_700_000_000_000,

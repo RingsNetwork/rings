@@ -10,23 +10,38 @@
 //! forward(t, f, υ):  Q ← Q ∪ {υ};  f = credit(υ…) ⇒ Q ← Q ∪ υ…;  f ∈ {data, fin} ⇒ reorder,
 //!                    then per released frame, in order:
 //!   data(t?, w)  Unbound ∧ T ⇒ bind t, Open(t);  Opening ∨ Open ⇒ Write(w) for w ≠ ε
+//!                a later T naming another target ⇒ abort
 //!   fin          ⇒ ShutdownWrite
-//! opened(ok):        ok ⇒ Open, reply data(0, 0, ε) once some υ is available;  ¬ok ⇒ reply fin(0), Close
-//! world(w | eof):    υ = take least x;  reply data(n, 0, w) | fin(n);  n ← n + 1
-//! tick(t):           gap, or t − last forward ≥ V, or both directions closed ⇒ Close
-//! fail:              the world failed ⇒ Close
+//!                    then drain the held world bytes into the new credit
+//! opened(ok):        ok ⇒ Open, reply data(0, 0, ε) once some υ is available
+//!                    ¬ok ⇒ reply fin(0), Close
+//! world(w | eof):    held ← held ‖ w (or eof);  drain
+//! drain:             while held ≠ ε ∧ υ = least x exists:  reply data(n, 0, w′), w′ ≤ cap(υ)
+//!                    held = ε ∧ eof ∧ υ exists ⇒ reply fin(n)
+//! tick(t):           a persisting gap ⇒ abort
+//!                    t − last forward ≥ V, or both directions closed ⇒ Close
+//! fail(t):           the world failed ⇒ abort
+//! abort:             reply fin(n) if a block is left, then Close (fail closed, #834 D2′)
 //! ```
 //!
 //! Laws (tested in `session::tests`):
 //!
 //! - **Credit.** Every `Reply` effect spends one block taken from `Q` (Invariant Credit), and
-//!   [`OnionExitSession::reply_capacity`] is `None` while `Q = ∅`, so the shell reads nothing
-//!   from the world then; a reply never exceeds its block's capacity.
-//! - **Binding.** `Open(t)` is emitted at most once, and only for `SHA-256(t) = d`.
+//!   [`OnionExitSession::reply_capacity`] is `None` while `Q = ∅` or world bytes are held, so the
+//!   shell reads nothing from the world then; a reply never exceeds its own block's capacity.
+//! - **Totality.** Every world byte the shell hands in is replied, in order, or the session
+//!   aborts: bytes that arrive when every block has expired are held until credit returns, never
+//!   dropped (D2′).
+//! - **Binding.** `Open(t)` is emitted at most once, and only for `SHA-256(t) = d`; a later `T`
+//!   naming another target aborts the session.
 //! - **Ack.** The first reply of an opened session is `data(0, 0, ε)`, and a refused one's only
 //!   reply is `fin(0)` (#843 Q5); world bytes are never replied before the ack.
 //! - **Order.** Forward frames reach the world in sequence order, each once; replies carry
 //!   `n = 0, 1, …`.
+//! - **Fail closed.** A gap or a world failure spends a remaining block on `fin(n)` before the
+//!   session closes, so the client learns of it in one loop instead of by its own timeout.
+
+use std::collections::VecDeque;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
@@ -115,6 +130,10 @@ pub(crate) struct OnionExitSession {
     pool: OnionSurbPool,
     /// The sequence of the next reply; `None` once the 32-bit space is spent.
     reply: Option<OnionSequence>,
+    /// World bytes read and not yet replied, in order.
+    held: VecDeque<Bytes>,
+    /// Whether the world's stream has ended and its `fin` is not yet replied.
+    eof_held: bool,
     /// Whether the world's stream has ended (`fin` replied).
     read_closed: bool,
     /// Whether the client's stream has ended (`fin` applied).
@@ -132,6 +151,8 @@ impl OnionExitSession {
             forward: OnionReorder::default(),
             pool: OnionSurbPool::default(),
             reply: Some(OnionSequence::FIRST),
+            held: VecDeque::new(),
+            eof_held: false,
             read_closed: false,
             write_closed: false,
             last_forward_ms: now_ms,
@@ -176,6 +197,7 @@ impl OnionExitSession {
             }
         }
         self.flush_ack(now_ms, &mut effects);
+        self.drain(now_ms, &mut effects);
         effects
     }
 
@@ -197,56 +219,55 @@ impl OnionExitSession {
 
     /// The most world bytes one reply can carry now: the data capacity of the block it would
     /// spend, or `None` while the session may not read the world (not acked, the world's stream
-    /// ended, or `Q_{h,ς} = ∅`, Invariant Credit).
+    /// ended, world bytes still held, or `Q_{h,ς} = ∅`, Invariant Credit).
     pub(crate) fn reply_capacity(&mut self, now_ms: u128) -> Option<usize> {
         match self.phase {
-            OnionExitPhase::Open { acked: true } if !self.read_closed => {
+            OnionExitPhase::Open { acked: true }
+                if !self.read_closed && !self.eof_held && self.held.is_empty() =>
+            {
                 self.pool.least_class(now_ms).map(OnionFrame::data_capacity)
             }
             _ => None,
         }
     }
 
-    /// The world handed the session `read` at `now`.
+    /// The world handed the session `read` at `now`: it is held, then drained into the credit
+    /// there is (Law Totality).
     pub(crate) fn world(&mut self, now_ms: u128, read: OnionWorldRead) -> Vec<OnionExitEffect> {
         let mut effects = Vec::new();
-        if self.reply_capacity(now_ms).is_none() {
+        if !matches!(self.phase, OnionExitPhase::Open { acked: true }) || self.read_closed {
             return effects;
         }
         match read {
-            OnionWorldRead::Bytes(bytes) => {
-                self.reply_frame(now_ms, ReplyKind::Data(bytes), &mut effects);
-            }
-            OnionWorldRead::Eof => {
-                self.reply_frame(now_ms, ReplyKind::Fin, &mut effects);
-                self.read_closed = true;
-                if self.write_closed {
-                    self.close(&mut effects);
-                }
-            }
+            OnionWorldRead::Bytes(bytes) if bytes.is_empty() => {}
+            OnionWorldRead::Bytes(bytes) => self.held.push_back(bytes),
+            OnionWorldRead::Eof => self.eof_held = true,
         }
+        self.drain(now_ms, &mut effects);
         effects
     }
 
-    /// The periodic step at `now`: a persisting gap, `V` without a forward loop, or both
+    /// The periodic step at `now`: a persisting gap aborts; `V` without a forward loop, or both
     /// directions closed, closes the session.
     pub(crate) fn tick(&mut self, now_ms: u128) -> Vec<OnionExitEffect> {
         let mut effects = Vec::new();
-        let idle = now_ms.saturating_sub(self.last_forward_ms) >= ONION_FORWARD_MAX_VALIDITY_MS;
-        if !self.is_closed()
-            && (self.forward.expire(now_ms).is_err()
-                || idle
-                || (self.read_closed && self.write_closed))
+        if self.is_closed() {
+            return effects;
+        }
+        if self.forward.expire(now_ms).is_err() {
+            self.abort(now_ms, &mut effects);
+        } else if now_ms.saturating_sub(self.last_forward_ms) >= ONION_FORWARD_MAX_VALIDITY_MS
+            || (self.read_closed && self.write_closed)
         {
             self.close(&mut effects);
         }
         effects
     }
 
-    /// The world failed (a read, a write, or the byte policy): the session fails closed.
-    pub(crate) fn fail(&mut self) -> Vec<OnionExitEffect> {
+    /// The world failed at `now` (a read, a write, or the byte policy): the session aborts.
+    pub(crate) fn fail(&mut self, now_ms: u128) -> Vec<OnionExitEffect> {
         let mut effects = Vec::new();
-        self.close(&mut effects);
+        self.abort(now_ms, &mut effects);
         effects
     }
 
@@ -261,13 +282,13 @@ impl OnionExitSession {
         match self.forward.accept(now_ms, sequence, frame) {
             Ok(released) => released
                 .into_iter()
-                .for_each(|frame| self.apply(frame, effects)),
-            Err(_) => self.close(effects),
+                .for_each(|frame| self.apply(now_ms, frame, effects)),
+            Err(_) => self.abort(now_ms, effects),
         }
     }
 
-    /// Apply one in-order forward frame (see the module diagram).
-    fn apply(&mut self, frame: OnionStreamFrame, effects: &mut Vec<OnionExitEffect>) {
+    /// Apply one in-order forward frame at `now` (see the module diagram).
+    fn apply(&mut self, now_ms: u128, frame: OnionStreamFrame, effects: &mut Vec<OnionExitEffect>) {
         match (self.phase, frame) {
             (OnionExitPhase::Closed, _) => {}
             (
@@ -283,6 +304,14 @@ impl OnionExitSession {
             }
             // A digest mismatch, or stream bytes before the target is known, is not a session.
             (OnionExitPhase::Unbound, _) => self.close(effects),
+            // Law Binding: a bound session never takes another target.
+            (
+                _,
+                OnionStreamFrame::Data {
+                    target: Some(target),
+                    ..
+                },
+            ) if OnionTargetDigest::of(&target) != self.digest => self.abort(now_ms, effects),
             (_, OnionStreamFrame::Data { payload, .. }) => Self::write(payload, effects),
             (_, OnionStreamFrame::Fin) => {
                 self.write_closed = true;
@@ -306,6 +335,46 @@ impl OnionExitSession {
         }
     }
 
+    /// Reply the held world bytes, each block carrying at most its own capacity, and then the
+    /// held end of stream, while blocks last (see the module diagram).
+    fn drain(&mut self, now_ms: u128, effects: &mut Vec<OnionExitEffect>) {
+        if !matches!(self.phase, OnionExitPhase::Open { acked: true }) {
+            return;
+        }
+        while let Some(capacity) = self.pool.least_class(now_ms).map(OnionFrame::data_capacity) {
+            if self.is_closed() {
+                return;
+            }
+            let Some(front) = self.held.front_mut() else {
+                break;
+            };
+            let chunk = front.split_to(capacity.min(front.len()));
+            if front.is_empty() {
+                self.held.pop_front();
+            }
+            self.reply_frame(now_ms, ReplyKind::Data(chunk), effects);
+        }
+        if self.held.is_empty() && self.eof_held && !self.pool.is_empty(now_ms) {
+            self.eof_held = false;
+            self.read_closed = true;
+            self.reply_frame(now_ms, ReplyKind::Fin, effects);
+            if self.write_closed {
+                self.close(effects);
+            }
+        }
+    }
+
+    /// Fail closed: reply `fin(n)` if a block is left, then close.
+    fn abort(&mut self, now_ms: u128, effects: &mut Vec<OnionExitEffect>) {
+        if self.is_closed() {
+            return;
+        }
+        if self.reply.is_some() && !self.pool.is_empty(now_ms) {
+            self.reply_frame(now_ms, ReplyKind::Fin, effects);
+        }
+        self.close(effects);
+    }
+
     /// Spend the block of least expiry on one reply frame, with the next reply sequence. With no
     /// block, no sequence left, or a failed production, the session closes: a reply that cannot
     /// leave would be a gap at the client.
@@ -322,8 +391,8 @@ impl OnionExitSession {
             },
             ReplyKind::Fin => OnionFrame::Fin { sequence },
         };
-        // A frame too wide for its block is refused by `encode`; the capacity the shell read
-        // against makes that unreachable, and a weak key of the block is probability 2^−124.
+        // A data frame is cut to its own block's capacity (`drain`), so `encode` refuses
+        // nothing here; a weak key of the block has probability 2^−124.
         let produced = frame
             .encode(surb.class())
             .ok()

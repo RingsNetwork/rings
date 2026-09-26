@@ -86,8 +86,7 @@ fn exit_descriptor(
             policy: OnionExitPolicy {
                 allowed_targets: vec![OnionExitTarget::parse("example.com:443")?],
                 denied_targets: vec![],
-                max_circuits: 16,
-                max_streams_per_circuit: 4,
+                max_sessions: 16,
                 max_bytes_per_minute: 1024,
             },
             started_at_ms: 1,

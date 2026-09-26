@@ -47,6 +47,7 @@ pub use protocol::Reject;
 pub use protocol::Transition;
 pub use protocol::Wire;
 pub(crate) use registry::Core;
+pub(crate) use registry::DynLinkObserver;
 pub use registry::EffectScope;
 pub use registry::Extensions;
 pub(crate) use registry::LinkFact;

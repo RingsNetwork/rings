@@ -287,9 +287,10 @@ fix it: they run above the relay and inherit whatever it exposes.
 
 The privacy layer is `crates/node/src/onion`: client-sealed loops of fixed-width
 Sphinx cells over direct edges, constant-rate link emission with real cells
-substituted for cover, paid admission with replay witnesses, fixed size classes for
-cells, and route selection from the online-node and onion-exit registries. It sits in `rings-node` deliberately: Chord remains the storage and
-discovery substrate, and exit policy is an application decision.
+substituted for cover, paid admission with a replay store, fixed size classes for
+cells, and route selection from the online-node and onion-exit registries. It sits
+in `rings-node` deliberately: Chord remains the storage and discovery substrate, and
+exit policy is an application decision.
 
 **Per-hop knowledge bound.** Every edge of a loop carries one cell `α‖β‖γ‖y` of
 exactly `b` bytes. Each position peels one Sphinx layer with its session key, which
@@ -357,6 +358,16 @@ first hop, which authenticates the client's DID on the transport edge the first 
 arrives on; it does not hide overlay membership, which is public; and it does not
 hide the active/idle phase of each link from an observer that watches it.
 
+**Accepted leakage of the loop design** (#834's leakage table):
+
+- the guard sees a loop leave and return, so it learns the loop's round-trip time;
+- every hop sees the loop's class `b`, the cell length, and all cells of a loop share it;
+- every hop sees the loop's expiry `x`, shared by its positions and quantised to `Q`, so
+  loops built within one quantum are indistinguishable by it and others are not;
+- the exit's reply timing follows its world: replies leave as the world produces bytes and
+  credit allows, so a session's reply pattern is visible on the return path, bounded by the
+  link's constant rate while it is active.
+
 **Inherited from the communication layer, and not repairable here:**
 
 - overlay membership is public: joining the ring and publishing a presence
@@ -386,7 +397,8 @@ evaluates each authenticated application through a table holding exactly the
 services it is configured to serve, one interpretation per symbol: `https` is a
 request/response fetch only, and every byte tunnel (HTTP CONNECT, SOCKS, the gateway's
 captured flows, TLS included) is `tcp`. No interpretation falls back to another
-symbol, so a body that is not a well-formed payload of its symbol is dropped, and an
+symbol: a session frame that does not decode is dropped, an `https` stream that is not
+one request is answered with `MalformedRequest`, and an
 operator who wants HTTPS-only egress registers `tcp` under a port-restricted policy
 such as `*:443`. A new incompatible descriptor
 shape is therefore a network-wide release cutover, not a value negotiated inside the

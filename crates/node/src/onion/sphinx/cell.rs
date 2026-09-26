@@ -211,6 +211,10 @@ pub(crate) enum OnionStepError {
     /// A symbol hop rejected its input slot.
     #[error(transparent)]
     Open(#[from] OnionOpenError),
+    /// The cell is narrower than a header. The class invariant (`|w| ≥ |χ| + τ` for every
+    /// class) excludes it, so this is a typed impossibility rather than a panic.
+    #[error("onion cell narrower than its header")]
+    Width,
 }
 
 /// Why the client did not build a loop's first cell.
@@ -225,8 +229,8 @@ pub(crate) enum OnionClientError {
 }
 
 impl OnionCell {
-    /// `w ↦ (b, w)` with `b = |w|`: the one parser of a received cell, which keeps the received
-    /// buffer as the cell.
+    /// `w ↦ (b, w)` with `b = |w|`: the one parser of a received cell. The payload is copied
+    /// only once its width is a class length, and the copy is the cell's buffer from then on.
     ///
     /// The only condition is the width: once `|w|` is a class length, `|w| ≥ |χ| + τ` holds for
     /// every class, and the header fields are read when the header is peeled.
@@ -234,11 +238,17 @@ impl OnionCell {
     /// # Errors
     ///
     /// [`OnionCellWidth`] unless `|w|` is the length of a loop class.
-    pub(crate) fn parse(bytes: Vec<u8>) -> Result<Self, OnionCellWidth> {
-        match OnionLoopClass::from_cell_bytes(bytes.len()) {
-            Some(class) => Ok(Self { class, bytes }),
-            None => Err(OnionCellWidth(bytes.len())),
-        }
+    pub(crate) fn parse(payload: &[u8]) -> Result<Self, OnionCellWidth> {
+        let class = Self::class_of(payload.len())?;
+        Ok(Self {
+            class,
+            bytes: payload.to_vec(),
+        })
+    }
+
+    /// The width judge: the class whose cell length is `width`.
+    fn class_of(width: usize) -> Result<OnionLoopClass, OnionCellWidth> {
+        OnionLoopClass::from_cell_bytes(width).ok_or(OnionCellWidth(width))
     }
 
     /// `w = χ ‖ y`, exactly `b` bytes: the cell's own buffer.
@@ -337,9 +347,10 @@ impl fmt::Debug for OnionCell {
 }
 
 impl<C> Charged<C> {
-    /// Pair `value` with the token of its charge. Only admission's `charge` calls it, with the
-    /// cell it just charged and the token it just built.
-    pub(crate) const fn new(value: C, charge: OnionAdmissionCharge) -> Self {
+    /// Pair `value` with the token of its charge: admission's `charge` pairs a cell with the
+    /// token it just built, and [`Charged::peel`] carries the same token over to the peeled
+    /// cell. A bare token exists nowhere else, so no other pairing is constructible.
+    pub(in crate::onion) const fn new(value: C, charge: OnionAdmissionCharge) -> Self {
         Self { value, charge }
     }
 
@@ -439,9 +450,9 @@ impl OnionAdmittedCell {
             }
             OnionLayerApplication::Apply { symbol, arguments } => {
                 let header = bytes
-                    .get(..ONION_HEADER_BYTES)
-                    .and_then(OnionHeader::decode)
-                    .ok_or(OnionOpenError::Inauthentic)?;
+                    .first_chunk::<ONION_HEADER_BYTES>()
+                    .map(OnionHeader::of)
+                    .ok_or(OnionStepError::Width)?;
                 let surb = Box::new(OnionSurb {
                     class,
                     next: head.next,
@@ -510,13 +521,13 @@ impl OnionSurb {
     /// `None` unless `|bytes| = |υ|` and `x_υ` lies on the grid.
     pub(crate) fn decode(class: OnionLoopClass, bytes: &[u8]) -> Option<Self> {
         let (next, rest) = bytes.split_first_chunk::<ONION_DID_BYTES>()?;
-        let (header, rest) = rest.split_at_checked(ONION_HEADER_BYTES)?;
+        let (header, rest) = rest.split_first_chunk::<ONION_HEADER_BYTES>()?;
         let (outbound, rest) = rest.split_first_chunk::<ONION_CARRY_SEED_BYTES>()?;
         let expiry = <[u8; ONION_EXPIRY_BYTES]>::try_from(rest).ok()?;
         Some(Self {
             class,
             next: Did::from(PublicKeyAddress::from(*next)),
-            header: OnionHeader::decode(header)?,
+            header: OnionHeader::of(header),
             outbound: OnionSegmentSeed::new(*outbound),
             expiry: OnionExpiry::from_wire_ms(u64::from_be_bytes(expiry))?,
         })

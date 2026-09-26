@@ -41,8 +41,6 @@ mod tests;
 
 pub(crate) use admission::OnionAdmissionCharge;
 pub(crate) use admission::OnionAdmissionLayer;
-#[cfg(test)]
-pub(crate) use admission::OnionAdmissionLink;
 pub(crate) use admission::OnionAdmissionRejection;
 pub(crate) use admission::OnionAdmissionState;
 #[cfg(test)]

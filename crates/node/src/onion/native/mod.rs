@@ -99,7 +99,7 @@ impl NativeOnionCircuitHandle {
     ///
     /// Obtain the target and call from [`OnionHttpsCall::from_url`], then select `route` for that
     /// target under
-    /// [`OnionProxyConfig::https_proxy`](crate::onion::proxy::OnionProxyConfig::https_proxy).
+    /// [`OnionProxyProtocol::HttpsProxy`](crate::onion::proxy::OnionProxyProtocol::HttpsProxy).
     /// Dropping the future ends the session, and a silent exit yields
     /// [`Error::OnionProxyRequestTimedOut`].
     ///

@@ -40,7 +40,7 @@ use crate::onion::https::OnionHttpsClient;
 use crate::onion::https::OnionHttpsClientRequest;
 use crate::onion::https::OnionHttpsResponse;
 use crate::onion::https_onion_exit_services;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::runtime::OnionRuntime;
@@ -95,7 +95,7 @@ impl ProviderRef {
 #[wasm_export]
 pub struct BrowserOnionProxy {
     processor: Arc<Processor>,
-    config: OnionProxyConfig,
+    config: OnionProxyProtocol,
     client: OnionHttpsClient,
     directory_endpoint: Option<RemoteRpcEndpoint>,
 }
@@ -264,7 +264,7 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
 
 async fn build_browser_route_from_reader(
     reader: &BrowserOnionDirectoryReader,
-    config: OnionProxyConfig,
+    config: OnionProxyProtocol,
     target: OnionProxyTarget,
 ) -> NodeResult<OnionProxyRoute> {
     let direct_peers = reader.direct_peer_dids();
@@ -281,14 +281,13 @@ async fn build_browser_route_from_reader(
 
 async fn build_browser_onion_proxy_route(
     processor: Arc<Processor>,
-    config: OnionProxyConfig,
+    config: OnionProxyProtocol,
     target: OnionProxyTarget,
     directory_endpoint: Option<RemoteRpcEndpoint>,
 ) -> NodeResult<OnionProxyRoute> {
     if let Some(endpoint) = directory_endpoint {
         let remote_reader = BrowserOnionDirectoryReader::remote(processor.clone(), endpoint);
-        match build_browser_route_from_reader(&remote_reader, config.clone(), target.clone()).await
-        {
+        match build_browser_route_from_reader(&remote_reader, config, target.clone()).await {
             Ok(route) => return Ok(route),
             Err(remote_error) => {
                 let local_reader = BrowserOnionDirectoryReader::local(processor);
@@ -307,7 +306,7 @@ async fn build_browser_onion_proxy_route(
 impl BrowserOnionProxy {
     /// Return the exit service class this proxy selects.
     pub fn exit_service(&self) -> String {
-        self.config.exit_service().to_string()
+        self.config.exit_service_name().as_str().to_string()
     }
 
     /// Build an HTTPS-over-TCP onion proxy route for `target_authority` (`host:port`).
@@ -791,7 +790,7 @@ impl Provider {
         let runtime = self.install_onion_runtime().map_err(JsError::from)?;
         Ok(BrowserOnionProxy {
             processor: self.processor.clone(),
-            config: OnionProxyConfig::https_proxy(),
+            config: OnionProxyProtocol::HttpsProxy,
             client: OnionHttpsClient::new(runtime),
             directory_endpoint: self.onion_directory_endpoint().map_err(JsError::from)?,
         })

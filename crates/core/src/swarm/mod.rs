@@ -221,8 +221,8 @@ impl Swarm {
     /// once under the lifecycle lock.
     ///
     /// Law (linearisation): the swarm marks a generation announced before its `Connected`
-    /// starts, and retires it before its [`SwarmEvent::PeerRetired`](callback::SwarmEvent::PeerRetired)
-    /// starts. So a snapshot taken after an application has applied an event already reflects
+    /// starts, and retires it before its
+    /// [`SwarmEvent::PeerRetired`](callback::SwarmEvent::PeerRetired) starts. So a snapshot taken after an application has applied an event already reflects
     /// that event, and an event applied after the snapshot either agrees with it or describes a
     /// later change of the registry.
     pub fn admitted_links(&self) -> Result<Vec<PeerLink>> {

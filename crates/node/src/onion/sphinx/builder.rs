@@ -12,7 +12,8 @@
 //! for i = 1 … H, in loop order:
 //!   relay     λ_i = (relay, (), next_i, e_i, x, ν_i, σ_in = σ_{k,j}, σ_out uniform);  j ← j + 1
 //!   symbol k  σ_k ← drawn;
-//!             λ_i = (f_k, ā_k, next_i, e_i, x, ν_i, σ_in = σ_{k−1,c}, σ_out = σ_k);  σ ← σ_k; j ← 1
+//!             λ_i = (f_k, ā_k, next_i, e_i, x, ν_i, σ_in = σ_{k−1,c}, σ_out = σ_k)
+//!             σ ← σ_k;  j ← 1
 //! next_H = the client (D6′);  (χ_1, t_⋄) ← header over (pk_i, λ_i)_{i=1…H}
 //! cell = χ_1 ‖ seal_{keys(σ_0)}(v);  reply key k_{c_n} = KDF₄₈(σ_{n,c})
 //! ```
@@ -29,6 +30,8 @@
 //! A reply block for batched credit (D8) is the same construction over the return path alone:
 //! one fresh segment `σ_υ` whose relays are the positions after `hₙ` and whose consumer is the
 //! client, with its own fresh tag.
+
+use std::array;
 
 use rand::CryptoRng;
 use rand::Rng;
@@ -58,6 +61,7 @@ use crate::onion::OnionLoop;
 use crate::onion::OnionLoopRole;
 use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
+use crate::onion::ONION_SEGMENT_RELAYS;
 
 /// The application `(f_k, ā_k)` a loop's symbol hop `h_k` evaluates.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -112,7 +116,7 @@ pub(crate) enum OnionBuildError {
 /// order, and its consumer seed.
 struct OnionOpenSegment {
     /// `σ_{k,j}` for the relays not yet placed, in visiting order.
-    relays: std::array::IntoIter<OnionCarrySeed, { crate::onion::ONION_SEGMENT_RELAYS }>,
+    relays: array::IntoIter<OnionCarrySeed, ONION_SEGMENT_RELAYS>,
     /// `σ_{k,c}`.
     consumer: OnionCarrySeed,
 }

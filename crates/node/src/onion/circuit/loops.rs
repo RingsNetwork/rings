@@ -13,6 +13,8 @@
 //! Law: every loop and reply block leaves its reply key in `T` before its cell leaves the node,
 //! so a reply can never arrive before its entry.
 
+use std::slice;
+
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::utils::get_epoch_ms;
@@ -116,7 +118,7 @@ impl OnionLoopClient {
         let expiry = OnionExpiry::of_build(now_ms);
         let built = build_loop(
             route.hops(),
-            std::slice::from_ref(application),
+            slice::from_ref(application),
             self.local,
             class,
             expiry,
@@ -124,7 +126,8 @@ impl OnionLoopClient {
             &mut rand::thread_rng(),
         )
         .map_err(|error| Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string())))?;
-        self.tags.register(now_ms, built.reply, sink.clone())?;
+        self.tags
+            .register(now_ms, built.guard, built.reply, sink.clone())?;
         Ok((
             OnionLink::new(built.guard),
             Bytes::from(built.cell.into_bytes()),
@@ -147,6 +150,7 @@ impl OnionLoopClient {
     ) -> Result<(Vec<OnionSurb>, OnionExpiry)> {
         let now_ms = get_epoch_ms();
         let expiry = OnionExpiry::of_build(now_ms);
+        let guard = route.hops().guard().did;
         let mut rng = rand::thread_rng();
         let surbs = (0..count)
             .map(|_| {
@@ -160,7 +164,7 @@ impl OnionLoopClient {
                 .map_err(|error| {
                     Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string()))
                 })?;
-                self.tags.register(now_ms, reply, sink.clone())?;
+                self.tags.register(now_ms, guard, reply, sink.clone())?;
                 Ok(surb)
             })
             .collect::<Result<Vec<_>>>()?;

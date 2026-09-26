@@ -123,8 +123,7 @@ fn onion_exit_policy_info(policy: OnionExitPolicy) -> OnionExitPolicyInfo {
             .into_iter()
             .map(|target| target.to_string())
             .collect(),
-        max_circuits: policy.max_circuits,
-        max_streams_per_circuit: policy.max_streams_per_circuit,
+        max_sessions: policy.max_sessions,
         max_bytes_per_minute: policy.max_bytes_per_minute,
     }
 }
@@ -142,8 +141,7 @@ fn onion_exit_policy_from_info(policy: OnionExitPolicyInfo) -> Result<OnionExitP
             .into_iter()
             .map(|target| OnionExitTarget::parse(target.as_str()))
             .collect::<Result<Vec<_>>>()?,
-        max_circuits: policy.max_circuits,
-        max_streams_per_circuit: policy.max_streams_per_circuit,
+        max_sessions: policy.max_sessions,
         max_bytes_per_minute: policy.max_bytes_per_minute,
     })
 }

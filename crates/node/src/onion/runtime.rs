@@ -39,6 +39,7 @@ use super::OnionExitOffer;
 use super::OnionServiceName;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::ext::DynLinkObserver;
 use crate::extension::ext::Extensions;
 use crate::extension::ext::Scope;
 
@@ -49,6 +50,9 @@ pub(crate) struct OnionRuntime {
     scope: Scope,
     /// The node's loop client.
     loops: OnionLoopClient,
+    /// What the runtime's clones own together: when the last one drops, the data plane's
+    /// tasks end.
+    _life: Arc<OnionRuntimeLife>,
     /// The witness of the data plane's link table.
     #[cfg(all(test, rings_native))]
     links: OnionLinkWitness,
@@ -96,10 +100,16 @@ impl OnionRuntime {
         let links = shell.link_witness();
         extensions.register(OnionCircuitProtocol, shell)?;
         let scope = Scope::new(core.clone(), ONION_CIRCUIT_NAMESPACE.to_string());
-        extensions.observe_links(Arc::new(OnionLinkFeed::start(scope.clone())?))?;
+        let feed = OnionLinkFeed::start(scope.clone())?;
+        let observer: Arc<DynLinkObserver> = feed.clone();
+        extensions.observe_links(&observer)?;
         Ok(Self {
             scope,
-            loops: OnionLoopClient::new(core.did(), tags, link_sender),
+            loops: OnionLoopClient::new(core.did(), tags, link_sender.clone()),
+            _life: Arc::new(OnionRuntimeLife {
+                _feed: feed,
+                link_sender,
+            }),
             #[cfg(all(test, rings_native))]
             links,
         })
@@ -118,6 +128,27 @@ impl OnionRuntime {
     /// The exit's refusal, a timeout, or a send failure (see [`dial::open`]).
     pub(crate) async fn open(&self, request: OnionSessionRequest) -> Result<OnionClientStream> {
         dial::open(self.loops.clone(), self.scope.clone(), request).await
+    }
+}
+
+/// The data plane's long-lived parts, owned by the runtime's clones together.
+///
+/// Law (lifetime): the feed's drain and tick end when the feed drops, and every emitter ends
+/// when its lane closes; so once the last runtime clone drops, no onion task keeps the node
+/// alive.
+struct OnionRuntimeLife {
+    /// The link feed, held for its lifetime: this is its only strong owner.
+    _feed: Arc<OnionLinkFeed>,
+    /// The node's link emitter.
+    link_sender: OnionLinkSender,
+}
+
+impl Drop for OnionRuntimeLife {
+    /// Close every lane, which stops its emitter; the feed drops after this.
+    fn drop(&mut self) {
+        if let Err(error) = self.link_sender.close_all() {
+            tracing::debug!(%error, "onion runtime could not close its link lanes");
+        }
     }
 }
 

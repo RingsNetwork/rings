@@ -42,6 +42,8 @@
 //!   [`OnionPeelError::Invalid`]: the admission step charges a cell rejected at either point
 //!   the same `u(b)` (#834), so a flood of invalid `α` is not free.
 
+use arrayref::array_ref;
+use arrayref::array_refs;
 use chacha20::cipher::KeyIvInit;
 use chacha20::cipher::StreamCipher;
 use chacha20::ChaCha20;
@@ -329,19 +331,23 @@ impl OnionHopSecrets {
 }
 
 impl OnionHeader {
-    /// The fields `α ‖ β ‖ γ` of an `|χ|`-byte string, `None` for any other width; `α` is
-    /// decoded as a point only when the header is peeled. The cell parser is the one caller.
-    pub(super) fn decode(bytes: &[u8]) -> Option<Self> {
-        let (alpha, rest) = bytes.split_first_chunk()?;
-        let (routing, mac) = rest.split_last_chunk()?;
-        let (blocks, []) = routing.as_chunks() else {
-            return None;
-        };
-        Some(Self {
+    /// The fields `α ‖ β ‖ γ` of an `|χ|`-byte string, total: the width is the type. `α` is
+    /// decoded as a point only when the header is peeled. The callers are a symbol hop's step,
+    /// which keeps the next header for its reply block, and the reply block's decoder.
+    pub(super) fn of(bytes: &[u8; ONION_HEADER_BYTES]) -> Self {
+        let (alpha, routing, mac) = array_refs![
+            bytes,
+            ONION_GROUP_ELEMENT_BYTES,
+            ONION_HEADER_ROUTING_BYTES,
+            ONION_HEADER_MAC_BYTES
+        ];
+        Self {
             alpha: PublicKey(*alpha),
-            routing: Routing::try_from(blocks).ok()?,
+            routing: std::array::from_fn(|slot| {
+                *array_ref![routing, slot * ONION_LAYER_BYTES, ONION_LAYER_BYTES]
+            }),
             mac: OnionHeaderMac(*mac),
-        })
+        }
     }
 
     /// Append the header's encoding `α ‖ β ‖ γ`, exactly `|χ|` bytes, to `bytes`.
@@ -476,7 +482,7 @@ impl OnionHeader {
             .zip(self.to_bytes())
             .for_each(|(slot, byte)| *slot = byte);
         let layer = peel_in_place(&mut bytes, class, key)?;
-        let next = Self::decode(&bytes).ok_or(OnionPeelError::Invalid)?;
+        let next = Self::of(&bytes);
         Ok(OnionPeeledHeader { layer, next })
     }
 }

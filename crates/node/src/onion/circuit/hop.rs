@@ -12,7 +12,7 @@
 //! admit(tk, e, x, ν)                                                   else Dropped(Admission)
 //! relay ∧ this node relays nothing                                     ⇒ Dropped(NotRelay)
 //! step (AEZ layer off, or the consumer's open)                         else Dropped(Step)
-//!   ├─ relay   ⇒ Relayed(next, cell)
+//!   ├─ relay   ⇒ Relayed(next, cell)          if next is a live link, else Dropped(NextNotLive)
 //!   └─ f ∈ Σ_W ⇒ Consumed(f, ā, v, υ)
 //! ```
 //!
@@ -28,6 +28,8 @@
 //!   epoch; its replay is `Dropped(Admission(Replayed))`.
 //! - **Identity** (L1). A `Relayed` cell has the received class and length, and its carry is the
 //!   received carry with one AEZ layer removed.
+//! - **Adjacency.** A `Relayed` cell's `next` is a live link, so a layer cannot make this node
+//!   emit toward a peer it has no link to.
 
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
@@ -92,6 +94,9 @@ pub(crate) enum OnionHopDrop {
     /// A relay layer reached a node that registers no `relay`.
     #[error("relay layer at a node that relays nothing")]
     NotRelay,
+    /// A relay layer names a `next` that is not a live link of this node.
+    #[error("relay layer names a next hop that is not a live link")]
+    NextNotLive,
     /// Its carry step failed (a weak key, or the consumer's check).
     #[error(transparent)]
     Step(#[from] OnionStepError),
@@ -133,6 +138,9 @@ pub(crate) fn hop(
         return OnionHopOutcome::Dropped(OnionHopDrop::NotRelay);
     }
     match admitted.step() {
+        Ok(OnionStep::Relayed { next, .. }) if admission.live_link(next).is_none() => {
+            OnionHopOutcome::Dropped(OnionHopDrop::NextNotLive)
+        }
         Ok(OnionStep::Relayed { next, cell }) => OnionHopOutcome::Relayed { next, cell },
         Ok(OnionStep::Consumed {
             symbol,

@@ -54,11 +54,12 @@ impl OnionSurbPool {
         self.surbs.first_key_value().map(|(_, surb)| surb.class())
     }
 
-    /// Add one block at `now`, returning whether the pool kept it: a block that has already
-    /// expired, or credit beyond `Q_max`, is dropped (D8).
+    /// Add one block at `now`, returning whether the pool kept it: a block whose expiry is not
+    /// admissible now (passed, or beyond `now + V`, so its reply would be refused by the first
+    /// relay), or credit beyond `Q_max`, is dropped (D8).
     pub(crate) fn add(&mut self, now_ms: u128, surb: OnionSurb) -> bool {
         self.purge(now_ms);
-        if surb.expiry().has_passed_at(now_ms) || self.surbs.len() >= ONION_SURB_POOL_CAPACITY {
+        if !surb.expiry().admissible_at(now_ms) || self.surbs.len() >= ONION_SURB_POOL_CAPACITY {
             return false;
         }
         let arrival = self.arrivals;

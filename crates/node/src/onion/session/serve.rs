@@ -5,23 +5,31 @@
 //! ⟦f⟧(from, ā, v, υ):  (ς, d) ← ā;  frame ← dec(v)
 //!                      ς known with d ?  ⇒ its driver ← (frame, υ)
 //!                      ς known, other d  ⇒ drop (D2′: a loop naming another target)
-//!                      ς new             ⇒ spawn a driver, then its driver ← (frame, υ)
+//!                      ς closed within V ⇒ drop (a tombstone: a late loop never respawns ς)
+//!                      ς new, frame T    ⇒ lease(from) ⇒ spawn a driver, its driver ← (frame, υ)
+//!                      ς new, other      ⇒ drop (credit, fin or data of no live session)
 //!
 //! driver(ς):  loop select
 //!               (frame, υ)  ─▶ machine.forward
 //!               world read  ─▶ machine.world            (only while reply_capacity = Some)
 //!               tick        ─▶ machine.tick
 //!             perform each effect in order:
-//!               Open(t)     policy ∧ lease ∧ world.open(t) ─▶ machine.opened(ok)
+//!               Open(t)     policy ∧ world.open(t) ─▶ machine.opened(ok)
 //!               Write(w)    world ← w (counted against the byte policy)
 //!               Reply(n, c) link sender ← (n, c), awaited: the world is read at the link's rate
 //!               Close       end the driver, release the lease and the world
 //! ```
 //!
-//! Laws: the pure machine's (Credit, Binding, Ack, Order), and **Isolation**: a session's
-//! reply blocks live in its own pool, so no two sessions share a block, and a session's inputs
-//! reach only its own driver. The world is read only when the machine reports a capacity, so a
-//! `tcp` session with no credit leaves its socket unread (it pauses), and resumes on credit.
+//! Laws: the pure machine's (Credit, Totality, Binding, Ack, Order, Fail closed), and:
+//!
+//! - **Isolation.** A session's reply blocks live in its own pool, so no two sessions share a
+//!   block, and a session's inputs reach only its own driver.
+//! - **Pause.** The world is read only when the machine reports a capacity, so a `tcp` session
+//!   with no credit leaves its socket unread, and resumes on credit.
+//! - **Bound.** Only a loop that can open a session (`data` with `T`) creates one, and it is
+//!   leased against its previous hop's share before its driver runs, so no previous hop holds
+//!   more than its share of the table, bound or not; each driver's inbound queue holds at most
+//!   `ONION_EXIT_SESSION_INBOUND` loops, since every loop goes through the one stored sender.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -36,7 +44,6 @@ use futures::future::Fuse;
 use futures::future::FusedFuture;
 use futures::FutureExt;
 use futures::StreamExt;
-use rings_core::dht::Did;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::sleep;
 use rings_runtime::MaybeSend;
@@ -57,6 +64,7 @@ use crate::onion::circuit::OnionApplicationInput;
 use crate::onion::circuit::OnionInterpretation;
 use crate::onion::circuit::OnionLink;
 use crate::onion::circuit::OnionLinkSender;
+use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::sphinx::cell::OnionSurb;
@@ -119,8 +127,38 @@ struct OnionExitInput {
 struct OnionExitSessionHandle {
     /// The digest the session is bound to.
     digest: OnionTargetDigest,
-    /// Its driver's inbound queue.
+    /// Its driver's inbound queue, the one sender every loop goes through: a full queue then
+    /// refuses.
     inbound: mpsc::Sender<OnionExitInput>,
+}
+
+/// The exit's sessions of one symbol: the live ones, and the tombstones of the closed ones.
+#[derive(Default)]
+struct OnionExitTable {
+    /// The live sessions.
+    live: HashMap<OnionSessionId, OnionExitSessionHandle>,
+    /// Sessions closed less than `V` ago, with the instant each tombstone lapses.
+    closed: HashMap<OnionSessionId, u128>,
+}
+
+impl OnionExitTable {
+    /// Record that `session` closed at `now`; tombstones past their lapse are dropped first,
+    /// and the set never holds more than `ONION_EXIT_MAX_SESSIONS`.
+    fn bury(&mut self, session: OnionSessionId, now_ms: u128) {
+        self.live.remove(&session);
+        self.closed.retain(|_, lapse_ms| *lapse_ms > now_ms);
+        if self.closed.len() < ONION_EXIT_MAX_SESSIONS {
+            self.closed
+                .insert(session, now_ms + ONION_FORWARD_MAX_VALIDITY_MS);
+        }
+    }
+
+    /// Whether `session` closed less than `V` before `now`.
+    fn is_buried(&self, session: &OnionSessionId, now_ms: u128) -> bool {
+        self.closed
+            .get(session)
+            .is_some_and(|lapse_ms| *lapse_ms > now_ms)
+    }
 }
 
 /// What the drivers of one symbol share.
@@ -133,8 +171,8 @@ struct OnionExitShared<W> {
     accounting: OnionExitAccounting,
     /// The link emitter replies leave through.
     link_sender: OnionLinkSender,
-    /// The live sessions.
-    sessions: Mutex<HashMap<OnionSessionId, OnionExitSessionHandle>>,
+    /// The sessions.
+    sessions: Mutex<OnionExitTable>,
 }
 
 /// The interpretation of one world-facing session symbol over the world `W`; see the module
@@ -158,7 +196,7 @@ impl<W: OnionWorld> OnionExitSessions<W> {
                 policy,
                 accounting,
                 link_sender,
-                sessions: Mutex::new(HashMap::new()),
+                sessions: Mutex::new(OnionExitTable::default()),
             }),
         }
     }
@@ -184,34 +222,46 @@ impl<W: OnionWorld> OnionInterpretation for OnionExitSessions<W> {
             received_at_ms,
         };
         let mut sessions = lock(&self.shared.sessions)?;
-        let handle = match sessions.get(&arguments.session) {
-            Some(handle) if handle.digest == arguments.digest => handle,
-            // D2′: a later loop of `ς` that names another target is rejected.
-            Some(_) => return Ok(()),
-            None => {
-                if sessions.len() >= ONION_EXIT_MAX_SESSIONS {
-                    return Ok(());
-                }
-                let (inbound, received) = mpsc::channel(ONION_EXIT_SESSION_INBOUND);
-                let driver = drive(
-                    Arc::clone(&self.shared),
-                    scope.clone(),
-                    arguments,
-                    from,
-                    received,
-                    received_at_ms,
-                );
-                Spawner::current()?.spawn(driver);
-                sessions
-                    .entry(arguments.session)
-                    .or_insert(OnionExitSessionHandle {
-                        digest: arguments.digest,
-                        inbound,
-                    })
+        if !sessions.live.contains_key(&arguments.session) {
+            let opens = matches!(loop_input.frame, OnionFrame::Data {
+                target: Some(_),
+                ..
+            });
+            if !opens
+                || sessions.is_buried(&arguments.session, received_at_ms)
+                || sessions.live.len() >= ONION_EXIT_MAX_SESSIONS
+            {
+                return Ok(());
             }
+            let Ok(lease) = self.shared.accounting.admit(&self.shared.policy, from) else {
+                tracing::debug!(%from, "onion exit session share is full; drop an open");
+                return Ok(());
+            };
+            let (inbound, received) = mpsc::channel(ONION_EXIT_SESSION_INBOUND);
+            Spawner::current()?.spawn(drive(
+                Arc::clone(&self.shared),
+                scope.clone(),
+                arguments,
+                lease,
+                received,
+                received_at_ms,
+            ));
+            sessions
+                .live
+                .insert(arguments.session, OnionExitSessionHandle {
+                    digest: arguments.digest,
+                    inbound,
+                });
+        }
+        let Some(handle) = sessions.live.get_mut(&arguments.session) else {
+            return Ok(());
         };
+        // D2′: a later loop of `ς` that names another target is rejected.
+        if handle.digest != arguments.digest {
+            return Ok(());
+        }
         // A full queue drops the loop; the session's reorder window then fails it closed.
-        if handle.inbound.clone().try_send(loop_input).is_err() {
+        if handle.inbound.try_send(loop_input).is_err() {
             tracing::debug!(%from, "onion exit session queue is full; drop a loop");
         }
         Ok(())
@@ -222,22 +272,21 @@ impl<W: OnionWorld> OnionInterpretation for OnionExitSessions<W> {
 type WorldRead<R> =
     Pin<Box<rings_runtime::maybe_send!(dyn Future<Output = (R, Result<Option<Bytes>>)>)>>;
 
-/// The halves of a session's open world, with the lease that admitted it.
+/// The halves of a session's open world.
 struct OnionOpenWorld<W: OnionWorld> {
     /// The read half, while no read is in flight.
     reader: Option<W::Reader>,
     /// The write half.
     writer: W::Writer,
-    /// The accounting lease of the session.
-    _lease: OnionExitLease,
 }
 
-/// The driver of one session (see the module diagram).
+/// The driver of one session (see the module diagram). It holds the session's lease until it
+/// ends, and buries the session when it does.
 async fn drive<W: OnionWorld>(
     shared: Arc<OnionExitShared<W>>,
     scope: Scope,
     arguments: OnionSessionArguments,
-    from: Did,
+    lease: OnionExitLease,
     mut inbound: mpsc::Receiver<OnionExitInput>,
     created_at_ms: u128,
 ) {
@@ -261,7 +310,7 @@ async fn drive<W: OnionWorld>(
                         machine.world(now_ms, OnionWorldRead::Bytes(bytes))
                     }
                     Ok(None) => machine.world(now_ms, OnionWorldRead::Eof),
-                    Ok(Some(_)) | Err(_) => machine.fail(),
+                    Ok(Some(_)) | Err(_) => machine.fail(now_ms),
                 }
             },
             _ = tick => {
@@ -269,16 +318,7 @@ async fn drive<W: OnionWorld>(
                 machine.tick(get_epoch_ms())
             },
         };
-        let open = perform(
-            &shared,
-            &scope,
-            arguments.session,
-            from,
-            &mut machine,
-            &mut world,
-            effects,
-        )
-        .await;
+        let open = perform(&shared, &scope, &mut machine, &mut world, effects).await;
         if !open {
             break;
         }
@@ -296,8 +336,9 @@ async fn drive<W: OnionWorld>(
             }
         }
     }
+    drop(lease);
     if let Ok(mut sessions) = lock(&shared.sessions) {
-        sessions.remove(&arguments.session);
+        sessions.bury(arguments.session, get_epoch_ms());
     }
 }
 
@@ -314,8 +355,6 @@ fn read_world<R: OnionWorldReader>(mut reader: R, max: usize) -> WorldRead<R> {
 async fn perform<W: OnionWorld>(
     shared: &OnionExitShared<W>,
     scope: &Scope,
-    session: OnionSessionId,
-    from: Did,
     machine: &mut OnionExitSession,
     world: &mut Option<OnionOpenWorld<W>>,
     effects: Vec<OnionExitEffect>,
@@ -324,7 +363,7 @@ async fn perform<W: OnionWorld>(
     while let Some(effect) = queue.pop_front() {
         match effect {
             OnionExitEffect::Open { target } => {
-                let opened = open(shared, session, from, &target).await;
+                let opened = open(shared, &target).await;
                 let accepted = opened.is_some();
                 *world = opened;
                 queue.extend(machine.opened(get_epoch_ms(), accepted));
@@ -337,7 +376,7 @@ async fn perform<W: OnionWorld>(
                     _ => false,
                 };
                 if !written {
-                    queue.extend(machine.fail());
+                    queue.extend(machine.fail(get_epoch_ms()));
                 }
             }
             OnionExitEffect::ShutdownWrite => {
@@ -359,7 +398,7 @@ async fn perform<W: OnionWorld>(
                     .await;
                 if let Err(error) = sent {
                     tracing::debug!(%next, %error, "an onion reply did not leave");
-                    queue.extend(machine.fail());
+                    queue.extend(machine.fail(get_epoch_ms()));
                 }
             }
             OnionExitEffect::Close => return false,
@@ -368,13 +407,10 @@ async fn perform<W: OnionWorld>(
     true
 }
 
-/// Admit and open the world at `target`: its authority must parse, the policy must allow it,
-/// and the accounting must lease the session. Any failure is a refusal, whose reason stays here
-/// (#843 Q5).
+/// Admit and open the world at `target`: its authority must parse and the policy must allow
+/// it. Any failure is a refusal, whose reason stays here (#843 Q5).
 async fn open<W: OnionWorld>(
     shared: &OnionExitShared<W>,
-    session: OnionSessionId,
-    from: Did,
     target: &[u8],
 ) -> Option<OnionOpenWorld<W>> {
     let target = std::str::from_utf8(target)
@@ -384,15 +420,10 @@ async fn open<W: OnionWorld>(
         tracing::debug!(target = %target.authority(), "onion exit policy refuses a target");
         return None;
     }
-    let lease = shared
-        .accounting
-        .admit(&shared.policy, session, from, 0)
-        .ok()?;
     match shared.world.open(&target).await {
         Ok((reader, writer)) => Some(OnionOpenWorld {
             reader: Some(reader),
             writer,
-            _lease: lease,
         }),
         Err(error) => {
             tracing::debug!(target = %target.authority(), %error, "onion exit world refused");
@@ -409,4 +440,116 @@ fn record<W>(shared: &OnionExitShared<W>, bytes: usize) -> bool {
             .record_bytes(&shared.policy, bytes)
             .is_ok()
     })
+}
+
+#[cfg(all(test, rings_native))]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
+
+    use bytes::Bytes;
+
+    use super::open;
+    use super::OnionExitShared;
+    use super::OnionExitTable;
+    use super::OnionWorld;
+    use super::OnionWorldReader;
+    use super::OnionWorldWriter;
+    use super::ONION_EXIT_MAX_SESSIONS;
+    use crate::error::Result;
+    use crate::onion::circuit::OnionLinkSender;
+    use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+    use crate::onion::exit_accounting::OnionExitAccounting;
+    use crate::onion::session::OnionSessionId;
+    use crate::onion::OnionExitPolicy;
+    use crate::onion::OnionProxyTarget;
+
+    /// A world that counts its opens and is otherwise empty.
+    #[derive(Default)]
+    struct CountingWorld(AtomicUsize);
+
+    /// The empty halves of a [`CountingWorld`].
+    struct Empty;
+
+    #[async_trait::async_trait]
+    impl OnionWorld for CountingWorld {
+        type Reader = Empty;
+        type Writer = Empty;
+
+        async fn open(&self, _: &OnionProxyTarget) -> Result<(Empty, Empty)> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok((Empty, Empty))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OnionWorldReader for Empty {
+        async fn read(&mut self, _: usize) -> Result<Option<Bytes>> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OnionWorldWriter for Empty {
+        async fn write(&mut self, _: Bytes) -> Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The shared state of an exit over a counting world under `policy`.
+    fn shared(policy: OnionExitPolicy) -> OnionExitShared<CountingWorld> {
+        OnionExitShared {
+            world: CountingWorld::default(),
+            policy,
+            accounting: OnionExitAccounting::default(),
+            link_sender: OnionLinkSender::default(),
+            sessions: Mutex::new(OnionExitTable::default()),
+        }
+    }
+
+    /// The exit's open admits a target only under its policy, and never opens the world for a
+    /// denied or malformed one (#895 D-L5, #843 Q5).
+    #[tokio::test]
+    async fn test_open_refuses_what_the_policy_denies_before_the_world() -> Result<()> {
+        let policy = OnionExitPolicy::from_target_strings(vec!["*:443".to_string()], vec![
+            "blocked.example:443".to_string(),
+        ])?;
+        let exit = shared(policy);
+
+        assert!(open(&exit, b"allowed.example:443").await.is_some());
+        assert!(open(&exit, b"blocked.example:443").await.is_none());
+        assert!(open(&exit, b"allowed.example:80").await.is_none());
+        assert!(open(&exit, b"not an authority").await.is_none());
+        assert!(open(&exit, &[0xff, 0xfe]).await.is_none());
+        assert_eq!(exit.world.0.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// A closed session is buried for `V`, so a late loop cannot respawn it, and the tombstones
+    /// stay bounded (#895 H5).
+    #[test]
+    fn test_a_closed_session_is_buried_for_v() {
+        let mut table = OnionExitTable::default();
+        let session = OnionSessionId::new([3; 16]);
+
+        table.bury(session, 1_000);
+        assert!(table.is_buried(&session, 1_000 + ONION_FORWARD_MAX_VALIDITY_MS - 1));
+        assert!(!table.is_buried(&session, 1_000 + ONION_FORWARD_MAX_VALIDITY_MS));
+
+        let mut full = OnionExitTable {
+            live: HashMap::new(),
+            closed: HashMap::new(),
+        };
+        for index in 0..=ONION_EXIT_MAX_SESSIONS {
+            let bytes = u128::try_from(index).expect("small").to_be_bytes();
+            full.bury(OnionSessionId::new(bytes), 0);
+        }
+        assert_eq!(full.closed.len(), ONION_EXIT_MAX_SESSIONS);
+    }
 }

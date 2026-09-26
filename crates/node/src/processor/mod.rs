@@ -70,7 +70,7 @@ use crate::onion::default_onion_exit_services;
 use crate::onion::default_onion_exit_ttl_secs;
 use crate::onion::directory;
 use crate::onion::directory::OnionDirectoryReader;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::validate_onion_exit_registration_timing;
@@ -501,7 +501,7 @@ impl Processor {
     /// Build an onion proxy route for a client target through a target-agnostic proxy config.
     pub async fn build_onion_proxy_route(
         &self,
-        proxy: OnionProxyConfig,
+        proxy: OnionProxyProtocol,
         target: OnionProxyTarget,
     ) -> Result<OnionProxyRoute> {
         directory::build_onion_proxy_route(self, proxy, target).await

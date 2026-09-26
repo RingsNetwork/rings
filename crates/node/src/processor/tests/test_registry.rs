@@ -202,8 +202,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
     let other = prepare_processor().await;
     let now_ms = get_epoch_ms();
     let mut policy = onion_policy(&["example.com:443"], &[])?;
-    policy.max_circuits = 8;
-    policy.max_streams_per_circuit = 2;
+    policy.max_sessions = 8;
     policy.max_bytes_per_minute = 4096;
     let stale_tcp = onion_exit_descriptor_for_processor_with_service(
         &processor,

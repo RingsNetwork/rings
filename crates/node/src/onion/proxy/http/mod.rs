@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
-use super::OnionProxyConfig;
+use super::OnionProxyProtocol;
 use super::OnionProxyTarget;
 use crate::error::Error;
 use crate::error::Result;
@@ -120,15 +120,30 @@ async fn handle_connect(
             return Err(error);
         }
     };
-    let proxy_route = processor
-        .build_onion_proxy_route(OnionProxyConfig::tcp_connect(), target)
-        .await?;
-    let opened = onion
-        .open_tcp_stream(proxy_route.route, proxy_route.target)
-        .await?;
-    write_proxy_response(&mut stream, "200 Connection Established").await?;
-    opened.relay(stream);
+    let opened = match processor
+        .build_onion_proxy_route(OnionProxyProtocol::TcpConnect, target)
+        .await
+    {
+        Ok(proxy_route) => {
+            onion
+                .open_tcp_stream(proxy_route.route, proxy_route.target)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    write_proxy_response(&mut stream, connect_status(opened.is_ok())).await?;
+    opened?.relay(stream);
     Ok(())
+}
+
+/// The CONNECT answer for a session that opened or did not: a refusal, from the route or the
+/// exit, is `502` with no reason (#843 Q5), since the exit gives none.
+const fn connect_status(opened: bool) -> &'static str {
+    if opened {
+        "200 Connection Established"
+    } else {
+        "502 Bad Gateway"
+    }
 }
 
 async fn read_connect_target(

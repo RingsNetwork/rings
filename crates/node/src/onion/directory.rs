@@ -15,7 +15,7 @@ use super::OnionRouteRequest;
 use super::SystemRouteEntropy;
 use crate::error::Error;
 use crate::error::Result;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::online::OnlineNodeDescriptor;
@@ -46,7 +46,7 @@ pub(crate) trait OnionDirectoryReader {
 /// Build an onion proxy route for a concrete target.
 pub(crate) async fn build_onion_proxy_route(
     reader: &impl OnionDirectoryReader,
-    proxy: OnionProxyConfig,
+    proxy: OnionProxyProtocol,
     target: OnionProxyTarget,
 ) -> Result<OnionProxyRoute> {
     build_onion_proxy_route_with_first_hop(reader, proxy, target, |_| true).await
@@ -54,7 +54,7 @@ pub(crate) async fn build_onion_proxy_route(
 
 pub(crate) async fn build_onion_proxy_route_with_first_hop(
     reader: &impl OnionDirectoryReader,
-    proxy: OnionProxyConfig,
+    proxy: OnionProxyProtocol,
     target: OnionProxyTarget,
     first_hop_permitted: impl Fn(Did) -> bool,
 ) -> Result<OnionProxyRoute> {
@@ -84,7 +84,7 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
         return Err(Error::OnionRouteError(
             OnionRouteError::NoExitForProxyProtocol {
                 service: service.clone(),
-                protocol: proxy.protocol.label().to_string(),
+                protocol: proxy.label().to_string(),
             },
         ));
     }
@@ -105,7 +105,7 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
         build_onion_route_from_exits(reader, request, policy_exits, first_hop_permitted).await?;
 
     Ok(OnionProxyRoute {
-        protocol: proxy.protocol,
+        protocol: proxy,
         target,
         route,
     })
