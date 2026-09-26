@@ -18,6 +18,7 @@ use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::Did;
+use crate::dht::EntryStorage;
 use crate::dht::PeerRingAction;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::dht::StorageRepairOutcome;
@@ -239,16 +240,23 @@ fn prepare_repair_node_with_optional_measure(
     key: SecretKey,
     measure: Option<MeasureImpl>,
 ) -> Result<Node> {
+    prepare_repair_node_with_storage(key, Box::new(MemStorage::new()), measure)
+}
+
+/// Build a repair-test node over the given DHT entry storage.
+///
+/// ICE is host-only: every peer of these tests runs in this process, so an external STUN
+/// server would only add a network dependency whose latency no test controls.
+fn prepare_repair_node_with_storage(
+    key: SecretKey,
+    storage: EntryStorage,
+    measure: Option<MeasureImpl>,
+) -> Result<Node> {
     let session = DelegateeKey::new_with_seckey(&key)?;
-    let mut builder = SwarmBuilder::new(
-        0,
-        "stun://stun.l.google.com:19302",
-        Box::new(MemStorage::new()),
-        session,
-    )
-    .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
-    .dht_storage_redundancy(2)
-    .dht_virtual_nodes(0);
+    let mut builder = SwarmBuilder::new(0, "", storage, session)
+        .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
+        .dht_storage_redundancy(2)
+        .dht_virtual_nodes(0);
     if let Some(measure) = measure {
         builder = builder.measure(measure);
     }

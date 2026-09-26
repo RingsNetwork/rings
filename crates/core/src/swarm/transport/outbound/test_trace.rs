@@ -274,4 +274,37 @@ impl crate::swarm::transport::SwarmTransport {
     pub(crate) fn outbound_admitted_transfer_total_for_test(&self) -> usize {
         self.outbound_schedulers.admitted_transfer_total_for_test()
     }
+
+    /// Await the event "the capacity `peer` held at the call has been deallocated".
+    ///
+    /// ```text
+    /// K₀         = capacity(peer) live at subscription     (None ⟹ nothing to await)
+    /// Retired(K₀) ≡ K₀ deallocated
+    /// Retired(K₀) ⟹ ∀ permit p of K₀. released(p)
+    /// ```
+    ///
+    /// Every permit holds its capacity (`Arc`), and the registry holds only a `Weak`, so the
+    /// capacity is deallocated only after every permit admitted to it has been dropped.
+    /// Deallocation is terminal, so `Retired` is stable: unlike `admitted = 0`, which a later
+    /// transient reservation can falsify and a watch can coalesce away, it cannot be observed
+    /// and then lost.
+    ///
+    /// The receiver is subscribed while `K₀` is pinned, and a closed watch stays closed, so a
+    /// deallocation that precedes the wait is still observed.
+    ///
+    /// Liveness premise: some instant holds no permit of `K₀`. A reservation for `peer` that
+    /// starts while `K₀` is live joins `K₀` (the registry upgrades its `Weak`), so a caller
+    /// must ensure that reservations toward `peer` stop overlapping, e.g. because `peer` was
+    /// retired.
+    #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
+    pub(crate) async fn outbound_capacity_retired_for_test(&self, peer: Did) {
+        let Some(mut retirement) = self
+            .outbound_schedulers
+            .subscribe_capacity_retirement_for_test(peer)
+        else {
+            return;
+        };
+        // Nothing is ever sent, so `changed` resolves only with the closing error.
+        while retirement.changed().await.is_ok() {}
+    }
 }
