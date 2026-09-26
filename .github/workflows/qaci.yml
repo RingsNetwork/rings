@@ -436,6 +436,13 @@ jobs:
             --inventory target/ci-evidence/core-dummy-inventory.json \
             --skip-file scripts/ci-native-model-tests.txt \
             --skip tests::default::test_sync_storm::
+      - name: Compile and run node dummy tests
+        env:
+          RUST_TEST_THREADS: 2
+        run: |
+          cargo test --locked --profile ci -p rings-node --features dummy --no-run --timings --message-format=json > target/ci-evidence/node-dummy.jsonl
+          python3 scripts/run-ci-tests.py target/ci-evidence/node-dummy.jsonl \
+            --inventory target/ci-evidence/node-dummy-inventory.json
       - name: Compile and run transport dummy tests
         run: |
           cargo test --locked --profile ci -p rings-transport --no-default-features --features dummy --no-run --timings --message-format=json > target/ci-evidence/transport-dummy.jsonl

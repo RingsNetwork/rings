@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rings_core::ecc::SecretKey;
+#[cfg(feature = "dummy")]
 use rings_core::swarm::SuccessorLookup;
 use tokio::sync::oneshot::error::TryRecvError;
 
@@ -24,6 +25,7 @@ use crate::seed::SeedPeer;
 use crate::seed::ValidatedSeedPeer;
 
 /// Draws of random identity keys before giving up on a chain layout.
+#[cfg(feature = "dummy")]
 const CHAIN_KEY_DRAWS: usize = 512;
 /// An endpoint that validates as public and is never dialed.
 const NEVER_DIALED: &str = "https://never-dialed.example.org:50001/";
@@ -62,6 +64,8 @@ impl SwarmCallback for ProbeTestCallback {
 struct ProbeNode {
     processor: Arc<Processor>,
     evidence: Arc<ReachabilityEvidence>,
+    /// The fixture callback, read by the connecting tests (`dummy` builds only).
+    #[cfg(feature = "dummy")]
     fixture: Arc<SwarmCallbackInstance>,
 }
 
@@ -84,6 +88,7 @@ impl ProbeNode {
         Self {
             processor,
             evidence,
+            #[cfg(feature = "dummy")]
             fixture,
         }
     }
@@ -96,6 +101,7 @@ impl ProbeNode {
 
 /// Three identity keys whose DIDs satisfy `A - B < C - B` (clockwise ring distance, the `Sub`
 /// on `Did`), so `A` is `B`'s successor head once both are connected to `B`.
+#[cfg(feature = "dummy")]
 fn chain_keys() -> (SecretKey, SecretKey, SecretKey) {
     for _ in 0..CHAIN_KEY_DRAWS {
         let a = SecretKey::random();
@@ -126,6 +132,7 @@ fn target(did: Did) -> ValidatedSeedPeer {
 /// Present targets are reachable through one hop (verified to be routed, not direct), an
 /// absent key is not, a direct peer needs no lookup at all, and a key in `C`'s successor
 /// interval is refuted without leaving `C`.
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn routed_probe_reports_presence_through_one_hop() {
     let _guard = network_test_guard().await;
@@ -246,6 +253,7 @@ async fn backend_translates_admission_and_retirement_only() {
 /// retirement transition and reaches the evidence as a loss, without any physical terminal
 /// state. The disconnect follows the admission *event*, not merely transport readiness: by the
 /// retirement law a retirement before the admission was announced is silent.
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
     let _guard = network_test_guard().await;

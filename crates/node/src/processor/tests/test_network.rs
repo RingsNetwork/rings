@@ -1,5 +1,6 @@
 use super::common::*;
 use super::*;
+#[cfg(feature = "dummy")]
 use crate::consts::DATA_REDUNDANT;
 
 const LISTENER_START_YIELD: Duration = Duration::from_millis(100);
@@ -203,6 +204,7 @@ async fn test_provider_wrappers_share_listener_lifecycle_lock() {
         .expect("the independent provider listener should not panic");
 }
 
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_online_node_registry_lists_two_publishers_over_network() -> Result<()> {
     let _network_guard = network_test_guard().await;
@@ -328,6 +330,7 @@ async fn test_processor_handshake_msg() {
     assert!(matches!(got_msg1, Message::CustomMessage(_)));
 }
 
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_processor_direct_message_reaches_connected_peer() {
     let _network_guard = network_test_guard().await;
@@ -363,6 +366,7 @@ async fn test_peer_measurement_is_absent_without_measure_or_observation() {
     assert!(measured.peer_measurements().await.is_empty());
 }
 
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_provider_exposes_sent_and_received_peer_measurements() {
     let _network_guard = network_test_guard().await;
@@ -456,6 +460,7 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
     assert!(list_measurements.next_cursor.is_none());
 }
 
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
     let _network_guard = network_test_guard().await;
@@ -583,38 +588,43 @@ fn test_e2e_stream_complete_is_order_insensitive_and_monotone() {
     }
 }
 
-/// E2E streaming over a real link, decrypted with the receiver's identity key.
+/// Secrets of the two E2E stream test identities; fixed, so the run is reproducible.
+#[cfg(feature = "dummy")]
+const E2E_STREAM_TEST_SECRETS: [&str; 2] = [
+    "0303030303030303030303030303030303030303030303030303030303030303",
+    "0404040404040404040404040404040404040404040404040404040404040404",
+];
+
+/// E2E streaming on the controlled network, delivered in reverse, then decrypted with the
+/// receiver's identity key.
 ///
 /// ```text
 /// Admitted ≡ p1 ∈ peers(p2) ∧ p2 ∈ peers(p1)
 /// Complete ≡ e2e_stream_complete(inbound(p2, stream))
 ///
-/// connect(p1, p2)       ⊢ ◇Admitted     awaited on `connected_notify`
-/// Admitted ; send(p1)   ⊢ ◇Complete     awaited on `inbound_notify`
+/// connect(p1, p2)                          ⊢ ◇Admitted    (FIFO pump; no clock)
+/// Admitted ; pause ; send(p1)              ⊢ all frames queued, none delivered
+/// deliver newest-first until Complete      ⊢ Complete, with arrival order ≠ send order
 /// ```
 ///
-/// Both notifies are `notify_one`, which stores a permit when no task waits, so a wake-up
-/// between a scan and the next wait is not lost. `Complete` is stable: frames are only
-/// appended, and the predicate is monotone. Arrival order is irrelevant to it, since the link
-/// does not guarantee order.
+/// The link makes no ordering guarantee (#738, #784). Here the reordering is not left to
+/// chance: with the pump paused, the whole stream is queued and then delivered newest-first,
+/// so the final frame arrives before every earlier one. `Complete` is monotone, so it stays
+/// true once reached. The shape assertions run on the raw frames in arrival order: exactly one
+/// final frame, and the sorted sequences are exactly `0..n` (no gap, duplicate or post-final
+/// frame). The test also asserts that arrival order differs from send order, so the
+/// reordering really happened, and decrypts in arrival order.
 ///
-/// The helper returns the raw frames in arrival order, so the shape assertions below are
-/// about what the sender emitted, among the frames that arrived by completion: exactly one
-/// final frame, and the sorted sequences are exactly `0..n`, which rules out gaps, and any
-/// duplicate or post-final frame that arrived before completion. A stray frame that arrives
-/// after completion is not observed; the processor has no end-of-stream signal to await for
-/// it. The frames are then decrypted in reverse arrival order.
-///
-/// The fixtures use host-only ICE, so the handshake depends on no external server. The link is
-/// still real WebRTC under the helpers' 5 s deadline; moving this protocol test onto a
-/// controlled transport is tracked in #883.
+/// The run is a deterministic function of the controlled queue: fixed identities, a seeded
+/// dummy, and no clock or network (#857, #883).
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_key() {
-    let _network_guard = network_test_guard().await;
+    let network_guard = network_test_guard().await;
     let callback1 = test_callback();
     let callback2 = test_callback();
-    let identity1 = SecretKey::random();
-    let identity2 = SecretKey::random();
+    let [identity1, identity2] =
+        E2E_STREAM_TEST_SECRETS.map(|secret| SecretKey::try_from(secret).unwrap());
 
     let p1 = prepare_processor_with_identity_key(identity1).await;
     let p2 = prepare_processor_with_identity_key(identity2.clone()).await;
@@ -627,6 +637,7 @@ async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_
     let did1 = p1.did();
     let did2 = p2.did();
     let responder_public_key = p2.swarm.delegator_pubkey().unwrap();
+    network_guard.network.pause();
     let stream_id = p1
         .send_e2e_message_with_frame_len(
             did2,
@@ -636,8 +647,15 @@ async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_
         )
         .await
         .unwrap();
+    network_guard
+        .network
+        .deliver_newest_until("E2E stream complete", || {
+            e2e_stream_complete(received_e2e_stream_frames(&callback2, stream_id).iter())
+        })
+        .await;
+    network_guard.network.resume();
 
-    let frames = wait_for_e2e_stream_frames(&callback2, stream_id).await;
+    let frames = received_e2e_stream_frames(&callback2, stream_id);
     assert!(
         frames.len() > 1,
         "streaming send should emit more than one frame for this frame size"
@@ -647,18 +665,22 @@ async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_
         1,
         "streaming send should emit exactly one final frame"
     );
-
-    let mut sequences = frames
+    let arrival = frames
         .iter()
         .map(|frame| frame.sequence)
         .collect::<Vec<_>>();
+    let mut sequences = arrival.clone();
     sequences.sort_unstable();
     let frame_count = u64::try_from(frames.len()).unwrap();
     assert_eq!(sequences, (0..frame_count).collect::<Vec<_>>());
+    assert_ne!(
+        arrival, sequences,
+        "newest-first delivery must reorder the stream"
+    );
 
     let mut decryptor = p2.e2e_stream_decryptor(did1, stream_id, identity2).unwrap();
     let mut plaintext = Vec::new();
-    for frame in frames.iter().rev() {
+    for frame in &frames {
         plaintext.extend_from_slice(&p2.decrypt_e2e_stream_frame(&mut decryptor, frame).unwrap());
     }
     decryptor.finish().unwrap();

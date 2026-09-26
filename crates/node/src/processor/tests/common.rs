@@ -1,6 +1,9 @@
 use rings_core::message::MessageSigner;
 
+#[cfg(feature = "dummy")]
+use super::controlled::ControlledNetwork;
 use super::*;
+#[cfg(feature = "dummy")]
 use crate::consts::DATA_REDUNDANT;
 use crate::tests::TEST_ICE_SERVERS;
 
@@ -70,11 +73,29 @@ pub(super) fn test_callback() -> Arc<SwarmCallbackInstance> {
     })
 }
 
-pub(super) async fn network_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    NETWORK_TEST_LOCK
+/// Exclusive use of the test network for one test.
+///
+/// Default build: serializes the real-WebRTC tests. `dummy` build: additionally runs the test
+/// on the controlled in-memory network (see [`ControlledNetwork`]), so delivery is a
+/// deterministic FIFO schedule with no clock and no network.
+pub(super) struct NetworkTestGuard {
+    /// Serializes tests that share process-global network resources.
+    _serial: tokio::sync::MutexGuard<'static, ()>,
+    /// The controlled network of this test.
+    #[cfg(feature = "dummy")]
+    pub(super) network: ControlledNetwork,
+}
+
+pub(super) async fn network_test_guard() -> NetworkTestGuard {
+    let serial = NETWORK_TEST_LOCK
         .get_or_init(|| AsyncTestMutex::new(()))
         .lock()
-        .await
+        .await;
+    NetworkTestGuard {
+        _serial: serial,
+        #[cfg(feature = "dummy")]
+        network: ControlledNetwork::start(),
+    }
 }
 
 pub(super) async fn prepare_processor_with_identity_key(identity_key: SecretKey) -> Processor {
@@ -109,6 +130,7 @@ pub(super) async fn prepare_processor_with_identity_key_network_and_virtual_node
         .unwrap()
 }
 
+#[cfg(feature = "dummy")]
 pub(super) async fn prepare_online_node_registry_pair(
     network_id: u32,
 ) -> Result<(Processor, Processor)> {
@@ -147,6 +169,7 @@ pub(super) async fn prepare_online_node_registry_pair(
     ))
 }
 
+#[cfg(feature = "dummy")]
 pub(super) fn owns_all_placements(local: Did, successor: Did, placements: &[Did]) -> bool {
     placements
         .iter()
@@ -175,6 +198,7 @@ pub(super) async fn prepare_processor_with_network_and_virtual_nodes(
         .unwrap()
 }
 
+#[cfg(feature = "dummy")]
 pub(super) fn owns_entry_placement(processor: &Processor, placement_key: Did) -> Result<bool> {
     match processor.swarm.dht().find_successor(placement_key)? {
         PeerRingAction::Some(_) => Ok(true),
@@ -330,6 +354,7 @@ pub(super) async fn prepare_measured_processor() -> Processor {
         .unwrap()
 }
 
+#[cfg(feature = "dummy")]
 pub(super) async fn connect_processors(
     p1: &Processor,
     p2: &Processor,
@@ -378,6 +403,7 @@ pub(super) fn processor_has_admitted_peer(processor: &Processor, peer: Did) -> b
 /// A round is issued once: `begin_stabilization` supersedes an unanswered round,
 /// so re-issuing while the head's report is in flight would make every report
 /// stale and the head notify (the only predecessor-propagation path) never fire.
+#[cfg(feature = "dummy")]
 pub(super) async fn wait_for_mutual_dht_topology(
     processor: &Processor,
     other: &Processor,
@@ -427,6 +453,7 @@ pub(super) async fn wait_for_mutual_dht_topology(
     }
 }
 
+#[cfg(feature = "dummy")]
 pub(super) async fn wait_for_online_node_dids(
     processor: &Processor,
     expected: &BTreeSet<Did>,
@@ -460,6 +487,7 @@ pub(super) async fn wait_for_online_node_dids(
     }
 }
 
+#[cfg(feature = "dummy")]
 pub(super) async fn wait_for_online_node_dids_in_storage(
     processor: &Processor,
     placement_keys: &[Did],
@@ -511,6 +539,7 @@ pub(super) async fn wait_for_online_node_dids_in_storage(
     }
 }
 
+#[cfg(feature = "dummy")]
 pub(super) async fn wait_for_peer_measurement(
     processor: &Processor,
     did: Did,
@@ -585,47 +614,21 @@ pub(super) fn e2e_stream_complete<'a>(
         .any(|last| (0..=last).all(|sequence| sequences.contains(&sequence)))
 }
 
-/// Await a complete E2E stream `stream_id` on `callback`, and return every frame of it that
-/// arrived, raw and in arrival order.
-///
-/// ```text
-/// loop:  frames := inbound(stream_id) ;  complete(frames) ? return frames : await inbound_notify
-/// ```
-///
-/// Completeness decides only *when* to stop; the frames are returned unfiltered, so the caller
-/// still sees duplicates, stray frames and the actual arrival order.
-///
-/// Law (no lost wake-up): `on_inbound` appends under the lock and then calls `notify_one`,
-/// which stores a permit when no task waits. A frame that arrives between the scan and the
-/// wait therefore leaves a permit that wakes the next wait. The deadline guards only against a
-/// hang; completion is the event. The link is still real WebRTC (#883).
-pub(super) async fn wait_for_e2e_stream_frames(
+/// Every frame of the E2E stream `stream_id` that `callback` received, raw and in arrival
+/// order: duplicates, stray frames and the actual order are all preserved.
+#[cfg(feature = "dummy")]
+pub(super) fn received_e2e_stream_frames(
     callback: &SwarmCallbackInstance,
     stream_id: e2e::E2eStreamId,
 ) -> Vec<E2eStreamFrame> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        {
-            let inbound = callback.inbound.lock().unwrap();
-            let frames = inbound
-                .iter()
-                .filter_map(|msg| match msg {
-                    Message::E2eStreamFrame(frame) if frame.stream_id == stream_id => {
-                        Some(frame.clone())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if e2e_stream_complete(frames.iter()) {
-                return frames;
-            }
-        }
-
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .expect("E2E stream was not delivered completely");
-        tokio::time::timeout(remaining, callback.inbound_notify.notified())
-            .await
-            .expect("E2E stream was not delivered completely");
-    }
+    callback
+        .inbound
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|msg| match msg {
+            Message::E2eStreamFrame(frame) if frame.stream_id == stream_id => Some(frame.clone()),
+            _ => None,
+        })
+        .collect()
 }
