@@ -410,6 +410,7 @@ pub(super) fn frame_chunk(
         did,
         crate::utils::new_uuid(),
         sequence,
+        None,
         Message::Chunk(chunk),
         signer,
     )?;

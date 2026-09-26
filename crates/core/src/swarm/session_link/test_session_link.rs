@@ -54,6 +54,7 @@ fn relayed_payload(
         destination,
         crate::utils::new_uuid(),
         sequence,
+        None,
         Message::custom(b"session link")?,
         MessageSigner::new(origin, TEST_NETWORK_ID),
     )?;

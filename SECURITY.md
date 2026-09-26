@@ -97,7 +97,7 @@ Every hop, and the destination, learns from a relayed message:
 
 - the origin DID, named by the transaction signature, which is also where every report
   for the message is routed back to. A node whose requests carry a signed `reply_via`
-  names its successor head there whenever it has no predecessor: while it joins, and
+  names its nearest linked successor there whenever it has no predecessor: while it joins, and
   again after its predecessor departs until a new one notifies it. For that time every
   hop of such a request, and of its successor or connection answer, learns one of the
   origin's links;

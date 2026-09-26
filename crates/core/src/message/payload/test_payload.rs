@@ -98,6 +98,7 @@ fn test_origin_is_the_account_behind_the_signing_session() -> Result<()> {
         destination,
         uuid::Uuid::new_v4(),
         0,
+        None,
         Message::custom(b"origin")?,
         MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
     )?;

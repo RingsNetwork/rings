@@ -88,6 +88,7 @@ mod tests {
             SecretKey::random().address().into(),
             uuid::Uuid::new_v4(),
             0,
+            None,
             Message::custom(b"logical bytes")?,
             MessageSigner::new(&session, 7),
         )?;

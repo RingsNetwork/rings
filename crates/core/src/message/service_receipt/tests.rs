@@ -442,6 +442,7 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
         provider_did,
         tx_id,
         1,
+        None,
         Message::ProbeRequest(request),
         beneficiary_signer,
     )?;
@@ -450,6 +451,7 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
         beneficiary_did,
         tx_id,
         1,
+        None,
         ProbeCompletion {
             request_digest,
             nonce: request.nonce,
@@ -475,6 +477,7 @@ fn probe_offer_verifies_the_exact_signed_request_and_completion() -> Result<()> 
         beneficiary_did,
         tx_id,
         2,
+        None,
         Message::ProbeOffer(Box::new(offer.clone())),
         provider_signer,
     )?;
@@ -541,6 +544,7 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
         provider_did,
         tx_id,
         1,
+        None,
         Message::ProbeRequest(request),
         beneficiary_signer,
     )?;
@@ -549,6 +553,7 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
         beneficiary_did,
         tx_id,
         1,
+        None,
         ProbeCompletion {
             request_digest,
             nonce: request.nonce,
@@ -579,6 +584,7 @@ fn probe_offer_rejects_an_attestation_from_an_expired_provider_session() -> Resu
         beneficiary_did,
         tx_id,
         2,
+        None,
         Message::ProbeOffer(Box::new(offer.clone())),
         provider_signer,
     )?;
@@ -628,6 +634,7 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
         provider_did,
         tx_id,
         1,
+        None,
         Message::ProbeRequest(request),
         beneficiary_signer,
     )?;
@@ -636,6 +643,7 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
         beneficiary_did,
         tx_id,
         1,
+        None,
         ProbeCompletion {
             request_digest,
             nonce: request.nonce,
@@ -661,6 +669,7 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
         beneficiary_did,
         tx_id,
         2,
+        None,
         Message::ProbeOffer(Box::new(offer.clone())),
         provider_signer,
     )?;

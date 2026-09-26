@@ -39,6 +39,7 @@ use rand::Rng;
 use rand_hc::Hc128Rng;
 
 use super::delivery_step;
+use super::reply_via;
 use super::RouteStage;
 use crate::dht::topology::dist;
 use crate::dht::topology::finger_table;
@@ -302,6 +303,22 @@ fn test_delivery_step_stages() {
     assert_eq!(step(4, via_far, &view), Some((Did::from(40u32), via_far)));
     assert_eq!(step(4, via_far, &[50]), Some((Did::from(50u32), via_far)));
     assert_eq!(step(4, via_far.handed_off(), &view), None);
+}
+
+/// `ReplyVia(n)` names the nearest linked successor exactly while no predecessor has notified
+/// `n`: an unlinked successor head is skipped, a notified node names nothing, and so does a
+/// node with no linked successor.
+#[test]
+fn test_reply_via_names_the_nearest_linked_successor_only_without_a_predecessor() {
+    let local = Did::from(0u32);
+    let [head, next] = [8u32, 16].map(Did::from);
+    let joining = TopologyState::new(local, vec![head, next], None, vec![]);
+    let notified = TopologyState::new(local, vec![head, next], Some(Did::from(40u32)), vec![]);
+
+    assert_eq!(reply_via(&joining, |_| true), Some(head));
+    assert_eq!(reply_via(&joining, |peer| peer == next), Some(next));
+    assert_eq!(reply_via(&joining, |_| false), None);
+    assert_eq!(reply_via(&notified, |_| true), None);
 }
 
 /// Laws of delivery on the Chord fixpoint.

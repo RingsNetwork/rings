@@ -19,6 +19,7 @@ fn relayed_wire(
         local,
         uuid::Uuid::new_v4(),
         sequence,
+        None,
         message,
         MessageSigner::new(origin, TEST_NETWORK_ID),
     )?;

@@ -124,9 +124,10 @@ pub struct Transaction {
     /// Monotonic sequence inside the origin account's destination-scoped stream.
     pub sequence: u64,
     /// The peer the origin's successor and connection answers return through while no node is
-    /// known to route to the origin: whenever it has no predecessor, i.e. while it joins and
-    /// again after its predecessor departs until a new one notifies it; `None` otherwise. Signed
-    /// with the rest of the transaction, so only the origin chooses it.
+    /// known to route to the origin: its nearest linked successor whenever it has no
+    /// predecessor, i.e. while it joins and again after its predecessor departs until a new one
+    /// notifies it; `None` otherwise. Signed with the rest of the transaction, so only the
+    /// origin chooses it.
     pub reply_via: Option<Did>,
     /// data
     pub data: Vec<u8>,
@@ -170,23 +171,11 @@ impl fmt::Debug for MessagePayload {
 }
 
 impl Transaction {
-    /// Wrap data. Will serialize by [rings_codec::serialize]
-    /// then sign [MessageVerification] by `signer`. The transaction names no `reply_via`.
+    /// Wrap data: serialize it with [rings_codec::serialize], then sign it, `reply_via`
+    /// included, with `signer`. `reply_via` names the peer the origin's successor and
+    /// connection answers return through; a report, or any transaction whose origin has a
+    /// predecessor, names `None`.
     pub fn new<T>(
-        destination: Did,
-        tx_id: uuid::Uuid,
-        sequence: u64,
-        data: T,
-        signer: MessageSigner<&DelegateeKey>,
-    ) -> Result<Self>
-    where
-        T: Serialize,
-    {
-        Self::replying_via(destination, tx_id, sequence, None, data, signer)
-    }
-
-    /// [`Self::new`] naming `reply_via` as the peer its reports return through.
-    pub fn replying_via<T>(
         destination: Did,
         tx_id: uuid::Uuid,
         sequence: u64,
@@ -277,8 +266,7 @@ impl MessagePayload {
         T: Serialize,
     {
         let tx_id = crate::utils::new_uuid();
-        let transaction =
-            Transaction::replying_via(destination, tx_id, sequence, reply_via, data, signer)?;
+        let transaction = Transaction::new(destination, tx_id, sequence, reply_via, data, signer)?;
         let relay = MessageRelay::new(hop, transaction.destination, HopBudget::MAX);
         Self::new(transaction, signer, relay)
     }
@@ -429,14 +417,17 @@ pub trait PayloadSender {
     }
 
     /// Build a locally originated payload for `destination`: the only constructor of a
-    /// transaction this node authors as a request.
+    /// transaction this node authors, other than a report for a received request
+    /// ([`Self::send_report_message`]).
     ///
     /// The first hop is `next_hop` when the caller fixed it, otherwise the delivery decision;
-    /// the transaction names this node's [`reply_via`](crate::dht::topology::reply_via). When
+    /// the transaction names this node's [`reply_via`](crate::dht::delivery::reply_via). When
     /// the hop is decided here, both come from one topology snapshot
-    /// ([`origination`](crate::dht::delivery::origination)). Every locally originated request
-    /// passes through here, so the law "a node without a predecessor names its successor head"
-    /// holds for all of them.
+    /// ([`origination`](crate::dht::delivery::origination)). Every locally originated payload
+    /// passes through here, so the law "a node without a predecessor names its nearest linked
+    /// successor" holds for all of them. That includes a manually signalled connection answer,
+    /// which names the hint harmlessly: no report is ever sent for it, and its only reader is
+    /// the peer it is sent to.
     async fn originate<T>(
         &self,
         msg: T,
@@ -447,7 +438,10 @@ pub trait PayloadSender {
         T: Serialize + Send,
     {
         let (hop, reply_via) = match next_hop {
-            Some(peer) => (NextHop::toward(peer), self.dht().reply_via()?),
+            Some(peer) => (
+                NextHop::toward(peer),
+                self.dht().reply_via(|peer| self.is_connected(peer))?,
+            ),
             None => {
                 let origination = self
                     .dht()
@@ -531,8 +525,14 @@ pub trait PayloadSender {
             .reserve_transaction_sequences(origin, NonZeroU64::MIN)
             .await?
             .start();
-        let transaction =
-            Transaction::new(origin, payload.transaction.tx_id, sequence, msg, signer)?;
+        let transaction = Transaction::new(
+            origin,
+            payload.transaction.tx_id,
+            sequence,
+            None,
+            msg,
+            signer,
+        )?;
 
         let pl = MessagePayload::new(transaction, signer, relay)?;
         self.send_payload(pl).await

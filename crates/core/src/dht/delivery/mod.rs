@@ -17,12 +17,12 @@
 //! ```
 //!
 //! - `Greedy(a)`: forward to the linked known peer on `(n, a]` nearest `a`
-//!   ([`route_toward`](crate::dht::topology::route_toward));
+//!   ([`route_toward`](crate::dht::delivery::route_toward));
 //! - `Handoff`: no linked known peer lies on `(n, a]`; the payload goes once to the first
 //!   linked known node after `n`, which lies past `a`, and the stage is marked; the receiver
 //!   delivers over a direct link or ends the route with a typed error, and never routes
 //!   greedily again;
-//! - `via b`: a report whose request named `reply_via = b` (see
+//! - `via b`: a successor or connection answer whose request named `reply_via = b` (see
 //!   [`Transaction`](crate::message::Transaction)) is first delivered to `b`, which hands it
 //!   to `T` over its link.
 //!
@@ -39,33 +39,35 @@
 //! No route cycles in any views. The hop budget ends a delivery only when a correct route is
 //! longer than it: with a sparse finger table greedy delivery degenerates to a walk along the
 //! successor lists, so `RelayHopBudgetExhausted` on the delivery path requires
-//! `|V| + 2 > MAX_RELAY_HOPS` (a ring whose finger table does not span the identifier space);
-//! with spanning fingers a greedy run takes `O(log |V|)` hops.
+//! `|V| + 2 > MAX_RELAY_HOPS` (a ring whose finger table does not span the identifier space).
+//! On the Chord fixpoint every greedy hop at least halves the remaining distance, so a route
+//! takes at most `⌈log₂ dist(n₀, T)⌉ + 1` hops, `O(log |V|)` with high probability for random
+//! identifiers.
 //!
 //! Law (liveness). The payload is delivered if a node on the greedy prefix is linked to the
 //! aim, or the handoff receiver is. On the Chord fixpoint `pred(T)` knows `T`. Before
-//! convergence a payload for a node no view knows fails fast; a report to a node without a
-//! predecessor reaches it through the peer it named.
+//! convergence a payload for a node no view knows fails fast; a successor or connection
+//! answer to a node without a predecessor reaches it through the peer it named.
 
-use super::topology::reply_via;
-use super::topology::route_toward;
-use super::topology::RouteStep;
+use num_bigint::BigUint;
+
+use super::topology::dist;
 use super::topology::TopologyState;
 use super::Did;
 
 /// The stage of a route, carried by the relay carrier outside every signature.
 ///
 /// `RouteStage = Aim × 𝔹` with `Aim = {destination} + {via b}`. A fresh carrier starts at
-/// `(destination, ⊥)`, or at `(via b, ⊥)` for a report whose request named `reply_via = b`;
-/// a handoff moves `⊥ → ⊤` and nothing moves it back, which bounds each aim to one greedy run
-/// and one crossing.
+/// `(destination, ⊥)`, or at `(via b, ⊥)` for a successor or connection answer whose request
+/// named `reply_via = b`; a handoff moves `⊥ → ⊤` and nothing moves it back, which bounds each
+/// aim to one greedy run and one crossing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RouteStage {
     /// The peer a report is first delivered to; `None` while the route aims at the
     /// destination itself.
     pub via: Option<Did>,
-    /// Whether the payload has been handed past its aim to the owner of the aim's successor
-    /// position.
+    /// Whether the payload has been handed past its aim, to the first linked known node after
+    /// the hop that knew no peer on the way to it.
     pub handed_off: bool,
 }
 
@@ -119,6 +121,97 @@ impl NextHop {
     pub const fn toward(peer: Did) -> Self {
         Self::new(peer, RouteStage::TOWARD)
     }
+}
+
+/// Pure result of one greedy delivery step toward a node (see [`route_toward`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteStep {
+    /// Send to this linked known peer on `(n, a]`; the peer is `a` itself when known.
+    Forward(Did),
+    /// No linked known peer lies on `(n, a]`: hand the payload once to the first linked known
+    /// node after `n`, which lies past `a`.
+    Handoff(Did),
+    /// The node has no linked known peer to route through.
+    Isolated,
+}
+
+/// `Reaches(n, p, a)`: `p` lies on the half-open arc `(n, a]`, so forwarding to `p` either
+/// delivers to `a` (`p = a`) or makes strict clockwise progress toward it.
+fn reaches(local: Did, peer: Did, target: &BigUint) -> bool {
+    peer != local && dist(local, peer) <= *target
+}
+
+/// `Known(n) ∩ Linked(n)`, where `Known(n) = succ[n] ∪ {finger[n][i]}` minus `n` itself: the
+/// peers of the view this node can hand a message to now. The successor list may name peers a
+/// stabilization report introduced before any link to them exists, so knowing a peer is not
+/// enough.
+fn linked_known_peers<'state>(
+    state: &'state TopologyState,
+    linked: &'state impl Fn(Did) -> bool,
+) -> impl Iterator<Item = Did> + 'state {
+    state
+        .successors
+        .iter()
+        .copied()
+        .chain(state.fingers.iter().flatten().copied())
+        .filter(move |peer| *peer != state.local && linked(*peer))
+}
+
+/// Pure greedy step of delivery toward the node `aim` over one view and this node's link
+/// predicate `linked`.
+///
+/// ```text
+/// ∃ p ∈ Known ∩ Linked. p ∈ (n, a] ──▶ Forward(argmax dist(n, p))    (p = a delivers)
+///            │ no
+///            ▼
+/// ∃ p ∈ Known ∩ Linked            ──▶ Handoff(argmin dist(n, p))    (past a: the first
+///            │ no                                                    linked node after it)
+///            ▼
+///         Isolated
+/// ```
+///
+/// Law (progress). `Forward(p)` satisfies `dist(p, a) < dist(n, a)`, so a chain of forwards
+/// strictly decreases a measure in `ℕ` and visits each node at most once. `Handoff(h)` is the
+/// only step that passes `a`; since no linked known peer lies on `(n, a]`, `h` is the first
+/// linked known node after `a`.
+///
+/// Unlike [`find_successor`](crate::dht::topology::find_successor), which answers
+/// `Local(head)` for `a ∈ (n, head]` and so lets a hop that does not know `a` pass it and then
+/// route greedily again from the far side, circling among the nodes whose views skip `a`
+/// (#873), the pass here is explicit and terminal.
+pub fn route_toward(state: &TopologyState, aim: Did, linked: impl Fn(Did) -> bool) -> RouteStep {
+    let target = dist(state.local, aim);
+    let peers = || linked_known_peers(state, &linked);
+    match peers()
+        .filter(|peer| reaches(state.local, *peer, &target))
+        .max_by_key(|peer| dist(state.local, *peer))
+    {
+        Some(next) => RouteStep::Forward(next),
+        None => peers()
+            .min_by_key(|peer| dist(state.local, *peer))
+            .map_or(RouteStep::Isolated, RouteStep::Handoff),
+    }
+}
+
+/// `ReplyVia(n)`: the peer `n` names for its successor and connection answers while no node is
+/// known to route to it, i.e. while it has no predecessor; `None` once a predecessor has
+/// notified it.
+///
+/// A predecessor `p` notifies `n` iff `p`'s successor is `n`, i.e. iff `p` knows `n`; from then
+/// on greedy delivery reaches `n` through `p`. Before that (while joining, and again after the
+/// predecessor departs until a new one notifies), only `n`'s own links know it, so its answers
+/// must return through one of them: its nearest successor it is linked to, which for a joiner
+/// is its bootstrap. A successor entry without a link cannot hand an answer on, so it is
+/// skipped.
+pub fn reply_via(state: &TopologyState, linked: impl Fn(Did) -> bool) -> Option<Did> {
+    if state.predecessor.is_some() {
+        return None;
+    }
+    state
+        .successors
+        .iter()
+        .copied()
+        .find(|successor| *successor != state.local && linked(*successor))
 }
 
 /// One delivery step at `view.local` for a payload addressed to `destination` whose carrier
@@ -179,8 +272,8 @@ pub fn origination(
     linked: impl Fn(Did) -> bool,
 ) -> Origination {
     Origination {
-        hop: delivery_step(view, destination, RouteStage::TOWARD, linked),
-        reply_via: reply_via(view),
+        hop: delivery_step(view, destination, RouteStage::TOWARD, &linked),
+        reply_via: reply_via(view, &linked),
     }
 }
 

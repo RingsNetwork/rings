@@ -257,14 +257,14 @@ impl PeerRing {
         self.with_topology_state(|view| delivery::delivery_step(view, destination, stage, linked))
     }
 
-    /// The peer this node names for its reports while no node is known to route to it; see
-    /// [`topology::reply_via`].
+    /// The peer this node names for its answers while no node is known to route to it, among
+    /// the peers `linked` holds; see [`delivery::reply_via`].
     ///
     /// # Errors
     ///
     /// Returns an error when a backing lock is poisoned.
-    pub(crate) fn reply_via(&self) -> Result<Option<Did>> {
-        self.with_topology_state(topology::reply_via)
+    pub(crate) fn reply_via(&self, linked: impl Fn(Did) -> bool) -> Result<Option<Did>> {
+        self.with_topology_state(|view| delivery::reply_via(view, linked))
     }
 
     /// The first hop and the `reply_via` of a request this node originates toward

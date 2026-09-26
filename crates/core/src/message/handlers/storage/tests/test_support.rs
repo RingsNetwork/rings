@@ -243,6 +243,7 @@ pub(super) fn storage_sync_report_payload(
         destination,
         request.transaction.tx_id,
         request.transaction.sequence,
+        None,
         Message::SyncEntriesWithSuccessorReport(report),
         signer,
     )?;

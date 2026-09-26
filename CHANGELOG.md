@@ -28,7 +28,7 @@
   `RelayDestinationUnreachable`. This ends the cycles that dropped replies with
   `RelayHopBudgetExhausted` on unconverged rings: a route takes at most `|V| + 2` hops. Whenever
   a node has no predecessor, its requests carry a signed `Transaction::reply_via` naming its
-  successor head, and successor and connection answers to it return through that peer, so joins
+  nearest linked successor, and successor and connection answers to it return through that peer, so joins
   work under fail-fast. Every locally originated request is built by
   `PayloadSender::originate`. The owner lookup `find_successor` is unchanged. The relay carrier
   gains a `stage` field and the transaction hash covers `reply_via`, so the wire format is

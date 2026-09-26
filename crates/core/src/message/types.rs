@@ -744,6 +744,7 @@ mod tests {
             fixture.provider.delegator_did(),
             tx_id,
             0,
+            None,
             Message::ProbeRequest(request_body),
             MessageSigner::new(&fixture.beneficiary, network_id),
         )?;
@@ -752,6 +753,7 @@ mod tests {
             fixture.beneficiary.delegator_did(),
             tx_id,
             0,
+            None,
             ProbeCompletion {
                 request_digest,
                 nonce: request_body.nonce,

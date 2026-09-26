@@ -989,21 +989,6 @@ fn test_rectify_never_adopts_the_local_node_as_predecessor() {
     assert!(is_responsible_for(&notified_by_itself.state, did(7)));
 }
 
-/// `ReplyVia(n)` names the successor head exactly while no predecessor has notified `n`, and
-/// nothing for a node without successors.
-#[test]
-fn test_reply_via_names_the_head_only_without_a_predecessor() {
-    let local = did(0);
-    let head = did(8);
-    let joining = state(local, vec![head, did(16)], None, vec![None; 4], 0);
-    let notified = state(local, vec![head, did(16)], Some(did(40)), vec![None; 4], 0);
-    let alone = state(local, vec![], None, vec![None; 4], 0);
-
-    assert_eq!(reply_via(&joining), Some(head));
-    assert_eq!(reply_via(&notified), None);
-    assert_eq!(reply_via(&alone), None);
-}
-
 /// Admission-focused regression tests for deferred finger proofs.
 ///
 /// The submodule keeps timeout, duplicate, and supersession cases close to the

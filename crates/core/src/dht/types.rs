@@ -18,7 +18,7 @@ use crate::error::Result;
 /// all the nodes in the finger table for every node, we construct a [PeerRing](super::PeerRing).
 /// It's the basic construction of the rings network. When passing a message to a
 /// destination node, each hop forwards to its closest known peer on `(self, destination]`,
-/// and a hop that knows none hands the message once, terminally, to its successor head
+/// and a hop that knows none hands the message once, terminally, to the first linked node after it
 /// (see [`delivery`](super::delivery)); `find_successor` answers the different question of
 /// who owns a ring position. A route takes O(log n) hops over O(log n) connections per node
 /// on a converged ring.

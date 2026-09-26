@@ -64,6 +64,7 @@ fn stranger_payload(
         transport.dht.did,
         crate::utils::new_uuid(),
         0,
+        None,
         Message::custom(data)?,
         MessageSigner::new(stranger, TEST_NETWORK_ID),
     )?;

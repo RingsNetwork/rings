@@ -697,6 +697,7 @@ mod tests {
             destination,
             uuid::Uuid::new_v4(),
             0,
+            None,
             crate::message::Message::custom(b"first")?,
             crate::message::MessageSigner::new(&first_session, 7),
         )?;
@@ -704,6 +705,7 @@ mod tests {
             destination,
             uuid::Uuid::new_v4(),
             1,
+            None,
             crate::message::Message::custom(b"rotated")?,
             crate::message::MessageSigner::new(&rotated_session, 7),
         )?;

@@ -95,6 +95,7 @@ impl ProbeOfferPlan {
             self.beneficiary,
             self.request.tx_id,
             completion_sequence,
+            None,
             ProbeCompletion {
                 request_digest: self.request_digest,
                 nonce: self.nonce,
