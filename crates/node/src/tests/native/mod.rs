@@ -10,13 +10,19 @@ mod test_duplicate_namespace;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 
+/// ICE servers of every native processor fixture: none, so peers gather host candidates only.
+///
+/// All peers of these tests run in this process, so loopback host candidates connect them; an
+/// external STUN server would only add a network dependency whose latency no test controls.
+pub(crate) const TEST_ICE_SERVERS: &str = "";
+
 pub async fn prepare_processor() -> Processor {
     let key = SecretKey::random();
     let sm = DelegateeKey::new_with_seckey(&key).unwrap();
 
     let config = serde_yaml::to_string(&ProcessorConfig::new(
         0,
-        "stun://stun.l.google.com:19302".to_string(),
+        TEST_ICE_SERVERS.to_string(),
         sm,
         3,
     ))

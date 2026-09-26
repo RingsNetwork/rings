@@ -508,6 +508,106 @@ async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
     }
 }
 
+/// Secret of the sender key on [`e2e_test_frame`]; any fixed key serves, since only sequence
+/// and finality matter to the predicate under test.
+const E2E_TEST_FRAME_SECRET: &str =
+    "0101010101010101010101010101010101010101010101010101010101010101";
+
+/// A stream frame at `sequence` with no payload; only sequence and finality matter here, so the
+/// stream id and sender key are fixed.
+fn e2e_test_frame(sequence: u64, is_final: bool) -> E2eStreamFrame {
+    E2eStreamFrame {
+        stream_id: uuid::Uuid::nil(),
+        sender_public_key: SecretKey::try_from(E2E_TEST_FRAME_SECRET).unwrap().pubkey(),
+        sequence,
+        is_final,
+        ciphertext: Vec::new(),
+    }
+}
+
+/// Every ordering of `items`.
+fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+    if items.is_empty() {
+        return vec![Vec::new()];
+    }
+    (0..items.len())
+        .flat_map(|chosen| {
+            let mut rest = items.to_vec();
+            let head = rest.remove(chosen);
+            permutations(rest.as_slice())
+                .into_iter()
+                .map(move |mut tail| {
+                    tail.insert(0, head.clone());
+                    tail
+                })
+        })
+        .collect()
+}
+
+/// `e2e_stream_complete` is insensitive to arrival order, and monotone.
+///
+/// ```text
+/// ∀ π ∈ Perm({0, 1, 2, 3ᶠ}).
+///   ∀ k < 4. ¬complete(π[..k])                     (some sequence ≤ 3 is missing)
+///   complete(π)
+///   complete(π ++ [π₀, 4])                          (a duplicate and a stray frame)
+/// ```
+///
+/// All 24 arrival orders are checked. Every proper prefix of a permutation of four distinct
+/// sequences lacks one of them, so it is incomplete whether or not it holds the final frame.
+#[test]
+fn test_e2e_stream_complete_is_order_insensitive_and_monotone() {
+    let stream = [
+        e2e_test_frame(0, false),
+        e2e_test_frame(1, false),
+        e2e_test_frame(2, false),
+        e2e_test_frame(3, true),
+    ];
+    let orders = permutations(stream.as_slice());
+    assert_eq!(orders.len(), 24);
+    for order in orders {
+        for delivered in 0..order.len() {
+            assert!(
+                !e2e_stream_complete(order.iter().take(delivered)),
+                "{delivered} arrivals leave a sequence below the final frame missing"
+            );
+        }
+        assert!(e2e_stream_complete(order.iter()));
+        let mut extended = order.clone();
+        extended.push(order[0].clone());
+        extended.push(e2e_test_frame(4, false));
+        assert!(
+            e2e_stream_complete(extended.iter()),
+            "later duplicates and stray frames keep a complete stream complete"
+        );
+    }
+}
+
+/// E2E streaming over a real link, decrypted with the receiver's identity key.
+///
+/// ```text
+/// Admitted ≡ p1 ∈ peers(p2) ∧ p2 ∈ peers(p1)
+/// Complete ≡ e2e_stream_complete(inbound(p2, stream))
+///
+/// connect(p1, p2)       ⊢ ◇Admitted     awaited on `connected_notify`
+/// Admitted ; send(p1)   ⊢ ◇Complete     awaited on `inbound_notify`
+/// ```
+///
+/// Both notifies are `notify_one`, which stores a permit when no task waits, so a wake-up
+/// between a scan and the next wait is not lost. `Complete` is stable: frames are only
+/// appended, and the predicate is monotone. Arrival order is irrelevant to it, since the link
+/// does not guarantee order.
+///
+/// The helper returns the raw frames in arrival order, so the shape assertions below are
+/// about what the sender emitted, among the frames that arrived by completion: exactly one
+/// final frame, and the sorted sequences are exactly `0..n`, which rules out gaps, and any
+/// duplicate or post-final frame that arrived before completion. A stray frame that arrives
+/// after completion is not observed; the processor has no end-of-stream signal to await for
+/// it. The frames are then decrypted in reverse arrival order.
+///
+/// The fixtures use host-only ICE, so the handshake depends on no external server. The link is
+/// still real WebRTC under the helpers' 5 s deadline; moving this protocol test onto a
+/// controlled transport is tracked in #883.
 #[tokio::test]
 async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_key() {
     let _network_guard = network_test_guard().await;
@@ -558,9 +658,7 @@ async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_
 
     let mut decryptor = p2.e2e_stream_decryptor(did1, stream_id, identity2).unwrap();
     let mut plaintext = Vec::new();
-    let mut delivered_frames = frames.clone();
-    delivered_frames.reverse();
-    for frame in &delivered_frames {
+    for frame in frames.iter().rev() {
         plaintext.extend_from_slice(&p2.decrypt_e2e_stream_frame(&mut decryptor, frame).unwrap());
     }
     decryptor.finish().unwrap();

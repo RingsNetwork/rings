@@ -2,6 +2,7 @@ use rings_core::message::MessageSigner;
 
 use super::*;
 use crate::consts::DATA_REDUNDANT;
+use crate::tests::native::TEST_ICE_SERVERS;
 
 // Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive
 // connection callbacks; run them serially so one test's candidates or callbacks
@@ -96,13 +97,8 @@ pub(super) async fn prepare_processor_with_identity_key_network_and_virtual_node
     dht_virtual_nodes: u16,
 ) -> Processor {
     let delegatee_key = DelegateeKey::new_with_seckey(&identity_key).unwrap();
-    let config = ProcessorConfig::new(
-        network_id,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .dht_virtual_nodes(dht_virtual_nodes);
+    let config = ProcessorConfig::new(network_id, TEST_ICE_SERVERS.to_string(), delegatee_key, 3)
+        .dht_virtual_nodes(dht_virtual_nodes);
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
@@ -167,13 +163,8 @@ pub(super) async fn prepare_processor_with_network_and_virtual_nodes(
 ) -> Processor {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        network_id,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .dht_virtual_nodes(dht_virtual_nodes);
+    let config = ProcessorConfig::new(network_id, TEST_ICE_SERVERS.to_string(), delegatee_key, 3)
+        .dht_virtual_nodes(dht_virtual_nodes);
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
@@ -199,12 +190,7 @@ pub(super) async fn prepare_processor_with_online_node_type(
 ) -> Processor {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    );
+    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 3);
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
@@ -329,12 +315,7 @@ pub(super) fn mismatched_storage_redundancy(value: u16) -> u16 {
 pub(super) async fn prepare_measured_processor() -> Processor {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    );
+    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 3);
     let storage = Box::new(MemStorage::new());
     let measure = PeriodicMeasure::new(Box::new(MemStorage::new()))
         .await
@@ -574,6 +555,50 @@ pub(super) async fn wait_for_inbound_message(
     }
 }
 
+/// Whether `frames` carry a complete stream: some final frame arrived, and so did every
+/// sequence up to it.
+///
+/// The overlay link makes no ordering guarantee, so arrival order is irrelevant. With
+/// `S = { f.sequence | f ∈ frames }`:
+///
+/// ```text
+/// complete(frames) ≡ ∃ f ∈ frames. f.is_final ∧ {0, …, f.sequence} ⊆ S
+/// ```
+///
+/// The predicate is monotone: `S` and the set of final frames only grow as frames arrive, so
+/// once complete, further arrivals (duplicates or stray frames included) keep it complete.
+pub(super) fn e2e_stream_complete<'a>(
+    frames: impl IntoIterator<Item = &'a E2eStreamFrame>,
+) -> bool {
+    let (sequences, finals): (BTreeSet<u64>, Vec<u64>) = frames.into_iter().fold(
+        (BTreeSet::new(), Vec::new()),
+        |(mut sequences, mut finals), frame| {
+            sequences.insert(frame.sequence);
+            if frame.is_final {
+                finals.push(frame.sequence);
+            }
+            (sequences, finals)
+        },
+    );
+    finals
+        .into_iter()
+        .any(|last| (0..=last).all(|sequence| sequences.contains(&sequence)))
+}
+
+/// Await a complete E2E stream `stream_id` on `callback`, and return every frame of it that
+/// arrived, raw and in arrival order.
+///
+/// ```text
+/// loop:  frames := inbound(stream_id) ;  complete(frames) ? return frames : await inbound_notify
+/// ```
+///
+/// Completeness decides only *when* to stop; the frames are returned unfiltered, so the caller
+/// still sees duplicates, stray frames and the actual arrival order.
+///
+/// Law (no lost wake-up): `on_inbound` appends under the lock and then calls `notify_one`,
+/// which stores a permit when no task waits. A frame that arrives between the scan and the
+/// wait therefore leaves a permit that wakes the next wait. The deadline guards only against a
+/// hang; completion is the event. The link is still real WebRTC (#883).
 pub(super) async fn wait_for_e2e_stream_frames(
     callback: &SwarmCallbackInstance,
     stream_id: e2e::E2eStreamId,
@@ -591,16 +616,16 @@ pub(super) async fn wait_for_e2e_stream_frames(
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            if frames.iter().any(|frame| frame.is_final) {
+            if e2e_stream_complete(frames.iter()) {
                 return frames;
             }
         }
 
         let remaining = deadline
             .checked_duration_since(Instant::now())
-            .expect("E2E stream final frame was not delivered");
+            .expect("E2E stream was not delivered completely");
         tokio::time::timeout(remaining, callback.inbound_notify.notified())
             .await
-            .expect("E2E stream final frame was not delivered");
+            .expect("E2E stream was not delivered completely");
     }
 }
