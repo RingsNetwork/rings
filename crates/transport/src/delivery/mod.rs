@@ -18,8 +18,13 @@
 //! channel's single `bufferedAmountLowThreshold` over every pending send; the
 //! channel's `bufferedamountlow`, `close` and `error` events are the only
 //! wake-ups, and no timer takes part in a verdict. Callers can still spawn the
-//! future and forget it: dropping it only withdraws its offset from the
-//! threshold.
+//! future and forget it: dropping it removes its slot, and the next settle
+//! round re-arms the threshold for the sends that remain.
+//!
+//! "Flushed" means the bytes left the channel's `bufferedAmount`. On native
+//! webrtc-rs that happens only when the peer's SCTP SACK acknowledges them, so
+//! there the verdict is "acknowledged by the peer", which is stronger than
+//! "handed to the wire".
 
 use std::future::Future;
 use std::pin::Pin;

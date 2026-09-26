@@ -7,6 +7,7 @@
 
 use std::future::Future;
 use std::pin::pin;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -31,6 +32,9 @@ enum Pause {
     Never,
     /// Suspend once right after reading `bufferedAmount`, before settling.
     AfterObserve,
+    /// Once, right after reading `bufferedAmount`, let a concurrent send of
+    /// this many bytes land: into `b` first, then into `E`, as a real write does.
+    EnqueueAfterObserve(u64),
 }
 
 /// Observable state of the modelled channel.
@@ -51,11 +55,13 @@ struct FakeState {
 struct FakeChannel {
     /// The modelled channel state.
     state: Mutex<FakeState>,
+    /// The tracker's counter `E`, which a concurrent send advances.
+    enqueued: Arc<AtomicU64>,
 }
 
 impl FakeChannel {
     /// An empty channel whose threshold starts at zero, as specified.
-    fn new() -> Self {
+    fn new(enqueued: Arc<AtomicU64>) -> Self {
         Self {
             state: Mutex::new(FakeState {
                 buffered: 0,
@@ -63,7 +69,14 @@ impl FakeChannel {
                 armed: Vec::new(),
                 pause: Pause::Never,
             }),
+            enqueued,
         }
+    }
+
+    /// Enqueue `bytes`: the write counts them in `b`, then the send path stores `E`.
+    fn enqueue(&self, bytes: u64) -> u64 {
+        self.state().buffered += bytes;
+        self.enqueued.fetch_add(bytes, Ordering::SeqCst) + bytes
     }
 
     /// Lock the modelled state.
@@ -102,8 +115,12 @@ impl BufferedChannel for FakeChannel {
             let pause = std::mem::replace(&mut state.pause, Pause::Never);
             (state.buffered, pause)
         };
-        if pause == Pause::AfterObserve {
-            YieldOnce(false).await;
+        match pause {
+            Pause::Never => {}
+            Pause::AfterObserve => YieldOnce(false).await,
+            Pause::EnqueueAfterObserve(bytes) => {
+                self.enqueue(bytes);
+            }
         }
         buffered
     }
@@ -130,9 +147,10 @@ struct Harness {
 impl Harness {
     /// A fresh channel with no traffic.
     fn new() -> Self {
+        let tracker = Arc::new(DeliveryTracker::default());
         Self {
-            channel: FakeChannel::new(),
-            tracker: Arc::new(DeliveryTracker::default()),
+            channel: FakeChannel::new(Arc::clone(tracker.enqueued())),
+            tracker,
         }
     }
 
@@ -164,8 +182,7 @@ impl Harness {
 
     /// Advance `E` and `b` by `bytes` without registering: the queue accepted it.
     fn enqueue(&self, bytes: u64) -> u64 {
-        self.channel.state().buffered += bytes;
-        self.tracker.enqueued().fetch_add(bytes, Ordering::SeqCst) + bytes
+        self.channel.enqueue(bytes)
     }
 
     /// Drain up to `bytes` from the buffer and deliver the low-water event if
@@ -374,12 +391,69 @@ fn test_dropped_wait_no_longer_bounds_the_threshold() {
     let (_, mut second) = harness.send(10);
     assert_eq!(harness.channel.state().threshold, 10);
     drop(first);
-    harness.run(harness.tracker.notify());
+    // The drop re-arms nothing: τ stays at the dropped send's 10, above the 0
+    // the remaining send needs, so the next event fires early, not late.
+    assert_eq!(harness.channel.state().threshold, 10);
+    assert!(harness.drain(10), "the stale threshold is crossed");
+    // That event's round re-armed τ for the remaining send.
     assert_eq!(harness.channel.state().threshold, 0);
-    assert!(!harness.drain(15));
     assert!(poll_now(&mut second).is_pending());
-    assert!(harness.drain(5));
+    assert!(harness.drain(10));
     assert!(matches!(poll_now(&mut second), Poll::Ready(Ok(()))));
+}
+
+/// Soundness under a concurrent enqueue: a send that lands between the
+/// round's read of `b` and its settlement advances `E` but not the `b` the
+/// round saw. The round settles against the `E` it snapshotted before `b`, so
+/// it cannot count that send's bytes as released.
+#[test]
+fn test_enqueue_during_a_round_fabricates_no_flush() {
+    let harness = Harness::new();
+    let (_, mut first) = harness.send(100);
+    // 70 of the 100 bytes are released; τ = 0 is not crossed yet, so b = 30.
+    assert!(!harness.drain(70));
+    harness.channel.state().pause = Pause::EnqueueAfterObserve(50);
+
+    harness.run(harness.tracker.notify());
+
+    // E = 150 after the concurrent send, but b = 30 was read before it:
+    // φ(150, 30, 100) would hold, while 30 bytes of the first send remain.
+    assert!(poll_now(&mut first).is_pending());
+    // The concurrent send registers after its enqueue, as the backend does;
+    // its round re-arms τ = 150 − 100 against the advanced `E`.
+    let (mut second, lease) = harness.tracker.track(150);
+    harness.run(lease);
+    assert_eq!(harness.channel.state().threshold, 50);
+    assert!(harness.drain(30));
+    assert!(matches!(poll_now(&mut first), Poll::Ready(Ok(()))));
+    assert!(poll_now(&mut second).is_pending());
+}
+
+/// Liveness within one event across a registration during a round: the
+/// registration's request forces a step against the advanced `E`, so τ tracks
+/// the first send in the new `E`, and that send resolves on its own drain
+/// rather than on the second send's.
+#[test]
+fn test_registration_during_a_round_rearms_against_the_new_counter() {
+    let harness = Harness::new();
+    let (_, mut first) = harness.send(100);
+    let lease = harness.tracker.notify();
+    let lease = lease.expect("the tracker is idle, so the event starts a round");
+    harness.channel.state().pause = Pause::AfterObserve;
+    let mut round = pin!(lease.run(&harness.channel));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(round.as_mut().poll(&mut context).is_pending());
+
+    let end_offset = harness.enqueue(50);
+    let (mut second, lease) = harness.tracker.track(end_offset);
+    assert!(lease.is_none(), "the running round owns the registration");
+    while round.as_mut().poll(&mut context).is_pending() {}
+
+    // τ = 150 − 100: the first send's bytes leaving is a reported crossing.
+    assert_eq!(harness.channel.state().threshold, 50);
+    assert!(harness.drain(100));
+    assert!(matches!(poll_now(&mut first), Poll::Ready(Ok(()))));
+    assert!(poll_now(&mut second).is_pending());
 }
 
 /// A round abandoned before it ran (its executor dropped it) frees the round

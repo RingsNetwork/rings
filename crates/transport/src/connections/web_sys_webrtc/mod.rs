@@ -76,8 +76,9 @@ type TrackedChannel = (RtcDataChannel, Arc<DeliveryTracker>);
 
 impl BufferedChannel for RtcDataChannel {
     async fn arm_low_threshold(&self, threshold: u64) {
-        // A threshold beyond `u32` saturates: the event then fires on any
-        // drain, which is a spurious (never a lost) wake-up.
+        // Never saturates: a round waits for the event only when τ < b, and the
+        // browser's `bufferedAmount` is a u32. Saturating keeps the conversion
+        // total.
         self.set_buffered_amount_low_threshold(u32::try_from(threshold).unwrap_or(u32::MAX));
     }
 

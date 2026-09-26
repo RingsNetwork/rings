@@ -96,7 +96,9 @@ impl DeliveryTracker {
 ///
 /// Issued only when the round phase moves `Idle → Running`. Dropping an
 /// unfinished lease (a cancelled or shut-down executor) returns the phase to
-/// `Idle`, so a later request can start a new round.
+/// `Idle`, so a later request can start a new round. Only a later registration
+/// is sure to make that request: the threshold the abandoned round left armed
+/// may already be below the buffer, in which case no event follows.
 #[must_use = "a settle round that is never run leaves pending sends unobserved"]
 pub(crate) struct RoundLease {
     /// The tracker whose round this lease runs.
@@ -117,16 +119,12 @@ impl RoundLease {
     /// Run the round to quiescence: arm `τ(E)`, then read `b`, then settle.
     ///
     /// See the registry's module documentation for why arming precedes the
-    /// read and why the loop ends only on a quiescent step.
+    /// read, why one snapshot of `E` taken under the lock feeds both `τ` and
+    /// the settlement, and why the loop ends only on a quiescent step.
     pub(crate) async fn run(mut self, channel: &impl BufferedChannel) {
-        loop {
-            let enqueued = self.tracker.enqueued.load(Ordering::SeqCst);
-            let Some(threshold) = self.tracker.registry().begin_step(enqueued) else {
-                break;
-            };
+        while let Some((enqueued, threshold)) = self.begin_step() {
             channel.arm_low_threshold(threshold).await;
             let buffered = channel.observe_buffered().await;
-            let enqueued = self.tracker.enqueued.load(Ordering::SeqCst);
             let settlement = self.tracker.registry().settle(enqueued, buffered);
             settlement.wakers.into_iter().for_each(Waker::wake);
             if settlement.step == Step::Quiescent {
@@ -134,6 +132,16 @@ impl RoundLease {
             }
         }
         self.finished = true;
+    }
+
+    /// Snapshot `E` under the registry lock and begin a step against it:
+    /// `(E, τ(E))`, or `None` when nothing waits.
+    fn begin_step(&self) -> Option<(u64, u64)> {
+        let mut registry = self.tracker.registry();
+        let enqueued = self.tracker.enqueued.load(Ordering::SeqCst);
+        registry
+            .begin_step(enqueued)
+            .map(|threshold| (enqueued, threshold))
     }
 }
 

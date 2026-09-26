@@ -21,7 +21,7 @@ use crate::error::Result;
 /// Hang guard: a bound on a test that waits only on events, never a pacing.
 const HANG_GUARD: Duration = Duration::from_secs(60);
 
-/// Payload size of one test message, the onion cell size of #843.
+/// Payload size of one test message, as in the #887 loopback measurement.
 const CELL_BYTES: usize = 16 * 1024;
 
 /// A callback that ignores every connection event.

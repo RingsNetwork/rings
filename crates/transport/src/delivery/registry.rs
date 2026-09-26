@@ -34,7 +34,8 @@
 //!
 //! ```text
 //! loop
-//!   τ ← begin_step(E)          -- None ⇒ round := Idle; stop
+//!   E ← load, under the registry lock  -- the ONE snapshot of E for this step
+//!   τ ← begin_step(E)          -- same lock; None ⇒ round := Idle; stop
 //!   arm(τ)                     -- effect: set the channel threshold
 //!   b ← observe()              -- effect: read bufferedAmount AFTER arming
 //!   settle(E, b)               -- Waiting(e) ∧ φ(E, b, e) ↦ Settled(Flushed)
@@ -63,6 +64,21 @@
 //! each successful enqueue with a registration, whose round re-arms `τ`
 //! against the new `E`.
 //!
+//! One snapshot of `E`, taken before `b`, feeds both `τ` and the settlement:
+//!
+//! - **Soundness.** A send's bytes enter `b` inside the channel write, and the
+//!   send path stores `E` only after that write returns. So a snapshot taken
+//!   before the read of `b` satisfies `E ⊖ b ≤` the bytes actually released.
+//!   A send enqueued after the snapshot has `e > E` and cannot settle in this
+//!   step. Re-reading `E` after `b` would count that send's bytes as released.
+//! - **No absorbed request.** A registration stores its `E` before it takes the
+//!   registry lock. A `begin_step` that turns its `Rerun` back into `Running`
+//!   holds that lock and loads `E` under it, so the step it absorbs the request
+//!   into arms `τ` against the registered send's `E`.
+//!
+//! A dropped waiter only removes its slot. The armed `τ` then stays at most as
+//! high as `τ` for the remaining sends, so the next event fires no later than
+//! needed, and the round it starts re-arms `τ` for the remaining sends.//!
 //! Wakers are data here: the registry returns them and the shell wakes them
 //! after releasing its lock. No clock takes part in any verdict.
 

@@ -110,8 +110,10 @@ struct TrackedChannel {
 
 impl BufferedChannel for RTCDataChannel {
     async fn arm_low_threshold(&self, threshold: u64) {
-        // A threshold beyond the address space saturates: the event then
-        // fires on any drain, which is a spurious (never a lost) wake-up.
+        // Never saturates: a round arms τ = E ⊖ e_min ≤ E, and the bytes of the
+        // pending sends are counted in a usize `bufferedAmount`, so τ < b ≤
+        // usize::MAX whenever a round waits for the event. Saturating keeps the
+        // conversion total.
         let threshold = usize::try_from(threshold).unwrap_or(usize::MAX);
         self.set_buffered_amount_low_threshold(threshold).await;
     }
@@ -132,7 +134,9 @@ fn spawn_delivery_round(lease: Option<RoundLease>, channel: Arc<RTCDataChannel>)
         Ok(runtime) => {
             runtime.spawn(async move { lease.run(channel.as_ref()).await });
         }
-        // Dropping the lease returns the round to idle; the next event retries.
+        // Unreachable from the send path, which requires the executor. Dropping
+        // the lease returns the round to idle, and only a later registration
+        // is sure to start the next one: no event may follow the stale arm.
         Err(error) => tracing::error!(%error, "no executor for a delivery settle round"),
     }
 }
