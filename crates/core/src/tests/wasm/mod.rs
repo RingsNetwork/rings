@@ -55,9 +55,7 @@ async fn prepare_node_with_storage_mode(key: SecretKey, mode: TestStorageMode) -
         TestStorageMode::Repair => builder.dht_storage_redundancy(2).dht_virtual_nodes(0),
     };
     let swarm = Arc::new(builder.build());
-    swarm
-        .set_callback(Arc::new(ActivityCallback::new(swarm.did(), ledger.clone())))
-        .unwrap();
+    swarm.set_callback(Arc::new(ActivityCallback)).unwrap();
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());

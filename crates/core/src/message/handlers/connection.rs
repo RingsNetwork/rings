@@ -282,6 +282,106 @@ pub mod tests {
     use crate::tests::default::TEST_HANG_GUARD;
     use crate::tests::manually_establish_connection;
 
+    /// A four-node real-WebRTC ring node: host-only, one successor, no fingers, so a node links
+    /// only to its successor and predecessor on its own.
+    #[cfg(not(feature = "dummy"))]
+    fn prepare_ring_node(key: SecretKey) -> Result<Node> {
+        let session = crate::delegation::DelegateeKey::new_with_seckey(&key)?;
+        Ok(Node::build(
+            crate::swarm::SwarmBuilder::new(
+                crate::tests::TEST_NETWORK_ID,
+                crate::tests::default::TEST_ICE_SERVERS,
+                Box::new(crate::storage::MemStorage::new()),
+                session,
+            )
+            .dht_succ_max(1)
+            .dht_finger_table_size(0)
+            .dht_virtual_nodes(0),
+        ))
+    }
+
+    /// Hop signers of the messages `node` received from `origin` that satisfy `matches`.
+    #[cfg(not(feature = "dummy"))]
+    async fn received_hops(
+        node: &Node,
+        origin: crate::dht::Did,
+        matches: fn(&Message) -> bool,
+    ) -> Vec<crate::dht::Did> {
+        use crate::message::MessageVerificationExt;
+        let mut hops = Vec::new();
+        while let Some(payload) = node.try_listen_once().await {
+            let is_match = payload
+                .transaction
+                .data::<Message>()
+                .is_ok_and(|message| matches(&message));
+            if is_match && payload.transaction.signer() == origin {
+                hops.push(payload.signer());
+            }
+        }
+        hops
+    }
+
+    /// Real-transport smoke test: an unconditional connect relayed through the DHT (#882).
+    ///
+    /// ```text
+    /// ring  n1 → n2 → n3 → n4 → n1      (d(n1) < d(n2) < d(n3) < d(n4); links = ring edges)
+    /// P₀ ≡ quiescent ∧ n1 has no link to n3, neither admitted nor pending
+    /// connect(n1, n3)  ⊢  ◇(C(n1, n3) ∧ C(n3, n1))
+    /// W  ≡ n3 received n1's ConnectNodeSend from hop n2 ∧ n1 received n3's report relayed
+    /// ```
+    ///
+    /// With one successor and no fingers, each node links on its own to its ring neighbours,
+    /// and at most a join-time successor hint links n1 and n3; such a link is retired first.
+    /// Unlike `test_triple_nodes_*`, the connect is therefore always issued, from a state with
+    /// no n1–n3 link, and it can only travel over the DHT. It runs over real
+    /// webrtc-rs with host-only ICE, which is what this test adds over the controlled
+    /// `test_handle_connect_node`: the relayed SDP drives a real ICE, DTLS and SCTP handshake.
+    /// Every wait is an activity-woken probe; the hang guard only bounds a hang.
+    #[cfg(not(feature = "dummy"))]
+    #[tokio::test]
+    async fn test_relayed_connect_over_real_webrtc() -> Result<()> {
+        let [key1, key2, key3, key4] = crate::tests::fixed_secret_keys::<4>()?;
+        let [node1, node2, node3, node4] = [key1, key2, key3, key4]
+            .map(|key| prepare_ring_node(key).expect("ring node configuration is valid"));
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        manually_establish_connection(&node2.swarm, &node3.swarm).await;
+        manually_establish_connection(&node3.swarm, &node4.swarm).await;
+        manually_establish_connection(&node4.swarm, &node1.swarm).await;
+        let nodes = [&node1, &node2, &node3, &node4];
+        wait_for_msgs(nodes).await;
+        // The joins may already have linked n1 and n3 through a successor hint; retire that
+        // link, so the connect under test always starts from P₀.
+        if node1.swarm.transport.get_connection(node3.did()).is_some() {
+            node1.swarm.disconnect(node3.did()).await?;
+            wait_for_msgs(nodes).await;
+        }
+        assert!(
+            node1.swarm.transport.get_connection(node3.did()).is_none()
+                && !node1.swarm.has_unadmitted_connection(node3.did())?,
+            "n1 has no link to n3 before the relayed connect"
+        );
+
+        node1.swarm.connect(node3.did()).await?;
+        wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
+        wait_for_connection_state(&node3, node1.did(), WebrtcConnectionState::Connected).await?;
+        // The witness is read from the inboxes before any quiescence wait, which drains them.
+
+        let is_send = |message: &Message| matches!(message, Message::ConnectNodeSend(_));
+        let is_report = |message: &Message| matches!(message, Message::ConnectNodeReport(_));
+        assert_eq!(
+            received_hops(&node3, node1.did(), is_send).await,
+            vec![node2.did()],
+            "n3 received n1's ConnectNodeSend relayed by n2"
+        );
+        let report_hops = received_hops(&node1, node3.did(), is_report).await;
+        assert!(
+            !report_hops.is_empty() && !report_hops.contains(&node3.did()),
+            "n1 received n3's ConnectNodeReport over a relay, got hops {report_hops:?}"
+        );
+        wait_for_msgs(nodes).await;
+        Ok(())
+    }
+
     #[test]
     fn test_connect_successor_hint_skips_requester_self_report() -> Result<()> {
         let keys = gen_ordered_keys::<4>();

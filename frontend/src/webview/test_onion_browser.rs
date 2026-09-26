@@ -7,11 +7,6 @@ use rings_node::onion::OnionExitPolicy;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
-use rings_node::prelude::rings_core::swarm::observer::LookupCorrelation;
-use rings_node::prelude::rings_core::swarm::observer::LookupKind;
-use rings_node::prelude::rings_core::swarm::observer::LookupOutcome;
-use rings_node::prelude::rings_core::swarm::observer::MessageObservation;
-use rings_node::prelude::rings_core::swarm::observer::SwarmObserver;
 use rings_node::prelude::uuid;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
@@ -20,8 +15,8 @@ use rings_node::provider::Provider;
 use rings_test_support::activity::activity_after;
 use rings_test_support::activity::activity_mark;
 use rings_test_support::activity::probe_on_activity;
-use rings_test_support::activity::record_activity;
-use rings_test_support::with_hang_guard;
+use rings_test_support::observer::activity_observer;
+use rings_test_support::within;
 use rings_webview::browser::BOOTSTRAP_MARKER;
 use rings_webview::GatewayHeader;
 use rings_webview::GatewayPrefix;
@@ -211,7 +206,7 @@ async fn browser_provider(
         .map_err(|error| WebviewError::transport(format!("build processor config: {error:?}")))?
         .storage(storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
-        .observer(std::sync::Arc::new(ActivityObserver))
+        .observer(activity_observer())
         .build()
         .map_err(|error| WebviewError::transport(format!("build processor: {error:?}")))?;
     let provider = Rc::new(provider_from_processor(processor));
@@ -284,28 +279,6 @@ fn string_field(value: &JsValue, field: &str) -> WebviewResult<String> {
         .ok_or_else(|| WebviewError::Browser(format!("missing string field {field:?}")))
 }
 
-/// Observer that records swarm activity, so the flow probes state on activity.
-struct ActivityObserver;
-
-impl SwarmObserver for ActivityObserver {
-    fn observe_message(&self, _observation: MessageObservation) {
-        record_activity();
-    }
-
-    fn lookup_started(&self, _kind: LookupKind, _correlation: LookupCorrelation) {
-        record_activity();
-    }
-
-    fn lookup_finished(
-        &self,
-        _kind: LookupKind,
-        _correlation: LookupCorrelation,
-        _outcome: LookupOutcome,
-    ) {
-        record_activity();
-    }
-}
-
 /// Await, on activity, `client` listing `exit` as a `Connected` peer. Admission starts the join
 /// traffic, so the admitted state is followed by recorded activity.
 async fn await_connected(client: &Provider, exit: &Provider) -> WebviewResult<()> {
@@ -331,25 +304,36 @@ async fn await_connected(client: &Provider, exit: &Provider) -> WebviewResult<()
 
 /// Navigate to `target` once the client can reach a browser onion exit.
 ///
-/// A failed attempt means the exit is not discoverable yet; the next attempt waits for
-/// activity recorded *after* the failure (the exit's registration traffic), not for a timer.
+/// A failed attempt means the exit is not discoverable yet. The activity mark is taken
+/// *before* each attempt, so any state change during or after it wakes the next attempt, and
+/// no timer paces the retries. The last error is kept for the hang-guard report.
 async fn retry_gateway_navigation(
     node: &WebviewNode,
     target: &TargetUrl,
 ) -> WebviewResult<GatewayResponse> {
-    with_hang_guard(
-        "gateway navigation found a browser onion exit",
-        FLOW_HANG_GUARD,
-        async {
-            loop {
-                match gateway_navigation(node, target).await {
-                    Ok(response) => return Ok(response),
-                    Err(_) => activity_after(activity_mark()).await,
+    let last_error = std::cell::RefCell::new(None::<String>);
+    let navigated = within(FLOW_HANG_GUARD, async {
+        loop {
+            let mark = activity_mark();
+            match gateway_navigation(node, target).await {
+                Ok(response) => return response,
+                Err(error) => {
+                    *last_error.borrow_mut() = Some(error.to_string());
+                    activity_after(mark).await;
                 }
             }
-        },
-    )
-    .await
+        }
+    })
+    .await;
+    navigated.ok_or_else(|| {
+        WebviewError::transport(format!(
+            "gateway navigation did not find a browser onion exit within {FLOW_HANG_GUARD:?}: {}",
+            last_error
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| "no attempt was made".to_string())
+        ))
+    })
 }
 
 async fn gateway_navigation(

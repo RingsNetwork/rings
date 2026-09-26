@@ -17,9 +17,7 @@ pub(crate) use rings_test_support::activity::activity_after;
 pub(crate) use rings_test_support::activity::activity_mark;
 pub(crate) use rings_test_support::activity::record_activity;
 
-use crate::dht::Did;
 use crate::message::MessagePayload;
-use crate::message::MessageVerificationExt;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::observer::LookupCorrelation;
@@ -43,33 +41,21 @@ where
     rings_test_support::activity::probe_on_activity(label, hang_guard, probe).await
 }
 
-/// Wire-message conservation counts of one test node.
+/// Wire deliveries of one test node, for the conservation clause of [`swarms_quiescent`].
 ///
 /// `delivered` counts logical messages this node delivered to a next hop (sent or forwarded,
-/// successfully). `received` counts logical messages that reached this node from another node;
-/// the node's test callback records them. Local self-deliveries appear in neither. Summed over
-/// every node of a test, `Σ delivered − Σ received` is the number of messages still between
-/// nodes.
+/// successfully). Arrivals are counted by the receiving transport itself
+/// (`inbound_arrivals_for_test`), before validation, so a dropped or rejected message still
+/// counts as arrived. Local self-deliveries appear on neither side.
 #[derive(Default)]
 pub struct MessageLedger {
     delivered: AtomicU64,
-    received: AtomicU64,
 }
 
 impl MessageLedger {
     /// Messages this node delivered to a next hop.
     pub(crate) fn delivered(&self) -> u64 {
         self.delivered.load(Ordering::Acquire)
-    }
-
-    /// Messages that reached this node from another node.
-    pub(crate) fn received(&self) -> u64 {
-        self.received.load(Ordering::Acquire)
-    }
-
-    /// Count one message that reached this node from another node.
-    pub(crate) fn record_received(&self) {
-        self.received.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -113,30 +99,17 @@ impl SwarmObserver for LedgerObserver {
     }
 }
 
-/// Callback of a test swarm without an inbox: counts wire receptions and records activity.
-pub(crate) struct ActivityCallback {
-    /// This swarm's DID, to tell a message from another node from a local self-delivery.
-    local: Did,
-    ledger: Arc<MessageLedger>,
-}
-
-impl ActivityCallback {
-    /// A callback for the swarm `local`, counting into `ledger`.
-    pub(crate) fn new(local: Did, ledger: Arc<MessageLedger>) -> Self {
-        Self { local, ledger }
-    }
-}
+/// Callback of a test swarm: records activity on every validated or handled message and on
+/// every connection event.
+pub(crate) struct ActivityCallback;
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl SwarmCallback for ActivityCallback {
     async fn on_validate(
         &self,
-        payload: &MessagePayload,
+        _payload: &MessagePayload,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        if payload.signer() != self.local {
-            self.ledger.record_received();
-        }
         record_activity();
         Ok(())
     }
@@ -174,27 +147,36 @@ pub(crate) fn swarm_in_flight(swarm: &Swarm) -> bool {
 /// Whether `nodes` are quiescent: nothing in flight on any of them, and nothing between them.
 ///
 /// ```text
-/// quiescent ≡ ∀ n. ¬in_flight(n)  ∧  Σ delivered(n) = Σ received(n)
+/// quiescent ≡ ∀ n. ¬in_flight(n)  ∧  Σ delivered(n) = Σ arrived(n)
+///             ∧ no activity during the evaluation
 /// ```
 ///
 /// The second clause is message conservation. A message a node delivered that no node has yet
-/// received (on the wire, or in a transport's delay) makes `Σ delivered > Σ received`, so
-/// quiescence is decided by counts, never by a silence window. Every clause changes only
-/// together with an activity (a delivery, a reception, a handled message, a released transfer),
-/// so probing it on activity observes the quiescent state as soon as it holds. Pre: `nodes` are
-/// all the nodes that exchange messages in the test.
+/// received (on the wire, or in a transport's delay) makes `Σ delivered > Σ arrived`, so
+/// quiescence is decided by counts, never by a silence window. Arrivals are counted before
+/// validation, so a message a receiver drops or rejects still balances its delivery.
+///
+/// The third clause makes the fold safe on a multi-thread runtime: nodes are sampled one after
+/// another, so a message moving between two samples could balance the counts falsely. Every
+/// such move records activity, so the evaluation holds only if the activity generation did not
+/// change while the nodes were sampled.
+///
+/// Preconditions: `nodes` are all the nodes that exchange messages in the test, and no message
+/// is lost below the swarm (a link retired with frames still on the wire); a violation makes
+/// the wait fail at its hang guard rather than pass falsely.
 pub(crate) fn swarms_quiescent<'a>(
     nodes: impl IntoIterator<Item = (&'a Swarm, &'a MessageLedger)>,
 ) -> bool {
-    let (idle, delivered, received) = nodes.into_iter().fold(
+    let mark = activity_mark();
+    let (idle, delivered, arrived) = nodes.into_iter().fold(
         (true, 0_u64, 0_u64),
-        |(idle, delivered, received), (swarm, ledger)| {
+        |(idle, delivered, arrived), (swarm, ledger)| {
             (
                 idle && !swarm_in_flight(swarm),
                 delivered + ledger.delivered(),
-                received + ledger.received(),
+                arrived + swarm.transport.inbound_arrivals_for_test(),
             )
         },
     );
-    idle && delivered == received
+    idle && delivered == arrived && activity_mark() == mark
 }

@@ -40,7 +40,7 @@ web-sys = { version = "=0.3.98", features = [
 yew = { version = "0.21", features = ["csr"] }
 
 [dev-dependencies]
-rings-test-support = { path = "../crates/test-support" }
+rings-test-support = { path = "../crates/test-support", features = ["swarm-observer"] }
 wasm-bindgen-test = "=0.3.71"
 
 [lints.rust]

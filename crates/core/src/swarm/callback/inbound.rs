@@ -727,6 +727,15 @@ async fn process_event(
     }
     let lane = event.lane();
     let sequence = event.sequence;
+    // Test builds: a logical message from another node has arrived, whether validation below
+    // dispatches, drops or rejects it. Chunks arrive as one logical event once reassembled.
+    #[cfg(test)]
+    if lane != InboundLane::Reassembly {
+        processor
+            .logical
+            .transport
+            .record_inbound_arrival_for_test();
+    }
     match validate_event(&processor, &event).await {
         Ok(InboundValidation::Dispatch) => {}
         Ok(InboundValidation::AcknowledgeDrop) => {

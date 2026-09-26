@@ -315,13 +315,8 @@ pub fn run() {
 mod tests {
     use std::collections::HashMap;
 
-    use rings_node::prelude::rings_core::swarm::observer::LookupCorrelation;
-    use rings_node::prelude::rings_core::swarm::observer::LookupKind;
-    use rings_node::prelude::rings_core::swarm::observer::LookupOutcome;
-    use rings_node::prelude::rings_core::swarm::observer::MessageObservation;
-    use rings_node::prelude::rings_core::swarm::observer::SwarmObserver;
     use rings_test_support::activity::probe_on_activity;
-    use rings_test_support::activity::record_activity;
+    use rings_test_support::observer::activity_observer;
     use wasm_bindgen_test::wasm_bindgen_test;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
 
@@ -469,31 +464,9 @@ mod tests {
     /// Hang guard of one awaited state in the end-to-end test; a failure bound only.
     const E2E_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
 
-    /// Observer that records swarm activity, so the test probes state on activity.
-    struct ActivityObserver;
-
-    impl SwarmObserver for ActivityObserver {
-        fn observe_message(&self, _observation: MessageObservation) {
-            record_activity();
-        }
-
-        fn lookup_started(&self, _kind: LookupKind, _correlation: LookupCorrelation) {
-            record_activity();
-        }
-
-        fn lookup_finished(
-            &self,
-            _kind: LookupKind,
-            _correlation: LookupCorrelation,
-            _outcome: LookupOutcome,
-        ) {
-            record_activity();
-        }
-    }
-
     /// A host-only test node whose swarm records activity.
     async fn build_test_node(storage_name: &str) -> DwebNode {
-        build_node_with(storage_name, "", Some(Arc::new(ActivityObserver))).await
+        build_node_with(storage_name, "", Some(activity_observer())).await
     }
 
     /// Whether `provider` lists `peer` as a `Connected` peer.

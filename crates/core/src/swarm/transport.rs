@@ -180,6 +180,10 @@ pub struct SwarmTransport {
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     storage_repair_requested: AtomicBool,
+    /// Test builds: logical messages that arrived from another node, counted before validation
+    /// decides to dispatch, drop or reject them; see [`Self::record_inbound_arrival_for_test`].
+    #[cfg(test)]
+    inbound_arrivals: std::sync::atomic::AtomicU64,
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
     outbound_schedulers: OutboundSchedulers,
     measured_disconnects: Mutex<MeasuredDisconnectMap>,
@@ -311,6 +315,8 @@ impl SwarmTransport {
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             storage_repair_requested: AtomicBool::new(false),
+            #[cfg(test)]
+            inbound_arrivals: std::sync::atomic::AtomicU64::new(0),
             storage_repair_cursor: Mutex::new(None),
             outbound_schedulers: OutboundSchedulers::new(measure.clone()),
             measured_disconnects: Mutex::new(BTreeMap::new()),
@@ -464,6 +470,25 @@ impl SwarmTransport {
 
     pub(crate) fn inbound_capacity(&self) -> Arc<InboundCapacity> {
         self.inbound_capacity.clone()
+    }
+
+    /// Test builds: count one logical message that arrived from another node, whatever its
+    /// validation outcome, and record the activity. Message conservation in the test harness
+    /// balances deliveries against these arrivals, so a dropped or rejected message still
+    /// counts as arrived.
+    #[cfg(test)]
+    pub(crate) fn record_inbound_arrival_for_test(&self) {
+        self.inbound_arrivals
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        crate::tests::activity::record_activity();
+    }
+
+    /// Test builds: logical messages that arrived from another node; see
+    /// [`Self::record_inbound_arrival_for_test`].
+    #[cfg(test)]
+    pub(crate) fn inbound_arrivals_for_test(&self) -> u64 {
+        self.inbound_arrivals
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     #[cfg(test)]

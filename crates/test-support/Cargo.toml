@@ -8,9 +8,26 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-[lints]
-workspace = true
+# The workspace lints, except `clippy::panic`. This dev-only crate exists to fail tests, and a
+# panic is how libtest and wasm-bindgen-test report a failed test; the crates under test get
+# the same exemption through `cfg(test)`, which a separate support crate cannot use.
+[lints.rust]
+missing_docs = "deny"
+warnings = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+
+[features]
+# The swarm activity observer, for crates that build Rings swarms or processors in their tests.
+# rings-core's own tests do not enable it, so this crate never depends on the crate under test.
+swarm-observer = ["dep:rings-core"]
 
 [dependencies]
 futures = { version = "0.3.21", default-features = false, features = ["std", "async-await"] }
+rings-core = { workspace = true, optional = true }
 rings-runtime = { workspace = true }

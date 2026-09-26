@@ -77,6 +77,10 @@ impl ProcessorBuilder {
     /// Chain `observer` after the processor's own `Observability`, so an embedder observes the
     /// swarm's message and lookup activity as well. `SwarmBuilder::observer` offers the same for a
     /// bare swarm; the processor keeps its own recorder first.
+    ///
+    /// The observer is called synchronously on protocol paths, so it must honour the
+    /// [`SwarmObserver`](rings_core::swarm::observer::SwarmObserver) contract: no I/O, no waiting,
+    /// bounded work. One extra observer is supported; a later call replaces an earlier one.
     pub fn observer(mut self, observer: rings_core::swarm::observer::SharedSwarmObserver) -> Self {
         self.observer = Some(observer);
         self

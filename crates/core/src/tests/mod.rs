@@ -310,13 +310,14 @@ pub fn outbound_capacity_released(transport: &SwarmTransport, peer: Did) -> bool
 mod test_structured_log_assertion;
 
 /// Hex secrets of [`fixed_secret_keys`]; a request for `N` keys takes the first `N`.
-const FIXED_SECRET_KEY_HEX: [&str; 3] = [
+const FIXED_SECRET_KEY_HEX: [&str; 4] = [
     "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0",
     "1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54",
     "27b2fe8ceaf3a6a720f12658301351960b128672e9da4d6f4dead366af3fd834",
+    "4a1c8e3f0b7d2965e8a13c57f09b4d26e7c1a85f3b0d9e624c7a18f5d03b6e92",
 ];
 
-/// The first `N ≤ 3` fixed identities, in ascending address order, so fixtures that depend
+/// The first `N ≤ 4` fixed identities, in ascending address order, so fixtures that depend
 /// on ring placement are the same on every run.
 pub fn fixed_secret_keys<const N: usize>() -> Result<[SecretKey; N]> {
     let mut keys = FIXED_SECRET_KEY_HEX
@@ -326,6 +327,6 @@ pub fn fixed_secret_keys<const N: usize>() -> Result<[SecretKey; N]> {
         .collect::<Result<Vec<_>>>()?;
     keys.sort_by_key(|key| key.address());
     keys.try_into().map_err(|_| {
-        crate::error::Error::InvalidMessage(format!("at most 3 fixed keys, {N} requested"))
+        crate::error::Error::InvalidMessage(format!("at most 4 fixed keys, {N} requested"))
     })
 }

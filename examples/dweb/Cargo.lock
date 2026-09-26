@@ -2639,6 +2639,7 @@ name = "rings-test-support"
 version = "0.32.0"
 dependencies = [
  "futures",
+ "rings-core",
  "rings-runtime",
 ]
 

@@ -32,14 +32,15 @@ use crate::tests::activity::record_activity;
 const CONTROLLED_NETWORK_SEED: u64 = 883;
 
 /// The dummy seed of the running test: [`CONTROLLED_NETWORK_SEED`] mixed with an FNV-1a hash of
-/// the test's name (libtest names each test's thread after it).
+/// the test's name (libtest names each test's thread after it; an unnamed thread fails the
+/// test instead of falling back to a seed shared with other tests).
 ///
 /// Ids are then stable for one test and distinct across tests, so no two tests register the
 /// same id in the dummy transport's process-wide connection registry.
 fn test_seed() -> u64 {
     let name_hash = std::thread::current()
         .name()
-        .unwrap_or_default()
+        .expect("libtest names each test's thread after the test")
         .bytes()
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)

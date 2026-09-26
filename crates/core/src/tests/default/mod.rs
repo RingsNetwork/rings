@@ -119,7 +119,7 @@ impl Node {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         let callback = NodeCallback {
             message_tx,
-            activity: ActivityCallback::new(swarm.did(), ledger.clone()),
+            activity: ActivityCallback,
         };
         swarm.set_callback(Arc::new(callback)).unwrap();
         Self {
@@ -554,11 +554,14 @@ fn panic_wait_for_msgs_timeout(
         node.swarm.transport.inbound_admitted_count_for_test()
     });
     let delivered: u64 = nodes.iter().map(|node| node.ledger.delivered()).sum();
-    let received: u64 = nodes.iter().map(|node| node.ledger.received()).sum();
+    let arrived: u64 = nodes
+        .iter()
+        .map(|node| node.swarm.transport.inbound_arrivals_for_test())
+        .sum();
     panic!(
         "wait_for_msgs did not reach quiescence within {ceiling:?}: still-handshaking \
          nodes={handshaking_nodes:?}, inbound={inbound_nodes:?}, outbound={outbound_nodes:?}, \
-         transport-pending={}, delivered={delivered}, received={received}",
+         transport-pending={}, delivered={delivered}, arrived={arrived}",
         pending_transport_events()
     );
 }

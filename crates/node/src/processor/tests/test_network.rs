@@ -5,7 +5,6 @@ use super::*;
 #[cfg(feature = "dummy")]
 use crate::consts::DATA_REDUNDANT;
 
-const LISTENER_START_YIELD: Duration = Duration::from_millis(100);
 const LISTENER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[tokio::test]
@@ -36,22 +35,26 @@ async fn test_provider_listen_with_pre_stopped_token_returns_before_first_tick()
     );
 }
 
+/// A started provider listener returns after its token is stopped.
+///
+/// The listener's first poll acquires the lifecycle lock and starts; `Pending` then proves it
+/// is running and waiting (on its tick or its stop token), so the stop is requested after the
+/// start as a state, not after a sleep.
 #[tokio::test]
 async fn test_provider_listen_with_started_token_returns_after_stop() {
     let processor = prepare_processor().await;
     let provider = Provider::from_processor(Arc::new(processor));
     let stop = StopSource::new();
-    let listen = provider.listen_with(stop.token());
-    let stopper = async {
-        tokio::time::sleep(LISTENER_START_YIELD).await;
-        stop.request_stop();
-    };
+    let mut listen = std::pin::pin!(provider.listen_with(stop.token()));
+    assert!(
+        futures::poll!(listen.as_mut()).is_pending(),
+        "a started listener runs until it is stopped"
+    );
+    stop.request_stop();
 
-    tokio::time::timeout(LISTENER_STOP_TIMEOUT, async {
-        futures::join!(listen, stopper);
-    })
-    .await
-    .expect("started provider listen token should exit after stop");
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, listen)
+        .await
+        .expect("started provider listen token should exit after stop");
 }
 
 /// Cloned processor handles queue listener starts and preserve restart after cleanup.
@@ -85,17 +88,20 @@ async fn test_listener_generation_queues_cancelled_starts_and_restarts() {
     let queued_started_in_task = queued_started.clone();
     let queued_processor = processor.clone();
     let queued_token = queued_stop.token();
-    let queued = tokio::spawn(async move {
+    let mut queued = Box::pin(async move {
         queued_processor
             .listen_with_started(queued_token, move || {
                 queued_started_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
             })
             .await;
     });
-    // Cancelling before ownership does not bypass the queue or let cleanup overlap.
+    // Cancelling before ownership does not bypass the queue or let cleanup overlap: polled
+    // after the cancellation, the queued generation is still waiting for the lock and has not
+    // started. Its poll runs every step that needs no timer, so this is decided by state.
     queued_stop.request_stop();
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(futures::poll!(queued.as_mut()).is_pending());
     assert!(!queued_started.load(std::sync::atomic::Ordering::SeqCst));
+    let queued = tokio::spawn(queued);
 
     first_stop.request_stop();
     tokio::time::timeout(LISTENER_STOP_TIMEOUT, first)
@@ -125,8 +131,12 @@ async fn test_listener_generation_queues_cancelled_starts_and_restarts() {
     restart_started_rx
         .await
         .expect("a new generation should start after cleanup");
+    // Stopping the finished generation's token again must not stop the restarted one. The
+    // restarted listener waits only on its own token and tick, so the stale stop wakes nothing:
+    // a scheduler turn later it is still running.
     first_stop.request_stop();
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::task::yield_now().await;
+    assert!(!restart.is_finished());
     assert!(!restart_finished.load(std::sync::atomic::Ordering::SeqCst));
     restart_stop.request_stop();
     tokio::time::timeout(LISTENER_STOP_TIMEOUT, restart)
@@ -146,49 +156,39 @@ async fn test_provider_wrappers_share_listener_lifecycle_lock() {
 
     let active_stop = StopSource::new();
     let active_token = active_stop.token();
-    let active = tokio::spawn(async move {
+    let mut active = Box::pin(async move {
         original_provider.listen_with(active_token).await;
     });
-
-    // Wait until the first provider has acquired the lifecycle lock before queuing
-    // starts through the clone and the independently constructed provider.
-    tokio::time::timeout(LISTENER_STOP_TIMEOUT, async {
-        loop {
-            if processor
-                .listener_lifecycle_lock_for_test()
-                .try_lock()
-                .is_none()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the first provider should acquire processor listener ownership");
+    // The first poll acquires the lifecycle lock and starts listening; `Pending` proves the
+    // first provider owns the processor listener before the others queue.
+    assert!(futures::poll!(active.as_mut()).is_pending());
+    assert!(processor
+        .listener_lifecycle_lock_for_test()
+        .try_lock()
+        .is_none());
 
     let cloned_stop = StopSource::new();
     cloned_stop.request_stop();
     let cloned_token = cloned_stop.token();
-    let mut cloned = tokio::spawn(async move {
+    let mut cloned = Box::pin(async move {
         cloned_provider.listen_with(cloned_token).await;
     });
 
     let independent_stop = StopSource::new();
     independent_stop.request_stop();
     let independent_token = independent_stop.token();
-    let mut independent = tokio::spawn(async move {
+    let mut independent = Box::pin(async move {
         independent_provider.listen_with(independent_token).await;
     });
 
-    assert!(tokio::time::timeout(Duration::from_millis(20), &mut cloned)
-        .await
-        .is_err());
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), &mut independent)
-            .await
-            .is_err()
-    );
+    // Pre-cancelled starts through a clone and an independent wrapper still queue behind the
+    // active listener: polled now, each waits for the shared lock.
+    assert!(futures::poll!(cloned.as_mut()).is_pending());
+    assert!(futures::poll!(independent.as_mut()).is_pending());
+
+    let active = tokio::spawn(active);
+    let cloned = tokio::spawn(cloned);
+    let independent = tokio::spawn(independent);
 
     active_stop.request_stop();
     tokio::time::timeout(LISTENER_STOP_TIMEOUT, active)
