@@ -24,9 +24,9 @@
 //!
 //! What a route achieves depends on the overlay, so the two regimes are tested apart:
 //!
-//! - [`converged`]: on the Chord fixpoint every route is delivered by greedy hops alone, each
+//! - [`test_converged`]: on the Chord fixpoint every route is delivered by greedy hops alone, each
 //!   hop at least halves the remaining distance, and no node names a `reply_via`;
-//! - [`unconverged`]: each kind of stale view has its own expected outcome: a stale successor
+//! - [`test_unconverged`]: each kind of stale view has its own expected outcome: a stale successor
 //!   is routed around, an unknown destination fails fast, a joiner's answers arrive through its
 //!   `reply_via`, and unlinked successor entries are never hopped to.
 
@@ -305,6 +305,6 @@ fn test_delivery_step_stages() {
 }
 
 /// Laws of delivery on the Chord fixpoint.
-mod converged;
+mod test_converged;
 /// Expected outcomes of delivery on each kind of stale view.
-mod unconverged;
+mod test_unconverged;

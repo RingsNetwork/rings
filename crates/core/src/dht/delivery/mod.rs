@@ -184,5 +184,6 @@ pub fn origination(
     }
 }
 
+/// Checked model of delivery: safety laws, and the converged and unconverged regimes.
 #[cfg(test)]
-mod tests;
+mod test_model;
