@@ -106,14 +106,24 @@ pub(crate) struct SwarmSample {
 
 /// Sample `swarm`'s quiescence witnesses.
 ///
-/// The frame ledger is sampled first, in its sampling law's order, and the actor and scheduler
-/// witnesses after it: a frame reaches the inbound actor's permit before it leaves the ledger's
-/// `in_flight`, so a sample that saw it leave the ledger then sees the permit or the frame done.
+/// Each witness is read before the witnesses a frame reaches while it still holds this one:
+///
+/// ```text
+/// outbound permit ⊇ send (sending → sent)      read: outbound, then the ledger
+/// ledger in_flight ⊇ acquiring the actor permit read: the ledger, then inbound
+/// ```
+///
+/// A transfer's outbound permit is released only after its sends ended and were counted, so a
+/// sample that sees the permit gone sees those frames in `sent`. The ledger is read in its
+/// sampling law's order. A frame acquires the inbound actor's permit before it leaves the
+/// ledger's `in_flight`, so a sample that saw it leave the ledger sees the permit or the frame
+/// done.
 pub(crate) fn sample_swarm(swarm: &Swarm) -> SwarmSample {
+    let outbound = swarm.transport.outbound_admitted_transfer_total_for_test() > 0;
     let frames = swarm.transport.frames_for_test().sample();
-    let busy = frames.busy()
+    let busy = outbound
+        || frames.busy()
         || swarm.transport.inbound_admitted_count_for_test() > 0
-        || swarm.transport.outbound_admitted_transfer_total_for_test() > 0
         || swarm
             .transport
             .pending_connection_count()
@@ -144,7 +154,11 @@ pub(crate) fn sample_swarm(swarm: &Swarm) -> SwarmSample {
 /// counted transition records activity, so the evaluation holds only if the activity generation
 /// did not change while the swarms were sampled.
 ///
-/// Preconditions: `swarms` are all the swarms that exchange frames in the test. A frame lost
+/// Preconditions: `swarms` are all the swarms that exchange frames in the test, and every frame
+/// they receive was sent through `send_data`. A frame injected below it (a test calling
+/// `on_admitted_message_for_test` or writing raw transport frames) arrives uncounted as sent and
+/// could balance another frame's deficit, so a test that injects frames does not wait on this
+/// predicate. A frame lost
 /// below the swarm (a link retired with frames still on the wire) was counted as sent by the
 /// commit law and never arrives, so it leaves `Σ sent > Σ arrived`: the wait fails at its hang
 /// guard rather than pass falsely.

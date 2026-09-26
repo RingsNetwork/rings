@@ -218,7 +218,11 @@ pub fn frame_count(trace: &[(MessageCategory, u64, usize)], category: MessageCat
 /// ```
 ///
 /// Position, not a count snapshot, decides the first disjunct, so a data frame admitted before
-/// the control never satisfies it: consecutive controls always have a data frame between them.
+/// the control never satisfies it. The trace does not tell the test's controls from other
+/// `DhtControl` traffic on the link: when the test's controls are the only such traffic, as in
+/// the native fixture, consecutive controls always have a data frame between them; when other
+/// control traffic shares the link, as in the browser soak's maintenance, the data frame follows
+/// the latest control of any origin, which paces the rounds but no longer guarantees it.
 /// The control's own activity cannot satisfy it either, and evaluating it only reads the trace,
 /// so it sends nothing. The last disjunct ends the rounds once the transfer is done and nothing
 /// more can interleave.

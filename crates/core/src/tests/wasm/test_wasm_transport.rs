@@ -249,9 +249,10 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
         "browser storage contention send must not be deferred"
     );
     for round in 0..8 {
-        // The next control is sent only once this one is traced and a storage frame follows
-        // it, so consecutive controls always have a storage frame between them. The wait is on
-        // the transfer's progress; the control's own activity does not satisfy it.
+        // The next control is sent only once a control is traced after this send and a storage
+        // frame follows the latest control. Maintenance also sends controls on this link, so
+        // that control may be maintenance's: the rounds are paced by the transfer's progress,
+        // and the final interleaving check decides. The control's own activity does not wake it.
         let trace = node1.transport.outbound_frame_trace_for_test(node2.did());
         if control_interleaves_transfer(&trace, MessageCategory::Storage) {
             break;
