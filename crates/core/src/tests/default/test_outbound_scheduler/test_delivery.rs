@@ -101,6 +101,9 @@ async fn test_detached_first_frame_cleanup_is_bounded_and_retires_generation() -
 #[tokio::test]
 async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_lane() -> Result<()>
 {
+    // One transfer in flight per lane, so a single paused delivery blocks the lane and the
+    // next transfer queues behind it (the window's own laws are tested in the queue module).
+    let _single_lane = SingleTransferLaneGuard::new();
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let _paused_delivery = PausedDeliveryGuard::new();

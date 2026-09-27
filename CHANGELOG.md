@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Keep up to `OUTBOUND_LANE_WINDOW` (8) transfers in flight per outbound class lane instead of
+  waiting for each delivery before the next (#899). On native, a delivery is the peer's SCTP
+  SACK, which the receiver delays by up to 200 ms; a stop-and-wait lane paid that per message.
+  On native loopback, 512 awaited 16 KiB sends go from 13.9 to about 1360 messages/s with no
+  send over 150 ms. The window stays below the 32-sequence replay window, so in-lane pipelining
+  never reorders a class beyond it. Transfers still start in FIFO order, chunked transfers stay
+  contiguous, and each transfer keeps its capacity permit and delivery outcome.
+
 - Confirm WebRTC delivery on the data channel's `bufferedamountlow`, `close` and `error`
   events instead of polling `bufferedAmount` every 300 ms (#887). Each channel multiplexes its
   single low-water threshold over every pending send, so an awaited send resolves on the event

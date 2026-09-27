@@ -66,10 +66,8 @@ fn finalize_shutdown_probe(mut probe: ShutdownProbe) -> Option<ShutdownProbeComp
 
 fn pop_and_finish(queues: &mut TransferQueues<TestTransfer>) -> Option<&'static str> {
     let transfer = queues.pop()?;
-    let class = transfer.class();
-    let (_, item) = transfer.into_item();
-    queues.record_frame_admitted(class);
-    queues.finish_current(class);
+    queues.record_frame_admitted(transfer.class());
+    let (_, item) = queues.finish_transfer(transfer);
     Some(item)
 }
 
@@ -135,14 +133,14 @@ fn admit_single_frame_transfer(
     let class = active.class();
     let label = active.item().1;
     queues.record_frame_admitted(class);
-    queues.wait_for_delivery(delivery_id, active);
+    queues.wait_for_delivery(delivery_id, FrameRemainder::Final, active);
     let delivered = queues
         .take_waiting(class, delivery_id)
         .expect("the matching delivery must own the lane head");
     queues.make_runnable(delivered);
     let completion_probe = queues.pop().expect("completion probe must be runnable");
     assert_eq!(completion_probe.item().1, label);
-    queues.finish_current(class);
+    queues.finish_transfer(completion_probe);
     label
 }
 
@@ -189,7 +187,7 @@ fn test_completion_probes_do_not_consume_control_frame_burst() {
     let class = active.class();
     queues.record_frame_admitted(class);
     admitted.push(active.item().1);
-    queues.wait_for_delivery(3, active);
+    queues.wait_for_delivery(3, FrameRemainder::Final, active);
     let delivered = queues
         .take_waiting(TransferClass::DhtControl, 3)
         .expect("fourth control delivery must resume its lane");
@@ -200,7 +198,7 @@ fn test_completion_probes_do_not_consume_control_frame_burst() {
         .pop()
         .expect("fourth control completion probe must remain runnable");
     assert_eq!(completed_control.item().1, "dht-4");
-    queues.finish_current(completed_control.class());
+    queues.finish_transfer(completed_control);
     admitted.push(admit_single_frame_transfer(&mut queues, 4));
 
     assert_eq!(admitted, vec![
@@ -241,7 +239,7 @@ fn test_every_transfer_class_uses_its_own_lane() {
     for _ in classes {
         let transfer = queues.pop().expect("every indexed lane must be reachable");
         assert_eq!(transfer.class(), transfer.item().0);
-        queues.finish_current(transfer.class());
+        queues.finish_transfer(transfer);
     }
 }
 
@@ -330,7 +328,7 @@ fn test_waiting_lane_preserves_same_class_fifo_and_allows_control_preemption() {
     let active = queues.pop().expect("first application transfer must exist");
     assert_eq!(active.item(), &(TransferClass::Application, "app-1"));
     queues.record_frame_admitted(TransferClass::Application);
-    queues.wait_for_delivery(7, active);
+    queues.wait_for_delivery(7, FrameRemainder::Final, active);
     push(&mut queues, TransferClass::DhtControl, "dht");
     let resumed = queues
         .take_waiting(TransferClass::Application, 7)
@@ -352,7 +350,7 @@ fn test_draining_a_waiting_lane_returns_its_active_and_queued_transfers() {
         .pop()
         .expect("active transfer must exist before drain");
     queues.record_frame_admitted(TransferClass::Application);
-    queues.wait_for_delivery(11, active);
+    queues.wait_for_delivery(11, FrameRemainder::Final, active);
 
     let mut drained: Vec<_> = queues
         .drain_transfers()
@@ -372,7 +370,7 @@ fn test_removing_ready_items_preserves_waiting_heads_and_fifo_order() {
     push(&mut queues, TransferClass::Application, "keep");
     push(&mut queues, TransferClass::Application, "cancel-2");
     let waiting = queues.pop().expect("lane head must be runnable");
-    queues.wait_for_delivery(17, waiting);
+    queues.wait_for_delivery(17, FrameRemainder::Final, waiting);
 
     let removed = queues.remove_ready_where(|(_, label)| label.starts_with("cancel"));
 
@@ -386,8 +384,8 @@ fn test_removing_ready_items_preserves_waiting_heads_and_fifo_order() {
     let waiting = queues
         .take_waiting(TransferClass::Application, 17)
         .expect("active delivery must remain owned by the lane");
-    queues.finish_current(TransferClass::Application);
     assert_eq!(waiting.item().1, "waiting");
+    queues.finish_transfer(waiting);
     assert_eq!(pop_and_finish(&mut queues), Some("keep"));
 }
 

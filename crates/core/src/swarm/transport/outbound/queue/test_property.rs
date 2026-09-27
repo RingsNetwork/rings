@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use super::*;
 
 const MODEL_CAPACITY: usize = 8;
+/// A window small enough for short traces to reach the in-flight bound.
+const MODEL_WINDOW: usize = 2;
 const ACTION_CARDINALITY: usize = 13;
 const TRACE_LENGTH: u32 = 6;
 const CLASSES: [TransferClass; TransferClass::COUNT] = [
@@ -27,7 +29,8 @@ struct ModelTransfer {
 
 struct SchedulerHarness {
     actual: TransferQueues<ModelTransfer>,
-    pending_deliveries: BTreeMap<u64, TransferClass>,
+    /// Pending deliveries: the class and transfer each one belongs to.
+    pending_deliveries: BTreeMap<u64, (TransferClass, u16)>,
     live: BTreeSet<u16>,
     terminated: BTreeSet<u16>,
     admitted: Vec<(TransferClass, u16, u8)>,
@@ -39,7 +42,7 @@ struct SchedulerHarness {
 impl SchedulerHarness {
     fn new() -> Self {
         Self {
-            actual: TransferQueues::default(),
+            actual: TransferQueues::with_window_for_test(MODEL_WINDOW),
             pending_deliveries: BTreeMap::new(),
             live: BTreeSet::new(),
             terminated: BTreeSet::new(),
@@ -70,7 +73,7 @@ impl SchedulerHarness {
             _ => {}
         }
         assert!(self.live.len() <= MODEL_CAPACITY);
-        self.assert_fifo_and_frame_contiguity();
+        self.assert_lane_laws();
     }
 
     fn submit(&mut self, class: TransferClass) {
@@ -108,14 +111,29 @@ impl SchedulerHarness {
         let id = actual.item().id;
         let frame = actual.item().next_frame;
         assert!(!self.terminated.contains(&id));
+        assert!(
+            self.pending_deliveries
+                .values()
+                .all(|(_, pending)| *pending != id),
+            "a transfer's next frame waits for its previous frame's delivery"
+        );
         self.admitted.push((class, id, frame));
         actual.item_mut().next_frame = frame.saturating_add(1);
         self.actual.record_frame_admitted(class);
+        let remainder = if actual.item().next_frame < actual.item().frames {
+            FrameRemainder::More
+        } else {
+            FrameRemainder::Final
+        };
 
         let delivery_id = self.next_delivery_id;
         self.next_delivery_id = self.next_delivery_id.saturating_add(1);
-        self.actual.wait_for_delivery(delivery_id, actual);
-        assert!(self.pending_deliveries.insert(delivery_id, class).is_none());
+        self.actual
+            .wait_for_delivery(delivery_id, remainder, actual);
+        assert!(self
+            .pending_deliveries
+            .insert(delivery_id, (class, id))
+            .is_none());
         Some(class)
     }
 
@@ -125,7 +143,7 @@ impl SchedulerHarness {
         } else {
             self.pending_deliveries.first_key_value()
         }
-        .map(|(id, class)| (*id, *class))
+        .map(|(id, (class, _))| (*id, *class))
     }
 
     fn complete_delivery(&mut self, newest: bool) {
@@ -190,8 +208,13 @@ impl SchedulerHarness {
         self.shutdown = true;
     }
 
-    fn assert_fifo_and_frame_contiguity(&self) {
+    /// The lane laws of #899 over the admitted frames so far:
+    /// - **FIFO and contiguity.** Within a class, frames of one transfer are admitted in
+    ///   order and back to back, and transfers start in push (id) order.
+    /// - **Bound.** Within a class, at most `MODEL_WINDOW` started, unterminated transfers.
+    fn assert_lane_laws(&self) {
         let mut last = [None; TransferClass::COUNT];
+        let mut started: [BTreeSet<u16>; TransferClass::COUNT] = Default::default();
         for &(class, id, frame) in &self.admitted {
             if let Some((last_id, last_frame)) = last[class.index()] {
                 if id == last_id {
@@ -204,6 +227,15 @@ impl SchedulerHarness {
                 assert_eq!(frame, 0);
             }
             last[class.index()] = Some((id, frame));
+            started[class.index()].insert(id);
+        }
+        for class in CLASSES {
+            let in_flight = started[class.index()]
+                .iter()
+                .filter(|id| self.live.contains(id))
+                .count();
+            assert!(in_flight <= MODEL_WINDOW, "{class:?} exceeded its window");
+            assert!(self.actual.in_flight(class) <= MODEL_WINDOW);
         }
     }
 }
@@ -306,4 +338,38 @@ fn test_bounded_control_burst_ablation_changes_the_real_queue_policy() {
         .map(|_| admit_single_frame(&mut queue).0)
         .collect::<Vec<_>>();
     assert_eq!(selected, vec![TransferClass::DhtControl; 5]);
+}
+
+/// With a window of `W`, a lane admits the first frames of `W` transfers before any delivery,
+/// holds the next one back until a slot is released, and then admits it in push order.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_lane_pipelines_up_to_its_window_and_then_waits() {
+    let window = OUTBOUND_LANE_WINDOW;
+    let mut queue = TransferQueues::default();
+    let transfers = u64::try_from(window).expect("small window") + 1;
+    for id in 0..transfers {
+        queue.push(TransferClass::Application, id);
+    }
+    for delivery in 0..u64::try_from(window).expect("small window") {
+        let sent = queue.pop().expect("a free window slot is runnable");
+        assert_eq!(*sent.item(), delivery, "first frames leave in push order");
+        queue.record_frame_admitted(TransferClass::Application);
+        queue.wait_for_delivery(delivery, FrameRemainder::Final, sent);
+    }
+    assert_eq!(queue.in_flight(TransferClass::Application), window);
+    assert!(
+        queue.pop().is_none(),
+        "the window is full until a transfer finishes"
+    );
+
+    let delivered = queue
+        .take_waiting(TransferClass::Application, 0)
+        .expect("the first transfer's delivery settles that transfer");
+    assert_eq!(*delivered.item(), 0);
+    assert_eq!(queue.finish_transfer(delivered), 0);
+    let next = queue
+        .pop()
+        .expect("the released slot admits the next transfer");
+    assert_eq!(*next.item(), transfers - 1);
 }

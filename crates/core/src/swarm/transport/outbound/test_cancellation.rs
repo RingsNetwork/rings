@@ -146,7 +146,9 @@ async fn test_cancellation_after_scan_releases_successor_behind_waiting_head() {
     let (head, head_completion) = scheduled_transfer(&node, peer, &capacity, &StopSource::new());
     worker.enqueue_transfer(head);
     let waiting = worker.ready.pop().expect("head runnable");
-    worker.ready.wait_for_delivery(1, waiting);
+    worker
+        .ready
+        .wait_for_delivery(1, FrameRemainder::Final, waiting);
     // Each later cancellation must reclaim its successor without completing the head.
     for _ in 0..2 {
         let stop = StopSource::new();

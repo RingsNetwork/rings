@@ -45,6 +45,7 @@ use crate::tests::default::dummy_hooks::PendingAfterSentCountGuard;
 use crate::tests::default::dummy_hooks::PendingCloseGuard;
 use crate::tests::default::dummy_hooks::PendingDataChannelOpenGuard;
 use crate::tests::default::dummy_hooks::PendingDeliveryGuard;
+use crate::tests::default::dummy_hooks::SingleTransferLaneGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_with_measure;
 use crate::tests::default::wait_for_connection_state;
@@ -88,6 +89,9 @@ async fn test_tracked_completion_releases_capacity_before_returning() -> Result<
 
 #[tokio::test]
 async fn test_tracked_timeout_removes_queued_capacity_before_predecessor_finishes() -> Result<()> {
+    // One transfer in flight per lane, so a single paused delivery blocks the lane and the
+    // next transfer queues behind it (the window's own laws are tested in the queue module).
+    let _single_lane = SingleTransferLaneGuard::new();
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let paused_delivery = PausedDeliveryGuard::new();
@@ -122,6 +126,9 @@ async fn test_tracked_timeout_removes_queued_capacity_before_predecessor_finishe
 
 #[tokio::test]
 async fn test_tracked_timeout_removes_target_behind_multiple_predecessors() -> Result<()> {
+    // One transfer in flight per lane, so a single paused delivery blocks the lane and the
+    // next transfer queues behind it (the window's own laws are tested in the queue module).
+    let _single_lane = SingleTransferLaneGuard::new();
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let paused_delivery = PausedDeliveryGuard::new();
@@ -259,6 +266,9 @@ async fn test_detached_deadline_cannot_succeed_after_irrevocable_chunk_admission
 
 #[tokio::test]
 async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<()> {
+    // One transfer in flight per lane, so a single paused delivery blocks the lane and the
+    // next transfer queues behind it (the window's own laws are tested in the queue module).
+    let _single_lane = SingleTransferLaneGuard::new();
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let paused_delivery = PausedDeliveryGuard::new();
@@ -297,6 +307,9 @@ async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<(
 
 #[tokio::test]
 async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() -> Result<()> {
+    // One transfer in flight per lane, so a single paused delivery blocks the lane and the
+    // next transfer queues behind it (the window's own laws are tested in the queue module).
+    let _single_lane = SingleTransferLaneGuard::new();
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let paused_delivery = PausedDeliveryGuard::new();
@@ -353,6 +366,9 @@ async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() ->
 /// head keeps its permit and completes after delivery is released.
 #[tokio::test]
 async fn test_backlogged_cancellations_all_apply_behind_a_blocked_head() -> Result<()> {
+    // One transfer in flight per lane, so a single paused delivery blocks the lane and the
+    // next transfer queues behind it (the window's own laws are tested in the queue module).
+    let _single_lane = SingleTransferLaneGuard::new();
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let paused_delivery = PausedDeliveryGuard::new();

@@ -510,13 +510,25 @@ The 4:1 burst and lower-lane rotation are unchanged: a continuously runnable low
 class receives service within 15 charged admissions/failed attempts, assuming
 executor/gate service and delivery, timeout or cancellation progress.
 
+Each class lane keeps at most `OUTBOUND_LANE_WINDOW` (8) transfers in flight
+(#899) instead of waiting for each delivery before its next transfer, so
+consecutive messages reach the peer back to back and the native SCTP delayed ACK
+no longer paces them. The window stays strictly below `TRANSACTION_REPLAY_WINDOW`,
+a compile-time assertion, so in-lane pipelining never reorders a class's
+transactions beyond the receiver's replay window. Within a lane, transfers start
+in FIFO order and a transfer that still has frames to admit holds the wire, so
+chunked transfers stay contiguous. Every transfer keeps its own capacity permit
+and delivery future, so the per-peer capacity bound is unchanged and each outcome
+is attributed to its own transfer; cancellation and shutdown settle all in-flight
+transfers.
+
 Receipt frees the notification slot before scanning; scans never read ingress.
 Shutdown releases all batch ownership before publishing its collected results.
 Common native/browser regressions cover these boundaries; native threads also
 exercise submission/close contention. The existing queue model checks 13^6 traces
-of six actions with eight slots, not arbitrary-schedule liveness. The former drain
-bounded submissions but not repeated notifications; this is not a claim of
-observed starvation or a wall-clock bound.
+of six actions with eight slots and a lane window of two, not arbitrary-schedule
+liveness. The former drain bounded submissions but not repeated notifications;
+this is not a claim of observed starvation or a wall-clock bound.
 
 ### Connection Admission
 
