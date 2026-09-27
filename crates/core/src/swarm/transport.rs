@@ -124,6 +124,8 @@ pub(crate) use self::outbound::OUTBOUND_DATA_TRANSFER_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_LANE_WINDOW;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 use self::pending::AnswerSlot;
 pub(crate) use self::pending::ConnectionEventDisposition;

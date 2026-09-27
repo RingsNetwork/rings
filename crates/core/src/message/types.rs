@@ -500,10 +500,13 @@ macro_rules! define_message_model {
 
 with_message_variants!(define_message_model);
 
-/// Traffic category shared by inbound scheduling, outbound scheduling, and
-/// final-destination quotas. Each category groups multiple concrete message kinds;
-/// it is local policy metadata and does not change the wire message encoding.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+/// Traffic category shared by inbound scheduling, outbound scheduling,
+/// final-destination quotas and transaction sequence streams. Each category groups
+/// multiple concrete message kinds. It never appears in a message: a transaction's
+/// category is implied by its signed data (see
+/// [`Transaction::class`](crate::message::Transaction::class)), and it is persisted only as
+/// part of a replay stream key.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum MessageCategory {
     /// Chord maintenance, connection negotiation, and topology queries.
     DhtControl,

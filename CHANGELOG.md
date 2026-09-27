@@ -36,6 +36,19 @@
 
 ### Breaking changes
 
+- Key transaction replay by traffic class: `StreamKey = (network, origin, destination, class)`
+  (#898). One stream shared by every class let DHT control traffic overtake an application
+  backlog by more than the replay window, so honest transactions were rejected as
+  `TransactionSequenceStale`. The class is implied by each transaction's signed message, so the
+  wire format is unchanged, but replay is not interoperable across the upgrade: an upgraded
+  sender's per-class sequences are stale to a node that has not upgraded. **This release is a
+  mandatory network-wide upgrade, seeds included.** The replay snapshot moves to
+  `rings-core:transaction-replay:class-streams`; the first load deletes the former
+  `rings-core:transaction-replay` snapshot unread, resetting every replay window once as deleting
+  the store does. `StreamKey::new` takes the class, `Transaction::stream_key` returns a `Result`,
+  `Transaction::class` is new, and `PayloadSender`'s send and originate methods take a `Message`
+  instead of any `Serialize` value, with `reserve_transaction_sequences` taking the class.
+
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`
   (core), both defaulting to `false`. For its traffic from the authenticated neighbour that

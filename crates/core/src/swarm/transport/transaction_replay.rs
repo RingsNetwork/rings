@@ -6,6 +6,7 @@ use std::ops::RangeInclusive;
 use super::SwarmTransport;
 use crate::dht::Did;
 use crate::error::Result;
+use crate::message::MessageCategory;
 use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaCounters;
 use crate::message::PayloadSender;
@@ -41,16 +42,19 @@ impl SwarmTransport {
         self.transaction_replay.quota_tokens_for_test(key).await
     }
 
-    /// Persistently reserve one or more sequences for this account and final destination.
+    /// Persistently reserve one or more sequences of `class` for this account and final
+    /// destination.
     pub(crate) async fn reserve_transaction_sequences(
         &self,
         destination: Did,
+        class: MessageCategory,
         count: NonZeroU64,
     ) -> Result<RangeInclusive<u64>> {
         let key = StreamKey::new(
             self.network_id,
             self.message_signer().delegator_did(),
             destination,
+            class,
         );
         self.transaction_replay.reserve(key, count).await
     }
@@ -61,7 +65,7 @@ impl SwarmTransport {
         transaction: &Transaction,
         charge: OriginQuotaCharge,
     ) -> Result<()> {
-        let key = transaction.stream_key(self.network_id);
+        let key = transaction.stream_key(self.network_id)?;
         let digest = transaction.digest()?;
         self.transaction_replay
             .admit_with_quota(

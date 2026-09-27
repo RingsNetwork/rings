@@ -194,12 +194,26 @@ generation and obeys these rules:
 ### Transaction replay boundary
 
 Signed transactions use a destination-scoped sequence stream keyed by `network_id`, the origin
-account DID recovered from the delegated delegation, and the final destination DID. The final
-destination persists a fixed 32-sequence acceptance window before application validation and
-handler dispatch. Exact duplicates, conflicting transactions at one sequence, and sequences
-below the retained window are rejected as separate typed verdicts. Delegation-key rotation does not
-reset the account stream, sender timestamps do not order it, and intermediate Chord relays keep no
-origin replay state.
+account DID recovered from the delegated delegation, the final destination DID, and the traffic
+class the transaction's signed message implies (#898). Order is claimed only within a class, because
+only a class lane of the outbound scheduler preserves it; one stream per class keeps an honest
+sender's transactions within the window however the lanes are interleaved, since a lane keeps fewer
+transactions in flight than the window holds. This assumes a class's transactions reach the
+scheduler in signing order, as they do from one sending task; concurrent originators of one class
+can still reorder between reserving a sequence and submitting it.
+
+The per-class snapshot is stored under `rings-core:transaction-replay:class-streams`. On its first
+load a node deletes the snapshot of the shared streams, stored under
+`rings-core:transaction-replay`, without reading it, since its keys cannot name a class. The upgrade
+therefore resets every replay window once, exactly as deleting the replay store does: an unexpired
+transaction signed before the upgrade can be accepted once more. Old and new nodes do not
+interoperate on replay: an upgraded sender's per-class sequences restart at zero and are stale to a
+node that still keeps one shared stream, so the release that ships per-class streams is a mandatory
+network-wide upgrade. The final destination persists a fixed 32-sequence acceptance window per
+stream before application validation and handler dispatch. Exact duplicates, conflicting
+transactions at one sequence, and sequences below the retained window are rejected as separate typed
+verdicts. Delegation-key rotation does not reset the account stream, sender timestamps do not order
+it, and intermediate Chord relays keep no origin replay state.
 
 This is an at-most-once dispatch guarantee only while the replay store is retained. A crash after
 the receiver commits a sequence but before handler dispatch can lose that event; replay storage

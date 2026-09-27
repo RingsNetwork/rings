@@ -13,7 +13,12 @@ fn digest(value: u8) -> TransactionDigest {
 }
 
 fn stream(origin: u32) -> StreamKey {
-    StreamKey::new(7, Did::from(origin), Did::from(99_u32))
+    StreamKey::new(
+        7,
+        Did::from(origin),
+        Did::from(99_u32),
+        MessageCategory::Application,
+    )
 }
 
 fn quota_config(message_burst: u64) -> OriginQuotaConfig {

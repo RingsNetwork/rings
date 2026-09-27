@@ -29,6 +29,7 @@ use crate::error::Result;
 use crate::message::quota::quota_admission_error;
 use crate::message::quota::OriginQuotaCounterState;
 use crate::message::quota::OriginQuotaTable;
+use crate::message::types::MessageCategory;
 use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaConfig;
 use crate::message::OriginQuotaCounters;
@@ -43,9 +44,22 @@ const TRANSACTION_REPLAY_WINDOW_U64: u64 = 32;
 const TRANSACTION_REPLAY_BACKTRACK: u64 = 31;
 /// Maximum sender streams and maximum receiver streams retained by one runtime.
 pub const TRANSACTION_REPLAY_STREAM_CAPACITY: usize = 4096;
-const TRANSACTION_REPLAY_SNAPSHOT_KEY: &str = "rings-core:transaction-replay";
+/// Storage key of the replay snapshot: one sequence stream per `(origin, destination, class)`.
+const TRANSACTION_REPLAY_SNAPSHOT_KEY: &str = "rings-core:transaction-replay:class-streams";
+/// Storage key of the snapshot whose streams were shared by every class (before #898).
+///
+/// It is deleted on first load without being read: its keys cannot name a class, so it cannot
+/// seed the per-class streams. Deleting it resets every replay window once, exactly as
+/// deleting the replay store does.
+const SHARED_STREAM_SNAPSHOT_KEY: &str = "rings-core:transaction-replay";
 
-/// A destination-scoped transaction stream.
+/// A destination-scoped transaction stream of one traffic class (#898).
+///
+/// Sequences are ordered only per class. The outbound scheduler preserves order inside a
+/// class lane and deliberately reorders across lanes, so a stream shared by every class let a
+/// backlog in one lane fall behind later-sequenced traffic of another lane and be rejected as
+/// stale. With one stream per class, an honest sender's transactions reach the receiver in
+/// sequence order up to the lane's in-flight window, which is below the replay window.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct StreamKey {
     /// Overlay in which the transaction signature is valid.
@@ -54,15 +68,23 @@ pub struct StreamKey {
     pub origin_account: Did,
     /// Final logical destination of the transaction.
     pub destination: Did,
+    /// Traffic class implied by the transaction's signed data.
+    pub class: MessageCategory,
 }
 
 impl StreamKey {
-    /// Name one account-to-destination stream inside an overlay.
-    pub const fn new(network_id: u32, origin_account: Did, destination: Did) -> Self {
+    /// Name one account-to-destination stream of `class` inside an overlay.
+    pub const fn new(
+        network_id: u32,
+        origin_account: Did,
+        destination: Did,
+        class: MessageCategory,
+    ) -> Self {
         Self {
             network_id,
             origin_account,
             destination,
+            class,
         }
     }
 }
@@ -378,6 +400,16 @@ impl TransactionReplay {
         slot: &'a mut Option<ReplaySnapshot>,
     ) -> Result<&'a mut ReplaySnapshot> {
         if slot.is_none() {
+            // Removing an absent key succeeds, so every first load repeats this idempotently.
+            if let Err(source) = self.storage.remove(SHARED_STREAM_SNAPSHOT_KEY).await {
+                self.counters
+                    .persistence_failure
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(Error::TransactionReplayPersistence {
+                    operation: "remove shared-stream snapshot",
+                    source: Box::new(source),
+                });
+            }
             let loaded = match self.storage.get(TRANSACTION_REPLAY_SNAPSHOT_KEY).await {
                 Ok(snapshot) => snapshot.unwrap_or_default(),
                 Err(source) => {
@@ -601,7 +633,12 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     fn stream(destination: Did) -> StreamKey {
-        StreamKey::new(7, SecretKey::random().address().into(), destination)
+        StreamKey::new(
+            7,
+            SecretKey::random().address().into(),
+            destination,
+            MessageCategory::Application,
+        )
     }
 
     #[test]
@@ -630,6 +667,117 @@ mod tests {
         assert_eq!(stale, SequenceVerdict::Stale { retained_min: 69 });
     }
 
+    /// One transaction as the receiver sees it: its class and its per-class and shared
+    /// sequence numbers.
+    #[derive(Clone, Copy)]
+    struct Sent {
+        /// Traffic class of the transaction.
+        class: MessageCategory,
+        /// Its sequence in its class's stream (#898).
+        class_sequence: u64,
+        /// Its sequence in a stream shared by every class (before #898).
+        shared_sequence: u64,
+    }
+
+    /// A deterministic 64-bit xorshift step.
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// One arrival order of an honest sender's traffic, from a fixed `seed`.
+    ///
+    /// The sender signs each class's transactions in sequence order, spread over four classes
+    /// and one shared counter. The scheduler then serves the class lanes in an arbitrary
+    /// interleaving: each lane stays FIFO up to its in-flight window, whose frames may still
+    /// arrive in any order (the lane window is below the replay window), and the lanes are
+    /// merged in any order, which lets one lane fall far behind the others.
+    fn arrivals(seed: u64, per_class: u64, lane_window: usize) -> Vec<Sent> {
+        let classes = [
+            MessageCategory::DhtControl,
+            MessageCategory::Storage,
+            MessageCategory::E2e,
+            MessageCategory::Application,
+        ];
+        let mut state = seed | 1;
+        let mut lanes: Vec<Vec<Sent>> = vec![Vec::new(); classes.len()];
+        let mut class_next = [0_u64; 4];
+        for shared_sequence in 0..per_class * classes.len() as u64 {
+            let lane = usize::try_from(xorshift(&mut state) % 4).expect("small index");
+            let class_sequence = class_next[lane];
+            class_next[lane] += 1;
+            lanes[lane].push(Sent {
+                class: classes[lane],
+                class_sequence,
+                shared_sequence,
+            });
+        }
+        for lane in lanes.iter_mut() {
+            for window in lane.chunks_mut(lane_window) {
+                for index in (1..window.len()).rev() {
+                    let other =
+                        usize::try_from(xorshift(&mut state) % (index as u64 + 1)).expect("index");
+                    window.swap(index, other);
+                }
+            }
+        }
+        let mut cursors = [0_usize; 4];
+        let mut merged = Vec::new();
+        while cursors
+            .iter()
+            .zip(lanes.iter())
+            .any(|(cursor, lane)| *cursor < lane.len())
+        {
+            // Favour one lane in long bursts so the others build a backlog behind it.
+            let lane = usize::try_from(xorshift(&mut state) % 4).expect("small index");
+            let burst = xorshift(&mut state) % 64;
+            for _ in 0..burst {
+                if let Some(sent) = lanes[lane].get(cursors[lane]) {
+                    merged.push(*sent);
+                    cursors[lane] += 1;
+                }
+            }
+        }
+        merged
+    }
+
+    /// Law of #898: with one stream per `(origin, destination, class)`, an honest sender's
+    /// transactions are never rejected as stale, however the class lanes are interleaved. The
+    /// same arrivals keyed by one shared stream are rejected, which is the defect removed.
+    #[test]
+    fn test_honest_sender_is_never_stale_under_any_cross_class_interleaving() {
+        let lane_window = 8;
+        let mut shared_stale = 0_usize;
+        for seed in 0..200_u64 {
+            let mut per_class: BTreeMap<MessageCategory, SequenceState> = BTreeMap::new();
+            let mut shared: Option<SequenceState> = None;
+            for (index, sent) in arrivals(seed, 100, lane_window).into_iter().enumerate() {
+                let tag = u8::try_from(index % 251).expect("small tag");
+                let (next, verdict) = observe(
+                    per_class.remove(&sent.class),
+                    sent.class_sequence,
+                    digest(tag),
+                );
+                assert!(
+                    verdict.permits_dispatch(),
+                    "seed {seed}: {verdict:?} for class sequence {}",
+                    sent.class_sequence
+                );
+                per_class.insert(sent.class, next);
+
+                let (next, verdict) = observe(shared.take(), sent.shared_sequence, digest(tag));
+                shared_stale += usize::from(matches!(verdict, SequenceVerdict::Stale { .. }));
+                shared = Some(next);
+            }
+        }
+        assert!(
+            shared_stale > 0,
+            "the shared stream must exhibit the #898 defect"
+        );
+    }
+
     #[test]
     fn transition_is_deterministic_for_the_same_state_and_input() {
         let (state, _) = observe(None, 4, digest(1));
@@ -643,7 +791,7 @@ mod tests {
     fn snapshot_encoding_preserves_structured_keys_and_full_width_sequences() {
         let origin: Did = SecretKey::random().address().into();
         let destination: Did = SecretKey::random().address().into();
-        let key = StreamKey::new(7, origin, destination);
+        let key = StreamKey::new(7, origin, destination, MessageCategory::Application);
         let mut snapshot = ReplaySnapshot::default();
         snapshot.sender.insert(key, u64::MAX);
         snapshot
@@ -663,7 +811,7 @@ mod tests {
         let b: Did = SecretKey::random().address().into();
         let mut states = BTreeMap::new();
         for (destination, sequence) in [(a, 8), (b, 0), (a, 10), (b, 1)] {
-            let key = StreamKey::new(1, origin, destination);
+            let key = StreamKey::new(1, origin, destination, MessageCategory::Application);
             let previous = states.remove(&key);
             let (next, verdict) = observe(previous, sequence, digest(sequence as u8));
             assert!(verdict.permits_dispatch());
@@ -671,13 +819,13 @@ mod tests {
         }
         assert_eq!(
             states
-                .get(&StreamKey::new(1, origin, a))
+                .get(&StreamKey::new(1, origin, a, MessageCategory::Application))
                 .map(SequenceState::high),
             Some(10)
         );
         assert_eq!(
             states
-                .get(&StreamKey::new(1, origin, b))
+                .get(&StreamKey::new(1, origin, b, MessageCategory::Application))
                 .map(SequenceState::high),
             Some(1)
         );
@@ -727,7 +875,7 @@ mod tests {
             first_session.delegation().delegatee_did(),
             rotated_session.delegation().delegatee_did()
         );
-        assert_eq!(first.stream_key(7), rotated.stream_key(7));
+        assert_eq!(first.stream_key(7)?, rotated.stream_key(7)?);
         Ok(())
     }
 
@@ -738,8 +886,8 @@ mod tests {
         let a: Did = SecretKey::random().address().into();
         let b: Did = SecretKey::random().address().into();
         let runtime = TransactionReplay::new(Box::new(crate::storage::MemStorage::new()));
-        let key_a = StreamKey::new(1, origin, a);
-        let key_b = StreamKey::new(1, origin, b);
+        let key_a = StreamKey::new(1, origin, a, MessageCategory::Application);
+        let key_b = StreamKey::new(1, origin, b, MessageCategory::Application);
 
         assert_eq!(runtime.reserve(key_a, NonZeroU64::MIN).await?, 0..=0);
         assert_eq!(runtime.reserve(key_b, NonZeroU64::MIN).await?, 0..=0);
@@ -831,13 +979,24 @@ mod tests {
             let mut state = runtime.state.lock().await;
             let snapshot = runtime.load_snapshot(&mut state.snapshot).await?;
             for origin in 0_u32..4096 {
-                snapshot
-                    .sender
-                    .insert(StreamKey::new(1, Did::from(origin), destination), 0);
+                snapshot.sender.insert(
+                    StreamKey::new(
+                        1,
+                        Did::from(origin),
+                        destination,
+                        MessageCategory::Application,
+                    ),
+                    0,
+                );
             }
             runtime.persist(snapshot).await?;
         }
-        let new_key = StreamKey::new(1, Did::from(4097_u32), destination);
+        let new_key = StreamKey::new(
+            1,
+            Did::from(4097_u32),
+            destination,
+            MessageCategory::Application,
+        );
         assert!(matches!(
             runtime.reserve(new_key, NonZeroU64::MIN).await,
             Err(Error::TransactionReplayStreamCapacityExceeded { capacity: 4096 })
@@ -855,7 +1014,7 @@ mod tests {
         storage.clear().await.expect("IndexedDB clears");
         let origin: Did = SecretKey::random().address().into();
         let destination: Did = SecretKey::random().address().into();
-        let key = StreamKey::new(7, origin, destination);
+        let key = StreamKey::new(7, origin, destination, MessageCategory::Application);
         let first = TransactionReplay::new(Box::new(storage));
 
         assert_eq!(
@@ -909,8 +1068,9 @@ mod tests {
             Err(Error::InvalidTransport)
         }
 
+        // Only reads fail: this storage models a snapshot that cannot be loaded.
         async fn remove(&self, _key: &str) -> Result<()> {
-            Err(Error::InvalidTransport)
+            Ok(())
         }
 
         async fn clear(&self) -> Result<()> {
@@ -950,6 +1110,142 @@ mod tests {
 
         async fn count(&self) -> Result<u32> {
             Ok(0)
+        }
+    }
+
+    /// A store that still holds a shared-stream snapshot under the key used before #898.
+    /// Reading that key is an error, so a passing test proves the cutover never reads it.
+    #[cfg(not(target_family = "wasm"))]
+    struct CutoverStorage {
+        /// The stored records.
+        inner: crate::storage::MemStorage<ReplaySnapshot>,
+        /// Whether removing a record fails.
+        fail_remove: bool,
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    impl CutoverStorage {
+        /// A store holding a snapshot under the shared-stream key.
+        async fn holding_a_shared_stream_snapshot(fail_remove: bool) -> Result<Self> {
+            let inner = crate::storage::MemStorage::new();
+            inner
+                .put(SHARED_STREAM_SNAPSHOT_KEY, &ReplaySnapshot::default())
+                .await?;
+            Ok(Self { inner, fail_remove })
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[async_trait::async_trait]
+    impl KvStorageInterface<ReplaySnapshot> for CutoverStorage {
+        async fn get(&self, key: &str) -> Result<Option<ReplaySnapshot>> {
+            if key == SHARED_STREAM_SNAPSHOT_KEY {
+                return Err(Error::InvalidTransport);
+            }
+            self.inner.get(key).await
+        }
+
+        async fn put(&self, key: &str, value: &ReplaySnapshot) -> Result<()> {
+            self.inner.put(key, value).await
+        }
+
+        async fn get_all(&self) -> Result<Vec<(String, ReplaySnapshot)>> {
+            self.inner.get_all().await
+        }
+
+        async fn remove(&self, key: &str) -> Result<()> {
+            if self.fail_remove {
+                return Err(Error::InvalidTransport);
+            }
+            self.inner.remove(key).await
+        }
+
+        async fn clear(&self) -> Result<()> {
+            self.inner.clear().await
+        }
+
+        async fn count(&self) -> Result<u32> {
+            self.inner.count().await
+        }
+    }
+
+    /// Cutover of #898: the first load deletes the shared-stream snapshot without reading it,
+    /// and admission proceeds on fresh per-class streams.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn test_first_load_deletes_the_shared_stream_snapshot_unread() -> Result<()> {
+        let storage =
+            std::sync::Arc::new(CutoverStorage::holding_a_shared_stream_snapshot(false).await?);
+        let runtime = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        let key = stream(SecretKey::random().address().into());
+
+        assert_eq!(
+            runtime.admit(key, 0, digest(1)).await?,
+            SequenceVerdict::First
+        );
+        assert!(storage
+            .inner
+            .get(SHARED_STREAM_SNAPSHOT_KEY)
+            .await?
+            .is_none());
+        assert!(storage
+            .inner
+            .get(TRANSACTION_REPLAY_SNAPSHOT_KEY)
+            .await?
+            .is_some());
+        assert_eq!(runtime.counters().persistence_failure, 0);
+        Ok(())
+    }
+
+    /// A failed deletion of the shared-stream snapshot fails closed and is counted; the next
+    /// load retries it.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn test_failed_shared_stream_deletion_fails_closed_and_is_counted() -> Result<()> {
+        let storage = CutoverStorage::holding_a_shared_stream_snapshot(true).await?;
+        let runtime = TransactionReplay::new(Box::new(storage));
+        let key = stream(SecretKey::random().address().into());
+
+        assert!(matches!(
+            runtime.admit(key, 0, digest(1)).await,
+            Err(Error::TransactionReplayPersistence {
+                operation: "remove shared-stream snapshot",
+                ..
+            })
+        ));
+        assert_eq!(runtime.counters().persistence_failure, 1);
+        Ok(())
+    }
+
+    /// Shares one [`CutoverStorage`] between the runtime and the test's assertions.
+    #[cfg(not(target_family = "wasm"))]
+    struct SharedCutoverStorage(std::sync::Arc<CutoverStorage>);
+
+    #[cfg(not(target_family = "wasm"))]
+    #[async_trait::async_trait]
+    impl KvStorageInterface<ReplaySnapshot> for SharedCutoverStorage {
+        async fn get(&self, key: &str) -> Result<Option<ReplaySnapshot>> {
+            self.0.get(key).await
+        }
+
+        async fn put(&self, key: &str, value: &ReplaySnapshot) -> Result<()> {
+            self.0.put(key, value).await
+        }
+
+        async fn get_all(&self) -> Result<Vec<(String, ReplaySnapshot)>> {
+            self.0.get_all().await
+        }
+
+        async fn remove(&self, key: &str) -> Result<()> {
+            self.0.remove(key).await
+        }
+
+        async fn clear(&self) -> Result<()> {
+            self.0.clear().await
+        }
+
+        async fn count(&self) -> Result<u32> {
+            self.0.count().await
         }
     }
 

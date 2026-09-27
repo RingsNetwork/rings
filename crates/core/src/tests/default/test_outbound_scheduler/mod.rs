@@ -36,6 +36,7 @@ use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::SendCompletionOutcome;
 use crate::swarm::transport::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 use crate::swarm::transport::OUTBOUND_DATA_TRANSFER_CAPACITY;
+use crate::swarm::transport::OUTBOUND_LANE_WINDOW;
 use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
 use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
@@ -818,6 +819,68 @@ async fn test_same_class_chunked_transfers_are_contiguous_on_the_wire() -> Resul
         .iter()
         .skip(first_chunks.len())
         .all(|chunk| chunk.meta.id == second_id));
+    Ok(())
+}
+
+/// Law of #898 end to end: DhtControl traffic that overtakes an Application backlog longer
+/// than the replay window never makes the backlog stale, because each class has its own
+/// sequence stream.
+///
+/// The outbound worker is paused while the backlog and then the control messages are signed
+/// and submitted, so both lanes are populated in signing order. On resume the scheduler's
+/// control priority sends the control messages first. With one stream shared by every class
+/// they would carry the latest sequences, reach the receiver first, and push the backlog's head
+/// out of its window. No delivery is held and no step waits on a timer.
+#[tokio::test]
+async fn test_control_overtaking_an_application_backlog_never_makes_it_stale() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let backlog = crate::message::TRANSACTION_REPLAY_WINDOW + 2 * OUTBOUND_LANE_WINDOW;
+    let transport = node1.swarm.transport.clone();
+    transport.pause_outbound_worker_for_test(peer);
+
+    reset_outbound_submit_count_for_test();
+    let mut sends = Vec::new();
+    let messages = (0..backlog)
+        .map(|index| Message::custom(format!("backlog-{index}").as_bytes()))
+        .chain((0..4).map(|nonce| Ok(Message::ProbeRequest(test_probe_request(nonce)))));
+    for (index, message) in messages.enumerate() {
+        let payload = transport.originate(message?, peer, Some(peer)).await?;
+        let sender = transport.clone();
+        // No admission deadline: every send waits for the resumed worker on events alone.
+        sends.push(tokio::spawn(async move {
+            sender
+                .send_payload_detached_until_for_test(
+                    payload,
+                    TEST_HANG_GUARD,
+                    std::future::pending(),
+                )
+                .await
+        }));
+        // Submit in signing order, so each lane's FIFO order is its sequence order.
+        wait_until("submission in signing order", || {
+            outbound_submit_count_for_test() > index
+        })
+        .await?;
+    }
+    transport.resume_outbound_worker_for_test(peer);
+
+    let mut received = 0;
+    while received < backlog {
+        let payload = timeout(TEST_HANG_GUARD, node2.listen_once())
+            .await
+            .map_err(|_| invalid_test_state("the Application backlog did not arrive"))?
+            .ok_or_else(|| invalid_test_state("node2 stopped listening"))?;
+        received += usize::from(matches!(
+            payload.transaction.data::<Message>()?,
+            Message::CustomMessage(_)
+        ));
+    }
+    for send in sends {
+        send.await
+            .map_err(|error| invalid_test_state(format!("send task failed: {error}")))??;
+    }
+    assert_eq!(node2.swarm.transaction_replay_counters().stale, 0);
     Ok(())
 }
 

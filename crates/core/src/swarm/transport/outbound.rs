@@ -107,6 +107,8 @@ use queue::RunnableTransfer;
 use queue::TransferQueues;
 #[cfg(test)]
 pub(crate) use queue::OUTBOUND_CONTROL_BURST;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use queue::OUTBOUND_LANE_WINDOW;
 use session_encoding::SharedAnnouncedDelegations;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;

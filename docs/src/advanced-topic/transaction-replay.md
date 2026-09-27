@@ -10,12 +10,27 @@ been deleted.
 Replay state is keyed by:
 
 ```text
-StreamKey = (network_id, origin_delegator_did, destination_did)
+StreamKey = (network_id, origin_delegator_did, destination_did, class)
 ```
 
 The origin is recovered from `Transaction.verification.delegation.delegator_did()`. It is not the
 delegatee DID and not an intermediate relay. Rotating a delegatee key therefore preserves
 the same delegator-to-destination stream, while two destinations advance independently.
+
+`class` is the traffic class (DHT control, storage, E2E, application) of the message the
+transaction carries, derived from its signed data on both sides, so it adds no wire field (#898).
+The outbound scheduler keeps order within a class lane only, with at most `OUTBOUND_LANE_WINDOW`
+(8, below the 32-slot window) transactions of a lane in flight. One stream per class therefore
+never rejects an honest sender's transaction as stale, however the lanes are interleaved; a
+single stream shared by every class did, once one lane's backlog fell behind another's traffic.
+This assumes a class's transactions reach the scheduler in signing order, as they do from one
+sending task.
+
+The per-class snapshot is stored under `rings-core:transaction-replay:class-streams`. The first load
+after the upgrade deletes the former shared-stream snapshot (`rings-core:transaction-replay`)
+without reading it, which resets every replay window once, as deleting the store does. An upgraded
+sender's per-class sequences are stale to a node that has not upgraded, so the upgrade is
+network-wide and mandatory.
 
 Every transaction carries a mandatory `u64` sequence. The transaction signature transcript
 binds the receiver-selected `network_id` through the signing domain and binds `destination`,

@@ -913,9 +913,10 @@ impl PayloadSender for SwarmTransport {
     async fn reserve_transaction_sequences(
         &self,
         destination: Did,
+        class: crate::message::MessageCategory,
         count: std::num::NonZeroU64,
     ) -> Result<std::ops::RangeInclusive<u64>> {
-        SwarmTransport::reserve_transaction_sequences(self, destination, count).await
+        SwarmTransport::reserve_transaction_sequences(self, destination, class, count).await
     }
 
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
