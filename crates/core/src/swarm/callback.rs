@@ -19,6 +19,8 @@ use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::swarm::session_link::ReferencedDelegations;
+use crate::swarm::transport::link_credit::ReleaseLedger;
+use crate::swarm::transport::link_credit::ReleaseToken;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -308,6 +310,8 @@ pub(super) struct InboundProcessor {
     reassembler: Arc<FuturesMutex<MessageReassembler>>,
     reassembly_clock: ReassemblyClock,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
+    /// The flow-control release ledger of the bound generation (#904): set with the attempt.
+    release_ledger: Arc<Mutex<Option<Arc<ReleaseLedger>>>>,
     /// Verified frames that arrived before this end admitted the connection; bounded by the
     /// per-peer inbound capacity. With the session hold below, an unadmitted peer occupies at
     /// most one and a half of an admitted peer's frame budgets, and a quarter of the transport's
@@ -322,11 +326,15 @@ pub(super) struct InboundProcessor {
 }
 
 /// What the transport handed over with one frame and takes back when the frame is done: the
-/// raw bytes, for their length and their memory accounting, and the transport capacity they
-/// occupy until the inbound actor releases it.
+/// raw bytes, for their length and their memory accounting, the transport capacity they occupy
+/// until the inbound actor takes the frame, and the flow-control token held until the frame is
+/// processed.
 pub(super) struct InboundFrameLease {
     bytes: Bytes,
     transport_capacity: Option<InboundFrameCapacityLease>,
+    /// The frame's flow-control token (#904): it travels with the frame until the inbound actor
+    /// has processed it, and releases the frame to its sender's credit when dropped.
+    release: Option<ReleaseToken>,
     /// Test builds: the frame's conservation witness, released with the lease.
     #[cfg(test)]
     in_flight: crate::swarm::transport::FrameInFlight,

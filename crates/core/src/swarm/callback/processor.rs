@@ -23,6 +23,7 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::swarm::session_link::ReferencedDelegations;
 use crate::swarm::session_link::Swept;
+use crate::swarm::transport::link_credit::ReleaseLedger;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SESSION_HOLD_TIMEOUT;
@@ -84,6 +85,7 @@ impl InboundProcessor {
             reassembler: Arc::new(FuturesMutex::new(reassembler)),
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),
+            release_ledger: Arc::new(Mutex::new(None)),
             pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
             session_link: Arc::new(Mutex::new(ReferencedDelegations::new(
                 super::SESSION_HOLD_CAPACITY,
@@ -196,11 +198,31 @@ impl InboundProcessor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Bind this callback to `attempt`, the handshake of the connection it serves, with a fresh
+    /// release ledger for that generation's flow control (#904).
     pub(super) fn set_pending_attempt(&self, attempt: PendingConnectionAttempt) {
         *self
             .pending_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(attempt);
+        *self
+            .release_ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+            ReleaseLedger::new(attempt, &self.logical.transport),
+        ));
+    }
+
+    /// The release ledger of the generation this callback is bound to, if it is `peer`'s: the
+    /// frames of that link it counts released (#904).
+    pub(super) fn release_ledger(&self, peer: Option<Did>) -> Option<Arc<ReleaseLedger>> {
+        let peer = peer?;
+        self.pending_attempt()
+            .filter(|attempt| attempt.is_with(peer))?;
+        self.release_ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(super) async fn record_receive_failure(

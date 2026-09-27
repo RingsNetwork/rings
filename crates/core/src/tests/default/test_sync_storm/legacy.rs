@@ -3,7 +3,21 @@ use super::pressure::exercise_per_entry_yield;
 use super::pressure::start_controlled_deliveries;
 use super::pressure::wait_for_control_barrier_verdict;
 use super::*;
+use crate::swarm::transport::link_credit::LINK_CREDIT_WINDOW;
 use crate::tests::live_entry;
+
+/// The storm's chunk frames, all held pending at the peer as the reassembly backlog that starves
+/// the stabilizer probe. Each frame of about 56.5 KB is served in 1 767 virtual ms, so
+/// `⌈45 001 / 1 767⌉ = 26` frames outlast `PEER_LIVENESS_TIMEOUT_MS`, and 28 keep two frames of
+/// margin. With the probe behind them they need 29 credits of their link generation (#904),
+/// which holds `w − 2 = 30` in this pinned history: the two bootstrap control frames it carried
+/// are released, but fewer than `w/2`, so not yet returned. [`queue_legacy_storm`] asserts that
+/// room before it sends the storm.
+const LEGACY_BACKLOG_FRAMES: usize = 28;
+/// The storm's entries: a count the production framing cuts into exactly
+/// [`LEGACY_BACKLOG_FRAMES`] chunks at `CHUNKED_MAX_MESSAGE_SIZE` (133 to 137 entries do), as
+/// [`queue_legacy_storm`] asserts once the storm is queued.
+const LEGACY_STORM_ENTRIES: usize = 135;
 
 pub(super) async fn legacy_feedback_loop_state() -> SimState {
     let runtime =
@@ -84,24 +98,38 @@ async fn queue_legacy_storm(
     let peer_did = nodes[peer].did();
     let mut entries = Vec::new();
     dummy_controlled::set_max_message_size(super::CHUNKED_MAX_MESSAGE_SIZE);
-    for index in 0..250 {
+    for index in 0..LEGACY_STORM_ENTRIES {
         let entry = entry_owned_by(&nodes[peer], &format!("legacy-loop-{index}"));
         entries.push(entry);
     }
+    let unreleased = nodes[observer]
+        .swarm
+        .transport
+        .link_credit(peer_did)
+        .expect("the storm link's credit must be readable")
+        .in_flight();
+    assert!(
+        unreleased + (LEGACY_BACKLOG_FRAMES as u64) < LINK_CREDIT_WINDOW,
+        "the storm and the probe behind it must fit the link's credit: {unreleased} in flight"
+    );
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
         destination: StorageSyncDestination::PhysicalOwner(peer_did),
         data: entries.clone(),
     };
+    // The storm is sent detached, as production repair sends it: a tracked send waits for its
+    // last frame, which link credit (#904) may hold until the receiver releases frames that this
+    // scenario deliberately leaves pending.
     assert!(matches!(
         nodes[observer]
             .swarm
             .transport
-            .send_storage_sync_tracked(msg)
+            .send_storage_sync(msg)
             .await
             .expect("legacy sync must enter the real scheduler"),
         StorageSyncOutcome::Sent(_)
     ));
+    wait_for_queued_storm(runtime, &nodes[observer].swarm.transport, peer_did).await;
     let initial_virtual_ms = u64::try_from(
         runtime
             .elapsed_ms()
@@ -124,6 +152,36 @@ async fn queue_legacy_storm(
         .any(|delivery| delivery.class == ScheduledDeliveryClass::Reassembly));
 
     (observer, peer, driver)
+}
+
+/// Wait, one scheduler poll at a time, until the detached storm's outbound worker toward `peer`
+/// has sent its last frame, and check the storm is exactly [`LEGACY_BACKLOG_FRAMES`] chunk
+/// frames, every one queued.
+async fn wait_for_queued_storm(
+    runtime: &SimulationRuntimeGuard,
+    transport: &crate::swarm::transport::SwarmTransport,
+    peer: crate::dht::Did,
+) {
+    for _ in 0..128 {
+        if !transport.outbound_worker_has_active_transfer_for_test(peer) {
+            break;
+        }
+        settle_one_poll().await;
+    }
+    assert!(
+        !transport.outbound_worker_has_active_transfer_for_test(peer),
+        "the legacy storm must leave within the link's credit"
+    );
+    let queued = runtime
+        .pending_deliveries()
+        .expect("legacy storm frames must classify")
+        .iter()
+        .filter(|delivery| delivery.class == ScheduledDeliveryClass::Reassembly)
+        .count();
+    assert_eq!(
+        queued, LEGACY_BACKLOG_FRAMES,
+        "the legacy storm must be cut into exactly its backlog of chunk frames"
+    );
 }
 
 async fn expire_healthy_peer(
@@ -168,11 +226,11 @@ async fn expire_healthy_peer(
         .expect("legacy reassembly backlog must classify")
         .into_iter()
         .filter(|delivery| delivery.class == ScheduledDeliveryClass::Reassembly)
-        .take(28)
+        .take(LEGACY_BACKLOG_FRAMES)
         .collect::<Vec<_>>();
     assert_eq!(
         backlog.len(),
-        28,
+        LEGACY_BACKLOG_FRAMES,
         "legacy storm must fill the real inbound reassembly lane"
     );
     runtime

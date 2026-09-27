@@ -74,12 +74,17 @@ macro_rules! define_prepare_inbound_frame {
                     self.report_invalid_inbound_frame();
                     None
                 }
-                InboundFrameAdmission::CapacityExceeded => {
-                    tracing::warn!(
+                // Local pressure, not evidence against the peer: logged at debug, since a
+                // congested receiver refuses up to a whole window per link, and handed to the
+                // callback, which counts the frame as released for its link's credit.
+                InboundFrameAdmission::CapacityExceeded { payload } => {
+                    tracing::debug!(
                         peer = %self.cid,
                         bytes = received_bytes,
                         "rejected data-channel message before dispatch"
                     );
+                    self.callback
+                        .on_inbound_frame_refused(&self.cid, payload.as_ref());
                     None
                 }
             }
@@ -168,8 +173,8 @@ impl InnerTransportCallback {
     /// Public transport adapters must call this before retaining the frame in an
     /// async task, then pass an admitted value to [`Self::handle_admitted_frame`].
     /// Adapters that do not use the runtime-backed `prepare_inbound_frame` helper must call
-    /// [`Self::notify_invalid_inbound_frame`] for `Malformed` and `Oversized`,
-    /// but not for local `CapacityExceeded` rejections.
+    /// [`Self::notify_invalid_inbound_frame`] for `Malformed` and `Oversized`, and the
+    /// callback's `on_inbound_frame_refused` for local `CapacityExceeded` rejections.
     pub fn admit_inbound_frame(&self, raw: Bytes) -> InboundFrameAdmission {
         if inbound_frame_exceeds_protocol_ceiling(raw.len()) {
             return InboundFrameAdmission::Oversized {
@@ -193,7 +198,9 @@ impl InnerTransportCallback {
             .inbound_frames
             .try_acquire_raw(Arc::clone(&self.cid), raw.len())
         else {
-            return InboundFrameAdmission::CapacityExceeded;
+            return InboundFrameAdmission::CapacityExceeded {
+                payload: raw.slice_ref(payload),
+            };
         };
         let payload = raw.slice_ref(payload);
         InboundFrameAdmission::Admitted(AdmittedInboundFrame {
@@ -227,6 +234,24 @@ impl InnerTransportCallback {
         if let Err(error) = self.callback.on_admitted_message(message).await {
             tracing::error!("Callback on_admitted_message failed: {error:?}");
         }
+    }
+
+    /// Dummy builds: end a capacity-admitted frame undispatched, as this end's inbound bound
+    /// refuses a frame: its capacity is released first, then the callback learns of the refusal
+    /// with its payload, exactly as for a `CapacityExceeded` frame. A controlled schedule that
+    /// withholds a frame for good ends it here, so a callback that paces its peer by the frames
+    /// it released still counts it, as every production path that ends a frame does.
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn refuse_admitted_frame(&self, frame: AdmittedInboundFrame) {
+        let AdmittedInboundFrame {
+            payload,
+            owner,
+            permit,
+        } = frame;
+        drop(permit);
+        drop(owner);
+        self.callback
+            .on_inbound_frame_refused(&self.cid, payload.as_ref());
     }
 
     /// This method is invoked when the state of connection has changed.

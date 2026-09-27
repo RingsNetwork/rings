@@ -299,8 +299,12 @@ impl<'a> WirePayload<'a> {
     }
 }
 
-/// What the two ends of one link tell each other about delegation references. See the module
-/// documentation for why these are unsigned.
+/// What the two ends of one link tell each other: about delegation references, and the credit
+/// of the link's flow control (#904). See the module documentation for why these are unsigned.
+///
+/// The link-control frames are never counted by the flow control: a sender spends no credit on
+/// them and a receiver counts none of them released, so credit cannot be withheld by the frames
+/// that return it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) enum LinkControl {
     /// "A frame of yours carried this session inline and it verified: you may reference it."
@@ -312,6 +316,10 @@ pub(crate) enum LinkControl {
     Announce(Delegation),
     /// "I no longer hold the session you asked for": frames waiting on it cannot be resolved.
     Unknown(DelegationDigest),
+    /// "I have released this many of your payload frames on this link generation": the
+    /// receiver's monotone count, returned cumulatively, so a lost, repeated or reordered return
+    /// is harmless (see [`crate::swarm::transport::link_credit`]).
+    Credit(u64),
 }
 
 impl LinkControl {
@@ -320,6 +328,12 @@ impl LinkControl {
         let body = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
         frame_bytes(LINK_CONTROL_FRAME_MARKER, body.as_slice())
     }
+}
+
+/// Whether `bytes` are a payload frame, by its marker alone: the frames a link's flow control
+/// counts, which a receiver recognises even when it cannot, or does not, decode them.
+pub(crate) fn is_payload_frame(bytes: &[u8]) -> bool {
+    bytes.starts_with(PAYLOAD_FRAME_MARKER)
 }
 
 /// One decoded frame.

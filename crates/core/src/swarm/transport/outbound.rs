@@ -35,8 +35,10 @@ use super::delivery::send_data_with_timeout;
 use super::delivery::ChunkSendCancelReason;
 use super::delivery::ChunkSendPermit;
 use super::delivery::ChunkSendProgress;
+use super::delivery::FrameSend;
 use super::delivery::SendCompletionOutcome;
 use super::delivery::TransferStop;
+use super::link_credit::LinkCredits;
 use super::AdmittedConnection;
 use crate::dht::Did;
 use crate::error::Error;
@@ -386,7 +388,14 @@ impl OutboundSchedulers {
         let (measurements, measurement_receiver) =
             MeasurementRecorder::channel(self.measure.clone(), peer);
         spawn_worker(
-            OutboundWorker::new(receiver, stop, measurements, peer, link.announced),
+            OutboundWorker::new(
+                receiver,
+                stop,
+                measurements,
+                peer,
+                link.announced,
+                link.credit,
+            ),
             measurement_receiver,
         )?;
         registry.peers.insert(peer, handle.clone());
@@ -488,6 +497,8 @@ struct OutboundWorker {
     ready: TransferQueues<QueuedTransfer>,
     active: Option<RunnableTransfer<QueuedTransfer>>,
     announced: SharedAnnouncedDelegations,
+    /// The credit of the peer's link generations: every payload frame waits for one.
+    credits: LinkCredits,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     measurements: MeasurementRecorder,
     stop: StopSource,
@@ -503,6 +514,7 @@ impl OutboundWorker {
         measurements: MeasurementRecorder,
         peer: Did,
         announced: SharedAnnouncedDelegations,
+        credits: LinkCredits,
     ) -> Self {
         #[cfg(not(test))]
         let _ = peer;
@@ -517,6 +529,7 @@ impl OutboundWorker {
             ready: TransferQueues::default(),
             active: None,
             announced,
+            credits,
             deliveries: FuturesUnordered::new(),
             measurements,
             stop,
@@ -821,16 +834,24 @@ impl OutboundWorker {
                 let transfer = &runnable.item().scheduled.transfer;
                 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
                 let _active_trace = test_trace::ActiveTransferGuard::enter(self.peer);
-                let admission = send_data_with_timeout(
-                    &transfer.admitted,
-                    bytes,
-                    &transfer.permit,
-                    &transfer.stop,
-                    transfer.detached_admission.as_ref(),
-                    transfer.did,
+                let attempt = transfer.admitted.attempt();
+                // Every payload frame waits for its link generation's credit (#904); a retired
+                // generation has none and its frame is refused as superseded.
+                let send = FrameSend {
+                    admitted: &transfer.admitted,
+                    permit: &transfer.permit,
+                    stop: &transfer.stop,
+                    detached_admission: transfer.detached_admission.as_ref(),
+                    did: transfer.did,
                     context,
-                )
-                .await;
+                };
+                let admission = match self.credits.for_sending(attempt.generation()) {
+                    Some(credit) => send_data_with_timeout(&send, bytes, Some(&credit)).await,
+                    None => ChunkSendProgress::Ready(Err(Error::ConnectionAttemptSuperseded {
+                        peer: attempt.peer(),
+                        generation: attempt.generation(),
+                    })),
+                };
                 if self.stop.is_stop_requested() {
                     let final_results =
                         self.finalize_stopped_active_admission(before_first_frame, admission);

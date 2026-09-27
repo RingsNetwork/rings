@@ -49,6 +49,7 @@ use super::OnMessageRecursionDepthGuard;
 use super::TransportCallbackError;
 use crate::delegation::DelegationDigest;
 use crate::dht::Did;
+use crate::message::is_payload_frame;
 use crate::message::LinkControl;
 use crate::message::LinkFrame;
 use crate::message::WirePayload;
@@ -86,6 +87,13 @@ impl InnerSwarmCallback {
         let in_flight = self.processor.logical.transport.frames_for_test().arrive();
 
         let peer = Did::from_str(cid).ok();
+        // A payload frame the transport admitted on this link counts toward its sender's credit
+        // (#904) from here, whatever ends it: the token releases it when dropped.
+        let release = transport_capacity
+            .as_ref()
+            .filter(|_| is_payload_frame(msg.as_ref()))
+            .and_then(|_| self.processor.release_ledger(peer))
+            .map(|ledger| ledger.token());
         let frame = match LinkFrame::from_wire(msg.as_ref()) {
             Ok(frame) => frame,
             Err(error) => {
@@ -103,6 +111,7 @@ impl InnerSwarmCallback {
         let lease = InboundFrameLease {
             bytes: msg,
             transport_capacity,
+            release,
             #[cfg(test)]
             in_flight,
         };
@@ -314,6 +323,7 @@ impl InnerSwarmCallback {
     ///   Request(d)  ─▶ answer from that table
     ///   Announce(s) ─▶ announce ─▶ charge refused frames ─▶ release what resolves
     ///   Unknown(d)  ─▶ unknown  ─▶ charge awaiting frames
+    ///   Credit(r)   ─▶ advance this generation's send credit to r (#904)
     /// ```
     async fn handle_link_control(&self, peer: Option<Did>, control: LinkControl) {
         let Some(link) = self.bound_attempt(peer) else {
@@ -360,6 +370,11 @@ impl InnerSwarmCallback {
                     .charge_dropped_frames(Some(link.peer()), awaiting, HeldFrameDrop::Disclaimed)
                     .await;
             }
+            LinkControl::Credit(released) => self
+                .processor
+                .logical
+                .transport
+                .acknowledge_link_credit(link, released),
         }
     }
 

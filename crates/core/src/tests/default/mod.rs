@@ -52,6 +52,8 @@ mod test_chunk_e2e;
 mod test_decode_boundaries;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_inbox;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_link_credit;
 mod test_message_handler;
 #[cfg(all(feature = "std", not(feature = "dummy")))]
 mod test_native_transport;

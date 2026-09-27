@@ -39,6 +39,7 @@ use crate::message::Message;
 
 mod wire;
 
+pub(crate) use self::wire::is_payload_frame;
 pub(crate) use self::wire::DelegationRef;
 pub(crate) use self::wire::LinkControl;
 pub(crate) use self::wire::LinkFrame;

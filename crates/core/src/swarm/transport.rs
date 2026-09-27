@@ -68,6 +68,7 @@ mod event_delivery;
 #[cfg(test)]
 mod frame_ledger;
 mod link_control;
+pub(crate) mod link_credit;
 mod liveness;
 mod measurement;
 mod outbound;
@@ -486,6 +487,32 @@ impl SwarmTransport {
 
     pub(crate) fn inbound_capacity(&self) -> Arc<InboundCapacity> {
         self.inbound_capacity.clone()
+    }
+
+    /// Whether this node's transport inbound bound is congested, so its credit returns wait
+    /// (#904): its senders then slow down until it drains.
+    pub(crate) fn is_inbound_congested(&self) -> bool {
+        self.transport.inbound_frame_capacity().is_congested()
+    }
+
+    /// The credit of `peer`'s current link generation, the one its frames leave on, as this
+    /// sending end sees it (#904). A newer generation than the ledger's starts a fresh ledger
+    /// here, as its first frame would, so the view never reads a retired generation's window;
+    /// a link this end has sent nothing on has its whole window.
+    ///
+    /// # Errors
+    ///
+    /// A poisoned lifecycle lock.
+    pub(crate) fn link_credit(&self, peer: Did) -> Result<self::link_credit::LinkCredit> {
+        let generation = self
+            .admitted_send_connection(peer)?
+            .map(|admitted| admitted.attempt().generation());
+        let credit = generation.and_then(|generation| {
+            self.outbound_schedulers
+                .link_credits(peer)
+                .and_then(|credits| credits.for_sending(generation))
+        });
+        Ok(self::link_credit::LinkCredit::new(credit))
     }
 
     /// Test builds: the frames this node sent and received; see [`FrameLedger`].

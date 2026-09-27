@@ -387,6 +387,10 @@ hide the active/idle phase of each link from an observer that watches it.
 - the exit's reply timing follows its world: replies leave as the world produces bytes and
   credit allows, so a session's reply pattern is visible on the return path, bounded by the
   link's constant rate while it is active.
+- a link's emission rate is paced by its receiver's credit (#904): the receiver returns credit
+  as it releases frames, so an active link's rate is `min(r, the receiver's release rate)`, and
+  an observer of the link learns the receiver's processing load. Real and cover cells slow down
+  alike, so the rate reveals the receiver's load, never the sender's volume.
 
 **Inherited from the communication layer, and not repairable here:**
 

@@ -16,29 +16,42 @@
 //! ```text
 //! link facts:  Opened(l) ─▶ lane(l), emitter(l)      Closed(l) ─▶ lane dropped, emitter stops
 //! enqueue(l, c) ─▶ queue(l) ← c;  last_real(l) ← now;  wake emitter(l)
-//! emitter(l):  loop { plan(queue, last_real, last_start, now)           (pure: [`plan`])
+//! emitter(l):  loop { plan(queue, last_real, last_start, credit, now)   (pure: [`plan`])
 //!                       Emit          ⇒ send the next real cell, else uniform cover
+//!                       WaitCredit    ⇒ wait for the link's credit, or until woken
 //!                       WaitUntil(t)  ⇒ sleep until t, or until woken }
 //! active ⇔ queued ∨ now < last_real + D,   D = Q = 30 s;   rate r while active, r_idle idle
 //! ```
+//!
+//! `credit` is the link's flow control (#904): a slot is emitted, real or cover, only while the
+//! receiver has returned credit for the frames already sent (`rings_core::swarm::LinkCredit`),
+//! so the link's rate is `min(r, the receiver's release rate)`, and its transport's per-peer
+//! inbound bound is never overrun.
 //!
 //! Laws (the pure schedule is tested in `tests` below):
 //!
 //! - **Budget safety.** An emission starts at least `slot(u)` after the start of the previous one
 //!   of `u` units, whatever the phase, so every interval of length `V` carries at most
 //!   `r·V + u_max = ρ·B + u_max` units, which is `< B` (`u_max = 768` at 12 MiB,
-//!   `(1 − ρ)·B ≈ 1638`). An honest sender is therefore never refused by its receiver's
-//!   admission, and no real cell is lost to it, assuming the receiver's arrival spacing follows
-//!   the sender's start spacing: the margin after `u_max`, `(1 − ρ)·B − 768 ≈ 870` units at
-//!   12 MiB and `≈ 1637` units (`≈ 16.6 s` of `r`) at 16 KiB, absorbs transport jitter and window
-//!   misalignment beyond that.
+//!   `(1 − ρ)·B ≈ 1638`). An honest sender is therefore never refused by its receiver's L9
+//!   admission budget, assuming the receiver's arrival spacing follows the sender's start
+//!   spacing: the margin after `u_max`, `(1 − ρ)·B − 768 ≈ 870` units at 12 MiB and `≈ 1637`
+//!   units (`≈ 16.6 s` of `r`) at 16 KiB, absorbs transport jitter and window misalignment
+//!   beyond that. Credit only delays an emission, so it keeps this bound.
+//! - **No transport drop.** The receiver's transport admits a frame only while the peer has
+//!   fewer than its per-peer bound unreleased; the credit keeps at most `w` of them, half that
+//!   bound, so no cell of an honest sender, real or cover, is tail-dropped before it is charged
+//!   (#904, R3-H1). This is the premise the budget law alone does not provide: a receiver slower
+//!   than `r` slows the link instead of losing its cells.
 //! - **Floor.** While a link is up its rate is at least `r_idle`: an idle link emits exactly the
 //!   floor.
 //! - **Dwell.** A real cell at `t` keeps the link at `r` on `[t, t + D)`; the link returns to the
 //!   floor only after `D` without a real cell, so every active period lasts at least `D`.
-//! - **Volume hiding.** While a link is active its cell rate is `r / u(b)` whatever the real
-//!   volume: real cells replace cover, they are never added to it. What is visible is the
-//!   active/idle phase at the resolution `D` (#834 leakage table).
+//! - **Volume hiding.** Emission depends only on (queue non-empty, dwell, credit): while a link is
+//!   active its cell rate is `min(r, release rate) / u(b)` whatever the real volume, since real
+//!   cells replace cover, never add to it, and credit slows both alike. What is visible is the
+//!   active/idle phase at the resolution `D` and the receiver's release rate, which reveals its
+//!   load, never the sender's volume (#834 leakage table).
 //! - **Order.** Real cells of one link leave in FIFO order, one per slot, so a queued cell waits
 //!   at most its queue position times the slot.
 //! - **Bound.** The queues hold at most `MAX_PENDING_ONION_SENDS` cells and
@@ -188,6 +201,8 @@ struct LinkClock {
 enum Plan {
     /// Emit now: a real cell if one is queued, else cover.
     Emit,
+    /// Emit nothing until the link's receiver returns credit.
+    WaitCredit,
     /// Emit nothing before this instant (microseconds).
     WaitUntil(u128),
 }
@@ -202,19 +217,29 @@ const fn is_active(clock: LinkClock, queued: bool, now_us: u128) -> bool {
         }
 }
 
-/// The pure schedule of one up link (#880 option C):
+/// The pure schedule of one up link (#880 option C, #904):
 ///
 /// ```text
 /// active(now) = queued ∨ now < last_real + D
 /// due(now)    = last_start + (active(now) ? u/r : u/r_idle)      (0 before the first emission)
-/// plan(now)   = now ≥ due(now) ? Emit : WaitUntil(due(now))
+/// plan(now)   = ¬credited ⇒ WaitCredit;  now ≥ due(now) ? Emit : WaitUntil(due(now))
 /// ```
 ///
 /// Laws: every emission starts at least `u/r` after the previous one (`u/r_idle ≥ u/r`), so the
-/// budget bound of the module holds across phase changes; while active the rate is `r`, while
-/// idle it is `r_idle`, so the rate is `≥ r_idle` while the link is up; and an active period,
-/// begun by a real cell at `t`, lasts at least until `t + D`.
-fn plan(clock: LinkClock, queued: bool, floor: OnionIdleFloor, now_us: u128) -> Plan {
+/// budget bound of the module holds across phase changes, and a wait for credit only delays the
+/// next start; while active and credited the rate is `r`, while idle it is `r_idle`, so an
+/// up link with credit emits at `≥ r_idle`; and an active period, begun by a real cell at `t`,
+/// lasts at least until `t + D`.
+fn plan(
+    clock: LinkClock,
+    queued: bool,
+    credited: bool,
+    floor: OnionIdleFloor,
+    now_us: u128,
+) -> Plan {
+    if !credited {
+        return Plan::WaitCredit;
+    }
     let Some((start_us, units)) = clock.last_start else {
         return Plan::Emit;
     };
@@ -345,6 +370,8 @@ enum EmitterStep<T> {
     Emit(Emission<T>),
     /// Sleep until this instant, or until the wake-up fires.
     Wait(u128, oneshot::Receiver<()>),
+    /// Wait for the link's credit, or until the wake-up fires.
+    WaitCredit(oneshot::Receiver<()>),
     /// The link is down, or the lane belongs to a newer emitter: the emitter returns.
     Stop,
 }
@@ -586,27 +613,33 @@ impl<T> OrderedSendState<T> {
         }
     }
 
-    /// The next step at `now` under `floor` of the emitter of epoch `epoch`: [`plan`] over the
-    /// lane, taking the next queued cell when it emits and charging the emission the units of
-    /// what it sends. A wait arms the lane's wake-up under the same lock, so no enqueue is
-    /// missed. While a real cell is in flight nothing is taken from the queue, so real cells
-    /// leave in order.
+    /// The next step at `now` under `floor` of the emitter of epoch `epoch`, with the link
+    /// `credited` or not: [`plan`] over the lane, taking the next queued cell when it emits and
+    /// charging the emission the units of what it sends. A wait arms the lane's wake-up under
+    /// the same lock, so no enqueue is missed. While a real cell is in flight nothing is taken
+    /// from the queue, so real cells leave in order.
     fn next(
         &mut self,
         peer: Did,
         epoch: u64,
         floor: OnionIdleFloor,
+        credited: bool,
         now_us: u128,
     ) -> EmitterStep<T> {
         let Some(lane) = self.lanes.get_mut(&peer).filter(|lane| lane.epoch == epoch) else {
             return EmitterStep::Stop;
         };
         let queued = !lane.queued.is_empty() || lane.in_flight.is_some();
-        match plan(lane.clock, queued, floor, now_us) {
+        match plan(lane.clock, queued, credited, floor, now_us) {
             Plan::WaitUntil(due_us) => {
                 let (wake, woken) = oneshot::channel();
                 lane.wake = Some(wake);
                 EmitterStep::Wait(due_us, woken)
+            }
+            Plan::WaitCredit => {
+                let (wake, woken) = oneshot::channel();
+                lane.wake = Some(wake);
+                EmitterStep::WaitCredit(woken)
             }
             Plan::Emit => {
                 let (emission, class) = match lane.in_flight {
@@ -928,15 +961,35 @@ impl<T> Refusal<T> {
 /// diagram). It returns when the lane is closed or belongs to a newer epoch.
 async fn emit(sender: OnionLinkSender, peer: Did, epoch: u64, scope: Scope) {
     loop {
+        // The credit is read before the lane's lock is taken; a release after the read is not
+        // lost, since the wait below resolves at once when credit is already available.
+        let credit = match scope.link_credit(peer) {
+            Ok(credit) => credit,
+            Err(error) => {
+                tracing::debug!(%peer, %error, "onion link emitter cannot read its link credit");
+                return;
+            }
+        };
         let now_us = sender.now_us();
-        let Ok(step) =
-            lock(&sender.state).map(|mut state| state.next(peer, epoch, sender.floor, now_us))
+        let credited = credit.is_available();
+        let Ok(step) = lock(&sender.state)
+            .map(|mut state| state.next(peer, epoch, sender.floor, credited, now_us))
         else {
             tracing::debug!(%peer, "onion link emitter lost its lane state");
             return;
         };
         match step {
             EmitterStep::Stop => return,
+            EmitterStep::WaitCredit(woken) => {
+                let available = credit.available().fuse();
+                futures::pin_mut!(available);
+                let woken = woken.fuse();
+                futures::pin_mut!(woken);
+                futures::select! {
+                    () = available => {},
+                    _ = woken => {},
+                }
+            }
             EmitterStep::Wait(due_us, woken) => {
                 let delay = Duration::from_micros(
                     u64::try_from(due_us.saturating_sub(now_us)).unwrap_or(u64::MAX),
@@ -1037,13 +1090,14 @@ mod tests {
                 clock.last_real_us = Some(real_us);
                 queued += 1;
             }
-            match plan(clock, queued > 0, floor, now_us) {
+            match plan(clock, queued > 0, true, floor, now_us) {
                 Plan::Emit => {
                     let real = queued > 0;
                     queued = queued.saturating_sub(1);
                     clock.last_start = Some((now_us, units));
                     starts.push((now_us, real));
                 }
+                Plan::WaitCredit => unreachable!("the schedule is always credited"),
                 Plan::WaitUntil(due_us) => {
                     now_us = pending
                         .peek()
@@ -1084,6 +1138,60 @@ mod tests {
         assert!(OnionIdleFloor::per_unit(Duration::from_secs(4)).is_some());
         assert_eq!(OnionIdleFloor::per_unit(Duration::from_millis(999)), None);
         assert!(OnionIdleFloor::DEFAULT.slot_micros(1) > slot_micros(1));
+    }
+
+    /// Credit (#904): with no credit the schedule emits nothing, due or not, and a credited slot
+    /// is decided as before, so credit only ever delays a start (Budget safety holds).
+    #[test]
+    fn test_no_credit_emits_nothing_and_credit_only_delays() {
+        let floor = OnionIdleFloor::DEFAULT;
+        let units = units_of(OnionLoopClass::DEFAULT);
+        let clock = LinkClock {
+            last_real_us: Some(0),
+            last_start: Some((0, units)),
+        };
+        let due_us = slot_micros(units);
+
+        assert_eq!(
+            plan(clock, true, false, floor, 10 * due_us),
+            Plan::WaitCredit
+        );
+        assert_eq!(
+            plan(LinkClock::default(), true, false, floor, 0),
+            Plan::WaitCredit
+        );
+        assert_eq!(
+            plan(clock, true, true, floor, due_us - 1),
+            Plan::WaitUntil(due_us)
+        );
+        assert_eq!(plan(clock, true, true, floor, 10 * due_us), Plan::Emit);
+    }
+
+    /// Volume hiding (#904): an uncredited lane takes no queued cell and arms its wake-up, and
+    /// once credited it emits its queued real cell exactly as it would have.
+    #[test]
+    fn test_an_uncredited_lane_holds_its_queue_until_credit_returns() {
+        let peer = Did::from(14_u32);
+        let class = OnionLoopClass::DEFAULT;
+        let floor = OnionIdleFloor::DEFAULT;
+        let mut state = OrderedSendState::<u32>::default();
+        let epoch = state.open(peer, 0).expect("a new lane");
+        assert!(state
+            .enqueue(peer, 7, 1, class, 0, QueueRole::Relay)
+            .is_ok());
+
+        assert!(matches!(
+            state.next(peer, epoch, floor, false, 0),
+            EmitterStep::WaitCredit(_)
+        ));
+        assert_eq!(
+            state.lanes.get(&peer).map(|lane| lane.queued.len()),
+            Some(1)
+        );
+        assert!(matches!(
+            state.next(peer, epoch, floor, true, 0),
+            EmitterStep::Emit(Emission::Real(7))
+        ));
     }
 
     /// Floor: an idle link emits exactly `r_idle`, one cover per unit period.
@@ -1200,29 +1308,29 @@ mod tests {
             .enqueue(peer, 2, 7, class, 0, QueueRole::Relay)
             .is_ok());
         assert!(matches!(
-            state.next(peer, epoch, floor, 0),
+            state.next(peer, epoch, floor, true, 0),
             EmitterStep::Emit(Emission::Real(1))
         ));
         // One slot later, with the first cell still in flight: cover.
         let slot_us = slot_micros(1);
         assert!(matches!(
-            state.next(peer, epoch, floor, 1),
+            state.next(peer, epoch, floor, true, 1),
             EmitterStep::Wait(due, _) if due == slot_us
         ));
         assert!(matches!(
-            state.next(peer, epoch, floor, slot_us),
+            state.next(peer, epoch, floor, true, slot_us),
             EmitterStep::Emit(Emission::Cover(_))
         ));
         state.complete(peer, epoch);
         assert!(matches!(
-            state.next(peer, epoch, floor, 2 * slot_us),
+            state.next(peer, epoch, floor, true, 2 * slot_us),
             EmitterStep::Emit(Emission::Real(2))
         ));
         state.complete(peer, epoch);
 
         assert!(state.close(peer, 0).is_empty());
         assert!(matches!(
-            state.next(peer, epoch, floor, 3 * slot_us),
+            state.next(peer, epoch, floor, true, 3 * slot_us),
             EmitterStep::Stop
         ));
         assert_eq!(state.quota.total(), 0);
@@ -1265,11 +1373,11 @@ mod tests {
 
         assert_ne!(first, second);
         assert!(matches!(
-            state.next(peer, first, floor, 0),
+            state.next(peer, first, floor, true, 0),
             EmitterStep::Stop
         ));
         assert!(matches!(
-            state.next(peer, second, floor, 0),
+            state.next(peer, second, floor, true, 0),
             EmitterStep::Emit(Emission::Cover(_))
         ));
     }
@@ -1291,17 +1399,17 @@ mod tests {
             .map_err(|_| Error::InvalidData)?;
 
         assert!(matches!(
-            state.next(peer, epoch, floor, 0),
+            state.next(peer, epoch, floor, true, 0),
             EmitterStep::Emit(Emission::Real(1))
         ));
         state.complete(peer, epoch);
         let large_slot = slot_micros(units_of(large));
         assert!(matches!(
-            state.next(peer, epoch, floor, slot_micros(1)),
+            state.next(peer, epoch, floor, true, slot_micros(1)),
             EmitterStep::Wait(due, _) if due == large_slot
         ));
         assert!(matches!(
-            state.next(peer, epoch, floor, large_slot),
+            state.next(peer, epoch, floor, true, large_slot),
             EmitterStep::Emit(Emission::Real(2))
         ));
         Ok(())
@@ -1317,10 +1425,10 @@ mod tests {
         let mut state = OrderedSendState::<u32>::default();
         let epoch = state.open(peer, 0).expect("a new lane");
         assert!(matches!(
-            state.next(peer, epoch, floor, 0),
+            state.next(peer, epoch, floor, true, 0),
             EmitterStep::Emit(Emission::Cover(_))
         ));
-        let EmitterStep::Wait(due, mut woken) = state.next(peer, epoch, floor, 1) else {
+        let EmitterStep::Wait(due, mut woken) = state.next(peer, epoch, floor, true, 1) else {
             panic!("an idle link waits for its floor");
         };
         assert_eq!(due, floor.slot_micros(1));
@@ -1330,7 +1438,7 @@ mod tests {
             .is_ok());
         assert_eq!(woken.try_recv(), Ok(Some(())));
         assert!(matches!(
-            state.next(peer, epoch, floor, 20_000),
+            state.next(peer, epoch, floor, true, 20_000),
             EmitterStep::Emit(Emission::Real(9))
         ));
     }
@@ -1368,7 +1476,7 @@ mod tests {
         };
 
         assert!(matches!(
-            state.next(peer, epoch, floor, 0),
+            state.next(peer, epoch, floor, true, 0),
             EmitterStep::Emit(Emission::Real(0))
         ));
         state.complete(peer, epoch);
@@ -1417,7 +1525,7 @@ mod tests {
         };
 
         assert!(matches!(
-            state.next(peer, epoch, floor, 0),
+            state.next(peer, epoch, floor, true, 0),
             EmitterStep::Emit(Emission::Real(0))
         ));
         state.complete(peer, epoch);
@@ -1443,7 +1551,7 @@ mod tests {
 
         state.shutdown(0);
         assert!(matches!(
-            state.next(peer, epoch, OnionIdleFloor::DEFAULT, 0),
+            state.next(peer, epoch, OnionIdleFloor::DEFAULT, true, 0),
             EmitterStep::Stop
         ));
         assert_eq!(state.open(peer, 0), None);
@@ -1459,14 +1567,14 @@ mod tests {
         let mut state = OrderedSendState::<u32>::default();
         let first = state.open(peer, 0).expect("a new lane");
         assert!(matches!(
-            state.next(peer, first, floor, 0),
+            state.next(peer, first, floor, true, 0),
             EmitterStep::Emit(Emission::Cover(_))
         ));
         state.close(peer, 0);
         let second = state.open(peer, 1).expect("a new lane");
 
         assert!(matches!(
-            state.next(peer, second, floor, 1),
+            state.next(peer, second, floor, true, 1),
             EmitterStep::Wait(due, _) if due == floor.slot_micros(1)
         ));
         state.close(peer, 0);
@@ -1474,7 +1582,13 @@ mod tests {
             .open(peer, ONION_FORWARD_MAX_VALIDITY_MS * 1_000)
             .expect("a new lane");
         assert!(matches!(
-            state.next(peer, third, floor, ONION_FORWARD_MAX_VALIDITY_MS * 1_000),
+            state.next(
+                peer,
+                third,
+                floor,
+                true,
+                ONION_FORWARD_MAX_VALIDITY_MS * 1_000
+            ),
             EmitterStep::Emit(Emission::Cover(_))
         ));
     }
@@ -1491,12 +1605,12 @@ mod tests {
             .enqueue(peer, 1, 1, large, 0, QueueRole::Relay)
             .map_err(|_| Error::InvalidData)?;
         assert!(matches!(
-            state.next(peer, epoch, floor, 0),
+            state.next(peer, epoch, floor, true, 0),
             EmitterStep::Emit(Emission::Real(1))
         ));
         state.complete(peer, epoch);
         assert!(matches!(
-            state.next(peer, epoch, floor, slot_micros(units_of(large))),
+            state.next(peer, epoch, floor, true, slot_micros(units_of(large))),
             EmitterStep::Emit(Emission::Cover(class)) if class == large
         ));
         Ok(())

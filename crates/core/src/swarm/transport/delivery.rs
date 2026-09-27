@@ -6,11 +6,14 @@ use bytes::Bytes;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
+use rings_transport::core::transport::SendAcceptance;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::delivery::DeliveryFuture;
 
 use super::connection::await_bounded_connection_close;
 use super::connection::DATA_CHANNEL_CLOSE_TIMEOUT;
+use super::link_credit::CreditClaim;
+use super::link_credit::SendCredit;
 use super::outbound::DetachedAdmission;
 use super::outbound::DetachedAdmissionClaim;
 use super::AdmittedConnection;
@@ -226,37 +229,125 @@ impl ChunkSendPermit {
     }
 }
 
+/// The frame send discipline of one frame: the connection generation it leaves on, the route and
+/// stop conditions that cancel it while it is revocable, and how it is logged.
+#[derive(Clone, Copy)]
+pub(super) struct FrameSend<'a> {
+    /// The connection generation the frame leaves on.
+    pub(super) admitted: &'a AdmittedConnection,
+    /// The route condition the frame is sent under.
+    pub(super) permit: &'a ChunkSendPermit,
+    /// The caller's and the scheduler's stop.
+    pub(super) stop: &'a TransferStop,
+    /// The detached transfer's irrevocability claim, if the transfer is detached.
+    pub(super) detached_admission: Option<&'a DetachedAdmission>,
+    /// The peer, for logs and errors.
+    pub(super) did: Did,
+    /// The send context, for logs and errors.
+    pub(super) context: &'static str,
+}
+
+/// Send one frame of `send` on its data channel, after claiming one credit of `credit`, the link
+/// generation's flow control (#904), when the frame is a payload frame. A link-control frame
+/// passes `None` and waits for no credit.
+///
+/// ```text
+/// credit ⇒ wait until a credit is claimable (cancellable as the send is, no accept timeout)
+/// send   ⇒ the accept phase, bounded by DATA_CHANNEL_SEND_ACCEPT_TIMEOUT
+/// the frame left (irrevocable, or accepted) ⇒ commit the credit;  otherwise ⇒ refund it
+/// ```
 pub(super) async fn send_data_with_timeout(
-    admitted: &AdmittedConnection,
+    send: &FrameSend<'_>,
     data: Bytes,
-    permit: &ChunkSendPermit,
-    stop: &TransferStop,
-    detached_admission: Option<&DetachedAdmission>,
-    did: Did,
-    context: &'static str,
+    credit: Option<&Arc<SendCredit>>,
 ) -> ChunkSendProgress<Result<DeliveryFuture>> {
-    let bytes = data.len();
-    let send_permit = build_transport_send_permit(admitted, permit, stop, detached_admission);
+    let claim = match credit {
+        Some(credit) => match await_credit(send, credit).await {
+            Ok(claim) => Some(claim),
+            Err(reason) => return ChunkSendProgress::Cancelled(reason),
+        },
+        None => None,
+    };
+    let send_permit = build_transport_send_permit(
+        send.admitted,
+        send.permit,
+        send.stop,
+        send.detached_admission,
+    );
     let acceptance = send_permit.acceptance();
-    let send = admitted.connection().send_data(data, send_permit).fuse();
+    let progress = send_accepted(send, data, send_permit, &acceptance).await;
+    if let Some(claim) = claim {
+        if acceptance.is_irrevocable() || matches!(progress, ChunkSendProgress::Ready(Ok(_))) {
+            claim.commit();
+        }
+    }
+    progress
+}
+
+/// Wait until one credit of `credit` is claimable and claim it, re-checking the send's
+/// cancellation on every change and every poll, as the accept phase does.
+///
+/// # Errors
+///
+/// The cancellation reason, once the send is cancelled before a credit was claimed.
+async fn await_credit(
+    send: &FrameSend<'_>,
+    credit: &Arc<SendCredit>,
+) -> std::result::Result<CreditClaim, ChunkSendCancelReason> {
+    loop {
+        if let Some(claim) = credit.try_claim() {
+            return Ok(claim);
+        }
+        if let Some(reason) = chunk_send_cancel_reason(send.admitted, send.permit, send.stop) {
+            log_chunk_send_cancel(send.did, send.context, &reason);
+            return Err(reason);
+        }
+        let changed = credit.changed().fuse();
+        let poll = sleep(CHUNK_SEND_PERMIT_POLL_INTERVAL).fuse();
+        pin_mut!(changed, poll);
+        select! {
+            _ = changed => {},
+            _ = poll => {},
+        }
+    }
+}
+
+/// The accept phase of [`send_data_with_timeout`]: hand `data` to the data channel, cancelled
+/// while revocable, bounded by the accept timeout.
+async fn send_accepted(
+    send: &FrameSend<'_>,
+    data: Bytes,
+    send_permit: SendPermit,
+    acceptance: &SendAcceptance,
+) -> ChunkSendProgress<Result<DeliveryFuture>> {
+    let FrameSend {
+        admitted,
+        permit,
+        stop,
+        did,
+        context,
+        ..
+    } = *send;
+    let bytes = data.len();
+    let transmit = admitted.connection().send_data(data, send_permit).fuse();
     let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_TIMEOUT).fuse();
-    pin_mut!(send, timeout);
+    pin_mut!(transmit, timeout);
 
     loop {
         if acceptance.is_irrevocable() {
-            return await_irrevocable_send(send, timeout, admitted, did, bytes, context).await;
+            return await_irrevocable_send(transmit, timeout, admitted, did, bytes, context).await;
         }
         if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
             if acceptance.try_cancel() {
                 log_chunk_send_cancel(did, context, &reason);
                 return ChunkSendProgress::Cancelled(reason);
             }
-            return await_irrevocable_send(send, timeout, admitted, did, bytes, context).await;
+            return await_irrevocable_send(transmit, timeout, admitted, did, bytes, context).await;
         }
         let poll = sleep(CHUNK_SEND_PERMIT_POLL_INTERVAL).fuse();
         pin_mut!(poll);
         select! {
-            result = send => {
+            result = transmit => {
                 if result.is_err() && !acceptance.is_irrevocable() {
                     if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
                         log_chunk_send_cancel(did, context, &reason);

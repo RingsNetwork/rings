@@ -10,10 +10,14 @@ use bytes::Bytes;
 
 pub(super) const INBOUND_FRAME_CAPACITY: usize = 256;
 const INBOUND_FRAME_BYTE_CAPACITY: usize = 16 * 1024 * 1024;
+/// The share of the node-wide bound, in quarters, from which the node counts as congested: a
+/// receiver pacing its peers by credit returns more slowly past it.
+const INBOUND_CONGESTION_QUARTERS: usize = 3;
 /// Raw frames one peer may have in flight at this end, admitted but not yet released by the
 /// protocol callback: the per-peer bound every protocol-side per-peer budget derives from.
 pub const INBOUND_PEER_FRAME_CAPACITY: usize = 64;
-pub(super) const INBOUND_PEER_BYTE_CAPACITY: usize = 4 * 1024 * 1024;
+/// Raw bytes one peer may have in flight at this end, admitted but not yet released.
+pub const INBOUND_PEER_BYTE_CAPACITY: usize = 4 * 1024 * 1024;
 
 #[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
 pub(super) const INBOUND_DATA_CHANNEL_CAPACITY: usize = 4;
@@ -42,6 +46,17 @@ impl InboundFrameCapacity {
         Self {
             state: Mutex::new(InboundFrameState::default()),
         }
+    }
+
+    /// Whether the node-wide bound is at least three quarters full, in frames or in bytes: the
+    /// node is congested, and a receiver that paces its peers by credit returns it more slowly.
+    pub fn is_congested(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.frames * 4 >= INBOUND_FRAME_CAPACITY * INBOUND_CONGESTION_QUARTERS
+            || state.bytes * 4 >= INBOUND_FRAME_BYTE_CAPACITY * INBOUND_CONGESTION_QUARTERS
     }
 
     #[cfg(test)]
@@ -141,8 +156,15 @@ pub enum InboundFrameAdmission {
         /// Maximum permitted wire bytes.
         max_bytes: usize,
     },
-    /// Node-wide or per-peer raw-frame capacity was unavailable.
-    CapacityExceeded,
+    /// Node-wide or per-peer raw-frame capacity was unavailable; the refused frame's payload,
+    /// which the callback learns of ([`TransportCallback::on_inbound_frame_refused`]).
+    ///
+    /// [`TransportCallback::on_inbound_frame_refused`]:
+    /// crate::core::callback::TransportCallback::on_inbound_frame_refused
+    CapacityExceeded {
+        /// The payload of the refused frame.
+        payload: Bytes,
+    },
 }
 
 impl Drop for InboundFramePermit {

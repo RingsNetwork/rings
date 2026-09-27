@@ -28,6 +28,7 @@ use super::SharedSwarmCallback;
 use super::SwarmEvent;
 use super::TransportCallbackError;
 use crate::dht::Did;
+use crate::message::is_payload_frame;
 use crate::message::MessagePayload;
 use crate::swarm::detached::run_detached_or_inline;
 use crate::swarm::transport::ConnectionEventDisposition;
@@ -574,6 +575,20 @@ impl TransportCallback for InnerSwarmCallback {
         let (cid, msg, transport_capacity) = message.into_parts();
         self.submit_inbound_message(cid, msg, Some(transport_capacity))
             .await
+    }
+
+    /// A payload frame the transport refused for local capacity never reaches core, so it is
+    /// released here, at once, for its link's credit (#904): its sender counted it sent.
+    fn on_inbound_frame_refused(&self, cid: &str, payload: &[u8]) {
+        // Test builds: the frame was sent and arrived; the transport ended it.
+        #[cfg(test)]
+        drop(self.processor.logical.transport.frames_for_test().arrive());
+        if !is_payload_frame(payload) {
+            return;
+        }
+        if let Some(ledger) = self.processor.release_ledger(Did::from_str(cid).ok()) {
+            ledger.release();
+        }
     }
 
     async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {

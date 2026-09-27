@@ -24,6 +24,7 @@ use rings_core::dht::Did;
 use rings_core::swarm::callback::PeerLink;
 use rings_core::swarm::callback::PeerTransition;
 use rings_core::swarm::callback::SharedSwarmCallback;
+use rings_core::swarm::LinkCredit;
 use rings_runtime::MaybeSendSync;
 
 use super::Ctx;
@@ -114,6 +115,14 @@ impl Core {
         self.processor
             .swarm
             .admitted_links()
+            .map_err(Error::InternalError)
+    }
+
+    /// The flow-control credit of `peer`'s current link generation (see `Swarm::link_credit`).
+    pub(crate) fn link_credit(&self, peer: Did) -> Result<LinkCredit> {
+        self.processor
+            .swarm
+            .link_credit(peer)
             .map_err(Error::InternalError)
     }
 
@@ -247,6 +256,12 @@ impl Scope {
     /// Retire exactly the admitted generation `link`.
     pub(crate) async fn disconnect_link(&self, link: PeerLink) -> Result<()> {
         self.core.disconnect_link(link).await
+    }
+
+    /// The flow-control credit of `peer`'s current link generation: a sender that shapes its
+    /// own emission paces itself on it (#904).
+    pub(crate) fn link_credit(&self, peer: Did) -> Result<LinkCredit> {
+        self.core.link_credit(peer)
     }
 
     /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).

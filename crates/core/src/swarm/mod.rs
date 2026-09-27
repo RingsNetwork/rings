@@ -16,6 +16,8 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub use builder::SwarmBuilder;
+pub use transport::link_credit::LinkCredit;
+pub use transport::link_credit::LINK_CREDIT_WINDOW;
 
 use self::callback::InnerSwarmCallback;
 use crate::dht::Chord;
@@ -240,6 +242,15 @@ impl Swarm {
     /// admitted links, so an application keying state by admitted link can size it by `𝓡`.
     pub fn connection_registry_capacity(&self) -> Result<usize> {
         self.transport.connection_registry_capacity()
+    }
+
+    /// The flow-control credit of `peer`'s current link generation, the one its frames leave on,
+    /// as this sending end sees it (#904): whether a payload frame may be sent on it now, and a
+    /// wake-up for when it may. Every payload frame waits for credit in the outbound path
+    /// anyway; the view lets a sender that shapes its own emission (the onion link emitter)
+    /// pace itself on the receiver's release rate.
+    pub fn link_credit(&self, peer: Did) -> Result<LinkCredit> {
+        self.transport.link_credit(peer)
     }
 
     /// Retire the admitted generation `link` and close its transport. It is a no-op unless
