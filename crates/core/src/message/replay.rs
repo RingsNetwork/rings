@@ -1,17 +1,29 @@
 //! Destination-scoped replay protection for signed transactions.
 //!
-//! The stream identity is `(network_id, origin account DID, destination DID)`. A receiver keeps
-//! a fixed-width window per stream, so delivery may be reordered within the window without
-//! turning a normal gap into an omission claim. The state transition is pure in [`observe`];
-//! [`TransactionReplay`] is the effect boundary that serializes transitions and persists an
-//! admitted state before returning it to the inbound dispatcher.
+//! The stream identity is `(network_id, origin account DID, destination DID, traffic class)`
+//! (#898). A receiver keeps a fixed-width window per stream, so delivery may be reordered within
+//! the window without turning a normal gap into an omission claim. The state transition is pure
+//! in [`observe`]; [`TransactionReplay`] is the effect boundary that serializes transitions and
+//! persists an admitted state before returning it to the inbound dispatcher.
 //!
-//! Persistence is one versioned snapshot under one storage key. Sender and receiver tables each
-//! have a hard stream-count bound and never evict: once the bound is reached, a new stream fails
-//! closed. Existing stream records remain durable until an operator explicitly removes the
-//! replay store. Deleting that store deletes the corresponding replay guarantee. Runtime-local
-//! origin quota state shares the serialized receiver commit boundary but is not part of the
-//! snapshot.
+//! **Law (in-class order).** The sender signs a class's transactions in sequence order and its
+//! outbound scheduler keeps them in that order on the class lane, with fewer than
+//! [`TRANSACTION_REPLAY_WINDOW`] in flight. Each class lane is pinned to one ordered data channel
+//! of the connection, so a class's stream reaches this admission in sequence order whatever the
+//! other classes' channels do, and a stall on one class's channel holds only that class. An
+//! honest stream crossing one edge is therefore never rejected as stale; a class lane that is not pinned (frames
+//! spread over several channels) loses this law, since another channel can carry later
+//! sequences of the class past a stalled one.
+//!
+//! Persistence is one versioned snapshot under one storage key, whose canonical encoding is at
+//! most [`TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES`]. The load that finds no snapshot under that key
+//! is the one-time cutover from the shared-stream key used before #898: it deletes the former
+//! snapshot without reading it (best effort, counted on failure) and persists the empty
+//! class-stream snapshot. Sender and receiver tables each have a hard stream-count bound and
+//! never evict: once the bound is reached, a new stream fails closed. Existing stream records
+//! remain durable until an operator explicitly removes the replay store. Deleting that store
+//! deletes the corresponding replay guarantee. Runtime-local origin quota state shares the
+//! serialized receiver commit boundary but is not part of the snapshot.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -42,8 +54,48 @@ use crate::utils::Instant;
 pub const TRANSACTION_REPLAY_WINDOW: usize = 32;
 const TRANSACTION_REPLAY_WINDOW_U64: u64 = 32;
 const TRANSACTION_REPLAY_BACKTRACK: u64 = 31;
+/// Account-to-destination pairs whose four class streams one runtime retains in full.
+const TRANSACTION_REPLAY_PAIR_CAPACITY: usize = 4096;
 /// Maximum sender streams and maximum receiver streams retained by one runtime.
-pub const TRANSACTION_REPLAY_STREAM_CAPACITY: usize = 4096;
+///
+/// A pair keeps one stream per traffic class (#898), so the table holds one stream per
+/// [`MessageCategory`] for each of 4096 pairs: 4096 origins that use every class, or
+/// proportionally more that use fewer. A pair's streams count separately, and a new stream
+/// fails closed at this bound whichever class it belongs to.
+pub const TRANSACTION_REPLAY_STREAM_CAPACITY: usize =
+    MessageCategory::COUNT * TRANSACTION_REPLAY_PAIR_CAPACITY;
+/// Largest canonical encoding of a [`StreamKey`]: the network id as a `u32` varint (5), two
+/// DIDs (43 each: a one-byte length and 42 hex characters) and the class tag (1).
+const STREAM_KEY_MAX_BYTES: usize = 5 + 2 * 43 + 1;
+/// Largest canonical encoding of a `u64` varint.
+const U64_MAX_BYTES: usize = 10;
+/// Largest canonical encoding of a [`SequenceState`]: `high`, then each window slot as a
+/// presence tag and a 32-byte digest.
+const SEQUENCE_STATE_MAX_BYTES: usize = U64_MAX_BYTES + TRANSACTION_REPLAY_WINDOW * (1 + 32);
+/// Largest varint length prefix of a snapshot part; parts stay below `2^28` bytes (asserted).
+const LENGTH_PREFIX_MAX_BYTES: usize = 4;
+
+/// Upper bound of the canonical encoding of a snapshot holding `streams` sender and `streams`
+/// receiver records:
+///
+/// ```text
+/// |snapshot| ≤ prefix + 2·prefix + streams·(2·|key| + |u64| + |window|)
+/// ```
+///
+/// the outer byte-string prefix, the two map lengths, and one sender record (key, last
+/// sequence) plus one receiver record (key, window) per stream.
+const fn snapshot_max_bytes(streams: usize) -> usize {
+    3 * LENGTH_PREFIX_MAX_BYTES
+        + streams * (2 * STREAM_KEY_MAX_BYTES + U64_MAX_BYTES + SEQUENCE_STATE_MAX_BYTES)
+}
+
+/// Upper bound, in bytes, of the canonical encoding of a full replay snapshot: about 19.7 MiB
+/// at [`TRANSACTION_REPLAY_STREAM_CAPACITY`] streams per table. Every admitted transition
+/// rewrites the snapshot, so this is also the largest single write of the replay store; a
+/// storage backend adds its own framing around it.
+pub const TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES: usize =
+    snapshot_max_bytes(TRANSACTION_REPLAY_STREAM_CAPACITY);
+const _: () = assert!(TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES < 1 << 28);
 /// Storage key of the replay snapshot: one sequence stream per `(origin, destination, class)`.
 const TRANSACTION_REPLAY_SNAPSHOT_KEY: &str = "rings-core:transaction-replay:class-streams";
 /// Storage key of the snapshot whose streams were shared by every class (before #898).
@@ -59,7 +111,8 @@ const SHARED_STREAM_SNAPSHOT_KEY: &str = "rings-core:transaction-replay";
 /// class lane and deliberately reorders across lanes, so a stream shared by every class let a
 /// backlog in one lane fall behind later-sequenced traffic of another lane and be rejected as
 /// stale. With one stream per class, an honest sender's transactions reach the receiver in
-/// sequence order up to the lane's in-flight window, which is below the replay window.
+/// sequence order: the class lane keeps them FIFO with fewer in flight than the replay window,
+/// and the one data channel it is pinned to delivers them in that order.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct StreamKey {
     /// Overlay in which the transaction signature is valid.
@@ -395,23 +448,19 @@ impl TransactionReplay {
         self.quota_counters.snapshot()
     }
 
+    /// The snapshot, loaded from storage on the first operation of this runtime.
+    ///
+    /// The load that finds no class-stream snapshot is the #898 cutover: it retires the
+    /// shared-stream snapshot and persists the empty class-stream snapshot, so every later load,
+    /// in this run or after a restart, finds the class-stream key and never touches the former
+    /// one again.
     async fn load_snapshot<'a>(
         &self,
         slot: &'a mut Option<ReplaySnapshot>,
     ) -> Result<&'a mut ReplaySnapshot> {
         if slot.is_none() {
-            // Removing an absent key succeeds, so every first load repeats this idempotently.
-            if let Err(source) = self.storage.remove(SHARED_STREAM_SNAPSHOT_KEY).await {
-                self.counters
-                    .persistence_failure
-                    .fetch_add(1, Ordering::Relaxed);
-                return Err(Error::TransactionReplayPersistence {
-                    operation: "remove shared-stream snapshot",
-                    source: Box::new(source),
-                });
-            }
-            let loaded = match self.storage.get(TRANSACTION_REPLAY_SNAPSHOT_KEY).await {
-                Ok(snapshot) => snapshot.unwrap_or_default(),
+            let stored = match self.storage.get(TRANSACTION_REPLAY_SNAPSHOT_KEY).await {
+                Ok(snapshot) => snapshot,
                 Err(source) => {
                     self.counters
                         .persistence_failure
@@ -420,6 +469,15 @@ impl TransactionReplay {
                         operation: "load",
                         source: Box::new(source),
                     });
+                }
+            };
+            let loaded = match stored {
+                Some(snapshot) => snapshot,
+                None => {
+                    self.retire_shared_stream_snapshot().await;
+                    let fresh = ReplaySnapshot::default();
+                    self.persist(&fresh).await?;
+                    fresh
                 }
             };
             if loaded.sender.len() > TRANSACTION_REPLAY_STREAM_CAPACITY
@@ -436,6 +494,24 @@ impl TransactionReplay {
         slot.as_mut().ok_or(Error::TransactionReplayStateInvalid)
     }
 
+    /// Delete the shared-stream snapshot of the key used before #898, without reading it.
+    ///
+    /// Best effort: the former key is never read, so a failed deletion leaves only inert bytes.
+    /// It is counted as a persistence failure and logged, and admission continues.
+    async fn retire_shared_stream_snapshot(&self) {
+        if let Err(error) = self.storage.remove(SHARED_STREAM_SNAPSHOT_KEY).await {
+            self.counters
+                .persistence_failure
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                %error,
+                key = SHARED_STREAM_SNAPSHOT_KEY,
+                "failed to delete the shared-stream replay snapshot; it is never read"
+            );
+        }
+    }
+
+    /// Store `snapshot` under the class-stream key; a failure is counted and returned.
     async fn persist(&self, snapshot: &ReplaySnapshot) -> Result<()> {
         self.storage
             .put(TRANSACTION_REPLAY_SNAPSHOT_KEY, snapshot)
@@ -693,23 +769,19 @@ mod tests {
     /// and one shared counter. The scheduler then serves the class lanes in an arbitrary
     /// interleaving: each lane stays FIFO up to its in-flight window, whose frames may still
     /// arrive in any order (the lane window is below the replay window), and the lanes are
-    /// merged in any order, which lets one lane fall far behind the others.
+    /// merged in any order, which lets one lane fall far behind the others. The in-window
+    /// shuffle is conservative: a lane pinned to one ordered channel delivers in order.
     fn arrivals(seed: u64, per_class: u64, lane_window: usize) -> Vec<Sent> {
-        let classes = [
-            MessageCategory::DhtControl,
-            MessageCategory::Storage,
-            MessageCategory::E2e,
-            MessageCategory::Application,
-        ];
+        let class_count = u64::try_from(CLASSES.len()).expect("four classes");
         let mut state = seed | 1;
-        let mut lanes: Vec<Vec<Sent>> = vec![Vec::new(); classes.len()];
-        let mut class_next = [0_u64; 4];
-        for shared_sequence in 0..per_class * classes.len() as u64 {
-            let lane = usize::try_from(xorshift(&mut state) % 4).expect("small index");
+        let mut lanes: Vec<Vec<Sent>> = vec![Vec::new(); CLASSES.len()];
+        let mut class_next = [0_u64; MessageCategory::COUNT];
+        for shared_sequence in 0..per_class * class_count {
+            let lane = usize::try_from(xorshift(&mut state) % class_count).expect("small index");
             let class_sequence = class_next[lane];
             class_next[lane] += 1;
             lanes[lane].push(Sent {
-                class: classes[lane],
+                class: CLASSES[lane],
                 class_sequence,
                 shared_sequence,
             });
@@ -717,13 +789,13 @@ mod tests {
         for lane in lanes.iter_mut() {
             for window in lane.chunks_mut(lane_window) {
                 for index in (1..window.len()).rev() {
-                    let other =
-                        usize::try_from(xorshift(&mut state) % (index as u64 + 1)).expect("index");
+                    let bound = u64::try_from(index + 1).expect("index");
+                    let other = usize::try_from(xorshift(&mut state) % bound).expect("index");
                     window.swap(index, other);
                 }
             }
         }
-        let mut cursors = [0_usize; 4];
+        let mut cursors = [0_usize; MessageCategory::COUNT];
         let mut merged = Vec::new();
         while cursors
             .iter()
@@ -731,7 +803,7 @@ mod tests {
             .any(|(cursor, lane)| *cursor < lane.len())
         {
             // Favour one lane in long bursts so the others build a backlog behind it.
-            let lane = usize::try_from(xorshift(&mut state) % 4).expect("small index");
+            let lane = usize::try_from(xorshift(&mut state) % class_count).expect("small index");
             let burst = xorshift(&mut state) % 64;
             for _ in 0..burst {
                 if let Some(sent) = lanes[lane].get(cursors[lane]) {
@@ -969,38 +1041,81 @@ mod tests {
         assert_eq!(runtime.counters().persistence_failure, 1);
     }
 
+    /// The four classes of a class-keyed stream, in lane order.
+    const CLASSES: [MessageCategory; MessageCategory::COUNT] = [
+        MessageCategory::DhtControl,
+        MessageCategory::Storage,
+        MessageCategory::E2e,
+        MessageCategory::Application,
+    ];
+
+    /// The table retains every class stream of 4096 pairs; the next pair's stream fails closed.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn new_sender_stream_fails_closed_at_the_table_bound() -> Result<()> {
-        assert_eq!(TRANSACTION_REPLAY_STREAM_CAPACITY, 4096);
+        let pairs = u32::try_from(TRANSACTION_REPLAY_PAIR_CAPACITY)
+            .map_err(|_| Error::TransactionReplayStateInvalid)?;
         let runtime = TransactionReplay::new(Box::new(crate::storage::MemStorage::new()));
-        let destination = Did::from(1_u32);
+        let destination = Did::from(u32::MAX);
         {
             let mut state = runtime.state.lock().await;
             let snapshot = runtime.load_snapshot(&mut state.snapshot).await?;
-            for origin in 0_u32..4096 {
-                snapshot.sender.insert(
-                    StreamKey::new(
-                        1,
-                        Did::from(origin),
-                        destination,
-                        MessageCategory::Application,
-                    ),
-                    0,
-                );
+            for origin in 0..pairs {
+                for class in CLASSES {
+                    let key = StreamKey::new(1, Did::from(origin), destination, class);
+                    snapshot.sender.insert(key, 0);
+                }
             }
+            assert_eq!(snapshot.sender.len(), TRANSACTION_REPLAY_STREAM_CAPACITY);
             runtime.persist(snapshot).await?;
         }
         let new_key = StreamKey::new(
             1,
-            Did::from(4097_u32),
+            Did::from(pairs),
             destination,
             MessageCategory::Application,
         );
         assert!(matches!(
             runtime.reserve(new_key, NonZeroU64::MIN).await,
-            Err(Error::TransactionReplayStreamCapacityExceeded { capacity: 4096 })
+            Err(Error::TransactionReplayStreamCapacityExceeded {
+                capacity: TRANSACTION_REPLAY_STREAM_CAPACITY
+            })
         ));
+        Ok(())
+    }
+
+    /// Length of the canonical encoding of `value`.
+    fn encoded_len<T: Serialize>(value: &T) -> Result<usize> {
+        rings_codec::serialize(value)
+            .map(|bytes| bytes.len())
+            .map_err(|error| Error::InvalidMessage(error.to_string()))
+    }
+
+    /// The encoding bounds are exact at their maxima, and a snapshot of maximal records stays
+    /// within [`snapshot_max_bytes`].
+    #[test]
+    fn snapshot_encoding_is_bounded_by_its_record_maxima() -> Result<()> {
+        let key =
+            |origin: u32, class| StreamKey::new(u32::MAX, Did::from(origin), Did::from(0), class);
+        let window = SequenceState {
+            high: u64::MAX,
+            accepted: [Some(TransactionDigest::new([0xff; 32])); TRANSACTION_REPLAY_WINDOW],
+        };
+        assert_eq!(
+            encoded_len(&key(0, MessageCategory::Application))?,
+            STREAM_KEY_MAX_BYTES
+        );
+        assert_eq!(encoded_len(&u64::MAX)?, U64_MAX_BYTES);
+        assert_eq!(encoded_len(&window)?, SEQUENCE_STATE_MAX_BYTES);
+        // The figure SECURITY.md and the replay documentation state.
+        assert_eq!(TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES, 20_643_852);
+
+        let mut snapshot = ReplaySnapshot::default();
+        for (origin, class) in (0..).zip(CLASSES) {
+            snapshot.sender.insert(key(origin, class), u64::MAX);
+            snapshot.receiver.insert(key(origin, class), window.clone());
+        }
+        assert!(encoded_len(&snapshot)? <= snapshot_max_bytes(CLASSES.len()));
         Ok(())
     }
 
@@ -1121,6 +1236,8 @@ mod tests {
         inner: crate::storage::MemStorage<ReplaySnapshot>,
         /// Whether removing a record fails.
         fail_remove: bool,
+        /// Removals attempted.
+        removals: std::sync::atomic::AtomicUsize,
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -1131,7 +1248,11 @@ mod tests {
             inner
                 .put(SHARED_STREAM_SNAPSHOT_KEY, &ReplaySnapshot::default())
                 .await?;
-            Ok(Self { inner, fail_remove })
+            Ok(Self {
+                inner,
+                fail_remove,
+                removals: std::sync::atomic::AtomicUsize::new(0),
+            })
         }
     }
 
@@ -1154,6 +1275,7 @@ mod tests {
         }
 
         async fn remove(&self, key: &str) -> Result<()> {
+            self.removals.fetch_add(1, Ordering::SeqCst);
             if self.fail_remove {
                 return Err(Error::InvalidTransport);
             }
@@ -1170,7 +1292,8 @@ mod tests {
     }
 
     /// Cutover of #898: the first load deletes the shared-stream snapshot without reading it,
-    /// and admission proceeds on fresh per-class streams.
+    /// and admission proceeds on fresh per-class streams. A restart after it never deletes
+    /// again: it finds the class-stream snapshot the cutover persisted.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn test_first_load_deletes_the_shared_stream_snapshot_unread() -> Result<()> {
@@ -1194,26 +1317,44 @@ mod tests {
             .await?
             .is_some());
         assert_eq!(runtime.counters().persistence_failure, 0);
+
+        let restarted = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        assert_eq!(
+            restarted.admit(key, 1, digest(2)).await?,
+            SequenceVerdict::Advance
+        );
+        assert_eq!(storage.removals.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
-    /// A failed deletion of the shared-stream snapshot fails closed and is counted; the next
-    /// load retries it.
+    /// A failed deletion of the shared-stream snapshot is counted and admission continues: the
+    /// former key is never read, so it is left inert, and a restart does not retry it.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
-    async fn test_failed_shared_stream_deletion_fails_closed_and_is_counted() -> Result<()> {
-        let storage = CutoverStorage::holding_a_shared_stream_snapshot(true).await?;
-        let runtime = TransactionReplay::new(Box::new(storage));
+    async fn test_failed_shared_stream_deletion_is_counted_and_admission_continues() -> Result<()> {
+        let storage =
+            std::sync::Arc::new(CutoverStorage::holding_a_shared_stream_snapshot(true).await?);
+        let runtime = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
         let key = stream(SecretKey::random().address().into());
 
-        assert!(matches!(
-            runtime.admit(key, 0, digest(1)).await,
-            Err(Error::TransactionReplayPersistence {
-                operation: "remove shared-stream snapshot",
-                ..
-            })
-        ));
+        assert_eq!(
+            runtime.admit(key, 0, digest(1)).await?,
+            SequenceVerdict::First
+        );
         assert_eq!(runtime.counters().persistence_failure, 1);
+        assert!(storage
+            .inner
+            .get(SHARED_STREAM_SNAPSHOT_KEY)
+            .await?
+            .is_some());
+
+        let restarted = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        assert_eq!(
+            restarted.admit(key, 1, digest(2)).await?,
+            SequenceVerdict::Advance
+        );
+        assert_eq!(restarted.counters().persistence_failure, 0);
+        assert_eq!(storage.removals.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

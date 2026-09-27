@@ -20,15 +20,28 @@ the same delegator-to-destination stream, while two destinations advance indepen
 `class` is the traffic class (DHT control, storage, E2E, application) of the message the
 transaction carries, derived from its signed data on both sides, so it adds no wire field (#898).
 The outbound scheduler keeps order within a class lane only, with at most `OUTBOUND_LANE_WINDOW`
-(8, below the 32-slot window) transactions of a lane in flight. One stream per class therefore
+(8, below the 32-slot window) transactions of a lane in flight, and each class lane is pinned to
+one ordered data channel of the connection:
+
+```text
+channel(lane) = pool[lane mod |pool|]      DHT control -> 0, storage -> 1, E2E -> 2, application -> 3
+```
+
+A class's transactions therefore reach the receiver in the order the lane sent them, and a
+receive handler stalled on one channel holds only that channel's class. One stream per class
 never rejects an honest sender's transaction as stale, however the lanes are interleaved; a
-single stream shared by every class did, once one lane's backlog fell behind another's traffic.
+single stream shared by every class did, once one lane's backlog fell behind another's traffic,
+and so would one class spread over several channels, once a stalled channel let later sequences
+of the class overtake it by more than the window.
 This assumes a class's transactions reach the scheduler in signing order, as they do from one
 sending task.
 
 The per-class snapshot is stored under `rings-core:transaction-replay:class-streams`. The first load
-after the upgrade deletes the former shared-stream snapshot (`rings-core:transaction-replay`)
-without reading it, which resets every replay window once, as deleting the store does. An upgraded
+that finds no snapshot there deletes the former shared-stream snapshot
+(`rings-core:transaction-replay`) without reading it, which resets every replay window once, as
+deleting the store does, and then persists the empty per-class snapshot, so no later start touches
+the former key. The deletion is best effort: since the former key is never read, a failed deletion
+is counted as a persistence failure and logged, and admission continues. An upgraded
 sender's per-class sequences are stale to a node that has not upgraded, so the upgrade is
 network-wide and mandatory.
 
@@ -91,10 +104,15 @@ crash after persistence but before dispatch may lose the event. This is the deli
 persistence-before-dispatch boundary: it prevents duplicate dispatch but is not exactly-once
 execution because replay storage and application handlers do not share a transaction.
 
-Sender and receiver state are stored in one versioned snapshot. Each table retains at most 4096
-streams, and each receiver stream has exactly 32 hot digest slots. New streams fail closed at the
+Sender and receiver state are stored in one versioned snapshot. Each table retains at most
+`TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class stream of 4096
+account-destination pairs, or more pairs that use fewer classes. Each receiver stream has exactly
+32 hot digest slots. A full snapshot's canonical encoding is at most
+`TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES` = 20,643,852 bytes (about 19.7 MiB): per stream, a
+92-byte key with its 10-byte last sequence and a 92-byte key with its 1066-byte window, plus
+length prefixes. Every admission rewrites the snapshot, so this is also the largest single write. New streams fail closed at the
 bound; there is no LRU eviction or sender-controlled reset. The native daemon keeps the snapshot
-in a dedicated 16 MiB atomic file store, and browser providers keep it in a dedicated IndexedDB
+in a dedicated 32 MiB atomic file store, and browser providers keep it in a dedicated IndexedDB
 store. A custom `SwarmBuilder` or `ProcessorBuilder` must supply durable `ReplayStorage` to retain
 the restart guarantee; their in-memory default guarantees replay rejection only for the lifetime
 of that runtime.
@@ -112,7 +130,9 @@ begins with the `RINGS-PAYLOAD` marker, and the replay store key is
 `rings-core:transaction-replay` (see [Delegation References](delegation-references.md)). Payloads
 without the current marker are rejected before deserialization. There is no dual decoder,
 negotiation, feature flag, downgrade path, or legacy fallback, and no version behind any of these
-names: the protocol is not versioned before 1.0. Mixed-version overlays are unsupported.
+names: the protocol is not versioned before 1.0. Mixed-version overlays are unsupported. Per-class
+streams (#898) are the next cutover: the store key becomes
+`rings-core:transaction-replay:class-streams`, and every node, seeds included, upgrades together.
 
 ## Non-guarantees
 

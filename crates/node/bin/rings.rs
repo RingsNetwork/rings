@@ -63,7 +63,12 @@ use tokio::task::JoinSet;
 
 const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
-const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 16 * 1024 * 1024;
+/// Byte budget of the native replay store: one full replay snapshot
+/// ([`TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES`](rings_node::prelude::rings_core::message::TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES),
+/// about 19.7 MiB) and its file-record framing, with
+/// room left for the former shared-stream record until the first load after the #898 upgrade
+/// deletes it.
+const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 32 * 1024 * 1024;
 
 fn onion_entry_guard_storage_path(data_storage_path: &str) -> String {
     let data_path = Path::new(data_storage_path);
@@ -1356,6 +1361,7 @@ mod tests {
     use clap::CommandFactory;
     use clap::FromArgMatches;
     use rings_node::logging::LogLevel;
+    use rings_node::prelude::rings_core::message::TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES;
 
     use super::await_gateway_startup;
     use super::await_task_cleanup;
@@ -1363,6 +1369,7 @@ mod tests {
     use super::provisional_evidence_storage_path;
     use super::transaction_replay_storage_path;
     use super::Cli;
+    use super::TRANSACTION_REPLAY_STORAGE_CAPACITY;
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
         let matches = Cli::command()
@@ -1415,6 +1422,19 @@ mod tests {
             onion_entry_guard_storage_path("/tmp/rings/data"),
             "/tmp/rings/onion-entry-guards"
         );
+    }
+
+    /// A full replay snapshot always fits the native replay store, so the stream-count bound,
+    /// not the store's budget, is what fails closed.
+    #[test]
+    fn test_transaction_replay_storage_holds_a_full_snapshot(
+    ) -> Result<(), std::num::TryFromIntError> {
+        // The file record frames the snapshot with its storage key,
+        // `rings-core:transaction-replay:class-streams` (43 bytes), and a length prefix.
+        const RECORD_FRAMING_BYTES: usize = 64;
+        let capacity = usize::try_from(TRANSACTION_REPLAY_STORAGE_CAPACITY)?;
+        assert!(TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES + RECORD_FRAMING_BYTES <= capacity);
+        Ok(())
     }
 
     #[test]

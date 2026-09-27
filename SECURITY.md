@@ -198,19 +198,30 @@ account DID recovered from the delegated delegation, the final destination DID, 
 class the transaction's signed message implies (#898). Order is claimed only within a class, because
 only a class lane of the outbound scheduler preserves it; one stream per class keeps an honest
 sender's transactions within the window however the lanes are interleaved, since a lane keeps fewer
-transactions in flight than the window holds. This assumes a class's transactions reach the
+transactions in flight than the window holds. Each class lane is pinned to one ordered data channel
+of the connection (`channel(lane) = pool[lane mod |pool|]`, one lane per class), so a class's frames
+reach the receiver in the order the lane sent them, and a stalled receive handler on one channel
+holds only that channel's class; spreading one class over several channels would let later
+sequences overtake a stalled one past the window. This assumes a class's transactions reach the
 scheduler in signing order, as they do from one sending task; concurrent originators of one class
 can still reorder between reserving a sequence and submitting it.
 
-The per-class snapshot is stored under `rings-core:transaction-replay:class-streams`. On its first
-load a node deletes the snapshot of the shared streams, stored under
-`rings-core:transaction-replay`, without reading it, since its keys cannot name a class. The upgrade
+The per-class snapshot is stored under `rings-core:transaction-replay:class-streams`. The first load
+that finds no snapshot there deletes the snapshot of the shared streams, stored under
+`rings-core:transaction-replay`, without reading it, since its keys cannot name a class, and then
+persists the empty per-class snapshot, so later starts never touch the former key. The deletion is
+best effort: the former key is never read, so a failed deletion is counted as a replay persistence
+failure and logged, and admission continues. The upgrade
 therefore resets every replay window once, exactly as deleting the replay store does: an unexpired
 transaction signed before the upgrade can be accepted once more. Old and new nodes do not
 interoperate on replay: an upgraded sender's per-class sequences restart at zero and are stale to a
 node that still keeps one shared stream, so the release that ships per-class streams is a mandatory
 network-wide upgrade. The final destination persists a fixed 32-sequence acceptance window per
-stream before application validation and handler dispatch. Exact duplicates, conflicting
+stream before application validation and handler dispatch. Each of the sender and receiver tables
+holds at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096 streams: every class stream of 4096
+account-destination pairs, or more pairs that use fewer classes. A full snapshot's canonical
+encoding is at most `TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES` (20,643,852 bytes, about 19.7 MiB), and
+each admission rewrites it, so that is also the largest single write of the replay store. Exact duplicates, conflicting
 transactions at one sequence, and sequences below the retained window are rejected as separate typed
 verdicts. Delegation-key rotation does not reset the account stream, sender timestamps do not order
 it, and intermediate Chord relays keep no origin replay state.
@@ -527,14 +538,25 @@ executor/gate service and delivery, timeout or cancellation progress.
 Each class lane keeps at most `OUTBOUND_LANE_WINDOW` (8) transfers in flight
 (#899) instead of waiting for each delivery before its next transfer, so
 consecutive messages reach the peer back to back and the native SCTP delayed ACK
-no longer paces them. The window stays strictly below `TRANSACTION_REPLAY_WINDOW`,
-a compile-time assertion, so in-lane pipelining never reorders a class's
-transactions beyond the receiver's replay window. Within a lane, transfers start
-in FIFO order and a transfer that still has frames to admit holds the wire, so
-chunked transfers stay contiguous. Every transfer keeps its own capacity permit
-and delivery future, so the per-peer capacity bound is unchanged and each outcome
-is attributed to its own transfer; cancellation and shutdown settle all in-flight
-transfers.
+no longer paces them. Each class lane sends on the one data channel it is pinned
+to, so a class's frames arrive in the order the lane admitted them; the window
+stays strictly below `TRANSACTION_REPLAY_WINDOW` (a compile-time assertion), so
+even a reordering of the frames in flight would stay inside the receiver's replay
+window. Within a lane, transfers start in FIFO order and a transfer that still has
+frames to admit holds the wire, so chunked transfers stay contiguous. The window
+pipelines whole transfers, not the frames of one: a chunked message (larger than
+one frame) admits its next frame only once the previous one is delivered, so it
+still pays the per-frame delayed-ACK tail and holds its lane's wire until its last
+frame is admitted. Every transfer keeps its own capacity permit and delivery
+future, so the per-peer capacity bound is unchanged and each outcome is attributed
+to its own transfer; cancellation and shutdown settle all in-flight transfers.
+
+A frame's delivery deadline measures a stall, not a queue position: a frame
+expires only once the connection has confirmed no delivery for the whole deadline
+since the later of the frame's admission and the connection's last confirmed
+delivery. A slow link that keeps delivering a full window therefore never expires
+frames queued behind the head, while a link that stops delivering still fails
+after one deadline.
 
 Receipt frees the notification slot before scanning; scans never read ingress.
 Shutdown releases all batch ownership before publishing its collected results.

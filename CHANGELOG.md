@@ -6,9 +6,15 @@
   waiting for each delivery before the next (#899). On native, a delivery is the peer's SCTP
   SACK, which the receiver delays by up to 200 ms; a stop-and-wait lane paid that per message.
   On native loopback, 512 awaited 16 KiB sends go from 13.9 to about 1360 messages/s with no
-  send over 150 ms. The window stays below the 32-sequence replay window, so in-lane pipelining
-  never reorders a class beyond it. Transfers still start in FIFO order, chunked transfers stay
-  contiguous, and each transfer keeps its capacity permit and delivery outcome.
+  send over 150 ms. Each class lane is pinned to one data channel, so a class's frames arrive in
+  lane order, and the window stays below the 32-sequence replay window. Transfers still start in
+  FIFO order, chunked transfers stay contiguous, and each transfer keeps its capacity permit and
+  delivery outcome. The window pipelines whole transfers: a chunked message still admits its
+  next frame only once the previous one is delivered, so it pays the per-frame delayed-ACK tail
+  and holds its lane's wire until its last frame is admitted. A frame's delivery deadline now
+  measures a stall: it expires only after a full deadline with no confirmed delivery on the
+  connection since its admission, so a slow link draining a full window never expires the frames
+  queued behind the head.
 
 - Confirm WebRTC delivery on the data channel's `bufferedamountlow`, `close` and `error`
   events instead of polling `bufferedAmount` every 300 ms (#887). Each channel multiplexes its
@@ -36,6 +42,16 @@
 
 ### Breaking changes
 
+- Pin each outbound class lane to one data channel of a connection (#906). The transport pool
+  selects a channel by lane, `channel(lane) = pool[lane mod |pool|]`, instead of rotating over
+  the channels, so the messages of one lane reach the remote handler in send order and a
+  receiver handler stalled on one channel holds only that channel's lane. Core sends DHT control
+  (and link control), storage, end-to-end and application traffic on lanes 0 to 3.
+  `ConnectionInterface::send_message_with_permit` takes a `ChannelLane`; `send_message` uses the
+  default lane. `RoundRobin` and `RoundRobinPool` become `LanePool` and `ChannelPool`, `select`
+  takes the lane, and `Error::RoundRobinPoolEmpty` becomes `Error::ChannelPoolEmpty`. No wire
+  change.
+
 - Key transaction replay by traffic class: `StreamKey = (network, origin, destination, class)`
   (#898). One stream shared by every class let DHT control traffic overtake an application
   backlog by more than the replay window, so honest transactions were rejected as
@@ -45,7 +61,12 @@
   mandatory network-wide upgrade, seeds included.** The replay snapshot moves to
   `rings-core:transaction-replay:class-streams`; the first load deletes the former
   `rings-core:transaction-replay` snapshot unread, resetting every replay window once as deleting
-  the store does. `StreamKey::new` takes the class, `Transaction::stream_key` returns a `Result`,
+  the store does; that deletion is best effort (a failure is counted and logged, and admission
+  continues), and the cutover load persists the per-class snapshot so it is never retried. Each
+  replay table now holds `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096 streams, every class
+  stream of 4096 account-destination pairs, and a full snapshot encodes to at most
+  `TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES` (about 19.7 MiB, new export), which each admission
+  rewrites. `StreamKey::new` takes the class, `Transaction::stream_key` returns a `Result`,
   `Transaction::class` is new, and `PayloadSender`'s send and originate methods take a `Message`
   instead of any `Serialize` value, with `reserve_transaction_sequences` taking the class.
 
