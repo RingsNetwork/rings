@@ -14,6 +14,7 @@ use tokio::sync::Notify;
 use super::controlled;
 use super::DeliveryGate;
 use super::Event;
+use super::HeldDeliveries;
 
 thread_local! {
     /// Per-(test-)thread controlled-delivery state. Thread-local on purpose: a
@@ -55,6 +56,9 @@ thread_local! {
     pub(super) static NEXT_DELIVERY_GATE: RefCell<Option<Arc<DeliveryGate>>> = const { RefCell::new(None) };
     /// Completion gate retained by the delivery currently being executed.
     pub(super) static ACTIVE_DELIVERY_GATE: RefCell<Option<Arc<DeliveryGate>>> = const { RefCell::new(None) };
+    /// Completion gate that every delivery accepted while it is installed waits on.
+    pub(super) static HELD_DELIVERY_GATE: RefCell<Option<Arc<HeldDeliveries>>> =
+        const { RefCell::new(None) };
     /// Accept sends while dropping their receiver-side message callbacks.
     pub(super) static DROP_MESSAGES: Cell<bool> = const { Cell::new(false) };
     /// Seeded dummy delay and identifier state for deterministic simulations.

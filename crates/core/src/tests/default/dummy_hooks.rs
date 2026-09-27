@@ -105,20 +105,20 @@ impl Drop for PendingDeliveryGuard {
     }
 }
 
-/// Gives the outbound workers created while it lives one transfer in flight per lane, the
-/// pre-#899 lane, so a single paused delivery blocks a lane.
-pub(super) struct SingleTransferLaneGuard;
+/// Holds the delivery future of every send accepted while it lives, releasing them all on
+/// drop, so a whole in-flight window stays pending.
+pub(super) struct HeldDeliveryGuard;
 
-impl SingleTransferLaneGuard {
+impl HeldDeliveryGuard {
     pub(super) fn new() -> Self {
-        crate::swarm::transport::set_lane_window_for_test(Some(1));
+        dummy_controlled::hold_delivery_futures();
         Self
     }
 }
 
-impl Drop for SingleTransferLaneGuard {
+impl Drop for HeldDeliveryGuard {
     fn drop(&mut self) {
-        crate::swarm::transport::set_lane_window_for_test(None);
+        dummy_controlled::release_held_delivery_futures();
     }
 }
 

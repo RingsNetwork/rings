@@ -1,4 +1,5 @@
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -17,6 +18,7 @@ use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::pool::ChannelLane;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
@@ -52,6 +54,7 @@ use self::state::CONTROLLED_VIRTUAL_MS;
 use self::state::DELIVERY;
 use self::state::DELIVERY_FUTURE_PENDING;
 use self::state::DROP_MESSAGES;
+use self::state::HELD_DELIVERY_GATE;
 use self::state::IRREVOCABLE_SEND_GATE;
 use self::state::IRREVOCABLE_SEND_GATE_WAITING;
 use self::state::MAX_MESSAGE_SIZE;
@@ -91,6 +94,70 @@ impl DeliveryGate {
     }
 }
 
+/// A completion gate shared by every delivery accepted while it is installed.
+///
+/// Unlike the one-shot [`DeliveryGate`], it holds any number of deliveries until one release,
+/// so a test can keep a whole in-flight window pending.
+struct HeldDeliveries {
+    /// Set once by the release; a delivery that observes it completes.
+    released: AtomicBool,
+    /// Deliveries allowed to complete one by one before the release.
+    permits: AtomicUsize,
+    /// Deliveries currently parked on the gate.
+    waiting: AtomicUsize,
+    /// Wakes every parked delivery on release.
+    notify: Notify,
+}
+
+impl HeldDeliveries {
+    /// A gate holding every delivery until released.
+    fn new() -> Self {
+        Self {
+            released: AtomicBool::new(false),
+            permits: AtomicUsize::new(0),
+            waiting: AtomicUsize::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    /// Park until the release. The waiter registers before it checks the flag, so a release
+    /// between the check and the wait is not lost.
+    async fn wait(&self) {
+        self.waiting.fetch_add(1, Ordering::AcqRel);
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.released.load(Ordering::Acquire) || self.take_permit() {
+                break;
+            }
+            notified.await;
+        }
+        self.waiting.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Consume one single-delivery permit, if one is left.
+    fn take_permit(&self) -> bool {
+        self.permits
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |permits| {
+                permits.checked_sub(1)
+            })
+            .is_ok()
+    }
+
+    /// Let exactly one parked (or the next) delivery complete.
+    fn release_one(&self) {
+        self.permits.fetch_add(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
+    }
+
+    /// Release every parked and future delivery of this gate.
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+}
+
 #[cfg(test)]
 mod test_dummy;
 
@@ -114,6 +181,7 @@ pub mod controlled {
     use super::DELIVERY;
     use super::DELIVERY_FUTURE_PENDING;
     use super::DROP_MESSAGES;
+    use super::HELD_DELIVERY_GATE;
     use super::IRREVOCABLE_SEND_GATE;
     use super::IRREVOCABLE_SEND_GATE_WAITING;
     use super::MAX_MESSAGE_SIZE;
@@ -373,6 +441,37 @@ pub mod controlled {
     /// Test hook: make connection cleanup never complete.
     pub fn set_close_pending(on: bool) {
         CLOSE_PENDING.with(|pending| pending.set(on));
+    }
+
+    /// Hold the delivery future of every send accepted from now on until
+    /// [`release_held_delivery_futures`], so a whole in-flight window stays pending.
+    pub fn hold_delivery_futures() {
+        HELD_DELIVERY_GATE.with(|slot| {
+            *slot.borrow_mut() = Some(Arc::new(super::HeldDeliveries::new()));
+        });
+    }
+
+    /// Delivery futures currently parked by [`hold_delivery_futures`].
+    pub fn held_delivery_futures_waiting() -> usize {
+        HELD_DELIVERY_GATE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map_or(0, |gate| gate.waiting.load(super::Ordering::Acquire))
+        })
+    }
+
+    /// Let exactly one delivery future held by [`hold_delivery_futures`] complete.
+    pub fn release_one_held_delivery_future() {
+        if let Some(gate) = HELD_DELIVERY_GATE.with(|slot| slot.borrow().clone()) {
+            gate.release_one();
+        }
+    }
+
+    /// Release every delivery future held by [`hold_delivery_futures`] and stop holding.
+    pub fn release_held_delivery_futures() {
+        if let Some(gate) = HELD_DELIVERY_GATE.with(|slot| slot.borrow_mut().take()) {
+            gate.release();
+        }
     }
 
     /// Suspend exactly the next accepted send's delivery future.
@@ -736,6 +835,12 @@ fn complete_irrevocable_send<F: FnOnce()>(
     if DELIVERY_FUTURE_PENDING.with(|pending| pending.get()) {
         return Ok(Box::pin(std::future::pending::<Result<()>>()));
     }
+    if let Some(gate) = HELD_DELIVERY_GATE.with(|slot| slot.borrow().clone()) {
+        return Ok(Box::pin(async move {
+            gate.wait().await;
+            Ok(())
+        }));
+    }
     let delivery_gate = NEXT_DELIVERY_GATE.with(|slot| slot.borrow_mut().take());
     if let Some(gate) = delivery_gate {
         ACTIVE_DELIVERY_GATE.with(|slot| {
@@ -782,9 +887,13 @@ impl ConnectionInterface for DummyConnection {
     type Sdp = String;
     type Error = Error;
 
+    /// The dummy link delivers one connection's messages over one ordered event queue, which
+    /// meets the lane law for every lane at once (a controlled test may reorder events on
+    /// purpose), so the lane needs no channel of its own here.
     async fn send_message_with_permit(
         &self,
         msg: TransportMessage,
+        _lane: ChannelLane,
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;

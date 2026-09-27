@@ -152,9 +152,9 @@ pub enum Error {
     #[error("Rwlock try read failed: {0}")]
     RwLockRead(String),
 
-    /// Cannot select from an empty round-robin pool
-    #[error("Cannot select from an empty round-robin pool")]
-    RoundRobinPoolEmpty,
+    /// Cannot select from an empty channel pool
+    #[error("Cannot select from an empty channel pool")]
+    ChannelPoolEmpty,
 }
 
 #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]

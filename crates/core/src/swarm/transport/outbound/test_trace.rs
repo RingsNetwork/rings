@@ -27,8 +27,6 @@ pub(crate) type LinkDirection = (Did, Did);
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 thread_local! {
     static OUTBOUND_SUBMIT_COUNT: Cell<usize> = const { Cell::new(0) };
-    /// Lane window of the outbound workers this thread creates, when a test overrides it.
-    static LANE_WINDOW: Cell<Option<usize>> = const { Cell::new(None) };
     /// Per link direction, the digests this thread's nodes put in each slot of a payload frame,
     /// one entry per frame whose slot went by reference.
     static REFERENCED_SLOTS: RefCell<BTreeMap<LinkDirection, PerSlot<Vec<DelegationDigest>>>> =
@@ -36,20 +34,6 @@ thread_local! {
     /// Every link-control frame this thread's nodes dispatched, with the peer it went to.
     static DISPATCHED_LINK_CONTROL: RefCell<Vec<(Did, LinkControl)>> =
         const { RefCell::new(Vec::new()) };
-}
-
-/// Set (`Some`) or clear (`None`) the lane window of outbound workers created on this thread.
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn set_lane_window_for_test(window: Option<usize>) {
-    LANE_WINDOW.with(|slot| slot.set(window));
-}
-
-/// The lane window an outbound worker created on this thread uses.
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub(super) fn lane_window() -> usize {
-    LANE_WINDOW
-        .with(Cell::get)
-        .unwrap_or(super::queue::OUTBOUND_LANE_WINDOW)
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]

@@ -37,6 +37,8 @@ use super::delivery::send_data_with_timeout;
 use super::delivery::ChunkSendCancelReason;
 use super::delivery::ChunkSendPermit;
 use super::delivery::ChunkSendProgress;
+use super::delivery::DeliveryProgress;
+use super::delivery::FrameTarget;
 use super::delivery::SendCompletionOutcome;
 use super::delivery::TransferStop;
 use super::AdmittedConnection;
@@ -73,8 +75,6 @@ pub(crate) use test_trace::referenced_slots_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::reset_outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use test_trace::set_lane_window_for_test;
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::LinkDirection;
 mod transfer;
 
@@ -99,6 +99,7 @@ use mailbox::MailboxSender;
 use measurement::MeasurementReceiver;
 use measurement::MeasurementRecorder;
 use measurement::OutboundMeasurement;
+pub(super) use model::channel_lane;
 pub(super) use model::OutboundCompletion;
 pub(super) use model::OutboundMessageKind;
 pub(super) use model::TransferClass;
@@ -489,6 +490,8 @@ struct OutboundWorker {
     active: Option<RunnableTransfer<QueuedTransfer>>,
     announced: SharedAnnouncedDelegations,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
+    /// When a delivery to this peer last settled: the stall deadline's reference.
+    delivery_progress: DeliveryProgress,
     measurements: MeasurementRecorder,
     stop: StopSource,
     next_id: u64,
@@ -514,13 +517,11 @@ impl OutboundWorker {
             #[cfg(test)]
             peer,
             receiver,
-            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-            ready: TransferQueues::with_window_for_test(test_trace::lane_window()),
-            #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
             ready: TransferQueues::default(),
             active: None,
             announced,
             deliveries: FuturesUnordered::new(),
+            delivery_progress: DeliveryProgress::default(),
             measurements,
             stop,
             next_id,
@@ -824,8 +825,11 @@ impl OutboundWorker {
                     &transfer.permit,
                     &transfer.stop,
                     transfer.detached_admission.as_ref(),
-                    transfer.did,
-                    context,
+                    FrameTarget {
+                        did: transfer.did,
+                        lane: model::channel_lane(class),
+                        context,
+                    },
                 )
                 .await;
                 if self.stop.is_stop_requested() {
@@ -866,7 +870,8 @@ impl OutboundWorker {
                 let id = runnable.item().id;
                 let transfer = &runnable.item().scheduled.transfer;
                 let remainder = transfer.remainder();
-                let delivery_wait = Self::delivery_wait(id, class, delivery, transfer);
+                let delivery_wait =
+                    Self::delivery_wait(id, class, delivery, transfer, &self.delivery_progress);
                 self.ready.wait_for_delivery(id, remainder, runnable);
                 self.deliveries.push(delivery_wait);
             }
@@ -927,11 +932,13 @@ impl OutboundWorker {
         class: TransferClass,
         delivery: DeliveryFuture,
         transfer: &OutboundTransfer,
+        progress: &DeliveryProgress,
     ) -> DeliveryWaitFuture {
         let admitted = transfer.admitted.clone();
         let permit = transfer.permit.clone();
         let stop = transfer.stop.clone();
         let did = transfer.did;
+        let progress = progress.clone();
         Box::pin(async move {
             let result = await_delivery_or_cancel(
                 delivery,
@@ -940,6 +947,7 @@ impl OutboundWorker {
                 &stop,
                 did,
                 "frame_delivery",
+                &progress,
             )
             .await;
             DeliveryEvent { id, class, result }

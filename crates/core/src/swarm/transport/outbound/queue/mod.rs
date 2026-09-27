@@ -27,9 +27,15 @@ macro_rules! lane_for_class {
 ///
 /// A lane no longer waits for each delivery before its next transfer: up to this many
 /// transfers hold a window slot, so consecutive frames reach the peer back to back and its SCTP
-/// SACKs pair up instead of waiting out the delayed-ACK timer. It stays strictly below
-/// `TRANSACTION_REPLAY_WINDOW`, so pipelining inside one lane can never reorder a class's
-/// transactions beyond the receiver's replay window.
+/// SACKs pair up instead of waiting out the delayed-ACK timer. The lane sends on the one data
+/// channel it is pinned to, so its frames arrive in the order it admitted them; the window stays
+/// strictly below `TRANSACTION_REPLAY_WINDOW`, so even a reordering of the frames in flight would
+/// stay inside the receiver's replay window.
+///
+/// The window pipelines whole transfers, not the frames of one: a chunked transfer admits its
+/// next frame only once the previous one is delivered (it waits in its slot with a
+/// [`FrameRemainder::More`] remainder), so a message larger than one frame still pays the
+/// per-frame delayed-ACK tail and holds its lane's wire until its last frame is admitted.
 pub(crate) const OUTBOUND_LANE_WINDOW: usize = 8;
 
 const _: () = assert!(OUTBOUND_LANE_WINDOW > 0);

@@ -8,6 +8,7 @@ use rings_runtime::MaybeSendSync;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use crate::core::pool::ChannelLane;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::SendPermit;
@@ -116,9 +117,12 @@ where
     async fn send_message_with_permit(
         &self,
         msg: TransportMessage,
+        lane: ChannelLane,
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
-        self.upgrade()?.send_message_with_permit(msg, permit).await
+        self.upgrade()?
+            .send_message_with_permit(msg, lane, permit)
+            .await
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -207,6 +211,7 @@ mod tests {
         async fn send_message_with_permit(
             &self,
             _: TransportMessage,
+            _: ChannelLane,
             _: SendPermit,
         ) -> Result<DeliveryFuture> {
             unreachable!("a released ref must fail before reaching the inner connection")
