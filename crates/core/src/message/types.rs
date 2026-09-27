@@ -541,6 +541,21 @@ impl Message {
     pub fn custom(msg: &[u8]) -> Result<Message> {
         Ok(Message::CustomMessage(CustomMessage(msg.to_vec())))
     }
+
+    /// Whether this report honours its request's signed `reply_via`: exactly the reports a
+    /// node needs while no node is known to route to it (the successor answer of its join and
+    /// finger lookups, and the answer to its connection offer).
+    ///
+    /// Law (reflection bound): a request names one peer and can make a responder route at most
+    /// one of these bounded reports toward it; every other report, such as `FoundEntry` with
+    /// its entry data, routes straight toward the origin, so `reply_via` cannot turn a small
+    /// request into a large report aimed at a third party.
+    pub(crate) const fn returns_through_reply_via(&self) -> bool {
+        matches!(
+            self,
+            Self::FindSuccessorReport(_) | Self::ConnectNodeReport(_)
+        )
+    }
 }
 
 impl std::fmt::Debug for CustomMessage {
@@ -729,6 +744,7 @@ mod tests {
             fixture.provider.delegator_did(),
             tx_id,
             0,
+            None,
             Message::ProbeRequest(request_body),
             MessageSigner::new(&fixture.beneficiary, network_id),
         )?;
@@ -737,6 +753,7 @@ mod tests {
             fixture.beneficiary.delegator_did(),
             tx_id,
             0,
+            None,
             ProbeCompletion {
                 request_digest,
                 nonce: request_body.nonce,

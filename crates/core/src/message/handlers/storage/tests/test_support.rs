@@ -1,5 +1,4 @@
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
 
 use futures::FutureExt;
 use num_bigint::BigUint;
@@ -9,6 +8,7 @@ use tokio::time::Instant;
 
 use super::super::ChordStorageInterfaceCacheChecker;
 use crate::delegation::DelegateeKey;
+use crate::dht::delivery::NextHop;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::topology::dist;
@@ -34,7 +34,7 @@ use crate::storage::MemStorage;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::Node;
-use crate::tests::default::TEST_NETWORK_IDLE_TIMEOUT;
+use crate::tests::default::TEST_HANG_GUARD;
 
 pub(super) struct NoopCallback;
 
@@ -98,7 +98,7 @@ pub(super) async fn next_payload_matching(
     label: &str,
     matches: impl FnMut(&MessagePayload) -> Result<bool>,
 ) -> Result<MessagePayload> {
-    next_payload_matching_with_timeout(node, label, TEST_NETWORK_IDLE_TIMEOUT, matches).await
+    next_payload_matching_with_timeout(node, label, TEST_HANG_GUARD, matches).await
 }
 
 async fn next_payload_matching_with_timeout(
@@ -245,10 +245,11 @@ pub(super) fn storage_sync_report_payload(
         destination,
         request.transaction.tx_id,
         request.transaction.sequence,
+        None,
         Message::SyncEntriesWithSuccessorReport(report),
         signer,
     )?;
-    let relay = MessageRelay::new(next_hop, destination, HopBudget::MAX);
+    let relay = MessageRelay::new(NextHop::toward(next_hop), destination, HopBudget::MAX);
     MessagePayload::new(transaction, signer, relay)
 }
 
@@ -257,19 +258,18 @@ pub(super) fn prepare_node_with_storage_redundancy(
     redundancy: u16,
 ) -> Result<Node> {
     let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-    let swarm = Arc::new(
+    let node = Node::build(
         SwarmBuilder::new(
             0,
-            "stun://stun.l.google.com:19302",
+            crate::tests::default::TEST_ICE_SERVERS,
             Box::new(MemStorage::new()),
             delegatee_key,
         )
         .dht_storage_redundancy(redundancy)
         .dht_virtual_nodes(0)
-        .dht_finger_table_size(8)
-        .build(),
+        .dht_finger_table_size(8),
     );
-    Ok(Node::new(swarm))
+    Ok(node)
 }
 
 pub(super) fn prepare_node_with_virtual_nodes(
@@ -277,18 +277,17 @@ pub(super) fn prepare_node_with_virtual_nodes(
     positions_per_peer: u16,
 ) -> Result<Node> {
     let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-    let swarm = Arc::new(
+    let node = Node::build(
         SwarmBuilder::new(
             0,
-            "stun://stun.l.google.com:19302",
+            crate::tests::default::TEST_ICE_SERVERS,
             Box::new(MemStorage::new()),
             delegatee_key,
         )
         .dht_virtual_nodes(positions_per_peer)
-        .dht_finger_table_size(8)
-        .build(),
+        .dht_finger_table_size(8),
     );
-    Ok(Node::new(swarm))
+    Ok(node)
 }
 
 pub(super) fn owner_index(nodes: &[&Node], placement: Did) -> Result<usize> {

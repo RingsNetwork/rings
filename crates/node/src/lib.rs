@@ -10,6 +10,12 @@
         clippy::unwrap_used
     )
 )]
+// The `dummy` feature selects rings-core's in-memory test transport. Combined with `ffi`, it
+// would ship a C library whose nodes cannot reach any peer; the `rings` binary refuses the
+// feature on its own (see `bin/rings.rs`).
+#[cfg(all(feature = "dummy", feature = "ffi"))]
+compile_error!("the `dummy` test transport cannot back the FFI library; build `ffi` without it");
+
 /// Shared protocol constants used by the node runtime.
 pub mod consts;
 mod descriptor;

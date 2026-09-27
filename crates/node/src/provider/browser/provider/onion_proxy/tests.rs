@@ -22,7 +22,7 @@ use crate::tests::wasm::prepare_processor_with_onion_role;
 /// and one pending table.
 #[wasm_bindgen_test]
 async fn test_browser_proxies_send_through_the_installed_runtime_client() {
-    let provider = new_provider().await;
+    let provider = new_provider().await.provider;
     let first = provider
         .onion_https_proxy()
         .map_err(JsValue::from)

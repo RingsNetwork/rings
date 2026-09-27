@@ -24,6 +24,7 @@ use js_sys::Uint8Array;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
+use rings_node::prelude::rings_core::swarm::observer::SharedSwarmObserver;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
@@ -69,28 +70,37 @@ impl DwebNode {
 /// The browser provider is used only on the single-threaded wasm event loop, but
 /// the upstream `Provider` constructor takes an `Arc<Processor>`; keep that shape
 /// at this adapter boundary instead of introducing a parallel wasm-only provider.
-#[allow(clippy::arc_with_non_send_sync)]
 async fn build_node(storage_name: &str) -> DwebNode {
+    build_node_with(storage_name, APP_ICE_SERVERS, None).await
+}
+
+/// ICE servers of the demo app's nodes.
+const APP_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+
+/// [`build_node`] with explicit ICE servers and an optional observer chained after the
+/// processor's own, so a test can run host-only and observe swarm activity.
+#[allow(clippy::arc_with_non_send_sync)]
+async fn build_node_with(
+    storage_name: &str,
+    ice_servers: &str,
+    observer: Option<SharedSwarmObserver>,
+) -> DwebNode {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).expect("session sk");
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        200,
-    );
+    let config = ProcessorConfig::new(0, ice_servers.to_string(), delegatee_key, 200);
     let storage = Box::new(
         IdbStorage::new_with_cap_and_name(50_000, storage_name)
             .await
             .expect("idb storage"),
     );
-    let processor = Arc::new(
-        ProcessorBuilder::from_config(&config)
-            .expect("processor builder")
-            .storage(storage)
-            .build()
-            .expect("build processor"),
-    );
+    let builder = ProcessorBuilder::from_config(&config)
+        .expect("processor builder")
+        .storage(storage);
+    let builder = match observer {
+        Some(observer) => builder.observer(observer),
+        None => builder,
+    };
+    let processor = Arc::new(builder.build().expect("build processor"));
     let listening = processor.clone();
     let provider = Arc::new(Provider::from_processor(processor));
     provider.set_backend().expect("install backend");
@@ -305,6 +315,8 @@ pub fn run() {
 mod tests {
     use std::collections::HashMap;
 
+    use rings_test_support::activity::probe_on_activity;
+    use rings_test_support::observer::activity_observer;
     use wasm_bindgen_test::wasm_bindgen_test;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
 
@@ -449,15 +461,39 @@ mod tests {
         let _ = rpc(a, "acceptAnswer", obj(&[("answer", &answer)])).await;
     }
 
+    /// Hang guard of one awaited state in the end-to-end test; a failure bound only.
+    const E2E_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// A host-only test node whose swarm records activity.
+    async fn build_test_node(storage_name: &str) -> DwebNode {
+        build_node_with(storage_name, "", Some(activity_observer())).await
+    }
+
+    /// Whether `provider` lists `peer` as a `Connected` peer.
+    async fn lists_connected_peer(provider: &Arc<Provider>, peer: &str) -> bool {
+        let peers = Reflect::get(&rpc(provider, "listPeers", obj(&[])).await, &"peers".into())
+            .map(|peers| Array::from(&peers))
+            .unwrap_or_default();
+        peers.iter().any(|peer_info| {
+            get_str(&peer_info, "did").eq_ignore_ascii_case(peer)
+                && get_str(&peer_info, "state") == "Connected"
+        })
+    }
+
     /// Two nodes: B hosts `/`, A connects and fetches it over rings, expecting B's page.
+    ///
+    /// ```text
+    /// connect(A, B)                  ⊢ ◇Listed(A, B)       probed on activity
+    /// Listed(A, B) ; send(A → B, /)  ⊢ ◇Got(A, "/")        probed on activity
+    /// ```
+    ///
+    /// Admission starts the join traffic, and B's response is a received message, so each
+    /// state change is followed by recorded activity; no wait is paced by a timer. The request
+    /// is sent once, after admission, rather than retried on a timer.
     #[wasm_bindgen_test]
     async fn test_two_nodes_fetch_a_hosted_page() {
-        use std::time::Duration;
-
-        use rings_node::prelude::rings_runtime::sleep;
-
         // B hosts a page.
-        let b = build_node("rings-dweb-test-b").await;
+        let b = build_test_node("rings-dweb-test-b").await;
         register_dweb(
             &b.provider,
             Rc::new(RefCell::new(HashMap::from([(
@@ -469,25 +505,33 @@ mod tests {
 
         // A is the fetcher; it records the page it receives.
         let got: Rc<RefCell<Option<(String, String)>>> = Rc::new(RefCell::new(None));
-        let a = build_node("rings-dweb-test-a").await;
+        let a = build_test_node("rings-dweb-test-a").await;
         register_dweb(&a.provider, Rc::new(RefCell::new(HashMap::new())), {
             let got = got.clone();
             Callback::from(move |r| *got.borrow_mut() = Some(r))
         });
 
         connect(&a.provider, &b.provider).await;
-
-        // Retry the request until the overlay link is up and B's response arrives.
         let b_did = b.provider.address();
-        for _ in 0..60 {
-            let _ = fetch_path(a.provider.clone(), b_did.clone(), "/".to_string()).await;
-            sleep(Duration::from_millis(500)).await.ok();
-            if got.borrow().is_some() {
-                break;
-            }
-        }
+        probe_on_activity("A lists B as connected", E2E_HANG_GUARD, || async {
+            Ok::<_, ()>(
+                lists_connected_peer(&a.provider, &b_did)
+                    .await
+                    .then_some(()),
+            )
+        })
+        .await
+        .unwrap();
 
-        let page = got.borrow().clone().expect("no response received from B");
+        fetch_path(a.provider.clone(), b_did.clone(), "/".to_string())
+            .await
+            .expect("send the page request");
+        let page = probe_on_activity("B's page reached A", E2E_HANG_GUARD, || {
+            let received = got.borrow().clone();
+            async move { Ok::<_, ()>(received) }
+        })
+        .await
+        .unwrap();
         assert_eq!(page.0, "/");
         assert_eq!(page.1, "<h1>from B</h1>");
         a.stop();

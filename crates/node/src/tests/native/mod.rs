@@ -7,6 +7,7 @@ use crate::prelude::DelegateeKey;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
+use crate::tests::TEST_ICE_SERVERS;
 
 mod test_duplicate_namespace;
 
@@ -23,7 +24,7 @@ pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) 
 
     let config = serde_yaml::to_string(&ProcessorConfig::new(
         0,
-        "stun://stun.l.google.com:19302".to_string(),
+        TEST_ICE_SERVERS.to_string(),
         sm,
         3,
     ))
@@ -35,7 +36,8 @@ pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) 
         .unwrap()
         .storage(storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
-        .onion_role(role);
+        .onion_role(role)
+        .observer(crate::tests::activity::activity_observer());
 
     procssor_builder.build().unwrap()
 }

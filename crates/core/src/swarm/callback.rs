@@ -287,6 +287,9 @@ pub(super) struct InboundProcessor {
 pub(super) struct InboundFrameLease {
     bytes: Bytes,
     transport_capacity: Option<InboundFrameCapacityLease>,
+    /// Test builds: the frame's conservation witness, released with the lease.
+    #[cfg(test)]
+    in_flight: crate::swarm::transport::FrameInFlight,
 }
 
 /// One verified frame waiting for admission, with everything its delivery needs.

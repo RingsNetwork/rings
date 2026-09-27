@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::delegation::DelegationDigest;
+use crate::dht::delivery::NextHop;
 use crate::message::DelegationRef;
 use crate::message::HopBudget;
 use crate::message::LinkControl;
@@ -63,10 +64,15 @@ fn stranger_payload(
         transport.dht.did,
         crate::utils::new_uuid(),
         0,
+        None,
         Message::custom(data)?,
         MessageSigner::new(stranger, TEST_NETWORK_ID),
     )?;
-    let relay = MessageRelay::new(transport.dht.did, transport.dht.did, HopBudget::MAX);
+    let relay = MessageRelay::new(
+        NextHop::toward(transport.dht.did),
+        transport.dht.did,
+        HopBudget::MAX,
+    );
     MessagePayload::new(
         transaction,
         MessageSigner::new(&pending.session, TEST_NETWORK_ID),
