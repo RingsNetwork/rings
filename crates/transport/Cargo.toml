@@ -69,6 +69,7 @@ url = { version = "2.4.0", features = ["serde"] }
 
 [dev-dependencies]
 futures = "0.3.28"
+rings-test-support = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]

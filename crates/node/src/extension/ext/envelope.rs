@@ -35,4 +35,12 @@ impl Envelope {
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         rings_codec::deserialize(bytes).map_err(|_| Error::DecodeError)
     }
+
+    /// Read only the namespace of an encoded envelope, borrowing it from `bytes` without
+    /// decoding or copying the payload. `namespace_of : [u8] ⇀ str` (partial).
+    pub(crate) fn namespace_of(bytes: &[u8]) -> Result<&str> {
+        rings_codec::deserialize_prefix::<&str>(bytes)
+            .map(|(namespace, _payload)| namespace)
+            .map_err(|_| Error::DecodeError)
+    }
 }

@@ -1,9 +1,10 @@
 use std::future::Future;
 use std::net::IpAddr;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Weak;
+#[cfg(test)]
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -43,8 +44,9 @@ use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::CONNECTION_RETIRE_TIMEOUT as NATIVE_CONNECTION_RETIRE_TIMEOUT;
 use crate::core::transport::IRREVOCABLE_SEND_COMPLETION_TIMEOUT as NATIVE_SEND_COMPLETION_TIMEOUT;
-use crate::delivery::closed_before_flush;
-use crate::delivery::delivery_flushed;
+use crate::delivery::tracker::BufferedChannel;
+use crate::delivery::tracker::DeliveryTracker;
+use crate::delivery::tracker::RoundLease;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
@@ -83,18 +85,16 @@ const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
 /// pool size of data channel
 const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
-/// How often the delivery future re-checks whether a message has been flushed.
-const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(300);
-
 #[cfg(test)]
 const NATIVE_SEND_TEST_COMPLETION_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// A data channel paired with a monotonic counter of the total bytes ever
-/// enqueued onto it, plus a lock that serializes sends. The counter lets the
-/// delivery future tell, per message, whether the bytes have been flushed to
-/// the wire: `enqueued_total - buffered_amount` is the number of bytes already
-/// handed off, so a message whose end offset is below that has left the local
-/// send buffer.
+/// A data channel paired with its delivery tracker, plus a lock that
+/// serializes sends. The tracker owns the monotonic counter of the total bytes
+/// ever enqueued onto the channel, which lets the delivery future tell, per
+/// message, whether the bytes have been flushed to the wire:
+/// `enqueued_total - buffered_amount` is the number of bytes already handed
+/// off, so a message whose end offset is below that has left the local send
+/// buffer. The channel's `bufferedamountlow` event drives the tracker.
 ///
 /// The lock is held across reserve+send so the reserved end offset always
 /// matches the order bytes are actually enqueued in. Without it, two concurrent
@@ -104,8 +104,41 @@ const NATIVE_SEND_TEST_COMPLETION_TIMEOUT: Duration = Duration::from_millis(100)
 #[derive(Clone)]
 struct TrackedChannel {
     channel: Arc<RTCDataChannel>,
-    enqueued_bytes: Arc<AtomicU64>,
+    delivery: Arc<DeliveryTracker>,
     send_lock: Arc<Mutex<()>>,
+}
+
+impl BufferedChannel for RTCDataChannel {
+    async fn arm_low_threshold(&self, threshold: u64) {
+        // Never saturates: a round arms τ = E ⊖ e_min ≤ E, and the bytes of the
+        // pending sends are counted in a usize `bufferedAmount`, so τ < b ≤
+        // usize::MAX whenever a round waits for the event. Saturating keeps the
+        // conversion total.
+        let threshold = usize::try_from(threshold).unwrap_or(usize::MAX);
+        self.set_buffered_amount_low_threshold(threshold).await;
+    }
+
+    async fn observe_buffered(&self) -> u64 {
+        // Saturating up is conservative: an oversized buffer never flushes.
+        u64::try_from(self.buffered_amount().await).unwrap_or(u64::MAX)
+    }
+}
+
+/// Run a delivery settle round on the current executor, detached from the
+/// requester so that cancelling a send cannot interrupt an arm-and-read step.
+fn spawn_delivery_round(lease: Option<RoundLease>, channel: Arc<RTCDataChannel>) {
+    let Some(lease) = lease else {
+        return;
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => {
+            runtime.spawn(async move { lease.run(channel.as_ref()).await });
+        }
+        // Unreachable from the send path, which requires the executor. Dropping
+        // the lease returns the round to idle, and only a later registration
+        // is sure to start the next one: no event may follow the stale arm.
+        Err(error) => tracing::error!(%error, "no executor for a delivery settle round"),
+    }
 }
 
 fn sdp_candidate_count(sdp: &str) -> usize {
@@ -215,27 +248,15 @@ fn append_sdp_extra_host_candidates(sdp: String, extra_addresses: &[String]) -> 
 
 /// Build the future that resolves once the message ending at `end_offset` on
 /// this channel has been flushed to the wire, or errors if the channel closes
-/// first. It re-checks on a timer, driving its own wake-ups.
+/// first. Registering it re-arms the channel's low-water threshold.
 fn delivery_future(
     channel: Arc<RTCDataChannel>,
-    enqueued: Arc<AtomicU64>,
+    delivery: &Arc<DeliveryTracker>,
     end_offset: u64,
 ) -> DeliveryFuture {
-    Box::pin(async move {
-        loop {
-            let buffered = channel.buffered_amount().await as u64;
-            if delivery_flushed(enqueued.load(Ordering::SeqCst), buffered, end_offset) {
-                return Ok(());
-            }
-            if matches!(
-                channel.ready_state(),
-                RTCDataChannelState::Closing | RTCDataChannelState::Closed
-            ) {
-                return Err(closed_before_flush());
-            }
-            tokio::time::sleep(DELIVERY_POLL_INTERVAL).await;
-        }
-    })
+    let (wait, lease) = delivery.track(end_offset);
+    spawn_delivery_round(lease, channel);
+    Box::pin(wait)
 }
 
 impl RoundRobinPool<TrackedChannel> {
@@ -249,7 +270,7 @@ impl RoundRobinPool<TrackedChannel> {
     ) -> Result<DeliveryFuture> {
         let TrackedChannel {
             channel,
-            enqueued_bytes: enqueued,
+            delivery,
             send_lock,
         } = self.select()?;
         let data = rings_codec::serialize(&msg).map(Bytes::from)?;
@@ -280,7 +301,7 @@ impl RoundRobinPool<TrackedChannel> {
             primitive,
             permit,
             guard,
-            Arc::clone(&enqueued),
+            Arc::clone(delivery.enqueued()),
             data_len,
             lifecycle,
         )?;
@@ -294,7 +315,7 @@ impl RoundRobinPool<TrackedChannel> {
             std::task::Poll::Ready(result) => result?,
             std::task::Poll::Pending => run_irrevocable_send(&runtime, send).await?,
         };
-        Ok(delivery_future(channel, enqueued, end_offset))
+        Ok(delivery_future(channel, &delivery, end_offset))
     }
 }
 
@@ -763,6 +784,28 @@ fn wire_peer_connection_state(
     }));
 }
 
+/// Drive a channel's delivery tracker from its `bufferedamountlow` and `error`
+/// events. The handlers hold the channel weakly: the channel owns them.
+async fn wire_delivery_events(channel: &Arc<RTCDataChannel>, delivery: &Arc<DeliveryTracker>) {
+    let low_channel: Weak<RTCDataChannel> = Arc::downgrade(channel);
+    let low_delivery = Arc::clone(delivery);
+    channel
+        .on_buffered_amount_low(Box::new(move || {
+            if let Some(channel) = low_channel.upgrade() {
+                spawn_delivery_round(low_delivery.notify(), channel);
+            }
+            Box::pin(async {})
+        }))
+        .await;
+
+    let error_delivery = Arc::clone(delivery);
+    channel.on_error(Box::new(move |error| {
+        tracing::warn!(%error, "data channel failed; pending deliveries are lost");
+        error_delivery.close();
+        Box::pin(async {})
+    }));
+}
+
 async fn create_outbound_data_channels(
     webrtc_conn: &RTCPeerConnection,
     channel_pool: &Arc<RoundRobinPool<TrackedChannel>>,
@@ -789,10 +832,15 @@ async fn create_outbound_data_channels(
             })
         }));
 
+        let delivery = Arc::new(DeliveryTracker::default());
+        wire_delivery_events(&channel, &delivery).await;
+
         let close_pool = Arc::clone(channel_pool);
         let close_cb = Arc::clone(inner_cb);
         let close_state = connection_state.clone();
+        let close_delivery = Arc::clone(&delivery);
         channel.on_close(Box::new(move || {
+            close_delivery.close();
             close_state.observe_outbound_data_channels(false);
             let all_closed = matches!(
                 close_pool.all(|tracked| {
@@ -810,7 +858,7 @@ async fn create_outbound_data_channels(
 
         channel_pool.push(TrackedChannel {
             channel,
-            enqueued_bytes: Arc::new(AtomicU64::new(0)),
+            delivery,
             send_lock: Arc::new(Mutex::new(())),
         })?;
     }
@@ -916,5 +964,7 @@ impl From<RTCPeerConnectionState> for WebrtcConnectionState {
     }
 }
 
+#[cfg(test)]
+mod test_delivery_loopback;
 #[cfg(test)]
 mod test_native_webrtc;

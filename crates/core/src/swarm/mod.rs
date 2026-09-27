@@ -353,7 +353,10 @@ impl Swarm {
             ));
         }
         self.transport
-            .admit_final_transaction(&offer_payload.transaction, MessageCategory::DhtControl)
+            .admit_final_transaction(
+                &offer_payload.transaction,
+                MessageCategory::DhtControl.into(),
+            )
             .await?;
 
         let peer = offer_payload.transaction.origin();
@@ -416,7 +419,10 @@ impl Swarm {
             ));
         }
         self.transport
-            .admit_final_transaction(&answer_payload.transaction, MessageCategory::DhtControl)
+            .admit_final_transaction(
+                &answer_payload.transaction,
+                MessageCategory::DhtControl.into(),
+            )
             .await?;
 
         let peer = answer_payload.transaction.signer();

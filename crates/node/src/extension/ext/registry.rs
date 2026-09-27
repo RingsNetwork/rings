@@ -22,6 +22,7 @@ use futures::lock::Mutex as AsyncMutex;
 use rings_core::dht::Did;
 use rings_runtime::MaybeSendSync;
 
+use super::delegation::DelegatedNamespaces;
 use super::Ctx;
 use super::Envelope;
 use super::Interpret;
@@ -59,6 +60,8 @@ pub(crate) trait Handler {
 pub(crate) struct Core {
     processor: Arc<Processor>,
     handlers: Arc<HandlerMap>,
+    /// Namespaces whose registered protocols delegate admission, installed with their handlers.
+    delegation: Arc<DelegatedNamespaces>,
 }
 
 impl Core {
@@ -348,6 +351,7 @@ impl Extensions {
             core: Core {
                 processor,
                 handlers: Arc::new(RwLock::new(HashMap::new())),
+                delegation: Arc::new(DelegatedNamespaces::default()),
             },
         }
     }
@@ -400,10 +404,11 @@ impl Extensions {
         I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
         // Build (namespace, runner) outside the lock.
-        let prepared: Vec<(String, Arc<DynHandler>)> = items
+        let prepared: Vec<(String, bool, Arc<DynHandler>)> = items
             .into_iter()
             .map(|(protocol, interpret)| {
                 let namespace = protocol.namespace().to_string();
+                let delegates = protocol.delegates_admission();
                 let state = Mutex::new(protocol.init());
                 let runner: Arc<DynHandler> = Arc::new(Runner {
                     protocol,
@@ -417,25 +422,30 @@ impl Extensions {
                     #[cfg(all(test, rings_native))]
                     before_gate_wait_for_test: None,
                 });
-                (namespace, runner)
+                (namespace, delegates, runner)
             })
             .collect();
 
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         // Check-all (existing table + intra-batch duplicates) before mutating anything.
-        for (index, (namespace, _)) in prepared.iter().enumerate() {
+        for (index, (namespace, _, _)) in prepared.iter().enumerate() {
             let duplicate_in_batch = prepared
                 .iter()
                 .take(index)
-                .any(|(seen, _)| seen == namespace);
+                .any(|(seen, _, _)| seen == namespace);
             if duplicate_in_batch || handlers.contains_key(namespace) {
                 return Err(Error::ExtensionError(format!(
                     "namespace {namespace:?} is already registered"
                 )));
             }
         }
-        // All free: insert the whole batch.
-        for (namespace, runner) in prepared {
+        // All free: record the declarations and insert the batch under the same write lock.
+        self.core.delegation.install(
+            prepared
+                .iter()
+                .map(|(namespace, delegates, _)| (namespace.as_str(), *delegates)),
+        )?;
+        for (namespace, _, runner) in prepared {
             handlers.insert(namespace, runner);
         }
         Ok(())
@@ -449,6 +459,7 @@ impl Extensions {
         I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
         let namespace = protocol.namespace().to_string();
+        let delegates = protocol.delegates_admission();
         let state = Mutex::new(protocol.init());
         let runner: Arc<DynHandler> = Arc::new(Runner {
             protocol,
@@ -468,6 +479,9 @@ impl Extensions {
                 "namespace {namespace:?} is already registered"
             )));
         }
+        self.core
+            .delegation
+            .install([(namespace.as_str(), delegates)])?;
         handlers.insert(namespace, runner);
         Ok(())
     }
@@ -479,6 +493,12 @@ impl Extensions {
             .read()
             .map(|h| h.contains_key(namespace))
             .unwrap_or(false)
+    }
+
+    /// Whether an encoded envelope's namespace delegates its admission. Core consults it only
+    /// where delegation may apply; see [`Protocol::delegates_admission`].
+    pub(crate) fn delegates_admission(&self, envelope: &[u8]) -> bool {
+        self.core.delegation.delegates(envelope)
     }
 
     /// Route a decoded envelope (inbound entry point). `pub(crate)`: the authenticated ingress
@@ -642,6 +662,58 @@ mod tests {
             .advertise_presence(false)
             .build()?;
         Ok(Extensions::new(Arc::new(processor)))
+    }
+
+    /// A protocol that delegates its admission, or not.
+    struct DelegatingProtocol {
+        /// The declaration.
+        delegates: bool,
+    }
+
+    impl Protocol for DelegatingProtocol {
+        type State = ();
+        type Event = ();
+        type Effect = u8;
+
+        fn namespace(&self) -> &str {
+            "delegating"
+        }
+
+        fn init(&self) -> Self::State {}
+
+        fn decode(&self, _wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
+            Ok(())
+        }
+
+        fn step(&self, _ctx: Ctx<'_, Self::State>, _event: Self::Event) -> Transition<(), u8> {
+            Transition::pure(())
+        }
+
+        fn delegates_admission(&self) -> bool {
+            self.delegates
+        }
+    }
+
+    /// Registration records the declaration with the handler; a replacement that declares
+    /// nothing withdraws it, so at admission time a namespace delegates exactly while a
+    /// delegating protocol owns it.
+    #[tokio::test]
+    async fn test_registration_installs_and_replacement_withdraws_delegation() -> Result<()> {
+        let extensions = extensions()?;
+        let wire = Envelope::new("delegating", Bytes::from_static(b"cell")).encode()?;
+        let other = Envelope::new("ordered-effects", Bytes::from_static(b"x")).encode()?;
+        let interpreter = Arc::new(FailingOrderedInterpreter::default());
+
+        extensions.register(
+            DelegatingProtocol { delegates: true },
+            Arc::clone(&interpreter),
+        )?;
+        assert!(extensions.delegates_admission(&wire));
+        assert!(!extensions.delegates_admission(&other));
+
+        extensions.replace(DelegatingProtocol { delegates: false }, interpreter)?;
+        assert!(!extensions.delegates_admission(&wire));
+        Ok(())
     }
 
     #[tokio::test]

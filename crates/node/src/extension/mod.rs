@@ -99,6 +99,13 @@ impl SwarmCallback for Backend {
         Ok(())
     }
 
+    /// Report whether an inbound envelope's namespace delegates its admission, so a protocol's
+    /// declaration (see [`ext::Protocol::delegates_admission`]) reaches core's admission. Core
+    /// alone decides whether delegation applies to the delivering edge.
+    fn delegates_admission(&self, application_payload: &[u8]) -> bool {
+        self.extensions.delegates_admission(application_payload)
+    }
+
     /// Translate the swarm's events into the observer's facts: an admission and a retirement.
     async fn on_event(&self, event: &SwarmEvent) -> Result<(), rings_core::error::CallbackError> {
         let Some(observer) = self.observer.as_deref() else {

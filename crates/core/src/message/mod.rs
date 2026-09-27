@@ -28,6 +28,10 @@ pub(crate) use payload::SlotEncoding;
 pub use payload::Transaction;
 pub(crate) use payload::WirePayload;
 
+mod admission_delegation;
+pub(crate) use admission_delegation::EdgeRelation;
+pub use admission_delegation::MessageLimit;
+pub(crate) use admission_delegation::OriginQuotaCharge;
 mod quota;
 pub use quota::OriginQuota;
 pub use quota::OriginQuotaArithmeticError;
@@ -45,6 +49,7 @@ pub use quota::DEFAULT_ORIGIN_QUOTA_BYTE_BURST;
 pub use quota::DEFAULT_ORIGIN_QUOTA_MESSAGES_PER_SECOND;
 pub use quota::DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST;
 pub use quota::DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE;
+pub use quota::DELEGATED_MIN_CHARGE;
 pub use types::MessageCategory;
 
 mod replay;

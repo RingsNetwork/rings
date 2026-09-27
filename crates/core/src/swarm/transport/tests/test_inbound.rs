@@ -11,6 +11,7 @@ use crate::swarm::callback::inbound_peer_capacity_for_test;
 use crate::swarm::callback::InboundLane;
 use crate::tests::TEST_NETWORK_ID;
 
+mod test_admission_delegation;
 mod test_callback_failure;
 mod test_capacity_handoff;
 mod test_delegation_reference;
