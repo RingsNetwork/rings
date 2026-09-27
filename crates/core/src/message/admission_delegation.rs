@@ -18,8 +18,10 @@
 //! A delegated transaction neither needs nor consumes a message token. It is still charged to
 //! the same record's byte bucket, at least `DELEGATED_MIN_CHARGE` bytes, and the record bound
 //! still applies. The byte bound on the neighbour's application traffic is unchanged, and the
-//! floor bounds core's own per-message admission work, which no delegating protocol can bound
-//! because it runs before the protocol sees the message. Core takes a flag, not a rate, and has no
+//! floor bounds how many delegated messages core admits, and so the per-message work that
+//! follows admission (the replay-snapshot persist onwards), which no delegating protocol can
+//! bound because it runs before the protocol sees the message. The decode and signature checks
+//! precede the quota and are not bounded by it. Core takes a flag, not a rate, and has no
 //! vocabulary of the protocol that declares it.
 //!
 //! # Why only the authenticated neighbour qualifies

@@ -35,13 +35,14 @@ pub const DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
 pub const DEFAULT_ORIGIN_QUOTA_BYTE_BURST: u64 = 64 * 1024 * 1024;
 /// Minimum byte charge of a delegated admission.
 ///
-/// Core admits every final-destination message at a fixed per-message cost: two signature
-/// checks and a replay-snapshot persist under the replay lock. A delegated admission skips the
-/// message limit, so without a floor only the byte bucket would bound that work, and tiny
-/// messages would multiply it. Charging `max(len, DELEGATED_MIN_CHARGE)` bounds a neighbour's
-/// delegated admissions to `byte_rate / 16 KiB` per second (256/s under the default 4 MiB/s),
-/// with a burst of `byte_burst / 16 KiB` (4096 by default). Messages of at least 16 KiB pay
-/// exactly their length.
+/// Every admitted final-destination message costs core a fixed amount of work: the
+/// replay-snapshot persist under the replay lock, then its logical lane, validation and dispatch.
+/// A delegated admission skips the message limit, so without a floor only the byte bucket would
+/// bound how many messages are admitted, and tiny messages would multiply that work. Charging
+/// `max(len, DELEGATED_MIN_CHARGE)` bounds a neighbour's delegated admissions to
+/// `byte_rate / 16 KiB` per second (256/s under the default 4 MiB/s), with a burst of
+/// `byte_burst / 16 KiB` (4096 by default). Messages of at least 16 KiB pay exactly their
+/// length. The decode and signature checks run before the quota and are not bounded by it.
 pub const DELEGATED_MIN_CHARGE: usize = 16 * 1024;
 /// Default number of runtime-local origin records retained per logical lane.
 pub const DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE: usize = 1024;
@@ -1058,9 +1059,9 @@ mod tests {
         assert_eq!(quota.whole_byte_tokens(), u128::from(floor - 1 - 7));
     }
 
-    /// The floor bounds core's per-message work under delegation: a neighbour flooding
-    /// 50-byte delegated messages at 1000/s for a minute is admitted at most
-    /// `byte_burst / floor + T · byte_rate / floor` times (4096 + 256·T by default).
+    /// The floor bounds how many delegated messages core admits: a neighbour flooding 50-byte
+    /// delegated messages at 1000/s for a minute is admitted exactly as often as floors of bytes
+    /// become available, `byte_burst / floor + t · byte_rate / floor` (4096 + 256·t by default).
     #[test]
     fn small_delegated_messages_are_bounded_by_the_floor_rate() {
         let config = OriginQuotaLaneConfig::default();
@@ -1076,10 +1077,17 @@ mod tests {
             quota = next;
             admitted += u128::from(verdict == OriginQuotaVerdict::Admitted);
         }
-        let burst = u128::from(DEFAULT_ORIGIN_QUOTA_BYTE_BURST) / floor;
-        let rate = u128::from(DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND) / floor;
-        assert!(admitted <= burst + rate * seconds + 1, "{admitted}");
-        assert!(admitted < 1_000 * seconds);
+        // Attempts every millisecond outpace the refill of one floor (about 4 ms), and after the
+        // first admission the bucket never refills to its cap. So every floor's worth of bytes
+        // available by the last attempt, at `t_last = T − 1 ms`, is admitted, and no more:
+        // `⌊(byte_burst + byte_rate · t_last) / floor⌋`. A per-message charge above the floor
+        // would admit fewer.
+        let last_attempt_millis = 1_000 * seconds - 1;
+        let available = u128::from(DEFAULT_ORIGIN_QUOTA_BYTE_BURST) * 1_000
+            + u128::from(DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND) * last_attempt_millis;
+        assert_eq!(admitted, available / (floor * 1_000));
+        // 4096 in the burst plus 256 per second for 59.999 s.
+        assert_eq!(admitted, 4_096 + 256 * last_attempt_millis / 1_000);
     }
 
     #[test]

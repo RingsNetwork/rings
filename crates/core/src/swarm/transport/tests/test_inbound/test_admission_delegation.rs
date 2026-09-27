@@ -48,10 +48,14 @@ use crate::tests::TEST_NETWORK_ID;
 const DELEGATED_PREFIX: &[u8] = b"delegated/";
 
 /// The message bucket of a record whose message limit was skipped: untouched.
-const MESSAGES_SKIPPED: u128 = DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST as u128;
+fn messages_skipped() -> u128 {
+    u128::from(DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST)
+}
 
 /// The message bucket of a record charged one message.
-const MESSAGES_CHARGED: u128 = MESSAGES_SKIPPED - 1;
+fn messages_charged() -> u128 {
+    messages_skipped() - 1
+}
 
 /// A stand-in for the application registry: payloads under [`DELEGATED_PREFIX`] belong to a
 /// namespace that declared delegated admission, every other payload to one that did not.
@@ -188,7 +192,8 @@ fn bytes_after(cost: u128) -> u128 {
 
 /// The byte bucket after one delegated admission of `cost`: the floor applies.
 fn bytes_after_delegated(cost: u128) -> u128 {
-    bytes_after(cost.max(DELEGATED_MIN_CHARGE as u128))
+    let floor = u128::try_from(DELEGATED_MIN_CHARGE).expect("usize fits u128");
+    bytes_after(cost.max(floor))
 }
 
 #[tokio::test]
@@ -206,7 +211,7 @@ async fn test_neighbours_own_delegated_traffic_skips_only_the_message_limit() ->
     harness.deliver(&neighbour, &frame).await?;
     assert_eq!(
         harness.tokens(neighbour.did).await,
-        Some((MESSAGES_SKIPPED, bytes_after_delegated(cost)))
+        Some((messages_skipped(), bytes_after_delegated(cost)))
     );
     Ok(())
 }
@@ -226,7 +231,7 @@ async fn test_neighbours_other_namespace_keeps_the_message_limit() -> Result<()>
     harness.deliver(&neighbour, &frame).await?;
     assert_eq!(
         harness.tokens(neighbour.did).await,
-        Some((MESSAGES_CHARGED, bytes_after(cost)))
+        Some((messages_charged(), bytes_after(cost)))
     );
     Ok(())
 }
@@ -247,7 +252,7 @@ async fn test_relayed_origin_keeps_the_message_limit() -> Result<()> {
     harness.deliver(&neighbour, &frame).await?;
     assert_eq!(
         harness.tokens(relayed.delegator_did()).await,
-        Some((MESSAGES_CHARGED, bytes_after(cost)))
+        Some((messages_charged(), bytes_after(cost)))
     );
     // Ineligible traffic never reaches the application registry.
     assert_eq!(harness.app.consulted.load(Ordering::SeqCst), 0);
@@ -270,7 +275,7 @@ async fn test_neighbours_origin_over_another_neighbour_keeps_the_message_limit()
     harness.deliver(&carrier, &frame).await?;
     assert_eq!(
         harness.tokens(origin.did).await,
-        Some((MESSAGES_CHARGED, bytes_after(cost)))
+        Some((messages_charged(), bytes_after(cost)))
     );
     Ok(())
 }
@@ -290,7 +295,7 @@ async fn test_unauthenticated_peer_claiming_its_origin_keeps_the_message_limit()
     harness.deliver(&stranger, &frame).await?;
     assert_eq!(
         harness.tokens(stranger.did).await,
-        Some((MESSAGES_CHARGED, bytes_after(cost)))
+        Some((messages_charged(), bytes_after(cost)))
     );
     assert_eq!(harness.app.consulted.load(Ordering::SeqCst), 0);
     Ok(())
@@ -318,7 +323,7 @@ async fn test_reassembled_neighbour_traffic_skips_only_the_message_limit() -> Re
     }
     assert_eq!(
         harness.tokens(neighbour.did).await,
-        Some((MESSAGES_SKIPPED, bytes_after_delegated(cost)))
+        Some((messages_skipped(), bytes_after_delegated(cost)))
     );
     Ok(())
 }

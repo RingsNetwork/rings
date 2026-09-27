@@ -228,17 +228,18 @@ plane does, through its per-link admission). For a transaction in such a namespa
 the handshake-authenticated connection of its own origin account, core skips only the per-origin
 message-count limit: the transaction neither needs nor consumes a message token. It is still charged
 to the same Application record's byte bucket, at least `DELEGATED_MIN_CHARGE` (16 KiB) per message,
-and the record bound still applies. The floor bounds core's own per-message admission work (two
-signature checks and a replay-snapshot persist), which no delegating protocol can bound because it
-runs first: under the default 4 MiB/s and 64 MiB burst, at most 256 delegated messages per second
-and a burst of 4096. Messages of 16 KiB or more pay exactly their length. Delegated and
-non-delegated traffic from one neighbour share that Application byte bucket, so operators tuning
-`application.byte_*` bound both together. A delegation carries no rate. Every other transaction,
-including a relayed or foreign-origin one in a delegating namespace, keeps the enforced class
-limits. Such an origin's traffic reaches the destination through any number of neighbours, and no
-per-neighbour admission bounds it by origin; the relay carrier is also unsigned, so "direct" is
-witnessed only by the authenticated connection, never by the payload. Delegation therefore never
-widens what a non-neighbour origin can send.
+and the record bound still applies. The floor bounds how many delegated messages core admits, and so
+the per-message work that follows admission (the replay-snapshot persist, the logical lane,
+validation and dispatch), which no delegating protocol can bound because it runs first: under the
+default 4 MiB/s and 64 MiB burst, at most 256 delegated messages per second and a burst of 4096. The
+decode and signature checks precede the quota and are not bounded by it. Messages of 16 KiB or more
+pay exactly their length. Delegated and non-delegated traffic from one neighbour share that
+Application byte bucket, so operators tuning `application.byte_*` bound both together. A delegation
+carries no rate. Every other transaction, including a relayed or foreign-origin one in a delegating
+namespace, keeps the enforced class limits. Such an origin's traffic reaches the destination through
+any number of neighbours, and no per-neighbour admission bounds it by origin; the relay carrier is
+also unsigned, so "direct" is witnessed only by the authenticated connection, never by the payload.
+Delegation therefore never widens what a non-neighbour origin can send.
 
 Delegation is trusted local configuration, with the authority of the operator who configures the
 quota. It enters in exactly two ways: a node `Protocol` whose `delegates_admission` returns `true`,
