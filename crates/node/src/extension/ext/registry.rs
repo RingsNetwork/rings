@@ -695,8 +695,8 @@ mod tests {
     }
 
     /// Registration records the declaration with the handler; a replacement that declares
-    /// nothing withdraws it, so a namespace delegates exactly while a delegating protocol owns
-    /// it.
+    /// nothing withdraws it, so at admission time a namespace delegates exactly while a
+    /// delegating protocol owns it.
     #[tokio::test]
     async fn test_registration_installs_and_replacement_withdraws_delegation() -> Result<()> {
         let extensions = extensions()?;

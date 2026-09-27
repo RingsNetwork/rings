@@ -6,7 +6,9 @@
 //! time. Quota records are intentionally absent from the durable replay snapshot.
 //!
 //! An admission either enforces the message limit or, for traffic whose namespace delegated its
-//! admission, skips it ([`MessageLimit`]); the byte limit and the record bound always apply.
+//! admission, skips it ([`MessageLimit`]); the byte limit and the record bound always apply. A
+//! delegated admission pays at least [`DELEGATED_MIN_CHARGE`] bytes, so the byte bucket also
+//! bounds how many messages core admits for it.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
@@ -31,6 +33,16 @@ pub const DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
 /// This exceeds the 60 MB logical-message protocol ceiling, so every valid message can fit an
 /// otherwise full bucket.
 pub const DEFAULT_ORIGIN_QUOTA_BYTE_BURST: u64 = 64 * 1024 * 1024;
+/// Minimum byte charge of a delegated admission.
+///
+/// Core admits every final-destination message at a fixed per-message cost: two signature
+/// checks and a replay-snapshot persist under the replay lock. A delegated admission skips the
+/// message limit, so without a floor only the byte bucket would bound that work, and tiny
+/// messages would multiply it. Charging `max(len, DELEGATED_MIN_CHARGE)` bounds a neighbour's
+/// delegated admissions to `byte_rate / 16 KiB` per second (256/s under the default 4 MiB/s),
+/// with a burst of `byte_burst / 16 KiB` (4096 by default). Messages of at least 16 KiB pay
+/// exactly their length.
+pub const DELEGATED_MIN_CHARGE: usize = 16 * 1024;
 /// Default number of runtime-local origin records retained per logical lane.
 pub const DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE: usize = 1024;
 
@@ -327,7 +339,8 @@ impl OriginQuota {
     /// Rejected transitions retain any refill but consume neither dimension. The byte cost is the
     /// verified transaction's serialized logical `data` length; chunk-envelope sizes never enter
     /// this transition. Under [`MessageLimit::Delegated`] the message cost is zero: the message
-    /// bucket is neither checked nor consumed, while the byte bucket is.
+    /// bucket is neither checked nor consumed, while the byte bucket is charged at least
+    /// [`DELEGATED_MIN_CHARGE`].
     pub fn admit(
         self,
         config: OriginQuotaLaneConfig,
@@ -340,6 +353,7 @@ impl OriginQuota {
         if !next.messages.has(message_cost) {
             return Ok((next, OriginQuotaVerdict::MessageRateExhausted));
         }
+        let byte_cost = charged_bytes(message_limit, byte_cost);
         let byte_cost =
             u128::try_from(byte_cost).map_err(|_| OriginQuotaArithmeticError::ByteCostOverflow)?;
         let scaled_byte_cost = byte_cost
@@ -401,6 +415,15 @@ const fn scaled_message_cost(message_limit: MessageLimit) -> u128 {
     match message_limit {
         MessageLimit::Enforced => NANOS_PER_SECOND,
         MessageLimit::Delegated => 0,
+    }
+}
+
+/// Bytes one admission of `byte_cost` logical bytes is charged: its length, raised to
+/// [`DELEGATED_MIN_CHARGE`] when admission is delegated.
+fn charged_bytes(message_limit: MessageLimit, byte_cost: usize) -> usize {
+    match message_limit {
+        MessageLimit::Enforced => byte_cost,
+        MessageLimit::Delegated => byte_cost.max(DELEGATED_MIN_CHARGE),
     }
 }
 
@@ -964,14 +987,14 @@ mod tests {
     }
 
     /// Acceptance of #888. One neighbour's Application record under the default limits carries
-    /// a delegated namespace at 98 messages/s and another namespace at 20 messages/s for half an
-    /// hour, interleaved on one simulated clock. The delegated traffic is never refused by the
-    /// message limit, and the other namespace still is, beyond `burst + 8·T`.
+    /// a delegated namespace at 98 messages/s of 16 KiB, the floor itself, and another namespace
+    /// at 20 messages/s for half an hour, interleaved on one simulated clock. The delegated
+    /// traffic is never refused, and the other namespace still is, beyond `burst + 8·T`.
     #[test]
     fn delegated_namespace_is_never_refused_while_another_namespace_still_is() {
         let config = OriginQuotaLaneConfig::default();
         let seconds: u128 = 1_800;
-        let message_bytes = 13_442;
+        let message_bytes = DELEGATED_MIN_CHARGE;
         let mut schedule: Vec<(u128, MessageLimit)> = (0..98 * seconds)
             .map(|index| (index * NANOS_PER_SECOND / 98, MessageLimit::Delegated))
             .chain(
@@ -1001,26 +1024,62 @@ mod tests {
         assert!(enforced_admitted < 20 * seconds);
     }
 
-    /// A delegated admission neither needs nor consumes a message token, and still pays bytes.
+    /// A delegated admission neither needs nor consumes a message token, and still pays bytes:
+    /// the floor for a small message, the exact length for a message above it.
     #[test]
     fn delegated_admission_skips_the_message_bucket_but_not_the_byte_bucket() {
-        let config = config(1, 1, 1, 8, 4);
+        let floor = u64::try_from(DELEGATED_MIN_CHARGE).expect("floor fits u64");
+        let config = config(1, 1, 1, 3 * floor, 4);
         let quota = OriginQuota::full(config, OriginQuotaInstant::ZERO);
         let (quota, first) = quota
             .admit(config, MessageLimit::Enforced, 1, OriginQuotaInstant::ZERO)
             .expect("first transition is valid");
-        let (quota, delegated) = quota
+        let (quota, small) = quota
             .admit(config, MessageLimit::Delegated, 4, OriginQuotaInstant::ZERO)
             .expect("delegated transition is valid");
+        assert_eq!(quota.whole_byte_tokens(), u128::from(3 * floor - 1 - floor));
+        let (quota, large) = quota
+            .admit(
+                config,
+                MessageLimit::Delegated,
+                DELEGATED_MIN_CHARGE + 7,
+                OriginQuotaInstant::ZERO,
+            )
+            .expect("delegated transition is valid");
         let (quota, byte_refused) = quota
-            .admit(config, MessageLimit::Delegated, 4, OriginQuotaInstant::ZERO)
+            .admit(config, MessageLimit::Delegated, 1, OriginQuotaInstant::ZERO)
             .expect("byte rejection is valid");
 
         assert_eq!(first, OriginQuotaVerdict::Admitted);
-        assert_eq!(delegated, OriginQuotaVerdict::Admitted);
+        assert_eq!(small, OriginQuotaVerdict::Admitted);
+        assert_eq!(large, OriginQuotaVerdict::Admitted);
         assert_eq!(byte_refused, OriginQuotaVerdict::ByteRateExhausted);
         assert_eq!(quota.whole_message_tokens(), 0);
-        assert_eq!(quota.whole_byte_tokens(), 3);
+        assert_eq!(quota.whole_byte_tokens(), u128::from(floor - 1 - 7));
+    }
+
+    /// The floor bounds core's per-message work under delegation: a neighbour flooding
+    /// 50-byte delegated messages at 1000/s for a minute is admitted at most
+    /// `byte_burst / floor + T · byte_rate / floor` times (4096 + 256·T by default).
+    #[test]
+    fn small_delegated_messages_are_bounded_by_the_floor_rate() {
+        let config = OriginQuotaLaneConfig::default();
+        let floor = u128::try_from(DELEGATED_MIN_CHARGE).expect("floor fits u128");
+        let seconds: u128 = 60;
+        let mut quota = OriginQuota::full(config, OriginQuotaInstant::ZERO);
+        let mut admitted = 0_u128;
+        for index in 0..1_000 * seconds {
+            let now = OriginQuotaInstant::from_nanos(index * NANOS_PER_SECOND / 1_000);
+            let (next, verdict) = quota
+                .admit(config, MessageLimit::Delegated, 50, now)
+                .expect("monotonic schedule");
+            quota = next;
+            admitted += u128::from(verdict == OriginQuotaVerdict::Admitted);
+        }
+        let burst = u128::from(DEFAULT_ORIGIN_QUOTA_BYTE_BURST) / floor;
+        let rate = u128::from(DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND) / floor;
+        assert!(admitted <= burst + rate * seconds + 1, "{admitted}");
+        assert!(admitted < 1_000 * seconds);
     }
 
     #[test]

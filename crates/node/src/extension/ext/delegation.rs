@@ -1,7 +1,7 @@
 //! Namespaces that delegate their admission (#888).
 //!
 //! A [`Protocol`](super::Protocol) that admits its own direct-edge traffic, per sending
-//! neighbour, before any further processing declares it through
+//! neighbour, before its own processing declares it through
 //! [`Protocol::delegates_admission`](super::Protocol::delegates_admission). The registry records
 //! the declaration here when the protocol is installed, under the same write lock that installs
 //! its handler, and core asks it about an inbound application payload through
@@ -14,6 +14,12 @@
 //!
 //! Core decides whether delegation applies at all (Application traffic from the authenticated
 //! neighbour that originated it); this set only names the namespaces, never the eligibility.
+//!
+//! The verdict is taken at admission and not carried with the frame. A frame admitted as
+//! delegated that is still queued when its namespace's protocol is replaced by one that does not
+//! delegate reaches the replacement having skipped the message limit, and the reverse holds too.
+//! The exposure is bounded by the inbound mailbox depth, and every delegated frame was charged
+//! at least `DELEGATED_MIN_CHARGE` bytes.
 
 use std::collections::HashSet;
 use std::sync::RwLock;
@@ -33,7 +39,8 @@ impl DelegatedNamespaces {
     /// Record the declarations of a batch of namespaces at once.
     ///
     /// Pre: the caller holds the handler table's write lock and inserts the batch's handlers
-    /// right after, so a namespace delegates exactly while a delegating protocol owns it.
+    /// right after, so at admission time a namespace delegates exactly while a delegating
+    /// protocol owns it.
     pub(crate) fn install<'a>(
         &self,
         declarations: impl IntoIterator<Item = (&'a str, bool)>,
@@ -88,6 +95,20 @@ mod tests {
         assert!(!namespaces.delegates(&envelope("delegating")));
         namespaces.install([("delegating", true)])?;
         assert!(namespaces.delegates(&envelope("delegating")));
+        Ok(())
+    }
+
+    /// Only the namespace prefix is read: a delegating namespace followed by an undecodable
+    /// tail still resolves as delegated. Core then charges it at least `DELEGATED_MIN_CHARGE`
+    /// bytes, which is what bounds such frames.
+    #[test]
+    fn test_a_malformed_tail_after_a_delegating_namespace_still_delegates() -> Result<()> {
+        let namespaces = DelegatedNamespaces::default();
+        namespaces.install([("delegating", true)])?;
+        let mut malformed = rings_codec::serialize(&"delegating").expect("namespace encodes");
+        malformed.extend_from_slice(&[0xff; 9]);
+        assert!(Envelope::decode(&malformed).is_err());
+        assert!(namespaces.delegates(&malformed));
         Ok(())
     }
 }

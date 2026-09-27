@@ -4,9 +4,9 @@
 //! quota record after one admission. A stored record holds its tokens as of that admission, so
 //! the assertions are exact and depend on no clock:
 //!
-//! - message limit skipped: the message bucket is still full (`burst`);
-//! - message limit enforced: it holds `burst − 1`;
-//! - byte bucket applied in both cases: it holds `byte_burst − cost`.
+//! - message limit skipped: the message bucket is still full (`burst`), and the byte bucket holds
+//!   `byte_burst − max(cost, DELEGATED_MIN_CHARGE)`;
+//! - message limit enforced: the buckets hold `burst − 1` and `byte_burst − cost`.
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -34,6 +34,7 @@ use crate::message::OriginQuotaLaneConfig;
 use crate::message::Transaction;
 use crate::message::DEFAULT_ORIGIN_QUOTA_BYTE_BURST;
 use crate::message::DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST;
+use crate::message::DELEGATED_MIN_CHARGE;
 use crate::storage::MemStorage;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
@@ -180,9 +181,14 @@ fn wire(
     Ok((frame, cost))
 }
 
-/// The byte bucket after one admission of `cost` from a full default bucket.
+/// The byte bucket after one enforced admission of `cost` from a full default bucket.
 fn bytes_after(cost: u128) -> u128 {
     u128::from(DEFAULT_ORIGIN_QUOTA_BYTE_BURST) - cost
+}
+
+/// The byte bucket after one delegated admission of `cost`: the floor applies.
+fn bytes_after_delegated(cost: u128) -> u128 {
+    bytes_after(cost.max(DELEGATED_MIN_CHARGE as u128))
 }
 
 #[tokio::test]
@@ -200,7 +206,7 @@ async fn test_neighbours_own_delegated_traffic_skips_only_the_message_limit() ->
     harness.deliver(&neighbour, &frame).await?;
     assert_eq!(
         harness.tokens(neighbour.did).await,
-        Some((MESSAGES_SKIPPED, bytes_after(cost)))
+        Some((MESSAGES_SKIPPED, bytes_after_delegated(cost)))
     );
     Ok(())
 }
@@ -312,18 +318,22 @@ async fn test_reassembled_neighbour_traffic_skips_only_the_message_limit() -> Re
     }
     assert_eq!(
         harness.tokens(neighbour.did).await,
-        Some((MESSAGES_SKIPPED, bytes_after(cost)))
+        Some((MESSAGES_SKIPPED, bytes_after_delegated(cost)))
     );
     Ok(())
 }
 
-/// Delegation skips the message limit, never the byte bucket: a delegated neighbour whose
-/// messages exceed the byte burst is refused on bytes.
+/// Delegation skips the message limit, never the byte bucket: a small delegated message is
+/// charged the floor, so a byte burst of one floor and a bit admits exactly one of them, where
+/// its length alone would admit dozens. An undecodable payload in a delegating namespace is
+/// just such a small message.
 #[tokio::test]
-async fn test_delegated_traffic_is_still_refused_by_the_byte_bucket() -> Result<()> {
+async fn test_small_delegated_messages_are_charged_the_floor() -> Result<()> {
     let [local, neighbour] = fixed_secret_keys::<2>()?;
-    let payload = [DELEGATED_PREFIX, &[7; 512]].concat();
-    let lane = OriginQuotaLaneConfig::new(1, 1, 1, 1_024, 8)
+    let payload = [DELEGATED_PREFIX, &[0xff; 64]].concat();
+    let byte_burst =
+        u64::try_from(DELEGATED_MIN_CHARGE + 1_024).map_err(|_| Error::MessageSizeOverflow)?;
+    let lane = OriginQuotaLaneConfig::new(1, 1, 1, byte_burst, 8)
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     let harness = Harness::new(&local, OriginQuotaConfig::new(lane, lane, lane, lane))?;
     let neighbour = harness.peer(&neighbour, true).await?;

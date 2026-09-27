@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Confirm WebRTC delivery on the data channel's `bufferedamountlow`, `close` and `error`
+  events instead of polling `bufferedAmount` every 300 ms (#887). Each channel multiplexes its
+  single low-water threshold over every pending send, so an awaited send resolves on the event
+  that flushes it: on native loopback the p50 of an awaited 16 KiB send drops from about 302 ms
+  to about 5 ms. On native, "delivered" still means acknowledged by the peer's SCTP SACK. No
+  wire or API change.
+
 - Rename the relay transport identifier from `SessionId` to `RelaySessionId` to distinguish
   relayed TCP connections and UDP flows from delegated-signing identities. The wire value and
   frame encoding are unchanged.
@@ -20,6 +27,16 @@
   and construction requires a database name.
 
 ### Breaking changes
+
+- Add delegated admission of direct-edge application traffic (#888). A namespace declares it
+  through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`
+  (core), both defaulting to `false`. For its traffic from the authenticated neighbour that
+  originated it, core skips the per-origin message-count limit and charges at least
+  `DELEGATED_MIN_CHARGE` (16 KiB) against the same per-origin byte bucket, whose limits and
+  record bound still apply. Relayed and foreign-origin traffic keeps the enforced limits.
+  `OriginQuota::admit` takes a new `MessageLimit` argument, and `MessageLimit` and
+  `DELEGATED_MIN_CHARGE` are exported from `rings_core::message`. No shipped protocol declares
+  delegation yet.
 
 - Deliver messages toward a node DID by a dedicated rule instead of the owner lookup (#865, #873).
   Greedy hops forward to the linked known peer, successors included, that lies nearest the

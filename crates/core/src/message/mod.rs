@@ -49,6 +49,7 @@ pub use quota::DEFAULT_ORIGIN_QUOTA_BYTE_BURST;
 pub use quota::DEFAULT_ORIGIN_QUOTA_MESSAGES_PER_SECOND;
 pub use quota::DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST;
 pub use quota::DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE;
+pub use quota::DELEGATED_MIN_CHARGE;
 pub use types::MessageCategory;
 
 mod replay;

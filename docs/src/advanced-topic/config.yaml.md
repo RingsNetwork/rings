@@ -117,7 +117,9 @@ where noted.
   deliberately reset on restart; durable replay state is separate. A protocol may declare
   delegated admission when it is registered: for its own traffic from the authenticated neighbour
   that originated it, the `application` message limit is skipped, while the `application` byte
-  limits and record bound still apply. Delegation is not configured here.
+  limits and record bound still apply, each such message is charged at least 16 KiB
+  (`DELEGATED_MIN_CHARGE`), and it shares the byte bucket with that neighbour's other
+  application traffic. Delegation is not configured here.
 * `external_ip`, `webrtc_udp_port_min`, `webrtc_udp_port_max`: optional reachability hints, an
   externally visible address and a UDP port range for ICE. The two port bounds must be given
   together.

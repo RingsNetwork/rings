@@ -110,7 +110,7 @@ pub trait Protocol {
     ) -> Transition<Self::State, Self::Effect>;
 
     /// Whether this protocol delegates its admission: it admits its own direct-edge traffic,
-    /// per sending neighbour, before any further processing (#888).
+    /// per sending neighbour, before its own processing and after core's admission (#888).
     ///
     /// Read once when the protocol is registered. For this namespace's traffic from the
     /// authenticated neighbour that originated it, core then skips the per-origin message-count

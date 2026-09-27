@@ -4,7 +4,8 @@
 //! `(network, origin account, destination, class)`, with a message bucket and a byte bucket.
 //!
 //! Some application protocols admit each sending neighbour themselves, through their own
-//! per-neighbour admission, before any further processing. For their direct-edge traffic the
+//! per-neighbour admission before their own processing (after core's admission: decode, both
+//! signature checks, and replay classification). For their direct-edge traffic the
 //! generic per-origin message limit is a second, tighter bound on the same traffic, and it refuses
 //! what the protocol admits. Such a namespace may declare *delegated admission*, a flag with no
 //! rate, and core then skips only the message-count limit for it:
@@ -15,8 +16,10 @@
 //! ```
 //!
 //! A delegated transaction neither needs nor consumes a message token. It is still charged to
-//! the same record's byte bucket, and the record bound still applies, so the byte bound on the
-//! neighbour's application traffic is unchanged. Core takes a flag, not a rate, and has no
+//! the same record's byte bucket, at least `DELEGATED_MIN_CHARGE` bytes, and the record bound
+//! still applies. The byte bound on the neighbour's application traffic is unchanged, and the
+//! floor bounds core's own per-message admission work, which no delegating protocol can bound
+//! because it runs before the protocol sees the message. Core takes a flag, not a rate, and has no
 //! vocabulary of the protocol that declares it.
 //!
 //! # Why only the authenticated neighbour qualifies
