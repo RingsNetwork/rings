@@ -108,16 +108,17 @@ pub mod tests {
 
     /// Each lane always selects the same resource, `lane mod |pool|`.
     #[test]
-    fn test_a_lane_is_pinned_to_one_resource() {
+    fn test_a_lane_is_pinned_to_one_resource() -> crate::error::Result<()> {
         let pool = ChannelPool::<usize>::from_vec(vec![10, 11, 12, 13]);
         for _ in 0..3 {
             for lane in 0..8_u8 {
                 assert_eq!(
-                    pool.select(ChannelLane::new(lane)).unwrap(),
+                    pool.select(ChannelLane::new(lane))?,
                     10 + usize::from(lane % 4)
                 );
             }
         }
+        Ok(())
     }
 
     #[test]

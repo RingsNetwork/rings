@@ -104,7 +104,10 @@ receiver                                   sender
   queued behind one that does not, and a held frame never waits for one held before it,
   because the link promises no order to preserve. Among the held frames that resolve at one
   instant, when a later frame or an announcement teaches the delegation they await, the earliest
-  arrival leaves first; nothing downstream may rely on more than this.
+  arrival leaves first; nothing downstream may rely on more than this. In particular, frames of
+  the held frame's traffic class that arrive after it may pass transaction-replay admission
+  first, and a held frame released after a replay window's worth of them is rejected as stale
+  (see [Transaction Replay Protection](transaction-replay.md)).
 - The hold keeps at most 16 frames per connection (half the pre-admission hold, so the two
   holds together leave a quarter of the transport's per-peer frames for the control frames that
   release them), each for at most twice the transport's delivery timeout plus one period of the

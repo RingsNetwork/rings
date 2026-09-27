@@ -200,11 +200,14 @@ fn backlog_index(payload: &MessagePayload) -> Result<Option<usize>> {
 /// control keeps flowing on its own channel, and the held Application backlog, twice the replay
 /// window, arrives afterwards in send order with no replay rejection.
 ///
-/// Under a rotating channel choice the backlog would spread over every channel: the unstalled
-/// channels would admit later sequences past the stalled one, and more than a replay window of
-/// them makes the held frames `TransactionSequenceStale` once released.
+/// The control and order checks are what discriminate. Spreading Application frames over every
+/// channel puts some on the control channel, so control stalls behind the held handler; spreading
+/// them over the other three channels delivers the backlog out of send order. The stale count
+/// stays zero either way: the receiver's single Application actor holds each channel's handler
+/// after one frame, so no more than a window of frames can pass the stalled one, and the
+/// `stale == 0` check guards the law rather than detecting its violation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_a_stalled_class_channel_holds_only_its_class_and_never_goes_stale() -> Result<()> {
+async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     let (release_tx, release) = watch::channel(false);

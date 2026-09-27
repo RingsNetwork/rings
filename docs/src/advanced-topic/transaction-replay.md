@@ -24,7 +24,8 @@ The outbound scheduler keeps order within a class lane only, with at most `OUTBO
 one ordered data channel of the connection:
 
 ```text
-channel(lane) = pool[lane mod |pool|]      DHT control -> 0, storage -> 1, E2E -> 2, application -> 3
+channel(lane) = pool[lane mod |pool|]
+DHT control -> 0, storage -> 1, E2E -> 2, application -> 3
 ```
 
 A class's transactions therefore reach the receiver in the order the lane sent them, and a
@@ -33,6 +34,13 @@ never rejects an honest sender's transaction as stale, however the lanes are int
 single stream shared by every class did, once one lane's backlog fell behind another's traffic,
 and so would one class spread over several channels, once a stalled channel let later sequences
 of the class overtake it by more than the window.
+
+The order holds for frames that resolve on arrival. A frame whose delegation reference misses
+(the receiver forgot the delegation to capacity eviction or expiry) is held for one repair round
+trip and released independently of later frames, because the session link promises no order
+among held frames (see [Delegation References](delegation-references.md)). If a window's worth
+of its class is admitted meanwhile, the released frame is rejected as `Stale`: one frame lost
+and counted, never a false admission.
 This assumes a class's transactions reach the scheduler in signing order, as they do from one
 sending task.
 
@@ -106,16 +114,16 @@ execution because replay storage and application handlers do not share a transac
 
 Sender and receiver state are stored in one versioned snapshot. Each table retains at most
 `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class stream of 4096
-account-destination pairs, or more pairs that use fewer classes. Each receiver stream has exactly
-32 hot digest slots. A full snapshot's canonical encoding is at most
-`TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES` = 20,643,852 bytes (about 19.7 MiB): per stream, a
-92-byte key with its 10-byte last sequence and a 92-byte key with its 1066-byte window, plus
-length prefixes. Every admission rewrites the snapshot, so this is also the largest single write. New streams fail closed at the
-bound; there is no LRU eviction or sender-controlled reset. The native daemon keeps the snapshot
-in a dedicated 32 MiB atomic file store, and browser providers keep it in a dedicated IndexedDB
-store. A custom `SwarmBuilder` or `ProcessorBuilder` must supply durable `ReplayStorage` to retain
-the restart guarantee; their in-memory default guarantees replay rejection only for the lifetime
-of that runtime.
+account-destination pairs, or more pairs that use fewer classes. Each receiver stream has exactly 32
+hot digest slots. A full snapshot's canonical encoding is at most
+`TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES` = 20,643,852 bytes (about 19.7 MiB): per stream, a 92-byte
+key with its 10-byte last sequence and a 92-byte key with its 1066-byte window, plus length
+prefixes. Every admission rewrites the snapshot, so this is also the largest single write. New
+streams fail closed at the bound; there is no LRU eviction or sender-controlled reset. The native
+daemon keeps the snapshot in a dedicated 32 MiB atomic file store, and browser providers keep it in
+a dedicated IndexedDB store. A custom `SwarmBuilder` or `ProcessorBuilder` must supply durable
+`ReplayStorage` to retain the restart guarantee; their in-memory default guarantees replay rejection
+only for the lifetime of that runtime.
 
 Deleting or replacing the replay store deletes the guarantee for its streams. There is no safe
 incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail

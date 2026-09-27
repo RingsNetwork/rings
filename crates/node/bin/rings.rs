@@ -64,10 +64,9 @@ use tokio::task::JoinSet;
 const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
 /// Byte budget of the native replay store: one full replay snapshot
-/// ([`TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES`](rings_node::prelude::rings_core::message::TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES),
-/// about 19.7 MiB) and its file-record framing, with
-/// room left for the former shared-stream record until the first load after the #898 upgrade
-/// deletes it.
+/// (`rings_core::message::TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES`, about 19.7 MiB) and its
+/// file-record framing, with room left for the former shared-stream record until the first
+/// load after the #898 upgrade deletes it.
 const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 32 * 1024 * 1024;
 
 fn onion_entry_guard_storage_path(data_storage_path: &str) -> String {

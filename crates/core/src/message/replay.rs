@@ -11,9 +11,17 @@
 //! [`TRANSACTION_REPLAY_WINDOW`] in flight. Each class lane is pinned to one ordered data channel
 //! of the connection, so a class's stream reaches this admission in sequence order whatever the
 //! other classes' channels do, and a stall on one class's channel holds only that class. An
-//! honest stream crossing one edge is therefore never rejected as stale; a class lane that is not pinned (frames
-//! spread over several channels) loses this law, since another channel can carry later
-//! sequences of the class past a stalled one.
+//! honest stream crossing one edge is therefore never rejected as stale; a class lane that is
+//! not pinned (frames spread over several channels) loses this law, since another channel can
+//! carry later sequences of the class past a stalled one.
+//!
+//! The law covers the frames that resolve on arrival. A frame whose delegation reference misses
+//! (the receiver forgot the delegation to capacity eviction or expiry) is held on the session
+//! link for one repair round trip and released independently of the frames behind it, since
+//! the link promises no order among held frames (see the delegation-references chapter of the
+//! book, `docs/src/advanced-topic/delegation-references.md`). Later
+//! frames of its class may reach this admission first; once a window's worth have, the released
+//! frame is rejected as stale. That is the loss of one frame, counted, never a false admission.
 //!
 //! Persistence is one versioned snapshot under one storage key, whose canonical encoding is at
 //! most [`TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES`]. The load that finds no snapshot under that key
@@ -112,7 +120,8 @@ const SHARED_STREAM_SNAPSHOT_KEY: &str = "rings-core:transaction-replay";
 /// backlog in one lane fall behind later-sequenced traffic of another lane and be rejected as
 /// stale. With one stream per class, an honest sender's transactions reach the receiver in
 /// sequence order: the class lane keeps them FIFO with fewer in flight than the replay window,
-/// and the one data channel it is pinned to delivers them in that order.
+/// and the one data channel it is pinned to delivers them in that order (a frame held on a
+/// delegation-reference miss excepted; see the module documentation).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct StreamKey {
     /// Overlay in which the transaction signature is valid.
