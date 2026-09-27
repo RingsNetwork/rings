@@ -62,7 +62,7 @@ async fn wait_for_raw_capacity_release(
         .await;
     match callback.admit_inbound_frame(raw.clone()) {
         InboundFrameAdmission::Admitted(frame) => Ok(frame),
-        InboundFrameAdmission::CapacityExceeded => Err(Error::InvalidMessage(
+        InboundFrameAdmission::CapacityExceeded { .. } => Err(Error::InvalidMessage(
             "raw transport capacity was not released at the core handoff".to_string(),
         )),
         _ => Err(Error::InvalidMessage(

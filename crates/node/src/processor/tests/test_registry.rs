@@ -202,8 +202,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
     let other = prepare_processor().await;
     let now_ms = get_epoch_ms();
     let mut policy = onion_policy(&["example.com:443"], &[])?;
-    policy.max_circuits = 8;
-    policy.max_streams_per_circuit = 2;
+    policy.max_sessions = 8;
     policy.max_bytes_per_minute = 4096;
     let stale_tcp = onion_exit_descriptor_for_processor_with_service(
         &processor,
@@ -245,7 +244,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         Duration::from_secs(90),
         default_online_node_type(),
         OnionExitOffer::new(vec![OnionServiceName::https()], policy)?,
-        processor.onion_process_epoch,
+        processor.onion_process_epoch(),
     );
     let published = registration
         .publish_descriptors(&processor.registration_context())
@@ -256,7 +255,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .ok_or_else(|| Error::InvalidConfig("expected one onion-exit descriptor".to_string()))?;
     assert_eq!(
         published_descriptor.process_epoch,
-        processor.onion_process_epoch
+        processor.onion_process_epoch.get()
     );
     let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
     processor.storage_fetch(entry_key).await?;

@@ -288,9 +288,12 @@ async fn test_onion_relay_capability_carries_a_fresh_process_epoch() {
 
     assert_eq!(
         descriptor.capabilities,
-        OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch)
+        OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch.get())
     );
-    assert_ne!(processor.onion_process_epoch, restarted.onion_process_epoch);
+    assert_ne!(
+        processor.onion_process_epoch.get(),
+        restarted.onion_process_epoch.get()
+    );
 }
 
 /// The reserved HTTPS name is valid without a parallel transport discriminator, and an exit
@@ -307,7 +310,7 @@ async fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
     assert_eq!(processor.onion_role(), &https_exit_role()?);
     assert_eq!(
         descriptor.capabilities,
-        OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch)
+        OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch.get())
     );
     Ok(())
 }

@@ -61,7 +61,7 @@ use crate::observability::PeerRatingSnapshot;
 use crate::observability::SessionKeySnapshot;
 use crate::observability::OPERATOR_SCHEMA_VERSION;
 use crate::observability::PEER_RATING_CAPACITY;
-use crate::onion::circuit::OnionCircuitCapabilities;
+use crate::onion::circuit::OnionIdleFloor;
 use crate::onion::default_advertise_onion_exit;
 use crate::onion::default_advertise_onion_relay;
 use crate::onion::default_onion_exit_heartbeat_interval_secs;
@@ -70,7 +70,7 @@ use crate::onion::default_onion_exit_services;
 use crate::onion::default_onion_exit_ttl_secs;
 use crate::onion::directory;
 use crate::onion::directory::OnionDirectoryReader;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::validate_onion_exit_registration_timing;
@@ -81,10 +81,10 @@ use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitRegistration;
 use crate::onion::OnionProcessEpoch;
+use crate::onion::OnionProcessEpochCell;
 use crate::onion::OnionRole;
 use crate::onion::OnionServiceName;
 use crate::onion::ONION_EXITS_TOPIC;
-use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
@@ -208,8 +208,9 @@ pub struct Processor {
     pub swarm: Arc<Swarm>,
     /// Same delegatee key held by the swarm transport; kept here for node-layer descriptor signing.
     delegatee_key: DelegateeKey,
-    /// Fresh process epoch `e_n` carried by every onion symbol this process registers (#834 D2).
-    onion_process_epoch: OnionProcessEpoch,
+    /// The process epoch `e_n` carried by every onion symbol this process registers (#834 D2):
+    /// drawn fresh at process start, renewed only by the onion admission state.
+    onion_process_epoch: OnionProcessEpochCell,
     onion_entry_guards: Arc<OnionEntryGuards>,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
@@ -219,6 +220,8 @@ pub struct Processor {
     listener_lifecycle_lock: Arc<futures::lock::Mutex<()>>,
     /// Onion symbols this process registers (#834 D2).
     onion_role: OnionRole<OnionExitOffer>,
+    /// The cover floor of this node's idle onion links (#880).
+    onion_idle_floor: OnionIdleFloor,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     /// Process-local bounded recorder backing the authenticated operator surface.
     observability: Arc<Observability>,
@@ -253,10 +256,15 @@ impl Processor {
         &self.onion_role
     }
 
-    /// Return this process's circuit capabilities: its onion role at its process epoch, the image
-    /// of [`Self::onion_role`] under `OnionRole::map(|_| e_n)`.
-    pub(crate) fn onion_circuit_capabilities(&self) -> OnionCircuitCapabilities {
-        self.onion_role.as_ref().map(|_| self.onion_process_epoch)
+    /// Return the cover floor of this node's idle onion links (#880).
+    pub(crate) const fn onion_idle_floor(&self) -> OnionIdleFloor {
+        self.onion_idle_floor
+    }
+
+    /// Return the cell of this process's onion epoch `e_n` (#834 D2), shared with the onion
+    /// admission state and the registrations.
+    pub(crate) fn onion_process_epoch(&self) -> OnionProcessEpochCell {
+        self.onion_process_epoch.clone()
     }
 
     fn registration_context(&self) -> RegistrationContext<'_> {
@@ -493,7 +501,7 @@ impl Processor {
     /// Build an onion proxy route for a client target through a target-agnostic proxy config.
     pub async fn build_onion_proxy_route(
         &self,
-        proxy: OnionProxyConfig,
+        proxy: OnionProxyProtocol,
         target: OnionProxyTarget,
     ) -> Result<OnionProxyRoute> {
         directory::build_onion_proxy_route(self, proxy, target).await

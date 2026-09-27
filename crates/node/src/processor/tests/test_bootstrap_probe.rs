@@ -198,6 +198,7 @@ async fn backend_translates_admission_and_retirement_only() {
     let state_change = |state: WebrtcConnectionState| SwarmEvent::ConnectionStateChange {
         peer: managed,
         state,
+        generation: 0,
     };
 
     let mut admitted = evidence
@@ -232,7 +233,10 @@ async fn backend_translates_admission_and_retirement_only() {
     assert_eq!(admitted.await, Ok(()));
 
     backend
-        .on_event(&SwarmEvent::PeerRetired { peer: managed })
+        .on_event(&SwarmEvent::PeerRetired {
+            peer: managed,
+            generation: 0,
+        })
         .await
         .expect("events are accepted");
     assert_eq!(

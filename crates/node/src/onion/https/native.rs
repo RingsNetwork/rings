@@ -1,19 +1,18 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use super::limits::headers_bytes;
 use super::limits::reject_content_length_over_limit;
 use super::limits::usize_to_u64;
 use super::normalize_method;
 use super::FetchResponse;
 use super::OnionHttpsRequest;
-use super::OnionHttpsRuntime;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::target::resolve_target_addresses;
 use crate::onion::target::select_public_exit_addresses;
 use crate::onion::target::PublicAddressSelection;
-use crate::onion::OnionExitPolicy;
 
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -67,8 +66,7 @@ pub(super) async fn execute_https_request(
     target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
-    policy: &OnionExitPolicy,
+    record_bytes: impl Fn(u64) -> Result<()>,
 ) -> Result<FetchResponse> {
     let addresses = resolve_target_addresses(target).await?;
     let egress = select_native_https_egress(target, addresses)?;
@@ -78,7 +76,7 @@ pub(super) async fn execute_https_request(
         max_body_bytes,
         HTTPS_EXIT_REQUEST_TIMEOUT,
         &egress,
-        |bytes| runtime.record_exit_bytes(policy, bytes),
+        record_bytes,
     )
     .await
 }
@@ -153,6 +151,7 @@ pub(super) async fn native_fetch_with_timeout(
         })
         .collect::<Vec<_>>();
     reject_content_length_over_limit(&headers, max_body_bytes)?;
+    record_bytes(headers_bytes(&headers)?)?;
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()

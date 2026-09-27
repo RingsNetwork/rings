@@ -572,6 +572,19 @@ impl SimulationRuntimeGuard {
         Ok(dummy_controlled::discard_sequence(delivery.sequence))
     }
 
+    /// Remove one controlled event without executing its callback, as its receiving end's
+    /// inbound bound refuses a frame: a data frame reaches the receiver only as refused, which
+    /// releases it for its link's credit (#904), while [`Self::discard`] loses it below the
+    /// receiver, a loss the reliable link never suffers.
+    pub(crate) fn refuse(
+        &self,
+        delivery: &ScheduledDelivery,
+    ) -> Result<bool, SimulationRuntimeError> {
+        verify_effect_boundary()?;
+        remove_cached_delivery(delivery)?;
+        Ok(dummy_controlled::refuse_sequence(delivery.sequence))
+    }
+
     /// Snapshot violations emitted by real production boundaries in this run.
     pub(crate) fn protection_observations(
         &self,

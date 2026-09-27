@@ -29,6 +29,10 @@ pub enum OnionProxyTargetError {
     /// Host contains whitespace.
     #[error("onion proxy target host must not contain whitespace")]
     HostWhitespace,
+    /// Host contains `*`: no authority has a wildcard host, so a `*` is never a literal (the
+    /// exit patterns `*`, `*:*` and `*:port` are recognised before any host is parsed).
+    #[error("onion proxy target host must not contain '*'")]
+    WildcardHost,
     /// Port is not a valid `u16`.
     #[error("onion proxy target has an invalid port")]
     InvalidPort,
@@ -178,6 +182,8 @@ pub(crate) fn validate_public_ip_literal(target: &OnionProxyTarget) -> Result<()
     }
 }
 
+/// The canonical host: trimmed, without trailing dots, lowercase; empty, whitespace and `*`
+/// are refused.
 fn normalize_host(host: &str) -> Result<String> {
     let host = host.trim().trim_end_matches('.');
     if host.is_empty() {
@@ -185,6 +191,9 @@ fn normalize_host(host: &str) -> Result<String> {
     }
     if host.chars().any(char::is_whitespace) {
         return Err(OnionProxyTargetError::HostWhitespace.into());
+    }
+    if host.contains('*') {
+        return Err(OnionProxyTargetError::WildcardHost.into());
     }
     Ok(host.to_ascii_lowercase())
 }

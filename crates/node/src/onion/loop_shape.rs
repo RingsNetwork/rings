@@ -174,6 +174,16 @@ pub(crate) enum OnionLoopRelay {
     Relay,
 }
 
+/// The role of one position of a loop: a relay position (the guard included), or the symbol hop
+/// `hₖ` with its index `k ∈ [1, n]`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnionLoopRole {
+    /// A position evaluating `relay`.
+    Relay,
+    /// The symbol hop `hₖ`.
+    Symbol(usize),
+}
+
 /// A loop whose relay positions carry a label `P` and whose symbol positions carry a label `T`,
 /// the guard's label stored once.
 ///
@@ -291,6 +301,41 @@ impl<P> OnionLoop<P> {
         self.open_path().chain(iter::once(&self.guard))
     }
 
+    /// Return every position `1 … H` in order with its role: the relay positions, the guard at
+    /// `1` and `H` included, and each symbol hop `hₖ` with its index `k` (`1 ≤ k ≤ n`).
+    ///
+    /// Law: the projection to labels is [`Self::positions`], and the roles read
+    /// `Relay^s · Π_{k=1..n} (Symbol k · Relay^s)`, the unfold grammar with the guard counted in
+    /// both end segments.
+    pub fn roles(&self) -> impl Iterator<Item = (OnionLoopRole, &P)> {
+        let symbols = self.shape().symbols();
+        iter::once(&self.guard)
+            .chain(self.lead.iter())
+            .map(|relay| (OnionLoopRole::Relay, relay))
+            .chain(
+                self.stages
+                    .iter()
+                    .zip(1..)
+                    .flat_map(|((symbol, relays), k)| {
+                        iter::once((OnionLoopRole::Symbol(k), symbol))
+                            .chain(relays.iter().map(|relay| (OnionLoopRole::Relay, relay)))
+                    }),
+            )
+            .chain(iter::once((OnionLoopRole::Symbol(symbols), &self.terminal)))
+            .chain(
+                self.tail
+                    .iter()
+                    .chain(iter::once(&self.guard))
+                    .map(|relay| (OnionLoopRole::Relay, relay)),
+            )
+    }
+
+    /// Return the return path: the positions after the terminal `hₙ`, `rₙ,₁ … rₙ,ₛ = g`, which a
+    /// reply block of `hₙ` travels.
+    pub fn return_path(&self) -> impl Iterator<Item = &P> {
+        self.tail.iter().chain(iter::once(&self.guard))
+    }
+
     /// Return the label of the symbol hop `hₖ`, `1 ≤ k ≤ n`, or `None` for any other `k`.
     pub fn symbol(&self, k: usize) -> Option<&P> {
         if k == self.shape().symbols() {
@@ -304,6 +349,7 @@ impl<P> OnionLoop<P> {
 mod tests {
     use super::OnionLoop;
     use super::OnionLoopRelay;
+    use super::OnionLoopRole;
     use super::OnionLoopShape;
     use super::OnionPipelineSymbols;
     use super::MAX_ONION_LOOP_HOPS;
@@ -429,6 +475,38 @@ mod tests {
                     .get(..ONION_SEGMENT_RELAYS)
                     .map(<[Kind]>::to_vec)
                     .unwrap_or_default()
+            );
+        }
+        Ok(())
+    }
+
+    /// `roles` labels exactly the positions `positions` lists, the `k`-th symbol at `(s + 1)·k`
+    /// and every other position a relay, and the return path is the last `s` positions.
+    #[test]
+    fn test_roles_label_every_position_by_the_unfold_grammar() -> Result<()> {
+        for symbols in 1..=MAX_ONION_LOOP_SYMBOLS {
+            let (unfolded, _) = unfold_kinds(symbols)?;
+            let roles = unfolded.roles().collect::<Vec<_>>();
+
+            assert_eq!(
+                roles.iter().map(|(_, kind)| **kind).collect::<Vec<_>>(),
+                unfolded.positions().copied().collect::<Vec<_>>()
+            );
+            for (index, (role, kind)) in roles.iter().enumerate() {
+                match role {
+                    OnionLoopRole::Symbol(k) => {
+                        assert_eq!(**kind, Kind::Symbol(*k));
+                        assert_eq!(index + 1, (ONION_SEGMENT_RELAYS + 1) * k);
+                    }
+                    OnionLoopRole::Relay => assert!(!matches!(kind, Kind::Symbol(_))),
+                }
+            }
+            let tail = roles
+                .get(roles.len() - ONION_SEGMENT_RELAYS..)
+                .map(|tail| tail.iter().map(|(_, kind)| **kind).collect::<Vec<_>>());
+            assert_eq!(
+                tail,
+                Some(unfolded.return_path().copied().collect::<Vec<_>>())
             );
         }
         Ok(())

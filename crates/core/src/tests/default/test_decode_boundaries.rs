@@ -129,7 +129,10 @@ fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
             Ok(LinkFrame::Control(LinkControl::Unknown(digest))) => {
                 let _unavailable = receiver.unknown(digest, now_ms);
             }
-            Ok(LinkFrame::Control(LinkControl::Request(_) | LinkControl::Known(_))) | Err(_) => {}
+            Ok(LinkFrame::Control(
+                LinkControl::Request(_) | LinkControl::Known(_) | LinkControl::Credit(_),
+            ))
+            | Err(_) => {}
         }
         while let Ok(Some(_)) = receiver.release_next(now_ms) {}
         if generator.one_in(7) {
@@ -158,8 +161,9 @@ fn generated_link_frame(
         }
         1 => LinkControl::Unknown(sessions.origin.digest().ok()?).to_wire(),
         2 => LinkControl::Request(sessions.origin.digest().ok()?).to_wire(),
-        3 => match generator.usize(2) {
+        3 => match generator.usize(3) {
             0 => LinkControl::Known(sessions.origin.digest().ok()?).to_wire(),
+            1 => LinkControl::Credit(u64::try_from(generator.usize(1 << 20)).ok()?).to_wire(),
             _ => payload.to_wire(),
         },
         _ => {

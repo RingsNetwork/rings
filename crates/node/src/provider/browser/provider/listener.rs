@@ -111,7 +111,7 @@ impl Provider {
     pub fn listen(&self) -> ProviderListener {
         // Install before spawning, so the task holds only the installation's outcome.
         let installed = if self.processor.onion_role().registers_relay() {
-            self.install_onion_https_protocol().map(drop)
+            self.install_onion_runtime().map(drop)
         } else {
             Ok(())
         };

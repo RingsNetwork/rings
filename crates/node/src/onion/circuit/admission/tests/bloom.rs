@@ -23,7 +23,7 @@ use crate::onion::circuit::admission::OnionReplayFilterKey;
 use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA;
 use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::admission::ONION_ADMISSION_GLOBAL_UNITS;
-use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionReplayNonce;
 
 /// Geometry lemma: the exact expected fill of a slice after `B` insertions is
 /// `p_B = 1 − (1 − 1/M)^B ≤ ½`, and slices are independent, so a full block's false-positive rate
@@ -93,7 +93,7 @@ fn test_saturated_filter_meets_the_false_positive_target() {
 
     let false_positives = (0..1_u32 << 16)
         .filter(|_| {
-            let probe = admission.replay.probe(OnionForwardNonce::new(rng.gen()));
+            let probe = admission.replay.probe(OnionReplayNonce::new(rng.gen()));
             admission.replay.contains(x, &probe)
         })
         .count();
@@ -151,7 +151,7 @@ fn test_filter_grows_by_blocks_without_false_negatives() {
     let mut store = ReplayStore::new(OnionReplayFilterKey::new(rng.gen()));
     let x = latest_expiry(ORIGIN_MS);
     let tags = (0..=REPLAY_BLOCK_TAGS)
-        .map(|_| OnionForwardNonce::new(rng.gen()))
+        .map(|_| OnionReplayNonce::new(rng.gen()))
         .collect::<Vec<_>>();
     for tag in tags.iter() {
         store.insert(x, &store.probe(tag.to_owned()));

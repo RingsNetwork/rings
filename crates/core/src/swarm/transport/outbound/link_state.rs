@@ -1,7 +1,8 @@
 //! The state of one peer's link that the sending end keeps across its outbound workers: the
-//! announced-delegation table and the budget of link-control sends in flight. A worker is
-//! replaced under an unchanged connection generation without losing either; a newer
-//! generation empties the table by itself on its first frame.
+//! announced-delegation table, the budget of link-control sends in flight, and the credit of the
+//! link's flow control. A worker is replaced under an unchanged connection generation without
+//! losing any of them; a newer generation empties the table and starts a fresh credit ledger by
+//! itself on its first frame.
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -12,6 +13,7 @@ use rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY;
 use super::session_encoding::SharedAnnouncedDelegations;
 use super::OutboundSchedulers;
 use crate::dht::Did;
+use crate::swarm::transport::link_credit::LinkCredits;
 
 /// Link-control sends this end keeps in flight to one peer at most: two per frame the peer may
 /// have in flight at this end's transport, since each inbound frame causes at most two of
@@ -26,6 +28,8 @@ pub(super) struct PeerLinkState {
     pub(super) announced: SharedAnnouncedDelegations,
     /// The link-control sends in flight to the peer.
     pub(super) control_budget: LinkControlBudget,
+    /// The credit of the peer's current link generation.
+    pub(super) credit: LinkCredits,
 }
 
 impl PeerLinkState {
@@ -34,6 +38,7 @@ impl PeerLinkState {
         Self {
             announced: SharedAnnouncedDelegations::new(),
             control_budget: LinkControlBudget::new(),
+            credit: LinkCredits::default(),
         }
     }
 
@@ -84,6 +89,26 @@ impl OutboundSchedulers {
             .peers
             .get(&peer)
             .map(|handle| handle.state.link.clone())
+    }
+
+    /// The credit ledgers of `peer`'s link, if this end has a worker for it.
+    pub(in crate::swarm::transport) fn link_credits(&self, peer: Did) -> Option<LinkCredits> {
+        self.link_of(peer).map(|link| link.credit)
+    }
+
+    /// One link-control send to `peer` counted against its budget, creating the peer's worker,
+    /// and so its link state, if this end has none: a receiver returns credit on a link it has
+    /// sent nothing on (#904). `Ok(None)` when the budget is spent.
+    ///
+    /// # Errors
+    ///
+    /// No runtime to carry the peer's worker.
+    pub(in crate::swarm::transport) fn establish_link_control_permit(
+        &self,
+        peer: Did,
+    ) -> crate::error::Result<Option<LinkControlPermit>> {
+        self.handle(peer)
+            .map(|handle| handle.state.link.control_budget.try_reserve())
     }
 
     /// One link-control send to `peer` counted against its budget: `None` when this end has

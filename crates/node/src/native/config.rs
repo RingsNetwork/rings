@@ -90,9 +90,6 @@ pub struct NativeGatewayConfig {
     /// Interval for refreshing Onion exit availability in gateway status.
     #[serde(default = "default_gateway_status_refresh_secs")]
     pub status_refresh_secs: u64,
-    /// Onion TCP exit service selected for captured flows.
-    #[serde(default = "OnionServiceName::tcp")]
-    pub onion_service: OnionServiceName,
 }
 
 impl NativeGatewayConfig {
@@ -108,7 +105,6 @@ impl NativeGatewayConfig {
             unix_helper_socket: default_gateway_unix_helper_socket(),
             wintun_dll_path: None,
             status_refresh_secs: default_gateway_status_refresh_secs(),
-            onion_service: OnionServiceName::tcp(),
         }
     }
 
@@ -127,7 +123,7 @@ struct GatewaySection<'a> {
 
 /// Keys of the `gateway:` section: those of [`NativeGatewayConfig`] and of the flattened
 /// [`GatewayConfig`], in the order `rings init` writes them.
-const GATEWAY_KEYS: [&str; 11] = [
+const GATEWAY_KEYS: [&str; 10] = [
     "enabled",
     "plan",
     "max_flows",
@@ -138,12 +134,26 @@ const GATEWAY_KEYS: [&str; 11] = [
     "unix_helper_socket",
     "wintun_dll_path",
     "status_refresh_secs",
-    "onion_service",
 ];
 
-/// Keys of the `gateway:` section removed by the onion loop cutover (#834 D5), rejected with a
-/// pointer to the loop shape.
-const REMOVED_GATEWAY_KEYS: [&str; 2] = ["onion_hop_count", "onion_allow_short_paths"];
+/// Keys of the `gateway:` section removed by the onion loop cutover, each rejected with the
+/// reason it went: the route length is fixed by the loop shape (#834 D5), and a captured flow is
+/// a byte tunnel, which is always `tcp` since `https` is a fetch only (#834 D1′).
+const REMOVED_GATEWAY_KEYS: [(&str, &str); 3] = [
+    (
+        "onion_hop_count",
+        "the onion route length is fixed by the loop shape (#834 D5)",
+    ),
+    (
+        "onion_allow_short_paths",
+        "the onion route length is fixed by the loop shape (#834 D5)",
+    ),
+    (
+        "onion_service",
+        "captured flows are byte tunnels, which always use the tcp exit service; restrict \
+         egress with the exit policy (for example *:443) instead (#834 D1′)",
+    ),
+];
 
 /// Deserialize the `gateway:` section, rejecting every key outside [`GATEWAY_KEYS`].
 ///
@@ -162,11 +172,11 @@ where D: serde::Deserializer<'de> {
         .find(|key| !GATEWAY_KEYS.contains(key))
     {
         return Err(serde::de::Error::custom(
-            if REMOVED_GATEWAY_KEYS.contains(&key) {
-                format!(
-                    "gateway.{key} was removed: the onion route length is fixed by the loop shape \
-                     (#834 D5)"
-                )
+            if let Some((_, reason)) = REMOVED_GATEWAY_KEYS
+                .iter()
+                .find(|(removed, _)| *removed == key)
+            {
+                format!("gateway.{key} was removed: {reason}")
             } else {
                 format!(
                     "unknown gateway key {key:?}; expected one of {}",
@@ -272,9 +282,6 @@ pub struct Config {
     /// Optional local HTTP CONNECT proxy listener address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onion_http_proxy_addr: Option<String>,
-    /// Onion service name used by the HTTP CONNECT proxy.
-    #[serde(default = "OnionServiceName::tcp")]
-    pub onion_http_proxy_service: OnionServiceName,
     /// Timeout for reading HTTP CONNECT headers in seconds.
     #[serde(default = "crate::onion::proxy::http::default_connect_header_timeout_secs")]
     pub onion_http_proxy_header_timeout_secs: u64,
@@ -387,7 +394,6 @@ impl Config {
             onion_exit_services: crate::onion::default_onion_exit_services(),
             onion_exit_policy: crate::onion::default_onion_exit_policy(),
             onion_http_proxy_addr: None,
-            onion_http_proxy_service: OnionServiceName::tcp(),
             onion_http_proxy_header_timeout_secs:
                 crate::onion::proxy::http::default_connect_header_timeout_secs(),
             onion_http_proxy_max_connections:
@@ -510,7 +516,6 @@ measure_storage:
         assert!(!cfg.advertise_onion_relay);
         assert!(!cfg.advertise_onion_exit);
         assert_eq!(cfg.onion_http_proxy_addr, None);
-        assert_eq!(cfg.onion_http_proxy_service, OnionServiceName::tcp());
         assert_eq!(
             cfg.onion_http_proxy_header_timeout_secs,
             crate::onion::proxy::http::default_connect_header_timeout_secs()
@@ -721,6 +726,26 @@ gateway:
         }
     }
 
+    /// `gateway.onion_service` is rejected by name: a captured flow is a byte tunnel, which is
+    /// always `tcp`, so there is nothing left to select.
+    #[test]
+    fn gateway_section_rejects_removed_onion_service_key() {
+        for value in ["tcp", "https"] {
+            let document = format!(
+                "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  \
+                 onion_service: {value}\n"
+            );
+
+            let error = match serde_yaml::from_str::<Config>(&document) {
+                Ok(_) => panic!("gateway.onion_service must be rejected"),
+                Err(error) => error.to_string(),
+            };
+
+            assert!(error.contains("gateway.onion_service was removed"));
+            assert!(error.contains("*:443"));
+        }
+    }
+
     #[test]
     fn gateway_section_without_enabled_is_inert() {
         let document = format!("{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}");
@@ -803,10 +828,11 @@ gateway:
         assert!(matches!(result, Err(Error::OpenFileError(_))));
     }
 
-    /// Removed signer and session-manager fields fail deserialization under total cutover.
+    /// Removed fields fail deserialization under total cutover: the signer and session-manager
+    /// fields, and the CONNECT proxy's service, which is always `tcp` (#834 D1′).
     #[test]
     fn test_removed_legacy_config_fields_are_rejected() {
-        for legacy_field in ["ecdsa_key", "session_manager"] {
+        for legacy_field in ["ecdsa_key", "session_manager", "onion_http_proxy_service"] {
             let document = generated_document().replace(
                 "network_id:",
                 &format!("{legacy_field}: legacy\nnetwork_id:"),

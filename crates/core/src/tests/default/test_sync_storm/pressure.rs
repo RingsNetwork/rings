@@ -2,9 +2,30 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::*;
+use crate::chunk::WireReserves;
+use crate::swarm::transport::link_credit::LINK_CREDIT_RETURN_BATCH;
 
-const BARRIER_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
-const STARTED_REASSEMBLY_FRAMES: usize = 28;
+/// The chunk frames of the barrier payload, all held pending at the receiver as its reassembly
+/// backlog: `w/2`, so that they and the control frame sent behind them fit the credit one link
+/// generation is guaranteed to hold whatever its history (#904).
+///
+/// ```text
+/// in_flight = sent − acked ≤ w                              (sender credit)
+/// quiescent link:  acked = returned,  released − returned < w/2
+///   ⇒ unreturned history ≤ w/2 − 1  ⇒  free credit ≥ w − (w/2 − 1) = w/2 + 1
+///   ⇒ w/2 chunk frames + 1 control frame leave without a credit return
+/// ```
+///
+/// With `w = 32` that is 16 frames of about 56 KB, each served in about 1.76 virtual s by the
+/// reassembly service, so the backlog outlasts the 15 s control deadline by far.
+const STARTED_REASSEMBLY_FRAMES: usize = LINK_CREDIT_RETURN_BATCH as usize;
+/// The data bytes one chunk frame carries at the dummy link's frame limit, as the production
+/// framing plan cuts them.
+const BARRIER_CHUNK_BYTES: usize = CHUNKED_MAX_MESSAGE_SIZE - WireReserves::PRODUCTION.chunk;
+/// The barrier payload: half a chunk into its last of [`STARTED_REASSEMBLY_FRAMES`] chunks, so the
+/// message envelope (far below half a chunk) cannot move the chunk count.
+const BARRIER_PAYLOAD_BYTES: usize =
+    (STARTED_REASSEMBLY_FRAMES - 1) * BARRIER_CHUNK_BYTES + BARRIER_CHUNK_BYTES / 2;
 
 pub(super) async fn exercise_per_entry_yield(
     runtime: &SimulationRuntimeGuard,

@@ -63,9 +63,10 @@ The substrate both layers build on:
 - End-to-end ElGamal encryption to a DID's account key after the E2E handshake
   (`crates/core/src/message/e2e.rs`); opt-in, because a DID is a key digest and a lookup
   yields no key to encrypt to.
-- Onion circuits over direct edges with layered ElGamal-AEAD frames, fixed-batch cover
-  cells, pacing, and fixed cell size classes (`crates/node/src/onion`); the contract is drawn
-  in [SECURITY.md](./SECURITY.md#layer-contracts).
+- Onion loops over direct edges: client-sealed loops of fixed-width Sphinx cells, constant-rate
+  link emission with real cells substituted for cover, paid admission, and fixed cell size
+  classes (`crates/node/src/onion`); the contract is drawn in
+  [SECURITY.md](./SECURITY.md#layer-contracts).
 - A path-less relay on the communication layer: the carrier names only the next hop, the
   destination, and a hop budget, so no hop learns the route
   (`crates/core/src/message/protocols/relay`).
@@ -73,7 +74,7 @@ The substrate both layers build on:
 **Planned**
 - User-installed zero-knowledge identity and verifiable off-chain compute protocols.
 - Secret sharing and private storage primitives.
-- DID-to-DID sender-unlinkable messaging on top of the circuits.
+- DID-to-DID sender-unlinkable messaging on top of the loops.
 
 ---
 

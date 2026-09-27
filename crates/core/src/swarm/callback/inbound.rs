@@ -32,6 +32,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::measure::Authentication;
 use crate::message::MessagePayload;
+use crate::swarm::transport::link_credit::ReleaseToken;
 use crate::utils::try_sleep;
 use crate::utils::GenerationWitness;
 use crate::utils::Instant;
@@ -127,6 +128,8 @@ struct InboundEvent {
     lane: InboundLane,
     wire_bytes: usize,
     permit: InboundCapacityPermit,
+    /// The frame's flow-control token (#904): released with the event, once it is processed.
+    release: Option<ReleaseToken>,
     completion: InboundCompletion,
 }
 
@@ -253,6 +256,7 @@ impl InboundMailbox {
                 InboundFrameLease {
                     bytes,
                     transport_capacity,
+                    release,
                     #[cfg(test)]
                     in_flight,
                 },
@@ -310,6 +314,7 @@ impl InboundMailbox {
             lane,
             wire_bytes,
             permit,
+            release,
             completion,
         })?;
         Ok(())

@@ -447,6 +447,29 @@ pub mod controlled {
         DELIVERY.with(|state| state.borrow_mut().remove_sequence(sequence).is_some())
     }
 
+    /// Remove one queued event by stable sequence without dispatching it, as its receiving
+    /// end's inbound bound refuses a frame: a data frame is reported to that end's callback as
+    /// refused (see `InnerTransportCallback::refuse_admitted_frame`), any other event is
+    /// dropped. Unlike [`discard_sequence`], which loses the frame below the callback, this ends
+    /// it on a path the receiver observes. Returns whether the event was queued.
+    pub fn refuse_sequence(sequence: u64) -> bool {
+        let Some(entry) = DELIVERY.with(|state| state.borrow_mut().remove_sequence(sequence))
+        else {
+            return false;
+        };
+        let super::ControlledDeliveryEntry {
+            connection_id,
+            event,
+            ..
+        } = entry;
+        if let super::Event::Message(frame) = event {
+            if let Some(conn) = CONNS.get(&connection_id).map(|conn| conn.clone()) {
+                conn.callback.refuse_admitted_frame(frame);
+            }
+        }
+        true
+    }
+
     /// Deliver the queued event at `index` to its target connection — invoking
     /// the real handler, which may enqueue further events. Returns false if the
     /// index is out of range or the target connection is gone.

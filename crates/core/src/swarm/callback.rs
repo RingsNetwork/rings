@@ -9,6 +9,8 @@ use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::InboundFrameCapacityLease;
 use rings_transport::core::transport::WebrtcConnectionState;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
@@ -17,6 +19,8 @@ use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::swarm::session_link::ReferencedDelegations;
+use crate::swarm::transport::link_credit::ReleaseLedger;
+use crate::swarm::transport::link_credit::ReleaseToken;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -166,6 +170,10 @@ pub enum SwarmEvent {
         peer: Did,
         /// The final state of the connection.
         state: WebrtcConnectionState,
+        /// The generation of the connection the state belongs to: every reported connection
+        /// is bound to the attempt that reserved it, and `Connected` names the generation just
+        /// admitted. A callback not bound to an attempt reports no state at all.
+        generation: u64,
     },
     /// An admitted peer's connection record was retired and its transport is being closed: the
     /// peer left the local DHT. Emitted from the one retirement transition, whatever reached it
@@ -183,7 +191,38 @@ pub enum SwarmEvent {
     PeerRetired {
         /// The did of the retired peer.
         peer: Did,
+        /// The generation retired: the generation of the `Connected` this retirement pairs
+        /// with.
+        generation: u64,
     },
+}
+
+/// One admitted generation of the connection to a peer: the unit the swarm admits and
+/// retires.
+///
+/// Law: at most one generation of a peer is admitted at a time, and a peer's generations
+/// increase strictly, so `(peer, generation)` names one admission for the life of the swarm.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct PeerLink {
+    peer: Did,
+    generation: u64,
+}
+
+impl PeerLink {
+    /// The link of `peer` at `generation`.
+    pub const fn new(peer: Did, generation: u64) -> Self {
+        Self { peer, generation }
+    }
+
+    /// The peer at the other end.
+    pub const fn peer(self) -> Did {
+        self.peer
+    }
+
+    /// The generation of the peer's connection.
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
 }
 
 /// The two halves of the retirement law, as an application reads them off the event stream.
@@ -200,14 +239,17 @@ impl SwarmEvent {
     /// whose delivery is the fact "peer admitted", so its interpretation lives here, beside
     /// the retirement it is paired with. Law: for every retired generation, as seen by a
     /// callback held across it, the stream carries at most one `Admitted` and, iff it did,
-    /// exactly one later `Retired` for that peer.
-    pub fn peer_transition(&self) -> Option<(Did, PeerTransition)> {
+    /// exactly one later `Retired` for that peer, both naming the same [`PeerLink`].
+    pub fn peer_transition(&self) -> Option<(PeerLink, PeerTransition)> {
         match *self {
             Self::ConnectionStateChange {
                 peer,
                 state: WebrtcConnectionState::Connected,
-            } => Some((peer, PeerTransition::Admitted)),
-            Self::PeerRetired { peer } => Some((peer, PeerTransition::Retired)),
+                generation,
+            } => Some((PeerLink::new(peer, generation), PeerTransition::Admitted)),
+            Self::PeerRetired { peer, generation } => {
+                Some((PeerLink::new(peer, generation), PeerTransition::Retired))
+            }
             Self::ConnectionStateChange { .. } => None,
         }
     }
@@ -268,6 +310,8 @@ pub(super) struct InboundProcessor {
     reassembler: Arc<FuturesMutex<MessageReassembler>>,
     reassembly_clock: ReassemblyClock,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
+    /// The flow-control release ledger of the bound generation (#904): set with the attempt.
+    release_ledger: Arc<Mutex<Option<Arc<ReleaseLedger>>>>,
     /// Verified frames that arrived before this end admitted the connection; bounded by the
     /// per-peer inbound capacity. With the session hold below, an unadmitted peer occupies at
     /// most one and a half of an admitted peer's frame budgets, and a quarter of the transport's
@@ -282,11 +326,15 @@ pub(super) struct InboundProcessor {
 }
 
 /// What the transport handed over with one frame and takes back when the frame is done: the
-/// raw bytes, for their length and their memory accounting, and the transport capacity they
-/// occupy until the inbound actor releases it.
+/// raw bytes, for their length and their memory accounting, the transport capacity they occupy
+/// until the inbound actor takes the frame, and the flow-control token held until the frame is
+/// processed.
 pub(super) struct InboundFrameLease {
     bytes: Bytes,
     transport_capacity: Option<InboundFrameCapacityLease>,
+    /// The frame's flow-control token (#904): it travels with the frame until the inbound actor
+    /// has processed it, and releases the frame to its sender's credit when dropped.
+    release: Option<ReleaseToken>,
     /// Test builds: the frame's conservation witness, released with the lease.
     #[cfg(test)]
     in_flight: crate::swarm::transport::FrameInFlight,

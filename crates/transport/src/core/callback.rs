@@ -103,6 +103,13 @@ pub trait TransportCallback {
         Ok(())
     }
 
+    /// Learn of a frame this end's inbound bound refused before dispatch, with its payload.
+    ///
+    /// The frame occupied no capacity and never reaches [`Self::on_admitted_message`]: a
+    /// callback that paces its peer by the frames it released counts it as released here. It
+    /// runs synchronously on the backend's read path, so it must not block.
+    fn on_inbound_frame_refused(&self, _cid: &str, _payload: &[u8]) {}
+
     /// This method is invoked when the state of connection has changed.
     async fn on_peer_connection_state_change(
         &self,

@@ -41,7 +41,8 @@ const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 /// Every guard therefore fails by name before the runner's timeout.
 pub const TEST_HANG_GUARD: Duration = Duration::from_secs(20);
 
-/// A logical peer transition, as [`SwarmEvent::peer_transition`] reads it off the event stream.
+/// A logical peer transition, as [`SwarmEvent::peer_transition`] reads it off the event stream,
+/// keyed by the peer of its link: the browser tests await peers, not generations.
 type Transition = (Did, PeerTransition);
 
 /// Write side of a peer-transition log: forwards every admission and retirement of one swarm.
@@ -54,8 +55,8 @@ pub struct TransitionRecorder(mpsc::UnboundedSender<Transition>);
 impl TransitionRecorder {
     /// Record the transition `event` carries, if any.
     pub fn record(&self, event: &SwarmEvent) {
-        if let Some(transition) = event.peer_transition() {
-            self.send(transition);
+        if let Some((link, transition)) = event.peer_transition() {
+            self.send((link.peer(), transition));
         }
     }
 

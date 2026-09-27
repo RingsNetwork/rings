@@ -101,6 +101,7 @@ pub(super) async fn process_chunk_event(
                 lane: reassembled.lane,
                 wire_bytes: event.wire_bytes,
                 permit: event.permit,
+                release: event.release,
                 completion: event.completion,
             });
         }

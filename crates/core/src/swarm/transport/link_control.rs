@@ -36,7 +36,9 @@ use bytes::Bytes;
 use super::delivery::send_data_with_timeout;
 use super::delivery::ChunkSendPermit;
 use super::delivery::ChunkSendProgress;
+use super::delivery::FrameSend;
 use super::delivery::TransferStop;
+use super::link_credit::CreditReturn;
 use super::outbound::LinkControlPermit;
 use super::AdmittedConnection;
 use super::PendingConnectionAttempt;
@@ -49,6 +51,17 @@ use crate::message::LinkControl;
 use crate::swarm::detached::spawn_detached;
 use crate::utils::get_epoch_ms;
 
+/// Whether a link-control send may create the sending end's link state of its peer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkState {
+    /// Only a link this end already sends on: the answers and confirmations of the delegation
+    /// references, which follow a frame this end sent.
+    Existing,
+    /// Create the link state if missing: a credit return, which a receiver owes on a link it
+    /// may never have sent anything on (#904).
+    Establish,
+}
+
 /// The send context every link-control frame is logged and judged under.
 const LINK_CONTROL_SEND_CONTEXT: &str = "link_control";
 
@@ -56,34 +69,38 @@ const LINK_CONTROL_SEND_CONTEXT: &str = "link_control";
 /// still revocable if the generation is superseded or the transport cannot make progress,
 /// retired through the termination path if it became irrevocable and timed out. The flush is
 /// not awaited, since nothing depends on it; `permit` returns to the peer's budget when the
-/// send is over.
+/// send is over. Post: whether the frame was handed to the data channel, which is ordered and
+/// reliable, so a frame handed over reaches the peer while the generation lives.
 async fn deliver_link_control(
     admitted: AdmittedConnection,
     frame: Bytes,
     permit: LinkControlPermit,
-) {
+) -> bool {
     let peer = admitted.attempt().peer();
     let stop = TransferStop::new(StopToken::never());
-    let progress = send_data_with_timeout(
-        &admitted,
-        frame,
-        &ChunkSendPermit::Always,
-        &stop,
-        None,
-        peer,
-        LINK_CONTROL_SEND_CONTEXT,
-    )
-    .await;
-    match progress {
-        ChunkSendProgress::Ready(Ok(_flush)) => {}
+    let send = FrameSend {
+        admitted: &admitted,
+        permit: &ChunkSendPermit::Always,
+        stop: &stop,
+        detached_admission: None,
+        did: peer,
+        context: LINK_CONTROL_SEND_CONTEXT,
+    };
+    // A link-control frame spends no credit (#904): credit returns must never wait for credit.
+    let progress = send_data_with_timeout(&send, frame, None).await;
+    let delivered = match progress {
+        ChunkSendProgress::Ready(Ok(_flush)) => true,
         ChunkSendProgress::Ready(Err(error)) => {
             tracing::debug!(peer = %peer, error = ?error, "failed to send link control");
+            false
         }
         ChunkSendProgress::Cancelled(reason) => {
             tracing::debug!(peer = %peer, reason = ?reason, "link control send cancelled");
+            false
         }
-    }
+    };
     drop(permit);
+    delivered
 }
 
 impl SwarmTransport {
@@ -100,6 +117,75 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         control: &LinkControl,
     ) -> Result<()> {
+        let (admitted, frame, permit) =
+            self.claim_link_control(attempt, control, LinkState::Existing)?;
+        let deliver = async move {
+            deliver_link_control(admitted, frame, permit).await;
+        };
+        if spawn_detached(Box::pin(deliver)).is_err() {
+            return Err(Error::LinkControlRuntimeUnavailable);
+        }
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        super::outbound::record_dispatched_link_control(attempt.peer(), control);
+        Ok(())
+    }
+
+    /// Return `released`, the credit count of `attempt`'s generation, to its peer (#904), and
+    /// wait until the frame is handed to the data channel. The caller is the credit returner,
+    /// a task of its own, so the wait stalls no read loop (Detachment law).
+    pub(crate) async fn return_link_credit(
+        &self,
+        attempt: PendingConnectionAttempt,
+        released: u64,
+    ) -> CreditReturn {
+        let control = LinkControl::Credit(released);
+        let (admitted, frame, permit) = match self.claim_link_control(
+            attempt,
+            &control,
+            LinkState::Establish,
+        ) {
+            Ok(claimed) => claimed,
+            Err(Error::ConnectionAttemptSuperseded { .. } | Error::SwarmMissDidInTable(_)) => {
+                return CreditReturn::Gone;
+            }
+            Err(error) => {
+                tracing::debug!(peer = %attempt.peer(), error = ?error, "link credit not returned");
+                return CreditReturn::Retry;
+            }
+        };
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        super::outbound::record_dispatched_link_control(attempt.peer(), &control);
+        if deliver_link_control(admitted, frame, permit).await {
+            CreditReturn::Delivered
+        } else {
+            CreditReturn::Retry
+        }
+    }
+
+    /// `attempt`'s peer has released `released` of this end's payload frames on that
+    /// generation: advance the generation's credit, if frames were sent under it (#904).
+    pub(crate) fn acknowledge_link_credit(&self, attempt: PendingConnectionAttempt, released: u64) {
+        let credit = self
+            .outbound_schedulers
+            .link_credits(attempt.peer())
+            .and_then(|credits| credits.of_generation(attempt.generation()));
+        if let Some(credit) = credit {
+            credit.acknowledge(released);
+        }
+    }
+
+    /// The link-control frame of `control` for `attempt`'s generation, with the connection it
+    /// leaves on and its permit in the peer's budget.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::send_link_control`] refuses, before any runtime is needed.
+    fn claim_link_control(
+        &self,
+        attempt: PendingConnectionAttempt,
+        control: &LinkControl,
+        state: LinkState,
+    ) -> Result<(AdmittedConnection, Bytes, LinkControlPermit)> {
         let peer = attempt.peer();
         let frame = control.to_wire()?;
         let Some(admitted) = self.admitted_send_connection(peer)? else {
@@ -113,8 +199,13 @@ impl SwarmTransport {
         }
         // The permit is taken while the generation cannot be retired, so no worker is looked
         // up for a peer that retirement is removing.
-        let permit = admitted
-            .with_current_connection(|_| self.outbound_schedulers.link_control_permit(peer))?;
+        let permit = admitted.with_current_connection(|_| match state {
+            LinkState::Existing => Ok(self.outbound_schedulers.link_control_permit(peer)),
+            LinkState::Establish => self
+                .outbound_schedulers
+                .establish_link_control_permit(peer)
+                .map(Some),
+        })?;
         let permit = match permit {
             None => {
                 return Err(Error::ConnectionAttemptSuperseded {
@@ -122,16 +213,12 @@ impl SwarmTransport {
                     generation: attempt.generation(),
                 })
             }
-            Some(None) => return Err(Error::SwarmMissDidInTable(peer)),
-            Some(Some(None)) => return Err(Error::LinkControlInFlightCapacity(peer)),
-            Some(Some(Some(permit))) => permit,
+            Some(Err(_)) => return Err(Error::LinkControlRuntimeUnavailable),
+            Some(Ok(None)) => return Err(Error::SwarmMissDidInTable(peer)),
+            Some(Ok(Some(None))) => return Err(Error::LinkControlInFlightCapacity(peer)),
+            Some(Ok(Some(Some(permit)))) => permit,
         };
-        if spawn_detached(Box::pin(deliver_link_control(admitted, frame, permit))).is_err() {
-            return Err(Error::LinkControlRuntimeUnavailable);
-        }
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        super::outbound::record_dispatched_link_control(peer, control);
-        Ok(())
+        Ok((admitted, frame, permit))
     }
 
     /// `attempt`'s peer confirmed `digest`: frames to it may reference the session from now on.

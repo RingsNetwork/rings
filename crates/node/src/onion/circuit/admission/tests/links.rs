@@ -8,6 +8,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
 use rings_core::dht::Did;
+use rings_core::swarm::callback::PeerLink;
 
 use super::generation;
 use super::latest_expiry;
@@ -27,13 +28,11 @@ use super::EPOCH;
 use super::ORIGIN_MS;
 use super::Q;
 use crate::onion::circuit::admission::OnionAdmissionLayer;
-use crate::onion::circuit::admission::OnionAdmissionLink;
 use crate::onion::circuit::admission::OnionAdmissionRejection;
 use crate::onion::circuit::admission::OnionAdmissionState;
 use crate::onion::circuit::admission::OnionChargeRejection;
 use crate::onion::circuit::admission::OnionEpochNotFresh;
 use crate::onion::circuit::admission::OnionLinkTableFull;
-use crate::onion::circuit::admission::OnionRefusedLinks;
 use crate::onion::circuit::admission::OnionReplayFilterKey;
 use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::admission::ONION_ADMISSION_SENDER_UNITS;
@@ -250,14 +249,13 @@ fn test_a_refused_generation_cannot_close_a_live_one() {
     }
 }
 
-/// Law: the epoch reset rebuilds the live set from core's snapshot `L`, not from the old live set.
-/// The snapshot here differs from the live set: it drops the live DID 2 and adds the non-live DID
-/// 3. Every link of `L` starts with a zero ledger, so every live link still has a ledger. The reset
-/// clears the loads, the clock and the replay store, and drops every other ledger. Every layer of
-/// the old epoch is then rejected, and so is every token charged before the reset, because its
-/// epoch differs.
+/// Law: the epoch reset keeps the table's own live links, `ρ = reconcile(live_links(S)) ∘ clear`,
+/// and refuses none. Every live link starts with a zero ledger. The reset clears the loads, the
+/// clock and the replay store, and drops every ledger without a live link. Every layer of the
+/// old epoch is then rejected, and so is every token charged before the reset, because its epoch
+/// differs; a DID that had no live link is still not live.
 #[test]
-fn test_renewal_rebuilds_live_links_from_the_snapshot() {
+fn test_renewal_keeps_the_live_links_and_clears_the_rest() {
     let mut rng = StdRng::seed_from_u64(0x0841_0015);
     let mut admission = state_with(&mut rng, EPOCH, 4, 1..3);
     let x = latest_expiry(ORIGIN_MS);
@@ -276,24 +274,21 @@ fn test_renewal_rebuilds_live_links_from_the_snapshot() {
         Verdict::Admitted
     );
     let held = admission
-        .charge(ORIGIN_MS, link(2), units(1))
+        .charge_units(ORIGIN_MS, link(2), units(1))
         .expect("DID 2 has headroom");
     let renewed_epoch = OnionProcessEpoch::new([8; 16]);
     assert_eq!(
-        admission.renew(renewed_epoch, OnionReplayFilterKey::new(rng.gen()), [
-            link(1),
-            link(3)
-        ]),
-        Ok(OnionRefusedLinks::default())
+        admission.renew(renewed_epoch, OnionReplayFilterKey::new(rng.gen())),
+        Ok(())
     );
     assert_eq!(admission.clock_ms, 0);
     assert_eq!(live_filters(&admission), Vec::new());
     assert_eq!(admission.senders.keys().collect::<Vec<_>>(), vec![
         &Did::from(1_u32),
-        &Did::from(3_u32)
+        &Did::from(2_u32)
     ]);
     assert_eq!(sender_load(&admission, 1, ORIGIN_MS), Some(0));
-    assert_eq!(sender_load(&admission, 3, ORIGIN_MS), Some(0));
+    assert_eq!(sender_load(&admission, 2, ORIGIN_MS), Some(0));
     assert_eq!(
         admission.admit(ORIGIN_MS, held, OnionAdmissionLayer {
             epoch: renewed_epoch,
@@ -313,11 +308,11 @@ fn test_renewal_rebuilds_live_links_from_the_snapshot() {
         Verdict::Admitted
     );
     assert_eq!(
-        send(&mut admission, ORIGIN_MS, 2, 1, layer(x, 3)),
+        send(&mut admission, ORIGIN_MS, 3, 1, layer(x, 3)),
         Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
     );
     assert_eq!(
-        send(&mut admission, ORIGIN_MS, 3, 1, OnionAdmissionLayer {
+        send(&mut admission, ORIGIN_MS, 2, 1, OnionAdmissionLayer {
             epoch: renewed_epoch,
             ..layer(x, 5)
         }),
@@ -337,7 +332,7 @@ fn test_a_same_epoch_renewal_is_refused_and_cannot_readmit_a_replay() {
         Verdict::Admitted
     );
     assert_eq!(
-        admission.renew(EPOCH, OnionReplayFilterKey::new(rng.gen()), [link(1)]),
+        admission.renew(EPOCH, OnionReplayFilterKey::new(rng.gen())),
         Err(OnionEpochNotFresh)
     );
     assert_eq!(admission.clock_ms, ORIGIN_MS);
@@ -567,13 +562,9 @@ fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
 /// Whether the table has no room for `link`, given the modelled number of live links: the live-link
 /// set is full, or `link`'s DID has no ledger and the ledger table is full. This is the only
 /// justification for a refusal.
-fn is_full_for(
-    admission: &OnionAdmissionState,
-    live_links: usize,
-    link: &OnionAdmissionLink,
-) -> bool {
+fn is_full_for(admission: &OnionAdmissionState, live_links: usize, link: &PeerLink) -> bool {
     live_links >= admission.capacity
-        || (!admission.senders.contains_key(&link.did)
+        || (!admission.senders.contains_key(&link.peer())
             && admission.senders.len() >= admission.capacity)
 }
 
@@ -633,11 +624,8 @@ impl Lockstep {
     /// states open it; a refusal must be justified, and the shell then closes the link in core.
     fn open(&mut self, now_ms: u128, did: Did) {
         self.next_generation += 1;
-        let opened = OnionAdmissionLink {
-            did,
-            generation: self.next_generation,
-        };
-        self.truth.insert((did, opened.generation));
+        let opened = PeerLink::new(did, self.next_generation);
+        self.truth.insert((did, opened.generation()));
         if self.rng.gen_ratio(1, 6) {
             self.lost += 1;
             return;
@@ -647,12 +635,12 @@ impl Lockstep {
         match verdict {
             Ok(()) => {
                 self.occurred[0] += 1;
-                self.modelled.insert((did, opened.generation));
+                self.modelled.insert((did, opened.generation()));
             }
             Err(OnionLinkTableFull) => {
                 self.occurred[2] += 1;
                 assert!(is_full_for(&self.sorted, self.modelled.len(), &opened));
-                self.truth.remove(&(did, opened.generation));
+                self.truth.remove(&(did, opened.generation()));
             }
         }
     }
@@ -669,7 +657,7 @@ impl Lockstep {
             self.lost += 1;
             return;
         }
-        let closed = OnionAdmissionLink { did, generation };
+        let closed = PeerLink::new(did, generation);
         self.sorted.link_closed(now_ms, closed);
         self.shuffled.link_closed(now_ms, closed);
         self.occurred[1] += 1;
@@ -684,7 +672,7 @@ impl Lockstep {
         let snapshot = self
             .truth
             .iter()
-            .map(|&(did, generation)| OnionAdmissionLink { did, generation })
+            .map(|&(did, generation)| PeerLink::new(did, generation))
             .collect::<Vec<_>>();
         let mut permuted = snapshot.clone();
         permuted.shuffle(&mut self.rng);
@@ -697,7 +685,7 @@ impl Lockstep {
         let refused_set = refused
             .links()
             .iter()
-            .map(|link| (link.did, link.generation))
+            .map(|link| (link.peer(), link.generation()))
             .collect::<BTreeSet<_>>();
         let expected = self
             .truth
@@ -733,13 +721,8 @@ impl Lockstep {
     fn charge(&mut self, now_ms: u128, did: Did, tag: u128) {
         let index = self.rng.gen_range(0..self.modelled.len().max(1));
         let on = match self.modelled.iter().nth(index) {
-            Some(&(did, generation)) if !self.rng.gen_ratio(1, 4) => {
-                OnionAdmissionLink { did, generation }
-            }
-            _ => OnionAdmissionLink {
-                did,
-                generation: self.rng.gen_range(0..=self.next_generation),
-            },
+            Some(&(did, generation)) if !self.rng.gen_ratio(1, 4) => PeerLink::new(did, generation),
+            _ => PeerLink::new(did, self.rng.gen_range(0..=self.next_generation)),
         };
         let cost = self.rng.gen_range(1..=64_u32);
         let x = layer(latest_expiry(now_ms), tag);
@@ -747,7 +730,7 @@ impl Lockstep {
         assert_eq!(send_on(&mut self.shuffled, now_ms, on, cost, x), verdict);
         assert_eq!(
             verdict == Verdict::Unpaid(OnionChargeRejection::LinkNotLive),
-            !self.modelled.contains(&(on.did, on.generation))
+            !self.modelled.contains(&(on.peer(), on.generation()))
         );
     }
 }

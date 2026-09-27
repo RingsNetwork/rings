@@ -16,9 +16,9 @@ use std::ops::Range;
 use rand::rngs::StdRng;
 use rand::Rng;
 use rings_core::dht::Did;
+use rings_core::swarm::callback::PeerLink;
 
 use super::OnionAdmissionLayer;
-use super::OnionAdmissionLink;
 use super::OnionAdmissionRejection;
 use super::OnionAdmissionState;
 use super::OnionAdmissionUnits;
@@ -26,7 +26,7 @@ use super::OnionChargeRejection;
 use super::OnionExpiry;
 use super::OnionReplayFilterKey;
 use super::ADMISSION_WINDOW_QUANTA_WIDE;
-use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionReplayNonce;
 use crate::onion::circuit::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use crate::onion::OnionProcessEpoch;
 
@@ -56,15 +56,12 @@ pub(super) fn registry(r: usize) -> NonZeroUsize {
 }
 
 /// Generation `generation` of a link from DID `did`.
-pub(super) fn generation(did: u32, generation: u64) -> OnionAdmissionLink {
-    OnionAdmissionLink {
-        did: Did::from(did),
-        generation,
-    }
+pub(super) fn generation(did: u32, generation: u64) -> PeerLink {
+    PeerLink::new(Did::from(did), generation)
 }
 
 /// The first generation of a link from DID `did`.
-pub(super) fn link(did: u32) -> OnionAdmissionLink {
+pub(super) fn link(did: u32) -> PeerLink {
     generation(did, 0)
 }
 
@@ -90,7 +87,7 @@ pub(super) fn state(rng: &mut StdRng) -> OnionAdmissionState {
 }
 
 /// Open `link` at `now_ms`, which the test expects the table to accept.
-pub(super) fn open(admission: &mut OnionAdmissionState, now_ms: u128, link: OnionAdmissionLink) {
+pub(super) fn open(admission: &mut OnionAdmissionState, now_ms: u128, link: PeerLink) {
     admission
         .link_opened(now_ms, link)
         .expect("the table has room for this link");
@@ -116,7 +113,7 @@ pub(super) fn layer(expiry: OnionExpiry, tag: u128) -> OnionAdmissionLayer {
     OnionAdmissionLayer {
         epoch: EPOCH,
         expiry,
-        tag: OnionForwardNonce::new(tag.to_le_bytes()),
+        tag: OnionReplayNonce::new(tag.to_le_bytes()),
     }
 }
 
@@ -125,11 +122,11 @@ pub(super) fn layer(expiry: OnionExpiry, tag: u128) -> OnionAdmissionLayer {
 pub(super) fn send_on(
     admission: &mut OnionAdmissionState,
     now_ms: u128,
-    link: OnionAdmissionLink,
+    link: PeerLink,
     n: u32,
     layer: OnionAdmissionLayer,
 ) -> Verdict {
-    match admission.charge(now_ms, link, units(n)) {
+    match admission.charge_units(now_ms, link, units(n)) {
         Err(rejection) => Verdict::Unpaid(rejection),
         Ok(token) => match admission.admit(now_ms, token, layer) {
             Ok(()) => Verdict::Admitted,

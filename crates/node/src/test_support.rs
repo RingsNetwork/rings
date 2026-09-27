@@ -64,35 +64,24 @@ impl<K> Default for BlockingSendProbe<K> {
 impl<K> BlockingSendProbe<K>
 where K: Clone + Eq
 {
-    /// Block only the invocation that claims an empty probe.
-    pub(crate) async fn block_first(&self, key: K) -> Result<()> {
-        let claimed = self.register(key)?.0;
-        if !claimed {
-            return Ok(());
-        }
-        self.wait_for_release().await;
-        Ok(())
-    }
-
     /// Block every invocation carrying the first observed key.
     pub(crate) async fn block_key(&self, key: K) -> Result<()> {
-        let (_, matches_claimed_key) = self.register(key)?;
-        if !matches_claimed_key {
+        if !self.register(key)? {
             return Ok(());
         }
         self.wait_for_release().await;
         Ok(())
     }
 
-    fn register(&self, key: K) -> Result<(bool, bool)> {
+    /// Claim an empty probe for `key`; whether `key` is the claimed key.
+    fn register(&self, key: K) -> Result<bool> {
         let mut blocked_key = lock(&self.blocked_key)?;
-        let claimed = blocked_key.is_none();
-        if claimed {
+        if blocked_key.is_none() {
             *blocked_key = Some(key.clone());
             self.blocked.store(true, Ordering::Release);
             self.entered.notify_one();
         }
-        Ok((claimed, blocked_key.as_ref() == Some(&key)))
+        Ok(blocked_key.as_ref() == Some(&key))
     }
 
     async fn wait_for_release(&self) {

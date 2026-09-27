@@ -1,22 +1,17 @@
 use std::sync::Arc;
 
-use rings_core::delegation::DelegateeKey;
-use rings_core::ecc::SecretKey;
-use rings_core::message::MessageSigner;
-
-use super::super::native_onion_runtimes;
 use super::super::NativeOnionCircuitHandle;
-use super::super::NativeOnionCircuitHandler;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Extensions;
-use crate::onion::circuit::OnionCircuitHandler;
+use crate::onion::circuit::OnionLinkSender;
+use crate::onion::exit_accounting::OnionExitAccounting;
+use crate::onion::runtime::exit_algebra;
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionServiceName;
-use crate::tests::TEST_NETWORK_ID;
 
-/// One node has one circuit protocol, so a second install is refused instead of splitting state.
+/// One node has one data plane, so a second install is refused instead of splitting its state.
 #[tokio::test]
 async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
     let processor = Arc::new(crate::tests::native::prepare_processor().await);
@@ -30,21 +25,21 @@ async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime()
     Ok(())
 }
 
-/// The native Σ-algebra registers exactly the configured exit services `Σ_n`, and nothing on a
-/// node without an exit configuration.
+/// The native Σ-algebra registers exactly the offered exit services `Σ_n`, and nothing on a
+/// node without an offer.
 #[test]
-fn test_native_algebra_registers_exactly_the_configured_services() -> Result<()> {
-    let session = DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(Error::CoreError)?;
+fn test_native_algebra_registers_exactly_the_offered_services() -> Result<()> {
     let policy =
         OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?;
-    let registered = |exit_config: Option<OnionExitOffer>| {
-        let (tcp, https) = native_onion_runtimes(session.clone(), TEST_NETWORK_ID, exit_config);
-        let handler = NativeOnionCircuitHandler::new(
-            tcp,
-            https,
-            MessageSigner::new(session.clone(), TEST_NETWORK_ID),
-        );
-        handler.algebra().symbols().cloned().collect::<Vec<_>>()
+    let registered = |offer: Option<OnionExitOffer>| {
+        exit_algebra(
+            offer.as_ref(),
+            &OnionExitAccounting::default(),
+            &OnionLinkSender::default(),
+        )
+        .symbols()
+        .cloned()
+        .collect::<Vec<_>>()
     };
 
     assert_eq!(
@@ -57,9 +52,16 @@ fn test_native_algebra_registers_exactly_the_configured_services() -> Result<()>
     assert_eq!(
         registered(Some(OnionExitOffer::new(
             [OnionServiceName::tcp()],
-            policy
+            policy.clone()
         )?)),
         vec![OnionServiceName::tcp()]
+    );
+    assert_eq!(
+        registered(Some(OnionExitOffer::new(
+            [OnionServiceName::tcp(), OnionServiceName::https()],
+            policy
+        )?)),
+        vec![OnionServiceName::https(), OnionServiceName::tcp()]
     );
     assert!(registered(None).is_empty());
     Ok(())

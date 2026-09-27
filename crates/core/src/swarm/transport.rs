@@ -55,6 +55,7 @@ use crate::message::Message;
 use crate::message::PayloadSender;
 use crate::message::TransactionReplay;
 use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::PeerLink;
 use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::observer::MessageObservation;
@@ -67,6 +68,7 @@ mod event_delivery;
 #[cfg(test)]
 mod frame_ledger;
 mod link_control;
+pub(crate) mod link_credit;
 mod liveness;
 mod measurement;
 mod outbound;
@@ -487,6 +489,32 @@ impl SwarmTransport {
         self.inbound_capacity.clone()
     }
 
+    /// Whether this node's transport inbound bound is congested, so its credit returns wait
+    /// (#904): its senders then slow down until it drains.
+    pub(crate) fn is_inbound_congested(&self) -> bool {
+        self.transport.inbound_frame_capacity().is_congested()
+    }
+
+    /// The credit of `peer`'s current link generation, the one its frames leave on, as this
+    /// sending end sees it (#904). A newer generation than the ledger's starts a fresh ledger
+    /// here, as its first frame would, so the view never reads a retired generation's window;
+    /// a link this end has sent nothing on has its whole window.
+    ///
+    /// # Errors
+    ///
+    /// A poisoned lifecycle lock.
+    pub(crate) fn link_credit(&self, peer: Did) -> Result<self::link_credit::LinkCredit> {
+        let generation = self
+            .admitted_send_connection(peer)?
+            .map(|admitted| admitted.attempt().generation());
+        let credit = generation.and_then(|generation| {
+            self.outbound_schedulers
+                .link_credits(peer)
+                .and_then(|credits| credits.for_sending(generation))
+        });
+        Ok(self::link_credit::LinkCredit::new(credit))
+    }
+
     /// Test builds: the frames this node sent and received; see [`FrameLedger`].
     #[cfg(test)]
     pub(crate) fn frames_for_test(&self) -> &Arc<FrameLedger> {
@@ -516,27 +544,30 @@ impl SwarmTransport {
     async fn announce_retirement(
         &self,
         turn: SwarmEventDeliveryTurn,
-        peer: Did,
+        link: PeerLink,
         retirement: Retirement,
     ) {
         if !retirement.announced_admission() {
             return;
         }
-        if let Err(error) = self.deliver_retirement(turn, peer).await {
-            tracing::error!(%peer, %error, "peer retirement callback failed");
+        if let Err(error) = self.deliver_retirement(turn, link).await {
+            tracing::error!(peer = %link.peer(), %error, "peer retirement callback failed");
         }
     }
 
-    /// Start [`SwarmEvent::PeerRetired`] for `peer` on the current application callback under
+    /// Start [`SwarmEvent::PeerRetired`] for `link` on the current application callback under
     /// `turn`.
     async fn deliver_retirement(
         &self,
         turn: SwarmEventDeliveryTurn,
-        peer: Did,
+        link: PeerLink,
     ) -> std::result::Result<(), CallbackError> {
         let callback = self.callback.current()?;
-        turn.poll_once_then_release(callback.on_event(&SwarmEvent::PeerRetired { peer }))
-            .await
+        turn.poll_once_then_release(callback.on_event(&SwarmEvent::PeerRetired {
+            peer: link.peer(),
+            generation: link.generation(),
+        }))
+        .await
     }
 
     /// Run `deliver` under `peer`'s ordered delivery turn: the turn is acquired before `deliver`

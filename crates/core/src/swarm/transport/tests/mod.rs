@@ -216,7 +216,7 @@ impl EventLog {
         self.events()
             .into_iter()
             .filter_map(|event| match event {
-                SwarmEvent::PeerRetired { peer } => Some(peer),
+                SwarmEvent::PeerRetired { peer, .. } => Some(peer),
                 SwarmEvent::ConnectionStateChange { .. } => None,
             })
             .collect()
@@ -458,7 +458,7 @@ impl SwarmCallback for BlockingEventSwarmCallback {
         &self,
         event: &SwarmEvent,
     ) -> std::result::Result<(), crate::error::CallbackError> {
-        let SwarmEvent::ConnectionStateChange { peer, state } = event else {
+        let SwarmEvent::ConnectionStateChange { peer, state, .. } = event else {
             return Ok(());
         };
         match self.events.lock() {

@@ -13,11 +13,11 @@
 //!
 //! ```text
 //! OnionRole<OnionExitOffer>                registration, and the native and browser exit runtimes
-//!   ↦ OnionRole<OnionProcessEpoch>         circuit reducer: the epoch exit layers must name
+//!   ↦ OnionRole<OnionProcessEpoch>         relay capability: the epoch every layer must name
 //! ```
 //!
 //! `map` preserves the rung, so the relay capability published in the online-node descriptor,
-//! the exit descriptors, and the reducer's admission all agree by construction.
+//! the exit descriptors, and the data plane's admission all agree by construction.
 //!
 //! The ladder assumes every non-`relay` shape of `Σ` is world-facing (`tcp`, `https`), which
 //! holds until Phase 2b. Under #834 D1′, Phase 2b registers intermediate one-shot computations
@@ -35,7 +35,7 @@ use crate::error::Result;
 /// The rung of the registration ladder `∅ ⊂ {relay} ⊂ {relay} ⊎ Σ_W,n` of one node process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OnionRole<X> {
-    /// Registers no symbol: builds circuits, evaluates no position.
+    /// Registers no symbol: builds loops, evaluates no position.
     Client,
     /// Registers `relay` only.
     Relay,

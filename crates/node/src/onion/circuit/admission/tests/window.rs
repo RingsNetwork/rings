@@ -213,7 +213,7 @@ fn test_the_window_is_judged_at_the_charge_instant() {
     let outside = Err(OnionAdmissionRejection::OutsideWindow);
 
     let early = admission
-        .charge(ORIGIN_MS, sender, units(1))
+        .charge_units(ORIGIN_MS, sender, units(1))
         .expect("the sender has headroom");
     let too_far = expiry(ORIGIN_MS / Q + ADMISSION_WINDOW_QUANTA_WIDE + 1);
     assert!(too_far.admissible_at(ORIGIN_MS + Q));
@@ -225,7 +225,7 @@ fn test_the_window_is_judged_at_the_charge_instant() {
 
     let x = latest_expiry(ORIGIN_MS);
     let in_time = admission
-        .charge(ORIGIN_MS, sender, units(1))
+        .charge_units(ORIGIN_MS, sender, units(1))
         .expect("the sender has headroom");
     assert_eq!(admission.admit(x.as_ms(), in_time, layer(x, 2)), outside);
     assert!(live_filters(&admission).is_empty());
@@ -241,7 +241,7 @@ fn test_a_token_from_another_epoch_admits_nothing() {
     let mut elsewhere = state_with(&mut rng, OnionProcessEpoch::new([9; 16]), 4, 1..2);
     let x = latest_expiry(ORIGIN_MS);
     let foreign = elsewhere
-        .charge(ORIGIN_MS, link(1), units(1))
+        .charge_units(ORIGIN_MS, link(1), units(1))
         .expect("the other state has headroom");
     assert_eq!(
         here.admit(ORIGIN_MS, foreign, layer(x, 1)),
@@ -280,7 +280,7 @@ fn test_late_admissions_never_exceed_the_global_bound_per_filter() {
         for (sender, offset) in cells.clone().zip(0_u128..) {
             let arrival_ms = (k - 6) * Q + offset;
             let token = admission
-                .charge(arrival_ms, link(sender), units(UNITS))
+                .charge_units(arrival_ms, link(sender), units(UNITS))
                 .expect("phase A fits every budget");
             tag += 1;
             let release_ms = (k - 5) * Q + rng.gen_range(0..5 * Q);

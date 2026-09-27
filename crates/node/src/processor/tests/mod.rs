@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 #[cfg(feature = "dummy")]
@@ -15,7 +14,6 @@ use rings_core::swarm::callback::SwarmEvent;
 #[cfg(feature = "dummy")]
 use rings_rpc::method::Method;
 use rings_transport::core::transport::WebrtcConnectionState;
-use tokio::sync::Mutex as AsyncTestMutex;
 
 use super::*;
 use crate::onion::OnionExitDescriptorBody;

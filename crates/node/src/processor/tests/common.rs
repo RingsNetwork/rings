@@ -7,12 +7,8 @@ use super::*;
 use crate::consts::DATA_REDUNDANT;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::record_activity;
+use crate::tests::native::network_test_guard as native_network_lock;
 use crate::tests::TEST_ICE_SERVERS;
-
-// Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive
-// connection callbacks; run them serially so one test's candidates or callbacks
-// cannot add pressure to another test's handshake.
-static NETWORK_TEST_LOCK: OnceLock<AsyncTestMutex<()>> = OnceLock::new();
 
 pub(super) fn onion_policy(
     allowed_targets: &[&str],
@@ -83,11 +79,10 @@ pub(super) struct NetworkTestGuard {
 }
 
 /// Take exclusive use of the test network for the calling test; see [`NetworkTestGuard`].
+///
+/// The serial lock is the crate's one native network lock, shared with the onion loop tests.
 pub(super) async fn network_test_guard() -> NetworkTestGuard {
-    let serial = NETWORK_TEST_LOCK
-        .get_or_init(|| AsyncTestMutex::new(()))
-        .lock()
-        .await;
+    let serial = native_network_lock().await;
     NetworkTestGuard {
         #[cfg(feature = "dummy")]
         network: ControlledNetwork::start(),
@@ -233,8 +228,7 @@ pub(super) fn onion_exit_descriptor_for_processor(
 ) -> Result<OnionExitDescriptor> {
     onion_exit_descriptor_for_processor_with_policy(processor, service, now_ms, {
         let mut policy = onion_policy(&["127.0.0.1:8080", "example.com:443"], &[])?;
-        policy.max_circuits = 8;
-        policy.max_streams_per_circuit = 2;
+        policy.max_sessions = 8;
         policy.max_bytes_per_minute = 4096;
         policy
     })
@@ -284,7 +278,7 @@ pub(super) fn onion_exit_descriptor_for_processor_with_node_type_service(
                 .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
             delegatee_public_key: processor.delegatee_key.delegatee_public_key(),
-            process_epoch: processor.onion_process_epoch,
+            process_epoch: processor.onion_process_epoch.get(),
             node_type,
             network_id: processor.swarm.network_id(),
             service,
@@ -303,7 +297,7 @@ pub(super) fn online_relay_descriptor_for_processor(
     processor: &Processor,
     now_ms: u128,
 ) -> Result<OnlineNodeDescriptor> {
-    let capabilities = OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch);
+    let capabilities = OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch.get());
     OnlineNodeDescriptor::new_signed(
         OnlineNodeDescriptorBody {
             did: processor.did(),

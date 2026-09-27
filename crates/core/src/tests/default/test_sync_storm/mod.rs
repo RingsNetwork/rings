@@ -711,6 +711,19 @@ async fn settle_one_poll() {
     }
 }
 
+/// Whether [`drain_bootstrap`] delivers a frame of `class` rather than refusing it as bootstrap
+/// chatter: lifecycle events, and the link's own control frames, whose credit returns (#904) the
+/// sender's window depends on. A refused payload frame is released at its receiver, so its
+/// credit returns with the next return; a refused return is lost for good, since the reliable
+/// link this harness models never loses one, and would leave its sender short of up to `w/2`
+/// credits.
+fn delivered_while_bootstrapping(class: ScheduledDeliveryClass) -> bool {
+    matches!(
+        class,
+        ScheduledDeliveryClass::Lifecycle | ScheduledDeliveryClass::LinkControl
+    )
+}
+
 async fn drain_bootstrap(runtime: &SimulationRuntimeGuard, nodes: &[Node]) {
     let mut quiet = 0;
     for _ in 0..MAX_DRAIN_STEPS {
@@ -719,7 +732,7 @@ async fn drain_bootstrap(runtime: &SimulationRuntimeGuard, nodes: &[Node]) {
             .expect("bootstrap events must classify");
         if let Some(delivery) = pending
             .iter()
-            .find(|delivery| delivery.class == ScheduledDeliveryClass::Lifecycle)
+            .find(|delivery| delivered_while_bootstrapping(delivery.class))
         {
             assert!(runtime
                 .deliver(delivery)
@@ -728,8 +741,8 @@ async fn drain_bootstrap(runtime: &SimulationRuntimeGuard, nodes: &[Node]) {
             quiet = 0;
         } else if !pending.is_empty() {
             assert!(runtime
-                .discard(&pending[0])
-                .expect("bootstrap discard must remain stable"));
+                .refuse(&pending[0])
+                .expect("bootstrap refusal must remain stable"));
             quiet = 0;
         } else if network_busy(nodes) {
             quiet = 0;
