@@ -27,9 +27,12 @@
 //! - `protocol` — the pure core: [`Wire`]/[`Reject`] (decode boundary), [`Ctx`],
 //!   [`Transition`], and the [`Protocol`] trait.
 //! - `interpret` — the per-extension imperative shell ([`Interpret`]).
+//! - `delegation` — the namespaces whose protocols delegate their admission through
+//!   [`Protocol::delegates_admission`] (#888).
 //! - `registry` — the scoped capability [`Scope`] handed to shells, plus the router-internal
 //!   `Core` / `Handler` and the namespace registry ([`Extensions`]).
 
+mod delegation;
 mod envelope;
 mod interpret;
 mod protocol;

@@ -29,7 +29,7 @@ use crate::error::Result;
 use crate::message::quota::quota_admission_error;
 use crate::message::quota::OriginQuotaCounterState;
 use crate::message::quota::OriginQuotaTable;
-use crate::message::types::MessageCategory;
+use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaConfig;
 use crate::message::OriginQuotaCounters;
 use crate::message::OriginQuotaInstant;
@@ -463,7 +463,7 @@ impl TransactionReplay {
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
-        lane: MessageCategory,
+        charge: OriginQuotaCharge,
         byte_cost: usize,
     ) -> Result<SequenceVerdict> {
         let now = OriginQuotaInstant::from_nanos(
@@ -471,7 +471,7 @@ impl TransactionReplay {
                 .saturating_duration_since(self.started_at)
                 .as_nanos(),
         );
-        self.admit_at(key, sequence, digest, lane, byte_cost, now)
+        self.admit_at(key, sequence, digest, charge, byte_cost, now)
             .await
     }
 
@@ -480,7 +480,7 @@ impl TransactionReplay {
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
-        lane: MessageCategory,
+        charge: OriginQuotaCharge,
         byte_cost: usize,
         now: OriginQuotaInstant,
     ) -> Result<SequenceVerdict> {
@@ -524,12 +524,19 @@ impl TransactionReplay {
             }
         }
 
-        let quota_key =
-            OriginQuotaKey::new(key.network_id, key.origin_account, key.destination, lane);
-        let quota_reservation = match state.quota.reserve(quota_key, byte_cost, now) {
+        let quota_key = OriginQuotaKey::new(
+            key.network_id,
+            key.origin_account,
+            key.destination,
+            charge.lane,
+        );
+        let reservation = state
+            .quota
+            .reserve(quota_key, charge.message_limit, byte_cost, now);
+        let quota_reservation = match reservation {
             Ok(reservation) => reservation,
             Err(error) => {
-                self.quota_counters.record(lane, &error);
+                self.quota_counters.record(charge.lane, &error);
                 return Err(quota_admission_error(quota_key, byte_cost, error));
             }
         };
@@ -564,7 +571,7 @@ impl TransactionReplay {
             key,
             sequence,
             digest,
-            MessageCategory::Application,
+            crate::message::MessageCategory::Application.into(),
             0,
             OriginQuotaInstant::ZERO,
         )
@@ -574,6 +581,12 @@ impl TransactionReplay {
     #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) async fn quota_record_count_for_test(&self) -> usize {
         self.state.lock().await.quota.len()
+    }
+
+    /// The whole `(message, byte)` tokens `key`'s quota record held after its last admission.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn quota_tokens_for_test(&self, key: OriginQuotaKey) -> Option<(u128, u128)> {
+        self.state.lock().await.quota.whole_tokens(key)
     }
 }
 

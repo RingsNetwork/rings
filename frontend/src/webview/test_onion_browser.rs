@@ -709,4 +709,3 @@ fn restore_mock_exit_fetch() -> WebviewResult<()> {
 fn js_webview_error(error: JsValue) -> WebviewError {
     WebviewError::Browser(format!("{error:?}"))
 }
-

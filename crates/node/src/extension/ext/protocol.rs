@@ -108,4 +108,18 @@ pub trait Protocol {
         ctx: Ctx<'_, Self::State>,
         event: Self::Event,
     ) -> Transition<Self::State, Self::Effect>;
+
+    /// Whether this protocol delegates its admission: it admits its own direct-edge traffic,
+    /// per sending neighbour, before its own processing and after core's admission (#888).
+    ///
+    /// Read once when the protocol is registered. For this namespace's traffic from the
+    /// authenticated neighbour that originated it, core then skips the per-origin message-count
+    /// limit; the per-origin byte bucket and the record bound still apply, and relayed or
+    /// foreign-origin traffic keeps the enforced limits. `false`, the default, delegates nothing.
+    ///
+    /// Delegation is trusted local configuration: a protocol that returns `true` must enforce
+    /// its own per-neighbour admission.
+    fn delegates_admission(&self) -> bool {
+        false
+    }
 }
