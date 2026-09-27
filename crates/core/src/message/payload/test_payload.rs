@@ -98,6 +98,7 @@ fn test_origin_is_the_account_behind_the_signing_session() -> Result<()> {
         destination,
         uuid::Uuid::new_v4(),
         0,
+        None,
         Message::custom(b"origin")?,
         MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
     )?;
@@ -287,6 +288,57 @@ fn test_transaction_sequence_is_inside_both_signature_transcripts() {
     payload.transaction.sequence = payload.transaction.sequence.saturating_add(1);
     assert!(!payload.transaction.verify(TEST_NETWORK_ID));
     assert!(!payload.verify(TEST_NETWORK_ID));
+}
+
+/// `reply_via` is inside both signature transcripts: only the origin chooses where its reports
+/// return through, and no hop can add, change, or strip the hint.
+#[test]
+fn test_reply_via_is_inside_both_signature_transcripts() -> Result<()> {
+    let key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let signer = MessageSigner::new(&key, TEST_NETWORK_ID);
+    let bootstrap: Did = SecretKey::random().address().into();
+    let next_hop: Did = SecretKey::random().address().into();
+    let mut payload = MessagePayload::new_send_with_sequence(
+        Message::custom(b"join")?,
+        signer,
+        NextHop::new(next_hop, RouteStage::TOWARD),
+        SecretKey::random().address().into(),
+        0,
+        Some(bootstrap),
+    )?;
+    assert_eq!(payload.transaction.reply_via, Some(bootstrap));
+    assert!(payload.verify(TEST_NETWORK_ID));
+    assert!(payload.transaction.verify(TEST_NETWORK_ID));
+
+    for forged in [None, Some(next_hop)] {
+        payload.transaction.reply_via = forged;
+        assert!(!payload.transaction.verify(TEST_NETWORK_ID));
+        assert!(!payload.verify(TEST_NETWORK_ID));
+    }
+    Ok(())
+}
+
+/// The wire round trip keeps `reply_via` and the carrier stage.
+#[test]
+fn test_wire_round_trip_keeps_reply_via_and_stage() -> Result<()> {
+    let key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let bootstrap: Did = SecretKey::random().address().into();
+    let stage = RouteStage::replying_via(Some(bootstrap)).handed_off();
+    let payload = MessagePayload::new_send_with_sequence(
+        Message::custom(b"round trip")?,
+        MessageSigner::new(&key, TEST_NETWORK_ID),
+        NextHop::new(SecretKey::random().address().into(), stage),
+        SecretKey::random().address().into(),
+        0,
+        Some(bootstrap),
+    )?;
+
+    let decoded = MessagePayload::from_wire(payload.to_wire()?.as_ref())?;
+    assert_eq!(decoded, payload);
+    assert_eq!(decoded.transaction.reply_via, Some(bootstrap));
+    assert_eq!(decoded.relay.stage, stage);
+    assert!(decoded.verify(TEST_NETWORK_ID));
+    Ok(())
 }
 
 /// Law: outside a link a payload is self-contained; a frame that references a session, or a

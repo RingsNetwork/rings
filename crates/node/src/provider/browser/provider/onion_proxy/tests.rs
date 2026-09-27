@@ -22,7 +22,7 @@ use crate::tests::wasm::prepare_processor_with_onion_role;
 /// would be refused (the data plane's namespace registers once).
 #[wasm_bindgen_test]
 async fn test_browser_proxies_share_the_installed_runtime() {
-    let provider = new_provider().await;
+    let provider = new_provider().await.provider;
     assert!(!provider.extensions().contains(ONION_CIRCUIT_NAMESPACE));
 
     provider

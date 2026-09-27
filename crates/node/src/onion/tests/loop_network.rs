@@ -20,6 +20,7 @@ use futures::StreamExt;
 use rings_core::dht::Did;
 use rings_core::message::MessageSigner;
 use rings_core::utils::get_epoch_ms;
+use rings_test_support::with_hang_guard;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -47,7 +48,7 @@ use crate::provider::Provider;
 use crate::tests::native::network_test_guard;
 use crate::tests::native::prepare_processor_with_onion_role;
 
-/// The bound on a failing test's wait for one event.
+/// The hang guard of one awaited event: a failure bound, never a pacing.
 pub(super) const EVENT_BOUND: Duration = Duration::from_secs(30);
 
 /// One node of the network: its processor and its installed data plane.
@@ -132,12 +133,12 @@ async fn link(a: &LoopNode, b: &LoopNode) -> Result<()> {
             return Err(error);
         }
     }
-    tokio::time::timeout(EVENT_BOUND, async {
+    with_hang_guard("the loop network's link", EVENT_BOUND, async {
         a.runtime.links().live(b.did()).await;
         b.runtime.links().live(a.did()).await;
     })
-    .await
-    .map_err(|_| Error::InvalidData)
+    .await;
+    Ok(())
 }
 
 /// One offer/answer exchange from `a` to `b`.

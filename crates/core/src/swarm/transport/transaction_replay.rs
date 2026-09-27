@@ -7,7 +7,6 @@ use super::SwarmTransport;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::message::MessageCategory;
-use crate::message::MessagePayload;
 use crate::message::OriginQuotaCounters;
 use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
@@ -63,29 +62,6 @@ impl SwarmTransport {
             .await
             .map(|_| ())
     }
-
-    /// Build a locally originated payload after durably reserving its stream sequence.
-    pub(crate) async fn signed_payload<T>(
-        &self,
-        data: T,
-        next_hop: Did,
-        destination: Did,
-    ) -> Result<MessagePayload>
-    where
-        T: serde::Serialize,
-    {
-        let sequence = *self
-            .reserve_transaction_sequences(destination, NonZeroU64::MIN)
-            .await?
-            .start();
-        MessagePayload::new_send_with_sequence(
-            data,
-            self.message_signer(),
-            next_hop,
-            destination,
-            sequence,
-        )
-    }
 }
 
 /// Deterministic quota cost of one verified logical transaction.
@@ -112,6 +88,7 @@ mod tests {
             SecretKey::random().address().into(),
             uuid::Uuid::new_v4(),
             0,
+            None,
             Message::custom(b"logical bytes")?,
             MessageSigner::new(&session, 7),
         )?;

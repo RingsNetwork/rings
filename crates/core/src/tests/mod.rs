@@ -21,7 +21,6 @@ use crate::dht::entry::PlacedEntry;
 ))]
 use crate::dht::topology;
 use crate::dht::Did;
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::message::Encoded;
@@ -100,6 +99,7 @@ pub(crate) fn held_inbox_for(destination: Did, holder: &DelegateeKey) -> Result<
     Ok(live(Entry::inbox_delta(&held)?))
 }
 
+pub(crate) mod activity;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub mod wasm;
 
@@ -197,6 +197,57 @@ pub fn control_interleaves_transfer(
                             .any(|event| event.0 == MessageCategory::DhtControl)
                 })
     })
+}
+
+/// Frames of `category` admitted in `trace`.
+#[cfg(any(
+    all(feature = "std", not(feature = "dummy")),
+    all(feature = "wasm", target_family = "wasm")
+))]
+pub fn frame_count(trace: &[(MessageCategory, u64, usize)], category: MessageCategory) -> usize {
+    trace.iter().filter(|event| event.0 == category).count()
+}
+
+/// Whether a control round may send its next control: the `data_class` transfer moved on past
+/// the control just sent, which is traced once `trace` holds more than `controls_before`
+/// control frames.
+///
+/// ```text
+/// progressed ≡ (#control(trace) > controls_before ∧ ∃ data frame after the last control)
+///              ∨ interleaves(trace) ∨ transfers_in_flight = 0
+/// ```
+///
+/// Position, not a count snapshot, decides the first disjunct, so a data frame admitted before
+/// the control never satisfies it. The trace does not tell the test's controls from other
+/// `DhtControl` traffic on the link: when the test's controls are the only such traffic, as in
+/// the native fixture, consecutive controls always have a data frame between them; when other
+/// control traffic shares the link, as in the browser soak's maintenance, the data frame follows
+/// the latest control of any origin, which paces the rounds but no longer guarantees it.
+/// The control's own activity cannot satisfy it either, and evaluating it only reads the trace,
+/// so it sends nothing. The last disjunct ends the rounds once the transfer is done and nothing
+/// more can interleave.
+#[cfg(any(
+    all(feature = "std", not(feature = "dummy")),
+    all(feature = "wasm", target_family = "wasm")
+))]
+pub fn data_transfer_progressed(
+    trace: &[(MessageCategory, u64, usize)],
+    data_class: MessageCategory,
+    controls_before: usize,
+    transfers_in_flight: usize,
+) -> bool {
+    let data_follows_last_control = trace
+        .iter()
+        .rposition(|event| event.0 == MessageCategory::DhtControl)
+        .is_some_and(|last_control| {
+            trace
+                .iter()
+                .skip(last_control.saturating_add(1))
+                .any(|event| event.0 == data_class)
+        });
+    (frame_count(trace, MessageCategory::DhtControl) > controls_before && data_follows_last_control)
+        || control_interleaves_transfer(trace, data_class)
+        || transfers_in_flight == 0
 }
 
 pub fn assert_control_interleaves_transfer(
@@ -308,3 +359,25 @@ pub fn outbound_capacity_released(transport: &SwarmTransport, peer: Did) -> bool
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 mod test_structured_log_assertion;
+
+/// Hex secrets of [`fixed_secret_keys`]; a request for `N` keys takes the first `N`.
+const FIXED_SECRET_KEY_HEX: [&str; 4] = [
+    "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0",
+    "1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54",
+    "27b2fe8ceaf3a6a720f12658301351960b128672e9da4d6f4dead366af3fd834",
+    "4a1c8e3f0b7d2965e8a13c57f09b4d26e7c1a85f3b0d9e624c7a18f5d03b6e92",
+];
+
+/// The first `N ≤ 4` fixed identities, in ascending address order, so fixtures that depend
+/// on ring placement are the same on every run.
+pub fn fixed_secret_keys<const N: usize>() -> Result<[SecretKey; N]> {
+    let mut keys = FIXED_SECRET_KEY_HEX
+        .iter()
+        .take(N)
+        .map(|hex| SecretKey::try_from(*hex))
+        .collect::<Result<Vec<_>>>()?;
+    keys.sort_by_key(|key| key.address());
+    keys.try_into().map_err(|_| {
+        crate::error::Error::InvalidMessage(format!("at most 4 fixed keys, {N} requested"))
+    })
+}

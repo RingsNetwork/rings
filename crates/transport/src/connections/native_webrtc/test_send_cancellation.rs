@@ -343,7 +343,8 @@ async fn test_started_native_send_outlives_cancelled_caller() {
 async fn test_native_close_witness_outlives_cancelled_waiter() {
     let started = Arc::new(AtomicBool::new(false));
     let close_completed = Arc::new(AtomicBool::new(false));
-    let physical_close_completed = Arc::new(AtomicBool::new(false));
+    let physical_close_completed = PhysicalCloseCompletion::new();
+    let physical_close = physical_close_completed.witness();
     let release = Arc::new(tokio::sync::Notify::new());
     let close = {
         let started = Arc::clone(&started);
@@ -357,15 +358,18 @@ async fn test_native_close_witness_outlives_cancelled_waiter() {
         }
     };
     let runtime = native_send_runtime().expect("Tokio test runtime must be available");
-    let witness = Arc::clone(&physical_close_completed);
-    let waiter =
-        tokio::spawn(async move { run_native_close_with_witness(&runtime, close, witness).await });
+    let waiter = tokio::spawn(async move {
+        run_native_close_with_witness(&runtime, close, physical_close_completed).await
+    });
     wait_for_flag(&started, "native close start").await;
 
     waiter.abort();
     release.notify_one();
     wait_for_flag(&close_completed, "native physical close completion").await;
-    wait_for_flag(&physical_close_completed, "native physical close witness").await;
+    let completed = tokio::time::timeout(Duration::from_secs(1), physical_close.completed())
+        .await
+        .expect("timed out waiting for native physical close witness");
+    assert!(completed, "the detached close task publishes its success");
 }
 
 #[tokio::test]

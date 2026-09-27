@@ -23,14 +23,14 @@ use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
-use rings_node::prelude::rings_runtime::sleep;
-use rings_node::prelude::rings_runtime::TimerError;
 use rings_node::prelude::uuid;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::browser::ProviderListener;
 use rings_node::provider::Provider;
+use rings_test_support::activity::probe_on_activity;
+use rings_test_support::observer::activity_observer;
 use rings_webview::browser::BOOTSTRAP_MARKER;
 use rings_webview::GatewayHeader;
 use rings_webview::GatewayPrefix;
@@ -53,7 +53,11 @@ use super::GATEWAY_PREFIX;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_NETWORK_ID: u32 = 665;
-const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+/// Host-only ICE: every provider lives in this page, so no external STUN server is needed, and
+/// none can put its latency inside `createOffer`/`answerOffer` ahead of every awaited state.
+const TEST_ICE_SERVERS: &str = "";
+/// Hang guard of one awaited fixture state; a failure bound only, never the synchronisation.
+const FLOW_HANG_GUARD: Duration = Duration::from_secs(30);
 const TEST_STABILIZE_INTERVAL_SECS: u64 = 15;
 // Invariant: browser onion exits admit only public IP literals because the browser fetch adapter
 // cannot pin a hostname to a previously validated DNS result. The mocked fetch boundary prevents
@@ -63,10 +67,6 @@ const FIXTURE_ORIGIN_GLOBAL: &str = "__ringsWebviewOnionFixtureOrigin";
 /// Relays that are neither the client's guard nor the exit: the two candidates for the forward
 /// relay `r₀,₂` and the return relay `r₁,₁` of the loop `g, r₀,₂, exit, r₁,₁, g` (#834 D5).
 const FIXTURE_MIDDLE_RELAYS: usize = 2;
-/// Interval between two reads of a fixture precondition while it converges.
-const CONDITION_POLL_MS: u64 = 100;
-/// Reads of a fixture precondition before the fixture fails: an upper bound of 20 s.
-const CONDITION_POLLS: usize = 200;
 
 #[derive(Debug, Deserialize)]
 struct FetchCall {
@@ -343,6 +343,7 @@ async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewR
         .map_err(|error| WebviewError::transport(format!("build processor config: {error:?}")))?
         .storage(storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+        .observer(activity_observer())
         .build()
         .map_err(|error| WebviewError::transport(format!("build processor: {error:?}")))?;
     let admitted = Arc::new(AdmittedPeers::default());
@@ -425,29 +426,22 @@ fn string_field(value: &JsValue, field: &str) -> WebviewResult<String> {
         .ok_or_else(|| WebviewError::Browser(format!("missing string field {field:?}")))
 }
 
-/// Wait until `ready` holds, re-checking every `CONDITION_POLL_MS`, at most `CONDITION_POLLS`
-/// times.
+/// Wait until `ready` holds, re-probing it after every recorded swarm activity (#889, #890).
 ///
-/// The browser offers no notification for a WebRTC edge opening or for a DHT entry converging,
-/// so both fixture preconditions are read back. The bound is an upper bound on that convergence,
-/// not a delay: every wait returns on the first read that holds, and the navigation that follows
-/// runs once, failing on any route error.
+/// The fixture preconditions (a WebRTC edge admitted, a DHT entry converged) change only through
+/// swarm traffic, which every provider's activity observer records. So `ready` is probed once,
+/// then again after each activity newer than the mark taken before the previous probe: no
+/// change is missed, and no timer paces the probes. `FLOW_HANG_GUARD` bounds a hang only.
 async fn poll_until<Ready, Check>(what: &str, mut ready: Check) -> WebviewResult<()>
 where
     Check: FnMut() -> Ready,
     Ready: Future<Output = WebviewResult<bool>>,
 {
-    for _ in 0..CONDITION_POLLS {
-        if ready().await? {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(CONDITION_POLL_MS))
-            .await
-            .map_err(timer_webview_error)?;
-    }
-    Err(WebviewError::transport(format!(
-        "timed out waiting for {what}"
-    )))
+    probe_on_activity(what, FLOW_HANG_GUARD, || {
+        let probe = ready();
+        async move { Ok(probe.await?.then_some(())) }
+    })
+    .await
 }
 
 /// Return whether the client's directory holds the precondition of a loop route: the relay
@@ -716,6 +710,3 @@ fn js_webview_error(error: JsValue) -> WebviewError {
     WebviewError::Browser(format!("{error:?}"))
 }
 
-fn timer_webview_error(error: TimerError) -> WebviewError {
-    WebviewError::Browser(error.to_string())
-}

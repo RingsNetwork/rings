@@ -19,6 +19,7 @@ use super::TransportReadiness;
 use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::chunk::Chunk;
 use crate::delegation::DelegateeKey;
+use crate::dht::delivery::NextHop;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::StorageSyncDestination;
@@ -409,10 +410,11 @@ pub(super) fn frame_chunk(
         did,
         crate::utils::new_uuid(),
         sequence,
+        None,
         Message::Chunk(chunk),
         signer,
     )?;
-    let relay = MessageRelay::new(did, did, HopBudget::EXHAUSTED);
+    let relay = MessageRelay::new(NextHop::toward(did), did, HopBudget::EXHAUSTED);
     let payload = MessagePayload::new(transaction, signer, relay)?;
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     crate::simulation::record_outbound_submission(payload.transaction.tx_id);

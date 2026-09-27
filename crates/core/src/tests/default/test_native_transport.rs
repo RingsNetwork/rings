@@ -1,8 +1,7 @@
-use std::time::Duration;
-
 use super::prepare_node;
 use super::wait_for_connection_state;
 use super::wait_for_msgs;
+use super::wait_until_result;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::ecc::SecretKey;
@@ -13,11 +12,10 @@ use crate::message::MessageCategory;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
+use crate::tests::data_transfer_progressed;
+use crate::tests::frame_count;
 use crate::tests::manually_establish_connection;
 use crate::tests::multi_frame_storage_sync_entries;
-
-const TRACE_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const TRACE_POLL_ATTEMPTS: usize = 500;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fixture() -> Result<()>
@@ -56,6 +54,17 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
         .is_sent());
 
     for round in 0..16 {
+        // The next control is sent only once this one is traced and a storage frame follows
+        // it, so consecutive controls always have a storage frame between them. The wait is on
+        // the transfer's progress; the control's own activity does not satisfy it.
+        let trace = node1
+            .swarm
+            .transport
+            .outbound_frame_trace_for_test(node2.did());
+        if control_interleaves_transfer(&trace, MessageCategory::Storage) {
+            break;
+        }
+        let controls_before = frame_count(&trace, MessageCategory::DhtControl);
         node1
             .swarm
             .send_direct_message(
@@ -63,29 +72,35 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
                 node2.did(),
             )
             .await?;
-        if control_interleaves_transfer(
+        wait_until_result(
+            &format!("the storage transfer progresses after control {round}"),
+            || {
+                Ok(data_transfer_progressed(
+                    &node1
+                        .swarm
+                        .transport
+                        .outbound_frame_trace_for_test(node2.did()),
+                    MessageCategory::Storage,
+                    controls_before,
+                    node1
+                        .swarm
+                        .transport
+                        .outbound_admitted_transfer_total_for_test(),
+                ))
+            },
+        )
+        .await?;
+    }
+    wait_until_result("control interleaves the storage transfer", || {
+        Ok(control_interleaves_transfer(
             &node1
                 .swarm
                 .transport
                 .outbound_frame_trace_for_test(node2.did()),
             MessageCategory::Storage,
-        ) {
-            break;
-        }
-    }
-
-    for _ in 0..TRACE_POLL_ATTEMPTS {
-        if control_interleaves_transfer(
-            &node1
-                .swarm
-                .transport
-                .outbound_frame_trace_for_test(node2.did()),
-            MessageCategory::Storage,
-        ) {
-            break;
-        }
-        tokio::time::sleep(TRACE_POLL_INTERVAL).await;
-    }
+        ))
+    })
+    .await?;
     let trace = node1
         .swarm
         .transport

@@ -276,7 +276,8 @@ impl Error {
             | Self::PeerRingInvalidAction | Self::FailedToReadSuccessors
             | Self::SuccessorIndexOutOfBounds { .. } | Self::FailedToWriteSuccessors
             | Self::PeerRingUnexpectedAction(_) | Self::InvalidNextHop
-            | Self::RelayHopBudgetExhausted | Self::RelayHopBudgetAboveMax(_) | Self::NoNextHop
+            | Self::RelayHopBudgetExhausted | Self::RelayHopBudgetAboveMax(_)
+            | Self::RelayDestinationUnreachable { .. }
             | Self::ReroutingExhausted { .. } | Self::SingleAttemptRefused { .. }
             | Self::ReroutingStopped
             // host
@@ -382,7 +383,7 @@ mod tests {
                 bytes: 1,
                 context: "test",
             },
-            Error::NoNextHop,
+            Error::RelayDestinationUnreachable { destination: peer },
             Error::MessageTooLarge(1),
         ];
         for error in surfaced {

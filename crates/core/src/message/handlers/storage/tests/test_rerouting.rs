@@ -30,8 +30,12 @@ use crate::lifecycle::StopSource;
 use crate::message::types::Message;
 use crate::message::Encoder;
 use crate::swarm::transport::Attempts;
+use crate::tests::activity::activity_after;
+use crate::tests::activity::activity_mark;
+use crate::tests::activity::swarms_quiescent;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
+use crate::tests::default::wait_until_result;
 use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
 
@@ -84,23 +88,32 @@ async fn operate_entries_received(node: &Node) -> Result<usize> {
     Ok(count)
 }
 
-/// Count the further `OperateEntry` payloads `owner` receives until `writer` has no transfer
-/// in flight and `owner` no inbound message left.
+/// Count the further `OperateEntry` payloads `owner` receives until `writer` and `owner` are
+/// quiescent together ([`swarms_quiescent`]: no transfer, inbound message or frame in flight
+/// between them), re-probing after every recorded activity (#889). The mark is taken before the
+/// probe, so an activity during it wakes the next probe and none is missed.
 async fn operate_entries_delivered(writer: &Node, owner: &Node) -> Result<usize> {
     let mut count = 0;
     loop {
-        let settled = !writer.has_outbound_transfer() && !owner.has_inbound_message();
+        let mark = activity_mark();
+        let settled = swarms_quiescent([writer.swarm.as_ref(), owner.swarm.as_ref()]);
         count += operate_entries_received(owner).await?;
         if settled {
             return Ok(count);
         }
-        tokio::task::yield_now().await;
+        activity_after(mark).await;
     }
 }
 
 /// `Close`, `Dial`, `Admit`: retire the dead generation and admit a replacement.
 async fn replace_generation(writer: &Node, owner: &Node) -> Result<()> {
     writer.swarm.disconnect(owner.did()).await?;
+    // The owner learns of the close through the transport, not through a message, so message
+    // quiescence alone does not witness it: wait for the owner's side to retire the link.
+    wait_until_result("the owner retires the closed link", || {
+        Ok(owner.swarm.transport.get_connection(writer.did()).is_none())
+    })
+    .await?;
     wait_for_msgs([writer, owner]).await;
     manually_establish_connection(&writer.swarm, &owner.swarm).await;
     wait_for_msgs([writer, owner]).await;
@@ -252,7 +265,12 @@ fn test_placement_errors_join_to_the_ambiguous_class() {
         Err(Error::DetachedSendAbandonedAfterClaim { .. })
     ));
     assert!(matches!(
-        super::super::join_placements(vec![Err(exhausted()), Err(Error::NoNextHop)]),
+        super::super::join_placements(vec![
+            Err(exhausted()),
+            Err(Error::RelayDestinationUnreachable {
+                destination: Did::from(1_u32),
+            })
+        ]),
         Err(Error::ReroutingExhausted { .. })
     ));
 }

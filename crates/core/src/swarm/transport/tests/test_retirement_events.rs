@@ -14,6 +14,11 @@ use crate::swarm::callback::PeerLink;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::PeerTransition;
 
+/// The fixed secret key whose scalar repeats the hex byte `byte` (#889: fixed keys).
+fn fixed_key(byte: &str) -> SecretKey {
+    SecretKey::try_from(byte.repeat(32).as_str()).expect("a fixed scalar")
+}
+
 /// A transport whose application callback is a fresh event log.
 fn transport_with_log() -> Result<(SwarmTransport, Arc<EventLog>)> {
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
@@ -215,7 +220,7 @@ async fn test_an_unbound_callback_reports_no_state() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let peer: Did = SecretKey::random().address().into();
+    let peer: Did = fixed_key("21").address().into();
     let log = Arc::new(EventLog::default());
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), log.clone());
 
@@ -273,7 +278,7 @@ async fn test_admitted_snapshot_is_linearised_with_admission_and_retirement() ->
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let peer = SecretKey::random().address().into();
+    let peer = fixed_key("27").address().into();
     let log = Arc::new(SnapshotLog::default());
     let _ = log.transport.set(Arc::clone(&transport));
     transport.callback_slot().replace(log.clone())?;
@@ -323,7 +328,7 @@ async fn test_admitted_snapshot_is_linearised_with_admission_and_retirement() ->
 #[tokio::test]
 async fn test_disconnect_link_retires_only_its_own_generation() -> Result<()> {
     let (transport, log) = transport_with_log()?;
-    let peer = SecretKey::random().address().into();
+    let peer = fixed_key("32").address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
     assert!(transport.mark_admission_announced(attempt)?);

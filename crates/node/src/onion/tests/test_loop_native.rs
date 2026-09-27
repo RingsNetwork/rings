@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use bytes::Bytes;
+use rings_test_support::with_hang_guard;
 
 use super::loop_network::open_policy;
 use super::loop_network::EchoWorld;
@@ -96,9 +97,12 @@ async fn test_tcp_loop_echoes_a_multi_frame_stream() -> Result<()> {
 
     sender.send(Bytes::from(sent.clone())).await?;
     sender.fin().await?;
-    let echoed = tokio::time::timeout(EVENT_BOUND, collect(&mut receiver))
-        .await
-        .map_err(|_| Error::OnionProxyRequestTimedOut)??;
+    let echoed = with_hang_guard(
+        "test_tcp_loop_echoes_a_multi_frame_stream",
+        EVENT_BOUND,
+        collect(&mut receiver),
+    )
+    .await?;
 
     assert_eq!(echoed, sent);
     Ok(())
@@ -178,12 +182,12 @@ async fn test_https_loop_fetches_through_the_session_target() -> Result<()> {
         route: network.route(OnionServiceName::https())?,
     };
 
-    let response = tokio::time::timeout(
+    let response = with_hang_guard(
+        "test_https_loop_fetches_through_the_session_target",
         EVENT_BOUND,
         OnionHttpsClient::new(network.client.runtime.clone()).request(&route, call),
     )
-    .await
-    .map_err(|_| Error::OnionProxyRequestTimedOut)??;
+    .await?;
 
     assert_eq!(response.status, 200);
     assert_eq!(response.headers, vec![(
