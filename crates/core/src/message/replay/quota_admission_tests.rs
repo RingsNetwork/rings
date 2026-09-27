@@ -4,7 +4,6 @@ use std::sync::atomic::Ordering;
 use super::*;
 use crate::message::MessageCategory;
 use crate::message::OriginQuotaLaneConfig;
-use crate::message::OriginQuotaLaneId;
 use crate::storage::MemStorage;
 
 const ONE_SECOND: u128 = 1_000_000_000;
@@ -144,7 +143,7 @@ async fn capacity_rejection_preserves_replay_until_an_idle_slot_is_safe() -> Res
         admit_at(&runtime, waiting, 0, digest(2), 0).await,
         Err(Error::OriginQuota(
             crate::message::OriginQuotaError::TableCapacityExhausted {
-                lane: OriginQuotaLaneId::Class(MessageCategory::Application),
+                lane: MessageCategory::Application,
                 capacity: 1,
             }
         ))

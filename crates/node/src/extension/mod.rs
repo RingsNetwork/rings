@@ -12,7 +12,6 @@ use rings_core::message::CustomMessage;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
-use rings_core::message::PacedLane;
 use rings_core::swarm::callback::PeerTransition;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::callback::SwarmEvent;
@@ -100,11 +99,11 @@ impl SwarmCallback for Backend {
         Ok(())
     }
 
-    /// Name the paced direct-edge lane of an inbound envelope from the registry, so a
-    /// protocol's declared rate (see [`ext::Protocol::paced_direct_rate`]) reaches core's
-    /// admission. Core alone decides whether the lane applies to the delivering edge.
-    fn paced_lane(&self, application_payload: &[u8]) -> Option<PacedLane> {
-        self.extensions.paced_lane(application_payload)
+    /// Report whether an inbound envelope's namespace delegates its admission, so a protocol's
+    /// declaration (see [`ext::Protocol::delegates_admission`]) reaches core's admission. Core
+    /// alone decides whether delegation applies to the delivering edge.
+    fn delegates_admission(&self, application_payload: &[u8]) -> bool {
+        self.extensions.delegates_admission(application_payload)
     }
 
     /// Translate the swarm's events into the observer's facts: an admission and a retirement.

@@ -6,8 +6,8 @@ use std::ops::RangeInclusive;
 use super::SwarmTransport;
 use crate::dht::Did;
 use crate::error::Result;
+use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaCounters;
-use crate::message::OriginQuotaLane;
 use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
 use crate::message::StreamKey;
@@ -29,13 +29,16 @@ impl SwarmTransport {
         self.transaction_replay.quota_record_count_for_test().await
     }
 
-    /// The origin-quota lanes holding a record of `origin`.
+    /// The whole `(message, byte)` tokens of `origin`'s record in `lane` at this destination,
+    /// as of its last admission: a stored record is not refilled until it is next admitted.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn origin_quota_lanes_for_test(
+    pub(crate) async fn origin_quota_tokens_for_test(
         &self,
         origin: Did,
-    ) -> Vec<crate::message::OriginQuotaLaneId> {
-        self.transaction_replay.quota_lanes_for_test(origin).await
+        lane: crate::message::MessageCategory,
+    ) -> Option<(u128, u128)> {
+        let key = crate::message::OriginQuotaKey::new(self.network_id, origin, self.dht.did, lane);
+        self.transaction_replay.quota_tokens_for_test(key).await
     }
 
     /// Persistently reserve one or more sequences for this account and final destination.
@@ -56,7 +59,7 @@ impl SwarmTransport {
     pub(crate) async fn admit_final_transaction(
         &self,
         transaction: &Transaction,
-        lane: OriginQuotaLane,
+        charge: OriginQuotaCharge,
     ) -> Result<()> {
         let key = transaction.stream_key(self.network_id);
         let digest = transaction.digest()?;
@@ -65,7 +68,7 @@ impl SwarmTransport {
                 key,
                 transaction.sequence,
                 digest,
-                lane,
+                charge,
                 logical_message_byte_cost(transaction),
             )
             .await

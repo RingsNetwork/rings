@@ -16,7 +16,6 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
-use crate::message::PacedLane;
 use crate::swarm::session_link::ReferencedDelegations;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
@@ -250,20 +249,21 @@ pub trait SwarmCallback {
         Ok(())
     }
 
-    /// Resolve the paced direct-edge lane of an application payload (the bytes of a
-    /// [`CustomMessage`](crate::message::CustomMessage)), if the protocol that owns the payload
-    /// registered one.
+    /// Whether the namespace of an application payload (the bytes of a
+    /// [`CustomMessage`](crate::message::CustomMessage)) declared delegated admission: it admits
+    /// its own direct-edge traffic, per sending neighbour, before any further processing.
     ///
     /// The swarm consults this only for Application messages whose origin is the authenticated
-    /// neighbour that delivered them, before replay and quota admission; see
-    /// [`OriginQuotaLane`](crate::message::OriginQuotaLane). It runs on the inbound admission
-    /// path, so it must be a cheap, non-blocking lookup. The default registers no paced lane.
+    /// neighbour that delivered them, before replay and quota admission. For those it then skips
+    /// the per-origin message-count limit; the byte limit and the record bound still apply (see
+    /// [`MessageLimit`](crate::message::MessageLimit)). It runs on the inbound admission path, so
+    /// it must be a cheap, non-blocking lookup. The default delegates nothing.
     ///
-    /// A returned rate is trusted local configuration: for that namespace's neighbour-originated
-    /// traffic it replaces the configured Application message limit, and core does not bound
-    /// it. Implementers hold the authority of the operator who configures the quota.
-    fn paced_lane(&self, _application_payload: &[u8]) -> Option<PacedLane> {
-        None
+    /// Delegation is trusted local configuration: implementers hold the authority of the
+    /// operator who configures the quota, and a delegating namespace must enforce its own
+    /// per-neighbour admission.
+    fn delegates_admission(&self, _application_payload: &[u8]) -> bool {
+        false
     }
 }
 

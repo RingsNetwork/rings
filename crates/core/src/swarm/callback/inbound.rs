@@ -809,7 +809,7 @@ pub(super) async fn deliver_local(
 ) -> Result<()> {
     let message = payload.transaction.data::<crate::message::Message>()?;
     let lane = InboundLane::from_kind(crate::message::MessageKind::from_message(&message));
-    // A local payload crossed no connection, so no neighbour can claim a paced lane for it.
+    // A local payload crossed no connection, so no neighbour can have its admission delegated.
     pipeline
         .admit_final_transaction(payload, &message, lane, EdgeRelation::Remote)
         .await?;

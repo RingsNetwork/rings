@@ -15,8 +15,7 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
-use crate::message::OriginQuotaLane;
-use crate::message::PacedLane;
+use crate::message::OriginQuotaCharge;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
 use crate::swarm::observer::LookupOutcome;
@@ -150,9 +149,9 @@ impl LogicalInbound {
 
     /// Commit replay and origin-quota admission of a transaction addressed to this node.
     ///
-    /// The quota lane is the message's class lane, or the paced direct-edge lane its owning
-    /// protocol registered when `edge` is [`EdgeRelation::Neighbour`] (see
-    /// [`OriginQuotaLane::select`]). Transactions for other destinations are not admitted here.
+    /// The charge is the message's class record, with its message limit skipped only when
+    /// `edge` is [`EdgeRelation::Neighbour`] and the namespace delegated its admission (see
+    /// [`OriginQuotaCharge::select`]). Transactions for other destinations are not admitted here.
     pub(super) async fn admit_final_transaction(
         &self,
         payload: &MessagePayload,
@@ -164,21 +163,22 @@ impl LogicalInbound {
             let class = lane
                 .class()
                 .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
-            let quota_lane = OriginQuotaLane::select(class, edge, || self.paced_lane(message));
+            let charge =
+                OriginQuotaCharge::select(class, edge, || self.delegates_admission(message));
             self.transport
-                .admit_final_transaction(&payload.transaction, quota_lane)
+                .admit_final_transaction(&payload.transaction, charge)
                 .await?;
         }
         Ok(())
     }
 
-    /// The paced lane the application layer registered for an application message, if any.
-    fn paced_lane(&self, message: &Message) -> Option<PacedLane> {
+    /// Whether the namespace of an application message delegated its admission.
+    fn delegates_admission(&self, message: &Message) -> bool {
         match message {
-            Message::CustomMessage(CustomMessage(application_payload)) => {
-                self.callback.paced_lane(application_payload.as_slice())
-            }
-            _ => None,
+            Message::CustomMessage(CustomMessage(application_payload)) => self
+                .callback
+                .delegates_admission(application_payload.as_slice()),
+            _ => false,
         }
     }
 
