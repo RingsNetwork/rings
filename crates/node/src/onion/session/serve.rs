@@ -5,18 +5,22 @@
 //! ⟦f⟧(from, ā, v, υ):  (ς, d) ← ā;  frame ← dec(v)
 //!                      ς known with d ?  ⇒ its driver ← (frame, υ)
 //!                      ς known, other d  ⇒ drop (D2′: a loop naming another target)
-//!                      ς closed within V ⇒ drop (a tombstone: a late loop never respawns ς)
+//!                      ς closed within V ⇒ unheld (a tombstone: a late loop never respawns ς)
 //!                      ς new, frame T    ⇒ lease(from) ⇒ spawn a driver, its driver ← (frame, υ)
-//!                      ς new, other      ⇒ drop (credit, fin or data of no live session)
+//!                                          (no slot or no lease ⇒ unheld: a refusal)
+//!                      ς new, other      ⇒ unheld (credit, fin or data of no live session)
+//! unheld(frame, υ):    reply abort(0) sealed under υ, unless frame is the client's abort
 //!
 //! driver(ς):  loop select
 //!               (frame, υ)  ─▶ machine.forward
-//!               world read  ─▶ machine.world            (only while reply_capacity = Some)
+//!               world read  ─▶ machine.world            (only while reply_capacity = Some;
+//!                                                        the reader records its own bytes)
 //!               tick        ─▶ machine.tick
 //!             perform each effect in order:
 //!               Open(t)     policy ∧ world.open(t) ─▶ machine.opened(ok)
 //!               Write(w)    world ← w (counted against the byte policy)
-//!               Reply(n, c) link sender ← (n, c), awaited: the world is read at the link's rate
+//!               Reply(f, υ) link sender ← seal(f, υ), awaited: the world is read at the link's
+//!                           rate; a seal that fails fails the session closed
 //!               Close       end the driver, release the lease and the world
 //! ```
 //!
@@ -24,6 +28,10 @@
 //!
 //! - **Isolation.** A session's reply blocks live in its own pool, so no two sessions share a
 //!   block, and a session's inputs reach only its own driver.
+//! - **Liveness of failure.** Every forward loop is answered or delivered: a loop of a session
+//!   `h` does not hold is answered with `abort` under its own block, so a client whose session
+//!   closed without a reply (no block left) learns of it at its next loop, at the latest its
+//!   `V/2` keep-alive.
 //! - **Pause.** The world is read only when the machine reports a capacity, so a `tcp` session
 //!   with no credit leaves its socket unread, and resumes on credit.
 //! - **Bound.** Only a loop that can open a session (`data` with `T`) creates one, and it is
@@ -50,6 +58,8 @@ use rings_runtime::MaybeSend;
 use rings_runtime::MaybeSendSync;
 use rings_runtime::Spawner;
 
+use super::exit::reply_to_unheld;
+use super::exit::seal;
 use super::exit::OnionExitEffect;
 use super::exit::OnionExitSession;
 use super::exit::OnionWorldRead;
@@ -90,15 +100,13 @@ pub(crate) trait OnionWorld: MaybeSendSync + 'static {
     /// The world's write half.
     type Writer: OnionWorldWriter;
 
-    /// Whether the world records the bytes it reads against the exit's byte policy itself, as
-    /// they stream, so the shell must not record them again: one place per byte.
-    const RECORDS_OWN_READS: bool = false;
-
     /// Open the world at `target`, already admitted by the exit policy.
     async fn open(&self, target: &OnionProxyTarget) -> Result<(Self::Reader, Self::Writer)>;
 }
 
-/// The read half of one session's world.
+/// The read half of one session's world. It records every byte it reads against the exit's
+/// byte policy itself, as the bytes stream (the shell records only writes: one place per byte),
+/// and fails once the budget is spent.
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 pub(crate) trait OnionWorldReader: MaybeSend + 'static {
@@ -241,14 +249,14 @@ impl<W: OnionWorld> OnionInterpretation for OnionExitSessions<W> {
                 target: Some(_),
                 ..
             });
-            if !opens
-                || sessions.is_buried(&arguments.session, received_at_ms)
-                || sessions.live.len() >= ONION_EXIT_MAX_SESSIONS
-            {
-                return Ok(());
-            }
-            let Ok(lease) = self.shared.accounting.admit(&self.shared.policy, from) else {
-                tracing::debug!(%from, "onion exit session share is full; drop an open");
+            let lease = (opens
+                && !sessions.is_buried(&arguments.session, received_at_ms)
+                && sessions.live.len() < ONION_EXIT_MAX_SESSIONS)
+                .then(|| self.shared.accounting.admit(&self.shared.policy, from).ok())
+                .flatten();
+            let Some(lease) = lease else {
+                drop(sessions);
+                self.answer_unheld(scope, loop_input);
                 return Ok(());
             };
             let (inbound, received) = mpsc::channel(ONION_EXIT_SESSION_INBOUND);
@@ -279,6 +287,27 @@ impl<W: OnionWorld> OnionInterpretation for OnionExitSessions<W> {
             tracing::debug!(%from, "onion exit session queue is full; drop a loop");
         }
         Ok(())
+    }
+}
+
+impl<W: OnionWorld> OnionExitSessions<W> {
+    /// Answer a loop of a session this exit does not hold ([`reply_to_unheld`]), queued on the
+    /// link without waiting, as a relay would: the evaluation never blocks on a dead session.
+    fn answer_unheld(&self, scope: &Scope, input: OnionExitInput) {
+        let Some(frame) = reply_to_unheld(&input.frame) else {
+            return;
+        };
+        let Some((next, cell)) = seal(&frame, *input.surb) else {
+            return;
+        };
+        let queued = self.shared.link_sender.enqueue(
+            scope.clone(),
+            OnionLink::new(next),
+            Bytes::from(cell.into_bytes()),
+        );
+        if let Err(error) = queued {
+            tracing::debug!(%next, %error, "an onion exit's abort to an unheld session was dropped");
+        }
     }
 }
 
@@ -319,15 +348,10 @@ async fn drive<W: OnionWorld>(
                     open.reader = Some(reader);
                 }
                 let now_ms = get_epoch_ms();
-                let recorded = |bytes: &Bytes| {
-                    W::RECORDS_OWN_READS || record(&shared, bytes.len(), now_ms)
-                };
                 match read {
-                    Ok(Some(bytes)) if recorded(&bytes) => {
-                        machine.world(now_ms, OnionWorldRead::Bytes(bytes))
-                    }
+                    Ok(Some(bytes)) => machine.world(now_ms, OnionWorldRead::Bytes(bytes)),
                     Ok(None) => machine.world(now_ms, OnionWorldRead::Eof),
-                    Ok(Some(_)) | Err(_) => machine.fail(now_ms),
+                    Err(_) => machine.fail(now_ms),
                 }
             },
             _ = tick => {
@@ -404,7 +428,12 @@ async fn perform<W: OnionWorld>(
             // The driver waits for its reply to leave, so the world is read no faster than the
             // link emits: a reply is never dropped at a full link queue, which would be a gap
             // at the client (Law pause).
-            OnionExitEffect::Reply { next, cell } => {
+            OnionExitEffect::Reply { frame, surb } => {
+                let Some((next, cell)) = seal(&frame, *surb) else {
+                    tracing::debug!("an onion reply could not be sealed");
+                    queue.extend(machine.fail(get_epoch_ms()));
+                    continue;
+                };
                 let sent = shared
                     .link_sender
                     .send(

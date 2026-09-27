@@ -32,7 +32,7 @@
 //! - **Adjacency.** A `Relayed` cell's `next` is a live link, as of the link facts this node has
 //!   applied, so a layer cannot make it emit toward a peer it has no link to. A link core has
 //!   just admitted is live once its `Opened` is applied; until then its loops fail closed, so a
-//!   session over a fresh guard waits for the link first.
+//!   session opened over a fresh guard before that fails (`LinkDown`), and the caller retries.
 
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;

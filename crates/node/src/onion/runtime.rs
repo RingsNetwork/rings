@@ -188,7 +188,7 @@ pub(super) fn exit_algebra(
                 algebra.register(
                     service.clone(),
                     OnionExitSessions::new(
-                        super::tcp::OnionTcpWorld,
+                        super::tcp::OnionTcpWorld::new(policy.clone(), accounting.clone()),
                         policy,
                         accounting.clone(),
                         link_sender.clone(),

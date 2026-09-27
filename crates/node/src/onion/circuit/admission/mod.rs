@@ -9,7 +9,7 @@
 //! δ : S × Time × I → S × (Out + Rejection)
 //! I = Charge(Link × Units) + Admit(Charge × Epoch × Expiry × Tag)
 //!   + LinkOpened(Link) + LinkClosed(Link) + Reconcile(𝒫 Link)
-//! ρ : S × Epoch × Key × 𝒫 Link → S × (Refused + NotFresh)      (the reset; it takes no time)
+//! ρ : S × Epoch × Key → S + NotFresh                            (the reset; it takes no time)
 //! Link = Did × Generation
 //! ```
 //!
@@ -63,9 +63,8 @@
 //!   the shell (`circuit::shell`), when [`OnionAdmissionState::is_rolled_back_at`] holds
 //!   (`now < clock − X₀`), must move to a fresh process epoch with
 //!   [`OnionAdmissionState::renew`]. That clears the ledgers, the clock and the replay store, and
-//!   then reconciles the cleared state with the table's own live links, `ρ = reconcile ∘ clear`,
-//!   so the live links are kept up to refusals. It is safe by the epoch law, but it invalidates
-//!   every loop in flight through this hop.
+//!   then keeps the table's own live links with fresh ledgers, refusing nothing. It is safe by
+//!   the epoch law, but it invalidates every loop in flight through this hop.
 //! * **Skew.** The window has no skew tolerance. A hop whose clock runs `δ < Q` behind
 //!   or ahead of the builder's rejects about `δ / Q` of loops at the window's edges.
 //! * **Epoch (D2).** Only layers sealed for the current process epoch are admitted. A restarted
@@ -103,8 +102,9 @@
 //!   links, and one budget ledger per DID with at least one live link or some load.
 //!   * **Event-pairing obligation** (met by `circuit::feed`). Between resets the live set
 //!     shrinks only through `link_closed` and `reconcile`. A lost `Retired` therefore pins a
-//!     live link, and a ledger slot, until a reconciliation repairs it. Core itself splits an `Admitted`/`Retired` pair
-//!     when the callback is replaced, and a bounded shell queue may drop events. The shell must
+//!     live link, and a ledger slot, until a reconciliation repairs it. Core itself splits an
+//!     `Admitted`/`Retired` pair when the callback is replaced, and a bounded shell queue may
+//!     drop events. The shell must
 //!     call [`OnionAdmissionState::reconcile`] with core's registry snapshot of live links whenever
 //!     the callback is replaced, and on a periodic tick no longer than `V`. `reconcile` closes
 //!     every live link absent from the snapshot and opens every snapshot link that is not live,
@@ -115,10 +115,9 @@
 //!     the event stream it repairs. It must be delivered through the same ordered channel as
 //!     `Admitted`/`Retired`, or read and applied atomically at the shell's queue-drain point.
 //!     Under this obligation, after `reconcile` the live set is exactly core's registry minus the
-//!     refused links. Without it, a
-//!     snapshot read before an `Admitted(g)` that is processed first would close the live `g` (its
-//!     cells would be `LinkNotLive` for up to one tick), and the converse would reopen a retired
-//!     `g`.
+//!     refused links. Without it, a snapshot read before an `Admitted(g)` that is processed first
+//!     would close the live `g` (its cells would be `LinkNotLive` for up to one tick), and the
+//!     converse would reopen a retired `g`.
 //!   * [`OnionAdmissionState::link_opened`] makes a link live, creating its DID's ledger, and is
 //!     idempotent on a live link. [`OnionAdmissionState::link_closed`] makes it not live, and is
 //!     idempotent too: closing an unknown, refused or closed link changes nothing. A close

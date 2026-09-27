@@ -28,6 +28,12 @@ impl TcpDuplexState {
         self.write_open
     }
 
+    /// Whether the session's end of stream reached the local stream: every byte carried toward
+    /// it was written in order, and its write half was shut down, an orderly end.
+    pub(super) const fn delivered_whole(self) -> bool {
+        !self.write_open
+    }
+
     /// Whether both halves are closed.
     pub(super) const fn is_closed(self) -> bool {
         !self.read_open && !self.write_open

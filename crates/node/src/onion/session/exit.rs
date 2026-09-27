@@ -38,13 +38,15 @@
 //! - **Binding.** `Open(t)` is emitted at most once, and only for `SHA-256(t) = d`; a later `T`
 //!   naming another target aborts the session.
 //! - **Ack.** The first reply of an opened session is `data(0, 0, ε)`, and a refused one's only
-//!   reply is `abort(0)` (#843 Q5); world bytes are never replied before the ack.
+//!   reply is `abort(0)`: a refusal is a failure (the `abort` decision of #834 D2′, which
+//!   supersedes #843 Q5's refusing `fin`); world bytes are never replied before the ack.
 //! - **Order.** Forward frames reach the world in sequence order, each once; replies carry
 //!   `n = 0, 1, …`.
 //! - **Fail closed.** A gap, a world failure, a spent byte policy or a rebind spends a remaining
 //!   block on `abort(n)` before the session closes, so the client learns of it in one loop, as
 //!   a failure; `fin` is sent only when the world's bytes really ended. Without a block the
-//!   session closes silently, and the client's own request timeout decides.
+//!   session closes without a reply, and the shell answers the client's next loop, which
+//!   brings its own block, with `abort` ([`reply_to_unheld`]).
 
 use std::collections::VecDeque;
 
@@ -87,12 +89,13 @@ pub(crate) enum OnionExitEffect {
     Write(Bytes),
     /// The client closed its direction: shut the world's write half.
     ShutdownWrite,
-    /// Send a produced reply cell to `next`, the first hop of its return path.
+    /// Seal `frame` into the reply cell of `surb` ([`seal`]) and send it to the first hop of
+    /// its return path: the block is spent, whatever becomes of the cell.
     Reply {
-        /// The DID the reply cell goes to.
-        next: Did,
-        /// The reply cell.
-        cell: OnionCell,
+        /// The reply frame.
+        frame: OnionFrame,
+        /// The block it is sealed under, boxed: a block is far wider than every other effect.
+        surb: Box<OnionSurb>,
     },
     /// Drop the session and release the world.
     Close,
@@ -395,8 +398,8 @@ impl OnionExitSession {
     }
 
     /// Spend the block of least expiry on one reply frame, with the next reply sequence. With no
-    /// block, no sequence left, or a failed production, the session closes: a reply that cannot
-    /// leave would be a gap at the client.
+    /// block or no sequence left, the session closes: a reply that cannot leave would be a gap
+    /// at the client.
     fn reply_frame(&mut self, now_ms: u128, kind: ReplyKind, effects: &mut Vec<OnionExitEffect>) {
         let (Some(sequence), Some(surb)) = (self.reply, self.pool.take(now_ms)) else {
             self.close(effects);
@@ -411,19 +414,11 @@ impl OnionExitSession {
             ReplyKind::Fin => OnionFrame::Fin { sequence },
             ReplyKind::Abort => OnionFrame::Abort { sequence },
         };
-        // A data frame is cut to its own block's capacity (`drain`), so `encode` refuses
-        // nothing here; a weak key of the block has probability 2^−124.
-        let produced = frame
-            .encode(surb.class())
-            .ok()
-            .and_then(|value| surb.produce(&value).ok());
-        match produced {
-            Some((next, cell)) => {
-                self.reply = sequence.next();
-                effects.push(OnionExitEffect::Reply { next, cell });
-            }
-            None => self.close(effects),
-        }
+        self.reply = sequence.next();
+        effects.push(OnionExitEffect::Reply {
+            frame,
+            surb: Box::new(surb),
+        });
     }
 
     /// Enter `Closed` and tell the shell, once.
@@ -431,6 +426,36 @@ impl OnionExitSession {
         if !self.is_closed() {
             self.phase = OnionExitPhase::Closed;
             effects.push(OnionExitEffect::Close);
+        }
+    }
+}
+
+/// Seal `frame` into the reply cell of `surb`: the cell and the DID it goes to, the first hop of
+/// its return path.
+///
+/// `None` for a frame wider than the block's class, which the machine never replies (a data
+/// frame is cut to its own block's capacity in `drain`), or for a weak key of the block, of
+/// probability `2^−124`; the shell then fails the session closed.
+pub(crate) fn seal(frame: &OnionFrame, surb: OnionSurb) -> Option<(Did, OnionCell)> {
+    let value = frame.encode(surb.class()).ok()?;
+    surb.produce(value.as_slice()).ok()
+}
+
+/// The answer of `h` to a forward loop of a session it does not hold (closed, refused, or never
+/// opened), sealed under that loop's own block: `abort`, so a client still using the session
+/// learns within one loop that it is gone (#895 R3-M2). A client's own `abort` is answered by
+/// nothing, since that client already gave the session up.
+///
+/// The answer's `n` is `0`: `abort` is applied on arrival and its `n` is informational, and `h`
+/// keeps no sequence of a session it does not hold. Every loop brings exactly one block, so the
+/// answer is one reply per forward loop and amplifies nothing.
+pub(crate) fn reply_to_unheld(frame: &OnionFrame) -> Option<OnionFrame> {
+    match frame {
+        OnionFrame::Abort { .. } => None,
+        OnionFrame::Data { .. } | OnionFrame::Fin { .. } | OnionFrame::Credit(_) => {
+            Some(OnionFrame::Abort {
+                sequence: OnionSequence::FIRST,
+            })
         }
     }
 }

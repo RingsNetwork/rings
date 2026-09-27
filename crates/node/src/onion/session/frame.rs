@@ -11,7 +11,10 @@
 //! `n` is the per-direction sequence of `data`, `fin` and `abort`, starting at 0; `credit` is
 //! unsequenced and flows client-to-`h` only. `fin` ends a direction whose bytes really ended;
 //! `abort` fails the session, carrying no reason (#834 D2′, #843 Q5), and is never an end of
-//! stream: a receiver applies it on arrival, since nothing after it counts. Every frame fills
+//! stream: a receiver applies it on arrival, since nothing after it counts. Its `n` is
+//! informational: the sender's next sequence where it has one (`0` from an exit answering a
+//! session it no longer holds), kept so every frame's contents are uniform; no receiver orders
+//! an `abort` by it or reads it otherwise. Every frame fills
 //! one uniform cell, so a relay cannot tell an `abort` from any other frame. The flag `T`
 //! carries the session target `t` inline, so any loop can open the session and none is
 //! dedicated to opening; its other bits are reserved for message-oriented symbols (#847) and
@@ -102,7 +105,8 @@ pub(crate) enum OnionFrame {
     },
     /// `credit(υ₁ … υ_k)`: `k ≥ 1` further reply blocks for the session.
     Credit(Vec<OnionSurb>),
-    /// `abort(n)`: the session failed at its sender, after frame `n − 1`; no reason is given.
+    /// `abort(n)`: the session failed at its sender; no reason is given, and `n` is
+    /// informational (see the module documentation).
     Abort {
         /// `n`.
         sequence: OnionSequence,

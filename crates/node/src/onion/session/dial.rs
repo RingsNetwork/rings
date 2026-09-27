@@ -5,15 +5,16 @@
 //! open(route, f, t, b, W):  ς ← uniform;  ā = ς ‖ SHA-256(t);  spawn the driver
 //!                           await the first event: Opened ⇒ the stream, Refused | timeout ⇒ error
 //!
-//! driver:  send data(0, T, ε);  top up                                            (awaited)
+//! driver:  send data(0, T, ε);  control(Refill)                                   (awaited)
 //!          loop select
 //!            user Data(w)  ─▶ data(n, T?, w′) per chunk w′ ≤ capacity, one loop each (awaited)
 //!            user Fin      ─▶ fin(n)                                                (awaited)
 //!            user gone     ─▶ abort(n), unless both directions ended                (queued)
 //!            reply abort   ─▶ Failed to the user; the session is over
-//!            reply         ─▶ credit.replied;  machine.reply ⇒ events to the user
-//!            tick          ─▶ gap check;  one credit loop if keep_alive_due          (queued)
-//!          top up:  ⌊(min(W, Q_max) − outstanding) / (k + 1)⌋ full credit loops    (queued)
+//!            reply         ─▶ credit.replied;  machine.reply ⇒ events;  control(Refill)
+//!            tick          ─▶ gap check;  control(Tick)
+//!          control(step):  control_loops(step) full credit loops                    (queued)
+//!            Refill ⇒ ⌊(min(W, Q_max) − outstanding) / (k + 1)⌋;  Tick ⇒ keep-alive
 //! ```
 //!
 //! Departure: stream frames wait for the guard's lane, which is the upload's backpressure;
@@ -38,10 +39,10 @@ use rings_runtime::sleep;
 use rings_runtime::Spawner;
 use zeroize::Zeroizing;
 
-use super::client::keep_alive_due;
 use super::client::OnionClientCredit;
 use super::client::OnionClientEvent;
 use super::client::OnionClientSession;
+use super::client::OnionControlStep;
 use super::client::OnionCreditWindow;
 use super::frame::OnionFrame;
 use super::pool::ONION_SURB_POOL_CAPACITY;
@@ -325,15 +326,15 @@ impl OnionSessionDriver {
             Ok(frame) => self.send(&frame, &sink).await.is_ok(),
             Err(_) => false,
         };
-        if !started || self.top_up(&sink).is_err() {
+        if !started || self.control(OnionControlStep::Refill, &sink).is_err() {
             return;
         }
         let mut tick = Box::pin(sleep(ONION_SESSION_TICK).fuse());
         loop {
-            let step = futures::select! {
+            let (step, control) = futures::select! {
                 command = commands.next() => match command {
-                    Some(OnionStreamCommand::Data(bytes)) => self.upload(bytes, &sink).await,
-                    Some(OnionStreamCommand::Fin) => self.finish(&sink).await,
+                    Some(OnionStreamCommand::Data(bytes)) => (self.upload(bytes, &sink).await, None),
+                    Some(OnionStreamCommand::Fin) => (self.finish(&sink).await, None),
                     None => {
                         // The user is gone: give the session up, unless both directions ended.
                         if !(self.fin_sent && self.world_ended) {
@@ -344,20 +345,25 @@ impl OnionSessionDriver {
                 },
                 reply = replies.next() => match reply {
                     Some(reply) => match self.on_reply(reply, &mut events, &mut opened).await {
-                        OnionReplyFlow::Continue => Ok(()),
+                        OnionReplyFlow::Continue => (Ok(()), Some(OnionControlStep::Refill)),
                         OnionReplyFlow::Stop => return,
-                        OnionReplyFlow::Fail => {
-                            Err(Error::OnionRouteError(OnionRouteError::SessionFailed))
-                        }
+                        OnionReplyFlow::Fail => (
+                            Err(Error::OnionRouteError(OnionRouteError::SessionFailed)),
+                            None,
+                        ),
                     },
                     None => return,
                 },
                 _ = tick => {
                     tick = Box::pin(sleep(ONION_SESSION_TICK).fuse());
-                    self.keep_alive(&sink)
+                    (self.expire(), Some(OnionControlStep::Tick))
                 },
             };
-            if step.and_then(|()| self.top_up(&sink)).is_err() {
+            let controlled = step.and_then(|()| match control {
+                Some(control) => self.control(control, &sink),
+                None => Ok(()),
+            });
+            if controlled.is_err() {
                 // Fail closed: `h` learns of it by our `abort`, the user by `Failed`.
                 self.abort(&sink);
                 let _ = events.send(OnionStreamEvent::Failed).await;
@@ -448,28 +454,29 @@ impl OnionSessionDriver {
         }
     }
 
-    /// The tick: fail on a persisting gap, and send one credit loop when the keep-alive rule
-    /// is due ([`keep_alive_due`]).
-    fn keep_alive(&mut self, sink: &OnionReplySink) -> Result<()> {
-        let now_ms = get_epoch_ms();
+    /// The tick's gap check: a reply missing for longer than the reorder window fails the
+    /// session.
+    fn expire(&mut self) -> Result<()> {
         self.machine
-            .expire(now_ms)
-            .map_err(|_| Error::OnionRouteError(OnionRouteError::SessionFailed))?;
-        if !self.world_ended && keep_alive_due(now_ms, self.last_forward_ms) {
-            self.credit_loop(sink)?;
-        }
-        Ok(())
+            .expire(get_epoch_ms())
+            .map_err(|_| Error::OnionRouteError(OnionRouteError::SessionFailed))
     }
 
-    /// Queue the credit loops the window asks for, until the guard's lane is full: the rest is
-    /// asked for again at the next step.
-    fn top_up(&mut self, sink: &OnionReplySink) -> Result<()> {
+    /// Queue the credit loops [`OnionCreditWindow::control_loops`] asks for after `step`, until
+    /// the guard's lane is full: the rest is asked for again after the next reply, or by the
+    /// keep-alive. Nothing once the world's `fin` has arrived, since `h` replies nothing more.
+    fn control(&mut self, step: OnionControlStep, sink: &OnionReplySink) -> Result<()> {
         if self.world_ended {
             return Ok(());
         }
-        let loops = self
-            .window
-            .credit_loops(self.credit.count(get_epoch_ms()), self.class);
+        let now_ms = get_epoch_ms();
+        let loops = self.window.control_loops(
+            step,
+            self.credit.count(now_ms),
+            self.class,
+            now_ms,
+            self.last_forward_ms,
+        );
         for _ in 0..loops {
             match self.credit_loop(sink) {
                 Ok(()) => {}

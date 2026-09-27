@@ -11,9 +11,10 @@
 //! driver ends, so a session that never binds a target still counts against its previous hop's
 //! share (for at most `Q`, when it closes unbound).
 //!
-//! World bytes are recorded in one place per world, as they stream: the session shell records
-//! what it writes and, for a `tcp` world, what it reads; an `https` fetch records its headers
-//! and body chunks itself, so a budget holds across concurrent fetches.
+//! World bytes are recorded in one place each, as they stream: the session shell records what it
+//! writes, and every world's reader records what it reads (a `tcp` socket its reads, an `https`
+//! fetch its response's header names and values and its body chunks), so a budget holds across
+//! concurrent sessions and fetches.
 
 use std::sync::Arc;
 use std::sync::Mutex;

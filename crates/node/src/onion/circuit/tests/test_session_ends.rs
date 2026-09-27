@@ -1,5 +1,6 @@
 //! Law Fail closed of the exit session (#834 D2′ `abort`), end to end over the fixture loop: the
-//! frame a failing exit replies is the `abort(n)` the client opens, never a `fin`.
+//! frame a failing exit replies is the `abort(n)` the client opens, never a `fin`, and a session
+//! that closed with no block left is answered with `abort` at the client's next loop.
 
 use futures::channel::mpsc;
 
@@ -9,6 +10,10 @@ use super::NOW_MS;
 use crate::onion::circuit::hop::OnionHopOutcome;
 use crate::onion::circuit::OnionClientTags;
 use crate::onion::circuit::OnionReply;
+use crate::onion::session::client::OnionClientEvent;
+use crate::onion::session::client::OnionClientSession;
+use crate::onion::session::exit::reply_to_unheld;
+use crate::onion::session::exit::seal;
 use crate::onion::session::exit::OnionExitEffect;
 use crate::onion::session::exit::OnionExitSession;
 use crate::onion::session::frame::OnionFrame;
@@ -54,7 +59,9 @@ fn opened_replies(
     let frames = effects
         .into_iter()
         .filter_map(|effect| match effect {
-            OnionExitEffect::Reply { cell, .. } => Some(cell),
+            OnionExitEffect::Reply { frame, surb } => {
+                Some(seal(&frame, *surb).expect("a sealable reply").1)
+            }
             _ => None,
         })
         .map(|cell| {
@@ -131,4 +138,50 @@ fn test_a_world_failure_replies_abort_never_fin() {
         sequence: OnionSequence::new(1)
     })]);
     assert!(closes);
+}
+
+/// Liveness of failure (#895 R3-M2): a world failure with no block left closes the session
+/// without a reply; the client's next loop is answered with `abort` under that loop's own block,
+/// and the client reads it as `Aborted`, never as the end of its stream.
+#[test]
+fn test_a_failure_without_a_block_is_answered_at_the_next_loop() {
+    let mut fixture = Fixture::new();
+    let (mut blocks, keys) = delivered(&mut fixture, 2);
+    let mut keys = keys.into_iter();
+    let mut session = OnionExitSession::new(arguments().digest, NOW_MS);
+    session.forward(NOW_MS, opening(), blocks.remove(0));
+    let (acked, _) = opened_replies(&mut fixture, session.opened(NOW_MS, true), &mut keys);
+    let mut client = OnionClientSession::new(bytes::Bytes::from_static(b"example.com:443"));
+    let ack = OnionFrame::decode(OnionLoopClass::DEFAULT, &acked[0]).expect("a frame");
+    assert_eq!(
+        client.reply(NOW_MS, ack),
+        Ok(vec![OnionClientEvent::Opened])
+    );
+
+    let closed = session.fail(NOW_MS);
+    assert!(
+        matches!(closed.as_slice(), [OnionExitEffect::Close]),
+        "no block is left, so no reply"
+    );
+    // The client's `V/2` keep-alive: a credit frame, whose blocks the answer does not read.
+    let keep_alive = OnionFrame::Credit(Vec::new());
+    let answer = reply_to_unheld(&keep_alive).expect("an unheld loop is answered");
+    let reply = vec![OnionExitEffect::Reply {
+        frame: answer,
+        surb: Box::new(blocks.remove(0)),
+    }];
+    let (frames, _) = opened_replies(&mut fixture, reply, &mut keys);
+    let abort = OnionFrame::decode(OnionLoopClass::DEFAULT, &frames[0]).expect("a frame");
+
+    assert_eq!(
+        client.reply(NOW_MS, abort),
+        Ok(vec![OnionClientEvent::Aborted])
+    );
+    assert!(
+        reply_to_unheld(&OnionFrame::Abort {
+            sequence: OnionSequence::FIRST
+        })
+        .is_none(),
+        "a client that gave up is not answered"
+    );
 }

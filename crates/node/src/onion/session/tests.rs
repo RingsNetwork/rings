@@ -10,10 +10,10 @@ use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 
-use super::client::keep_alive_due;
 use super::client::OnionClientCredit;
 use super::client::OnionClientEvent;
 use super::client::OnionClientSession;
+use super::client::OnionControlStep;
 use super::client::OnionCreditWindow;
 use super::exit::OnionExitEffect;
 use super::exit::OnionExitSession;
@@ -294,7 +294,8 @@ fn test_reorder_fails_closed_on_a_persisting_gap() {
 
 // ---- exit --------------------------------------------------------------------------------------
 
-/// The kinds of `effects`, for comparison: the payloads of writes and the reply count.
+/// The kinds of `effects`, for comparison: the payloads of writes, and each reply's frame with
+/// its sequence (and, for `data`, its length), so a test sees `abort` apart from `fin`.
 fn kinds(effects: &[OnionExitEffect]) -> Vec<String> {
     effects
         .iter()
@@ -302,7 +303,14 @@ fn kinds(effects: &[OnionExitEffect]) -> Vec<String> {
             OnionExitEffect::Open { target } => format!("open {}", String::from_utf8_lossy(target)),
             OnionExitEffect::Write(bytes) => format!("write {}", String::from_utf8_lossy(bytes)),
             OnionExitEffect::ShutdownWrite => "shutdown".to_string(),
-            OnionExitEffect::Reply { .. } => "reply".to_string(),
+            OnionExitEffect::Reply { frame, .. } => match frame {
+                OnionFrame::Data {
+                    sequence, payload, ..
+                } => format!("data {} {}", sequence.value(), payload.len()),
+                OnionFrame::Fin { sequence } => format!("fin {}", sequence.value()),
+                OnionFrame::Abort { sequence } => format!("abort {}", sequence.value()),
+                OnionFrame::Credit(_) => "credit".to_string(),
+            },
             OnionExitEffect::Close => "close".to_string(),
         })
         .collect()
@@ -338,17 +346,17 @@ fn test_exit_session_opens_acks_replies_and_closes() {
     );
     assert_eq!(
         kinds(&session.opened(NOW_MS, true)),
-        ["reply"],
+        ["data 0 0"],
         "the ack spends a block"
     );
-    for chunk in [b"one", b"two"] {
+    for (chunk, reply) in [(b"one", "data 1 3"), (b"two", "data 2 3")] {
         assert_eq!(
             session.reply_capacity(NOW_MS),
             Some(OnionFrame::data_capacity(CLASS))
         );
         assert_eq!(
             kinds(&session.world(NOW_MS, OnionWorldRead::Bytes(Bytes::from_static(chunk)))),
-            ["reply"]
+            [reply]
         );
     }
     assert_eq!(session.reply_capacity(NOW_MS), None, "Q = ∅ stops reading");
@@ -357,9 +365,11 @@ fn test_exit_session_opens_acks_replies_and_closes() {
         sequence: OnionSequence::new(1),
     };
     assert_eq!(kinds(&session.forward(NOW_MS, fin, next())), ["shutdown"]);
-    assert_eq!(kinds(&session.world(NOW_MS, OnionWorldRead::Eof)), [
-        "reply", "close"
-    ]);
+    assert_eq!(
+        kinds(&session.world(NOW_MS, OnionWorldRead::Eof)),
+        ["fin 3", "close"],
+        "fin only after the world's end"
+    );
     assert!(session.is_closed());
 }
 
@@ -370,7 +380,7 @@ fn acked(blocks: &mut impl Iterator<Item = OnionSurb>) -> OnionExitSession {
     let mut next = || blocks.next().expect("a fixture block");
     session.forward(NOW_MS, opening(0, b""), next());
     session.forward(NOW_MS, OnionFrame::Credit(vec![next()]), next());
-    assert_eq!(kinds(&session.opened(NOW_MS, true)), ["reply"]);
+    assert_eq!(kinds(&session.opened(NOW_MS, true)), ["data 0 0"]);
     session
 }
 
@@ -400,14 +410,15 @@ fn test_exit_session_holds_world_bytes_until_credit_returns() {
     let credit = OnionFrame::Credit(vec![fresh.next().expect("a block")]);
     assert_eq!(
         kinds(&session.forward(expired_ms, credit, fresh.next().expect("a block"))),
-        ["reply"]
+        ["data 1 4"]
     );
     assert!(session.reply_capacity(expired_ms).is_some());
 }
 
-/// Fail closed (#895 B-M2): a gap spends a remaining block on `fin` before the session closes.
+/// Fail closed (#895 B-M2, B3-M2): a gap spends a remaining block on `abort`, never `fin`,
+/// before the session closes.
 #[test]
-fn test_exit_session_aborts_a_gap_with_fin() {
+fn test_exit_session_aborts_a_gap() {
     let mut blocks = surbs(47, 4, 0).into_iter();
     let mut session = acked(&mut blocks);
     let far = OnionFrame::Data {
@@ -418,31 +429,32 @@ fn test_exit_session_aborts_a_gap_with_fin() {
 
     assert_eq!(
         kinds(&session.forward(NOW_MS, far, blocks.next().expect("a block"))),
-        ["reply", "close"]
+        ["abort 1", "close"]
     );
     assert!(session.is_closed());
 }
 
-/// Fail closed (#895 C-M4): a world failure replies `fin` if a block is left, and closes either
-/// way.
+/// Fail closed (#895 C-M4, B3-M2): a world failure replies `abort`, never `fin`, if a block is
+/// left, and closes either way; the held bytes are dropped with it.
 #[test]
-fn test_exit_session_fails_closed_with_fin_while_credit_lasts() {
+fn test_exit_session_aborts_a_world_failure_while_credit_lasts() {
     let mut blocks = surbs(48, 3, 0).into_iter();
     let mut session = acked(&mut blocks);
-    assert_eq!(kinds(&session.fail(NOW_MS)), ["reply", "close"]);
+    assert_eq!(kinds(&session.fail(NOW_MS)), ["abort 1", "close"]);
 
     let mut blocks = surbs(49, 3, 0).into_iter();
     let mut drained = acked(&mut blocks);
-    for chunk in [b"y", b"z"] {
+    for (chunk, reply) in [(b"y", "data 1 1"), (b"z", "data 2 1")] {
         assert_eq!(
             kinds(&drained.world(NOW_MS, OnionWorldRead::Bytes(Bytes::from_static(chunk)))),
-            ["reply"]
+            [reply]
         );
     }
     assert_eq!(kinds(&drained.fail(NOW_MS)), ["close"]);
 }
 
-/// Binding (#895 C-L4): a later `T` frame naming another target aborts a bound session.
+/// Binding (#895 C-L4, B3-M2): a later `T` frame naming another target aborts a bound session
+/// with `abort`.
 #[test]
 fn test_exit_session_refuses_to_rebind_its_target() {
     let mut blocks = surbs(50, 4, 0).into_iter();
@@ -455,7 +467,7 @@ fn test_exit_session_refuses_to_rebind_its_target() {
 
     assert_eq!(
         kinds(&session.forward(NOW_MS, other, blocks.next().expect("a block"))),
-        ["reply", "close"]
+        ["abort 1", "close"]
     );
 }
 
@@ -536,7 +548,7 @@ fn test_held_bytes_are_cut_to_each_blocks_capacity_then_fin() {
             OnionFrame::Credit(vec![wider.next().expect("a wide block")]),
             fresh.next().expect("a block"),
         )),
-        ["reply", "reply"]
+        [format!("data 1 {small}"), format!("data 2 {}", small + 5)]
     );
     assert_eq!(
         session.reply_capacity(expired_ms),
@@ -549,7 +561,7 @@ fn test_held_bytes_are_cut_to_each_blocks_capacity_then_fin() {
             OnionFrame::Credit(vec![fresh.next().expect("a block")]),
             surbs(58, 1, 2).pop().expect("a block"),
         )),
-        ["reply"],
+        ["fin 3"],
         "the held fin leaves with the next block"
     );
 }
@@ -599,13 +611,13 @@ fn test_exit_session_rejects_an_unbound_or_mismatching_target() {
 fn test_exit_session_refusal_and_credit_resumption() {
     let mut refused = OnionExitSession::new(arguments().digest, NOW_MS);
     refused.forward(NOW_MS, opening(0, b""), surb(44));
-    assert_eq!(kinds(&refused.opened(NOW_MS, false)), ["reply", "close"]);
+    assert_eq!(kinds(&refused.opened(NOW_MS, false)), ["abort 0", "close"]);
 
     let mut starved = OnionExitSession::new(arguments().digest, NOW_MS);
     let mut blocks = surbs(45, 1, 0);
     starved.forward(NOW_MS, opening(0, b""), blocks.remove(0));
     // The open ack spends the session's only block.
-    assert_eq!(kinds(&starved.opened(NOW_MS, true)), ["reply"]);
+    assert_eq!(kinds(&starved.opened(NOW_MS, true)), ["data 0 0"]);
     assert_eq!(starved.reply_capacity(NOW_MS), None);
     let credit = OnionFrame::Credit(surbs(46, 4, 0));
     assert!(kinds(&starved.forward(NOW_MS, credit, surb(47))).is_empty());
@@ -827,22 +839,51 @@ fn test_a_steady_download_costs_one_loop_per_k_plus_one_replies() {
     assert!(loops >= replies / (k + 1) - 1, "{loops} loops");
 }
 
-/// Idle (#895 N-H1): a session with no replies and no data, ticked every 10 s for 10 minutes,
-/// sends one keep-alive loop per `V/2`: at most `⌈600 / 75⌉`.
+/// Idle (#895 N-H1, R3-M3): a session with no replies and no data, driven through the
+/// driver's control rule every 10 s for 10 minutes after its open, sends exactly one keep-alive
+/// loop per `V/2` rounded up to a tick (every 80 s, so `⌊600 / 80⌋ = 7`), and no refill burst
+/// as the open's credit expires.
 #[test]
 fn test_an_idle_session_sends_one_loop_per_half_window() {
+    let window = OnionCreditWindow::DEFAULT;
+    let mut credit = OnionClientCredit::default();
+    let expiry = |sent_ms: u128| {
+        OnionExpiry::from_ms((sent_ms / QUANTUM_MS + 4) * QUANTUM_MS).expect("on the grid")
+    };
+    let blocks = OnionFrame::credit_capacity(CLASS);
+    let send = |credit: &mut OnionClientCredit, now_ms: u128, loops: usize| {
+        for _ in 0..loops {
+            credit.sent(now_ms, expiry(now_ms), blocks);
+        }
+    };
+    let opened = window.control_loops(OnionControlStep::Refill, 0, CLASS, 0, 0);
+    send(&mut credit, 0, opened);
+    assert_eq!(opened, 12, "the open fills the window");
+
     let mut last_forward_ms = 0;
     let mut loops = 0;
     for tick in 1..=60_u128 {
         let now_ms = tick * 10_000;
-        if keep_alive_due(now_ms, last_forward_ms) {
+        let due = window.control_loops(
+            OnionControlStep::Tick,
+            credit.count(now_ms),
+            CLASS,
+            now_ms,
+            last_forward_ms,
+        );
+        assert!(due <= 1, "a tick sends at most the keep-alive");
+        if due > 0 {
+            send(&mut credit, now_ms, due);
             last_forward_ms = now_ms;
-            loops += 1;
+            loops += due;
         }
     }
 
-    assert!(loops <= 600_u32.div_ceil(75), "{loops} loops");
-    assert!(loops >= 7, "{loops} loops");
+    assert_eq!(
+        loops,
+        600 / 80,
+        "one keep-alive per V/2, at 10 s ticks, over 600 s"
+    );
 }
 
 /// The ledger saturates at `Q_max`, where `h`'s pool refuses further blocks (#895 H4): a long

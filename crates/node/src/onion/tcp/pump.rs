@@ -5,14 +5,17 @@
 //!   local read  n > 0 ─▶ session.send(bytes)      local EOF ─▶ session.fin, close read
 //!   session Data(w)   ─▶ local write(w)           session Fin ─▶ local shutdown, close write
 //!   session Failed | end ─▶ stop
-//! end = Closed  iff both halves closed in order
+//! end = Closed  iff the session's fin reached the local stream (its write half shut in order)
 //!     = Failed  otherwise                         ─▶ the caller resets the local stream
 //! ```
 //!
 //! Laws: the halves close independently (TCP half-close); the local stream is read only while
-//! its read half is open, and written only while its write half is. A stream the pump did not
-//! close in order ends [`OnionPumpEnd::Failed`]: a truncated stream is never presented as
-//! complete (#843 D2′ `abort`).
+//! its read half is open, and written only while its write half is. A stream whose incoming
+//! bytes did not end in order ends [`OnionPumpEnd::Failed`]: a truncated stream is never
+//! presented as complete (#843 D2′ `abort`). A failure after the session's `fin` (an upload
+//! the exit could no longer write) ends [`OnionPumpEnd::Closed`]: the local stream already
+//! holds every byte and an orderly end, and a reset would discard bytes still in its send
+//! buffer, turning a complete stream into an error (#895 B3-L1).
 
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
@@ -31,17 +34,17 @@ use crate::onion::session::dial::OnionStreamSender;
 /// How a pump ended, a function of its final [`TcpDuplexState`] alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OnionPumpEnd {
-    /// Both halves closed in order: every byte of both directions was carried.
+    /// The session's `fin` reached the local stream: every incoming byte was written in order.
     Closed,
-    /// The session failed, a side broke, or the stream idled out: the local stream must be
-    /// reset, never closed cleanly.
+    /// The incoming stream did not end in order (the session failed before its `fin`, a side
+    /// broke, or the stream idled out): the local stream must be reset, never closed cleanly.
     Failed,
 }
 
 impl OnionPumpEnd {
     /// The end of a pump whose halves stopped in `state`.
     const fn of(state: TcpDuplexState) -> Self {
-        if state.is_closed() {
+        if state.delivered_whole() {
             Self::Closed
         } else {
             Self::Failed

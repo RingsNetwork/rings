@@ -15,12 +15,14 @@
 //! unreplenished session pauses the target instead of dropping its bytes, and resumes on credit.
 //!
 //! Law (fail closed): a session that ends by `abort`, a gap, or any failure resets the local
-//! stream ([`OnionLocalStream::reset`], an RST for a socket); only a pump that closed both halves
-//! in order closes it cleanly, so a truncated stream is never presented as complete.
+//! stream ([`OnionLocalStream::reset`], an RST for a socket); only a pump whose incoming bytes
+//! ended with the session's `fin` closes it cleanly, so a truncated stream is never presented as
+//! complete, and a complete one is never reset.
 
 use std::time::Duration;
 
 use bytes::Bytes;
+use rings_core::utils::get_epoch_ms;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedReadHalf;
@@ -31,11 +33,13 @@ use tokio::time::Instant;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::session::dial::OnionClientStream;
 use crate::onion::session::serve::OnionWorld;
 use crate::onion::session::serve::OnionWorldReader;
 use crate::onion::session::serve::OnionWorldWriter;
 use crate::onion::target::resolve_public_target;
+use crate::onion::OnionExitPolicy;
 use crate::onion::OnionProxyTarget;
 
 mod duplex;
@@ -82,11 +86,30 @@ async fn connect(target: &OnionProxyTarget) -> Result<TcpStream> {
     )))
 }
 
-/// The socket world of a `tcp` exit.
-pub(crate) struct OnionTcpWorld;
+/// The socket world of a `tcp` exit, whose reads are recorded against the exit's byte policy.
+pub(crate) struct OnionTcpWorld {
+    /// The policy whose byte budget the reads are recorded against.
+    policy: OnionExitPolicy,
+    /// The node-wide exit accounting.
+    accounting: OnionExitAccounting,
+}
 
-/// The read half of a connected target.
-pub(crate) struct OnionTcpReader(OwnedReadHalf);
+impl OnionTcpWorld {
+    /// The socket world recording its reads against `policy` in `accounting`.
+    pub(crate) const fn new(policy: OnionExitPolicy, accounting: OnionExitAccounting) -> Self {
+        Self { policy, accounting }
+    }
+}
+
+/// The read half of a connected target, which records every byte it reads.
+pub(crate) struct OnionTcpReader {
+    /// The socket half.
+    half: OwnedReadHalf,
+    /// The policy whose byte budget the reads are recorded against.
+    policy: OnionExitPolicy,
+    /// The node-wide exit accounting.
+    accounting: OnionExitAccounting,
+}
 
 /// The write half of a connected target.
 pub(crate) struct OnionTcpWriter(OwnedWriteHalf);
@@ -108,22 +131,34 @@ impl OnionWorld for OnionTcpWorld {
         };
         tokio::time::sleep_until(open_response_deadline(opened_at, Instant::now())).await;
         let (read, write) = connected?.into_split();
-        Ok((OnionTcpReader(read), OnionTcpWriter(write)))
+        Ok((
+            OnionTcpReader {
+                half: read,
+                policy: self.policy.clone(),
+                accounting: self.accounting.clone(),
+            },
+            OnionTcpWriter(write),
+        ))
     }
 }
 
 #[async_trait::async_trait]
 impl OnionWorldReader for OnionTcpReader {
+    /// Read up to `max` bytes and record them against the byte policy; a spent budget is a
+    /// failure, which aborts the session.
     async fn read(&mut self, max: usize) -> Result<Option<Bytes>> {
         let mut buffer = vec![0; max.max(1)];
         let read =
-            self.0.read(&mut buffer).await.map_err(|error| {
+            self.half.read(&mut buffer).await.map_err(|error| {
                 Error::HttpRequestError(format!("onion TCP target read: {error}"))
             })?;
         if read == 0 {
             return Ok(None);
         }
         buffer.truncate(read);
+        let bytes = u64::try_from(read).map_err(|_| Error::InvalidData)?;
+        self.accounting
+            .record_bytes(&self.policy, bytes, get_epoch_ms())?;
         Ok(Some(Bytes::from(buffer)))
     }
 }
@@ -158,8 +193,8 @@ impl NativeOnionOpenStream {
     }
 
     /// Relay the local byte stream `local` through the session, until both directions close;
-    /// a pump that does not close both halves in order resets `local` (see the module's
-    /// fail-closed law).
+    /// a pump whose incoming bytes did not end with the session's `fin` resets `local` (see the
+    /// module's fail-closed law).
     pub fn relay<S>(self, local: S)
     where S: OnionLocalStream {
         let (sender, receiver) = self.stream.split();

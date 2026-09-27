@@ -176,9 +176,6 @@ impl OnionWorld for OnionHttpsWorld {
     type Reader = OnionHttpsReader;
     type Writer = OnionHttpsWriter;
 
-    /// The fetch records the response's headers and body as they stream.
-    const RECORDS_OWN_READS: bool = true;
-
     async fn open(&self, target: &OnionProxyTarget) -> Result<(Self::Reader, Self::Writer)> {
         let (complete, request) = oneshot::channel();
         Ok((
@@ -260,8 +257,8 @@ impl OnionHttpsReader {
 
 /// Fetch `request` at `target`, the session's authority, recording the response's headers and
 /// body chunks against the policy's byte budget as they arrive, and refusing past it: the
-/// budget holds across every concurrent fetch, and the session shell records none of these bytes
-/// again ([`OnionWorld::RECORDS_OWN_READS`]).
+/// budget holds across every concurrent fetch, and these are the reader's own records (every
+/// world records what it reads; the session shell records only writes).
 async fn fetch(
     target: &OnionProxyTarget,
     request: &OnionHttpsRequest,

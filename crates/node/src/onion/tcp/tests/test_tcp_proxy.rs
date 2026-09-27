@@ -95,3 +95,25 @@ async fn test_a_completed_session_closes_the_local_socket_cleanly() {
         .expect("an orderly end");
     assert_eq!(received, b"whole");
 }
+
+/// Law (fail closed, #895 B3-L1): a failure after the session's `fin` (an upload the exit
+/// could no longer write) leaves the complete download intact: its peer reads every byte and
+/// an orderly end, never a reset.
+#[tokio::test]
+async fn test_a_failure_after_the_sessions_fin_keeps_the_complete_stream() {
+    let (local, mut peer) = socket_pair().await;
+    let (stream, mut driver) = OnionClientStream::driven_by_test();
+    NativeOnionOpenStream::new(stream).relay(local);
+
+    driver
+        .emit(OnionStreamEvent::Data(Bytes::from_static(b"whole")))
+        .await;
+    driver.emit(OnionStreamEvent::Fin).await;
+    driver.emit(OnionStreamEvent::Failed).await;
+
+    let mut received = Vec::new();
+    peer.read_to_end(&mut received)
+        .await
+        .expect("an orderly end");
+    assert_eq!(received, b"whole");
+}

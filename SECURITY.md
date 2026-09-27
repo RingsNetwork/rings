@@ -403,14 +403,17 @@ hide the active/idle phase of each link from an observer that watches it.
 sent only when that direction's bytes really ended, or `abort(n)`, sent on any failure (a
 world error, a spent byte policy, a sequence gap, a target rebind, a refused open, or a
 client that gives the session up) and carrying no reason. A receiver applies `abort` on
-arrival and reads it as a failure, never as an end of stream: the client resets its local
-TCP stream (an RST, not a FIN) instead of closing it, a CONNECT that the exit refuses is
-answered `502`, and an `https` fetch fails. A truncated stream is therefore never presented
-as a complete one. Every frame fills one uniform cell, so relays cannot tell an `abort` from
-any other frame. An exit that holds no reply block cannot send `abort` and closes silently;
-the client then relies on the reply timeout of an outstanding request (the open, an `https`
-response), and an idle session is never failed for being idle. The gateway's captured flows
-cannot yet carry a reset across the gateway boundary (#902).
+arrival, whatever its `n`, and reads it as a failure, never as an end of stream: a client
+whose incoming bytes have not ended resets its local TCP stream (an RST, not a FIN) instead
+of closing it, a CONNECT that the exit refuses is answered `502`, and an `https` fetch fails.
+A truncated stream is therefore never presented as a complete one, and a stream whose
+incoming bytes did end is never reset. Every frame fills one uniform cell, so relays cannot
+tell an `abort` from any other frame. An exit that holds no reply block closes without a
+reply, and answers the next loop of that session, which brings its own block, with `abort`:
+every loop of a session the exit does not hold (closed, refused, or never opened) is
+answered so, one reply per loop, so a client learns of the failure at its next loop, at the
+latest its keep-alive. An idle session is never failed for being idle. The gateway's
+captured flows cannot yet carry a reset across the gateway boundary (#902).
 
 **Candidate set.** Route security depends on the candidate set as much as on the
 loop protocol. In an authenticated-open overlay, a Sybil operator can try to

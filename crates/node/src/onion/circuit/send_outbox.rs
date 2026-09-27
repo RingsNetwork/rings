@@ -43,6 +43,9 @@
 //!   at most its queue position times the slot.
 //! - **Bound.** The queues hold at most `MAX_PENDING_ONION_SENDS` cells and
 //!   `MAX_PENDING_ONION_SEND_BYTES` bytes, with a per-peer share of each.
+//! - **Fairness.** While an endpoint waits for a lane, relayed cells may hold at most half of
+//!   that lane's places and bytes ([`RELAY_SHARE_CELLS`], [`RELAY_SHARE_BYTES`]): under
+//!   contention each role keeps half of the lane, so neither starves the other.
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -83,6 +86,12 @@ const MAX_PENDING_ONION_SEND_BYTES: usize = 64 * 1024 * 1024;
 /// Most bytes queued for one link.
 const MAX_PENDING_ONION_SEND_BYTES_PER_PEER: usize = 16 * 1024 * 1024;
 
+/// The places of one lane relayed cells may hold while an endpoint waits for it: half.
+const RELAY_SHARE_CELLS: usize = MAX_PENDING_ONION_SENDS_PER_PEER / 2;
+
+/// The bytes of one lane relayed cells may hold while an endpoint waits for it: half.
+const RELAY_SHARE_BYTES: usize = MAX_PENDING_ONION_SEND_BYTES_PER_PEER / 2;
+
 /// The receiver's per-sender budget `B` in units (#834 L9).
 const ONION_LINK_BUDGET_UNITS: u128 = ONION_ADMISSION_SENDER_UNITS as u128;
 
@@ -114,7 +123,9 @@ const _: () = assert!(
 const WINDOW_US: u128 = ONION_FORWARD_MAX_VALIDITY_MS * 1_000;
 
 /// The longest an endpoint waits in [`OnionLinkSender::send`], for space and for its cell to
-/// leave: `Q`, so a session's driver resumes its ticks within one quantum.
+/// leave: `Q`, so a session's driver resumes its ticks within one quantum. The bound covers
+/// the cells ahead of it too: at the ~290 ms per send of the transport before #887, a cell
+/// queued behind a full lane of 128 needs ~37 s and meets this deadline on a healthy lane.
 const ONION_LINK_SEND_DEADLINE: Duration = Duration::from_secs(30);
 
 /// `D = Q`, the dwell: an active link stays active for `D` after its last real cell.
@@ -239,6 +250,49 @@ struct Queued<T> {
     bytes: usize,
     /// Its class.
     class: OnionLoopClass,
+    /// Whether a relay queued it: it counts against the relay share.
+    relayed: bool,
+}
+
+/// The cells and bytes of one lane that relays hold, queued or in flight.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RelayShare {
+    /// Cells.
+    cells: usize,
+    /// Bytes.
+    bytes: usize,
+}
+
+impl RelayShare {
+    /// Whether one more relayed cell of `bytes` would exceed half of the lane.
+    const fn would_exceed_half(self, bytes: usize) -> bool {
+        self.cells >= RELAY_SHARE_CELLS || self.bytes.saturating_add(bytes) > RELAY_SHARE_BYTES
+    }
+
+    /// The share with one more cell of `bytes`.
+    const fn with(self, bytes: usize) -> Self {
+        Self {
+            cells: self.cells.saturating_add(1),
+            bytes: self.bytes.saturating_add(bytes),
+        }
+    }
+
+    /// The share without one cell of `bytes`.
+    const fn without(self, bytes: usize) -> Self {
+        Self {
+            cells: self.cells.saturating_sub(1),
+            bytes: self.bytes.saturating_sub(bytes),
+        }
+    }
+}
+
+/// The cell in flight on a lane: its bytes, and whether a relay queued it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InFlight {
+    /// Its bytes.
+    bytes: usize,
+    /// Whether a relay queued it.
+    relayed: bool,
 }
 
 /// The queue and emission state of one up link.
@@ -249,8 +303,10 @@ struct PeerLane<T> {
     queued: VecDeque<Queued<T>>,
     /// Bytes of `queued` plus the cell in flight.
     pending_bytes: usize,
-    /// The byte size of the cell being sent, if any.
-    in_flight_bytes: Option<usize>,
+    /// The cell being sent, if any.
+    in_flight: Option<InFlight>,
+    /// What relays hold of the lane.
+    relayed: RelayShare,
     /// The class of the last real cell: cover takes it.
     class: OnionLoopClass,
     /// The link's emission clock.
@@ -266,7 +322,8 @@ impl<T> PeerLane<T> {
             epoch,
             queued: VecDeque::new(),
             pending_bytes: 0,
-            in_flight_bytes: None,
+            in_flight: None,
+            relayed: RelayShare::default(),
             class: OnionLoopClass::DEFAULT,
             clock: LinkClock::default(),
             wake: None,
@@ -292,11 +349,11 @@ enum EmitterStep<T> {
     Stop,
 }
 
-/// Who queues a cell: a relay forwards without waiting, an endpoint waits for queue space and
-/// takes precedence over relays while it waits.
+/// Who queues a cell: a relay forwards without waiting, an endpoint waits for queue space and,
+/// while it waits, keeps relays to half of the lane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QueueRole {
-    /// A relayed cell; refused while an endpoint waits for the same lane.
+    /// A relayed cell; refused beyond half of the lane while an endpoint waits for it.
     Relay,
     /// An endpoint's cell; `holding` once it retries after a wake-up, when it hands back the
     /// place it held.
@@ -328,8 +385,9 @@ struct Refusal<T> {
 /// - every lane has exactly one emitter, the one of its epoch: an emitter of a closed lane's
 ///   epoch meets `Stop` even after the lane is reopened;
 /// - `waiting[p]` counts the endpoints that wait for, or retry into, `p`'s lane; while it is
-///   positive a relayed cell for `p` is refused, so an endpoint is never starved by relays, and
-///   each freed place wakes one waiter;
+///   positive a relayed cell for `p` is refused once relays hold half of the lane, so under
+///   contention each role keeps half (Fairness), and each freed place wakes one waiter;
+/// - a lane's `relayed` share equals the relayed cells and bytes it holds, queued or in flight;
 /// - a reopened lane keeps its emission clock for `V`, so closing and reopening a link never
 ///   lets an emission start early (Budget safety holds across generations).
 struct OrderedSendState<T> {
@@ -371,11 +429,7 @@ impl<T> OrderedSendState<T> {
         if self.shut {
             return None;
         }
-        self.retired.retain(|_, clock| {
-            clock
-                .last_start
-                .is_some_and(|(start_us, _)| start_us + WINDOW_US > now_us)
-        });
+        self.prune_retired(now_us);
         let clock = self.retired.remove(&peer).unwrap_or_default();
         match self.lanes.entry(peer) {
             Entry::Occupied(_) => None,
@@ -395,8 +449,8 @@ impl<T> OrderedSendState<T> {
     /// # Errors
     ///
     /// `LinkDown` if `peer` has no up link, the bound the cell would exceed, or, for a relay,
-    /// `PeerFull` while an endpoint waits for the lane; the cell is handed back, with an
-    /// endpoint's wake-up when a bound refused it.
+    /// `PeerFull` beyond half of the lane while an endpoint waits for it; the cell is handed
+    /// back, with an endpoint's wake-up when a bound refused it.
     fn enqueue(
         &mut self,
         peer: Did,
@@ -412,7 +466,7 @@ impl<T> OrderedSendState<T> {
             space: None,
         };
         match role {
-            QueueRole::Relay if self.waiting.get(&peer).is_some_and(|count| *count > 0) => {
+            QueueRole::Relay if self.relay_yields(peer, item_bytes) => {
                 return Err(refuse(OnionQueueAdmissionReason::PeerFull, item));
             }
             QueueRole::Endpoint { holding: true } => self.leave(peer),
@@ -430,15 +484,30 @@ impl<T> OrderedSendState<T> {
         let Some(lane) = self.lanes.get_mut(&peer) else {
             return Err(refuse(OnionQueueAdmissionReason::LinkDown, item));
         };
+        let relayed = role == QueueRole::Relay;
+        if relayed {
+            lane.relayed = lane.relayed.with(item_bytes);
+        }
         lane.queued.push_back(Queued {
             item,
             bytes: item_bytes,
             class,
+            relayed,
         });
         lane.class = class;
         lane.clock.last_real_us = Some(now_us);
         lane.wake();
         Ok(())
+    }
+
+    /// Whether a relayed cell of `item_bytes` yields `peer`'s lane: an endpoint waits for it and
+    /// relays already hold half of it (Fairness).
+    fn relay_yields(&self, peer: Did, item_bytes: usize) -> bool {
+        self.waiting.get(&peer).is_some_and(|count| *count > 0)
+            && self
+                .lanes
+                .get(&peer)
+                .is_some_and(|lane| lane.relayed.would_exceed_half(item_bytes))
     }
 
     /// Reserve the quota and bytes of one cell of `item_bytes` for `peer`'s up lane.
@@ -532,7 +601,7 @@ impl<T> OrderedSendState<T> {
         let Some(lane) = self.lanes.get_mut(&peer).filter(|lane| lane.epoch == epoch) else {
             return EmitterStep::Stop;
         };
-        let queued = !lane.queued.is_empty() || lane.in_flight_bytes.is_some();
+        let queued = !lane.queued.is_empty() || lane.in_flight.is_some();
         match plan(lane.clock, queued, floor, now_us) {
             Plan::WaitUntil(due_us) => {
                 let (wake, woken) = oneshot::channel();
@@ -540,9 +609,12 @@ impl<T> OrderedSendState<T> {
                 EmitterStep::Wait(due_us, woken)
             }
             Plan::Emit => {
-                let (emission, class) = match lane.in_flight_bytes {
+                let (emission, class) = match lane.in_flight {
                     None => lane.queued.pop_front().map(|queued| {
-                        lane.in_flight_bytes = Some(queued.bytes);
+                        lane.in_flight = Some(InFlight {
+                            bytes: queued.bytes,
+                            relayed: queued.relayed,
+                        });
                         (Emission::Real(queued.item), queued.class)
                     }),
                     Some(_) => None,
@@ -560,9 +632,12 @@ impl<T> OrderedSendState<T> {
         let Some(lane) = self.lanes.get_mut(&peer).filter(|lane| lane.epoch == epoch) else {
             return;
         };
-        let Some(bytes) = lane.in_flight_bytes.take() else {
+        let Some(InFlight { bytes, relayed }) = lane.in_flight.take() else {
             return;
         };
+        if relayed {
+            lane.relayed = lane.relayed.without(bytes);
+        }
         if self.quota.release(peer) {
             lane.pending_bytes = lane.pending_bytes.saturating_sub(bytes);
             self.pending_bytes = self.pending_bytes.saturating_sub(bytes);
@@ -570,14 +645,26 @@ impl<T> OrderedSendState<T> {
         self.wake_one(peer);
     }
 
-    /// The link to `peer` is down, or its emitter cannot run: drop its lane and every queued
-    /// cell, releasing their quota and bytes, keep its clock for a reopen, wake its emitter so
-    /// it stops, and wake every endpoint waiting for it (it retries into `LinkDown`).
-    fn close(&mut self, peer: Did) -> Vec<T> {
+    /// Forget the clocks of lanes closed so long ago that a reopen could not emit early: their
+    /// last emission started `V` or more before `now`.
+    fn prune_retired(&mut self, now_us: u128) {
+        self.retired.retain(|_, clock| {
+            clock
+                .last_start
+                .is_some_and(|(start_us, _)| start_us + WINDOW_US > now_us)
+        });
+    }
+
+    /// The link to `peer` is down at `now`, or its emitter cannot run: drop its lane and every
+    /// queued cell, releasing their quota and bytes, keep its clock for a reopen (pruning the
+    /// lapsed ones), wake its emitter so it stops, and wake every endpoint waiting for it (it
+    /// retries into `LinkDown`).
+    fn close(&mut self, peer: Did, now_us: u128) -> Vec<T> {
         let Some(mut lane) = self.lanes.remove(&peer) else {
             return Vec::new();
         };
         lane.wake();
+        self.prune_retired(now_us);
         self.retired.insert(peer, lane.clock);
         self.quota.release_peer(peer);
         self.pending_bytes = self.pending_bytes.saturating_sub(lane.pending_bytes);
@@ -590,11 +677,11 @@ impl<T> OrderedSendState<T> {
         lane.queued.into_iter().map(|queued| queued.item).collect()
     }
 
-    /// Close every lane, and open none again: the sender's owner is gone.
-    fn shutdown(&mut self) {
+    /// Close every lane at `now`, and open none again: the sender's owner is gone.
+    fn shutdown(&mut self, now_us: u128) {
         self.shut = true;
         for peer in self.lanes_outside(&[]) {
-            self.close(peer);
+            self.close(peer, now_us);
         }
     }
 
@@ -664,7 +751,8 @@ impl OnionLinkSender {
     ///
     /// A poisoned lock.
     pub(crate) fn close(&self, link: OnionLink) -> Result<()> {
-        lock(&self.state)?.close(link.peer);
+        let now_us = self.now_us();
+        lock(&self.state)?.close(link.peer, now_us);
         Ok(())
     }
 
@@ -675,7 +763,8 @@ impl OnionLinkSender {
     ///
     /// A poisoned lock.
     pub(crate) fn shutdown(&self) -> Result<()> {
-        lock(&self.state)?.shutdown();
+        let now_us = self.now_us();
+        lock(&self.state)?.shutdown(now_us);
         Ok(())
     }
 
@@ -745,16 +834,21 @@ impl OnionLinkSender {
                 }
                 Err(refusal) => return Err(refusal.into_error(link)),
             };
-            role = QueueRole::Endpoint { holding: true };
+            // Registered under the refusal's lock; this future's drop, at the deadline or
+            // anywhere else, leaves the wait, and a retry hands it back to `enqueue` instead.
+            let registration = OnionLaneWait {
+                state: Arc::clone(&self.state),
+                peer: link.peer,
+                armed: true,
+            };
             let space = space.fuse();
             futures::pin_mut!(space);
             futures::select! {
                 _ = space => {},
-                _ = deadline => {
-                    lock(&self.state)?.leave(link.peer);
-                    return Err(timed_out());
-                },
+                _ = deadline => return Err(timed_out()),
             }
+            registration.hand_back();
+            role = QueueRole::Endpoint { holding: true };
         }
         let completed = completed.fuse();
         futures::pin_mut!(completed);
@@ -781,6 +875,35 @@ impl OnionLinkSender {
         let bytes = send.payload.len();
         let now_us = self.now_us();
         Ok(lock(&self.state)?.enqueue(link.peer, send, bytes, class, now_us, role))
+    }
+}
+
+/// An endpoint's registration in a lane's `waiting` count, for as long as it waits: dropped
+/// armed, it leaves the wait, so an endpoint whose `send` is abandoned never keeps relays
+/// yielding the lane.
+struct OnionLaneWait {
+    /// The queue state the registration is in.
+    state: Arc<Mutex<OrderedSendState<OverlaySend>>>,
+    /// The lane waited for.
+    peer: Did,
+    /// Whether the drop still has to leave the wait.
+    armed: bool,
+}
+
+impl OnionLaneWait {
+    /// The endpoint retries: the retry's `enqueue` leaves the wait under its own lock.
+    fn hand_back(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for OnionLaneWait {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Ok(mut state) = lock(&self.state) {
+                state.leave(self.peer);
+            }
+        }
     }
 }
 
@@ -827,7 +950,8 @@ async fn emit(sender: OnionLinkSender, peer: Did, epoch: u64, scope: Scope) {
                     _ = woken => Ok(()),
                 };
                 if let Err(error) = slept {
-                    let cancelled = lock(&sender.state).map(|mut state| state.close(peer).len());
+                    let cancelled =
+                        lock(&sender.state).map(|mut state| state.close(peer, now_us).len());
                     tracing::debug!(%peer, ?error, ?cancelled, "onion link emitter has no timer");
                     return;
                 }
@@ -1096,7 +1220,7 @@ mod tests {
         ));
         state.complete(peer, epoch);
 
-        assert!(state.close(peer).is_empty());
+        assert!(state.close(peer, 0).is_empty());
         assert!(matches!(
             state.next(peer, epoch, floor, 3 * slot_us),
             EmitterStep::Stop
@@ -1136,7 +1260,7 @@ mod tests {
         let floor = OnionIdleFloor::DEFAULT;
         let mut state = OrderedSendState::<u32>::default();
         let first = state.open(peer, 0).expect("a new lane");
-        state.close(peer);
+        state.close(peer, 0);
         let second = state.open(peer, 0).expect("a new lane");
 
         assert_ne!(first, second);
@@ -1212,10 +1336,10 @@ mod tests {
     }
 
     /// A full lane registers an endpoint under the same lock as its refusal, and the next
-    /// completion wakes exactly that one waiter; while it waits, relays yield the lane to it
-    /// (#895 N-M1).
+    /// completion wakes exactly that one waiter; while it waits, relays holding half of the lane
+    /// yield it (#895 N-M1, R3-M1).
     #[test]
-    fn test_a_completion_wakes_one_waiting_endpoint_ahead_of_relays() {
+    fn test_a_completion_wakes_one_waiting_endpoint_and_relays_yield_beyond_half() {
         let peer = Did::from(10_u32);
         let floor = OnionIdleFloor::DEFAULT;
         let class = OnionLoopClass::DEFAULT;
@@ -1265,6 +1389,51 @@ mod tests {
             .is_ok());
     }
 
+    /// Fairness (#895 R3-M1): a waiting endpoint does not veto relays below half of the lane,
+    /// so relayed traffic toward a busy endpoint's link is never blackholed.
+    #[test]
+    fn test_relays_below_half_keep_their_share_while_an_endpoint_waits() {
+        let peer = Did::from(13_u32);
+        let floor = OnionIdleFloor::DEFAULT;
+        let class = OnionLoopClass::DEFAULT;
+        let endpoint = QueueRole::Endpoint { holding: false };
+        let relays = 10;
+        let mut state = OrderedSendState::<usize>::default();
+        let epoch = state.open(peer, 0).expect("a new lane");
+        for item in 0..MAX_PENDING_ONION_SENDS_PER_PEER - relays {
+            assert!(state.enqueue(peer, item, 1, class, 0, endpoint).is_ok());
+        }
+        for item in 0..relays {
+            assert!(state
+                .enqueue(peer, 1_000 + item, 1, class, 0, QueueRole::Relay)
+                .is_ok());
+        }
+        let Err(Refusal {
+            space: Some(mut woken),
+            ..
+        }) = state.enqueue(peer, 900, 1, class, 0, endpoint)
+        else {
+            panic!("a full lane registers the endpoint");
+        };
+
+        assert!(matches!(
+            state.next(peer, epoch, floor, 0),
+            EmitterStep::Emit(Emission::Real(0))
+        ));
+        state.complete(peer, epoch);
+        assert_eq!(woken.try_recv(), Ok(Some(())));
+        assert!(
+            state
+                .enqueue(peer, 999, 1, class, 0, QueueRole::Relay)
+                .is_ok(),
+            "relays hold less than half, so the freed place is theirs to take"
+        );
+        assert_eq!(
+            state.lanes.get(&peer).map(|lane| lane.relayed.cells),
+            Some(11)
+        );
+    }
+
     /// Shutdown is terminal (#895 A2-M1): every lane closes and no link fact opens one again.
     #[test]
     fn test_shutdown_closes_every_lane_and_opens_none_again() {
@@ -1272,7 +1441,7 @@ mod tests {
         let peer = Did::from(11_u32);
         let epoch = state.open(peer, 0).expect("a new lane");
 
-        state.shutdown();
+        state.shutdown(0);
         assert!(matches!(
             state.next(peer, epoch, OnionIdleFloor::DEFAULT, 0),
             EmitterStep::Stop
@@ -1293,14 +1462,14 @@ mod tests {
             state.next(peer, first, floor, 0),
             EmitterStep::Emit(Emission::Cover(_))
         ));
-        state.close(peer);
+        state.close(peer, 0);
         let second = state.open(peer, 1).expect("a new lane");
 
         assert!(matches!(
             state.next(peer, second, floor, 1),
             EmitterStep::Wait(due, _) if due == floor.slot_micros(1)
         ));
-        state.close(peer);
+        state.close(peer, 0);
         let third = state
             .open(peer, ONION_FORWARD_MAX_VALIDITY_MS * 1_000)
             .expect("a new lane");
@@ -1383,7 +1552,7 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(global.close(Did::from(20_u32)), vec![20]);
+        assert_eq!(global.close(Did::from(20_u32), 0), vec![20]);
         assert!(global
             .enqueue(Did::from(24_u32), 24, 1, class, 0, QueueRole::Relay)
             .is_ok());

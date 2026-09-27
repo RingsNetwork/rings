@@ -4,14 +4,16 @@
 //! data(w):   frame data(n, T?, w), n ← n + 1;  T is set, with t inline, until the first reply
 //! fin:       frame fin(n), n ← n + 1;     abort: frame abort(n), the session is given up
 //! reply(f):  replied ← ⊤;  reorder f, then per released frame, in order:
-//!   first frame   data(0, ε) ⇒ Opened      fin ⇒ Refused (a fin before any data: no reason given)
+//!   first frame   data(0, ε) ⇒ Opened      fin ⇒ Refused (tolerated; h refuses with abort(0))
 //!   later frames  data(w)    ⇒ Data(w)     fin ⇒ Fin
 //!   abort(n), on arrival      ⇒ Refused before the open is decided, Aborted after it
+//!                               (n is informational: nothing orders an abort)
 //! credit:    want min(W, Q_max) reply blocks outstanding at h; each forward loop leaves one and a
 //!            full credit loop k + 1, so the deficit D asks ⌊D / (k + 1)⌋ full credit loops: the
 //!            window refills only once it is k + 1 short, a hysteresis of one loop
+//!            after the open and after each reply only: an expired block is not refilled
 //! keep-alive: one credit loop once no loop has left for V/2, which also replaces credit lost on
-//!            the way (a session whose replies stop sends nothing else)
+//!            the way or expired (a session whose replies stop sends nothing else)
 //! ```
 //!
 //! Laws (tested in `session::tests`):
@@ -20,8 +22,9 @@
 //!   after it does, so the session opens at `h` whichever forward loop arrives first and the
 //!   target stops travelling once `h` has answered.
 //! - **Sequence.** Forward frames carry `n = 0, 1, …`; replies are released in their order.
-//! - **Open result.** The first released reply decides the open: `data(0, ε)` is the ack, `fin`
-//!   is a refusal (#843 Q5).
+//! - **Open result.** The first reply decides the open: `data(0, ε)` is the ack, and `abort(0)`
+//!   the refusal `h` sends (the `abort` decision of #834 D2′, superseding #843 Q5's `fin`); a
+//!   `fin` before any data, which `h` never sends, is still read as a refusal, failing closed.
 //! - **Abort.** An `abort` is a failure, never an end of stream: it yields `Aborted` (or
 //!   `Refused` before the open), at once and whatever is still missing before it, and nothing
 //!   after it, so a stream `h` could not finish is never presented as complete.
@@ -32,8 +35,10 @@
 //!   blocks.
 //! - **Batching.** A steady download of `n` replies costs at most `⌈n / (k + 1)⌉ + 1` forward
 //!   loops (Prop. SURB batching), since only full credit frames are sent.
-//! - **Idle.** An idle session sends one loop per `V/2`, whatever its credit, so its route's
-//!   links return to the idle floor between loops (#880).
+//! - **Idle.** An idle session sends exactly one loop per `V/2`, whatever its credit: credit is
+//!   refilled only after the open or a reply, and expired credit is replaced by the keep-alive
+//!   alone ([`OnionCreditWindow::control_loops`]), so its route's links return to the idle floor
+//!   between loops (#880, #895 R3-M3).
 
 use std::collections::BTreeMap;
 
@@ -249,6 +254,40 @@ impl OnionCreditWindow {
             .saturating_sub(outstanding);
         deficit / (OnionFrame::credit_capacity(class) + 1)
     }
+
+    /// The full credit loops the driver sends after `step` at `now`, with `outstanding` blocks
+    /// live at `h` and its last loop gone at `last_forward`: the pure control rule.
+    ///
+    /// ```text
+    /// Refill ⇒ ⌊(min(W, Q_max) − outstanding) / (k + 1)⌋        (credit_loops)
+    /// Tick   ⇒ keep_alive_due(now, last_forward) ? 1 : 0        (keep_alive_due)
+    /// ```
+    ///
+    /// Credit is refilled only after the open or a reply: a block that expires unspent is
+    /// replaced by the keep-alive alone, so an idle session sends exactly one loop per `V/2`,
+    /// never a refill burst per expiring cohort (Law Idle, #895 R3-M3).
+    pub(crate) fn control_loops(
+        self,
+        step: OnionControlStep,
+        outstanding: usize,
+        class: OnionLoopClass,
+        now_ms: u128,
+        last_forward_ms: u128,
+    ) -> usize {
+        match step {
+            OnionControlStep::Refill => self.credit_loops(outstanding, class),
+            OnionControlStep::Tick => usize::from(keep_alive_due(now_ms, last_forward_ms)),
+        }
+    }
+}
+
+/// A step of the client's driver after which it may send control (credit) loops.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OnionControlStep {
+    /// The open left, or a reply arrived: `h` may have spent blocks the window refills.
+    Refill,
+    /// The driver's periodic tick: only the keep-alive.
+    Tick,
 }
 
 /// The keep-alive rule: whether a session whose last loop left at `last_forward` owes `h` one

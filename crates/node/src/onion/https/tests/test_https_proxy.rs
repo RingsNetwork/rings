@@ -419,9 +419,13 @@ fn test_https_session_encodings_are_pinned() {
     );
 }
 
-/// One budget across concurrent fetches (#895 D-N1): each fetch records its headers and body
+/// One budget across concurrent fetches (#895 D-N1): each fetch records its header names and values and body
 /// chunks as they stream against the shared accounting, so two fetches whose bodies together
-/// exceed the window's budget cannot both complete, and no more than the budget is recorded.
+/// exceed the window's budget cannot both complete.
+///
+/// Only what the budget guarantees is asserted (#895 D-M2): how the two streams interleave is
+/// socket timing, and an interleaving in which each has recorded part of its body before the
+/// other's next chunk is refused fails both, a correct outcome of recording as bytes stream.
 #[tokio::test]
 async fn test_concurrent_fetches_share_one_byte_budget() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -483,11 +487,10 @@ async fn test_concurrent_fetches_share_one_byte_budget() {
         "both fetches fit a budget below their sum"
     );
     assert!(
-        first.is_ok() || second.is_ok(),
-        "the budget admits one whole fetch"
+        accounting
+            .remaining_bytes(&policy, 0)
+            .unwrap()
+            .is_some_and(|left| left < 4_000),
+        "the refused fetch's streamed bytes were recorded against the one budget"
     );
-    assert!(accounting
-        .remaining_bytes(&policy, 0)
-        .unwrap()
-        .is_some_and(|left| left < 4_000));
 }
