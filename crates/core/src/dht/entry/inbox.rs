@@ -34,7 +34,7 @@
 //! authenticated predecessor as an ownership hand-off, and a removal only from `d`; a relay
 //! carrier is never fetched, cached, or replicated. Removal is per element by its add dot (an
 //! observed-remove), never by a reset floor, so a message the recipient has not seen is never
-//! dropped by a compaction it did not issue.
+//! dropped by a removal it did not issue.
 //!
 //! Both "responsible for `d`" (the holder's `(pred, self]`) and "routes `d` to" (the owner's
 //! successor list) are projections of failure detection: while an owner still lists the departed
@@ -332,9 +332,7 @@ impl EntryOperation {
                 }
                 entry.validate_inbox_witness(now_ms, network_id)
             }
-            EntryOperation::Overwrite(_) | EntryOperation::CompactData(_) => {
-                Err(Error::RelayInboxOperationNotAllowed)
-            }
+            EntryOperation::Overwrite(_) => Err(Error::RelayInboxOperationNotAllowed),
         }
     }
 }

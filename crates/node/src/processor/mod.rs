@@ -887,7 +887,10 @@ impl Processor {
             .map_err(Error::EntryError)
     }
 
-    /// Store an entry on DHT storage
+    /// Store an entry on DHT storage, replacing its payloads.
+    ///
+    /// Each stored payload expires individually at its write time plus the data element horizon
+    /// `H = EntryKind::Data.max_lifetime_ms()` (100 minutes) unless it is written again.
     pub async fn storage_store(&self, entry: entry::Entry) -> Result<()> {
         self.swarm
             .storage_store(entry)
@@ -895,7 +898,11 @@ impl Processor {
             .map_err(Error::EntryError)
     }
 
-    /// Append data to an entry on DHT storage
+    /// Append data to an entry on DHT storage.
+    ///
+    /// The appended element expires individually at its write time plus the data element horizon
+    /// `H = EntryKind::Data.max_lifetime_ms()` (100 minutes), even while other writes keep the
+    /// topic alive; append it again within `H` to keep it.
     pub async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         self.swarm
             .storage_append_data(topic, data)
@@ -904,17 +911,12 @@ impl Processor {
     }
 
     /// Tombstone observed data in an entry on DHT storage.
+    ///
+    /// The removal covers every dot of `data` the storage owner holds, including earlier dots
+    /// forgotten under a later one, and is collected once every add it covers has expired.
     pub async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
         self.swarm
             .storage_tombstone_data(topic, data)
-            .await
-            .map_err(Error::EntryError)
-    }
-
-    /// Compact observed data in an entry on DHT storage.
-    pub async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
-        self.swarm
-            .storage_compact_data(topic, removals)
             .await
             .map_err(Error::EntryError)
     }
@@ -968,7 +970,10 @@ impl Processor {
         self.swarm.origin_quota_counters()
     }
 
-    /// register service
+    /// Register this node under the service name `name`.
+    ///
+    /// The registration is one appended element, so it expires at the data element horizon
+    /// (100 minutes) unless it is registered again within it.
     pub async fn register_service(&self, name: &str) -> Result<()> {
         let encoded_did = self
             .did()

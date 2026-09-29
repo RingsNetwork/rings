@@ -104,7 +104,9 @@ and expire, but a party with many identities can try to hold several positions o
   handshake methods `nodeDid` and `answerOffer` are public. The external listener binds a
   non-loopback address only on opt-in, and browser requests must come from configured origins.
 - **DHT storage.** Retention is capped at the maximum TTL; carriers are bounded in count and
-  size; versions too far ahead of the receiver's clock are rejected. A relay inbox is
+  size; versions too far ahead of the receiver's clock are rejected. Each data-topic element
+  expires at its own horizon, and a removal is collected only once every write it covers has
+  expired everywhere within the clock-skew tolerance, so a removed value is not resurrected. A relay inbox is
   verified by its owner, readable and removable only by its recipient, and capped at 64
   messages. Values are stored in the clear.
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
@@ -128,3 +130,5 @@ and expire, but a party with many identities can try to hold several positions o
 - #912: the browser replay store uses IndexedDB's default durability hint.
 - #915: a missing replay record restarts its stream from the first sequence.
 - #916: durable replay writes cap a node near 50 transitions per second on macOS.
+- #921: data-topic tombstones are bounded by rate, not by count: a writer that removes many
+  distinct values inflates a topic's metadata until the removals are collected.

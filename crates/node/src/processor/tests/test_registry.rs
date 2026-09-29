@@ -1,3 +1,5 @@
+use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
+use rings_core::dht::entry::EntryKind;
 use rings_core::message::MessageSigner;
 
 use super::common::*;
@@ -179,8 +181,10 @@ async fn test_online_node_publish_replaces_observed_self_records() -> Result<()>
     let stored = Processor::online_node_descriptors_from_entry(&entry);
 
     assert_eq!(stored.len(), 2);
+    // Publishing issues no reset floor: the register is the fixture's overwrite, and the two
+    // pruned descriptors are covering removes.
     assert!(entry.crdt.register.is_some());
-    assert!(entry.crdt.tombstones.is_empty());
+    assert_eq!(entry.crdt.tombstones.len(), 2);
     assert_eq!(entry.crdt.dots.len(), stored.len());
     assert_eq!(
         stored
@@ -286,6 +290,15 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .iter()
         .any(|descriptor| descriptor == &published_descriptor));
     assert!(stored.iter().any(|descriptor| descriptor == &other_https));
+
+    // #871: the four replaced or expired descriptors are covering removes, and every one of
+    // them is collected once it is stable, `H + σ` after the newest dot it covers.
+    assert_eq!(entry.crdt.tombstones.len(), 4);
+    let stable_at =
+        get_epoch_ms() + u128::from(EntryKind::Data.max_lifetime_ms()) + TS_OFFSET_TOLERANCE_MS;
+    let collected = entry.retired_at(stable_at).map_err(Error::CoreError)?;
+    assert!(collected.crdt.tombstones.is_empty());
+    assert!(collected.data.is_empty());
     Ok(())
 }
 

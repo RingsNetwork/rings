@@ -20,9 +20,12 @@ mod crdt;
 pub(crate) mod inbox;
 mod retention;
 
+use crdt::insert_max;
 pub use crdt::DataTopicBuffer;
+pub use crdt::ElementDigest;
 pub use crdt::EntryCrdt;
 pub use crdt::EntryDot;
+pub use crdt::EntryTombstone;
 pub use crdt::EntryVersion;
 
 /// DHT storage entry categories.
@@ -58,9 +61,12 @@ impl EntryKind {
         }
     }
 
-    /// The greatest number of tombstones a carrier of this kind keeps. A data topic keeps every
-    /// tombstone below its reset floor's pruning; a relay inbox has one owner and one
-    /// ack-gated relocation at a time, so a stale copy can only be transient and the newest
+    /// The greatest number of tombstones a carrier of this kind keeps. A data topic has no
+    /// count cap: a capped tombstone could be dropped while its add is still inside its element
+    /// horizon somewhere, and a stale replica would resurrect it; its tombstones are bounded by
+    /// rate instead, since each one retires `max_lifetime_ms + TS_OFFSET_TOLERANCE_MS` after its
+    /// dot (see the `retention` module). A relay inbox has one owner and one ack-gated
+    /// relocation at a time, so a stale copy can only be transient and the newest
     /// [`RELAY_INBOX_MAX_LEN`] removals suffice to shadow it.
     pub const fn max_tombstones(self) -> Option<usize> {
         match self {
@@ -81,8 +87,6 @@ enum EntryStampKind {
 enum EntryWitness {
     /// Per-element dots, plus a reset register for overwrites.
     Elements(EntryStampKind),
-    /// A register floor only.
-    Register,
     /// A reference witness: the operation names existing dots or values and issues none.
     Reference,
 }
@@ -106,21 +110,14 @@ pub enum EntryOperation {
     /// Add payloads to a data topic or a relay inbox.
     /// This operation will create an [`Entry`] if it does not exist.
     Extend(Entry),
-    /// Tombstone observed data or relay-message payloads in a two-phase set.
+    /// Remove observed data or relay-message payloads.
     ///
     /// The payload identifies the entry carrier and the values to
-    /// remove. If CRDT dots are present, those dots are the remove witnesses;
-    /// otherwise the receiver tombstones currently observed dots with matching
-    /// payload bytes.
+    /// remove. If CRDT dots are present, the payloads the receiver holds at those
+    /// dots are removed; otherwise the receiver removes the payloads it holds
+    /// with matching bytes. Each removal is a covering remove at the dot the
+    /// receiver holds (see [`EntryTombstone`]).
     Tombstone(Entry),
-    /// Compact a Data kind entry after removing listed payload bytes.
-    ///
-    /// The receiver computes the compacted live set from its current local
-    /// entry, not from a sender snapshot. This preserves concurrent live writes
-    /// already observed by the storage owner. The operation carries one
-    /// source-stamped register floor shared by every replica, so divergent
-    /// storage owners stay join-compatible after compaction.
-    CompactData(Entry),
 }
 
 /// A storage operation targeted at one concrete affine placement key.
@@ -195,8 +192,10 @@ fn placement_belongs_to_entry_key(
 /// stamped by the origin at the operation boundary and bounded by the receiver at admission
 /// (see the `retention` module and [`Entry::validate_admissible_at`]). The bound joins by
 /// `max`, so every accepted write extends the carrier's life to at least its own bound, and an
-/// entry whose bound has elapsed is dropped on the next read instead of being served or
-/// replicated.
+/// entry whose bound has elapsed (and that holds no remove still inside its horizon) is dropped
+/// on the next read instead of being served or replicated. Inside a live data carrier, every
+/// element expires individually at its dot's issue time plus the element horizon
+/// ([`EntryKind::element_horizon_ms`], see [`Entry::retired_at`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     /// The ring key of this entry. It has the same representation as a node DID, but a
@@ -272,14 +271,17 @@ impl SyncedEntryAck {
         Self { key, entry }
     }
 
-    /// Returns whether this ack proves that `local` equals the copied value.
+    /// Returns whether this ack proves that `local` equals the copied value at the clock
+    /// `now_ms`.
     ///
-    /// Post: comparison is performed on storage canonical forms, so legacy
-    /// entries without dots compare equal to the normalized value durably
-    /// persisted by the receiver.
-    pub fn confirms_local_value(&self, local: &Entry) -> Result<bool> {
-        Ok(self.entry.clone().try_into_storage_entry()?
-            == local.clone().try_into_storage_entry()?)
+    /// Post: comparison is performed on storage canonical forms projected to the element
+    /// horizon at `now_ms` ([`Entry::retired_at`]), so legacy entries without dots compare equal
+    /// to the normalized value durably persisted by the receiver, and an element or remove that
+    /// merely crossed its horizon between the copy and the ack is not mistaken for a newer
+    /// write: the copy was projected at an earlier clock, and projecting it again at `now_ms`
+    /// yields what `local` is when nothing was written meanwhile.
+    pub fn confirms_local_value(&self, local: &Entry, now_ms: u128) -> Result<bool> {
+        Ok(self.entry.clone().retired_at(now_ms)? == local.clone().retired_at(now_ms)?)
     }
 }
 
@@ -374,7 +376,6 @@ impl EntryOperation {
             let entry = entry.ensure_lifetime_from(now_ms);
             match witness {
                 EntryWitness::Elements(kind) => entry.ensure_stamp_after(now_ms, actor, None, kind),
-                EntryWitness::Register => entry.ensure_overwrite_stamp_after(now_ms, actor, None),
                 EntryWitness::Reference => Ok(entry),
             }
         })
@@ -386,7 +387,6 @@ impl EntryOperation {
             EntryOperation::Overwrite(_) => EntryWitness::Elements(EntryStampKind::Overwrite),
             EntryOperation::Extend(_) => EntryWitness::Elements(EntryStampKind::Delta),
             EntryOperation::Tombstone(_) => EntryWitness::Reference,
-            EntryOperation::CompactData(_) => EntryWitness::Register,
         }
     }
 
@@ -395,8 +395,7 @@ impl EntryOperation {
         match self {
             EntryOperation::Overwrite(entry)
             | EntryOperation::Extend(entry)
-            | EntryOperation::Tombstone(entry)
-            | EntryOperation::CompactData(entry) => entry,
+            | EntryOperation::Tombstone(entry) => entry,
         }
     }
 
@@ -406,7 +405,6 @@ impl EntryOperation {
             EntryOperation::Overwrite(entry) => EntryOperation::Overwrite(f(entry)?),
             EntryOperation::Extend(entry) => EntryOperation::Extend(f(entry)?),
             EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(f(entry)?),
-            EntryOperation::CompactData(entry) => EntryOperation::CompactData(f(entry)?),
         })
     }
 
@@ -503,28 +501,18 @@ impl Entry {
         }
     }
 
-    fn ensure_overwrite_stamp_after(
-        self,
-        now_ms: u128,
-        actor: Did,
-        floor: Option<EntryVersion>,
-    ) -> Result<Self> {
-        match self.crdt.register.is_some() {
-            true => Ok(self),
-            false => {
-                let version = self.issue_version_after(now_ms, actor, floor)?;
-                self.stamp_overwrite(version)
-            }
-        }
-    }
-
     /// Every version this entry carries: element dots, tombstones, and the reset floor.
     fn versions(&self) -> impl Iterator<Item = EntryVersion> + '_ {
         self.crdt
             .dots
             .iter()
             .map(|dot| dot.version)
-            .chain(self.crdt.tombstones.iter().map(|dot| dot.version))
+            .chain(
+                self.crdt
+                    .tombstones
+                    .iter()
+                    .map(|tombstone| tombstone.dot.version),
+            )
             .chain(self.crdt.register)
     }
 
@@ -552,19 +540,13 @@ impl Entry {
     fn topic_buffer(&self) -> Result<DataTopicBuffer> {
         let mut values = BTreeMap::new();
         for (index, value) in self.data.iter().cloned().enumerate() {
-            let dot = self.dot_for_element(index)?;
-            values
-                .entry(value)
-                .and_modify(|current: &mut EntryDot| {
-                    *current = (*current).max(dot);
-                })
-                .or_insert(dot);
+            insert_max(&mut values, value, self.dot_for_element(index)?);
         }
-        Ok(DataTopicBuffer::new(
-            self.crdt.register,
-            values,
-            self.crdt.tombstones.iter().copied().collect(),
-        ))
+        let mut removes = BTreeMap::new();
+        for tombstone in self.crdt.tombstones.iter() {
+            insert_max(&mut removes, tombstone.element, tombstone.dot);
+        }
+        Ok(DataTopicBuffer::new(self.crdt.register, values, removes))
     }
 
     fn materialize_elements(
@@ -572,14 +554,14 @@ impl Entry {
         kind: EntryKind,
         register: Option<EntryVersion>,
         elements: impl IntoIterator<Item = (Encoded, EntryDot)>,
-        tombstones: BTreeSet<EntryDot>,
+        removes: BTreeMap<ElementDigest, EntryDot>,
         expires_at_ms: Option<u128>,
     ) -> Self {
         let mut visible = elements
             .into_iter()
-            .filter(|(_, dot)| {
+            .filter(|(value, dot)| {
                 let visible_after_reset = register.is_none_or(|floor| dot.version >= floor);
-                visible_after_reset && !tombstones.contains(dot)
+                visible_after_reset && !DataTopicBuffer::covered_by(&removes, value, *dot)
             })
             .collect::<Vec<_>>();
         visible.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
@@ -590,6 +572,15 @@ impl Entry {
         let skip_count = visible.len().saturating_sub(kind.max_data_len());
         let visible = visible.into_iter().skip(skip_count).collect::<Vec<_>>();
         let (data, dots): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
+        let mut tombstones = removes
+            .into_iter()
+            .map(|(element, dot)| EntryTombstone { element, dot })
+            .collect::<Vec<_>>();
+        tombstones.sort_by(|left, right| {
+            left.dot
+                .cmp(&right.dot)
+                .then_with(|| left.element.cmp(&right.element))
+        });
         let tombstone_skip = kind
             .max_tombstones()
             .map_or(0, |cap| tombstones.len().saturating_sub(cap));
@@ -620,78 +611,6 @@ impl Entry {
             buffer.removes,
             expires_at_ms,
         )
-    }
-
-    fn compacted_data_dot(floor: EntryVersion, value: &Encoded) -> Result<EntryDot> {
-        let operation = Did::try_from(HashStr::from_bytes(value.value().as_bytes()))?;
-        let version =
-            EntryVersion::new(floor.logical_time_ms, floor.actor, operation).after(Some(floor));
-        EntryDot::for_index(version, 0)
-    }
-
-    fn compact_data_element(
-        floor: EntryVersion,
-        removal_values: &BTreeSet<Encoded>,
-        value: Encoded,
-        dot: EntryDot,
-    ) -> Result<Option<(Encoded, EntryDot)>> {
-        match dot.version < floor {
-            true if removal_values.contains(&value) => Ok(None),
-            true => Self::compacted_data_dot(floor, &value).map(|dot| Some((value, dot))),
-            false => Ok(Some((value, dot))),
-        }
-    }
-
-    fn data_compaction_candidates(
-        payload_order: &[Encoded],
-        live_values: BTreeMap<Encoded, EntryDot>,
-    ) -> Vec<(Encoded, EntryDot)> {
-        let (ordered_values, remaining_values) = payload_order.iter().fold(
-            (Vec::new(), live_values),
-            |(mut ordered, mut remaining), value| {
-                if let Some(dot) = remaining.remove(value) {
-                    ordered.push((value.clone(), dot));
-                }
-                (ordered, remaining)
-            },
-        );
-        ordered_values.into_iter().chain(remaining_values).collect()
-    }
-
-    fn compact_data_elements(
-        floor: EntryVersion,
-        removal_values: &BTreeSet<Encoded>,
-        values: impl IntoIterator<Item = (Encoded, EntryDot)>,
-    ) -> Result<Vec<(Encoded, EntryDot)>> {
-        values.into_iter().try_fold(
-            Vec::new(),
-            |mut elements, (value, dot)| -> Result<Vec<(Encoded, EntryDot)>> {
-                match Self::compact_data_element(floor, removal_values, value, dot)? {
-                    Some(element) => {
-                        elements.push(element);
-                        Ok(elements)
-                    }
-                    None => Ok(elements),
-                }
-            },
-        )
-    }
-
-    fn compact_data_output_floor(
-        current_floor: Option<EntryVersion>,
-        operation_floor: EntryVersion,
-    ) -> EntryVersion {
-        current_floor.map_or(operation_floor, |current| current.max(operation_floor))
-    }
-
-    fn compact_data_tombstones(
-        floor: EntryVersion,
-        tombstones: BTreeSet<EntryDot>,
-    ) -> BTreeSet<EntryDot> {
-        tombstones
-            .into_iter()
-            .filter(|dot| dot.version >= floor)
-            .collect()
     }
 
     /// Merge two entries from the same replicated carrier.
@@ -743,7 +662,6 @@ impl Entry {
             EntryOperation::Overwrite(entry) => self.overwrite(now_ms, entry, actor),
             EntryOperation::Extend(entry) => self.extend(now_ms, entry, actor),
             EntryOperation::Tombstone(entry) => self.tombstone(entry),
-            EntryOperation::CompactData(entry) => self.compact_data(now_ms, entry, actor),
         }
     }
 
@@ -779,13 +697,15 @@ impl Entry {
         )?)
     }
 
-    /// Tombstone observed data or relay-message payloads.
+    /// Remove observed data or relay-message payloads.
     ///
     /// Pre: `self` and `other` are the same data or relay-message carrier.
-    /// Post: every removed payload is represented by an add-dot tombstone, so
-    /// future joins with stale add replicas cannot resurrect it. The carrier keeps
-    /// its own retention bound: retention is refreshed by what is held, never by
-    /// a removal, so a drained carrier expires when its last hold would have.
+    /// Post: every removed payload is represented by a covering remove at the dot this carrier
+    /// holds for it, which also covers every earlier dot of the payload, including dots the
+    /// carrier has already forgotten under a later one; so no future join with a stale add
+    /// replica can resurrect it (#874). The carrier keeps its own retention bound: retention is
+    /// refreshed by what is held, never by a removal, so a drained carrier expires when its last
+    /// hold would have.
     pub fn tombstone(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
 
@@ -795,54 +715,25 @@ impl Entry {
         let has_dot_witness = !target_dots.is_empty();
 
         let mut buffer = self.topic_buffer()?;
-        for (value, dot) in &buffer.values {
-            if target_dots.contains(dot) || (!has_dot_witness && target_values.contains(value)) {
-                buffer.removes.insert(*dot);
-            }
+        let removed = buffer
+            .values
+            .iter()
+            .filter(|(value, dot)| match has_dot_witness {
+                true => target_dots.contains(*dot),
+                false => target_values.contains(*value),
+            })
+            .map(|(value, _)| value.clone())
+            .collect::<Vec<_>>();
+        for value in removed.iter() {
+            buffer.remove(value);
         }
         Ok(self.materialize_topic_buffer(buffer, expires_at_ms))
-    }
-
-    /// Compact a data topic using the receiver's current visible payloads.
-    ///
-    /// Pre: `removals` names the same data topic as `self`; a relay inbox is never compacted
-    /// by a reset floor, its removals are per-dot tombstones issued by its recipient.
-    /// Post: every current visible payload not listed in `removals` is preserved
-    /// under the greatest observed register floor, and older tombstone metadata
-    /// is pruned by that floor.
-    pub fn compact_data(&self, now_ms: u128, removals: Self, actor: Did) -> Result<Self> {
-        if !self.is_data_entry() {
-            return Err(Error::RelayInboxOperationNotAllowed);
-        }
-        let removals =
-            removals.ensure_overwrite_stamp_after(now_ms, actor, self.max_observed_version())?;
-        self.validate_same_carrier(&removals)?;
-        let expires_at_ms = self.joined_lifetime(&removals);
-        let floor = removals.crdt.register.ok_or_else(|| {
-            Error::InvalidMessage("compact data operation has no register floor".to_string())
-        })?;
-        let removal_values = removals.data.into_iter().collect::<BTreeSet<_>>();
-        let buffer = self.topic_buffer()?;
-        let (register, values, removes) = (buffer.register, buffer.values, buffer.removes);
-        let output_floor = Self::compact_data_output_floor(register, floor);
-        let elements = Self::compact_data_elements(
-            floor,
-            &removal_values,
-            Self::data_compaction_candidates(&self.data, values),
-        )?;
-        let tombstones = Self::compact_data_tombstones(output_floor, removes);
-        Ok(Self::materialize_elements(
-            self.did,
-            self.kind,
-            Some(output_floor),
-            elements,
-            tombstones,
-            expires_at_ms,
-        ))
     }
 }
 
 #[cfg(test)]
 mod test_entry;
+#[cfg(test)]
+mod test_horizon_model;
 #[cfg(test)]
 mod test_inbox;

@@ -888,6 +888,8 @@ impl Provider {
     ///
     /// The explicit topic/value pair preserves the content-derived identity of
     /// this browser API without a separate single-string entry constructor.
+    /// The stored element expires at the data element horizon (100 minutes)
+    /// unless it is stored again within it.
     pub fn storage_store(&self, data: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {

@@ -394,17 +394,13 @@ fn test_removal_authority_is_the_recipient_alone_and_nothing_else_is_allowed() -
         ),
         Err(Error::RelayInboxWriterNotRecipient)
     ));
-    for op in [
-        EntryOperation::Overwrite(carrier.clone()),
-        EntryOperation::CompactData(carrier.clone()),
-    ] {
-        assert!(matches!(
-            op.validate_inbox_write(destination, Some(responsible), now_ms, TEST_NETWORK_ID),
-            Err(Error::RelayInboxOperationNotAllowed)
-        ));
-    }
     assert!(matches!(
-        carrier.compact_data(now_ms, carrier.clone(), destination),
+        EntryOperation::Overwrite(carrier.clone()).validate_inbox_write(
+            destination,
+            Some(responsible),
+            now_ms,
+            TEST_NETWORK_ID
+        ),
         Err(Error::RelayInboxOperationNotAllowed)
     ));
     Ok(())
@@ -507,7 +503,7 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
         .crdt
         .tombstones
         .iter()
-        .copied()
+        .map(|tombstone| tombstone.dot)
         .collect::<std::collections::BTreeSet<_>>();
     assert!(first_round_dots.iter().all(|dot| !kept.contains(dot)));
     Ok(())
