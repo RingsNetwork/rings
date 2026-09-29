@@ -21,6 +21,7 @@ use rings_core::message::MessageSigner;
 use rings_core::message::ReplayStorage;
 use rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 use rings_core::storage::idb::IdbStorage;
+use rings_core::storage::idb::UndecodableRows;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use rings_rpc::jsonrpc::Client as RpcClient;
@@ -395,10 +396,14 @@ fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
     )
 }
 
+/// Open the browser DHT entry store. It retires rows it cannot decode: a carrier written by an
+/// earlier wire format must not fail every storage scan.
 async fn open_browser_entry_storage(storage_name: &str) -> NodeResult<EntryStorage> {
     IdbStorage::new_with_cap_and_name(50000, storage_name)
         .await
-        .map(|storage| Box::new(storage) as EntryStorage)
+        .map(|storage| {
+            Box::new(storage.with_undecodable_rows(UndecodableRows::Retire)) as EntryStorage
+        })
         .map_err(|source| Error::BrowserStorageOpen {
             name: storage_name.to_string(),
             source,
@@ -888,8 +893,9 @@ impl Provider {
     ///
     /// The explicit topic/value pair preserves the content-derived identity of
     /// this browser API without a separate single-string entry constructor.
-    /// The stored element expires at the data element horizon (100 minutes)
-    /// unless it is stored again within it.
+    /// The topic has this one writer, so the stored element expires with the
+    /// topic's retention bound, 10 minutes after it is stored, unless it is
+    /// stored again.
     pub fn storage_store(&self, data: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {

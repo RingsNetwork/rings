@@ -42,6 +42,16 @@
 //! The clock record witnesses that step 2 committed; an interrupted migration leaves the legacy
 //! rows untouched and reruns on the next open. The upgrade proceeds once every connection still
 //! open at version 1 (for example another tab running an older build) has closed.
+//!
+//! # Undecodable rows
+//!
+//! A row whose payload the caller's type cannot decode is handled by the store's
+//! [`UndecodableRows`] policy. `Keep` (the default) reports the decode error and leaves the row
+//! untouched, for a store whose records must survive a failed decode (the replay store, whose
+//! bad record keeps its stream closed). `Retire` gives the store the decode law of the native
+//! file store: the store holds only rows decodable as its type, and a row written by an earlier
+//! build is deleted in the transaction of the read that discovers it and reported absent. The
+//! DHT entry store retires, so a carrier of an earlier wire format cannot fail every scan.
 
 use async_trait::async_trait;
 use rexie::Index;
@@ -59,6 +69,16 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
 use crate::utils::js_value;
+
+/// What a read does with a row whose payload the caller's type cannot decode (module docs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UndecodableRows {
+    /// Report the decode error and keep the row.
+    #[default]
+    Keep,
+    /// Delete the row in the reading transaction and report it absent.
+    Retire,
+}
 
 /// IndexedDB schema version; 2 replaced wall-clock recency with the store-wide access clock.
 const SCHEMA_VERSION: u32 = 2;
@@ -283,6 +303,8 @@ impl Scope {
 pub struct IdbStorage {
     /// Open database handle; transactions own their requests until completion.
     db: Rexie,
+    /// What a read does with a row its caller's type cannot decode.
+    undecodable: UndecodableRows,
     /// Maximum number of stored rows.
     cap: u32,
     /// Row store and database name selected by the caller.
@@ -314,6 +336,7 @@ impl IdbStorage {
                 .build()
                 .await
                 .map_err(Error::IDBError)?,
+            undecodable: UndecodableRows::Keep,
             cap: row_capacity,
             storage_name: name.to_owned(),
             clock_store_name,
@@ -324,6 +347,14 @@ impl IdbStorage {
         // Opening under a smaller row budget immediately restores the configured bound.
         storage.prune().await?;
         Ok(storage)
+    }
+
+    /// This store under the undecodable-row policy `undecodable`.
+    pub fn with_undecodable_rows(self, undecodable: UndecodableRows) -> Self {
+        Self {
+            undecodable,
+            ..self
+        }
     }
 
     /// Open a transaction over both object stores.
@@ -390,8 +421,20 @@ where V: DeserializeOwned + Serialize + Sized
             scope.done().await?;
             return Ok(None);
         };
-        // Decode before scheduling any write so malformed values remain untouched.
-        let value = js_value::deserialize(row.data.clone())?;
+        // Decode before scheduling any write, so a kept row stays untouched.
+        let value = match (js_value::deserialize(row.data.clone()), self.undecodable) {
+            (Ok(value), _) => value,
+            (Err(error), UndecodableRows::Keep) => return Err(error),
+            (Err(_), UndecodableRows::Retire) => {
+                scope
+                    .rows
+                    .delete(&JsValue::from(row.key))
+                    .await
+                    .map_err(Error::IDBError)?;
+                scope.done().await?;
+                return Ok(None);
+            }
+        };
         scope.put_stamped(row.key, row.data).await?;
         scope.done().await?;
         Ok(Some(value))
@@ -422,20 +465,32 @@ where V: DeserializeOwned + Serialize + Sized
     }
 
     async fn get_all(&self) -> Result<Vec<(String, V)>> {
-        let scope = self.scope(TransactionMode::ReadOnly)?;
+        let mode = match self.undecodable {
+            UndecodableRows::Keep => TransactionMode::ReadOnly,
+            UndecodableRows::Retire => TransactionMode::ReadWrite,
+        };
+        let scope = self.scope(mode)?;
         let entries = scope
             .rows
             .get_all(None, None, None, None)
             .await
             .map_err(Error::IDBError)?;
 
-        entries
-            .into_iter()
-            .map(|(_key, row)| {
-                let row: StoredRow = js_value::deserialize(row)?;
-                Ok((row.key, js_value::deserialize(row.data)?))
-            })
-            .collect()
+        let mut decoded = Vec::with_capacity(entries.len());
+        for (_key, row) in entries {
+            let row: StoredRow = js_value::deserialize(row)?;
+            match (js_value::deserialize(row.data), self.undecodable) {
+                (Ok(value), _) => decoded.push((row.key, value)),
+                (Err(error), UndecodableRows::Keep) => return Err(error),
+                (Err(_), UndecodableRows::Retire) => scope
+                    .rows
+                    .delete(&JsValue::from(row.key))
+                    .await
+                    .map_err(Error::IDBError)?,
+            }
+        }
+        scope.done().await?;
+        Ok(decoded)
     }
 
     async fn remove(&self, key: &str) -> Result<()> {

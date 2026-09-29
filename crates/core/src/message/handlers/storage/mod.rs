@@ -39,23 +39,23 @@ use crate::utils::get_epoch_ms;
 
 /// ChordStorageInterface should imply necessary method for DHT storage
 ///
-/// Element lifetime: every element of a data topic expires individually at its dot's issue time
-/// plus the element horizon `H = EntryKind::Data.max_lifetime_ms()` (100 minutes), even while
-/// other writes keep its topic alive; writing the value again issues a fresh dot and is what
-/// keeps it. A publisher must therefore refresh each value within `H`. A removal covers every
-/// earlier dot of its value, and is collected `H + σ` after the dot it covers, with
-/// `σ = TS_OFFSET_TOLERANCE_MS`.
+/// Element lifetime: every element of a data topic expires at the earlier of its dot's issue time
+/// plus the element horizon `H = EntryKind::Data.max_lifetime_ms()` (100 minutes) and its
+/// topic's retention bound, the latest bound any write joined into the topic requested (a plain
+/// write requests `DEFAULT_TTL_MS`, 10 minutes). Writing the value again issues a fresh dot and
+/// a fresh bound: rewrite each value within 10 minutes unless other writes keep the topic alive,
+/// and within `H` in any case. A removal covers every earlier dot of its value, and is collected
+/// `H + σ` after the dot it covers, with `σ = TS_OFFSET_TOLERANCE_MS`.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterface {
     /// Fetch an entry from DHT storage.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()>;
     /// Store an entry on DHT storage, replacing its payloads (an `Overwrite`). Each stored
-    /// payload expires at the element horizon unless it is written again (see the trait
-    /// documentation).
+    /// payload expires as the trait documentation states unless it is written again.
     async fn storage_store(&self, entry: Entry) -> Result<()>;
-    /// Append data to a Data kind entry. The element expires at the element horizon unless it
-    /// is appended again within it (see the trait documentation).
+    /// Append data to a Data kind entry. The element expires as the trait documentation states
+    /// unless it is appended again.
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()>;
     /// Tombstone observed data in a Data kind entry: the removal covers every dot of `data` the
     /// storage owner holds or has held under a later one.

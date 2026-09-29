@@ -89,6 +89,28 @@ fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enable
 }
 
 #[test]
+fn test_registry_heartbeat_must_refresh_before_a_descriptor_expires() {
+    let key = SecretKey::random();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
+    let mut config = ProcessorConfig::new(
+        0,
+        "stun://stun.l.google.com:19302".to_string(),
+        delegatee_key,
+        3,
+    );
+    let bound = crate::registration::registry_refresh_bound();
+    config.online_node_heartbeat_interval = bound;
+    config.online_node_ttl = bound * 2;
+
+    assert!(matches!(
+        ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build),
+        Err(Error::InvalidConfig(message))
+            if message.contains("online_node_heartbeat_interval")
+                && message.contains("lifetime of a registry descriptor")
+    ));
+}
+
+#[test]
 fn test_presence_advertisement_can_be_disabled() {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();

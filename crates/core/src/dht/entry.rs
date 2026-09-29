@@ -253,15 +253,16 @@ impl PlacedEntry {
 /// Durable-storage acknowledgement for an entry hand-off delta.
 ///
 /// `key` is the placement key updated by the receiver. `entry` is the copied
-/// delta that the receiver joined into its local least upper bound. The sender
-/// compares the storage-normalized ack value with its current local value
-/// before deleting; if the sender has observed any newer durable delta
-/// meanwhile, deletion is skipped.
+/// delta that the receiver joined into its local least upper bound. Before
+/// deleting, the sender compares the copied value with its current local value,
+/// both normalized and projected by [`Entry::retired_at`] at the sender's clock;
+/// if the sender has observed any newer durable delta meanwhile, deletion is
+/// skipped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncedEntryAck {
     /// The placement key durably persisted by the sync receiver.
     pub key: Did,
-    /// The exact value durably persisted by the sync receiver.
+    /// The copied value the sync receiver durably joined.
     pub entry: Entry,
 }
 
@@ -281,7 +282,9 @@ impl SyncedEntryAck {
     /// write: the copy was projected at an earlier clock, and projecting it again at `now_ms`
     /// yields what `local` is when nothing was written meanwhile.
     pub fn confirms_local_value(&self, local: &Entry, now_ms: u128) -> Result<bool> {
-        Ok(self.entry.clone().retired_at(now_ms)? == local.clone().retired_at(now_ms)?)
+        let copied = self.entry.clone().try_into_storage_entry()?;
+        let local = local.clone().try_into_storage_entry()?;
+        Ok(copied.retired_at(now_ms) == local.retired_at(now_ms))
     }
 }
 
@@ -537,7 +540,9 @@ impl Entry {
         EntryDot::for_index(self.crdt.legacy_floor(), index)
     }
 
-    fn topic_buffer(&self) -> Result<DataTopicBuffer> {
+    /// This entry's carrier state before normalization: every element with its dot and every
+    /// remove, each keyed by its greatest dot, and the register.
+    fn raw_buffer(&self) -> Result<DataTopicBuffer> {
         let mut values = BTreeMap::new();
         for (index, value) in self.data.iter().cloned().enumerate() {
             insert_max(&mut values, value, self.dot_for_element(index)?);
@@ -546,24 +551,40 @@ impl Entry {
         for tombstone in self.crdt.tombstones.iter() {
             insert_max(&mut removes, tombstone.element, tombstone.dot);
         }
-        Ok(DataTopicBuffer::new(self.crdt.register, values, removes))
+        Ok(DataTopicBuffer {
+            register: self.crdt.register,
+            values,
+            removes,
+        })
     }
 
+    /// This entry's normalized carrier state (see [`DataTopicBuffer::new`]).
+    fn topic_buffer(&self) -> Result<DataTopicBuffer> {
+        let DataTopicBuffer {
+            register,
+            values,
+            removes,
+        } = self.raw_buffer()?;
+        Ok(DataTopicBuffer::new(register, values, removes))
+    }
+
+    /// Materialize a normalized buffer as an entry: elements in dot order under the count cap,
+    /// removes in dot order under the kind's tombstone cap.
+    ///
+    /// Pre: `buffer` is normalized, so no element is below the register or covered by a remove,
+    /// and no digest is computed here.
     fn materialize_elements(
         did: Did,
         kind: EntryKind,
-        register: Option<EntryVersion>,
-        elements: impl IntoIterator<Item = (Encoded, EntryDot)>,
-        removes: BTreeMap<ElementDigest, EntryDot>,
+        buffer: DataTopicBuffer,
         expires_at_ms: Option<u128>,
     ) -> Self {
-        let mut visible = elements
-            .into_iter()
-            .filter(|(value, dot)| {
-                let visible_after_reset = register.is_none_or(|floor| dot.version >= floor);
-                visible_after_reset && !DataTopicBuffer::covered_by(&removes, value, *dot)
-            })
-            .collect::<Vec<_>>();
+        let DataTopicBuffer {
+            register,
+            values,
+            removes,
+        } = buffer;
+        let mut visible = values.into_iter().collect::<Vec<_>>();
         visible.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
             left_dot
                 .cmp(right_dot)
@@ -603,14 +624,7 @@ impl Entry {
         buffer: DataTopicBuffer,
         expires_at_ms: Option<u128>,
     ) -> Self {
-        Self::materialize_elements(
-            self.did,
-            self.kind,
-            buffer.register,
-            buffer.values,
-            buffer.removes,
-            expires_at_ms,
-        )
+        Self::materialize_elements(self.did, self.kind, buffer, expires_at_ms)
     }
 
     /// Merge two entries from the same replicated carrier.
@@ -620,13 +634,15 @@ impl Entry {
     /// register; relay entries are two-phase sets whose remove side is carried
     /// by tombstones. The retention bound joins by `max`, so the product of the
     /// payload lattice and the bound lattice is again a join-semilattice.
+    ///
+    /// Both sides enter the join unnormalized and the result is normalized once: normalization
+    /// only drops what the joined register and removes still drop, so this equals the join of
+    /// the normalized sides, and each payload digest is computed once.
     pub fn join(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
         let expires_at_ms = self.joined_lifetime(&other);
-        Ok(self.materialize_topic_buffer(
-            self.topic_buffer()?.join(other.topic_buffer()?),
-            expires_at_ms,
-        ))
+        Ok(self
+            .materialize_topic_buffer(self.raw_buffer()?.join(other.raw_buffer()?), expires_at_ms))
     }
 
     fn is_data_entry(&self) -> bool {

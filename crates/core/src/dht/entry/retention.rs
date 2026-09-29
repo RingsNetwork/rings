@@ -13,14 +13,17 @@
 //!   idempotent, commutative, and associative, so the product of the payload lattice and the
 //!   bound lattice is again a join-semilattice.
 //! - Removal: a tombstone leaves the carrier's bound unchanged. Retention is refreshed by what
-//!   is held (adds and overwrites), never by a removal's own bound; a data carrier drained to
-//!   tombstones stays live only until its removes are stable (see Liveness).
+//!   is held (adds and overwrites), never by a removal: once the bound elapses, a data carrier
+//!   serves no element, and only its remove side stays until it is stable (see Liveness).
 //! - Liveness: `is_live_at(now) ⟺ expires_at_ms = Some(t) ∧ (now < t ∨ now < stable(x))`,
-//!   where `stable(x) = max τ(k) + H + σ` over the removes a data carrier holds (see Element
-//!   horizon) and is absent for a relay inbox. A carrier that expired with an unstable remove
-//!   would take the remove with it before its horizon, and a replica whose carrier other writes
-//!   keep alive would then serve the removed payload back. An unstamped value is not live, so a
-//!   stored value that predates retention is retired on its next read.
+//!   where `stable(x) = max({τ(k)} ∪ {τ(register)}) + H + σ` over the removes and the register
+//!   a data carrier holds (see Element horizon), and is absent for a relay inbox. A carrier
+//!   that expired with an unstable remove would take the remove with it before its horizon, and
+//!   a replica whose carrier other writes keep alive would then serve the removed payload back;
+//!   the register counts because an overwrite drops every remove below it. Past `t`, the
+//!   projection empties the element side (`retired_at`), so a live-by-`stable` carrier serves
+//!   only its removes and register. An unstamped value is not live, so a stored value that
+//!   predates retention is retired on its next read.
 //! - Admission: a value is admissible at `now` in overlay `n` iff it is live, its bound is at
 //!   most `now + kind.max_lifetime_ms() + TS_OFFSET_TOLERANCE_MS`, every version it carries has
 //!   a logical time at most `now + TS_OFFSET_TOLERANCE_MS`, every payload is at most
@@ -47,31 +50,43 @@
 //!
 //!   retire_t(x) = x ∖ { add (v, d)        | t ≥ τ(d) + H     }
 //!                   ∖ { remove (e, r)     | t ≥ τ(r) + H + σ }
+//!                   ∖ { register F        | t ≥ τ(F) + H + σ }
+//!
+//!   retired_at(x, t) = retire_t(x)                          if t < x.expires_at_ms
+//!                      retire_t(x) with no elements         otherwise
 //! ```
 //!
-//! `retire_t` is applied at the local clock `t` on every read of a stored or cached carrier and
-//! to every value written to storage or to the fetch cache. So every data element expires
-//! individually at `τ(d) + H` unless it is written again (a re-append issues a fresh dot), even
-//! while other writes keep its carrier alive: a registry refreshes its descriptors every
-//! heartbeat, and a plain `append` publisher must refresh its values within `H`.
+//! `retired_at` is applied at the local clock `t` on every read of a stored or cached carrier
+//! and to every value written to storage or to the fetch cache. So every data element lives
+//! until the earlier of `τ(d) + H` and its carrier's retention bound, the latest bound any write
+//! it was joined with requested (a plain append requests `default_lifetime_ms`, 10 minutes).
+//! Writing it again issues a fresh dot and a fresh bound: a sole writer must rewrite a value
+//! within the default lifetime, and every writer within `H`, even while other writes keep the
+//! carrier alive. A registry refreshes its descriptors every heartbeat.
 //!
 //! Laws, for `t` any node's clock and `x, y` carriers of one data topic:
-//! - Homomorphism: `retire_t(x ⊔ y) = retire_t(x) ⊔ retire_t(y)`. Both filters are thresholds
+//! - Homomorphism: `retire_t(x ⊔ y) = retire_t(x) ⊔ retire_t(y)`. Every filter is a threshold
 //!   on `τ`, the leading component of the dot order, so each drops a down-set of dots; `max`
-//!   per payload commutes with dropping a down-set; and a dropped remove only ever covered adds
-//!   that are dropped too (`d ≤ r ⇒ τ(d) ≤ τ(r)` and `H ≤ H + σ`), so no join pairs a
-//!   surviving add with a dropped remove that covered it. Retirement therefore commutes with
-//!   every replication path, and replicas stay join-compatible.
+//!   per payload (and on the register) commutes with dropping a down-set; and a dropped remove
+//!   or register only ever covered or floored adds that are dropped too (`d ≤ r ⇒ τ(d) ≤ τ(r)`
+//!   and `H ≤ H + σ`), so no join pairs a surviving add with a dropped remove or floor that
+//!   shadowed it. Retirement therefore commutes with every replication path, and replicas stay
+//!   join-compatible. The bound-elapsed step of `retired_at` is carrier-level, like deleting an
+//!   expired carrier, and is not a homomorphism; it only narrows that deletion.
 //! - Composition: `retire_t ∘ retire_s = retire_max(s, t)`; in particular `retire_t` is
 //!   idempotent.
 //! - No loss: no live add is lost. An add leaves a carrier only by a remove covering it, a user
-//!   `Overwrite` register above it, the `max_data_len` cap, or its own horizon:
+//!   `Overwrite` register above it, the `max_data_len` cap, its own horizon, its carrier's
+//!   retention bound, or storage byte-budget eviction of the whole carrier:
 //!   `∀ a. t < τ(a) + H ∧ ¬covered(a) ∧ a ∈ ⋃ᵢ xᵢ ⇒ a ∈ retire_t(⨆ᵢ xᵢ)`, cap aside.
-//! - No resurrection: a remove `(e, r)` is dropped, by this projection or with its carrier (which
-//!   stays live while it holds the remove, see Liveness), only at a clock `t_p ≥ τ(r) + H + σ`.
-//!   Every clock then reads `t_q ≥ t_p − σ ≥ τ(r) + H ≥ τ(d) + H` for every add `d ≤ r` it
-//!   covered, including the dropping node's own clock should it step back by up to `σ`, so every
-//!   carrier has already retired those adds and none can serve them back.
+//! - No resurrection: a remove `(e, r)` or a register is dropped, by this projection, by an
+//!   overwrite above it (whose register then holds the carrier at least as long), or with its
+//!   carrier (which stays live while it holds either, see Liveness), only at a clock
+//!   `t_p ≥ τ(r) + H + σ`. Every clock then reads `t_q ≥ t_p − σ ≥ τ(r) + H ≥ τ(d) + H` for every
+//!   add `d ≤ r` it shadowed, including the dropping node's own clock should it step back by up
+//!   to `σ`, so every carrier has already retired those adds and none can serve them back. This
+//!   holds barring storage byte-budget eviction, which drops a carrier whatever it holds (see
+//!   SECURITY.md).
 //! - Bound: a data carrier holds at most `max_data_len` elements, and at most one remove per
 //!   payload removed within the last `H + σ`. This is a rate bound, not a count cap: a cap
 //!   would drop a remove whose adds are still inside their horizon somewhere.
@@ -86,11 +101,12 @@
 //! the sizes of payloads a replica may already have dropped, so it is not a lattice morphism
 //! and replicas would diverge.
 
-use super::DataTopicBuffer;
 use super::Entry;
+use super::EntryCrdt;
 use super::EntryDot;
 use super::EntryKind;
 use super::EntryOperation;
+use super::EntryVersion;
 use crate::consts::DEFAULT_RELAY_INBOX_TTL_MS;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::ENTRY_PAYLOAD_MAX_BYTES;
@@ -132,43 +148,55 @@ impl EntryKind {
     }
 }
 
-/// The clock thresholds of `retire_t` for one horizon `H`.
-#[derive(Clone, Copy, Debug)]
-struct RetirementHorizon {
-    /// `H` in milliseconds.
-    horizon_ms: u128,
+/// The retention law of a kind with an element horizon: when an add retires, when a remove (and
+/// the register) retires, and what holds an expired carrier live.
+///
+/// The production law is [`ElementRetention::of`]; the fields are crate-visible so a model can
+/// check a deliberately broken law and witness that it fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ElementRetention {
+    /// `H`: an add retires at `τ(d) + H`.
+    pub(crate) add_horizon_ms: u128,
+    /// `H + σ`: a remove, and the register, retire at `τ + H + σ`.
+    pub(crate) remove_horizon_ms: u128,
+    /// Whether an unstable remove keeps a carrier live past its retention bound.
+    pub(crate) removes_hold_carrier: bool,
+    /// Whether an unstable register keeps a carrier live past its retention bound.
+    pub(crate) register_holds_carrier: bool,
 }
 
-impl RetirementHorizon {
+impl ElementRetention {
+    /// The production law of `kind`, or `None` for a kind without an element horizon.
+    pub(crate) fn of(kind: EntryKind) -> Option<Self> {
+        let horizon_ms = u128::from(kind.element_horizon_ms()?);
+        Some(Self {
+            add_horizon_ms: horizon_ms,
+            remove_horizon_ms: horizon_ms.saturating_add(TS_OFFSET_TOLERANCE_MS),
+            removes_hold_carrier: true,
+            register_holds_carrier: true,
+        })
+    }
+
     /// Whether the add `dot` is past the horizon at `now_ms`: `t ≥ τ(d) + H`.
     fn retires_add(self, dot: &EntryDot, now_ms: u128) -> bool {
-        now_ms >= dot.version.logical_time_ms.saturating_add(self.horizon_ms)
+        now_ms
+            >= dot
+                .version
+                .logical_time_ms
+                .saturating_add(self.add_horizon_ms)
     }
 
-    /// The instant the remove at `dot` becomes stable, i.e. every add it covers is retired on
-    /// every clock within the skew tolerance: `τ(r) + H + σ`.
-    fn remove_stable_at(self, dot: &EntryDot) -> u128 {
-        dot.version
+    /// The instant a remove or register at `version` becomes stable, i.e. every add it covers
+    /// or floors is retired on every clock within the skew tolerance: `τ + H + σ`.
+    fn stable_at(self, version: &EntryVersion) -> u128 {
+        version
             .logical_time_ms
-            .saturating_add(self.horizon_ms)
-            .saturating_add(TS_OFFSET_TOLERANCE_MS)
+            .saturating_add(self.remove_horizon_ms)
     }
 
-    /// Whether the remove at `dot` is stable at `now_ms`: `t ≥ τ(r) + H + σ`.
-    fn retires_remove(self, dot: &EntryDot, now_ms: u128) -> bool {
-        now_ms >= self.remove_stable_at(dot)
-    }
-
-    /// `retire_t` on a normalized buffer at the clock `now_ms`.
-    fn retire(self, buffer: DataTopicBuffer, now_ms: u128) -> DataTopicBuffer {
-        let DataTopicBuffer {
-            register,
-            mut values,
-            mut removes,
-        } = buffer;
-        values.retain(|_, dot| !self.retires_add(dot, now_ms));
-        removes.retain(|_, dot| !self.retires_remove(dot, now_ms));
-        DataTopicBuffer::new(register, values, removes)
+    /// Whether a remove or register at `version` is stable at `now_ms`: `t ≥ τ + H + σ`.
+    fn retires_remove(self, version: &EntryVersion, now_ms: u128) -> bool {
+        now_ms >= self.stable_at(version)
     }
 }
 
@@ -192,49 +220,130 @@ impl Entry {
         self.expires_at_ms.max(other.expires_at_ms)
     }
 
-    /// The element-horizon projection `retire_t` at the local clock `now_ms`, normalized for
-    /// storage (see the module documentation).
+    /// The element-horizon projection at the local clock `now_ms` (see the module
+    /// documentation): `retire_t`, then, once the retention bound has elapsed, the carrier's
+    /// elements dropped so that only its remove side outlives the bound.
     ///
-    /// Post: the result is [`Self::try_into_storage_entry`] of `self` without every add past
-    /// its horizon and every stable remove; for a kind without a horizon it is exactly
-    /// [`Self::try_into_storage_entry`]. The register and the retention bound are unchanged.
-    pub fn retired_at(self, now_ms: u128) -> Result<Self> {
-        let buffer = self.topic_buffer()?;
-        let buffer = match self.kind.element_horizon_ms() {
-            Some(horizon_ms) => RetirementHorizon {
-                horizon_ms: u128::from(horizon_ms),
-            }
-            .retire(buffer, now_ms),
-            None => buffer,
+    /// Pre: `self` is normalized for storage ([`Self::try_into_storage_entry`]), as every stored
+    /// value, join result, and operation result is.
+    /// Post: normalized; identity for a kind without a horizon, and identity, without copying or
+    /// hashing, when nothing has crossed a threshold. The retention bound is unchanged.
+    pub fn retired_at(self, now_ms: u128) -> Self {
+        let retention = ElementRetention::of(self.kind);
+        self.retired_under(retention, now_ms)
+    }
+
+    /// [`Self::retired_at`] under the retention law `retention`.
+    pub(super) fn retired_under(self, retention: Option<ElementRetention>, now_ms: u128) -> Self {
+        let Some(retention) = retention else {
+            return self;
         };
-        Ok(self.materialize_topic_buffer(buffer, self.expires_at_ms))
+        let bound_elapsed = !self.bound_live_at(now_ms);
+        let entry = self.horizon_retired_under(retention, now_ms);
+        match bound_elapsed && !entry.data.is_empty() {
+            true => Self {
+                data: Vec::new(),
+                crdt: EntryCrdt {
+                    dots: Vec::new(),
+                    ..entry.crdt
+                },
+                ..entry
+            },
+            false => entry,
+        }
+    }
+
+    /// `retire_t` alone under `retention`: every add past `τ + H` and every remove and register
+    /// past `τ + H + σ` is dropped. This is the join homomorphism of the module documentation;
+    /// the bound-elapsed projection of [`Self::retired_at`] is not.
+    ///
+    /// Pre: `self` is normalized. Retiring a remove or the register never uncovers an element,
+    /// since every element either covered is retired first, so the filters need no
+    /// renormalization and compute no digest.
+    pub(super) fn horizon_retired_under(self, retention: ElementRetention, now_ms: u128) -> Self {
+        let retires_add = |dot: &EntryDot| retention.retires_add(dot, now_ms);
+        let retires_remove = |version: &EntryVersion| retention.retires_remove(version, now_ms);
+        let crossed = self.crdt.dots.iter().any(retires_add)
+            || self
+                .crdt
+                .tombstones
+                .iter()
+                .any(|tombstone| retires_remove(&tombstone.dot.version))
+            || self.crdt.register.as_ref().is_some_and(retires_remove);
+        if !crossed {
+            return self;
+        }
+        let (data, dots) = self
+            .data
+            .into_iter()
+            .zip(self.crdt.dots)
+            .filter(|(_, dot)| !retires_add(dot))
+            .unzip();
+        Self {
+            data,
+            crdt: EntryCrdt {
+                register: self
+                    .crdt
+                    .register
+                    .filter(|version| !retires_remove(version)),
+                dots,
+                tombstones: self
+                    .crdt
+                    .tombstones
+                    .into_iter()
+                    .filter(|tombstone| !retires_remove(&tombstone.dot.version))
+                    .collect(),
+            },
+            ..self
+        }
+    }
+
+    /// Whether the retention bound itself has not elapsed at `now_ms`.
+    fn bound_live_at(&self, now_ms: u128) -> bool {
+        self.expires_at_ms
+            .is_some_and(|expires_at_ms| now_ms < expires_at_ms)
     }
 
     /// Whether this entry may still be served or replicated at `now_ms`: its retention bound
-    /// has not elapsed, or it still holds a remove that is not yet stable (see the module
-    /// documentation).
+    /// has not elapsed, or it still holds a remove or register that is not yet stable (see the
+    /// module documentation).
     ///
     /// Post: `false` for an unstamped entry, so a legacy stored value without a bound is
     /// retired on its next read.
     pub fn is_live_at(&self, now_ms: u128) -> bool {
-        self.expires_at_ms.is_some_and(|expires_at_ms| {
-            now_ms < expires_at_ms
-                || self
-                    .removes_stable_at()
-                    .is_some_and(|stable_at_ms| now_ms < stable_at_ms)
-        })
+        self.is_live_under(ElementRetention::of(self.kind), now_ms)
     }
 
-    /// The instant every remove this entry holds is stable, `max τ(k) + H + σ`, or `None` for a
-    /// kind without an element horizon or an entry that holds no remove.
-    fn removes_stable_at(&self) -> Option<u128> {
-        let horizon = RetirementHorizon {
-            horizon_ms: u128::from(self.kind.element_horizon_ms()?),
-        };
-        self.crdt
+    /// [`Self::is_live_at`] under the retention law `retention`.
+    pub(super) fn is_live_under(&self, retention: Option<ElementRetention>, now_ms: u128) -> bool {
+        self.expires_at_ms.is_some()
+            && (self.bound_live_at(now_ms)
+                || retention
+                    .and_then(|retention| self.removes_stable_under(retention))
+                    .is_some_and(|stable_at_ms| now_ms < stable_at_ms))
+    }
+
+    /// The instant every remove and the register this entry holds are stable,
+    /// `max({τ(k)} ∪ {τ(register)}) + H + σ`, or `None` when it holds neither (or when
+    /// `retention` lets nothing hold the carrier).
+    ///
+    /// The register counts because an overwrite drops every remove below it: were it not to
+    /// hold the carrier, an overwrite would collapse an unstable remove into a carrier that
+    /// expires at its own bound, and a stale replica could serve the removed payload back.
+    fn removes_stable_under(&self, retention: ElementRetention) -> Option<u128> {
+        let removes = self
+            .crdt
             .tombstones
             .iter()
-            .map(|tombstone| horizon.remove_stable_at(&tombstone.dot))
+            .map(|tombstone| tombstone.dot.version)
+            .filter(|_| retention.removes_hold_carrier);
+        let register = self
+            .crdt
+            .register
+            .filter(|_| retention.register_holds_carrier);
+        removes
+            .chain(register)
+            .map(|version| retention.stable_at(&version))
             .max()
     }
 
