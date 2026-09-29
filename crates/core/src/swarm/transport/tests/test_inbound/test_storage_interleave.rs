@@ -134,7 +134,7 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
         delegatee_key: local_session,
         dht,
         measure: Some(Arc::new(RecordingMeasure::default())),
-        transaction_replay: crate::message::TransactionReplay::new(Box::new(
+        transaction_replay: crate::message::TransactionReplay::new_shared(Box::new(
             crate::storage::MemStorage::new(),
         )),
         settings: SwarmTransportSettings::new(

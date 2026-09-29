@@ -1,6 +1,6 @@
 //! Handing work to the executor.
 //!
-//! Two contracts, deliberately kept apart:
+//! Three contracts, deliberately kept apart:
 //!
 //! ```text
 //!   spawn_detached : F → Result<(), Unscheduled F>        fire and forget
@@ -9,11 +9,10 @@
 //! ```
 //!
 //! All three hand ownership of the work to the executor at the call, not at a later poll:
-//! cancelling the caller (dropping the future that awaits [`run_detached`]) never cancels
-//! the work. Neither returns a handle that aborts the work — work whose lifetime the caller
-//! must own is not *detached*, and a caller that needs it keeps its own abort handle
-//! (native-only modules do so with Tokio's `JoinHandle`) instead of reaching for this
-//! boundary.
+//! cancelling the caller (dropping the future that awaits [`run_detached`] or `run_blocking`)
+//! never cancels the work. None returns a handle that aborts the work — work whose lifetime the
+//! caller must own is not *detached*, and a caller that needs it keeps its own abort handle
+//! (native-only modules do so with Tokio's `JoinHandle`) instead of reaching for this boundary.
 //!
 //! Scheduling is fallible. Native code needs a current Tokio runtime; the browser event loop
 //! is always current. A missing runtime is reported *before* anything starts:
@@ -21,7 +20,12 @@
 //! * [`Spawner::current`] fails with [`RuntimeUnavailable`], so a caller that claims a
 //!   resource for the task acquires the spawner first and then spawns infallibly;
 //! * [`spawn_detached`] hands the unpolled future back in [`Unscheduled`], so a caller whose
-//!   task must not be lost can run it inline instead.
+//!   task must not be lost can run it inline instead;
+//! * [`run_detached`] and `run_blocking` (native only: the browser has no blocking pool) yield
+//!   [`DetachedError::Unavailable`] at once, and their work never starts.
+//!
+//! Work that starts but publishes nothing (it panicked, or its runtime shut down first) is
+//! reported as [`Abandoned`].
 
 use std::fmt;
 use std::future::Future;
@@ -58,7 +62,7 @@ impl<F> fmt::Debug for Unscheduled<F> {
 #[error("detached task ended before publishing its result")]
 pub struct Abandoned;
 
-/// Why [`run_detached`] produced no output.
+/// Why [`run_detached`] or `run_blocking` produced no output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DetachedError {
     /// No executor was current, so the work never started.
@@ -173,9 +177,11 @@ where
 /// Start the blocking `operation` on the current executor's blocking thread pool now and return
 /// a future of its output (native only: the browser event loop has no blocking pool).
 ///
-/// Post: the returned future yields `Unavailable` at once when no executor is current, and
-/// `Abandoned` when `operation` panicked; otherwise the ownership law of [`run_detached`] holds:
-/// dropping the returned future abandons only the wait, and `operation` still runs to its end.
+/// Post: the returned future yields `Unavailable` at once when no executor is current (nothing
+/// runs), and `Abandoned` when `operation` panicked or the runtime shut down before its blocking
+/// task started (then `operation` never runs; see [`Abandoned`]). Otherwise the ownership law of
+/// [`run_detached`] holds: dropping the returned future abandons only the wait, and `operation`
+/// still runs to its end.
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 pub fn run_blocking<F, T>(
     operation: F,

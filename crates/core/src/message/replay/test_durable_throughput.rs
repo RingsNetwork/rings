@@ -1,4 +1,4 @@
-//! Measured ceiling of replay transitions on a flushed native store (#909 review, M1).
+//! Measured ceiling of replay transitions on a flushed native store (#909, #916).
 //!
 //! Every reservation and admission writes its stream's record under the global replay lock,
 //! and an authoritative store flushes the file and the directory before the write returns, so
@@ -26,10 +26,11 @@ use crate::storage::MemStorage;
 /// Admissions measured per store.
 const ADMISSIONS: u32 = 512;
 
-/// Admit the first transaction of `ADMISSIONS` streams, one per origin so that no origin quota
-/// binds, and return each admission's latency, sorted. Each admission writes one record.
+/// Admit the first transaction of `ADMISSIONS` streams through the production path (detached,
+/// quota-charged), one per origin so that no origin quota binds, and return each admission's
+/// latency, sorted. Each admission writes one record.
 async fn admission_latencies(storage: ReplayStorage) -> Result<Vec<Duration>> {
-    let replay = TransactionReplay::new(storage);
+    let replay = TransactionReplay::new_shared(storage);
     let mut latencies = Vec::new();
     for origin in 0..ADMISSIONS {
         let key = StreamKey::new(
@@ -40,7 +41,9 @@ async fn admission_latencies(storage: ReplayStorage) -> Result<Vec<Duration>> {
         );
         let digest = TransactionDigest::new([u8::try_from(origin % 251).unwrap_or(0); 32]);
         let started = Instant::now();
-        replay.admit(key, 0, digest).await?;
+        replay
+            .admit_with_quota(key, 0, digest, MessageCategory::Application.into(), 0)
+            .await?;
         latencies.push(started.elapsed());
     }
     latencies.sort();

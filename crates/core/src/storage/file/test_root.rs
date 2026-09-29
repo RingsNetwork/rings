@@ -19,18 +19,21 @@ impl TempRoot {
 impl Deref for TempRoot {
     type Target = Path;
 
+    /// The root's path.
     fn deref(&self) -> &Path {
         self.0.as_path()
     }
 }
 
 impl AsRef<Path> for TempRoot {
+    /// The root's path.
     fn as_ref(&self) -> &Path {
         self.0.as_path()
     }
 }
 
 impl Drop for TempRoot {
+    /// Remove the root and its contents, ignoring an error.
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }

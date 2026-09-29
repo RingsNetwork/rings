@@ -46,7 +46,7 @@
 //! the storage holds: a record that is absent (deleted, or never made durable, as a rename can
 //! be on a non-unix target) is indistinguishable from a stream never seen, and its stream
 //! restarts from `First` (tracked in #915). Each record write of the native store is flushed,
-//! which bounds the node-wide transition rate (about 55 per second on macOS, see the replay
+//! which bounds the node-wide transition rate (about 50 per second on macOS, see the replay
 //! chapter; group commit is tracked in #916). The unrestorable records are counted
 //! ([`ReplayCounters::unrestorable_record`]), each refusal is counted
 //! ([`ReplayCounters::unavailable_stream`]), and each unrestorable record is logged once at
@@ -419,6 +419,13 @@ impl ReplayCounterState {
 /// a table without that write, and the stale write could land last on disk: a receiver replay,
 /// or re-signed sender sequences, after a restart.
 ///
+/// A cancelled caller's transition therefore commits, exactly as if the caller had dropped the
+/// verdict: an admission enters the window and is charged its quota, though nobody dispatches
+/// it, so a retransmission of that transaction is a `Replay` and the message is lost (as for
+/// any drop after admission); a reservation consumes its sequences, which leaves a gap the
+/// receiver accepts as `Advance`. Cancellation also no longer sheds a queued transition: each
+/// cancelled attempt still waits its turn and pays its flushed write.
+///
 /// ```text
 /// caller ──call──▶ run_detached ─▶ [lock ─▶ persist ─▶ table := next ─▶ unlock]
 ///   │ drop                                   (owned by the runtime, never torn)
@@ -443,7 +450,7 @@ impl TransactionReplay {
     /// Construct a shared replay runtime, as the transport holds it. The store is restored
     /// lazily on its first operation.
     #[cfg(test)]
-    pub(crate) fn new(storage: ReplayStorage) -> Arc<Self> {
+    pub(crate) fn new_shared(storage: ReplayStorage) -> Arc<Self> {
         Arc::new(Self::new_with_quota(storage, OriginQuotaConfig::default()))
     }
 
@@ -765,11 +772,13 @@ mod tests {
     use super::store::record_key;
     #[cfg(not(target_family = "wasm"))]
     use super::store::ReplayTable;
+    #[cfg(not(target_family = "wasm"))]
+    use super::test_storage::Hooked;
+    #[cfg(not(target_family = "wasm"))]
+    use super::test_storage::StorageHooks;
     use super::*;
     use crate::ecc::SecretKey;
     use crate::storage::KvStorageInterface;
-    #[cfg(not(target_family = "wasm"))]
-    use crate::storage::ScannedRecord;
 
     fn digest(value: u8) -> TransactionDigest {
         TransactionDigest::new([value; 32])
@@ -1008,7 +1017,7 @@ mod tests {
         let origin: Did = SecretKey::random().address().into();
         let a: Did = SecretKey::random().address().into();
         let b: Did = SecretKey::random().address().into();
-        let runtime = TransactionReplay::new(Box::new(crate::storage::MemStorage::new()));
+        let runtime = TransactionReplay::new_shared(Box::new(crate::storage::MemStorage::new()));
         let key_a = StreamKey::new(1, origin, a, MessageCategory::Application);
         let key_b = StreamKey::new(1, origin, b, MessageCategory::Application);
 
@@ -1024,7 +1033,7 @@ mod tests {
         let destination: Did = SecretKey::random().address().into();
         let key = stream(destination);
         let storage = std::sync::Arc::new(crate::storage::MemStorage::new());
-        let first_runtime = TransactionReplay::new(Box::new(storage.clone()));
+        let first_runtime = TransactionReplay::new_shared(Box::new(storage.clone()));
         assert_eq!(first_runtime.reserve(key, NonZeroU64::MIN).await?, 0..=0);
         assert_eq!(
             first_runtime.admit(key, 0, digest(1)).await?,
@@ -1032,7 +1041,7 @@ mod tests {
         );
         drop(first_runtime);
 
-        let restarted = TransactionReplay::new(Box::new(storage));
+        let restarted = TransactionReplay::new_shared(Box::new(storage));
         assert_eq!(restarted.reserve(key, NonZeroU64::MIN).await?, 1..=1);
         assert!(matches!(
             restarted.admit(key, 0, digest(1)).await,
@@ -1048,7 +1057,7 @@ mod tests {
         let storage = crate::storage::MemStorage::new();
         let (storage_key, record) = sender_record(&key, u64::MAX)?;
         storage.put(storage_key.as_str(), &record).await?;
-        let runtime = TransactionReplay::new(Box::new(storage));
+        let runtime = TransactionReplay::new_shared(Box::new(storage));
         assert!(matches!(
             runtime.reserve(key, NonZeroU64::MIN).await,
             Err(Error::TransactionSequenceExhausted { .. })
@@ -1059,7 +1068,7 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn load_failure_fails_closed_and_is_counted() {
-        let runtime = TransactionReplay::new(Box::new(FailingStorage));
+        let runtime = TransactionReplay::new_shared(Box::new(Hooked::new(Unavailable)));
         let key = stream(SecretKey::random().address().into());
 
         assert!(matches!(
@@ -1075,7 +1084,7 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn store_failure_fails_closed_before_admission_and_is_counted() {
-        let runtime = TransactionReplay::new(Box::new(StoreFailingStorage));
+        let runtime = TransactionReplay::new_shared(Box::new(Hooked::new(WritesRefused)));
         let key = stream(SecretKey::random().address().into());
 
         assert!(matches!(
@@ -1102,7 +1111,7 @@ mod tests {
     async fn new_sender_stream_fails_closed_at_the_table_bound() -> Result<()> {
         let pairs = u32::try_from(TRANSACTION_REPLAY_PAIR_CAPACITY)
             .map_err(|_| Error::TransactionReplayStateInvalid)?;
-        let runtime = TransactionReplay::new(Box::new(crate::storage::MemStorage::new()));
+        let runtime = TransactionReplay::new_shared(Box::new(crate::storage::MemStorage::new()));
         let destination = Did::from(u32::MAX);
         {
             let mut state = runtime.state.lock().await;
@@ -1144,7 +1153,7 @@ mod tests {
         let origin: Did = SecretKey::random().address().into();
         let destination: Did = SecretKey::random().address().into();
         let key = StreamKey::new(7, origin, destination, MessageCategory::Application);
-        let first = TransactionReplay::new(Box::new(storage));
+        let first = TransactionReplay::new_shared(Box::new(storage));
 
         assert_eq!(
             first
@@ -1165,7 +1174,7 @@ mod tests {
         let reopened = crate::storage::idb::IdbStorage::new_with_cap_and_name(2, STORAGE_NAME)
             .await
             .expect("IndexedDB reopens");
-        let restarted = TransactionReplay::new(Box::new(reopened));
+        let restarted = TransactionReplay::new_shared(Box::new(reopened));
         assert_eq!(
             restarted
                 .reserve(key, NonZeroU64::MIN)
@@ -1199,7 +1208,7 @@ mod tests {
             .put(corrupt_key.as_str(), &42_u32)
             .await
             .expect("foreign row stores");
-        let replay = TransactionReplay::new(Box::new(storage));
+        let replay = TransactionReplay::new_shared(Box::new(storage));
 
         assert!(matches!(
             replay.admit(corrupt, 0, digest(1)).await,
@@ -1223,7 +1232,7 @@ mod tests {
         )
         .await
         .expect("the operator removes the row");
-        let restarted = TransactionReplay::new(Box::new(reopened));
+        let restarted = TransactionReplay::new_shared(Box::new(reopened));
         assert_eq!(
             restarted
                 .admit(corrupt, 0, digest(1))
@@ -1237,100 +1246,47 @@ mod tests {
         ));
     }
 
+    /// Hooks of a store that cannot be read or written: it models a store that cannot load.
     #[cfg(not(target_family = "wasm"))]
-    struct FailingStorage;
+    struct Unavailable;
 
     #[cfg(not(target_family = "wasm"))]
     #[async_trait::async_trait]
-    impl KvStorageInterface<ReplayRecord> for FailingStorage {
-        async fn get(&self, _key: &str) -> Result<Option<ReplayRecord>> {
+    impl StorageHooks for Unavailable {
+        /// Runs before a `get`.
+        async fn before_get(&self, _key: &str) -> Result<()> {
             Err(Error::InvalidTransport)
         }
 
-        async fn put(&self, _key: &str, _value: &ReplayRecord) -> Result<()> {
+        /// Runs before a `put`.
+        async fn before_put(&self) -> Result<()> {
             Err(Error::InvalidTransport)
         }
 
-        async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-            Err(Error::InvalidTransport)
-        }
-
-        // Only reads fail: this storage models a store that cannot be loaded.
-        async fn remove(&self, _key: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn clear(&self) -> Result<()> {
-            Err(Error::InvalidTransport)
-        }
-
-        async fn count(&self) -> Result<u32> {
+        /// Runs before a whole-store read.
+        async fn before_scan(&self) -> Result<()> {
             Err(Error::InvalidTransport)
         }
     }
 
+    /// Hooks of a store that loads but refuses every write.
+    #[cfg(not(target_family = "wasm"))]
+    struct WritesRefused;
+
     #[cfg(not(target_family = "wasm"))]
     #[async_trait::async_trait]
-    impl KvStorageScan<ReplayRecord> for FailingStorage {
-        async fn scan(&self) -> Result<Vec<ScannedRecord<ReplayRecord>>> {
+    impl StorageHooks for WritesRefused {
+        /// Runs before a `put`.
+        async fn before_put(&self) -> Result<()> {
             Err(Error::InvalidTransport)
         }
-
-        fn record_name(&self, key: &str) -> String {
-            key.to_owned()
-        }
     }
 
+    /// Hooks of a store that still holds a shared-stream snapshot under the key used before
+    /// #898. The snapshot's bytes decode as no stream, so a passing test proves the cutover
+    /// never decodes it, and reading the key alone is an error.
     #[cfg(not(target_family = "wasm"))]
-    struct StoreFailingStorage;
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl KvStorageInterface<ReplayRecord> for StoreFailingStorage {
-        async fn get(&self, _key: &str) -> Result<Option<ReplayRecord>> {
-            Ok(None)
-        }
-
-        async fn put(&self, _key: &str, _value: &ReplayRecord) -> Result<()> {
-            Err(Error::InvalidTransport)
-        }
-
-        async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-            Ok(Vec::new())
-        }
-
-        async fn remove(&self, _key: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn clear(&self) -> Result<()> {
-            Ok(())
-        }
-
-        async fn count(&self) -> Result<u32> {
-            Ok(0)
-        }
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl KvStorageScan<ReplayRecord> for StoreFailingStorage {
-        async fn scan(&self) -> Result<Vec<ScannedRecord<ReplayRecord>>> {
-            Ok(Vec::new())
-        }
-
-        fn record_name(&self, key: &str) -> String {
-            key.to_owned()
-        }
-    }
-
-    /// A store that still holds a shared-stream snapshot under the key used before #898. The
-    /// snapshot's bytes decode as no stream, so a passing test proves the cutover never decodes
-    /// it, and reading the key alone is an error.
-    #[cfg(not(target_family = "wasm"))]
-    struct CutoverStorage {
-        /// The stored records.
-        inner: crate::storage::MemStorage<ReplayRecord>,
+    struct Cutover {
         /// Whether removing a record fails.
         fail_remove: bool,
         /// Removals attempted.
@@ -1338,66 +1294,41 @@ mod tests {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    impl CutoverStorage {
-        /// A store holding a snapshot under the shared-stream key.
-        async fn holding_a_shared_stream_snapshot(fail_remove: bool) -> Result<Self> {
-            let inner = crate::storage::MemStorage::new();
-            inner
-                .put(SHARED_STREAM_SNAPSHOT_KEY, &ReplayRecord(vec![0xff; 3]))
-                .await?;
-            Ok(Self {
-                inner,
-                fail_remove,
-                removals: std::sync::atomic::AtomicUsize::new(0),
-            })
-        }
-    }
-
-    #[cfg(not(target_family = "wasm"))]
     #[async_trait::async_trait]
-    impl KvStorageInterface<ReplayRecord> for CutoverStorage {
-        async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
-            if key == SHARED_STREAM_SNAPSHOT_KEY {
-                return Err(Error::InvalidTransport);
+    impl StorageHooks for Cutover {
+        /// Runs before a `get`.
+        async fn before_get(&self, key: &str) -> Result<()> {
+            match key == SHARED_STREAM_SNAPSHOT_KEY {
+                true => Err(Error::InvalidTransport),
+                false => Ok(()),
             }
-            self.inner.get(key).await
         }
 
-        async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
-            self.inner.put(key, value).await
-        }
-
-        async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-            self.inner.get_all().await
-        }
-
-        async fn remove(&self, key: &str) -> Result<()> {
+        /// Runs before a `remove`.
+        async fn before_remove(&self) -> Result<()> {
             self.removals.fetch_add(1, Ordering::SeqCst);
-            if self.fail_remove {
-                return Err(Error::InvalidTransport);
+            match self.fail_remove {
+                true => Err(Error::InvalidTransport),
+                false => Ok(()),
             }
-            self.inner.remove(key).await
-        }
-
-        async fn clear(&self) -> Result<()> {
-            self.inner.clear().await
-        }
-
-        async fn count(&self) -> Result<u32> {
-            self.inner.count().await
         }
     }
 
+    /// A store holding a snapshot under the shared-stream key, whose removals fail iff
+    /// `fail_remove`.
     #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl KvStorageScan<ReplayRecord> for CutoverStorage {
-        async fn scan(&self) -> Result<Vec<ScannedRecord<ReplayRecord>>> {
-            self.inner.scan().await
-        }
-
-        fn record_name(&self, key: &str) -> String {
-            self.inner.record_name(key)
-        }
+    async fn holding_a_shared_stream_snapshot(
+        fail_remove: bool,
+    ) -> Result<std::sync::Arc<Hooked<Cutover>>> {
+        let storage = Hooked::new(Cutover {
+            fail_remove,
+            removals: std::sync::atomic::AtomicUsize::new(0),
+        });
+        storage
+            .inner
+            .put(SHARED_STREAM_SNAPSHOT_KEY, &ReplayRecord(vec![0xff; 3]))
+            .await?;
+        Ok(std::sync::Arc::new(storage))
     }
 
     /// Cutover of #898: the first load deletes the shared-stream snapshot without decoding it,
@@ -1406,9 +1337,8 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn test_first_load_deletes_the_shared_stream_snapshot_unread() -> Result<()> {
-        let storage =
-            std::sync::Arc::new(CutoverStorage::holding_a_shared_stream_snapshot(false).await?);
-        let runtime = TransactionReplay::new(Box::new(storage.clone()));
+        let storage = holding_a_shared_stream_snapshot(false).await?;
+        let runtime = TransactionReplay::new_shared(Box::new(storage.clone()));
         let key = stream(SecretKey::random().address().into());
 
         assert_eq!(
@@ -1427,12 +1357,12 @@ mod tests {
             .is_some());
         assert_eq!(runtime.counters().persistence_failure, 0);
 
-        let restarted = TransactionReplay::new(Box::new(storage.clone()));
+        let restarted = TransactionReplay::new_shared(Box::new(storage.clone()));
         assert_eq!(
             restarted.admit(key, 1, digest(2)).await?,
             SequenceVerdict::Advance
         );
-        assert_eq!(storage.removals.load(Ordering::SeqCst), 1);
+        assert_eq!(storage.hooks.removals.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
@@ -1441,9 +1371,8 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn test_failed_shared_stream_deletion_is_counted_and_admission_continues() -> Result<()> {
-        let storage =
-            std::sync::Arc::new(CutoverStorage::holding_a_shared_stream_snapshot(true).await?);
-        let runtime = TransactionReplay::new(Box::new(storage.clone()));
+        let storage = holding_a_shared_stream_snapshot(true).await?;
+        let runtime = TransactionReplay::new_shared(Box::new(storage.clone()));
         let key = stream(SecretKey::random().address().into());
 
         assert_eq!(
@@ -1457,13 +1386,13 @@ mod tests {
             .await?
             .is_some());
 
-        let restarted = TransactionReplay::new(Box::new(storage.clone()));
+        let restarted = TransactionReplay::new_shared(Box::new(storage.clone()));
         assert_eq!(
             restarted.admit(key, 1, digest(2)).await?,
             SequenceVerdict::Advance
         );
         assert_eq!(restarted.counters().persistence_failure, 1);
-        assert_eq!(storage.removals.load(Ordering::SeqCst), 2);
+        assert_eq!(storage.hooks.removals.load(Ordering::SeqCst), 2);
         Ok(())
     }
 }
@@ -1472,6 +1401,8 @@ mod tests {
 mod quota_admission_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_durable_throughput;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_storage;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_stream_failures;
 #[cfg(all(test, not(target_family = "wasm")))]

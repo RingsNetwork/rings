@@ -11,6 +11,8 @@ use super::store::receiver_record;
 use super::store::record_key;
 use super::store::sender_record;
 use super::store::ReplayTable;
+use super::test_storage::Hooked;
+use super::test_storage::StorageHooks;
 use super::ReplayRecord;
 use super::SequenceVerdict;
 use super::StreamKey;
@@ -24,8 +26,6 @@ use crate::storage::file::test_root::TempRoot;
 use crate::storage::file::FileStorage;
 use crate::storage::KvStorageInterface;
 use crate::storage::KvStorageScan;
-use crate::storage::MemStorage;
-use crate::storage::ScannedRecord;
 
 /// The digest of the transaction a test admits, one per `value`.
 fn digest(value: u8) -> TransactionDigest {
@@ -42,78 +42,43 @@ fn stream(origin: u32) -> StreamKey {
     )
 }
 
-/// A memory store shared across runtime restarts that counts the reads a load makes.
-struct CountingStorage {
-    /// The stored records.
-    inner: MemStorage<ReplayRecord>,
-    /// Whole-store reads (`scan` and `get_all`) made so far.
-    scans: AtomicUsize,
+/// Hooks that count the whole-store reads a load makes.
+#[derive(Default)]
+struct ScanCounter(AtomicUsize);
+
+#[async_trait::async_trait]
+impl StorageHooks for ScanCounter {
+    /// Runs before a whole-store read.
+    async fn before_scan(&self) -> Result<()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
+
+/// A memory store, shared across runtime restarts, that counts the whole-store reads.
+type CountingStorage = Hooked<ScanCounter>;
 
 impl CountingStorage {
-    /// An empty store.
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            inner: MemStorage::new(),
-            scans: AtomicUsize::new(0),
-        })
+    /// An empty counting store.
+    fn counting() -> Arc<Self> {
+        Arc::new(Hooked::new(ScanCounter::default()))
     }
 
-    /// Whole-store reads made so far.
+    /// Whole-store reads (`scan` and `get_all`) made so far.
     fn scans(&self) -> usize {
-        self.scans.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait::async_trait]
-impl KvStorageInterface<ReplayRecord> for CountingStorage {
-    async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
-        self.inner.get(key).await
-    }
-
-    async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
-        self.inner.put(key, value).await
-    }
-
-    async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-        self.scans.fetch_add(1, Ordering::SeqCst);
-        self.inner.get_all().await
-    }
-
-    async fn remove(&self, key: &str) -> Result<()> {
-        self.inner.remove(key).await
-    }
-
-    async fn clear(&self) -> Result<()> {
-        self.inner.clear().await
-    }
-
-    async fn count(&self) -> Result<u32> {
-        self.inner.count().await
-    }
-}
-
-#[async_trait::async_trait]
-impl KvStorageScan<ReplayRecord> for CountingStorage {
-    async fn scan(&self) -> Result<Vec<ScannedRecord<ReplayRecord>>> {
-        self.scans.fetch_add(1, Ordering::SeqCst);
-        self.inner.scan().await
-    }
-
-    fn record_name(&self, key: &str) -> String {
-        self.inner.record_name(key)
+        self.hooks.0.load(Ordering::SeqCst)
     }
 }
 
 /// A runtime over `storage`, as one run of a node opens it.
 fn runtime(storage: &Arc<CountingStorage>) -> Arc<TransactionReplay> {
-    TransactionReplay::new(Box::new(Arc::clone(storage)))
+    TransactionReplay::new_shared(Box::new(Arc::clone(storage)))
 }
 
 /// A store holding a receiver record of stream 1 whose inner bytes decode as no stream, next
 /// to intact sender and receiver records of stream 2.
 async fn store_with_one_corrupt_record() -> Result<Arc<CountingStorage>> {
-    let storage = CountingStorage::new();
+    let storage = CountingStorage::counting();
     let corrupt = record_key(ReplayTable::Receiver, &stream(1))?;
     storage
         .inner
@@ -170,7 +135,7 @@ async fn test_one_corrupt_record_refuses_only_its_stream() -> Result<()> {
 /// reservations and its own receiver slot working.
 #[tokio::test]
 async fn test_a_corrupt_sender_record_refuses_reservation_on_its_stream() -> Result<()> {
-    let storage = CountingStorage::new();
+    let storage = CountingStorage::counting();
     let corrupt = record_key(ReplayTable::Sender, &stream(1))?;
     storage
         .inner
@@ -207,7 +172,7 @@ async fn test_an_unreadable_native_record_fails_only_its_stream() -> Result<()> 
     let name = <FileStorage as KvStorageScan<ReplayRecord>>::record_name(&storage, &occupied);
     std::fs::create_dir(root.join(&name)).map_err(Error::ServiceIOError)?;
     drop(storage);
-    let replay = TransactionReplay::new(Box::new(
+    let replay = TransactionReplay::new_shared(Box::new(
         FileStorage::new_authoritative_with_cap_and_path(1 << 20, &root).await?,
     ));
 
@@ -302,7 +267,7 @@ async fn test_a_torn_native_record_fails_its_stream_closed_until_cleared() -> Re
     let torn = whole.get(..whole.len() / 2).unwrap_or_default();
     std::fs::write(&torn_file, torn).map_err(Error::ServiceIOError)?;
 
-    let replay = TransactionReplay::new(Box::new(open().await?));
+    let replay = TransactionReplay::new_shared(Box::new(open().await?));
     let named = torn_file
         .file_name()
         .and_then(|name| name.to_str())
@@ -318,7 +283,7 @@ async fn test_a_torn_native_record_fails_its_stream_closed_until_cleared() -> Re
     assert!(torn_file.exists());
 
     std::fs::remove_file(&torn_file).map_err(Error::ServiceIOError)?;
-    let restarted = TransactionReplay::new(Box::new(open().await?));
+    let restarted = TransactionReplay::new_shared(Box::new(open().await?));
     assert_eq!(
         restarted.admit(stream(1), 0, digest(1)).await?,
         SequenceVerdict::First

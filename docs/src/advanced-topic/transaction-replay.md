@@ -135,7 +135,12 @@ One lock serializes all replay transitions and is held across each record write,
 write latency bounds the node-wide transition rate. Each transition runs detached from its caller
 on the runtime: lock, persist the stream's record, update the table, unlock. Cancelling a caller
 abandons only its wait, so a record write is never left in flight while the next transition of its
-stream runs, and a stale write can never land after a newer one.
+stream runs, and a stale write can never land after a newer one. A cancelled caller's transition
+therefore commits, exactly as if the caller had dropped the verdict: an admission enters the window
+and is charged its quota though nobody dispatches it (a retransmission is then a `Replay`, and the
+message is lost, as for any drop after admission), and a reservation consumes its sequences (a gap
+the receiver accepts). A cancelled attempt is not shed from the queue: it still pays its flushed
+write.
 
 With the flushed native store that bound is the
 flush latency. `test_durable_throughput_of_replay_admissions` (ignored by default; run it with
@@ -143,9 +148,12 @@ flush latency. `test_durable_throughput_of_replay_admissions` (ignored by defaul
 
 | Store | Admissions/s | p50 | p99 |
 |---|---|---|---|
-| authoritative file | 53–57 | ~17 ms | ~30 ms |
-| disposable file | ~4,400 | ~0.2 ms | ~0.5 ms |
-| memory | ~400,000 | ~2 µs | ~6 µs |
+| authoritative file | 49–57 | ~17–18 ms | ~30–47 ms |
+| disposable file | ~4,500 | ~0.2 ms | ~0.4 ms |
+| memory | ~97,000 | ~10 µs | ~17 µs |
+
+The benchmark admits through the production path (`admit_with_quota`), so each figure includes
+the detached task every transition runs on.
 
 Sender reservations pay the same cost. The ceiling is far below the outbound lane rate, and group
 commit is tracked in #916.

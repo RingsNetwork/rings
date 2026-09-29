@@ -44,6 +44,7 @@ pub struct UndecodableRecord {
 pub type ScannedRecord<V> = std::result::Result<(String, V), UndecodableRecord>;
 
 impl std::fmt::Display for UndecodableRecord {
+    /// The record's name, and its key or that the key is unreadable.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.key.as_deref() {
             Some(key) => write!(f, "record {} (key {key})", self.name),
@@ -116,26 +117,32 @@ where
     V: MaybeSendSync,
     S: KvStorageInterface<V> + MaybeSendSync + ?Sized,
 {
+    /// `get` of the shared storage.
     async fn get(&self, key: &str) -> Result<Option<V>> {
         self.as_ref().get(key).await
     }
 
+    /// `put` of the shared storage.
     async fn put(&self, key: &str, value: &V) -> Result<()> {
         self.as_ref().put(key, value).await
     }
 
+    /// `get_all` of the shared storage.
     async fn get_all(&self) -> Result<Vec<(String, V)>> {
         self.as_ref().get_all().await
     }
 
+    /// `remove` of the shared storage.
     async fn remove(&self, key: &str) -> Result<()> {
         self.as_ref().remove(key).await
     }
 
+    /// `clear` of the shared storage.
     async fn clear(&self) -> Result<()> {
         self.as_ref().clear().await
     }
 
+    /// `count` of the shared storage.
     async fn count(&self) -> Result<u32> {
         self.as_ref().count().await
     }
@@ -149,10 +156,12 @@ where
     V: MaybeSendSync,
     S: KvStorageScan<V> + MaybeSendSync + ?Sized,
 {
+    /// `scan` of the shared storage.
     async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
         self.as_ref().scan().await
     }
 
+    /// `record_name` of the shared storage.
     fn record_name(&self, key: &str) -> String {
         self.as_ref().record_name(key)
     }

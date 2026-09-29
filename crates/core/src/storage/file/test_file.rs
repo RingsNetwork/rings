@@ -394,18 +394,6 @@ async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
     );
 }
 
-/// Whether this process can read the `locked` file despite its permission bits (it runs as
-/// root), which the permission-based cases need it not to; such a case then says it was skipped
-/// instead of passing vacuously.
-#[cfg(unix)]
-fn reads_through_permissions(case: &str, locked: &std::path::Path) -> bool {
-    let privileged = std::fs::read(locked).is_ok();
-    if privileged {
-        eprintln!("skipped {case}: the process reads through permission bits");
-    }
-    privileged
-}
-
 /// Scan law under an unreadable entry: a directory occupying a record's name is reported by its
 /// file name, and the scan as a whole succeeds with the readable records.
 #[tokio::test]
@@ -431,83 +419,112 @@ async fn test_scan_reports_a_directory_in_a_record_place() {
     ]);
 }
 
-/// Scan law under an unreadable file: a record file the process may not read is reported by its
-/// file name, and the scan as a whole succeeds with the readable records. Skipped, saying so,
-/// when the process reads through permission bits.
+/// A symbolic link named `name` in `root` that points at itself: its metadata and its contents
+/// fail to resolve (`ELOOP`) for every user, root included.
+#[cfg(unix)]
+fn plant_link_loop(root: &std::path::Path, name: &str) {
+    std::fs::create_dir_all(root).expect("root");
+    std::os::unix::fs::symlink(name, root.join(name)).expect("plant a link loop");
+}
+
+/// Scan law under an unreadable file: a record entry that cannot be read (a looping link) is
+/// reported by its file name, and the scan as a whole succeeds with the readable records.
 #[cfg(unix)]
 #[tokio::test]
-async fn test_scan_reports_a_record_it_may_not_read() {
-    use std::os::unix::fs::PermissionsExt;
-
+async fn test_scan_reports_a_record_it_cannot_read() {
     let root = temp_root("unreadable");
-    let locked = plant_record(
-        &root,
-        "locked",
-        &rings_codec::serialize(&("locked", "v")).expect("record serializes"),
-    );
-    let locked_path = root.join(&locked);
-    std::fs::set_permissions(&locked_path, std::fs::Permissions::from_mode(0o000))
-        .expect("lock the record");
-    if reads_through_permissions("test_scan_reports_a_record_it_may_not_read", &locked_path) {
-        return;
-    }
+    let looping = file_name_for("looping");
+    plant_link_loop(&root, &looping);
     let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
         .await
-        .expect("open");
+        .expect("open indexes the loop");
     storage.put("whole", &"v".to_string()).await.expect("put");
 
     let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
         .await
-        .expect("a bad file does not fail the scan");
+        .expect("a bad entry does not fail the scan");
     scanned.sort_by_key(|record| record.is_ok());
     assert_eq!(scanned, [
         Err(UndecodableRecord {
-            name: locked,
+            name: looping,
             key: None,
         }),
         Ok(("whole".to_owned(), "v".to_owned())),
     ]);
-    std::fs::set_permissions(&locked_path, std::fs::Permissions::from_mode(0o600))
-        .expect("unlock the record");
 }
 
-/// Index law under unreadable metadata: when the directory lists a record whose metadata the
-/// process may not read, an authoritative open indexes it and a scan reports it, while a
-/// disposable open fails as before. Skipped, saying so, when the process reads through
-/// permission bits.
+/// Index law under unreadable metadata: an entry whose metadata cannot be resolved (a looping
+/// link) fails a disposable open, while an authoritative open indexes it and a scan reports it.
 #[cfg(unix)]
 #[tokio::test]
 async fn test_authoritative_open_indexes_an_entry_whose_metadata_fails() {
-    use std::os::unix::fs::PermissionsExt;
-
     let root = temp_root("metadata");
-    let name = plant_record(
-        &root,
-        "stream",
-        &rings_codec::serialize(&("stream", "v")).expect("record serializes"),
-    );
-    // Listing without search permission: entries are readable, their metadata is not.
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o400)).expect("lock root");
-    let case = "test_authoritative_open_indexes_an_entry_whose_metadata_fails";
-    if reads_through_permissions(case, &root.join(&name)) {
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-            .expect("unlock root");
-        return;
-    }
-    let authoritative = FileStorage::new_authoritative_with_cap_and_path(4096, &root).await;
-    let disposable = FileStorage::new_with_cap_and_path(4096, &root).await;
-    let scanned = match &authoritative {
-        Ok(storage) => <FileStorage as KvStorageScan<String>>::scan(storage).await,
-        Err(_) => Ok(Vec::new()),
-    };
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).expect("unlock root");
+    let name = file_name_for("stream");
+    plant_link_loop(&root, &name);
 
-    assert!(authoritative.is_ok());
-    assert!(disposable.is_err());
-    assert_eq!(scanned.expect("scan"), [Err(UndecodableRecord {
-        name,
-        key: None
-    })]);
+    assert!(FileStorage::new_with_cap_and_path(4096, &root)
+        .await
+        .is_err());
+    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
+        .await
+        .expect("an authoritative open indexes the entry");
+    assert_eq!(
+        <FileStorage as KvStorageScan<String>>::scan(&storage)
+            .await
+            .expect("scan"),
+        [Err(UndecodableRecord { name, key: None })]
+    );
+}
+
+/// Index law under a dangling link: an entry whose target is missing is present, so a scan
+/// reports it as unreadable instead of hiding it as absent.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_scan_reports_a_dangling_link_instead_of_hiding_it() {
+    let root = temp_root("dangling");
+    let name = file_name_for("stream");
+    std::fs::create_dir_all(&*root).expect("root");
+    std::os::unix::fs::symlink(root.join("missing-target"), root.join(&name))
+        .expect("plant a dangling link");
+    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+
+    assert_eq!(
+        <FileStorage as KvStorageScan<String>>::scan(&storage)
+            .await
+            .expect("scan"),
+        [Err(UndecodableRecord { name, key: None })]
+    );
+}
+
+/// Root law: an authoritative store whose root vanished while open refuses the next write
+/// instead of recreating an empty store; a disposable store recreates it.
+#[tokio::test]
+async fn test_authoritative_store_refuses_a_write_into_a_vanished_root() {
+    let root = temp_root("vanished");
+    let authoritative = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+    authoritative
+        .put("a", &"v".to_string())
+        .await
+        .expect("put a");
+    std::fs::remove_dir_all(&*root).expect("remove the root");
+
+    assert!(matches!(
+        authoritative.put("b", &"v".to_string()).await,
+        Err(Error::StorageRootMissing(ref missing)) if missing.as_path() == &*root
+    ));
+    assert!(!root.exists());
+    drop(authoritative);
+
+    let disposable = FileStorage::new_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+    std::fs::remove_dir_all(&*root).expect("remove the root");
+    disposable.put("b", &"v".to_string()).await.expect("put b");
+    assert_eq!(stored_keys(&disposable).await, ["b"]);
 }
 
 /// Budget law of an authoritative store: a write that does not fit fails and evicts nothing,

@@ -25,14 +25,16 @@
 //! budget), and the directory is owned exclusively by this instance while it is open. Every
 //! entry with a record's name is indexed, whatever its file type. An entry whose metadata
 //! cannot be read fails a disposable open; an authoritative open indexes it at zero bytes so
-//! that a scan reports it rather than hiding it. A directory listing that fails part-way skips
-//! the unlisted entries of a disposable store, and fails an authoritative open as a whole,
-//! since an entry it cannot list it cannot name.
+//! that a scan reports it rather than hiding it, and an entry whose target is missing (a
+//! dangling symbolic link) is present, so a scan reports it as unreadable. A directory listing
+//! that fails part-way skips the unlisted entries of a disposable store, and fails an
+//! authoritative open as a whole, since an entry it cannot list it cannot name.
 //!
 //! Durability law: an authoritative `put` flushes the temporary file to stable storage before
 //! renaming it over the record, and flushes the directory after the rename; an authoritative
-//! removal flushes the directory after it, and an authoritative open flushes the root and every
-//! ancestor of it, so each directory entry on the store's path survives, whoever created it.
+//! removal flushes the directory after it, and an authoritative open flushes the root and its
+//! ancestors up to the first one the process may not open (a directory it did not create), so
+//! each directory entry on the store's path survives, whoever created it.
 //! On unix a crash therefore leaves each record either whole at its previous value or whole at
 //! its new one, never torn, and a completed write or removal is not rolled back. The flushes
 //! are `File::sync_all`, which the standard library maps to `fcntl(F_FULLFSYNC)` on Apple
@@ -51,6 +53,10 @@
 //! prefix is intact, its key, and the record stays until its owner or an operator removes it.
 //! A [`scan`](crate::storage::KvStorageScan::scan) deletes nothing under either authority and
 //! reports each record it cannot read (any error but absence) or decode by its file name.
+//!
+//! Root law: a disposable store recreates its root directory if it vanished while open; an
+//! authoritative store fails the write with `Error::StorageRootMissing`, since a vanished root
+//! took every record with it.
 //!
 //! Execution law: all file system work of an operation, flushes included, runs on the blocking
 //! thread pool of the tokio runtime, so a slow flush never stalls an asynchronous worker.
@@ -381,7 +387,7 @@ impl FileStore {
         let tmp_path = path.with_extension("tmp");
         let mut index = self.write_index()?;
         // The temporary file lives outside the index, so a failed write changes nothing.
-        std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError)?;
+        self.ensure_root()?;
         let written = write_file(&tmp_path, data, self.authority.flushes());
         if written.is_err() {
             remove_file_if_present(&tmp_path)?;
@@ -393,6 +399,17 @@ impl FileStore {
         }
         committed?;
         self.flush_directory()
+    }
+
+    /// Make sure the root directory exists before a write. A disposable store recreates a
+    /// vanished root; an authoritative store fails with `Error::StorageRootMissing` instead,
+    /// since a vanished root took every record with it and recreating it would silently restart
+    /// every stream (the root law).
+    fn ensure_root(&self) -> Result<()> {
+        if self.authority.flushes() && !self.root.is_dir() {
+            return Err(Error::StorageRootMissing(self.root.clone()));
+        }
+        std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError)
     }
 
     /// Acquire the index for reading.
@@ -412,17 +429,15 @@ impl FileStore {
     }
 
     /// Read every indexed record file under the read guard, each to its bytes or to the error
-    /// that kept them; a file removed since it was indexed is skipped. Only the index lock can
-    /// fail the read as a whole.
+    /// that kept them; an entry removed since it was indexed is skipped, while an entry that is
+    /// present but unreadable (a dangling or looping symbolic link included) is kept with its
+    /// error. Only the index lock can fail the read as a whole.
     fn read_records(&self) -> Result<Vec<ReadRecord>> {
         let index = self.read_index()?;
         Ok(index
             .files
             .iter()
-            .filter_map(|(name, _)| {
-                let read = read_file_if_present(&self.root.join(name)).transpose()?;
-                Some((name.to_owned(), read))
-            })
+            .filter_map(|(name, _)| Some((name.to_owned(), read_entry(&self.root.join(name))?)))
             .collect())
     }
 
@@ -490,9 +505,14 @@ where V: DeserializeOwned {
     }
 }
 
-/// Create the directory `root` and its missing ancestors; iff `flush`, flush `root` and every
-/// ancestor, deepest first, so that each directory entry on the path survives a crash, whoever
+/// Create the directory `root` and its missing ancestors; iff `flush`, flush `root` and its
+/// ancestors, deepest first, so that each directory entry on the path survives a crash, whoever
 /// created it (another store may have created a shared parent without flushing it).
+///
+/// The walk stops at the first ancestor the process may not open (`PermissionDenied`): an
+/// unreadable directory, such as `/` under a sandbox or an execute-only home, is one this
+/// process did not create, and whose entries were made durable by whoever did. Any other
+/// failure fails the open.
 fn create_directory(root: &Path, flush: bool) -> Result<()> {
     std::fs::create_dir_all(root).map_err(Error::ServiceIOError)?;
     if !flush {
@@ -504,7 +524,11 @@ fn create_directory(root: &Path, flush: bool) -> Result<()> {
             true => Path::new("."),
             false => directory,
         };
-        sync_directory(directory)?;
+        match sync_directory_io(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => break,
+            Err(error) => return Err(Error::ServiceIOError(error)),
+        }
     }
     Ok(())
 }
@@ -527,18 +551,21 @@ fn write_file(path: &Path, data: &[u8], flush: bool) -> Result<()> {
 ///
 /// `File::sync_all` on the directory is `fcntl(F_FULLFSYNC)` on Apple targets and `fsync` on
 /// other unix targets (a precondition of the durability law).
-#[cfg(unix)]
 fn sync_directory(root: &Path) -> Result<()> {
-    std::fs::File::open(root)
-        .and_then(|directory| directory.sync_all())
-        .map_err(Error::ServiceIOError)
+    sync_directory_io(root).map_err(Error::ServiceIOError)
+}
+
+/// Open the directory `root` and flush its entries, reporting the raw I/O error.
+#[cfg(unix)]
+fn sync_directory_io(root: &Path) -> std::io::Result<()> {
+    std::fs::File::open(root).and_then(|directory| directory.sync_all())
 }
 
 /// The standard library cannot open a directory for flushing on this platform; the durability
 /// of a rename or removal is then the file system's own (the durability law holds on unix
 /// only).
 #[cfg(not(unix))]
-fn sync_directory(_root: &Path) -> Result<()> {
+fn sync_directory_io(_root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -555,6 +582,22 @@ fn read_file_if_present(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         Ok(data) => Ok(Some(data)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+/// Read the directory entry `path` as a record: `None` iff the entry itself is absent, so an
+/// entry that is present but whose target is missing (a dangling symbolic link) is an error, not
+/// an absence.
+fn read_entry(path: &Path) -> Option<std::io::Result<Vec<u8>>> {
+    match read_file_if_present(path) {
+        Ok(Some(data)) => Some(Ok(data)),
+        Ok(None) => std::fs::symlink_metadata(path).ok().map(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the entry's target is missing",
+            ))
+        }),
+        Err(error) => Some(Err(error)),
     }
 }
 

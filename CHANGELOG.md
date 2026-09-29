@@ -13,30 +13,31 @@
   `ReplayCounters::unavailable_stream`). Every other stream in the store runs normally; each bad
   record holds one slot of both tables' stream bounds. An operator clears one stream by removing
   the named record with the node stopped (see the replay chapter). An absent record still
-  restarts its stream from `First` (#915). The new `KvStorageScan` trait (implemented by
-  `MemStorage`, `FileStorage` and `IdbStorage`) adds `scan` (every record, decoded or reported as
-  an `UndecodableRecord`, deleting nothing) and `record_name`, both required, and
-  `ReplayStorage` now boxes a `KvStorageScan`, and a shared `Arc` of either storage trait is one
-  itself. Each reservation and admission now runs detached from its caller
-  (`rings_runtime::run_detached`), so cancelling a caller mid-persist can no longer let a stale
-  record write land after a newer one.
+  restarts its stream from `First` (#915). Each reservation and admission now runs detached from
+  its caller (`rings_runtime::run_detached`): a caller cancelled mid-transition no longer lets a
+  stale record write land after a newer one, and its transition commits (its admission is
+  charged and its sequence consumed) exactly as if the caller had dropped the verdict.
 
 - Open the native transaction replay store as an authoritative `FileStorage` (#909). On unix its
   `put` flushes the temporary file before the rename and the directory after it (removals, and
-  the parent of the store's directory at open, are flushed too), so a crash leaves each record
-  whole at its previous or its new value. A record file that cannot be read, or whose framing
-  does not decode, is reported (`Error::StorageRecordUndecodable`, or per record by a scan),
-  naming its file and, when its key prefix is intact, its key; it is never deleted, so replay
-  fails closed on it instead of reopening its stream. An authoritative store evicts nothing: a
-  write beyond its budget, or an open under a lowered one, fails with
-  `Error::StorageBudgetExhausted`. The flush bounds replay transitions to about 55 per second on
-  an Apple M1 Max SSD (`F_FULLFSYNC`), against about 4,400 unflushed; group commit is tracked in
-  #916. Every `FileStorage` now runs its file I/O on the runtime's blocking pool through the new
-  `rings_runtime::run_blocking` (fallible: `Error::StorageWorkUnscheduled` outside a runtime).
-  `FileStorage::new_with_cap_and_path` keeps the disposable behaviour (no flush, oldest records
-  evicted, undecodable records retired) for the DHT, measurement, evidence and onion entry-guard
-  stores (the entry-guard store's policy is #911);
+  the store's directory and its ancestors at open, are flushed too), so a crash leaves each
+  record whole at its previous or its new value. A record file that cannot be read, or whose
+  framing does not decode, is reported (`Error::StorageRecordUndecodable`, or per record by a
+  scan), naming its file and, when its key prefix is intact, its key; it is never deleted, so
+  replay fails closed on it instead of reopening its stream. An authoritative store evicts
+  nothing: a write beyond its budget, or an open under a lowered one, fails with
+  `Error::StorageBudgetExhausted`, and a write into a root that vanished while open fails with
+  `Error::StorageRootMissing`. The flush bounds replay transitions to about 50 per second on an
+  Apple M1 Max SSD (`F_FULLFSYNC`), against about 4,500 unflushed; group commit is tracked in
+  #916. `FileStorage::new_with_cap_and_path` keeps the disposable behaviour (no flush, oldest
+  records evicted, undecodable records retired) for the DHT, measurement, evidence and onion
+  entry-guard stores (the entry-guard store's policy is #911);
   `FileStorage::new_authoritative_with_cap_and_path` opens the new mode.
+
+- `rings_runtime::run_blocking` (#919): fallible scheduling on the native blocking pool, with the
+  ownership law of `run_detached` (the work starts at the call and outlives a dropped waiter);
+  `Unavailable` outside a runtime, `Abandoned` when the work panicked or its runtime shut down
+  first.
 
 - Keep up to `OUTBOUND_LANE_WINDOW` (8) transfers in flight per outbound class lane instead of
   waiting for each delivery before the next (#899). On native, a delivery is the peer's SCTP
@@ -77,6 +78,18 @@
   and construction requires a database name.
 
 ### Breaking changes
+
+- `ReplayStorage` boxes a `KvStorageScan<ReplayRecord>` (#910), a new trait over
+  `KvStorageInterface` with two required methods: `scan` (every record, decoded or reported as an
+  `UndecodableRecord`, deleting nothing) and `record_name` (the name a scan reports an
+  unreadable record under). `MemStorage`, `FileStorage` and `IdbStorage` implement it; a custom
+  replay storage passed to `SwarmBuilder::replay_storage` or `ProcessorBuilder::replay_storage`
+  must implement it too.
+- `Arc<S>` implements `KvStorageInterface<V>` and `KvStorageScan<V>` whenever `S` does (#910),
+  so a downstream `impl KvStorageInterface<_> for Arc<_>` now conflicts.
+- Every `FileStorage` operation, disposable stores' included, runs its file I/O on the runtime's
+  blocking pool (#909, #919) and fails with `Error::StorageWorkUnscheduled` outside a Tokio
+  runtime.
 
 - Pin each outbound class lane to one data channel of a connection (#906). The transport pool
   selects a channel by lane, `channel(lane) = pool[lane mod |pool|]`, instead of rotating over

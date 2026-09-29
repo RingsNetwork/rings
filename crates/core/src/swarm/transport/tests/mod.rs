@@ -493,7 +493,7 @@ fn transport_with_key_measure_and_reassembly_limits(
         delegatee_key,
         dht,
         measure: Some(measure),
-        transaction_replay: crate::message::TransactionReplay::new(Box::new(
+        transaction_replay: crate::message::TransactionReplay::new_shared(Box::new(
             crate::storage::MemStorage::new(),
         )),
         settings: SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
