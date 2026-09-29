@@ -129,7 +129,7 @@ pub struct ElementDigest(pub [u8; 32]);
 thread_local! {
     /// Test instrumentation: the element digests computed on this thread, so a test can bound
     /// the hashing an operation performs.
-    pub(super) static DIGESTS_COMPUTED: std::cell::Cell<usize> =
+    pub(crate) static DIGESTS_COMPUTED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 

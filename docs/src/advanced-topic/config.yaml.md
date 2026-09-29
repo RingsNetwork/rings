@@ -143,6 +143,10 @@ where noted.
 
 * `online_node_heartbeat_interval_secs`, `online_node_ttl_secs`, `online_node_type`,
   `advertise_presence`: how this node publishes its online-node descriptor.
+  A heartbeat interval must be below the descriptor TTL, and below 597 seconds, the
+  10-minute lifetime of a registry write less the 3-second clock-skew tolerance; the same bound
+  applies to `onion_exit_heartbeat_interval_secs`. A node refuses to start otherwise, since a
+  sole registrant's descriptor would lapse between heartbeats.
 * `advertise_onion_relay`: advertise onion relay capability.
 * `advertise_onion_exit`, `onion_exit_heartbeat_interval_secs`, `onion_exit_ttl_secs`,
   `onion_exit_services`, `onion_exit_policy`: whether and how this node serves as an onion exit.

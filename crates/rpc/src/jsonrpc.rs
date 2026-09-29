@@ -233,9 +233,8 @@ impl Client {
 
     /// Publishes a message to the specified topic.
     ///
-    /// The message expires 10 minutes after it is published unless other writes keep
-    /// the topic alive, and 100 minutes after it in any case, unless it is published
-    /// again.
+    /// The message is a data-topic element and expires by the element lifetime rule of the
+    /// DHT storage chapter (`docs/src/advanced-topic/chord.md`) unless it is published again.
     pub async fn publish_message_to_topic(
         &self,
         req: &PublishMessageToTopicRequest,

@@ -21,7 +21,7 @@ use rings_core::message::MessageSigner;
 use rings_core::message::ReplayStorage;
 use rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 use rings_core::storage::idb::IdbStorage;
-use rings_core::storage::idb::UndecodableRows;
+use rings_core::storage::RecordAuthority;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use rings_rpc::jsonrpc::Client as RpcClient;
@@ -396,14 +396,12 @@ fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
     )
 }
 
-/// Open the browser DHT entry store. It retires rows it cannot decode: a carrier written by an
-/// earlier wire format must not fail every storage scan.
+/// Open the browser DHT entry store. It is disposable, so it retires rows it cannot decode: a
+/// carrier written by an earlier wire format must not fail every storage scan.
 async fn open_browser_entry_storage(storage_name: &str) -> NodeResult<EntryStorage> {
     IdbStorage::new_with_cap_and_name(50000, storage_name)
         .await
-        .map(|storage| {
-            Box::new(storage.with_undecodable_rows(UndecodableRows::Retire)) as EntryStorage
-        })
+        .map(|storage| Box::new(storage) as EntryStorage)
         .map_err(|source| Error::BrowserStorageOpen {
             name: storage_name.to_string(),
             source,
@@ -466,7 +464,8 @@ async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEnt
 /// ([`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]) and one row for the former shared-stream snapshot,
 /// until the first load after the #898 upgrade deletes it. IndexedDB evicts its least recently
 /// used row beyond the capacity, and an evicted replay record would reopen replay for its
-/// stream, so the capacity must never be reached.
+/// stream, so the capacity must never be reached. The store is authoritative: a record it cannot
+/// decode is reported and kept, never retired.
 async fn open_browser_replay_storage(storage_name: &str) -> NodeResult<ReplayStorage> {
     let open_error = |source| Error::BrowserStorageOpen {
         name: storage_name.to_string(),
@@ -474,7 +473,7 @@ async fn open_browser_replay_storage(storage_name: &str) -> NodeResult<ReplaySto
     };
     let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS + 1)
         .map_err(|_| open_error(rings_core::error::Error::InvalidCapacity))?;
-    IdbStorage::new_with_cap_and_name(rows, storage_name)
+    IdbStorage::new_with_cap_name_and_authority(rows, storage_name, RecordAuthority::Authoritative)
         .await
         .map(|storage| Box::new(storage) as ReplayStorage)
         .map_err(open_error)
@@ -893,9 +892,8 @@ impl Provider {
     ///
     /// The explicit topic/value pair preserves the content-derived identity of
     /// this browser API without a separate single-string entry constructor.
-    /// The topic has this one writer, so the stored element expires with the
-    /// topic's retention bound, 10 minutes after it is stored, unless it is
-    /// stored again.
+    /// The stored element expires by the element lifetime rule of the DHT storage
+    /// chapter (`docs/src/advanced-topic/chord.md`) unless it is stored again.
     pub fn storage_store(&self, data: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {

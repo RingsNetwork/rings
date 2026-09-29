@@ -1,4 +1,3 @@
-use super::crdt::DIGESTS_COMPUTED;
 use super::retention::ElementRetention;
 use super::*;
 use crate::algebra::assert_join_semilattice_laws;
@@ -1064,9 +1063,11 @@ fn test_overwrite_register_holds_carrier_until_stable() -> Result<()> {
         ..law
     };
     assert_eq!(read_under(owner_x, mutant, after_bound), None);
-    assert_entry_data_set(&replica_y.retired_under(Some(mutant), after_bound), &[
-        "a", "b",
-    ])
+    // X's slot is empty, so the sync from Y stores Y's read as it is: `a`, which X removed and
+    // overwrote, is served by X again.
+    let resurrected = read_under(replica_y, mutant, after_bound)
+        .ok_or_else(|| Error::InvalidMessage("Y's carrier is live".to_string()))?;
+    assert_entry_data_set(&resurrected, &["a", "b"])
 }
 
 /// Directed witness of `σ`: a remove collected at `τ + H` lets a stale add in on a clock that
@@ -1130,20 +1131,20 @@ fn test_ack_confirms_across_a_horizon_crossing_but_not_a_newer_write() -> Result
     // What `live_entry` reads at the ack: `a` has crossed its horizon.
     let local = copy.clone().retired_at(acked_at);
     assert_ne!(copy.clone().try_into_storage_entry()?, local);
-    assert!(ack.confirms_local_value(&local, acked_at)?);
+    assert!(ack.confirms_local_value(&local, acked_at));
 
     let added = local.join(delta_at("c", 2_000)?)?;
-    assert!(!ack.confirms_local_value(&added, acked_at)?);
+    assert!(!ack.confirms_local_value(&added, acked_at));
     let removed = local.tombstone(data_entry("topic", "b")?)?;
-    assert!(!ack.confirms_local_value(&removed, acked_at)?);
+    assert!(!ack.confirms_local_value(&removed, acked_at));
     Ok(())
 }
 
-/// Review B-M2, a bound on the work of the projection over a full carrier of maximal payloads:
-/// a read computes no digest whether or not anything crosses a threshold, and a join computes
-/// one digest per element.
+/// A bound on the digest work over a full carrier of maximal payloads (review B-M2): a read
+/// computes no digest whether or not anything crosses a threshold, and a join computes one
+/// digest per element.
 #[test]
-fn test_projection_of_a_full_carrier_computes_no_digest() -> Result<()> {
+fn test_digest_work_is_bounded_on_a_full_carrier() -> Result<()> {
     let horizon = data_horizon_ms();
     let values = (0..ENTRY_DATA_MAX_LEN)
         .map(|index| {
@@ -1173,5 +1174,33 @@ fn test_projection_of_a_full_carrier_computes_no_digest() -> Result<()> {
     assert_eq!((retired.data.len(), hashed), (0, 0));
     let (joined, hashed) = digests(&|| full.join(full.clone()))?;
     assert_eq!((joined == full, hashed), (true, ENTRY_DATA_MAX_LEN));
+    Ok(())
+}
+
+/// Review A2-L5: the projection of an entry whose elements carry no dots (a value stored by an
+/// earlier build) normalizes it first instead of truncating, so its elements are judged by the
+/// synthesized epoch dot and retired, and its remove side and bound are kept.
+#[test]
+fn test_projection_normalizes_an_undotted_entry() -> Result<()> {
+    let mut undotted = with_retention(
+        Entry::new(
+            Entry::gen_did("topic")?,
+            vec![encoded("a")?, encoded("b")?],
+            EntryKind::Data,
+        ),
+        NOW_MS + u128::from(DEFAULT_TTL_MS),
+    );
+    undotted.crdt.tombstones = vec![EntryTombstone::of(
+        &encoded("removed")?,
+        EntryDot::for_index(version_at(NOW_MS), 0)?,
+    )];
+    let projected = undotted.retired_at(NOW_MS);
+    assert!(projected.data.is_empty());
+    assert!(projected.crdt.dots.is_empty());
+    assert_eq!(projected.crdt.tombstones.len(), 1);
+    assert_eq!(
+        projected.expires_at_ms,
+        Some(NOW_MS + u128::from(DEFAULT_TTL_MS))
+    );
     Ok(())
 }

@@ -39,7 +39,9 @@
 //!                 ∧ carrier'[r] = retire_{clock(r)}(read(r) ⊔ read(s))   \* ReplaceCache: read(s)
 //!                 ∧ received'[r] = received[r] ∪ adds(read(s))         \* ReplaceCache: of s
 //!                 ∧ killed'[r] = killed[r] ∪ killed[s] ∧ floor'[r] = max(floor[r], floor[s])
-//! Handoff(s, r) ≜ Sync(s, r) ∧ (confirms(copy, read(s), clock(s)) ⇒ carrier'[s] = ⊥
+//! HandoffCopy(s, r) ≜ Sync(s, r) ∧ pending' = pending ∪ {(s, read(s))}
+//! HandoffAck(s)  ≜ (s, c) ∈ pending ∧ pending' = pending ∖ {(s, c)}
+//!                  ∧ (confirms(c, read(s), clock(s)) ⇒ carrier'[s] = ⊥
 //!                                ∧ received'[s] = killed'[s] = ∅ ∧ floor'[s] = ⊥)
 //! Tick(Δ)       ≜ real' = real + Δ,  Δ ∈ {1, σ/2, σ, H/3, H − σ, H + σ}
 //! Drift(r, o)   ≜ skew'[r] = o,  o ∈ Offsets                 \* NTP steps within tolerance
@@ -70,7 +72,9 @@
 //! requires a data carrier holding an unstable remove or register to stay live past its
 //! retention bound (`Entry::is_live_at`).
 //!
-//! A hand-off gives up the sender's slot, so the sender's history restarts with it. Reader
+//! A hand-off is two steps, the copy and a later acknowledgement, so writes, ticks and drifts
+//! interleave between them and the ack gate is exercised; a confirmed hand-off gives up the
+//! sender's slot, so the sender's history restarts with it. Reader
 //! caches of both kinds are modelled: one joins every reply it observes (the read-join of #864,
 //! on `develop`), one replaces its value with the last reply (master's `local_cache_put`), and
 //! both are delivered back to owners, as read-repair does from `local_cache_get`.
@@ -116,11 +120,9 @@ const REPLACE_CACHE: usize = 4;
 /// Every replica: the owners, then the two reader caches.
 const REPLICAS: usize = 5;
 
-/// The fixed seeds of the production-law walks, one walk each.
-const SEEDS: u64 = 64;
-
-/// The seeds a broken law is searched over for a counterexample.
-const MUTANT_SEEDS: u64 = 512;
+/// The fixed seeds, one walk each: the production law is walked on all of them, and a broken
+/// law is searched over the same ones for a counterexample.
+const SEEDS: u64 = 512;
 
 /// The steps of one walk.
 const STEPS: usize = 200;
@@ -203,8 +205,10 @@ enum Action {
     Remove(usize, usize, &'static str, Witness),
     /// A carrier is read at the first replica and delivered to the second.
     Sync(usize, usize),
-    /// An ownership hand-off from the first owner to the second, with the ack-gated delete.
-    Handoff(usize, usize),
+    /// An ownership hand-off copy from the first owner, joined at the second.
+    HandoffCopy(usize, usize),
+    /// The acknowledgement of the owner's oldest pending hand-off copy: the ack-gated delete.
+    HandoffAck(usize),
     /// Real time advances.
     Tick(u128),
     /// A replica's clock offset changes to the given one, stepping its clock back or forward.
@@ -255,6 +259,8 @@ struct World {
     issued: BTreeSet<Add>,
     /// Every remove ever issued, as the dot it covers up to.
     removes: Vec<EntryDot>,
+    /// Hand-off copies awaiting their acknowledgement, oldest first, with their sender.
+    pending: Vec<(usize, Entry)>,
 }
 
 impl World {
@@ -273,6 +279,7 @@ impl World {
             replicas: vec![Replica::default(); REPLICAS],
             issued: BTreeSet::new(),
             removes: Vec::new(),
+            pending: Vec::new(),
         })
     }
 
@@ -364,7 +371,8 @@ impl World {
             Action::Sync(sender, receiver) => {
                 self.sync(sender, receiver)?;
             }
-            Action::Handoff(sender, receiver) => self.handoff(sender, receiver)?,
+            Action::HandoffCopy(sender, receiver) => self.handoff_copy(sender, receiver)?,
+            Action::HandoffAck(sender) => self.handoff_ack(sender),
             Action::Tick(advance_ms) => self.real_ms += advance_ms,
             Action::Drift(replica, offset_ms) => {
                 if let Some(skew) = self.skews_ms.get_mut(replica) {
@@ -508,25 +516,33 @@ impl World {
         Ok(true)
     }
 
-    /// `Handoff(s, r)`: the copy is joined at `r`; `s` deletes its slot iff the production
-    /// acknowledgement confirms its current value, and its history restarts with the slot.
-    fn handoff(&mut self, sender: usize, receiver: usize) -> Result<()> {
+    /// `HandoffCopy(s, r)`: the copy is joined at `r` and awaits its acknowledgement.
+    fn handoff_copy(&mut self, sender: usize, receiver: usize) -> Result<()> {
         let Some(copy) = self.read(sender) else {
             return Ok(());
         };
-        if !self.sync(sender, receiver)? {
-            return Ok(());
-        }
-        let ack = SyncedEntryAck::new(self.topic, copy);
-        let now_ms = self.clock(sender);
-        let confirmed = match self.read(sender) {
-            Some(local) => ack.confirms_local_value(&local, now_ms)?,
-            None => true,
-        };
-        if confirmed {
-            *self.replica_mut(sender)? = Replica::default();
+        if self.sync(sender, receiver)? {
+            self.pending.push((sender, copy));
         }
         Ok(())
+    }
+
+    /// `HandoffAck(s)`: `s` deletes its slot iff the production acknowledgement of its oldest
+    /// pending copy confirms its current value, and its history restarts with the slot.
+    fn handoff_ack(&mut self, sender: usize) {
+        let Some(position) = self.pending.iter().position(|(from, _)| *from == sender) else {
+            return;
+        };
+        let (_, copy) = self.pending.remove(position);
+        let ack = SyncedEntryAck::new(self.topic, copy);
+        let confirmed = self
+            .read(sender)
+            .is_none_or(|local| ack.confirms_local_value(&local, self.clock(sender)));
+        if confirmed {
+            if let Some(replica) = self.replicas.get_mut(sender) {
+                *replica = Replica::default();
+            }
+        }
     }
 
     /// Whether `replica` has observed a remove or a register shadowing `(value, dot)`.
@@ -595,16 +611,24 @@ impl World {
 
     /// Check `Homomorphism` of `retire_t` on one drawn pair of stored carriers at one drawn
     /// replica clock.
+    ///
+    /// The three draws are made whatever the state, so the draw sequence, and with it the action
+    /// trace of a seed, is the same under every law.
     fn check_homomorphism(&self, prng: &mut Prng) -> Result<()> {
         let pick = |index: usize| {
             self.replicas
                 .get(index)
                 .and_then(|replica| replica.carrier.clone())
         };
-        let (Some(x), Some(y)) = (pick(prng.below(REPLICAS)), pick(prng.below(REPLICAS))) else {
+        let (left, right, clock) = (
+            prng.below(REPLICAS),
+            prng.below(REPLICAS),
+            prng.below(REPLICAS),
+        );
+        let (Some(x), Some(y)) = (pick(left), pick(right)) else {
             return Ok(());
         };
-        let now_ms = self.clock(prng.below(REPLICAS));
+        let now_ms = self.clock(clock);
         let lhs = x.join(y.clone())?.horizon_retired_under(self.law, now_ms);
         let rhs = x
             .horizon_retired_under(self.law, now_ms)
@@ -675,7 +699,8 @@ fn draw(prng: &mut Prng, ticks: &[u128; 6]) -> Action {
             let sender = prng.below(REPLICAS);
             Action::Sync(sender, other(prng, sender, REPLICAS))
         }
-        18..=19 => Action::Handoff(owner, other(prng, owner, OWNERS)),
+        18 => Action::HandoffCopy(owner, other(prng, owner, OWNERS)),
+        19 => Action::HandoffAck(owner),
         20..=22 => Action::Tick(prng.pick(ticks, 1)),
         _ => Action::Drift(prng.below(REPLICAS), prng.pick(&OFFSETS_MS, 0)),
     }
@@ -704,16 +729,18 @@ fn walk(law: ElementRetention, seed: u64) -> Result<()> {
         .map_err(|error| Error::InvalidMessage(format!("seed {seed}: {error}; trace {trace:?}")))
 }
 
-/// Witness that the broken law `law` violates the law named `violated` on some seed.
+/// Witness that the broken law `law` violates the law named `violated` on some seed, and that
+/// the production law passes that seed: the draws do not depend on the law, so the production
+/// walk replays the very trace that witnessed the violation.
 fn assert_mutant_fails(law: ElementRetention, violated: &str) -> Result<()> {
     let needle = format!("law violated: {violated}");
-    let witnessed = (0..MUTANT_SEEDS).any(|seed| {
-        walk(law, seed).is_err_and(|error| error.to_string().contains(needle.as_str()))
+    let witness = (0..SEEDS).find(|seed| {
+        walk(law, *seed).is_err_and(|error| error.to_string().contains(needle.as_str()))
     });
-    ensure(
-        witnessed,
-        format!("no seed witnesses {violated} under {law:?}"),
-    )
+    let Some(seed) = witness else {
+        return ensure(false, format!("no seed witnesses {violated} under {law:?}"));
+    };
+    walk(production_law()?, seed)
 }
 
 /// Every law of the element horizon holds on every fixed-seed interleaving of add, overwrite,

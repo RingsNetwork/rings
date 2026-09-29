@@ -95,12 +95,25 @@
     remover had forgotten under a later one can no longer resurrect it (#874).
     `EntryCrdt::tombstones` holds `EntryTombstone` (a Keccak-256 `ElementDigest` of the value
     and the greatest dot it covers), at most one per value.
+  - A carrier past its retention bound answers lookups as absent, so the lookup asks the next
+    placement and read-repair joins the missed one, and a read that retires part of a stored
+    carrier writes the projection back.
+  - Registry heartbeat intervals must be below 597 s (the 10-minute descriptor lifetime less
+    the 3 s skew tolerance), for the online-node and onion-exit registries alike; a node whose
+    configuration exceeds it refuses to start.
+  - Stores are opened with a `RecordAuthority` (`rings_core::storage`): a disposable store
+    retires a record it cannot decode, an authoritative one reports it and keeps it.
+    `IdbStorage::new_with_cap_and_name` now opens a disposable store, and the new
+    `IdbStorage::new_with_cap_name_and_authority` takes the authority; the browser replay
+    store is authoritative and every other browser store disposable, matching the native
+    stores of #914.
   - Cutover: the wire format of storage entries and operations changes, so every node of a
     network must upgrade together; the version is bumped at release. Stored carriers of the old
-    format that hold a tombstone, relay inboxes with delivered messages included, no longer
-    decode: native file storage retires them on first read, and the browser entry store, now
-    opened with the new `UndecodableRows::Retire` policy of `IdbStorage`, deletes them on first
-    read or scan. Their owners' next writes and the registries' next heartbeats repopulate them.
+    format that hold a tombstone no longer decode, and both native file storage and the browser
+    entry store retire them on first read or scan. Data topics are repopulated by their owners'
+    next writes and the registries' next heartbeats. A relay inbox that has ever drained a
+    message holds a tombstone, so it is retired with the messages it still held for its
+    offline recipient: those undelivered messages are lost at the cutover.
 
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`

@@ -548,9 +548,8 @@ curl -X POST \
 
 Publish data message to specific topic
 
-A published message expires 10 minutes after it is published unless other writes keep the
-topic alive, and 100 minutes after it (the data element horizon) in any case. Publish it again
-to keep it. See [DHT storage](advanced-topic/chord.md#data-topic-storage).
+A published message is a data-topic element: it expires by the element lifetime rule of
+[DHT storage](advanced-topic/chord.md#data-topic-storage) unless it is published again.
 
 #### REQUEST
 
@@ -630,9 +629,9 @@ curl -X POST \
 
 Register custom service to rings network
 
-A registration is one element of the service's data topic, so it expires 10 minutes after it
-is made unless other registrations keep the topic alive, and 100 minutes after it in any case.
-Register again to keep it. See [DHT storage](advanced-topic/chord.md#data-topic-storage).
+A registration is one element of the service's data topic: it expires by the element lifetime
+rule of [DHT storage](advanced-topic/chord.md#data-topic-storage) unless the service registers
+again.
 
 #### REQUEST
 
