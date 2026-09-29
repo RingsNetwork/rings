@@ -26,7 +26,46 @@
 //!
 //! Persistence is one record per stream (see [`store`]): a transition writes only its stream's
 //! record, at most [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`], so the cost of an admission does not
-//! grow with the number of streams retained. The first load that finds the shared-stream
+//! grow with the number of streams retained.
+//!
+//! **Law (fail closed per stream, #910).** The first operation restores the store from one scan
+//! of the storage and caches the result, including every record that does not restore. For a
+//! stream `s` whose stored record is torn, corrupt or unreadable:
+//!
+//! ```text
+//! ∀ transition t of s.   t = Err(TransactionReplayStreamUnavailable { s, record })
+//!                        until the record is cleared and the node restarts
+//! ∀ s′ ≠ s restored.     state(s′) and the verdicts of s′ are those of a store without s
+//! ∀ s′ new.              s′ opens iff its table's streams + |U| < capacity
+//! cost(restore) = O(|store|), once;  cost(call) = 0 store reads + 1 record write
+//! ```
+//!
+//! so no replay is admitted from, and no sequence is reused by, a stream whose record is torn,
+//! corrupt or unreadable, while every stream already in the store keeps its guarantee; a new
+//! stream sees each such record hold one slot of its table's bound. The law covers the records
+//! the storage holds: a record that is absent (deleted, or never made durable, as a rename can
+//! be on a non-unix target) is indistinguishable from a stream never seen, and its stream
+//! restarts from `First` (tracked in #915). Each record write of the native store is flushed,
+//! which bounds the node-wide transition rate (about 50 per second on macOS, see the replay
+//! chapter; group commit is tracked in #916). The unrestorable records are counted
+//! ([`ReplayCounters::unrestorable_record`]), each refusal is counted
+//! ([`ReplayCounters::unavailable_stream`]), and each unrestorable record is logged once at
+//! load with its storage record name. A scan that fails as a whole restores nothing: it is
+//! counted as a persistence failure, and the next operation scans again.
+//!
+//! **Recovery.** An operator clears one failed stream, accepting a replay-window reset for that
+//! stream alone, by removing the record the refusal and the log name while the node is stopped,
+//! and then starting it: the native daemon keeps each record as the file of that name in the
+//! `transaction-replay` directory beside its data store, and a browser provider keeps it as the
+//! row of that key in the IndexedDB database and object store `<storage name>/transaction-replay`
+//! (see the replay chapter for the steps). After the restart the stream starts from `First`: an
+//! unexpired transaction of a cleared receiver stream may be admitted once more, and a cleared
+//! sender stream restarts at sequence zero. Its destination rejects those sequences until they
+//! pass its retained high watermark: as `Stale` below the window, and as `Fork`, with signed
+//! [`TransactionForkEvidence`] against this node, inside it; the messages they carry are lost.
+//! No other stream is touched.
+//!
+//! The first load that finds the shared-stream
 //! snapshot of the key used before #898 deletes it without reading it (best effort, counted on
 //! failure); once it is gone no later load touches it. Sender and receiver tables each have a
 //! hard stream-count bound and never evict: once the bound is reached, a new stream fails
@@ -40,8 +79,10 @@ use std::num::NonZeroU64;
 use std::ops::RangeInclusive;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use futures::lock::Mutex;
+use rings_runtime::MaybeSend;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -57,7 +98,7 @@ use crate::message::OriginQuotaConfig;
 use crate::message::OriginQuotaCounters;
 use crate::message::OriginQuotaInstant;
 use crate::message::OriginQuotaKey;
-use crate::storage::KvStorageInterface;
+use crate::storage::KvStorageScan;
 use crate::utils::Instant;
 
 mod store;
@@ -66,7 +107,8 @@ use self::store::receiver_record;
 use self::store::restore;
 use self::store::sender_record;
 pub use self::store::ReplayRecord;
-use self::store::ReplayTables;
+use self::store::ReplayStore;
+use self::store::ReplayTable;
 use self::store::SHARED_STREAM_SNAPSHOT_KEY;
 pub use self::store::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
 pub use self::store::TRANSACTION_REPLAY_STORE_MAX_BYTES;
@@ -300,10 +342,25 @@ pub fn observe(
     (state, verdict)
 }
 
-/// Storage accepted by the transaction replay runtime.
-pub type ReplayStorage = Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<ReplayRecord>)>;
+/// Run one replay transition detached from its caller (the law of whole transitions of
+/// [`TransactionReplay`]).
+///
+/// Post: `Err(TransactionReplayUnscheduled)` when no runtime is current (the transition never
+/// started) or the transition panicked; otherwise the transition's own result.
+async fn run_whole<T, F>(transition: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>> + MaybeSend + 'static,
+    T: MaybeSend + 'static,
+{
+    rings_runtime::run_detached(transition)
+        .await
+        .map_err(Error::TransactionReplayUnscheduled)?
+}
 
-/// Observable rejected-verdict and persistence-failure counters.
+/// Storage accepted by the transaction replay runtime.
+pub type ReplayStorage = Box<rings_runtime::maybe_send_sync!(dyn KvStorageScan<ReplayRecord>)>;
+
+/// Observable rejected-verdict, persistence-failure and unavailable-stream counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReplayCounters {
     /// Exact duplicate transactions rejected.
@@ -314,23 +371,34 @@ pub struct ReplayCounters {
     pub stale: u64,
     /// Replay store reads or writes that failed.
     pub persistence_failure: u64,
+    /// Records the load found that do not restore, each failing its stream closed; a gauge,
+    /// fixed once the store is loaded, and non-zero calls for an operator.
+    pub unrestorable_record: u64,
+    /// Reservations and admissions refused because their stream's record does not restore.
+    pub unavailable_stream: u64,
 }
 
+/// The atomic cells behind [`ReplayCounters`].
 #[derive(Default)]
 struct ReplayCounterState {
     replay: AtomicU64,
     fork: AtomicU64,
     stale: AtomicU64,
     persistence_failure: AtomicU64,
+    unrestorable_record: AtomicU64,
+    unavailable_stream: AtomicU64,
 }
 
 impl ReplayCounterState {
+    /// The current value of every counter.
     fn snapshot(&self) -> ReplayCounters {
         ReplayCounters {
             replay: self.replay.load(Ordering::Relaxed),
             fork: self.fork.load(Ordering::Relaxed),
             stale: self.stale.load(Ordering::Relaxed),
             persistence_failure: self.persistence_failure.load(Ordering::Relaxed),
+            unrestorable_record: self.unrestorable_record.load(Ordering::Relaxed),
+            unavailable_stream: self.unavailable_stream.load(Ordering::Relaxed),
         }
     }
 }
@@ -342,6 +410,27 @@ impl ReplayCounterState {
 /// transitions node-wide. Each write is one record of at most
 /// [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`]; a lock per stream would let writes of different
 /// streams overlap.
+///
+/// **Law (whole transitions).** A transition, once started, runs to its end: lock, persist the
+/// stream's record, update the in-memory table, unlock. [`Self::reserve`] and
+/// [`Self::admit_with_quota`] hand it to the runtime ([`rings_runtime::run_detached`]), so
+/// cancelling the caller abandons only the wait. Otherwise a cancelled caller would release the
+/// mutex while its record write still ran, the next transition of the stream would compute from
+/// a table without that write, and the stale write could land last on disk: a receiver replay,
+/// or re-signed sender sequences, after a restart.
+///
+/// A cancelled caller's transition therefore commits, exactly as if the caller had dropped the
+/// verdict: an admission enters the window and is charged its quota, though nobody dispatches
+/// it, so a retransmission of that transaction is a `Replay` and the message is lost (as for
+/// any drop after admission); a reservation consumes its sequences, which leaves a gap the
+/// receiver accepts as `Advance`. Cancellation also no longer sheds a queued transition: each
+/// cancelled attempt still waits its turn and pays its flushed write.
+///
+/// ```text
+/// caller ──call──▶ run_detached ─▶ [lock ─▶ persist ─▶ table := next ─▶ unlock]
+///   │ drop                                   (owned by the runtime, never torn)
+///   └──────────▶ only the wait is abandoned
+/// ```
 pub(crate) struct TransactionReplay {
     storage: ReplayStorage,
     state: Mutex<TransactionAdmissionState>,
@@ -351,17 +440,18 @@ pub(crate) struct TransactionReplay {
 }
 
 struct TransactionAdmissionState {
-    /// The replay tables, loaded on the first operation.
-    tables: Option<ReplayTables>,
+    /// The replay store, restored once on the first operation and cached from then on.
+    store: Option<ReplayStore>,
     /// Runtime-local origin quotas.
     quota: OriginQuotaTable,
 }
 
 impl TransactionReplay {
-    /// Construct a replay runtime. The tables are loaded lazily on its first operation.
+    /// Construct a shared replay runtime, as the transport holds it. The store is restored
+    /// lazily on its first operation.
     #[cfg(test)]
-    pub(crate) fn new(storage: ReplayStorage) -> Self {
-        Self::new_with_quota(storage, OriginQuotaConfig::default())
+    pub(crate) fn new_shared(storage: ReplayStorage) -> Arc<Self> {
+        Arc::new(Self::new_with_quota(storage, OriginQuotaConfig::default()))
     }
 
     /// Construct a replay runtime with explicit runtime-local origin quotas.
@@ -369,7 +459,7 @@ impl TransactionReplay {
         Self {
             storage,
             state: Mutex::new(TransactionAdmissionState {
-                tables: None,
+                store: None,
                 quota: OriginQuotaTable::new(quota_config),
             }),
             started_at: Instant::now(),
@@ -388,29 +478,85 @@ impl TransactionReplay {
         self.quota_counters.snapshot()
     }
 
-    /// The tables, restored from every record of the store on the first operation.
+    /// The replay store, restored from one scan of the storage on the first operation and
+    /// cached from then on, unrestorable records included, so no later operation reads the
+    /// storage again.
     ///
     /// A load that finds the shared-stream snapshot of the key used before #898 retires it, so
-    /// once its deletion succeeds no later load, in this run or after a restart, touches it.
-    async fn load_tables<'a>(
+    /// once its deletion succeeds no later load, in this run or after a restart, touches it. A
+    /// scan that fails as a whole restores nothing: it is counted, the operation fails closed,
+    /// and the next operation scans again.
+    ///
+    /// ```text
+    /// slot cached? ── yes ──────────────────────────────────────────────▶ slot
+    ///      │ no
+    /// scan storage ── Err ──▶ count persistence failure ──▶ Err(load) (slot stays empty)
+    ///      │ Ok(records)
+    /// restore (pure, total) ──▶ count + log unrestorable ──▶ retire shared snapshot?
+    ///      └────────────────────────────────▶ slot := store ──▶ slot
+    /// ```
+    async fn load_store<'a>(
         &self,
-        slot: &'a mut Option<ReplayTables>,
-    ) -> Result<&'a mut ReplayTables> {
+        slot: &'a mut Option<ReplayStore>,
+    ) -> Result<&'a mut ReplayStore> {
         if slot.is_none() {
-            let records = self.storage.get_all().await.map_err(|source| {
+            let records = self.storage.scan().await.map_err(|source| {
                 self.count_persistence_failure();
                 Error::TransactionReplayPersistence {
                     operation: "load",
                     source: Box::new(source),
                 }
             })?;
-            let restored = restore(records).inspect_err(|_| self.count_persistence_failure())?;
+            let restored = restore(records, self.record_naming());
+            self.report_unrestorable(&restored.store);
             if restored.holds_shared_snapshot {
                 self.retire_shared_stream_snapshot().await;
             }
-            *slot = Some(restored.tables);
+            *slot = Some(restored.store);
         }
         slot.as_mut().ok_or(Error::TransactionReplayStateInvalid)
+    }
+
+    /// The storage's record naming, under which it files each record and reports the records it
+    /// cannot decode.
+    fn record_naming(&self) -> impl Fn(&str) -> String + '_ {
+        |storage_key| self.storage.record_name(storage_key)
+    }
+
+    /// Count and log the unrestorable records of a freshly restored store; each fails its
+    /// stream closed until an operator clears it (see the module documentation).
+    fn report_unrestorable(&self, store: &ReplayStore) {
+        let count = u64::try_from(store.unrestorable.len()).unwrap_or(u64::MAX);
+        self.counters
+            .unrestorable_record
+            .store(count, Ordering::Relaxed);
+        for (record, unrestorable) in store.unrestorable.iter() {
+            tracing::error!(
+                record = %record,
+                key = ?unrestorable.key,
+                failure = ?unrestorable.failure,
+                "replay record does not restore; its stream fails closed until it is cleared"
+            );
+        }
+    }
+
+    /// Refuse, and count, a transition of stream `key` of `table` whose record does not
+    /// restore (the fail-closed-per-stream law of [`store`]).
+    fn refuse_unavailable(
+        &self,
+        store: &ReplayStore,
+        table: ReplayTable,
+        key: StreamKey,
+    ) -> Result<()> {
+        match store.unavailable_record(table, &key, self.record_naming())? {
+            None => Ok(()),
+            Some(record) => {
+                self.counters
+                    .unavailable_stream
+                    .fetch_add(1, Ordering::Relaxed);
+                Err(Error::TransactionReplayStreamUnavailable { key, record })
+            }
+        }
     }
 
     /// Count one failed replay-store read or write.
@@ -451,15 +597,30 @@ impl TransactionReplay {
     }
 
     /// Reserve and persist `count` sender sequences before returning the range to the signer.
+    ///
+    /// The transition runs detached from the caller (the law of whole transitions): cancelling
+    /// the caller abandons only the wait.
     pub(crate) async fn reserve(
+        self: &Arc<Self>,
+        key: StreamKey,
+        count: NonZeroU64,
+    ) -> Result<RangeInclusive<u64>> {
+        let replay = Arc::clone(self);
+        run_whole(async move { replay.commit_reservation(key, count).await }).await
+    }
+
+    /// The reservation transition: lock, load, reserve, persist the stream's record, then update
+    /// the table.
+    async fn commit_reservation(
         &self,
         key: StreamKey,
         count: NonZeroU64,
     ) -> Result<RangeInclusive<u64>> {
         let mut state = self.state.lock().await;
-        let tables = self.load_tables(&mut state.tables).await?;
-        let previous = tables.sender.get(&key).copied();
-        if previous.is_none() && tables.sender.len() >= TRANSACTION_REPLAY_STREAM_CAPACITY {
+        let store = self.load_store(&mut state.store).await?;
+        self.refuse_unavailable(store, ReplayTable::Sender, key)?;
+        let previous = store.tables.sender.get(&key).copied();
+        if previous.is_none() && !store.admits_new_stream(ReplayTable::Sender) {
             return Err(Error::TransactionReplayStreamCapacityExceeded {
                 capacity: TRANSACTION_REPLAY_STREAM_CAPACITY,
             });
@@ -474,13 +635,16 @@ impl TransactionReplay {
             .checked_add(count.get().saturating_sub(1))
             .ok_or(Error::TransactionSequenceExhausted { key })?;
         self.persist(sender_record(&key, last)?).await?;
-        tables.sender.insert(key, last);
+        store.tables.sender.insert(key, last);
         Ok(first..=last)
     }
 
     /// Atomically commit replay classification and origin-quota admission before dispatch.
+    ///
+    /// The transition runs detached from the caller (the law of whole transitions): cancelling
+    /// the caller abandons only the wait.
     pub(crate) async fn admit_with_quota(
-        &self,
+        self: &Arc<Self>,
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
@@ -492,10 +656,17 @@ impl TransactionReplay {
                 .saturating_duration_since(self.started_at)
                 .as_nanos(),
         );
-        self.admit_at(key, sequence, digest, charge, byte_cost, now)
-            .await
+        let replay = Arc::clone(self);
+        run_whole(async move {
+            replay
+                .admit_at(key, sequence, digest, charge, byte_cost, now)
+                .await
+        })
+        .await
     }
 
+    /// The admission transition at quota time `now`: lock, load, classify, reserve quota,
+    /// persist the stream's record, then update the table.
     async fn admit_at(
         &self,
         key: StreamKey,
@@ -506,10 +677,11 @@ impl TransactionReplay {
         now: OriginQuotaInstant,
     ) -> Result<SequenceVerdict> {
         let mut state = self.state.lock().await;
-        let TransactionAdmissionState { tables, quota } = &mut *state;
-        let tables = self.load_tables(tables).await?;
-        let previous = tables.receiver.get(&key);
-        if previous.is_none() && tables.receiver.len() >= TRANSACTION_REPLAY_STREAM_CAPACITY {
+        let TransactionAdmissionState { store, quota } = &mut *state;
+        let store = self.load_store(store).await?;
+        self.refuse_unavailable(store, ReplayTable::Receiver, key)?;
+        let previous = store.tables.receiver.get(&key);
+        if previous.is_none() && !store.admits_new_stream(ReplayTable::Receiver) {
             return Err(Error::TransactionReplayStreamCapacityExceeded {
                 capacity: TRANSACTION_REPLAY_STREAM_CAPACITY,
             });
@@ -558,7 +730,7 @@ impl TransactionReplay {
             quota_reservation.rollback(quota);
             return Err(error);
         }
-        tables.receiver.insert(key, next);
+        store.tables.receiver.insert(key, next);
         Ok(verdict)
     }
 
@@ -600,8 +772,13 @@ mod tests {
     use super::store::record_key;
     #[cfg(not(target_family = "wasm"))]
     use super::store::ReplayTable;
+    #[cfg(not(target_family = "wasm"))]
+    use super::test_storage::Hooked;
+    #[cfg(not(target_family = "wasm"))]
+    use super::test_storage::StorageHooks;
     use super::*;
     use crate::ecc::SecretKey;
+    use crate::storage::KvStorageInterface;
 
     fn digest(value: u8) -> TransactionDigest {
         TransactionDigest::new([value; 32])
@@ -840,7 +1017,7 @@ mod tests {
         let origin: Did = SecretKey::random().address().into();
         let a: Did = SecretKey::random().address().into();
         let b: Did = SecretKey::random().address().into();
-        let runtime = TransactionReplay::new(Box::new(crate::storage::MemStorage::new()));
+        let runtime = TransactionReplay::new_shared(Box::new(crate::storage::MemStorage::new()));
         let key_a = StreamKey::new(1, origin, a, MessageCategory::Application);
         let key_b = StreamKey::new(1, origin, b, MessageCategory::Application);
 
@@ -856,7 +1033,7 @@ mod tests {
         let destination: Did = SecretKey::random().address().into();
         let key = stream(destination);
         let storage = std::sync::Arc::new(crate::storage::MemStorage::new());
-        let first_runtime = TransactionReplay::new(Box::new(SharedStorage(storage.clone())));
+        let first_runtime = TransactionReplay::new_shared(Box::new(storage.clone()));
         assert_eq!(first_runtime.reserve(key, NonZeroU64::MIN).await?, 0..=0);
         assert_eq!(
             first_runtime.admit(key, 0, digest(1)).await?,
@@ -864,7 +1041,7 @@ mod tests {
         );
         drop(first_runtime);
 
-        let restarted = TransactionReplay::new(Box::new(SharedStorage(storage)));
+        let restarted = TransactionReplay::new_shared(Box::new(storage));
         assert_eq!(restarted.reserve(key, NonZeroU64::MIN).await?, 1..=1);
         assert!(matches!(
             restarted.admit(key, 0, digest(1)).await,
@@ -880,7 +1057,7 @@ mod tests {
         let storage = crate::storage::MemStorage::new();
         let (storage_key, record) = sender_record(&key, u64::MAX)?;
         storage.put(storage_key.as_str(), &record).await?;
-        let runtime = TransactionReplay::new(Box::new(storage));
+        let runtime = TransactionReplay::new_shared(Box::new(storage));
         assert!(matches!(
             runtime.reserve(key, NonZeroU64::MIN).await,
             Err(Error::TransactionSequenceExhausted { .. })
@@ -891,7 +1068,7 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn load_failure_fails_closed_and_is_counted() {
-        let runtime = TransactionReplay::new(Box::new(FailingStorage));
+        let runtime = TransactionReplay::new_shared(Box::new(Hooked::new(Unavailable)));
         let key = stream(SecretKey::random().address().into());
 
         assert!(matches!(
@@ -907,7 +1084,7 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn store_failure_fails_closed_before_admission_and_is_counted() {
-        let runtime = TransactionReplay::new(Box::new(StoreFailingStorage));
+        let runtime = TransactionReplay::new_shared(Box::new(Hooked::new(WritesRefused)));
         let key = stream(SecretKey::random().address().into());
 
         assert!(matches!(
@@ -934,18 +1111,21 @@ mod tests {
     async fn new_sender_stream_fails_closed_at_the_table_bound() -> Result<()> {
         let pairs = u32::try_from(TRANSACTION_REPLAY_PAIR_CAPACITY)
             .map_err(|_| Error::TransactionReplayStateInvalid)?;
-        let runtime = TransactionReplay::new(Box::new(crate::storage::MemStorage::new()));
+        let runtime = TransactionReplay::new_shared(Box::new(crate::storage::MemStorage::new()));
         let destination = Did::from(u32::MAX);
         {
             let mut state = runtime.state.lock().await;
-            let tables = runtime.load_tables(&mut state.tables).await?;
+            let store = runtime.load_store(&mut state.store).await?;
             for origin in 0..pairs {
                 for class in CLASSES {
                     let key = StreamKey::new(1, Did::from(origin), destination, class);
-                    tables.sender.insert(key, 0);
+                    store.tables.sender.insert(key, 0);
                 }
             }
-            assert_eq!(tables.sender.len(), TRANSACTION_REPLAY_STREAM_CAPACITY);
+            assert_eq!(
+                store.tables.sender.len(),
+                TRANSACTION_REPLAY_STREAM_CAPACITY
+            );
         }
         let new_key = StreamKey::new(
             1,
@@ -973,7 +1153,7 @@ mod tests {
         let origin: Did = SecretKey::random().address().into();
         let destination: Did = SecretKey::random().address().into();
         let key = StreamKey::new(7, origin, destination, MessageCategory::Application);
-        let first = TransactionReplay::new(Box::new(storage));
+        let first = TransactionReplay::new_shared(Box::new(storage));
 
         assert_eq!(
             first
@@ -994,7 +1174,7 @@ mod tests {
         let reopened = crate::storage::idb::IdbStorage::new_with_cap_and_name(2, STORAGE_NAME)
             .await
             .expect("IndexedDB reopens");
-        let restarted = TransactionReplay::new(Box::new(reopened));
+        let restarted = TransactionReplay::new_shared(Box::new(reopened));
         assert_eq!(
             restarted
                 .reserve(key, NonZeroU64::MIN)
@@ -1008,76 +1188,108 @@ mod tests {
         ));
     }
 
+    /// Fail closed per stream in the browser store: a row under stream 1's receiver record key
+    /// that does not decode as a record refuses that stream alone, is kept, and removing it
+    /// before a reopen restores the stream while the others keep their windows.
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn test_browser_store_fails_closed_only_on_the_stream_of_an_undecodable_row() {
+        /// The IndexedDB database this test owns.
+        const STORAGE_NAME: &str = "rings-core/replay-store-undecodable-row";
+        let open = || crate::storage::idb::IdbStorage::new_with_cap_and_name(4, STORAGE_NAME);
+        let storage = open().await.expect("IndexedDB opens");
+        <crate::storage::idb::IdbStorage as KvStorageInterface<ReplayRecord>>::clear(&storage)
+            .await
+            .expect("IndexedDB clears");
+        let corrupt = StreamKey::new(7, Did::from(1_u32), Did::from(99_u32), MessageCategory::E2e);
+        let intact = StreamKey::new(7, Did::from(2_u32), Did::from(99_u32), MessageCategory::E2e);
+        let corrupt_key = super::store::record_key(super::store::ReplayTable::Receiver, &corrupt)
+            .expect("record key encodes");
+        storage
+            .put(corrupt_key.as_str(), &42_u32)
+            .await
+            .expect("foreign row stores");
+        let replay = TransactionReplay::new_shared(Box::new(storage));
+
+        assert!(matches!(
+            replay.admit(corrupt, 0, digest(1)).await,
+            Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
+                if *record == corrupt_key
+        ));
+        assert_eq!(
+            replay
+                .admit(intact, 0, digest(1))
+                .await
+                .expect("the intact stream admits"),
+            SequenceVerdict::First
+        );
+        assert_eq!(replay.counters().unrestorable_record, 1);
+        drop(replay);
+
+        let reopened = open().await.expect("IndexedDB reopens");
+        <crate::storage::idb::IdbStorage as KvStorageInterface<ReplayRecord>>::remove(
+            &reopened,
+            corrupt_key.as_str(),
+        )
+        .await
+        .expect("the operator removes the row");
+        let restarted = TransactionReplay::new_shared(Box::new(reopened));
+        assert_eq!(
+            restarted
+                .admit(corrupt, 0, digest(1))
+                .await
+                .expect("the cleared stream admits"),
+            SequenceVerdict::First
+        );
+        assert!(matches!(
+            restarted.admit(intact, 0, digest(1)).await,
+            Err(Error::TransactionReplay { .. })
+        ));
+    }
+
+    /// Hooks of a store that cannot be read or written, modelling a store that cannot load.
+    /// Removal (and `clear`, `count`) still succeeds: the shared-snapshot retirement must not
+    /// be what fails.
     #[cfg(not(target_family = "wasm"))]
-    struct FailingStorage;
+    struct Unavailable;
 
     #[cfg(not(target_family = "wasm"))]
     #[async_trait::async_trait]
-    impl KvStorageInterface<ReplayRecord> for FailingStorage {
-        async fn get(&self, _key: &str) -> Result<Option<ReplayRecord>> {
+    impl StorageHooks for Unavailable {
+        /// Runs before a `get`.
+        async fn before_get(&self, _key: &str) -> Result<()> {
             Err(Error::InvalidTransport)
         }
 
-        async fn put(&self, _key: &str, _value: &ReplayRecord) -> Result<()> {
+        /// Runs before a `put`.
+        async fn before_put(&self, _key: &str) -> Result<()> {
             Err(Error::InvalidTransport)
         }
 
-        async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-            Err(Error::InvalidTransport)
-        }
-
-        // Only reads fail: this storage models a store that cannot be loaded.
-        async fn remove(&self, _key: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn clear(&self) -> Result<()> {
-            Err(Error::InvalidTransport)
-        }
-
-        async fn count(&self) -> Result<u32> {
+        /// Runs before a whole-store read.
+        async fn before_scan(&self) -> Result<()> {
             Err(Error::InvalidTransport)
         }
     }
 
+    /// Hooks of a store that loads but refuses every write.
     #[cfg(not(target_family = "wasm"))]
-    struct StoreFailingStorage;
+    struct WritesRefused;
 
     #[cfg(not(target_family = "wasm"))]
     #[async_trait::async_trait]
-    impl KvStorageInterface<ReplayRecord> for StoreFailingStorage {
-        async fn get(&self, _key: &str) -> Result<Option<ReplayRecord>> {
-            Ok(None)
-        }
-
-        async fn put(&self, _key: &str, _value: &ReplayRecord) -> Result<()> {
+    impl StorageHooks for WritesRefused {
+        /// Runs before a `put`.
+        async fn before_put(&self, _key: &str) -> Result<()> {
             Err(Error::InvalidTransport)
-        }
-
-        async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-            Ok(Vec::new())
-        }
-
-        async fn remove(&self, _key: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn clear(&self) -> Result<()> {
-            Ok(())
-        }
-
-        async fn count(&self) -> Result<u32> {
-            Ok(0)
         }
     }
 
-    /// A store that still holds a shared-stream snapshot under the key used before #898. The
-    /// snapshot's bytes decode as no stream, so a passing test proves the cutover never decodes
-    /// it, and reading the key alone is an error.
+    /// Hooks of a store that still holds a shared-stream snapshot under the key used before
+    /// #898. The snapshot's bytes decode as no stream, so a passing test proves the cutover
+    /// never decodes it, and reading the key alone is an error.
     #[cfg(not(target_family = "wasm"))]
-    struct CutoverStorage {
-        /// The stored records.
-        inner: crate::storage::MemStorage<ReplayRecord>,
+    struct Cutover {
         /// Whether removing a record fails.
         fail_remove: bool,
         /// Removals attempted.
@@ -1085,54 +1297,41 @@ mod tests {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    impl CutoverStorage {
-        /// A store holding a snapshot under the shared-stream key.
-        async fn holding_a_shared_stream_snapshot(fail_remove: bool) -> Result<Self> {
-            let inner = crate::storage::MemStorage::new();
-            inner
-                .put(SHARED_STREAM_SNAPSHOT_KEY, &ReplayRecord(vec![0xff; 3]))
-                .await?;
-            Ok(Self {
-                inner,
-                fail_remove,
-                removals: std::sync::atomic::AtomicUsize::new(0),
-            })
+    #[async_trait::async_trait]
+    impl StorageHooks for Cutover {
+        /// Runs before a `get`.
+        async fn before_get(&self, key: &str) -> Result<()> {
+            match key == SHARED_STREAM_SNAPSHOT_KEY {
+                true => Err(Error::InvalidTransport),
+                false => Ok(()),
+            }
+        }
+
+        /// Runs before a `remove`.
+        async fn before_remove(&self, _key: &str) -> Result<()> {
+            self.removals.fetch_add(1, Ordering::SeqCst);
+            match self.fail_remove {
+                true => Err(Error::InvalidTransport),
+                false => Ok(()),
+            }
         }
     }
 
+    /// A store holding a snapshot under the shared-stream key, whose removals fail iff
+    /// `fail_remove`.
     #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl KvStorageInterface<ReplayRecord> for CutoverStorage {
-        async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
-            if key == SHARED_STREAM_SNAPSHOT_KEY {
-                return Err(Error::InvalidTransport);
-            }
-            self.inner.get(key).await
-        }
-
-        async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
-            self.inner.put(key, value).await
-        }
-
-        async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-            self.inner.get_all().await
-        }
-
-        async fn remove(&self, key: &str) -> Result<()> {
-            self.removals.fetch_add(1, Ordering::SeqCst);
-            if self.fail_remove {
-                return Err(Error::InvalidTransport);
-            }
-            self.inner.remove(key).await
-        }
-
-        async fn clear(&self) -> Result<()> {
-            self.inner.clear().await
-        }
-
-        async fn count(&self) -> Result<u32> {
-            self.inner.count().await
-        }
+    async fn holding_a_shared_stream_snapshot(
+        fail_remove: bool,
+    ) -> Result<std::sync::Arc<Hooked<Cutover>>> {
+        let storage = Hooked::new(Cutover {
+            fail_remove,
+            removals: std::sync::atomic::AtomicUsize::new(0),
+        });
+        storage
+            .inner
+            .put(SHARED_STREAM_SNAPSHOT_KEY, &ReplayRecord(vec![0xff; 3]))
+            .await?;
+        Ok(std::sync::Arc::new(storage))
     }
 
     /// Cutover of #898: the first load deletes the shared-stream snapshot without decoding it,
@@ -1141,9 +1340,8 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn test_first_load_deletes_the_shared_stream_snapshot_unread() -> Result<()> {
-        let storage =
-            std::sync::Arc::new(CutoverStorage::holding_a_shared_stream_snapshot(false).await?);
-        let runtime = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        let storage = holding_a_shared_stream_snapshot(false).await?;
+        let runtime = TransactionReplay::new_shared(Box::new(storage.clone()));
         let key = stream(SecretKey::random().address().into());
 
         assert_eq!(
@@ -1162,12 +1360,12 @@ mod tests {
             .is_some());
         assert_eq!(runtime.counters().persistence_failure, 0);
 
-        let restarted = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        let restarted = TransactionReplay::new_shared(Box::new(storage.clone()));
         assert_eq!(
             restarted.admit(key, 1, digest(2)).await?,
             SequenceVerdict::Advance
         );
-        assert_eq!(storage.removals.load(Ordering::SeqCst), 1);
+        assert_eq!(storage.hooks.removals.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
@@ -1176,9 +1374,8 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn test_failed_shared_stream_deletion_is_counted_and_admission_continues() -> Result<()> {
-        let storage =
-            std::sync::Arc::new(CutoverStorage::holding_a_shared_stream_snapshot(true).await?);
-        let runtime = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        let storage = holding_a_shared_stream_snapshot(true).await?;
+        let runtime = TransactionReplay::new_shared(Box::new(storage.clone()));
         let key = stream(SecretKey::random().address().into());
 
         assert_eq!(
@@ -1192,79 +1389,24 @@ mod tests {
             .await?
             .is_some());
 
-        let restarted = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        let restarted = TransactionReplay::new_shared(Box::new(storage.clone()));
         assert_eq!(
             restarted.admit(key, 1, digest(2)).await?,
             SequenceVerdict::Advance
         );
         assert_eq!(restarted.counters().persistence_failure, 1);
-        assert_eq!(storage.removals.load(Ordering::SeqCst), 2);
+        assert_eq!(storage.hooks.removals.load(Ordering::SeqCst), 2);
         Ok(())
-    }
-
-    /// Shares one [`CutoverStorage`] between the runtime and the test's assertions.
-    #[cfg(not(target_family = "wasm"))]
-    struct SharedCutoverStorage(std::sync::Arc<CutoverStorage>);
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl KvStorageInterface<ReplayRecord> for SharedCutoverStorage {
-        async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
-            self.0.get(key).await
-        }
-
-        async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
-            self.0.put(key, value).await
-        }
-
-        async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-            self.0.get_all().await
-        }
-
-        async fn remove(&self, key: &str) -> Result<()> {
-            self.0.remove(key).await
-        }
-
-        async fn clear(&self) -> Result<()> {
-            self.0.clear().await
-        }
-
-        async fn count(&self) -> Result<u32> {
-            self.0.count().await
-        }
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    struct SharedStorage(std::sync::Arc<crate::storage::MemStorage<ReplayRecord>>);
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl KvStorageInterface<ReplayRecord> for SharedStorage {
-        async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
-            self.0.get(key).await
-        }
-
-        async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
-            self.0.put(key, value).await
-        }
-
-        async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-            self.0.get_all().await
-        }
-
-        async fn remove(&self, key: &str) -> Result<()> {
-            self.0.remove(key).await
-        }
-
-        async fn clear(&self) -> Result<()> {
-            self.0.clear().await
-        }
-
-        async fn count(&self) -> Result<u32> {
-            self.0.count().await
-        }
     }
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod quota_admission_tests;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_durable_throughput;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_storage;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_stream_failures;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_whole_transitions;

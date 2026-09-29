@@ -212,31 +212,52 @@ originators of one class can still reorder between reserving a sequence and subm
 
 The replay store keeps one record per stream, under
 `rings-core:transaction-replay:stream:{sender|receiver}:<hex key>`, each carrying its own stream
-key; a record under any other key, or not under its own key, makes the store invalid and fails
-closed. That covers the records the storage returns: the native file store deletes a file whose
-framing does not decode before replay sees it, and writes without `fsync`, so a torn file left by a
-crash is dropped and its stream forgotten, reopening replay for that stream (tracked in #909). A
-load that finds the snapshot of the shared streams, stored under `rings-core:transaction-replay`,
-deletes it without decoding it, since its keys cannot name a class. The deletion is best effort: the
-former snapshot is never decoded, so a failed deletion is counted as a replay persistence failure
-and logged, admission continues, and the next load retries it; once deleted, no load touches it
-again. The upgrade therefore resets every replay window once, exactly as deleting the replay store
-does: an unexpired transaction signed before the upgrade can be accepted once more. Old and new
-nodes do not interoperate on replay: an upgraded sender's per-class sequences restart at zero and
-are stale to a node that still keeps one shared stream, so the release that ships per-class streams
-is a mandatory network-wide upgrade. The final destination persists a fixed 32-sequence acceptance
-window per stream before application validation and handler dispatch. Each of the sender and
-receiver tables holds at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096 streams: every class
-stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each transition
-writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES` (1161 bytes)
-whatever the number of streams retained. A full store is at most
+key. The native daemon opens it as an authoritative file store (#909), which evicts nothing and, on
+unix, flushes each write to stable storage before its rename and the directory after it
+(`F_FULLFSYNC` on macOS), so a crash leaves every record whole at its previous or its new value; on
+other targets the durability of a rename is the file system's own. A record file that cannot be
+read, whose framing does not decode, or that is misfiled (a whole record copied or moved over
+another key's file) is reported by its file (and its key, when intact) and never deleted. Failure is
+per stream (#910): a record that does not restore, whether torn, corrupt, unreadable, misfiled,
+misplaced (decoding as a stream other than the one its key names), or holding an invalid window,
+makes only the stream it is filed as unavailable (a misfiled record also the stream whose key it
+carries, unless that stream's own record restored it), and that stream refuses every reservation and
+admission with `TransactionReplayStreamUnavailable` until an operator removes that one record with
+the node stopped, which resets that stream's replay window alone (see the replay chapter). No replay
+is admitted from, and no sequence is reused by, a stream whose record is torn, corrupt or
+unreadable, and every other stream in the store keeps its guarantee; each such record holds one slot
+of both tables' stream bounds. A record that is absent is indistinguishable from a stream never
+seen, so its stream restarts from `First` (tracked in #915). The store is read once, on the first
+replay operation; later calls read nothing and write one flushed record. Each transition runs
+detached from its caller (lock, persist, update, unlock), so a cancelled caller never leaves a
+record write in flight to land after a newer one; its transition commits as if the caller had
+dropped the verdict (an admission is charged and its message lost to later retransmission as a
+`Replay`; a reservation leaves a sequence gap). The flushed write bounds the node-wide transition
+rate (about 50 per second on macOS; group commit is tracked in #916). Unrestorable records and
+refused calls are counted in `ReplayCounters` and each unrestorable record is logged at load. The
+browser store commits each record in an atomic IndexedDB transaction under the default durability
+hint (tracked in #912). A load that finds the snapshot of the shared streams, stored under
+`rings-core:transaction-replay`, deletes it without decoding it, since its keys cannot name a class.
+The deletion is best effort: the former snapshot is never decoded, so a failed deletion is counted
+as a replay persistence failure and logged, admission continues, and the next load retries it; once
+deleted, no load touches it again. The upgrade therefore resets every replay window once, exactly as
+deleting the replay store does: an unexpired transaction signed before the upgrade can be accepted
+once more. Old and new nodes do not interoperate on replay: an upgraded sender's per-class sequences
+restart at zero and are stale to a node that still keeps one shared stream, so the release that
+ships per-class streams is a mandatory network-wide upgrade. The final destination persists a fixed
+32-sequence acceptance window per stream before application validation and handler dispatch. Each of
+the sender and receiver tables holds at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096
+streams: every class stream of 4096 account-destination pairs, or more pairs that use fewer classes.
+Each transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
+(1161 bytes) whatever the number of streams retained. A full store is at most
 `TRANSACTION_REPLAY_STORE_MAX_RECORDS` (32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES`
-(28,295,168 bytes); the native file store (a 40 MiB budget) and the browser store (a row capacity
-one above the record bound) evict beyond their limits, so both are sized never to reach them, since
-an evicted record would reopen replay for its stream. Exact duplicates, conflicting transactions at
-one sequence, and sequences below the retained window are rejected as separate typed verdicts.
-Delegation-key rotation does not reset the account stream, sender timestamps do not order it, and
-intermediate Chord relays keep no origin replay state.
+(28,295,168 bytes). The native file store (a 40 MiB budget) evicts nothing and fails a write beyond
+its budget; the browser store (a row capacity one above the record bound) evicts beyond its limit,
+and an evicted record would reopen replay for its stream. Both are sized never to reach their
+limits. Exact duplicates, conflicting transactions at one sequence, and sequences below the retained
+window are rejected as separate typed verdicts. Delegation-key rotation does not reset the account
+stream, sender timestamps do not order it, and intermediate Chord relays keep no origin replay
+state.
 
 This is an at-most-once dispatch guarantee only while the replay store is retained. A crash after
 the receiver commits a sequence but before handler dispatch can lose that event; replay storage

@@ -1,6 +1,8 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use super::test_storage::Hooked;
+use super::test_storage::StorageHooks;
 use super::*;
 use crate::message::MessageCategory;
 use crate::message::OriginQuotaLaneConfig;
@@ -187,54 +189,26 @@ async fn concurrent_duplicates_cross_the_combined_boundary_once() {
     assert_eq!(replayed, 1);
 }
 
-struct FailFirstPutStorage {
-    inner: MemStorage<ReplayRecord>,
-    fail_next: AtomicBool,
-}
-
-impl FailFirstPutStorage {
-    fn new() -> Self {
-        Self {
-            inner: MemStorage::new(),
-            fail_next: AtomicBool::new(true),
-        }
-    }
-}
+/// Hooks that refuse the first write and pass every later one.
+struct FailFirstPut(AtomicBool);
 
 #[async_trait::async_trait]
-impl KvStorageInterface<ReplayRecord> for FailFirstPutStorage {
-    async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
-        self.inner.get(key).await
-    }
-
-    async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
-        if self.fail_next.swap(false, Ordering::AcqRel) {
-            return Err(Error::InvalidTransport);
+impl StorageHooks for FailFirstPut {
+    /// Runs before a `put`.
+    async fn before_put(&self, _key: &str) -> Result<()> {
+        match self.0.swap(false, Ordering::AcqRel) {
+            true => Err(Error::InvalidTransport),
+            false => Ok(()),
         }
-        self.inner.put(key, value).await
-    }
-
-    async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-        self.inner.get_all().await
-    }
-
-    async fn remove(&self, key: &str) -> Result<()> {
-        self.inner.remove(key).await
-    }
-
-    async fn clear(&self) -> Result<()> {
-        self.inner.clear().await
-    }
-
-    async fn count(&self) -> Result<u32> {
-        self.inner.count().await
     }
 }
 
 #[tokio::test]
 async fn replay_persistence_failure_rolls_back_provisional_quota() -> Result<()> {
-    let runtime =
-        TransactionReplay::new_with_quota(Box::new(FailFirstPutStorage::new()), quota_config(1));
+    let runtime = TransactionReplay::new_with_quota(
+        Box::new(Hooked::new(FailFirstPut(AtomicBool::new(true)))),
+        quota_config(1),
+    );
     let key = stream(1);
     assert!(matches!(
         admit_at(&runtime, key, 0, digest(1), 0).await,

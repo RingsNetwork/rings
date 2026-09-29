@@ -1,18 +1,18 @@
 //! Handing work to the executor.
 //!
-//! Two contracts, deliberately kept apart:
+//! Three contracts, deliberately kept apart:
 //!
 //! ```text
 //!   spawn_detached : F → Result<(), Unscheduled F>        fire and forget
 //!   run_detached   : F → Future (Result<T, DetachedError>) awaited, but owned by the runtime
+//!   run_blocking   : (() → T) → Future (Result<T, DetachedError>)   native blocking pool
 //! ```
 //!
-//! Both hand ownership of the future to the executor at the call, not at a later poll:
-//! cancelling the caller (dropping the future that awaits [`run_detached`]) never cancels
-//! the work. Neither returns a handle that aborts the work — work whose lifetime the caller
-//! must own is not *detached*, and a caller that needs it keeps its own abort handle
-//! (native-only modules do so with Tokio's `JoinHandle`) instead of reaching for this
-//! boundary.
+//! All three hand ownership of the work to the executor at the call, not at a later poll:
+//! cancelling the caller (dropping the future that awaits [`run_detached`] or `run_blocking`)
+//! never cancels the work. None returns a handle that aborts the work — work whose lifetime the
+//! caller must own is not *detached*, and a caller that needs it keeps its own abort handle
+//! (native-only modules do so with Tokio's `JoinHandle`) instead of reaching for this boundary.
 //!
 //! Scheduling is fallible. Native code needs a current Tokio runtime; the browser event loop
 //! is always current. A missing runtime is reported *before* anything starts:
@@ -20,7 +20,12 @@
 //! * [`Spawner::current`] fails with [`RuntimeUnavailable`], so a caller that claims a
 //!   resource for the task acquires the spawner first and then spawns infallibly;
 //! * [`spawn_detached`] hands the unpolled future back in [`Unscheduled`], so a caller whose
-//!   task must not be lost can run it inline instead.
+//!   task must not be lost can run it inline instead;
+//! * [`run_detached`] and `run_blocking` (native only: the browser has no blocking pool) yield
+//!   [`DetachedError::Unavailable`] at once, and their work never starts.
+//!
+//! Work that starts but publishes nothing (it panicked, or its runtime shut down first) is
+//! reported as [`Abandoned`].
 
 use std::fmt;
 use std::future::Future;
@@ -57,7 +62,7 @@ impl<F> fmt::Debug for Unscheduled<F> {
 #[error("detached task ended before publishing its result")]
 pub struct Abandoned;
 
-/// Why [`run_detached`] produced no output.
+/// Why [`run_detached`] or `run_blocking` produced no output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DetachedError {
     /// No executor was current, so the work never started.
@@ -169,6 +174,28 @@ where
     async move { Ok(output?.await?) }
 }
 
+/// Start the blocking `operation` on the current executor's blocking thread pool now and return
+/// a future of its output (native only: the browser event loop has no blocking pool).
+///
+/// Post: the returned future yields `Unavailable` at once when no executor is current (nothing
+/// runs), and `Abandoned` when `operation` panicked or the runtime shut down before its blocking
+/// task started (then `operation` never runs; see [`Abandoned`]). Otherwise the ownership law of
+/// [`run_detached`] holds: dropping the returned future abandons only the wait, and `operation`
+/// still runs to its end.
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+pub fn run_blocking<F, T>(
+    operation: F,
+) -> impl Future<Output = Result<T, DetachedError>> + Send + 'static
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let joined = tokio::runtime::Handle::try_current()
+        .map(|handle| handle.spawn_blocking(operation))
+        .map_err(|_| RuntimeUnavailable);
+    async move { Ok(joined?.await.map_err(|_| Abandoned)?) }
+}
+
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use std::sync::atomic::AtomicBool;
@@ -178,6 +205,7 @@ mod tests {
 
     use tokio::sync::Notify;
 
+    use super::run_blocking;
     use super::run_detached;
     use super::spawn_detached;
     use super::Abandoned;
@@ -288,6 +316,36 @@ mod tests {
             panic!("injected detached task failure");
         })
         .await;
+
+        assert_eq!(result, Err(DetachedError::Abandoned(Abandoned)));
+    }
+
+    /// Law: outside a runtime, blocking work is refused before anything starts.
+    #[test]
+    fn test_run_blocking_outside_a_runtime_is_unavailable() {
+        let result = futures::executor::block_on(run_blocking(|| ()));
+
+        assert_eq!(result, Err(DetachedError::Unavailable(RuntimeUnavailable)));
+    }
+
+    /// Law: the blocking work starts at the call and outlives a dropped waiter.
+    #[tokio::test]
+    async fn test_dropping_the_waiter_does_not_cancel_blocking_work() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        drop(run_blocking(move || sender.send(()).expect("receiver alive")));
+
+        tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(10)))
+            .await
+            .expect("waiting thread")
+            .expect("blocking work must run although its waiter was dropped");
+    }
+
+    /// Law: blocking work that panics publishes nothing and is reported as abandoned.
+    #[tokio::test]
+    async fn test_panicking_blocking_work_is_abandoned() {
+        let result: Result<(), DetachedError> =
+            run_blocking(|| panic!("injected blocking failure")).await;
 
         assert_eq!(result, Err(DetachedError::Abandoned(Abandoned)));
     }

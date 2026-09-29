@@ -17,6 +17,8 @@ use super::write_ordered::WriteOrderedMap;
 use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
+use crate::storage::KvStorageScan;
+use crate::storage::ScannedRecord;
 
 /// The table behind the lock together with its key budget.
 #[derive(Debug)]
@@ -124,6 +126,23 @@ where V: Clone + Send + Sync
     async fn count(&self) -> Result<u32> {
         let count = self.read()?.slots.len();
         u32::try_from(count).map_err(|_| Error::StorageCountOverflow)
+    }
+}
+
+/// A memory store holds values, not bytes, so every record decodes and each is named by its key.
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl<V> KvStorageScan<V> for MemStorage<V>
+where V: Clone + Send + Sync
+{
+    /// Every stored value, each decoded by construction.
+    async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
+        Ok(self.get_all().await?.into_iter().map(Ok).collect())
+    }
+
+    /// The key itself: a memory store files each value under its key.
+    fn record_name(&self, key: &str) -> String {
+        key.to_owned()
     }
 }
 
