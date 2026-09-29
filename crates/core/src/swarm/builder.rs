@@ -15,7 +15,7 @@ use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::measure::MeasureImpl;
 use crate::message::OriginQuotaConfig;
-use crate::message::ReplaySnapshot;
+use crate::message::ReplayRecord;
 use crate::message::ReplayStorage;
 use crate::message::TransactionReplay;
 use crate::swarm::callback::DefaultCallback;
@@ -70,7 +70,7 @@ impl SwarmBuilder {
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             reassembly_limits: default_reassembly_limits(),
             dht_storage,
-            replay_storage: Box::new(crate::storage::MemStorage::<ReplaySnapshot>::new()),
+            replay_storage: Box::new(crate::storage::MemStorage::<ReplayRecord>::new()),
             origin_quota: OriginQuotaConfig::default(),
             delegatee_key,
             session_ttl: None,

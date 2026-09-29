@@ -1,8 +1,10 @@
 //! Per-peer outbound transfer scheduling.
 //!
-//! Each class owns one FIFO lane and admits no second transfer before its active
-//! transfer finishes. Runnable heads use bounded DHT-control priority and
-//! round-robin service for storage, E2E, and application traffic.
+//! Each class owns one FIFO lane with a window of `OUTBOUND_LANE_WINDOW` transfers in flight
+//! (#899): a transfer whose last frame awaits delivery no longer blocks its successors, so
+//! consecutive messages pipeline, while a chunked transfer's frames stay contiguous. Runnable
+//! lanes use bounded DHT-control priority and round-robin service for storage, E2E, and
+//! application traffic.
 //! Cross-class order is not preserved; ordered sequences must stay in one class.
 //! Each iteration handles the available command backlog and completed deliveries,
 //! then admits at most one frame before choosing again.
@@ -35,6 +37,8 @@ use super::delivery::send_data_with_timeout;
 use super::delivery::ChunkSendCancelReason;
 use super::delivery::ChunkSendPermit;
 use super::delivery::ChunkSendProgress;
+use super::delivery::DeliveryProgress;
+use super::delivery::FrameTarget;
 use super::delivery::SendCompletionOutcome;
 use super::delivery::TransferStop;
 use super::AdmittedConnection;
@@ -95,13 +99,17 @@ use mailbox::MailboxSender;
 use measurement::MeasurementReceiver;
 use measurement::MeasurementRecorder;
 use measurement::OutboundMeasurement;
+pub(super) use model::channel_lane;
 pub(super) use model::OutboundCompletion;
 pub(super) use model::OutboundMessageKind;
 pub(super) use model::TransferClass;
+use queue::FrameRemainder;
 use queue::RunnableTransfer;
 use queue::TransferQueues;
 #[cfg(test)]
 pub(crate) use queue::OUTBOUND_CONTROL_BURST;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use queue::OUTBOUND_LANE_WINDOW;
 use session_encoding::SharedAnnouncedDelegations;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
@@ -482,6 +490,8 @@ struct OutboundWorker {
     active: Option<RunnableTransfer<QueuedTransfer>>,
     announced: SharedAnnouncedDelegations,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
+    /// When a delivery to this peer last settled: the stall deadline's reference.
+    delivery_progress: DeliveryProgress,
     measurements: MeasurementRecorder,
     stop: StopSource,
     next_id: u64,
@@ -511,6 +521,7 @@ impl OutboundWorker {
             active: None,
             announced,
             deliveries: FuturesUnordered::new(),
+            delivery_progress: DeliveryProgress::default(),
             measurements,
             stop,
             next_id,
@@ -553,8 +564,9 @@ impl OutboundWorker {
 
     /// Collect at most 256 submissions and one coalesced cancellation scan.
     /// All control submissions in that batch are visible before selection;
-    /// submissions racing the empty read may enter the next iteration. At most four
-    /// lane heads can have completed deliveries, with no new waits added here.
+    /// submissions racing the empty read may enter the next iteration. At most
+    /// `4 · OUTBOUND_LANE_WINDOW` in-flight transfers can have completed deliveries, with no
+    /// new waits added here.
     fn drain_available(&mut self) {
         let commands = self.receiver.drain_available();
         self.handle_commands(commands);
@@ -657,7 +669,7 @@ impl OutboundWorker {
 
     fn handle_delivery(&mut self, event: DeliveryEvent) {
         let Some(transfer) = self.ready.take_waiting(event.class, event.id) else {
-            debug_assert!(false, "delivery must identify the waiting lane head");
+            debug_assert!(false, "delivery must identify a waiting in-flight transfer");
             return;
         };
         match event.result {
@@ -813,8 +825,11 @@ impl OutboundWorker {
                     &transfer.permit,
                     &transfer.stop,
                     transfer.detached_admission.as_ref(),
-                    transfer.did,
-                    context,
+                    FrameTarget {
+                        did: transfer.did,
+                        lane: model::channel_lane(class),
+                        context,
+                    },
                 )
                 .await;
                 if self.stop.is_stop_requested() {
@@ -853,9 +868,11 @@ impl OutboundWorker {
                 #[cfg(test)]
                 test_trace::record(self.peer, class, runnable.item().id);
                 let id = runnable.item().id;
+                let transfer = &runnable.item().scheduled.transfer;
+                let remainder = transfer.remainder();
                 let delivery_wait =
-                    Self::delivery_wait(id, class, delivery, &runnable.item().scheduled.transfer);
-                self.ready.wait_for_delivery(id, runnable);
+                    Self::delivery_wait(id, class, delivery, transfer, &self.delivery_progress);
+                self.ready.wait_for_delivery(id, remainder, runnable);
                 self.deliveries.push(delivery_wait);
             }
             ChunkSendProgress::Ready(Err(error)) => {
@@ -915,11 +932,13 @@ impl OutboundWorker {
         class: TransferClass,
         delivery: DeliveryFuture,
         transfer: &OutboundTransfer,
+        progress: &DeliveryProgress,
     ) -> DeliveryWaitFuture {
         let admitted = transfer.admitted.clone();
         let permit = transfer.permit.clone();
         let stop = transfer.stop.clone();
         let did = transfer.did;
+        let progress = progress.clone();
         Box::pin(async move {
             let result = await_delivery_or_cancel(
                 delivery,
@@ -928,6 +947,7 @@ impl OutboundWorker {
                 &stop,
                 did,
                 "frame_delivery",
+                &progress,
             )
             .await;
             DeliveryEvent { id, class, result }

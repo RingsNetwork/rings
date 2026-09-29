@@ -19,6 +19,7 @@ use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 use rings_core::message::MessageSigner;
 use rings_core::message::ReplayStorage;
+use rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
@@ -456,14 +457,22 @@ async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEnt
     }
 }
 
+/// Open the browser replay store under a row capacity of every record of a full store
+/// ([`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]) and one row for the former shared-stream snapshot,
+/// until the first load after the #898 upgrade deletes it. IndexedDB evicts its least recently
+/// used row beyond the capacity, and an evicted replay record would reopen replay for its
+/// stream, so the capacity must never be reached.
 async fn open_browser_replay_storage(storage_name: &str) -> NodeResult<ReplayStorage> {
-    IdbStorage::new_with_cap_and_name(2, storage_name)
+    let open_error = |source| Error::BrowserStorageOpen {
+        name: storage_name.to_string(),
+        source,
+    };
+    let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS + 1)
+        .map_err(|_| open_error(rings_core::error::Error::InvalidCapacity))?;
+    IdbStorage::new_with_cap_and_name(rows, storage_name)
         .await
         .map(|storage| Box::new(storage) as ReplayStorage)
-        .map_err(|source| Error::BrowserStorageOpen {
-            name: storage_name.to_string(),
-            source,
-        })
+        .map_err(open_error)
 }
 
 impl Provider {

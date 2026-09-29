@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Keep up to `OUTBOUND_LANE_WINDOW` (8) transfers in flight per outbound class lane instead of
+  waiting for each delivery before the next (#899). On native, a delivery is the peer's SCTP
+  SACK, which the receiver delays by up to 200 ms; a stop-and-wait lane paid that per message.
+  On native loopback, 512 awaited 16 KiB sends go from 13.9 to about 1360 messages/s with no
+  send over 150 ms. Each class lane is pinned to one data channel, so a class's frames arrive in
+  lane order, and the window stays below the 32-sequence replay window. Transfers still start in
+  FIFO order, chunked transfers stay contiguous, and each transfer keeps its capacity permit and
+  delivery outcome. The window pipelines whole transfers: a chunked message still admits its
+  next frame only once the previous one is delivered, so it pays the per-frame delayed-ACK tail
+  and holds its lane's wire until its last frame is admitted. A frame's delivery deadline now
+  measures a stall: it expires only after a full deadline with no confirmed delivery on the
+  connection since its admission, so a slow link draining a full window never expires the frames
+  queued behind the head.
+
 - Confirm WebRTC delivery on the data channel's `bufferedamountlow`, `close` and `error`
   events instead of polling `bufferedAmount` every 300 ms (#887). Each channel multiplexes its
   single low-water threshold over every pending send, so an awaited send resolves on the event
@@ -27,6 +41,38 @@
   and construction requires a database name.
 
 ### Breaking changes
+
+- Pin each outbound class lane to one data channel of a connection (#906). The transport pool
+  selects a channel by lane, `channel(lane) = pool[lane mod |pool|]`, instead of rotating over
+  the channels, so the messages of one lane reach the remote handler in send order and a
+  receiver handler stalled on one channel holds only that channel's lane. Core sends DHT control
+  (and link control), storage, end-to-end and application traffic on lanes 0 to 3.
+  `ConnectionInterface::send_message_with_permit` takes a `ChannelLane`; `send_message` uses the
+  default lane. `RoundRobin` and `RoundRobinPool` become `LanePool` and `ChannelPool`, `select`
+  takes the lane, and `Error::RoundRobinPoolEmpty` becomes `Error::ChannelPoolEmpty`. No wire
+  change.
+
+- Key transaction replay by traffic class: `StreamKey = (network, origin, destination, class)`
+  (#898). One stream shared by every class let DHT control traffic overtake an application
+  backlog by more than the replay window, so honest transactions were rejected as
+  `TransactionSequenceStale`. The class is implied by each transaction's signed message, so the
+  wire format is unchanged, but replay is not interoperable across the upgrade: an upgraded
+  sender's per-class sequences are stale to a node that has not upgraded. **This release is a
+  mandatory network-wide upgrade, seeds included.** The replay store keeps one record per stream
+  under `rings-core:transaction-replay:stream:{sender|receiver}:<key>` instead of one snapshot, so
+  an admission writes only its stream's record (at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`,
+  1161 bytes) rather than rewriting every stream; `ReplayStorage` stores the opaque
+  `ReplayRecord`, which replaces `ReplaySnapshot`. The first load deletes the former
+  `rings-core:transaction-replay` snapshot without decoding it, resetting every replay window
+  once as deleting the store does; the deletion is best effort (a failure is counted and logged,
+  admission continues, and the next load retries it). Each replay table now holds
+  `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096 streams, every class stream of 4096
+  account-destination pairs; a full store is at most `TRANSACTION_REPLAY_STORE_MAX_RECORDS`
+  records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (about 27 MiB), and the native file store's
+  budget (40 MiB) and the browser store's row capacity are sized so they never evict a replay
+  record. `StreamKey::new` takes the class, `Transaction::stream_key` returns a `Result`,
+  `Transaction::class` is new, and `PayloadSender`'s send and originate methods take a `Message`
+  instead of any `Serialize` value, with `reserve_transaction_sequences` taking the class.
 
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`

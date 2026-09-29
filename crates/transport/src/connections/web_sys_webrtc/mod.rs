@@ -32,8 +32,9 @@ use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::pool::RoundRobin;
-use crate::core::pool::RoundRobinPool;
+use crate::core::pool::ChannelLane;
+use crate::core::pool::ChannelPool;
+use crate::core::pool::LanePool;
 use crate::core::send::operation::send_sync;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
@@ -153,9 +154,10 @@ impl WebSysWebrtcConnection {
     async fn send_with_permit(
         &self,
         msg: TransportMessage,
+        lane: ChannelLane,
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
-        let (channel, delivery) = self.webrtc_data_channel.select()?;
+        let (channel, delivery) = self.webrtc_data_channel.select(lane)?;
         let data = rings_codec::serialize(&msg)?;
         let bytes = u64::try_from(data.len()).map_err(|_| Error::SendByteCountOverflow)?;
         // The primitive runs only after shared queue admission; failures do not advance offsets.
@@ -171,7 +173,7 @@ impl WebSysWebrtcConnection {
     }
 }
 
-impl RoundRobinPool<TrackedChannel> {
+impl ChannelPool<TrackedChannel> {
     /// Return whether every channel in this backend pool is open.
     fn all_ready(&self) -> Result<bool> {
         self.all(|(c, _)| c.ready_state() == RtcDataChannelState::Open)
@@ -184,7 +186,7 @@ pub struct WebSysWebrtcConnection {
     webrtc_conn: RtcPeerConnection,
     // `Rc`, not `Arc`: the browser backend is single-threaded (the `ConnectionInterface` impl is
     // `?Send`), so the channel pool is never shared across threads.
-    webrtc_data_channel: Rc<RoundRobinPool<TrackedChannel>>,
+    webrtc_data_channel: Rc<ChannelPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
     connection_state: ConnectionStateCell,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
@@ -203,7 +205,7 @@ pub struct WebSysWebrtcTransport {
 impl WebSysWebrtcConnection {
     fn new(
         webrtc_conn: RtcPeerConnection,
-        webrtc_data_channel: Rc<RoundRobinPool<TrackedChannel>>,
+        webrtc_data_channel: Rc<ChannelPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
         connection_state: ConnectionStateCell,
     ) -> Self {
@@ -276,10 +278,11 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     async fn send_message_with_permit(
         &self,
         msg: TransportMessage,
+        lane: ChannelLane,
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
-        self.send_with_permit(msg, permit).await
+        self.send_with_permit(msg, lane, permit).await
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -472,7 +475,7 @@ fn wire_peer_connection_state(
 
 fn create_outbound_data_channels(
     webrtc_conn: &RtcPeerConnection,
-    channel_pool: &Rc<RoundRobinPool<TrackedChannel>>,
+    channel_pool: &Rc<ChannelPool<TrackedChannel>>,
     inner_cb: &Rc<InnerTransportCallback>,
     connection_state: &ConnectionStateCell,
 ) -> Result<()> {
@@ -569,7 +572,7 @@ impl TransportInterface for WebSysWebrtcTransport {
             webrtc_data_channel_state_notifier.clone(),
         ));
 
-        let channel_pool = Rc::new(RoundRobinPool::default());
+        let channel_pool = Rc::new(ChannelPool::default());
         // Wire open/close on the channels this side creates (the pool), not only
         // on received channels: a received channel's `onopen` can be missed if
         // it opens before the handler is registered, so `on_data_channel_open`
@@ -708,7 +711,7 @@ mod tests {
         let connection_state = ConnectionStateCell::new();
         let connection = WebSysWebrtcConnection::new(
             peer_connection.clone(),
-            Rc::new(RoundRobinPool::from_vec(Vec::new())),
+            Rc::new(ChannelPool::from_vec(Vec::new())),
             Notifier::default(),
             connection_state.clone(),
         );
@@ -770,6 +773,7 @@ mod tests {
             connection
                 .send_message_with_permit(
                     TransportMessage::Custom(Bytes::from_static(&[1])),
+                    ChannelLane::default(),
                     SendPermit::always(),
                 )
                 .await,
@@ -819,7 +823,7 @@ mod tests {
         let connection = RtcPeerConnection::new().expect("browser peer connection must construct");
         let channel = connection.create_data_channel("permit-boundary-test");
         let delivery = Arc::new(DeliveryTracker::default());
-        let pool = Rc::new(RoundRobinPool::from_vec(vec![(
+        let pool = Rc::new(ChannelPool::from_vec(vec![(
             channel,
             Arc::clone(&delivery),
         )]));
@@ -833,6 +837,7 @@ mod tests {
         let result = backend
             .send_with_permit(
                 TransportMessage::Custom(Bytes::from_static(&[1, 2, 3])),
+                ChannelLane::default(),
                 SendPermit::new(|| false),
             )
             .await;

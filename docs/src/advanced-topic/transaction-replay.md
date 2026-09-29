@@ -10,12 +10,49 @@ been deleted.
 Replay state is keyed by:
 
 ```text
-StreamKey = (network_id, origin_delegator_did, destination_did)
+StreamKey = (network_id, origin_delegator_did, destination_did, class)
 ```
 
 The origin is recovered from `Transaction.verification.delegation.delegator_did()`. It is not the
 delegatee DID and not an intermediate relay. Rotating a delegatee key therefore preserves
 the same delegator-to-destination stream, while two destinations advance independently.
+
+`class` is the traffic class (DHT control, storage, E2E, application) of the message the
+transaction carries, derived from its signed data on both sides, so it adds no wire field (#898).
+The outbound scheduler keeps order within a class lane only, with at most `OUTBOUND_LANE_WINDOW`
+(8, below the 32-slot window) transactions of a lane in flight, and each class lane is pinned to
+one ordered data channel of the connection:
+
+```text
+channel(lane) = pool[lane mod |pool|]
+DHT control -> 0, storage -> 1, E2E -> 2, application -> 3
+```
+
+A class's transactions therefore reach the receiver in the order the lane sent them, and a
+receive handler stalled on one channel holds only that channel's class. One stream per class
+never rejects an honest sender's transaction as stale, however the lanes are interleaved; a
+single stream shared by every class did, once one lane's backlog fell behind another's traffic,
+and so would one class spread over several channels, once a stalled channel let later sequences
+of the class overtake it by more than the window.
+
+The order holds for frames that resolve on arrival. A frame whose delegation reference misses
+(the receiver forgot the delegation to capacity eviction or expiry) is held for one repair round
+trip and released independently of later frames, because the session link promises no order
+among held frames (see [Delegation References](delegation-references.md)). If a window's worth
+of its class is admitted meanwhile, the released frame is rejected as `Stale`: one frame lost
+and counted, never a false admission. Removing this loss is tracked in #908.
+
+This assumes a class's transactions reach the scheduler in signing order, as they do from one
+sending task.
+
+The per-class streams are stored one record per stream (see [Persistence and
+bounds](#persistence-and-bounds)). A load that finds the former shared-stream snapshot
+(`rings-core:transaction-replay`) deletes it without decoding it, which resets every replay window
+once, as deleting the store does. The deletion is best effort: since the former snapshot is never
+decoded, a failed deletion is counted as a persistence failure and logged, admission continues, and
+the next load retries it; once it is gone, no load touches it again. An upgraded
+sender's per-class sequences are stale to a node that has not upgraded, so the upgrade is
+network-wide and mandatory.
 
 Every transaction carries a mandatory `u64` sequence. The transaction signature transcript
 binds the receiver-selected `network_id` through the signing domain and binds `destination`,
@@ -53,11 +90,11 @@ final destination.
 
 At that destination, replay classification and the runtime-local origin rate quota share one
 serialized admission boundary but remain separate state models. Replay, Fork, and Stale consume no
-quota; quota rejection leaves the durable replay window unchanged; and a replay-store failure
-rolls back the provisional quota reservation. Quota state is never encoded in `ReplaySnapshot`.
-The deterministic byte cost is the verified original transaction's `data.len()`: normal messages
-pay it once, chunk envelopes pay nothing, and a successfully reassembled original pays it once
-before logical lane admission.
+quota; quota rejection leaves the durable replay window unchanged; and a replay-store failure rolls
+back the provisional quota reservation. Quota state is never encoded in a `ReplayRecord`. The
+deterministic byte cost is the verified original transaction's `data.len()`: normal messages pay it
+once, chunk envelopes pay nothing, and a successfully reassembled original pays it once before
+logical lane admission.
 
 ## Persistence and bounds
 
@@ -76,13 +113,32 @@ crash after persistence but before dispatch may lose the event. This is the deli
 persistence-before-dispatch boundary: it prevents duplicate dispatch but is not exactly-once
 execution because replay storage and application handlers do not share a transaction.
 
-Sender and receiver state are stored in one versioned snapshot. Each table retains at most 4096
-streams, and each receiver stream has exactly 32 hot digest slots. New streams fail closed at the
-bound; there is no LRU eviction or sender-controlled reset. The native daemon keeps the snapshot
-in a dedicated 16 MiB atomic file store, and browser providers keep it in a dedicated IndexedDB
-store. A custom `SwarmBuilder` or `ProcessorBuilder` must supply durable `ReplayStorage` to retain
-the restart guarantee; their in-memory default guarantees replay rejection only for the lifetime
-of that runtime.
+Sender and receiver state are stored as one record per stream:
+
+```text
+rings-core:transaction-replay:stream:sender:<hex key>    ->  (key, last reserved sequence)
+rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot window)
+```
+
+A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
+(1161 bytes: a 92-byte key and a 1066-byte window, with tag and length prefix), so the cost of an
+admission does not grow with the number of streams retained. On load, every record must decode and
+sit under its own key, or the store is invalid and replay fails closed. This holds for the records
+the storage returns: the native file store deletes a file whose framing does not decode before
+replay sees it, and writes without `fsync`, so a torn file left by a crash is dropped and its stream
+forgotten, which reopens replay for that stream (tracked in #909). One lock serializes all replay
+transitions and is held across each record write, so store write latency bounds the node-wide
+transition rate. Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams:
+every class stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each
+receiver stream has exactly 32 hot digest slots. A full store is at most
+`TRANSACTION_REPLAY_STORE_MAX_RECORDS` (32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES`
+(28,295,168 bytes). New streams fail closed at the bound; there is no LRU eviction or
+sender-controlled reset. The native daemon keeps the records in a dedicated 40 MiB atomic file
+store, and browser providers keep them in a dedicated IndexedDB store with one row more than the
+record bound: both stores evict beyond their limits, and an evicted record would reopen replay for
+its stream, so both are sized never to reach them. A custom `SwarmBuilder` or `ProcessorBuilder`
+must supply durable `ReplayStorage` to retain the restart guarantee; their in-memory default
+guarantees replay rejection only for the lifetime of that runtime.
 
 Deleting or replacing the replay store deletes the guarantee for its streams. There is no safe
 incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail
@@ -97,7 +153,9 @@ begins with the `RINGS-PAYLOAD` marker, and the replay store key is
 `rings-core:transaction-replay` (see [Delegation References](delegation-references.md)). Payloads
 without the current marker are rejected before deserialization. There is no dual decoder,
 negotiation, feature flag, downgrade path, or legacy fallback, and no version behind any of these
-names: the protocol is not versioned before 1.0. Mixed-version overlays are unsupported.
+names: the protocol is not versioned before 1.0. Mixed-version overlays are unsupported. Per-class
+streams (#898) are the next cutover: the store becomes one record per stream under
+`rings-core:transaction-replay:stream:`, and every node, seeds included, upgrades together.
 
 ## Non-guarantees
 

@@ -26,6 +26,7 @@ use rings_transport::connections::WebrtcConnection as ConnectionOwner;
     not(feature = "dummy")
 ))]
 use rings_transport::connections::WebrtcTransport as Transport;
+use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::core::transport::TransportInterface;
@@ -84,6 +85,8 @@ pub(crate) use storage_sync::StorageSyncBatchStep;
 mod timeouts;
 pub(crate) use self::connection::AdmittedConnection;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::delivery::delivery_stall_deadline_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::delivery::SendCompletionOutcome;
 use self::event_delivery::PeerOperationLocks;
 use self::event_delivery::SwarmEventDeliveryLock;
@@ -121,6 +124,8 @@ pub(crate) use self::outbound::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 pub(crate) use self::outbound::OUTBOUND_DATA_TRANSFER_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_GLOBAL_BYTE_CAPACITY;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_LANE_WINDOW;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 use self::pending::AnswerSlot;
@@ -1043,14 +1048,19 @@ impl SwarmConnection {
         self.connection.dummy_generation_id().map_err(Into::into)
     }
 
-    /// Hand one frame to the transport; the sole send of every frame to another node.
-    async fn send_data(&self, data: Bytes, permit: SendPermit) -> Result<DeliveryFuture> {
+    /// Hand one frame to the transport on `lane`; the sole send of every frame to another node.
+    async fn send_data(
+        &self,
+        data: Bytes,
+        lane: ChannelLane,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
         // Test builds: a send dropped before the transport committed to it ends uncounted.
         #[cfg(test)]
         let frame_send = self.frames.begin_send(permit.acceptance());
         let delivery: Result<DeliveryFuture> = self
             .connection
-            .send_message_with_permit(TransportMessage::Custom(data), permit)
+            .send_message_with_permit(TransportMessage::Custom(data), lane, permit)
             .await
             .map_err(Into::into);
         #[cfg(test)]

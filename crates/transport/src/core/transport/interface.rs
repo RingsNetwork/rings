@@ -12,6 +12,7 @@ use super::WebrtcConnectionState;
 use crate::callback::InboundFrameCapacity;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::pool::ChannelLane;
 use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
 
@@ -96,8 +97,10 @@ pub trait ConnectionInterface {
     /// if the channel closed while the bytes were still buffered. Callers that
     /// don't care can drop it; callers that do can spawn it (see
     /// [crate::delivery]).
+    ///
+    /// It uses the default lane; see [`send_message_with_permit`](Self::send_message_with_permit).
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture, Self::Error> {
-        self.send_message_with_permit(msg, SendPermit::always())
+        self.send_message_with_permit(msg, ChannelLane::default(), SendPermit::always())
             .await
     }
 
@@ -115,9 +118,13 @@ pub trait ConnectionInterface {
     /// success. If work fails or is abandoned after claiming the proof but before
     /// acceptance, the implementation must retire and close that connection
     /// generation before returning.
+    ///
+    /// The message travels on the data channel `lane` is pinned to, so the messages of one lane
+    /// reach the remote handler in send order (see [`crate::core::pool`]).
     async fn send_message_with_permit(
         &self,
         msg: TransportMessage,
+        lane: ChannelLane,
         permit: SendPermit,
     ) -> Result<DeliveryFuture, Self::Error>;
 

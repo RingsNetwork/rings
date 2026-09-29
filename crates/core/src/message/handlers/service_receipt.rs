@@ -15,6 +15,7 @@ use crate::message::effects::CoreEffect;
 use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
+use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::PayloadSender;
@@ -214,7 +215,13 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
         let completion_sequence = *self
             .handler
             .transport
-            .reserve_transaction_sequences(plan.beneficiary, NonZeroU64::MIN)
+            // The completion is signed evidence carried inside the offer, never admitted on its
+            // own; it takes its sequence from the stream of the offer that carries it.
+            .reserve_transaction_sequences(
+                plan.beneficiary,
+                MessageKind::ProbeOffer.class(),
+                NonZeroU64::MIN,
+            )
             .await?
             .start();
         let offer = plan.build(completion_sequence, self.handler.transport.message_signer())?;

@@ -31,8 +31,9 @@ use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::pool::RoundRobin;
-use crate::core::pool::RoundRobinPool;
+use crate::core::pool::ChannelLane;
+use crate::core::pool::ChannelPool;
+use crate::core::pool::LanePool;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
@@ -259,11 +260,12 @@ fn delivery_future(
     Box::pin(wait)
 }
 
-impl RoundRobinPool<TrackedChannel> {
+impl ChannelPool<TrackedChannel> {
     /// Serialize one channel operation and hand its resource owner to the bounded executor.
     async fn send_with_retirement_fence(
         &self,
         msg: TransportMessage,
+        lane: ChannelLane,
         permit: SendPermit,
         retirement_fence: NativeRetirementFence,
         lifecycle: Arc<SendLifecycle>,
@@ -272,7 +274,7 @@ impl RoundRobinPool<TrackedChannel> {
             channel,
             delivery,
             send_lock,
-        } = self.select()?;
+        } = self.select(lane)?;
         let data = rings_codec::serialize(&msg).map(Bytes::from)?;
         let runtime = native_send_runtime()?;
         // Hold the per-channel lock across send + counter advance so the bytes
@@ -319,7 +321,7 @@ impl RoundRobinPool<TrackedChannel> {
     }
 }
 
-impl RoundRobinPool<TrackedChannel> {
+impl ChannelPool<TrackedChannel> {
     /// Return whether every channel in this backend pool is open.
     fn all_ready(&self) -> Result<bool> {
         self.all(|tracked| tracked.channel.ready_state() == RTCDataChannelState::Open)
@@ -333,7 +335,7 @@ mod test_send_cancellation;
 /// Used for native environment.
 pub struct WebrtcConnection {
     webrtc_conn: Arc<RTCPeerConnection>,
-    webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
+    webrtc_data_channel: Arc<ChannelPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
     connection_state: ConnectionStateCell,
     cancel_token: CancellationToken,
@@ -415,7 +417,7 @@ pub struct WebrtcTransport {
 impl WebrtcConnection {
     fn new(
         webrtc_conn: RTCPeerConnection,
-        webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
+        webrtc_data_channel: Arc<ChannelPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
         connection_state: ConnectionStateCell,
         sdp_extra_host_candidates: Vec<String>,
@@ -582,6 +584,7 @@ impl ConnectionInterface for WebrtcConnection {
     async fn send_message_with_permit(
         &self,
         msg: TransportMessage,
+        lane: ChannelLane,
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
@@ -596,7 +599,7 @@ impl ConnectionInterface for WebrtcConnection {
             acceptance,
             retirement_fence.clone(),
             move |lifecycle| async move {
-                pool.send_with_retirement_fence(msg, permit, retirement_fence, lifecycle)
+                pool.send_with_retirement_fence(msg, lane, permit, retirement_fence, lifecycle)
                     .await
             },
             close_failed_native_send(connection, physical_close_completed),
@@ -808,7 +811,7 @@ async fn wire_delivery_events(channel: &Arc<RTCDataChannel>, delivery: &Arc<Deli
 
 async fn create_outbound_data_channels(
     webrtc_conn: &RTCPeerConnection,
-    channel_pool: &Arc<RoundRobinPool<TrackedChannel>>,
+    channel_pool: &Arc<ChannelPool<TrackedChannel>>,
     inner_cb: &Arc<InnerTransportCallback>,
     connection_state: &ConnectionStateCell,
 ) -> Result<()> {
@@ -900,7 +903,7 @@ impl TransportInterface for WebrtcTransport {
         // missed if it opens before the handler is registered, which would mean
         // `on_data_channel_open` (and thus `join_dht`) never fires. The created
         // channels are registered before they can open, so this is reliable.
-        let channel_pool = Arc::new(RoundRobinPool::default());
+        let channel_pool = Arc::new(ChannelPool::default());
         wire_received_data_channels(&webrtc_conn, Arc::clone(&inner_cb));
         wire_peer_connection_state(
             &webrtc_conn,

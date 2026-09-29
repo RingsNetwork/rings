@@ -36,7 +36,9 @@ use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::SendCompletionOutcome;
 use crate::swarm::transport::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 use crate::swarm::transport::OUTBOUND_DATA_TRANSFER_CAPACITY;
+use crate::swarm::transport::OUTBOUND_LANE_WINDOW;
 use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
+use crate::tests::default::dummy_hooks::HeldDeliveryGuard;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
 use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
 use crate::tests::default::dummy_hooks::PausedDispatchGuard;
@@ -65,6 +67,47 @@ async fn connected_nodes() -> Result<(Node, Node)> {
     connect_nodes(node1, node2).await
 }
 
+/// Fill `peer`'s Application lane window in one scheduler pass (#899): with the worker paused,
+/// submit `OUTBOUND_LANE_WINDOW` detached sends that have no admission deadline, then resume and
+/// wait until every one of them is admitted with its delivery held. The next Application
+/// transfer then queues behind a full window. The window's frames are admitted together, just
+/// before the caller's next send, so their stall deadline starts as a single paused head's did.
+/// Dropping the returned guard releases the held deliveries.
+async fn fill_application_window(node: &Node, peer: Did, label: &str) -> Result<HeldDeliveryGuard> {
+    let held = HeldDeliveryGuard::new();
+    let transport = node.swarm.transport.clone();
+    transport.pause_outbound_worker_for_test(peer);
+    reset_outbound_submit_count_for_test();
+    for index in 0..OUTBOUND_LANE_WINDOW {
+        let payload = tracked_payload(node, peer, format!("{label}-{index}").as_bytes())?;
+        let sender = transport.clone();
+        drop(tokio::spawn(async move {
+            sender
+                .send_payload_detached_until_for_test(
+                    payload,
+                    TEST_HANG_GUARD,
+                    std::future::pending(),
+                )
+                .await
+        }));
+    }
+    wait_until("the window's submissions", || {
+        outbound_submit_count_for_test() == OUTBOUND_LANE_WINDOW
+    })
+    .await?;
+    transport.resume_outbound_worker_for_test(peer);
+    wait_until("a full window of held deliveries", || {
+        dummy_controlled::held_delivery_futures_waiting() >= OUTBOUND_LANE_WINDOW
+    })
+    .await?;
+    Ok(held)
+}
+
+/// `OUTBOUND_LANE_WINDOW + extra` as the scheduler's admitted-transfer count.
+fn window_plus(extra: usize) -> Option<usize> {
+    Some(OUTBOUND_LANE_WINDOW + extra)
+}
+
 fn tracked_payload(node: &Node, peer: Did, body: &[u8]) -> Result<MessagePayload> {
     MessagePayload::new_send(
         Message::custom(body)?,
@@ -90,11 +133,7 @@ async fn test_tracked_completion_releases_capacity_before_returning() -> Result<
 async fn test_tracked_timeout_removes_queued_capacity_before_predecessor_finishes() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    let paused_delivery = PausedDeliveryGuard::new();
-    node1
-        .swarm
-        .send_message(Message::custom(b"tracked-lane-head")?, peer)
-        .await?;
+    let held = fill_application_window(&node1, peer, "tracked-lane-head").await?;
     let payload = tracked_payload(&node1, peer, b"tracked-queued-successor")?;
 
     let outcome = node1.swarm.transport.send_payload_tracked(payload).await?;
@@ -105,10 +144,10 @@ async fn test_tracked_timeout_removes_queued_capacity_before_predecessor_finishe
             .swarm
             .transport
             .outbound_admitted_transfer_count_for_test(peer),
-        Some(1),
-        "only the still-active predecessor may retain capacity"
+        window_plus(0),
+        "only the still-active predecessors may retain capacity"
     );
-    drop(paused_delivery);
+    drop(held);
     wait_until("predecessor capacity release", || {
         node1
             .swarm
@@ -124,7 +163,7 @@ async fn test_tracked_timeout_removes_queued_capacity_before_predecessor_finishe
 async fn test_tracked_timeout_removes_target_behind_multiple_predecessors() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    let paused_delivery = PausedDeliveryGuard::new();
+    let held = fill_application_window(&node1, peer, "in-flight-predecessor").await?;
     reset_outbound_submit_count_for_test();
     let mut predecessors = Vec::new();
     for index in 0..3 {
@@ -157,10 +196,10 @@ async fn test_tracked_timeout_removes_target_behind_multiple_predecessors() -> R
             .swarm
             .transport
             .outbound_admitted_transfer_count_for_test(peer),
-        Some(3),
+        window_plus(3),
         "the cancelled target must release capacity without waiting for queued predecessors"
     );
-    drop(paused_delivery);
+    drop(held);
     for predecessor in predecessors {
         timeout(Duration::from_secs(2), predecessor)
             .await
@@ -261,13 +300,8 @@ async fn test_detached_deadline_cannot_succeed_after_irrevocable_chunk_admission
 async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    let paused_delivery = PausedDeliveryGuard::new();
     dummy_controlled::reset_sent_count();
-
-    node1
-        .swarm
-        .send_message(Message::custom(b"lane-head")?, peer)
-        .await?;
+    let held = fill_application_window(&node1, peer, "lane-head").await?;
     let error = node1
         .swarm
         .send_message(Message::custom(b"queued-successor")?, peer)
@@ -278,7 +312,7 @@ async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<(
         error,
         Error::OutboundFirstFrameAdmissionTimeout { peer: timed_out, .. } if timed_out == peer
     ));
-    drop(paused_delivery);
+    drop(held);
     wait_until("timed-out detached transfer cancellation", || {
         node1
             .swarm
@@ -289,7 +323,7 @@ async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<(
     .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
-        1,
+        OUTBOUND_LANE_WINDOW,
         "the timed-out successor must stop before its first frame"
     );
     Ok(())
@@ -299,13 +333,8 @@ async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<(
 async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    let paused_delivery = PausedDeliveryGuard::new();
     dummy_controlled::reset_sent_count();
-
-    node1
-        .swarm
-        .send_message(Message::custom(b"drop-lane-head")?, peer)
-        .await?;
+    let held = fill_application_window(&node1, peer, "drop-lane-head").await?;
     let swarm = node1.swarm.clone();
     let successor = tokio::spawn(async move {
         swarm
@@ -317,7 +346,7 @@ async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() ->
             .swarm
             .transport
             .outbound_admitted_transfer_count_for_test(peer)
-            == Some(2)
+            == window_plus(1)
     })
     .await?;
 
@@ -327,10 +356,10 @@ async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() ->
             .swarm
             .transport
             .outbound_admitted_transfer_count_for_test(peer)
-            == Some(1)
+            == window_plus(0)
     })
     .await?;
-    drop(paused_delivery);
+    drop(held);
     wait_until("detached predecessor completion", || {
         node1
             .swarm
@@ -341,27 +370,22 @@ async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() ->
     .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
-        1,
+        OUTBOUND_LANE_WINDOW,
         "dropping the successor caller must stop it before its first frame"
     );
     Ok(())
 }
 
-/// Every cancellation command in the backlog is applied: with the lane head
+/// Every cancellation command in the backlog is applied: with the lane's window
 /// waiting for delivery and the worker paused, two queued successors whose
 /// callers are dropped are both cancelled once the worker resumes, while the
-/// head keeps its permit and completes after delivery is released.
+/// in-flight transfers keep their permits and complete after delivery is released.
 #[tokio::test]
 async fn test_backlogged_cancellations_all_apply_behind_a_blocked_head() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    let paused_delivery = PausedDeliveryGuard::new();
     dummy_controlled::reset_sent_count();
-
-    node1
-        .swarm
-        .send_message(Message::custom(b"backlog-lane-head")?, peer)
-        .await?;
+    let held = fill_application_window(&node1, peer, "backlog-lane-head").await?;
     let successors = (0..2)
         .map(|index| {
             let swarm = node1.swarm.clone();
@@ -380,7 +404,7 @@ async fn test_backlogged_cancellations_all_apply_behind_a_blocked_head() -> Resu
             .swarm
             .transport
             .outbound_admitted_transfer_count_for_test(peer)
-            == Some(3)
+            == window_plus(2)
     })
     .await?;
 
@@ -397,12 +421,12 @@ async fn test_backlogged_cancellations_all_apply_behind_a_blocked_head() -> Resu
             .swarm
             .transport
             .outbound_admitted_transfer_count_for_test(peer)
-            == Some(1)
+            == window_plus(0)
     })
     .await?;
 
-    drop(paused_delivery);
-    wait_until("lane head completion", || {
+    drop(held);
+    wait_until("lane window completion", || {
         node1
             .swarm
             .transport
@@ -412,8 +436,8 @@ async fn test_backlogged_cancellations_all_apply_behind_a_blocked_head() -> Resu
     .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
-        1,
-        "only the head sends a frame; both successors stop before their first"
+        OUTBOUND_LANE_WINDOW,
+        "only the window sends frames; both successors stop before their first"
     );
     Ok(())
 }
@@ -802,6 +826,105 @@ async fn test_same_class_chunked_transfers_are_contiguous_on_the_wire() -> Resul
         .iter()
         .skip(first_chunks.len())
         .all(|chunk| chunk.meta.id == second_id));
+    Ok(())
+}
+
+/// Stall law of #906 end to end, on Tokio's paused clock: a link that delivers one frame of a
+/// full window every three quarters of the stall deadline takes six deadlines to drain it, yet
+/// no frame expires and the connection stays up, because each frame's deadline counts from the
+/// peer's last delivery. A deadline counted from each frame's own admission would have torn the
+/// connection down after one deadline.
+#[tokio::test(start_paused = true)]
+async fn test_a_slow_link_draining_a_full_window_is_not_expired() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let held = fill_application_window(&node1, peer, "slow-link").await?;
+    let step = crate::swarm::transport::delivery_stall_deadline_for_test() * 3 / 4;
+
+    for delivered in 1..=OUTBOUND_LANE_WINDOW {
+        tokio::time::sleep(step).await;
+        dummy_controlled::release_one_held_delivery_future();
+        wait_until("one more held delivery settles", || {
+            dummy_controlled::held_delivery_futures_waiting() <= OUTBOUND_LANE_WINDOW - delivered
+        })
+        .await?;
+        assert!(
+            node1.swarm.transport.get_connection(peer).is_some(),
+            "the connection was torn down after {delivered} deliveries"
+        );
+    }
+    drop(held);
+    wait_until("the window's capacity release", || {
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(0)
+    })
+    .await?;
+    assert!(node1.swarm.transport.get_connection(peer).is_some());
+    Ok(())
+}
+
+/// Law of #898 end to end: DhtControl traffic that overtakes an Application backlog longer
+/// than the replay window never makes the backlog stale, because each class has its own
+/// sequence stream.
+///
+/// The outbound worker is paused while the backlog and then the control messages are signed
+/// and submitted, so both lanes are populated in signing order. On resume the scheduler's
+/// control priority sends the control messages first. With one stream shared by every class
+/// they would carry the latest sequences, reach the receiver first, and push the backlog's head
+/// out of its window. No delivery is held and no step waits on a timer.
+#[tokio::test]
+async fn test_control_overtaking_an_application_backlog_never_makes_it_stale() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let backlog = crate::message::TRANSACTION_REPLAY_WINDOW + 2 * OUTBOUND_LANE_WINDOW;
+    let transport = node1.swarm.transport.clone();
+    transport.pause_outbound_worker_for_test(peer);
+
+    reset_outbound_submit_count_for_test();
+    let mut sends = Vec::new();
+    let messages = (0..backlog)
+        .map(|index| Message::custom(format!("backlog-{index}").as_bytes()))
+        .chain((0..4).map(|nonce| Ok(Message::ProbeRequest(test_probe_request(nonce)))));
+    for (index, message) in messages.enumerate() {
+        let payload = transport.originate(message?, peer, Some(peer)).await?;
+        let sender = transport.clone();
+        // No admission deadline: every send waits for the resumed worker on events alone.
+        sends.push(tokio::spawn(async move {
+            sender
+                .send_payload_detached_until_for_test(
+                    payload,
+                    TEST_HANG_GUARD,
+                    std::future::pending(),
+                )
+                .await
+        }));
+        // Submit in signing order, so each lane's FIFO order is its sequence order.
+        wait_until("submission in signing order", || {
+            outbound_submit_count_for_test() > index
+        })
+        .await?;
+    }
+    transport.resume_outbound_worker_for_test(peer);
+
+    let mut received = 0;
+    while received < backlog {
+        let payload = timeout(TEST_HANG_GUARD, node2.listen_once())
+            .await
+            .map_err(|_| invalid_test_state("the Application backlog did not arrive"))?
+            .ok_or_else(|| invalid_test_state("node2 stopped listening"))?;
+        received += usize::from(matches!(
+            payload.transaction.data::<Message>()?,
+            Message::CustomMessage(_)
+        ));
+    }
+    for send in sends {
+        send.await
+            .map_err(|error| invalid_test_state(format!("send task failed: {error}")))??;
+    }
+    assert_eq!(node2.swarm.transaction_replay_counters().stale, 0);
     Ok(())
 }
 

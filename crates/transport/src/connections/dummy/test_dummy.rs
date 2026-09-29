@@ -21,6 +21,7 @@ use crate::callback::inbound_peer_frame_capacity_for_test;
 use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::core::callback::TransportCallback;
+use crate::core::pool::ChannelLane;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
@@ -375,6 +376,7 @@ async fn test_pending_dummy_close_fences_an_irrevocable_dispatch_synchronously()
             connection
                 .send_message_with_permit(
                     TransportMessage::Custom(Bytes::from_static(b"payload")),
+                    ChannelLane::default(),
                     SendPermit::always(),
                 )
                 .await
@@ -531,6 +533,7 @@ async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_l
     let result = local
         .send_message_with_permit(
             TransportMessage::Custom(Bytes::from_static(b"payload")),
+            ChannelLane::default(),
             permit,
         )
         .await;
@@ -549,6 +552,7 @@ async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_l
         local
             .send_message_with_permit(
                 TransportMessage::Custom(Bytes::from_static(b"later")),
+                ChannelLane::default(),
                 SendPermit::always(),
             )
             .await,

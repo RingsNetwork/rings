@@ -177,6 +177,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+    use crate::core::pool::ChannelLane;
     use crate::core::transport::SendPermit;
     use crate::core::transport::TransportMessage;
     use crate::delivery::DeliveryFuture;
@@ -218,6 +219,7 @@ mod tests {
         async fn send_message_with_permit(
             &self,
             _: TransportMessage,
+            _: ChannelLane,
             _: SendPermit,
         ) -> Result<DeliveryFuture> {
             Err(Error::DataChannelOpen(

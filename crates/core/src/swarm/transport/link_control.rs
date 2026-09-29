@@ -36,8 +36,11 @@ use bytes::Bytes;
 use super::delivery::send_data_with_timeout;
 use super::delivery::ChunkSendPermit;
 use super::delivery::ChunkSendProgress;
+use super::delivery::FrameTarget;
 use super::delivery::TransferStop;
+use super::outbound::channel_lane;
 use super::outbound::LinkControlPermit;
+use super::outbound::TransferClass;
 use super::AdmittedConnection;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
@@ -64,14 +67,19 @@ async fn deliver_link_control(
 ) {
     let peer = admitted.attempt().peer();
     let stop = TransferStop::new(StopToken::never());
+    // Link control travels on the DHT-control lane. It needs no order against data frames:
+    // a frame whose delegation reference is not yet announced waits in the session-link hold.
     let progress = send_data_with_timeout(
         &admitted,
         frame,
         &ChunkSendPermit::Always,
         &stop,
         None,
-        peer,
-        LINK_CONTROL_SEND_CONTEXT,
+        FrameTarget {
+            did: peer,
+            lane: channel_lane(TransferClass::DhtControl),
+            context: LINK_CONTROL_SEND_CONTEXT,
+        },
     )
     .await;
     match progress {

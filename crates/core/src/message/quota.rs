@@ -3,7 +3,7 @@
 //! A quota key is `(network_id, origin account DID, destination DID, logical lane)`. Each key
 //! owns independent fixed-point message and byte token buckets. [`OriginQuota::admit`] is the
 //! pure transition; the destination replay runtime owns the bounded table and supplies monotonic
-//! time. Quota records are intentionally absent from the durable replay snapshot.
+//! time. Quota records are intentionally absent from the durable replay store.
 //!
 //! An admission either enforces the message limit or, for traffic whose namespace delegated its
 //! admission, skips it ([`MessageLimit`]); the byte limit and the record bound always apply. A
@@ -36,7 +36,7 @@ pub const DEFAULT_ORIGIN_QUOTA_BYTE_BURST: u64 = 64 * 1024 * 1024;
 /// Minimum byte charge of a delegated admission.
 ///
 /// Every admitted final-destination message costs core a fixed amount of work: the
-/// replay-snapshot persist under the replay lock, then its logical lane, validation and dispatch.
+/// replay-record persist under the replay lock, then its logical lane, validation and dispatch.
 /// A delegated admission skips the message limit, so without a floor only the byte bucket would
 /// bound how many messages are admitted, and tiny messages would multiply that work. Charging
 /// `max(len, DELEGATED_MIN_CHARGE)` bounds a neighbour's delegated admissions to
