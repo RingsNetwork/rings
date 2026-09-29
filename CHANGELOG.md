@@ -58,15 +58,19 @@
   `TransactionSequenceStale`. The class is implied by each transaction's signed message, so the
   wire format is unchanged, but replay is not interoperable across the upgrade: an upgraded
   sender's per-class sequences are stale to a node that has not upgraded. **This release is a
-  mandatory network-wide upgrade, seeds included.** The replay snapshot moves to
-  `rings-core:transaction-replay:class-streams`; the first load deletes the former
-  `rings-core:transaction-replay` snapshot unread, resetting every replay window once as deleting
-  the store does; that deletion is best effort (a failure is counted and logged, and admission
-  continues), and the cutover load persists the per-class snapshot so it is never retried. Each
-  replay table now holds `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096 streams, every class
-  stream of 4096 account-destination pairs, and a full snapshot encodes to at most
-  `TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES` (about 19.7 MiB, new export), which each admission
-  rewrites. `StreamKey::new` takes the class, `Transaction::stream_key` returns a `Result`,
+  mandatory network-wide upgrade, seeds included.** The replay store keeps one record per stream
+  under `rings-core:transaction-replay:stream:{sender|receiver}:<key>` instead of one snapshot, so
+  an admission writes only its stream's record (at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`,
+  1161 bytes) rather than rewriting every stream; `ReplayStorage` stores the opaque
+  `ReplayRecord`, which replaces `ReplaySnapshot`. The first load deletes the former
+  `rings-core:transaction-replay` snapshot without decoding it, resetting every replay window
+  once as deleting the store does; the deletion is best effort (a failure is counted and logged,
+  admission continues, and the next load retries it). Each replay table now holds
+  `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096 streams, every class stream of 4096
+  account-destination pairs; a full store is at most `TRANSACTION_REPLAY_STORE_MAX_RECORDS`
+  records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (about 27 MiB), and the native file store's
+  budget (40 MiB) and the browser store's row capacity are sized so they never evict a replay
+  record. `StreamKey::new` takes the class, `Transaction::stream_key` returns a `Result`,
   `Transaction::class` is new, and `PayloadSender`'s send and originate methods take a `Message`
   instead of any `Serialize` value, with `reserve_transaction_sequences` taking the class.
 

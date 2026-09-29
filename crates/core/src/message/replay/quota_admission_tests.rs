@@ -33,7 +33,7 @@ fn quota_config_with_capacity(message_burst: u64, max_records: usize) -> OriginQ
 
 fn runtime(message_burst: u64) -> TransactionReplay {
     TransactionReplay::new_with_quota(
-        Box::new(MemStorage::<ReplaySnapshot>::new()),
+        Box::new(MemStorage::<ReplayRecord>::new()),
         quota_config(message_burst),
     )
 }
@@ -135,7 +135,7 @@ async fn quota_rejection_does_not_advance_replay_and_retry_can_commit() -> Resul
 #[tokio::test]
 async fn capacity_rejection_preserves_replay_until_an_idle_slot_is_safe() -> Result<()> {
     let runtime = TransactionReplay::new_with_quota(
-        Box::new(MemStorage::<ReplaySnapshot>::new()),
+        Box::new(MemStorage::<ReplayRecord>::new()),
         quota_config_with_capacity(1, 1),
     );
     let first = stream(1);
@@ -188,7 +188,7 @@ async fn concurrent_duplicates_cross_the_combined_boundary_once() {
 }
 
 struct FailFirstPutStorage {
-    inner: MemStorage<ReplaySnapshot>,
+    inner: MemStorage<ReplayRecord>,
     fail_next: AtomicBool,
 }
 
@@ -202,19 +202,19 @@ impl FailFirstPutStorage {
 }
 
 #[async_trait::async_trait]
-impl KvStorageInterface<ReplaySnapshot> for FailFirstPutStorage {
-    async fn get(&self, key: &str) -> Result<Option<ReplaySnapshot>> {
+impl KvStorageInterface<ReplayRecord> for FailFirstPutStorage {
+    async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
         self.inner.get(key).await
     }
 
-    async fn put(&self, key: &str, value: &ReplaySnapshot) -> Result<()> {
+    async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
         if self.fail_next.swap(false, Ordering::AcqRel) {
             return Err(Error::InvalidTransport);
         }
         self.inner.put(key, value).await
     }
 
-    async fn get_all(&self) -> Result<Vec<(String, ReplaySnapshot)>> {
+    async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
         self.inner.get_all().await
     }
 

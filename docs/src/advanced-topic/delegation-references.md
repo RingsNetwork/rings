@@ -107,7 +107,8 @@ receiver                                   sender
   arrival leaves first; nothing downstream may rely on more than this. In particular, frames of
   the held frame's traffic class that arrive after it may pass transaction-replay admission
   first, and a held frame released after a replay window's worth of them is rejected as stale
-  (see [Transaction Replay Protection](transaction-replay.md)).
+  (see [Transaction Replay Protection](transaction-replay.md); removing this loss is tracked in
+  #908).
 - The hold keeps at most 16 frames per connection (half the pre-admission hold, so the two
   holds together leave a quarter of the transport's per-peer frames for the control frames that
   release them), each for at most twice the transport's delivery timeout plus one period of the

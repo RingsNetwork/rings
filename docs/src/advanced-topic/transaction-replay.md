@@ -40,16 +40,17 @@ The order holds for frames that resolve on arrival. A frame whose delegation ref
 trip and released independently of later frames, because the session link promises no order
 among held frames (see [Delegation References](delegation-references.md)). If a window's worth
 of its class is admitted meanwhile, the released frame is rejected as `Stale`: one frame lost
-and counted, never a false admission.
+and counted, never a false admission. Removing this loss is tracked in #908.
+
 This assumes a class's transactions reach the scheduler in signing order, as they do from one
 sending task.
 
-The per-class snapshot is stored under `rings-core:transaction-replay:class-streams`. The first load
-that finds no snapshot there deletes the former shared-stream snapshot
-(`rings-core:transaction-replay`) without reading it, which resets every replay window once, as
-deleting the store does, and then persists the empty per-class snapshot, so no later start touches
-the former key. The deletion is best effort: since the former key is never read, a failed deletion
-is counted as a persistence failure and logged, and admission continues. An upgraded
+The per-class streams are stored one record per stream (see [Persistence and
+bounds](#persistence-and-bounds)). A load that finds the former shared-stream snapshot
+(`rings-core:transaction-replay`) deletes it without decoding it, which resets every replay window
+once, as deleting the store does. The deletion is best effort: since the former snapshot is never
+decoded, a failed deletion is counted as a persistence failure and logged, admission continues, and
+the next load retries it; once it is gone, no load touches it again. An upgraded
 sender's per-class sequences are stale to a node that has not upgraded, so the upgrade is
 network-wide and mandatory.
 
@@ -112,18 +113,28 @@ crash after persistence but before dispatch may lose the event. This is the deli
 persistence-before-dispatch boundary: it prevents duplicate dispatch but is not exactly-once
 execution because replay storage and application handlers do not share a transaction.
 
-Sender and receiver state are stored in one versioned snapshot. Each table retains at most
+Sender and receiver state are stored as one record per stream:
+
+```text
+rings-core:transaction-replay:stream:sender:<hex key>    ->  (key, last reserved sequence)
+rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot window)
+```
+
+A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
+(1161 bytes: a 92-byte key and a 1066-byte window, with tag and length prefix), so the cost of an
+admission does not grow with the number of streams retained. On load, every record must decode and
+sit under its own key, or the store is invalid and replay fails closed. Each table retains at most
 `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class stream of 4096
 account-destination pairs, or more pairs that use fewer classes. Each receiver stream has exactly 32
-hot digest slots. A full snapshot's canonical encoding is at most
-`TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES` = 20,643,852 bytes (about 19.7 MiB): per stream, a 92-byte
-key with its 10-byte last sequence and a 92-byte key with its 1066-byte window, plus length
-prefixes. Every admission rewrites the snapshot, so this is also the largest single write. New
-streams fail closed at the bound; there is no LRU eviction or sender-controlled reset. The native
-daemon keeps the snapshot in a dedicated 32 MiB atomic file store, and browser providers keep it in
-a dedicated IndexedDB store. A custom `SwarmBuilder` or `ProcessorBuilder` must supply durable
-`ReplayStorage` to retain the restart guarantee; their in-memory default guarantees replay rejection
-only for the lifetime of that runtime.
+hot digest slots. A full store is at most `TRANSACTION_REPLAY_STORE_MAX_RECORDS` (32,768) records
+and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,295,168 bytes). New streams fail closed at the bound;
+there is no LRU eviction or sender-controlled reset. The native daemon keeps the records in a
+dedicated 40 MiB atomic file store, and browser providers keep them in a dedicated IndexedDB store
+with one row more than the record bound: both stores evict beyond their limits, and an evicted
+record would reopen replay for its stream, so both are sized never to reach them. A custom
+`SwarmBuilder` or `ProcessorBuilder` must supply durable `ReplayStorage` to retain the restart
+guarantee; their in-memory default guarantees replay rejection only for the lifetime of that
+runtime.
 
 Deleting or replacing the replay store deletes the guarantee for its streams. There is no safe
 incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail
@@ -139,8 +150,8 @@ begins with the `RINGS-PAYLOAD` marker, and the replay store key is
 without the current marker are rejected before deserialization. There is no dual decoder,
 negotiation, feature flag, downgrade path, or legacy fallback, and no version behind any of these
 names: the protocol is not versioned before 1.0. Mixed-version overlays are unsupported. Per-class
-streams (#898) are the next cutover: the store key becomes
-`rings-core:transaction-replay:class-streams`, and every node, seeds included, upgrades together.
+streams (#898) are the next cutover: the store becomes one record per stream under
+`rings-core:transaction-replay:stream:`, and every node, seeds included, upgrades together.
 
 ## Non-guarantees
 

@@ -206,29 +206,34 @@ overtake a stalled one past the window. The order covers frames that resolve on 
 held on a delegation-reference miss (the receiver forgot the delegation) is released independently
 of later frames after one repair round trip, since the session link promises no order among held
 frames, and is rejected as stale if a window's worth of its class were admitted meanwhile. That
-loses the frame, counted; it never admits one falsely. This assumes a class's transactions reach the
-scheduler in signing order, as they do from one sending task; concurrent originators of one class
-can still reorder between reserving a sequence and submitting it.
+loses the frame, counted; it never admits one falsely (tracked in #908). This assumes a class's
+transactions reach the scheduler in signing order, as they do from one sending task; concurrent
+originators of one class can still reorder between reserving a sequence and submitting it.
 
-The per-class snapshot is stored under `rings-core:transaction-replay:class-streams`. The first load
-that finds no snapshot there deletes the snapshot of the shared streams, stored under
-`rings-core:transaction-replay`, without reading it, since its keys cannot name a class, and then
-persists the empty per-class snapshot, so later starts never touch the former key. The deletion is
-best effort: the former key is never read, so a failed deletion is counted as a replay persistence
-failure and logged, and admission continues. The upgrade therefore resets every replay window once,
-exactly as deleting the replay store does: an unexpired transaction signed before the upgrade can be
-accepted once more. Old and new nodes do not interoperate on replay: an upgraded sender's per-class
-sequences restart at zero and are stale to a node that still keeps one shared stream, so the release
-that ships per-class streams is a mandatory network-wide upgrade. The final destination persists a
-fixed 32-sequence acceptance window per stream before application validation and handler dispatch.
-Each of the sender and receiver tables holds at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096
+The replay store keeps one record per stream, under
+`rings-core:transaction-replay:stream:{sender|receiver}:<hex key>`, each carrying its own stream
+key; a record under any other key, or not under its own key, makes the store invalid and fails
+closed. A load that finds the snapshot of the shared streams, stored under
+`rings-core:transaction-replay`, deletes it without decoding it, since its keys cannot name a class.
+The deletion is best effort: the former snapshot is never decoded, so a failed deletion is counted
+as a replay persistence failure and logged, admission continues, and the next load retries it; once
+deleted, no load touches it again. The upgrade therefore resets every replay window once, exactly as
+deleting the replay store does: an unexpired transaction signed before the upgrade can be accepted
+once more. Old and new nodes do not interoperate on replay: an upgraded sender's per-class sequences
+restart at zero and are stale to a node that still keeps one shared stream, so the release that
+ships per-class streams is a mandatory network-wide upgrade. The final destination persists a fixed
+32-sequence acceptance window per stream before application validation and handler dispatch. Each of
+the sender and receiver tables holds at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096
 streams: every class stream of 4096 account-destination pairs, or more pairs that use fewer classes.
-A full snapshot's canonical encoding is at most `TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES` (20,643,852
-bytes, about 19.7 MiB), and each admission rewrites it, so that is also the largest single write of
-the replay store. Exact duplicates, conflicting transactions at one sequence, and sequences below
-the retained window are rejected as separate typed verdicts. Delegation-key rotation does not reset
-the account stream, sender timestamps do not order it, and intermediate Chord relays keep no origin
-replay state.
+Each transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
+(1161 bytes) whatever the number of streams retained. A full store is at most
+`TRANSACTION_REPLAY_STORE_MAX_RECORDS` (32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES`
+(28,295,168 bytes); the native file store (a 40 MiB budget) and the browser store (a row capacity
+one above the record bound) evict beyond their limits, so both are sized never to reach them, since
+an evicted record would reopen replay for its stream. Exact duplicates, conflicting transactions at
+one sequence, and sequences below the retained window are rejected as separate typed verdicts.
+Delegation-key rotation does not reset the account stream, sender timestamps do not order it, and
+intermediate Chord relays keep no origin replay state.
 
 This is an at-most-once dispatch guarantee only while the replay store is retained. A crash after
 the receiver commits a sequence but before handler dispatch can lose that event; replay storage
@@ -258,7 +263,7 @@ the handshake-authenticated connection of its own origin account, core skips onl
 message-count limit: the transaction neither needs nor consumes a message token. It is still charged
 to the same Application record's byte bucket, at least `DELEGATED_MIN_CHARGE` (16 KiB) per message,
 and the record bound still applies. The floor bounds how many delegated messages core admits, and so
-the per-message work that follows admission (the replay-snapshot persist, the logical lane,
+the per-message work that follows admission (the replay-record persist, the logical lane,
 validation and dispatch), which no delegating protocol can bound because it runs first: under the
 default 4 MiB/s and 64 MiB burst, at most 256 delegated messages per second and a burst of 4096. The
 decode and signature checks precede the quota and are not bounded by it. Messages of 16 KiB or more
@@ -292,7 +297,7 @@ The byte charge is `Transaction.data.len()` from the verified original transacti
 frame is charged once at destination admission. Chunk envelopes are transport framing and consume
 no origin quota; after complete reassembly and signature verification, the recovered original
 transaction is charged once by the same function. Quota time is monotonic and local, token state
-is never serialized into the replay snapshot, and each lane has a hard record bound. Under
+is never serialized into the replay store, and each lane has a hard record bound. Under
 pressure only a fully replenished idle record is reusable; if none exists, admission fails closed.
 Quota drops are counted by the bounded lane and reason dimensions, never by origin DID. They are
 local drops and do not disconnect the immediate peer, which may be an honest relay.

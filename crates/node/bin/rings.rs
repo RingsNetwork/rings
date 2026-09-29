@@ -63,11 +63,12 @@ use tokio::task::JoinSet;
 
 const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
-/// Byte budget of the native replay store: one full replay snapshot
-/// (`rings_core::message::TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES`, about 19.7 MiB) and its
-/// file-record framing, with room left for the former shared-stream record until the first
-/// load after the #898 upgrade deletes it.
-const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 32 * 1024 * 1024;
+/// Byte budget of the native replay store: every record of a full store
+/// (`rings_core::message::TRANSACTION_REPLAY_STORE_MAX_BYTES`, about 27 MiB), with room left
+/// for the former shared-stream snapshot until the first load after the #898 upgrade deletes
+/// it. The file store evicts its oldest records beyond its budget, and an evicted replay record
+/// would reopen replay for its stream, so the budget must never be reached.
+const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 40 * 1024 * 1024;
 
 fn onion_entry_guard_storage_path(data_storage_path: &str) -> String {
     let data_path = Path::new(data_storage_path);
@@ -1360,7 +1361,7 @@ mod tests {
     use clap::CommandFactory;
     use clap::FromArgMatches;
     use rings_node::logging::LogLevel;
-    use rings_node::prelude::rings_core::message::TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES;
+    use rings_node::prelude::rings_core::message::TRANSACTION_REPLAY_STORE_MAX_BYTES;
 
     use super::await_gateway_startup;
     use super::await_task_cleanup;
@@ -1426,13 +1427,14 @@ mod tests {
     /// A full replay snapshot always fits the native replay store, so the stream-count bound,
     /// not the store's budget, is what fails closed.
     #[test]
-    fn test_transaction_replay_storage_holds_a_full_snapshot(
-    ) -> Result<(), std::num::TryFromIntError> {
-        // The file record frames the snapshot with its storage key,
-        // `rings-core:transaction-replay:class-streams` (43 bytes), and a length prefix.
-        const RECORD_FRAMING_BYTES: usize = 64;
+    fn test_transaction_replay_storage_holds_a_full_store() -> Result<(), std::num::TryFromIntError>
+    {
+        // The shared-stream snapshot a pre-#898 node left: 4096 streams, each a 91-byte key
+        // with its 10-byte last sequence and a 91-byte key with its 1066-byte window, plus
+        // length prefixes, and its file record's key framing.
+        const SHARED_STREAM_SNAPSHOT_MAX_BYTES: usize = 12 + 4096 * (2 * 91 + 10 + 1066) + 64;
         let capacity = usize::try_from(TRANSACTION_REPLAY_STORAGE_CAPACITY)?;
-        assert!(TRANSACTION_REPLAY_SNAPSHOT_MAX_BYTES + RECORD_FRAMING_BYTES <= capacity);
+        assert!(TRANSACTION_REPLAY_STORE_MAX_BYTES + SHARED_STREAM_SNAPSHOT_MAX_BYTES <= capacity);
         Ok(())
     }
 

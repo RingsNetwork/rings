@@ -114,7 +114,7 @@ pub enum Error {
         capacity: usize,
     },
 
-    /// The versioned replay snapshot violates its structural bounds.
+    /// The replay store holds a record that violates its structural bounds.
     #[error("Transaction replay state is invalid")]
     TransactionReplayStateInvalid,
 
