@@ -1424,7 +1424,7 @@ mod tests {
         );
     }
 
-    /// A full replay snapshot always fits the native replay store, so the stream-count bound,
+    /// A full replay store always fits the native replay store's budget, so the stream-count bound,
     /// not the store's budget, is what fails closed.
     #[test]
     fn test_transaction_replay_storage_holds_a_full_store() -> Result<(), std::num::TryFromIntError>

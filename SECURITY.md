@@ -213,20 +213,23 @@ originators of one class can still reorder between reserving a sequence and subm
 The replay store keeps one record per stream, under
 `rings-core:transaction-replay:stream:{sender|receiver}:<hex key>`, each carrying its own stream
 key; a record under any other key, or not under its own key, makes the store invalid and fails
-closed. A load that finds the snapshot of the shared streams, stored under
-`rings-core:transaction-replay`, deletes it without decoding it, since its keys cannot name a class.
-The deletion is best effort: the former snapshot is never decoded, so a failed deletion is counted
-as a replay persistence failure and logged, admission continues, and the next load retries it; once
-deleted, no load touches it again. The upgrade therefore resets every replay window once, exactly as
-deleting the replay store does: an unexpired transaction signed before the upgrade can be accepted
-once more. Old and new nodes do not interoperate on replay: an upgraded sender's per-class sequences
-restart at zero and are stale to a node that still keeps one shared stream, so the release that
-ships per-class streams is a mandatory network-wide upgrade. The final destination persists a fixed
-32-sequence acceptance window per stream before application validation and handler dispatch. Each of
-the sender and receiver tables holds at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096
-streams: every class stream of 4096 account-destination pairs, or more pairs that use fewer classes.
-Each transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
-(1161 bytes) whatever the number of streams retained. A full store is at most
+closed. That covers the records the storage returns: the native file store deletes a file whose
+framing does not decode before replay sees it, and writes without `fsync`, so a torn file left by a
+crash is dropped and its stream forgotten, reopening replay for that stream (tracked in #909). A
+load that finds the snapshot of the shared streams, stored under `rings-core:transaction-replay`,
+deletes it without decoding it, since its keys cannot name a class. The deletion is best effort: the
+former snapshot is never decoded, so a failed deletion is counted as a replay persistence failure
+and logged, admission continues, and the next load retries it; once deleted, no load touches it
+again. The upgrade therefore resets every replay window once, exactly as deleting the replay store
+does: an unexpired transaction signed before the upgrade can be accepted once more. Old and new
+nodes do not interoperate on replay: an upgraded sender's per-class sequences restart at zero and
+are stale to a node that still keeps one shared stream, so the release that ships per-class streams
+is a mandatory network-wide upgrade. The final destination persists a fixed 32-sequence acceptance
+window per stream before application validation and handler dispatch. Each of the sender and
+receiver tables holds at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096 streams: every class
+stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each transition
+writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES` (1161 bytes)
+whatever the number of streams retained. A full store is at most
 `TRANSACTION_REPLAY_STORE_MAX_RECORDS` (32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES`
 (28,295,168 bytes); the native file store (a 40 MiB budget) and the browser store (a row capacity
 one above the record bound) evict beyond their limits, so both are sized never to reach them, since

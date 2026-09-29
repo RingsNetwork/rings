@@ -19,6 +19,13 @@
 //! being skipped. The one tolerated foreign key is the shared-stream snapshot of the key used
 //! before #898, which is reported, never decoded.
 //!
+//! The law covers the records the storage returns. A storage that drops records itself escapes
+//! it: the native file store retires a file whose `(key, record)` framing does not decode before
+//! [`restore`] sees it, and writes without `fsync`, so a crash can leave a torn file that is
+//! then dropped and its stream forgotten, reopening replay for that stream. Only corruption of a
+//! record's inner bytes reaches [`restore`] and fails closed. Durability and surfacing instead of
+//! deleting are tracked in #909.
+//!
 //! The record is an opaque byte string to the storage, so browser storage never sees structured
 //! keys or `u64` counters, and the former snapshot (also an opaque byte string) loads as a
 //! record without being decoded.

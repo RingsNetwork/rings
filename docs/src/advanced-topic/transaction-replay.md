@@ -90,11 +90,11 @@ final destination.
 
 At that destination, replay classification and the runtime-local origin rate quota share one
 serialized admission boundary but remain separate state models. Replay, Fork, and Stale consume no
-quota; quota rejection leaves the durable replay window unchanged; and a replay-store failure
-rolls back the provisional quota reservation. Quota state is never encoded in `ReplaySnapshot`.
-The deterministic byte cost is the verified original transaction's `data.len()`: normal messages
-pay it once, chunk envelopes pay nothing, and a successfully reassembled original pays it once
-before logical lane admission.
+quota; quota rejection leaves the durable replay window unchanged; and a replay-store failure rolls
+back the provisional quota reservation. Quota state is never encoded in a `ReplayRecord`. The
+deterministic byte cost is the verified original transaction's `data.len()`: normal messages pay it
+once, chunk envelopes pay nothing, and a successfully reassembled original pays it once before
+logical lane admission.
 
 ## Persistence and bounds
 
@@ -123,18 +123,22 @@ rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot windo
 A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
 (1161 bytes: a 92-byte key and a 1066-byte window, with tag and length prefix), so the cost of an
 admission does not grow with the number of streams retained. On load, every record must decode and
-sit under its own key, or the store is invalid and replay fails closed. Each table retains at most
-`TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class stream of 4096
-account-destination pairs, or more pairs that use fewer classes. Each receiver stream has exactly 32
-hot digest slots. A full store is at most `TRANSACTION_REPLAY_STORE_MAX_RECORDS` (32,768) records
-and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,295,168 bytes). New streams fail closed at the bound;
-there is no LRU eviction or sender-controlled reset. The native daemon keeps the records in a
-dedicated 40 MiB atomic file store, and browser providers keep them in a dedicated IndexedDB store
-with one row more than the record bound: both stores evict beyond their limits, and an evicted
-record would reopen replay for its stream, so both are sized never to reach them. A custom
-`SwarmBuilder` or `ProcessorBuilder` must supply durable `ReplayStorage` to retain the restart
-guarantee; their in-memory default guarantees replay rejection only for the lifetime of that
-runtime.
+sit under its own key, or the store is invalid and replay fails closed. This holds for the records
+the storage returns: the native file store deletes a file whose framing does not decode before
+replay sees it, and writes without `fsync`, so a torn file left by a crash is dropped and its stream
+forgotten, which reopens replay for that stream (tracked in #909). One lock serializes all replay
+transitions and is held across each record write, so store write latency bounds the node-wide
+transition rate. Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams:
+every class stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each
+receiver stream has exactly 32 hot digest slots. A full store is at most
+`TRANSACTION_REPLAY_STORE_MAX_RECORDS` (32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES`
+(28,295,168 bytes). New streams fail closed at the bound; there is no LRU eviction or
+sender-controlled reset. The native daemon keeps the records in a dedicated 40 MiB atomic file
+store, and browser providers keep them in a dedicated IndexedDB store with one row more than the
+record bound: both stores evict beyond their limits, and an evicted record would reopen replay for
+its stream, so both are sized never to reach them. A custom `SwarmBuilder` or `ProcessorBuilder`
+must supply durable `ReplayStorage` to retain the restart guarantee; their in-memory default
+guarantees replay rejection only for the lifetime of that runtime.
 
 Deleting or replacing the replay store deletes the guarantee for its streams. There is no safe
 incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail

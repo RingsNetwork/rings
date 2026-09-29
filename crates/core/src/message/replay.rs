@@ -336,6 +336,12 @@ impl ReplayCounterState {
 }
 
 /// Serialized sender allocator and receiver replay-window effect boundary.
+///
+/// One mutex serializes every reservation and admission, and it is held across the store write
+/// of the stream's record, so the replay store's write latency bounds the rate of replay
+/// transitions node-wide. Each write is one record of at most
+/// [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`]; a lock per stream would let writes of different
+/// streams overlap.
 pub(crate) struct TransactionReplay {
     storage: ReplayStorage,
     state: Mutex<TransactionAdmissionState>,
