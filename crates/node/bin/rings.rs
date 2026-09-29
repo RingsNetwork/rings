@@ -46,7 +46,7 @@ use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::file::FileStorage;
-use rings_node::prelude::rings_core::storage::file::RecordAuthority;
+use rings_node::prelude::rings_core::storage::RecordAuthority;
 use rings_node::prelude::DelegationBuilder;
 use rings_node::prelude::StopSource;
 use rings_node::processor::ProcessorBuilder;

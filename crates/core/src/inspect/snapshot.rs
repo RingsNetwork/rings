@@ -137,8 +137,9 @@ impl StorageInspect {
     /// Build a storage inspection snapshot from an entry storage handle.
     ///
     /// Post: every item is live and projected by [`Entry::retired_at`] at the current clock, as
-    /// every storage read serves it; the snapshot is read-only and retires nothing, so a value
-    /// that is no longer live is left for the next storage read to retire.
+    /// every storage read serves it. The snapshot retires no expired value and writes back no
+    /// projection, leaving both to the next storage read; the store's own scan may still retire
+    /// a record it cannot decode, under a disposable store's decode law.
     pub async fn inspect_kv_storage(storage: &EntryStorage) -> Self {
         let now_ms = get_epoch_ms();
         Self {

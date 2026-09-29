@@ -27,6 +27,8 @@ pub use crdt::EntryCrdt;
 pub use crdt::EntryDot;
 pub use crdt::EntryTombstone;
 pub use crdt::EntryVersion;
+#[cfg(test)]
+pub(crate) use crdt::DIGESTS_COMPUTED;
 
 /// DHT storage entry categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,16 +277,15 @@ impl SyncedEntryAck {
     /// Returns whether this ack proves that `local` equals the copied value at the clock
     /// `now_ms`.
     ///
-    /// Post: comparison is performed on storage canonical forms projected to the element
-    /// horizon at `now_ms` ([`Entry::retired_at`]), so legacy entries without dots compare equal
-    /// to the normalized value durably persisted by the receiver, and an element or remove that
-    /// merely crossed its horizon between the copy and the ack is not mistaken for a newer
-    /// write: the copy was projected at an earlier clock, and projecting it again at `now_ms`
-    /// yields what `local` is when nothing was written meanwhile.
-    pub fn confirms_local_value(&self, local: &Entry, now_ms: u128) -> Result<bool> {
-        let copied = self.entry.clone().try_into_storage_entry()?;
-        let local = local.clone().try_into_storage_entry()?;
-        Ok(copied.retired_at(now_ms) == local.retired_at(now_ms))
+    /// Pre: both the copied value and `local` are normalized: `local` is a stored value, and
+    /// the copy is admitted only equal to one the sender took from its own storage.
+    /// Post: the comparison is on both values projected to the element horizon at `now_ms`
+    /// ([`Entry::retired_at`]), so an element or remove that merely crossed its horizon between
+    /// the copy and the ack is not mistaken for a newer write: the copy was projected at an
+    /// earlier clock, and projecting it again at `now_ms` yields what `local` is when nothing
+    /// was written meanwhile. It computes no digest.
+    pub fn confirms_local_value(&self, local: &Entry, now_ms: u128) -> bool {
+        self.entry.clone().retired_at(now_ms) == local.clone().retired_at(now_ms)
     }
 }
 

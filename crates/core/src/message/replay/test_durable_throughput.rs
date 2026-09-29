@@ -21,8 +21,8 @@ use crate::error::Result;
 use crate::message::MessageCategory;
 use crate::storage::file::test_root::TempRoot;
 use crate::storage::file::FileStorage;
-use crate::storage::file::RecordAuthority;
 use crate::storage::MemStorage;
+use crate::storage::RecordAuthority;
 
 /// Admissions measured per store.
 const ADMISSIONS: u32 = 512;

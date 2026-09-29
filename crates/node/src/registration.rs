@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::lock::Mutex as AsyncMutex;
+use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::entry;
 use rings_core::dht::Did;
@@ -76,13 +77,17 @@ pub(crate) const fn default_advertise_presence() -> bool {
     true
 }
 
-/// The longest heartbeat interval that keeps a registry descriptor stored between heartbeats:
-/// the earlier of the retention bound a descriptor write requests (the data default lifetime,
-/// which bounds the registry of a sole registrant) and the data element horizon.
+/// The heartbeat interval below which a registry descriptor stays stored between heartbeats.
+///
+/// A descriptor write requests the data default lifetime `L` (which bounds the registry of a
+/// sole registrant, and is below the element horizon), stamped on the publisher's clock; an
+/// owner whose clock runs up to `σ = TS_OFFSET_TOLERANCE_MS` ahead retires it at `L − σ` of the
+/// publisher's time. The next heartbeat must land before that, so the interval is below
+/// `L − σ`, and the publish latency must fit in what the interval leaves of it.
 pub(crate) fn registry_refresh_bound() -> Duration {
-    let kind = entry::EntryKind::Data;
-    let horizon_ms = kind.element_horizon_ms().unwrap_or(kind.max_lifetime_ms());
-    Duration::from_millis(kind.default_lifetime_ms().min(horizon_ms))
+    let lifetime_ms = u128::from(entry::EntryKind::Data.default_lifetime_ms());
+    let bound_ms = lifetime_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS);
+    Duration::from_millis(u64::try_from(bound_ms).unwrap_or(u64::MAX))
 }
 
 /// Validate a registry heartbeat interval against [`registry_refresh_bound`]; `setting` names
@@ -107,15 +112,15 @@ pub(crate) fn validate_online_node_registration_timing(
     heartbeat_interval: Duration,
     ttl: Duration,
 ) -> Result<()> {
-    if advertise_presence && heartbeat_interval >= ttl {
+    if !advertise_presence {
+        return Ok(());
+    }
+    if heartbeat_interval >= ttl {
         return Err(Error::InvalidConfig(format!(
             "online_node_heartbeat_interval ({heartbeat_interval:?}) must be less than online_node_ttl ({ttl:?}) when advertise_presence is enabled"
         )));
     }
-    if advertise_presence {
-        validate_registry_heartbeat("online_node_heartbeat_interval", heartbeat_interval)?;
-    }
-    Ok(())
+    validate_registry_heartbeat("online_node_heartbeat_interval", heartbeat_interval)
 }
 
 /// Capability passed to registration tasks.

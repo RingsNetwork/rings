@@ -22,6 +22,33 @@ use async_trait::async_trait;
 use crate::error::Result;
 pub use crate::storage::memory::MemStorage;
 
+/// The authority of a store's records, fixed when the store is opened.
+///
+/// A store is either a cache its owner can rebuild or do without, or the only copy of state
+/// whose loss would be silent (such as the transaction replay store). The law every backend
+/// that takes an authority shares is the decode law: a disposable store retires a record the
+/// current schema cannot decode, on the read that finds it, and reports it absent, while an
+/// authoritative store reports the record and keeps it. Budget, durability and open laws are
+/// per backend and documented there: the file store evicts and flushes by its authority, while
+/// IndexedDB evicts its least recently accessed rows beyond its row cap under either authority,
+/// so an authoritative IndexedDB store is sized never to reach its cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordAuthority {
+    /// A cache its owner can rebuild or do without.
+    Disposable,
+    /// The only copy of its state.
+    Authoritative,
+}
+
+impl RecordAuthority {
+    /// Whether a read retires a record it cannot decode instead of reporting it (the decode law,
+    /// shared by every backend that takes an authority).
+    pub(crate) const fn retires_undecodable(self) -> bool {
+        matches!(self, Self::Disposable)
+    }
+}
+
 /// A record a storage holds but cannot read or decode, named so that its owner can fail closed
 /// on it instead of losing it.
 ///

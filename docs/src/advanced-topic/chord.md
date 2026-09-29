@@ -75,7 +75,8 @@ merged value does not depend on the order replies arrive in.
   even while other writes keep the topic alive. The online-node and onion-exit registries
   refresh their descriptors every heartbeat (30 s by default). Once the topic's bound has
   elapsed, it serves no element; it is kept only while it holds a tombstone or overwrite that
-  is not yet collected.
+  is not yet collected, and it answers lookups as absent, so a reader asks the next replica
+  and read-repair joins the missed one, which is how its tombstones still spread.
 - **A removal wins over every earlier write of its value.** A tombstone names the value and the
   newest dot of it the storage owner holds, and covers every dot of that value up to that one,
   including dots already forgotten under a later write. "Earlier" is the dot order, not real

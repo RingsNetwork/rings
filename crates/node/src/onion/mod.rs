@@ -146,15 +146,15 @@ pub(crate) fn validate_onion_exit_registration_timing(
     heartbeat_interval: Duration,
     ttl: Duration,
 ) -> Result<()> {
-    if advertise_exit && heartbeat_interval >= ttl {
+    if !advertise_exit {
+        return Ok(());
+    }
+    if heartbeat_interval >= ttl {
         return Err(Error::InvalidConfig(format!(
             "onion_exit_heartbeat_interval ({heartbeat_interval:?}) must be less than onion_exit_ttl ({ttl:?}) when advertise_onion_exit is enabled"
         )));
     }
-    if advertise_exit {
-        validate_registry_heartbeat("onion_exit_heartbeat_interval", heartbeat_interval)?;
-    }
-    Ok(())
+    validate_registry_heartbeat("onion_exit_heartbeat_interval", heartbeat_interval)
 }
 
 /// Canonical onion-exit service name.
