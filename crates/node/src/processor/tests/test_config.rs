@@ -6,6 +6,7 @@ use rings_core::message::OriginQuotaLaneConfig;
 use super::common::*;
 use super::*;
 use crate::processor::config::parse_webrtc_udp_port_range;
+use crate::registration::registry_refresh_bound;
 
 #[test]
 fn test_webrtc_udp_port_range_absent_by_default() {
@@ -86,6 +87,48 @@ fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enable
             if message.contains("online_node_heartbeat_interval")
                 && message.contains("online_node_ttl")
     ));
+}
+
+/// Both registries refuse a heartbeat interval at or above the descriptor lifetime less the
+/// clock skew, at which a sole registrant's descriptor would lapse between heartbeats.
+#[test]
+fn test_registry_heartbeat_must_refresh_before_a_descriptor_expires() -> Result<()> {
+    let key = SecretKey::random();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
+    let bound = registry_refresh_bound();
+    let mut presence = ProcessorConfig::new(
+        0,
+        "stun://stun.l.google.com:19302".to_string(),
+        delegatee_key.clone(),
+        3,
+    );
+    presence.online_node_heartbeat_interval = bound;
+    presence.online_node_ttl = bound * 2;
+    assert!(matches!(
+        ProcessorBuilder::from_config(&presence).and_then(ProcessorBuilder::build),
+        Err(Error::InvalidConfig(message))
+            if message.contains("online_node_heartbeat_interval")
+                && message.contains("registry descriptor's lifetime")
+    ));
+
+    let mut exit = ProcessorConfig::new(
+        0,
+        "stun://stun.l.google.com:19302".to_string(),
+        delegatee_key,
+        3,
+    )
+    .advertise_onion_exit(true)
+    .onion_exit_policy(onion_policy(&["example.com:443"], &[])?);
+    exit.advertise_presence = false;
+    exit.onion_exit_heartbeat_interval = bound;
+    exit.onion_exit_ttl = bound * 2;
+    assert!(matches!(
+        ProcessorBuilder::from_config(&exit).and_then(ProcessorBuilder::build),
+        Err(Error::InvalidConfig(message))
+            if message.contains("onion_exit_heartbeat_interval")
+                && message.contains("registry descriptor's lifetime")
+    ));
+    Ok(())
 }
 
 #[test]

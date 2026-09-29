@@ -74,6 +74,47 @@
   `Transaction::class` is new, and `PayloadSender`'s send and originate methods take a `Message`
   instead of any `Serialize` value, with `reserve_transaction_sequences` taking the class.
 
+- Collect data-topic tombstones at a retention horizon and remove compaction (#867, #872, #874,
+  #871).
+  - Every data-topic element now expires at the earlier of its dot's issue time plus
+    `H = EntryKind::Data.max_lifetime_ms()` (100 minutes) and its topic's retention bound (the
+    latest bound any joined write requested; 10 minutes for a plain write). Writing a value
+    again refreshes both: a sole writer rewrites within 10 minutes, and every writer within `H`
+    even while other writes keep the topic alive. Registries already refresh every 30 s.
+  - A tombstone is collected `H + σ` after the dot it covers (`σ = TS_OFFSET_TOLERANCE_MS`), and
+    an overwrite register `H + σ` after it was issued. A data carrier stays live while it holds
+    either uncollected (`Entry::is_live_at`), but once its retention bound elapses it serves no
+    element. `Entry::retired_at` applies this on every storage and fetch-cache read and to every
+    stored value; `SyncedEntryAck::confirms_local_value` takes the clock it compares at.
+  - `EntryOperation::CompactData`, `Entry::compact_data` and `storage_compact_data` (core
+    `ChordStorageInterface` and node `Processor`) are removed, and the registries no longer
+    compact: a compaction floor stamped by one owner erased every concurrent add that owner had
+    not received, from every carrier that joined it (#867). Both registries, the onion-exit one
+    included, are bounded by the horizon alone (#871).
+  - A removal now covers every earlier dot of its value, so a stale replica holding a dot the
+    remover had forgotten under a later one can no longer resurrect it (#874).
+    `EntryCrdt::tombstones` holds `EntryTombstone` (a Keccak-256 `ElementDigest` of the value
+    and the greatest dot it covers), at most one per value.
+  - A carrier past its retention bound answers lookups as absent, from a replica and from a
+    reader's fetch cache alike, so the lookup asks the next placement and read-repair joins
+    the missed one; a read that retires part of a stored carrier writes the projection back.
+  - Registry heartbeat intervals must be below the descriptor lifetime less the clock-skew
+    tolerance and the fetch-poll budget (595 s by default), for the online-node and onion-exit
+    registries alike; a node whose configuration exceeds it refuses to start.
+  - IndexedDB stores are opened with a `RecordAuthority` (`rings_core::storage`): a disposable
+    store retires a record it cannot decode, an authoritative one reports it and keeps it.
+    `IdbStorage::new_with_cap_and_name` now opens a disposable store, and the new
+    `IdbStorage::new_with_cap_name_and_authority` takes the authority; the browser replay store
+    is authoritative and every other browser store disposable. Native file storage is
+    unchanged here: it retires an undecodable record in every store.
+  - Cutover: the wire format of storage entries and operations changes, so every node of a
+    network must upgrade together; the version is bumped at release. Stored carriers of the old
+    format that hold a tombstone no longer decode, and both native file storage and the browser
+    entry store retire them on first read or scan. Data topics are repopulated by their owners'
+    next writes and the registries' next heartbeats. A relay inbox that has ever drained a
+    message holds a tombstone, so it is retired with the messages it still held for its
+    offline recipient: those undelivered messages are lost at the cutover.
+
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`
   (core), both defaulting to `false`. For its traffic from the authenticated neighbour that

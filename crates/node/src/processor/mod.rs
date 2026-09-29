@@ -116,7 +116,12 @@ pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
 
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
+const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: u32 = 40;
+
+/// The longest a DHT fetch polls the cache for its reply: its attempts times their interval.
+pub(crate) const fn dht_lookup_poll_budget() -> Duration {
+    DHT_LOOKUP_CACHE_POLL_INTERVAL.saturating_mul(DHT_LOOKUP_CACHE_POLL_ATTEMPTS)
+}
 
 async fn sleep_registration_interval_with_stop(
     interval: Duration,
@@ -887,7 +892,10 @@ impl Processor {
             .map_err(Error::EntryError)
     }
 
-    /// Store an entry on DHT storage
+    /// Store an entry on DHT storage, replacing its payloads.
+    ///
+    /// Each stored payload expires by the element lifetime rule of [`ChordStorageInterface`]
+    /// unless it is written again.
     pub async fn storage_store(&self, entry: entry::Entry) -> Result<()> {
         self.swarm
             .storage_store(entry)
@@ -895,7 +903,10 @@ impl Processor {
             .map_err(Error::EntryError)
     }
 
-    /// Append data to an entry on DHT storage
+    /// Append data to an entry on DHT storage.
+    ///
+    /// The appended element expires by the element lifetime rule of [`ChordStorageInterface`],
+    /// even while other writes keep the topic alive, unless it is appended again.
     pub async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         self.swarm
             .storage_append_data(topic, data)
@@ -904,17 +915,12 @@ impl Processor {
     }
 
     /// Tombstone observed data in an entry on DHT storage.
+    ///
+    /// The removal covers every dot of `data` the storage owner holds, including earlier dots
+    /// forgotten under a later one, and is collected once every add it covers has expired.
     pub async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
         self.swarm
             .storage_tombstone_data(topic, data)
-            .await
-            .map_err(Error::EntryError)
-    }
-
-    /// Compact observed data in an entry on DHT storage.
-    pub async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
-        self.swarm
-            .storage_compact_data(topic, removals)
             .await
             .map_err(Error::EntryError)
     }
@@ -968,7 +974,10 @@ impl Processor {
         self.swarm.origin_quota_counters()
     }
 
-    /// register service
+    /// Register this node under the service name `name`.
+    ///
+    /// The registration is one appended element, so it expires by the element lifetime rule of
+    /// [`ChordStorageInterface`] unless it is registered again.
     pub async fn register_service(&self, name: &str) -> Result<()> {
         let encoded_did = self
             .did()

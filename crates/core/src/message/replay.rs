@@ -966,9 +966,13 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     async fn browser_storage_round_trip_retains_nonempty_replay_state() {
         const STORAGE_NAME: &str = "rings-core/replay-store-round-trip";
-        let storage = crate::storage::idb::IdbStorage::new_with_cap_and_name(2, STORAGE_NAME)
-            .await
-            .expect("IndexedDB opens");
+        let storage = crate::storage::idb::IdbStorage::new_with_cap_name_and_authority(
+            2,
+            STORAGE_NAME,
+            crate::storage::RecordAuthority::Authoritative,
+        )
+        .await
+        .expect("IndexedDB opens");
         storage.clear().await.expect("IndexedDB clears");
         let origin: Did = SecretKey::random().address().into();
         let destination: Did = SecretKey::random().address().into();
@@ -991,9 +995,13 @@ mod tests {
         );
         drop(first);
 
-        let reopened = crate::storage::idb::IdbStorage::new_with_cap_and_name(2, STORAGE_NAME)
-            .await
-            .expect("IndexedDB reopens");
+        let reopened = crate::storage::idb::IdbStorage::new_with_cap_name_and_authority(
+            2,
+            STORAGE_NAME,
+            crate::storage::RecordAuthority::Authoritative,
+        )
+        .await
+        .expect("IndexedDB reopens");
         let restarted = TransactionReplay::new(Box::new(reopened));
         assert_eq!(
             restarted

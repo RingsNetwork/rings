@@ -37,6 +37,7 @@ use crate::descriptor::SignedDescriptorBody;
 use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeType;
+use crate::registration::validate_registry_heartbeat;
 use crate::registration::DhtRegistrationPublisher;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
@@ -145,12 +146,15 @@ pub(crate) fn validate_onion_exit_registration_timing(
     heartbeat_interval: Duration,
     ttl: Duration,
 ) -> Result<()> {
-    if advertise_exit && heartbeat_interval >= ttl {
+    if !advertise_exit {
+        return Ok(());
+    }
+    if heartbeat_interval >= ttl {
         return Err(Error::InvalidConfig(format!(
             "onion_exit_heartbeat_interval ({heartbeat_interval:?}) must be less than onion_exit_ttl ({ttl:?}) when advertise_onion_exit is enabled"
         )));
     }
-    Ok(())
+    validate_registry_heartbeat("onion_exit_heartbeat_interval", heartbeat_interval)
 }
 
 /// Canonical onion-exit service name.

@@ -9,7 +9,9 @@ use crate::delegation::DelegateeKey;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use crate::dht::entry::inbox::HeldMessage;
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryDot;
 use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntry;
 #[cfg(any(
     all(feature = "dummy", not(target_family = "wasm")),
@@ -54,6 +56,15 @@ pub(crate) fn delegatee_key_with_ttl(ttl_ms: u64) -> Result<crate::delegation::D
     builder.set_delegator_signature(sig).build()
 }
 
+/// One SplitMix64 step: the deterministic generator behind every seeded test walk.
+pub(crate) fn splitmix64(mut state: u64) -> u64 {
+    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut mixed = state;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^ (mixed >> 31)
+}
+
 /// Retention bound far enough ahead that a fixture stays live for a whole test.
 const FIXTURE_RETENTION_MS: u128 = 60 * 60 * 1_000;
 
@@ -63,9 +74,26 @@ pub(crate) fn live_entry(did: Did, data: Vec<Encoded>, kind: EntryKind) -> Entry
     live(Entry::new(did, data, kind))
 }
 
-/// Stamp an existing fixture with a live retention bound.
+/// Stamp an existing fixture with a live retention bound, and give an undotted data fixture
+/// element dots issued now, so its elements lie inside the element horizon.
 pub(crate) fn live(entry: Entry) -> Entry {
-    with_retention(entry, get_epoch_ms() + FIXTURE_RETENTION_MS)
+    with_retention(dotted_now(entry), get_epoch_ms() + FIXTURE_RETENTION_MS)
+}
+
+/// Give an undotted data fixture one dot per element, issued now in payload order; a fixture
+/// that already carries dots, and every relay inbox, is returned unchanged. An undotted element
+/// has only the synthesized dot at the epoch, which is past the element horizon of any clock.
+fn dotted_now(mut entry: Entry) -> Entry {
+    if entry.kind == EntryKind::Data && entry.crdt.dots.is_empty() {
+        let version = EntryVersion::new(get_epoch_ms(), Did::default(), Did::default());
+        entry.crdt.dots = (0..entry.data.len())
+            .map(|index| EntryDot {
+                version,
+                index: u32::try_from(index).unwrap_or(u32::MAX),
+            })
+            .collect();
+    }
+    entry
 }
 
 /// Stamp an existing fixture with the retention bound `expires_at_ms`.

@@ -1,3 +1,5 @@
+use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
+use rings_core::dht::entry::EntryKind;
 use rings_core::message::MessageSigner;
 
 use super::common::*;
@@ -168,9 +170,17 @@ async fn test_online_node_publish_replaces_observed_self_records() -> Result<()>
             expired_other,
         ])?)
         .await?;
+    let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
+    processor.storage_fetch(entry_key).await?;
+    let fixture_register = processor
+        .storage_check_cache(entry_key)
+        .await
+        .expect("online node registry fixture should be cached after store")
+        .crdt
+        .register;
+    assert!(fixture_register.is_some());
 
     let published = processor.publish_online_node_descriptor().await?;
-    let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
     processor.storage_fetch(entry_key).await?;
     let entry = processor
         .storage_check_cache(entry_key)
@@ -179,8 +189,10 @@ async fn test_online_node_publish_replaces_observed_self_records() -> Result<()>
     let stored = Processor::online_node_descriptors_from_entry(&entry);
 
     assert_eq!(stored.len(), 2);
-    assert!(entry.crdt.register.is_some());
-    assert!(entry.crdt.tombstones.is_empty());
+    // Publishing issues no reset floor: the register is still the fixture's overwrite, and the
+    // two pruned descriptors are covering removes.
+    assert_eq!(entry.crdt.register, fixture_register);
+    assert_eq!(entry.crdt.tombstones.len(), 2);
     assert_eq!(entry.crdt.dots.len(), stored.len());
     assert_eq!(
         stored
@@ -286,6 +298,15 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .iter()
         .any(|descriptor| descriptor == &published_descriptor));
     assert!(stored.iter().any(|descriptor| descriptor == &other_https));
+
+    // #871: the four replaced or expired descriptors are covering removes, and every one of
+    // them is collected once it is stable, `H + σ` after the newest dot it covers.
+    assert_eq!(entry.crdt.tombstones.len(), 4);
+    let stable_at =
+        get_epoch_ms() + u128::from(EntryKind::Data.max_lifetime_ms()) + TS_OFFSET_TOLERANCE_MS;
+    let collected = entry.retired_at(stable_at);
+    assert!(collected.crdt.tombstones.is_empty());
+    assert!(collected.data.is_empty());
     Ok(())
 }
 
