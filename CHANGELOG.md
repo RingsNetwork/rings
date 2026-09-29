@@ -74,6 +74,26 @@
   `Transaction::class` is new, and `PayloadSender`'s send and originate methods take a `Message`
   instead of any `Serialize` value, with `reserve_transaction_sequences` taking the class.
 
+- Collect data-topic tombstones at a retention horizon and remove compaction (#867, #872, #874,
+  #871). Every data-topic element now expires individually at its dot's issue time plus
+  `H = EntryKind::Data.max_lifetime_ms()` (100 minutes), even while other writes keep its topic
+  alive; writing a value again refreshes it. Registries already refresh every 30 s; a plain
+  append (`storage_append_data`, `publishMessageToTopic`, `registerService`) must be refreshed
+  within `H`. A tombstone is collected `H + σ` after the dot it covers (`σ =
+  TS_OFFSET_TOLERANCE_MS`), and a data carrier holding an uncollected tombstone stays live until
+  then (`Entry::is_live_at`). The projection `Entry::retired_at` is applied on every storage and
+  fetch-cache read and to every stored value, and `SyncedEntryAck::confirms_local_value` takes
+  the clock it compares at. `EntryOperation::CompactData`, `Entry::compact_data` and
+  `storage_compact_data` (core `ChordStorageInterface` and node `Processor`) are removed, and the
+  registries no longer compact: a compaction floor stamped by one owner erased every concurrent
+  add that owner had not received, from every carrier that joined it (#867). Both registries are
+  now bounded by the horizon, the onion-exit registry included (#871). A removal now covers every
+  earlier dot of its value, so a stale replica holding a dot the remover had forgotten under a
+  later one can no longer resurrect it (#874): `EntryCrdt::tombstones` holds `EntryTombstone`
+  (a Keccak-256 `ElementDigest` of the value and the greatest dot it covers), at most one per
+  value. The wire format of storage entries and operations changes, a total cutover; the version
+  is bumped at release.
+
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`
   (core), both defaulting to `false`. For its traffic from the authenticated neighbour that

@@ -232,6 +232,9 @@ impl Client {
     }
 
     /// Publishes a message to the specified topic.
+    ///
+    /// The message expires at the data element horizon (100 minutes) unless it is
+    /// published again within it.
     pub async fn publish_message_to_topic(
         &self,
         req: &PublishMessageToTopicRequest,

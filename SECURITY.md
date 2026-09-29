@@ -644,6 +644,21 @@ junk for the peers it is responsible for (bounded to the newest 64 messages per 
 or redeliver a message inside the sender's own proof lifetime, and every element names
 it by signature. Held messages are stored and relocated in the clear between owners, as
 every DHT value is; confidentiality is the application's E2E layer's.
+Every data-topic element also expires individually at its dot's issue time plus the
+element horizon `H` (the maximum time-to-live), even while other writes keep its topic
+alive, and every read and write projects a topic to that horizon. A removal covers every
+earlier dot of its value and is collected `H + σ` after the dot it covers (`σ` is the message
+skew tolerance), which is when every copy of every covered write has expired on every node
+within that skew; a topic holding an uncollected removal stays live until then. No
+operation resets a topic other than an explicit overwrite: a reset floor stamped by one
+owner would erase concurrent writes that owner never received. Known bound: data-topic
+tombstones have no count cap. They are bounded by rate, one per value removed within the
+last `H + σ`, so a writer that removes many distinct values inflates a topic's metadata for
+that window (each tombstone is a fixed-size digest and dot). A count cap is deliberately not
+used, because a capped tombstone could be dropped while a write it covers is still live on
+some replica, which would resurrect the removed value. A peer can hold a topic live with a
+forged remove for at most `H + 2σ` past the receiver's clock, the same order as the
+admission bound on retention.
 Native storage enforces its configured byte budget by retiring the least recently
 written values, and the fetched-entry cache is bounded by entry count. These bounds
 limit resource use by any single writer; they are not a Sybil defence, and an
@@ -653,7 +668,11 @@ at the maximum time-to-live.
 ### Online And Onion Registries
 
 Online-node and onion-exit descriptors are signed and expire. This bounds stale
-records and makes advertised claims attributable. It does not prevent a Sybil
+records and makes advertised claims attributable. Both registries are bounded in storage the
+same way: each heartbeat writes a descriptor and removes the one it replaces, a descriptor
+expires at the data element horizon unless re-published, and each removal is collected
+`H + σ` after the descriptor it covers, so a registry holds about `(H + σ) / heartbeat`
+tombstones per registrant and never compacts. It does not prevent a Sybil
 operator from publishing many live descriptors or many exit candidates. The routes
 the privacy layer selects from these registries, and the caveat that follows from
 their candidate set, are specified under [Privacy layer](#privacy-layer).
