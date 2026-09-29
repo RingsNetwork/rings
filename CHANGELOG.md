@@ -32,7 +32,7 @@
   #916. `FileStorage::new_with_cap_and_path` keeps the disposable behaviour (no flush, oldest
   records evicted, undecodable records retired) for the DHT, measurement, evidence and onion
   entry-guard stores (the entry-guard store's policy is #911);
-  `FileStorage::new_authoritative_with_cap_and_path` opens the new mode.
+  `FileStorage::new_with_cap_path_and_authority` opens a store of either `RecordAuthority`.
 
 - `rings_runtime::run_blocking` (#919): fallible scheduling on the native blocking pool, with the
   ownership law of `run_detached` (the work starts at the call and outlives a dropped waiter);
@@ -79,6 +79,12 @@
 
 ### Breaking changes
 
+- The native daemon's replay store flushes every write (#909), so the node-wide ceiling of replay
+  transitions (every inbound admission and every sender reservation) falls from about 4,500 to
+  about 50 per second on an Apple M1 Max SSD (`F_FULLFSYNC`); group commit is tracked in #916.
+- `ReplayCounters` gains the public fields `unrestorable_record` and `unavailable_stream` (#910);
+  it is not `#[non_exhaustive]`, so a downstream struct literal or exhaustive pattern must add
+  them.
 - `ReplayStorage` boxes a `KvStorageScan<ReplayRecord>` (#910), a new trait over
   `KvStorageInterface` with two required methods: `scan` (every record, decoded or reported as an
   `UndecodableRecord`, deleting nothing) and `record_name` (the name a scan reports an

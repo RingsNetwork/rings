@@ -264,9 +264,10 @@ async fn test_authoritative_store_reports_a_torn_record_and_keeps_it() {
     let whole = rings_codec::serialize(&("stream", "window")).expect("record serializes");
     let torn = whole.get(..whole.len() - 3).expect("torn prefix");
     let name = plant_record(&root, "stream", torn);
-    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
-        .await
-        .expect("open");
+    let storage =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("open");
     let expected = UndecodableRecord {
         name: name.clone(),
         key: Some("stream".to_owned()),
@@ -301,9 +302,13 @@ async fn test_authoritative_store_reports_an_empty_record_by_its_file() {
         key: None,
     };
     for _ in 0..2 {
-        let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
-            .await
-            .expect("open");
+        let storage = FileStorage::new_with_cap_path_and_authority(
+            4096,
+            &root,
+            RecordAuthority::Authoritative,
+        )
+        .await
+        .expect("open");
         assert!(matches!(
             <FileStorage as KvStorageInterface<String>>::get_all(&storage).await,
             Err(Error::StorageRecordUndecodable(ref record)) if *record == expected
@@ -319,9 +324,10 @@ async fn test_a_misfiled_key_prefix_is_not_reported_as_the_key() {
     let root = temp_root("misfiled");
     let other = rings_codec::serialize(&"other").expect("key serializes");
     let name = plant_record(&root, "stream", &other);
-    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
-        .await
-        .expect("open");
+    let storage =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("open");
 
     assert!(matches!(
         <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
@@ -336,9 +342,13 @@ async fn test_a_misfiled_key_prefix_is_not_reported_as_the_key() {
 async fn test_authoritative_writes_round_trip_through_a_reopen() {
     let root = temp_root("authoritative");
     {
-        let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
-            .await
-            .expect("open");
+        let storage = FileStorage::new_with_cap_path_and_authority(
+            4096,
+            &root,
+            RecordAuthority::Authoritative,
+        )
+        .await
+        .expect("open");
         storage.put("a", &"v".to_string()).await.expect("put a");
         storage.put("b", &"v".to_string()).await.expect("put b");
         storage.put("a", &"w".to_string()).await.expect("rewrite a");
@@ -346,9 +356,10 @@ async fn test_authoritative_writes_round_trip_through_a_reopen() {
             .await
             .expect("remove b");
     }
-    let reopened = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
-        .await
-        .expect("reopen");
+    let reopened =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("reopen");
     assert_eq!(stored_keys(&reopened).await, ["a"]);
     assert_eq!(
         <FileStorage as KvStorageInterface<String>>::get(&reopened, "a")
@@ -401,9 +412,10 @@ async fn test_scan_reports_a_directory_in_a_record_place() {
     let root = temp_root("directory");
     let directory = file_name_for("directory");
     std::fs::create_dir_all(root.join(&directory)).expect("occupy a record name");
-    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
-        .await
-        .expect("open");
+    let storage =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("open");
     storage.put("whole", &"v".to_string()).await.expect("put");
 
     let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
@@ -435,9 +447,10 @@ async fn test_scan_reports_a_record_it_cannot_read() {
     let root = temp_root("unreadable");
     let looping = file_name_for("looping");
     plant_link_loop(&root, &looping);
-    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
-        .await
-        .expect("open indexes the loop");
+    let storage =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("open indexes the loop");
     storage.put("whole", &"v".to_string()).await.expect("put");
 
     let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
@@ -465,9 +478,10 @@ async fn test_authoritative_open_indexes_an_entry_whose_metadata_fails() {
     assert!(FileStorage::new_with_cap_and_path(4096, &root)
         .await
         .is_err());
-    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
-        .await
-        .expect("an authoritative open indexes the entry");
+    let storage =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("an authoritative open indexes the entry");
     assert_eq!(
         <FileStorage as KvStorageScan<String>>::scan(&storage)
             .await
@@ -483,12 +497,13 @@ async fn test_authoritative_open_indexes_an_entry_whose_metadata_fails() {
 async fn test_scan_reports_a_dangling_link_instead_of_hiding_it() {
     let root = temp_root("dangling");
     let name = file_name_for("stream");
-    std::fs::create_dir_all(&*root).expect("root");
+    std::fs::create_dir_all(root.as_ref()).expect("root");
     std::os::unix::fs::symlink(root.join("missing-target"), root.join(&name))
         .expect("plant a dangling link");
-    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
-        .await
-        .expect("open");
+    let storage =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("open");
 
     assert_eq!(
         <FileStorage as KvStorageScan<String>>::scan(&storage)
@@ -503,18 +518,19 @@ async fn test_scan_reports_a_dangling_link_instead_of_hiding_it() {
 #[tokio::test]
 async fn test_authoritative_store_refuses_a_write_into_a_vanished_root() {
     let root = temp_root("vanished");
-    let authoritative = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
-        .await
-        .expect("open");
+    let authoritative =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("open");
     authoritative
         .put("a", &"v".to_string())
         .await
         .expect("put a");
-    std::fs::remove_dir_all(&*root).expect("remove the root");
+    std::fs::remove_dir_all(root.as_ref()).expect("remove the root");
 
     assert!(matches!(
         authoritative.put("b", &"v".to_string()).await,
-        Err(Error::StorageRootMissing(ref missing)) if missing.as_path() == &*root
+        Err(Error::StorageRootMissing(ref missing)) if missing.as_path() == root.as_ref()
     ));
     assert!(!root.exists());
     drop(authoritative);
@@ -522,7 +538,7 @@ async fn test_authoritative_store_refuses_a_write_into_a_vanished_root() {
     let disposable = FileStorage::new_with_cap_and_path(4096, &root)
         .await
         .expect("open");
-    std::fs::remove_dir_all(&*root).expect("remove the root");
+    std::fs::remove_dir_all(root.as_ref()).expect("remove the root");
     disposable.put("b", &"v".to_string()).await.expect("put b");
     assert_eq!(stored_keys(&disposable).await, ["b"]);
 }
@@ -534,9 +550,13 @@ async fn test_authoritative_store_evicts_nothing() {
     let root = temp_root("no-eviction");
     let one = record_len("a", "v");
     {
-        let storage = FileStorage::new_authoritative_with_cap_and_path(one * 2, &root)
-            .await
-            .expect("open");
+        let storage = FileStorage::new_with_cap_path_and_authority(
+            one * 2,
+            &root,
+            RecordAuthority::Authoritative,
+        )
+        .await
+        .expect("open");
         storage.put("a", &"v".to_string()).await.expect("put a");
         storage.put("b", &"v".to_string()).await.expect("put b");
         storage
@@ -552,11 +572,85 @@ async fn test_authoritative_store_evicts_nothing() {
         assert!(!root.join(file_name_for("c")).with_extension("tmp").exists());
     }
     assert!(matches!(
-        FileStorage::new_authoritative_with_cap_and_path(one, &root).await,
+        FileStorage::new_with_cap_path_and_authority(one, &root, RecordAuthority::Authoritative)
+            .await,
         Err(Error::StorageBudgetExhausted { .. })
     ));
-    let reopened = FileStorage::new_authoritative_with_cap_and_path(one * 2, &root)
-        .await
-        .expect("reopen");
+    let reopened = FileStorage::new_with_cap_path_and_authority(
+        one * 2,
+        &root,
+        RecordAuthority::Authoritative,
+    )
+    .await
+    .expect("reopen");
     assert_eq!(stored_keys(&reopened).await, ["a", "b"]);
+}
+
+/// Decode law under a misfiled record: a whole, decodable record copied over another key's
+/// file carries a key that does not hash to its file name, so it is neither record: a scan
+/// reports it by its file alone, an authoritative `get` of either key does not return it, and a
+/// disposable `get` retires it.
+#[tokio::test]
+async fn test_a_misfiled_whole_record_is_neither_key_s_record() {
+    let root = temp_root("misfiled-whole");
+    let copied = rings_codec::serialize(&("other", "v")).expect("record serializes");
+    let name = plant_record(&root, "stream", &copied);
+    let storage =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("open");
+
+    assert_eq!(
+        <FileStorage as KvStorageScan<String>>::scan(&storage)
+            .await
+            .expect("scan"),
+        [Err(UndecodableRecord {
+            name: name.clone(),
+            key: None,
+        })]
+    );
+    assert!(matches!(
+        <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
+        Err(Error::StorageRecordUndecodable(UndecodableRecord { name: ref reported, key: None }))
+            if *reported == name
+    ));
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::get(&storage, "other")
+            .await
+            .expect("other is absent"),
+        None
+    );
+    drop(storage);
+
+    let disposable = FileStorage::new_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::get(&disposable, "stream")
+            .await
+            .expect("retired"),
+        None
+    );
+    assert!(!root.join(&name).exists());
+}
+
+/// Root law: an authoritative root that is no longer a directory is reported missing, and a
+/// metadata error on it is reported as itself, never as the root's absence. The walk's stop at
+/// an ancestor the process may not open (`PermissionDenied`) has no fixture that holds for every
+/// user, so it is covered by review only.
+#[tokio::test]
+async fn test_authoritative_root_replaced_by_a_file_is_missing() {
+    let root = temp_root("root-file");
+    let storage =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("open");
+    std::fs::remove_dir_all(root.as_ref()).expect("remove the root");
+    std::fs::write(root.as_ref(), b"not a directory").expect("occupy the root");
+
+    assert!(matches!(
+        storage.put("a", &"v".to_string()).await,
+        Err(Error::StorageRootMissing(_))
+    ));
+    std::fs::remove_file(root.as_ref()).expect("release the root");
 }

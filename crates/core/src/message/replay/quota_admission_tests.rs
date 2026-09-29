@@ -195,7 +195,7 @@ struct FailFirstPut(AtomicBool);
 #[async_trait::async_trait]
 impl StorageHooks for FailFirstPut {
     /// Runs before a `put`.
-    async fn before_put(&self) -> Result<()> {
+    async fn before_put(&self, _key: &str) -> Result<()> {
         match self.0.swap(false, Ordering::AcqRel) {
             true => Err(Error::InvalidTransport),
             false => Ok(()),

@@ -47,7 +47,7 @@ struct Gate {
 #[async_trait::async_trait]
 impl StorageHooks for Gate {
     /// Runs before a `put`.
-    async fn before_put(&self) -> Result<()> {
+    async fn before_put(&self, _key: &str) -> Result<()> {
         self.entered.notify_one();
         self.release.notified().await;
         Ok(())

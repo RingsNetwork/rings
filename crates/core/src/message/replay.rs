@@ -1194,6 +1194,7 @@ mod tests {
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
     #[wasm_bindgen_test::wasm_bindgen_test]
     async fn test_browser_store_fails_closed_only_on_the_stream_of_an_undecodable_row() {
+        /// The IndexedDB database this test owns.
         const STORAGE_NAME: &str = "rings-core/replay-store-undecodable-row";
         let open = || crate::storage::idb::IdbStorage::new_with_cap_and_name(4, STORAGE_NAME);
         let storage = open().await.expect("IndexedDB opens");
@@ -1246,7 +1247,9 @@ mod tests {
         ));
     }
 
-    /// Hooks of a store that cannot be read or written: it models a store that cannot load.
+    /// Hooks of a store that cannot be read or written, modelling a store that cannot load.
+    /// Removal (and `clear`, `count`) still succeeds: the shared-snapshot retirement must not
+    /// be what fails.
     #[cfg(not(target_family = "wasm"))]
     struct Unavailable;
 
@@ -1259,7 +1262,7 @@ mod tests {
         }
 
         /// Runs before a `put`.
-        async fn before_put(&self) -> Result<()> {
+        async fn before_put(&self, _key: &str) -> Result<()> {
             Err(Error::InvalidTransport)
         }
 
@@ -1277,7 +1280,7 @@ mod tests {
     #[async_trait::async_trait]
     impl StorageHooks for WritesRefused {
         /// Runs before a `put`.
-        async fn before_put(&self) -> Result<()> {
+        async fn before_put(&self, _key: &str) -> Result<()> {
             Err(Error::InvalidTransport)
         }
     }
@@ -1305,7 +1308,7 @@ mod tests {
         }
 
         /// Runs before a `remove`.
-        async fn before_remove(&self) -> Result<()> {
+        async fn before_remove(&self, _key: &str) -> Result<()> {
             self.removals.fetch_add(1, Ordering::SeqCst);
             match self.fail_remove {
                 true => Err(Error::InvalidTransport),

@@ -21,6 +21,7 @@ use crate::error::Result;
 use crate::message::MessageCategory;
 use crate::storage::file::test_root::TempRoot;
 use crate::storage::file::FileStorage;
+use crate::storage::file::RecordAuthority;
 use crate::storage::MemStorage;
 
 /// Admissions measured per store.
@@ -69,9 +70,12 @@ fn report(label: &str, latencies: &[Duration]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_durable_throughput_of_replay_admissions() -> Result<()> {
     let root = TempRoot::new("replay-bench");
-    let authoritative =
-        FileStorage::new_authoritative_with_cap_and_path(1 << 24, root.join("authoritative"))
-            .await?;
+    let authoritative = FileStorage::new_with_cap_path_and_authority(
+        1 << 24,
+        root.join("authoritative"),
+        RecordAuthority::Authoritative,
+    )
+    .await?;
     let disposable = FileStorage::new_with_cap_and_path(1 << 24, root.join("disposable")).await?;
     report(
         "authoritative file",

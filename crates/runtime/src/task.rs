@@ -320,6 +320,7 @@ mod tests {
         assert_eq!(result, Err(DetachedError::Abandoned(Abandoned)));
     }
 
+    /// Law: outside a runtime, blocking work is refused before anything starts.
     #[test]
     fn test_run_blocking_outside_a_runtime_is_unavailable() {
         let result = futures::executor::block_on(run_blocking(|| ()));
@@ -340,6 +341,7 @@ mod tests {
             .expect("blocking work must run although its waiter was dropped");
     }
 
+    /// Law: blocking work that panics publishes nothing and is reported as abandoned.
     #[tokio::test]
     async fn test_panicking_blocking_work_is_abandoned() {
         let result: Result<(), DetachedError> =

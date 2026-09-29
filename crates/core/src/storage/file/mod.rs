@@ -33,8 +33,11 @@
 //! Durability law: an authoritative `put` flushes the temporary file to stable storage before
 //! renaming it over the record, and flushes the directory after the rename; an authoritative
 //! removal flushes the directory after it, and an authoritative open flushes the root and its
-//! ancestors up to the first one the process may not open (a directory it did not create), so
-//! each directory entry on the store's path survives, whoever created it.
+//! ancestors, deepest first, up to the first one the process may not open. Exact bound: every
+//! directory entry below that ancestor survives a crash. The chain the open itself created is
+//! therefore durable iff the parent of its topmost created directory is readable, which fails
+//! only for a write-and-search-only (`-wx`) parent; entries at or above the first unreadable
+//! ancestor are not flushed by this open.
 //! On unix a crash therefore leaves each record either whole at its previous value or whole at
 //! its new one, never torn, and a completed write or removal is not rolled back. The flushes
 //! are `File::sync_all`, which the standard library maps to `fcntl(F_FULLFSYNC)` on Apple
@@ -52,7 +55,10 @@
 //! `Error::StorageRecordUndecodable`, naming the record's file and, when the record's key
 //! prefix is intact, its key, and the record stays until its owner or an operator removes it.
 //! A [`scan`](crate::storage::KvStorageScan::scan) deletes nothing under either authority and
-//! reports each record it cannot read (any error but absence) or decode by its file name.
+//! reports each record it cannot read (any error but the absence of the entry) or decode by its
+//! file name. A record is the file's only if its key hashes to the file name: a pair that
+//! decodes but carries another key (a record copied or renamed over another) is misfiled, and is
+//! treated as undecodable, never as the record of either key.
 //!
 //! Root law: a disposable store recreates its root directory if it vanished while open; an
 //! authoritative store fails the write with `Error::StorageRootMissing`, since a vanished root
@@ -108,8 +114,19 @@ impl RecordAuthority {
         matches!(self, Self::Disposable)
     }
 
-    /// Whether the budget retires the oldest records to make room.
+    /// Whether the budget retires the oldest records to make room (the budget law).
     const fn evicts(self) -> bool {
+        matches!(self, Self::Disposable)
+    }
+
+    /// Whether every entry named as a record must be indexed, so that an entry that cannot be
+    /// listed fails the open and one whose metadata fails is indexed anyway (the index law).
+    const fn indexes_every_entry(self) -> bool {
+        matches!(self, Self::Authoritative)
+    }
+
+    /// Whether a write recreates a root directory that vanished while open (the root law).
+    const fn recreates_root(self) -> bool {
         matches!(self, Self::Disposable)
     }
 }
@@ -171,28 +188,27 @@ impl FileStorage {
     /// holds, so lowering the configured capacity retires the oldest files at open.
     pub async fn new_with_cap_and_path<P>(byte_capacity: u32, path: P) -> Result<Self>
     where P: AsRef<std::path::Path> {
-        Self::open(byte_capacity, path, RecordAuthority::Disposable).await
+        Self::new_with_cap_path_and_authority(byte_capacity, path, RecordAuthority::Disposable)
+            .await
     }
 
-    /// Open the authoritative store rooted at `path`, creating it if absent, under a budget of
-    /// `byte_capacity` serialized bytes: the store of security state, whose writes are flushed,
-    /// which evicts nothing, and whose undecodable records are reported and kept.
+    /// Open the store rooted at `path` with `authority`, creating it if absent, under a budget
+    /// of `byte_capacity` serialized bytes. [`RecordAuthority::Authoritative`] opens a store of
+    /// security state, whose writes are flushed, which evicts nothing, and whose undecodable
+    /// records are reported and kept.
     ///
-    /// Post: the index mirrors the directory (stale `.tmp` files removed) and the store's
-    /// directory entry is flushed; an open over the budget fails instead of retiring files.
-    pub async fn new_authoritative_with_cap_and_path<P>(
+    /// Post: the index mirrors the directory (stale `.tmp` files removed) and the budget law
+    /// holds: a disposable open retires the oldest files down to the capacity, while an
+    /// authoritative open over it fails, and flushes the store's directory entries (the
+    /// durability law).
+    pub async fn new_with_cap_path_and_authority<P>(
         byte_capacity: u32,
         path: P,
+        authority: RecordAuthority,
     ) -> Result<Self>
     where
         P: AsRef<std::path::Path>,
     {
-        Self::open(byte_capacity, path, RecordAuthority::Authoritative).await
-    }
-
-    /// Open the store rooted at `path` with `authority` on the blocking pool.
-    async fn open<P>(byte_capacity: u32, path: P, authority: RecordAuthority) -> Result<Self>
-    where P: AsRef<std::path::Path> {
         let root = path.as_ref().to_path_buf();
         let store = blocking(move || FileStore::open(byte_capacity, root, authority)).await?;
         Ok(Self {
@@ -278,7 +294,9 @@ impl FileStore {
             let entry = match entry {
                 Ok(entry) => entry,
                 // An unlisted record cannot be named, so an authoritative store fails whole.
-                Err(error) if self.authority.flushes() => return Err(Error::ServiceIOError(error)),
+                Err(error) if self.authority.indexes_every_entry() => {
+                    return Err(Error::ServiceIOError(error));
+                }
                 Err(_) => continue,
             };
             let path = entry.path();
@@ -295,7 +313,7 @@ impl FileStore {
                     metadata.len(),
                 ),
                 // Indexed so that a scan reports it (the index law).
-                Err(_) if self.authority.flushes() => (SystemTime::UNIX_EPOCH, 0),
+                Err(_) if self.authority.indexes_every_entry() => (SystemTime::UNIX_EPOCH, 0),
                 Err(error) => return Err(Error::ServiceIOError(error)),
             };
             files.push((modified, name.to_owned(), len));
@@ -388,7 +406,8 @@ impl FileStore {
         let mut index = self.write_index()?;
         // The temporary file lives outside the index, so a failed write changes nothing.
         self.ensure_root()?;
-        let written = write_file(&tmp_path, data, self.authority.flushes());
+        let written = write_file(&tmp_path, data, self.authority.flushes())
+            .map_err(|e| self.write_failure(e));
         if written.is_err() {
             remove_file_if_present(&tmp_path)?;
         }
@@ -401,15 +420,37 @@ impl FileStore {
         self.flush_directory()
     }
 
-    /// Make sure the root directory exists before a write. A disposable store recreates a
-    /// vanished root; an authoritative store fails with `Error::StorageRootMissing` instead,
-    /// since a vanished root took every record with it and recreating it would silently restart
-    /// every stream (the root law).
+    /// Make sure the root directory exists before a write (the root law). A disposable store
+    /// recreates a vanished root; an authoritative store never creates it here, and fails with
+    /// `Error::StorageRootMissing` iff the root is absent or not a directory (any other metadata
+    /// error is reported as itself), since a vanished root took every record with it.
     fn ensure_root(&self) -> Result<()> {
-        if self.authority.flushes() && !self.root.is_dir() {
-            return Err(Error::StorageRootMissing(self.root.clone()));
+        if self.authority.recreates_root() {
+            return std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError);
         }
-        std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError)
+        match std::fs::metadata(&self.root) {
+            Ok(metadata) if metadata.is_dir() => Ok(()),
+            Ok(_) => Err(Error::StorageRootMissing(self.root.clone())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(Error::StorageRootMissing(self.root.clone()))
+            }
+            Err(error) => Err(Error::ServiceIOError(error)),
+        }
+    }
+
+    /// Classify a failed write of the temporary file under the root law: an authoritative
+    /// store whose root vanished after [`Self::ensure_root`] checked it reports the root
+    /// missing, not a bare I/O error.
+    fn write_failure(&self, error: Error) -> Error {
+        match error {
+            Error::ServiceIOError(io)
+                if !self.authority.recreates_root()
+                    && io.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Error::StorageRootMissing(self.root.clone())
+            }
+            other => other,
+        }
     }
 
     /// Acquire the index for reading.
@@ -422,10 +463,13 @@ impl FileStore {
         self.index.write().map_err(|_| Error::LockPoisoned)
     }
 
-    /// The bytes of the record file `name`, read under the read guard; `None` if it is absent.
+    /// The bytes of the record file `name`, read under the read guard; `None` iff the entry is
+    /// absent (a present entry that cannot be read, a dangling link included, is an error).
     fn read_record(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let _guard = self.read_index()?;
-        read_file_if_present(&self.root.join(name)).map_err(Error::ServiceIOError)
+        read_entry(&self.root.join(name))
+            .transpose()
+            .map_err(Error::ServiceIOError)
     }
 
     /// Read every indexed record file under the read guard, each to its bytes or to the error
@@ -480,19 +524,31 @@ impl FileStore {
     }
 }
 
-/// Decode `data`, the bytes of the file `name`, as a `(key, value)` record (pure).
+/// Decode `data`, the bytes of the file `name`, as the `(key, value)` record filed under it
+/// (pure).
 ///
-/// An undecodable record is named by its file and, when its leading key decodes and hashes to
-/// `name` (a torn record loses its tail first), by its key as well.
+/// A record is the file's only if its key hashes to `name`: a pair that decodes but carries
+/// another key (a file copied or renamed over another record) is misfiled, and is reported as
+/// undecodable by its file alone, so that neither the key it is filed as nor the key it carries
+/// restores from it. An undecodable record is named by its file and, when its leading key
+/// decodes and hashes to `name` (a torn record loses its tail first), by its key as well.
 fn decode_pair<V>(name: &str, data: &[u8]) -> std::result::Result<(String, V), UndecodableRecord>
 where V: DeserializeOwned {
-    rings_codec::deserialize::<(String, V)>(data).map_err(|_| UndecodableRecord {
-        name: name.to_owned(),
-        key: rings_codec::deserialize_prefix::<String>(data)
-            .ok()
-            .map(|(key, _)| key)
-            .filter(|key| file_name_for(key) == name),
-    })
+    let files_as = |key: &String| file_name_for(key) == name;
+    match rings_codec::deserialize::<(String, V)>(data) {
+        Ok(pair) if files_as(&pair.0) => Ok(pair),
+        Ok(_) => Err(UndecodableRecord {
+            name: name.to_owned(),
+            key: None,
+        }),
+        Err(_) => Err(UndecodableRecord {
+            name: name.to_owned(),
+            key: rings_codec::deserialize_prefix::<String>(data)
+                .ok()
+                .map(|(key, _)| key)
+                .filter(files_as),
+        }),
+    }
 }
 
 /// Scan one record file (pure): its decoded pair, or the record it could not read or decode,
@@ -509,10 +565,10 @@ where V: DeserializeOwned {
 /// ancestors, deepest first, so that each directory entry on the path survives a crash, whoever
 /// created it (another store may have created a shared parent without flushing it).
 ///
-/// The walk stops at the first ancestor the process may not open (`PermissionDenied`): an
-/// unreadable directory, such as `/` under a sandbox or an execute-only home, is one this
-/// process did not create, and whose entries were made durable by whoever did. Any other
-/// failure fails the open.
+/// The walk stops at the first ancestor the process may not open (`PermissionDenied`), such as
+/// `/` under a sandbox or an execute-only home: its entries, and every entry above it, are left
+/// to whoever made them (the exact bound of the durability law). Any other failure fails the
+/// open.
 fn create_directory(root: &Path, flush: bool) -> Result<()> {
     std::fs::create_dir_all(root).map_err(Error::ServiceIOError)?;
     if !flush {
@@ -592,9 +648,9 @@ fn read_entry(path: &Path) -> Option<std::io::Result<Vec<u8>>> {
     match read_file_if_present(path) {
         Ok(Some(data)) => Some(Ok(data)),
         Ok(None) => std::fs::symlink_metadata(path).ok().map(|_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "the entry's target is missing",
+            // Not `NotFound`: callers read that kind as the entry's absence.
+            Err(std::io::Error::other(
+                "the entry is present but its target is missing",
             ))
         }),
         Err(error) => Some(Err(error)),

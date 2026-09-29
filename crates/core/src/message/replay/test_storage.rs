@@ -2,8 +2,8 @@
 //! before its operations, so each double states only the behaviour it changes.
 //!
 //! ```text
-//! Hooked<H> = H ∘ MemStorage     get ↦ H.before_get; put ↦ H.before_put;
-//!                                get_all, scan ↦ H.before_scan; remove ↦ H.before_remove
+//! Hooked<H> = H ∘ MemStorage     get k ↦ H.before_get k; put k ↦ H.before_put k;
+//!                                get_all, scan ↦ H.before_scan; remove k ↦ H.before_remove k
 //! ```
 //!
 //! A hook that fails fails the operation before the store is touched; every other operation,
@@ -24,8 +24,8 @@ pub(super) trait StorageHooks: Send + Sync {
         Ok(())
     }
 
-    /// Runs before every `put`; an error fails the write.
-    async fn before_put(&self) -> Result<()> {
+    /// Runs before every `put` of `key`; an error fails the write.
+    async fn before_put(&self, _key: &str) -> Result<()> {
         Ok(())
     }
 
@@ -34,8 +34,8 @@ pub(super) trait StorageHooks: Send + Sync {
         Ok(())
     }
 
-    /// Runs before every `remove`; an error fails the removal.
-    async fn before_remove(&self) -> Result<()> {
+    /// Runs before every `remove` of `key`; an error fails the removal.
+    async fn before_remove(&self, _key: &str) -> Result<()> {
         Ok(())
     }
 }
@@ -68,7 +68,7 @@ impl<H: StorageHooks> KvStorageInterface<ReplayRecord> for Hooked<H> {
 
     /// The hook, then the memory store's `put`.
     async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
-        self.hooks.before_put().await?;
+        self.hooks.before_put(key).await?;
         self.inner.put(key, value).await
     }
 
@@ -80,7 +80,7 @@ impl<H: StorageHooks> KvStorageInterface<ReplayRecord> for Hooked<H> {
 
     /// The hook, then the memory store's `remove`.
     async fn remove(&self, key: &str) -> Result<()> {
-        self.hooks.before_remove().await?;
+        self.hooks.before_remove(key).await?;
         self.inner.remove(key).await
     }
 

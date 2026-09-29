@@ -24,6 +24,7 @@ use crate::error::Result;
 use crate::message::MessageCategory;
 use crate::storage::file::test_root::TempRoot;
 use crate::storage::file::FileStorage;
+use crate::storage::file::RecordAuthority;
 use crate::storage::KvStorageInterface;
 use crate::storage::KvStorageScan;
 
@@ -167,13 +168,23 @@ async fn test_a_corrupt_sender_record_refuses_reservation_on_its_stream() -> Res
 #[tokio::test]
 async fn test_an_unreadable_native_record_fails_only_its_stream() -> Result<()> {
     let root = TempRoot::new("replay-unreadable");
-    let storage = FileStorage::new_authoritative_with_cap_and_path(1 << 20, &root).await?;
+    let storage = FileStorage::new_with_cap_path_and_authority(
+        1 << 20,
+        &root,
+        RecordAuthority::Authoritative,
+    )
+    .await?;
     let occupied = record_key(ReplayTable::Receiver, &stream(1))?;
     let name = <FileStorage as KvStorageScan<ReplayRecord>>::record_name(&storage, &occupied);
     std::fs::create_dir(root.join(&name)).map_err(Error::ServiceIOError)?;
     drop(storage);
     let replay = TransactionReplay::new_shared(Box::new(
-        FileStorage::new_authoritative_with_cap_and_path(1 << 20, &root).await?,
+        FileStorage::new_with_cap_path_and_authority(
+            1 << 20,
+            &root,
+            RecordAuthority::Authoritative,
+        )
+        .await?,
     ));
 
     for sequence in 0..4_u8 {
@@ -191,6 +202,54 @@ async fn test_an_unreadable_native_record_fails_only_its_stream() -> Result<()> 
     assert_eq!(counters.unavailable_stream, 4);
     assert_eq!(counters.persistence_failure, 0);
     drop(replay);
+    Ok(())
+}
+
+/// Fail closed per stream under a misfiled native record: a copy of stream 2's receiver record
+/// under stream 1's file name restores neither stream from the copy. Stream 1 is refused, named
+/// by its file, and stream 2 keeps its own, newer window, so the stale copy cannot roll it back.
+#[tokio::test]
+async fn test_a_record_copied_over_another_stream_restores_neither() -> Result<()> {
+    let root = TempRoot::new("replay-misfiled");
+    let open = || {
+        FileStorage::new_with_cap_path_and_authority(1 << 20, &root, RecordAuthority::Authoritative)
+    };
+    let (copied_from, copied_to) = {
+        let storage = open().await?;
+        let name =
+            |key: &str| <FileStorage as KvStorageScan<ReplayRecord>>::record_name(&storage, key);
+        (
+            root.join(name(&record_key(ReplayTable::Receiver, &stream(2))?)),
+            root.join(name(&record_key(ReplayTable::Receiver, &stream(1))?)),
+        )
+    };
+    {
+        let replay = TransactionReplay::new_shared(Box::new(open().await?));
+        replay.admit(stream(2), 0, digest(1)).await?;
+    }
+    std::fs::copy(&copied_from, &copied_to).map_err(Error::ServiceIOError)?;
+    {
+        let replay = TransactionReplay::new_shared(Box::new(open().await?));
+        replay.admit(stream(2), 1, digest(2)).await?;
+    }
+
+    let replay = TransactionReplay::new_shared(Box::new(open().await?));
+    let named = copied_to
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned);
+    assert!(matches!(
+        replay.admit(stream(1), 0, digest(1)).await,
+        Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
+            if Some(record) == named.as_ref()
+    ));
+    for (sequence, value) in [(0, 1), (1, 2)] {
+        assert!(matches!(
+            replay.admit(stream(2), sequence, digest(value)).await,
+            Err(Error::TransactionReplay { .. })
+        ));
+    }
+    assert_eq!(replay.counters().unrestorable_record, 1);
     Ok(())
 }
 
@@ -251,7 +310,9 @@ async fn test_clearing_the_record_restores_the_stream() -> Result<()> {
 #[tokio::test]
 async fn test_a_torn_native_record_fails_its_stream_closed_until_cleared() -> Result<()> {
     let root = TempRoot::new("replay-torn");
-    let open = || FileStorage::new_authoritative_with_cap_and_path(1 << 20, &root);
+    let open = || {
+        FileStorage::new_with_cap_path_and_authority(1 << 20, &root, RecordAuthority::Authoritative)
+    };
     let torn_file = {
         let storage = open().await?;
         let (window, _) = super::observe(None, 0, digest(1));
