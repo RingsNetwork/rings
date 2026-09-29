@@ -18,6 +18,12 @@
 //! holds the superseded one resurrect the payload (#874). Under the covering remove the
 //! forgotten dot needs no storage at all, and the carrier is an LWW element set: a remove at
 //! `r` wins over every add of the payload at or below `r`, an add above `r` wins over it.
+//! "At or below" is the dot order, which leads with the hybrid logical time: a re-add issued
+//! after the remove in real time by a writer whose clock runs behind (by at most `σ`) can lie
+//! below `r` and stays removed. A value-witness remove carries no dot, so each owner covers the
+//! dot it holds when the remove arrives; delivered after the same client's re-add, it covers
+//! that re-add too. A remove that must not outrun its issuer's view names the issuer's dots
+//! (the dot-witness path of `Entry::tombstone`).
 //!
 //! Semilattice laws:
 //! - `DataTopicBuffer` join is the product of three join-semilattices, `register` under `max`
@@ -119,9 +125,19 @@ impl EntryDot {
 )]
 pub struct ElementDigest(pub [u8; 32]);
 
+#[cfg(test)]
+thread_local! {
+    /// Test instrumentation: the element digests computed on this thread, so a test can bound
+    /// the hashing an operation performs.
+    pub(super) static DIGESTS_COMPUTED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 impl ElementDigest {
     /// The digest of `value`.
     pub fn of(value: &Encoded) -> Self {
+        #[cfg(test)]
+        DIGESTS_COMPUTED.with(|computed| computed.set(computed.get() + 1));
         Self(keccak256(value.value().as_bytes()))
     }
 }
@@ -219,9 +235,10 @@ impl DataTopicBuffer {
         value: &Encoded,
         dot: EntryDot,
     ) -> bool {
-        removes
-            .get(&ElementDigest::of(value))
-            .is_some_and(|remove| dot <= *remove)
+        !removes.is_empty()
+            && removes
+                .get(&ElementDigest::of(value))
+                .is_some_and(|remove| dot <= *remove)
     }
 
     /// Record a covering remove for `value` at its held dot, if the carrier holds `value`.

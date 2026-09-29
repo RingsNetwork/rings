@@ -8,7 +8,8 @@
 //! unless it is written again, and the heartbeat is what writes it again. Each heartbeat adds
 //! one descriptor and removes the one it replaces, and a remove retires `H + σ` after the dot
 //! it covers, so a registry holds at most one live descriptor per registrant and service plus
-//! the removes of the last `H + σ`: about `(H + σ) / heartbeat` per registrant. No publisher
+//! the removes of the last `H + σ`: about `(H + σ) / heartbeat` per registrant, 200 removes of
+//! 125 encoded bytes each at the default 30 s heartbeat. No publisher
 //! compacts; a reset floor stamped by one owner would erase every concurrent descriptor that
 //! owner never received (#867).
 
@@ -75,6 +76,31 @@ pub(crate) const fn default_advertise_presence() -> bool {
     true
 }
 
+/// The longest heartbeat interval that keeps a registry descriptor stored between heartbeats:
+/// the earlier of the retention bound a descriptor write requests (the data default lifetime,
+/// which bounds the registry of a sole registrant) and the data element horizon.
+pub(crate) fn registry_refresh_bound() -> Duration {
+    let kind = entry::EntryKind::Data;
+    let horizon_ms = kind.element_horizon_ms().unwrap_or(kind.max_lifetime_ms());
+    Duration::from_millis(kind.default_lifetime_ms().min(horizon_ms))
+}
+
+/// Validate a registry heartbeat interval against [`registry_refresh_bound`]; `setting` names
+/// the configuration key in the error.
+pub(crate) fn validate_registry_heartbeat(
+    setting: &str,
+    heartbeat_interval: Duration,
+) -> Result<()> {
+    let bound = registry_refresh_bound();
+    if heartbeat_interval >= bound {
+        return Err(Error::InvalidConfig(format!(
+            "{setting} ({heartbeat_interval:?}) must be less than {bound:?}, \
+             the lifetime of a registry descriptor"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate online-node registration scheduling.
 pub(crate) fn validate_online_node_registration_timing(
     advertise_presence: bool,
@@ -85,6 +111,9 @@ pub(crate) fn validate_online_node_registration_timing(
         return Err(Error::InvalidConfig(format!(
             "online_node_heartbeat_interval ({heartbeat_interval:?}) must be less than online_node_ttl ({ttl:?}) when advertise_presence is enabled"
         )));
+    }
+    if advertise_presence {
+        validate_registry_heartbeat("online_node_heartbeat_interval", heartbeat_interval)?;
     }
     Ok(())
 }
@@ -247,14 +276,6 @@ impl DhtRegistrationPublisher {
     }
 }
 
-fn should_prune_observed_registry_value(
-    observed: &Encoded,
-    replaces_observed_value: &impl Fn(&Encoded) -> bool,
-    preserves_observed_value: &impl Fn(&Encoded) -> bool,
-) -> bool {
-    replaces_observed_value(observed) || !preserves_observed_value(observed)
-}
-
 fn begin_registration_publish(
     published_values: &mut BTreeSet<Encoded>,
     current_values: &BTreeSet<Encoded>,
@@ -368,31 +389,19 @@ impl OnlineNodeRegistration {
         let now_ms = get_epoch_ms();
         let descriptor = self.descriptor_at(context, now_ms)?;
         let encoded = descriptor.encode().map_err(Error::CoreError)?;
-        let replaces_observed_value = |observed: &Encoded| {
+        // Prune this node's own earlier descriptors, and every descriptor that does not decode,
+        // does not verify, or has expired.
+        let prunes_observed_value = |observed: &Encoded| {
             observed
                 .decode::<OnlineNodeDescriptor>()
-                .is_ok_and(|descriptor| {
+                .map_or(true, |descriptor| {
                     descriptor.did == context.did()
-                        || (descriptor.verify_signature(context.network_id())
-                            && descriptor.is_expired_at(now_ms))
-                })
-        };
-        let preserves_observed_value = |observed: &Encoded| {
-            observed
-                .decode::<OnlineNodeDescriptor>()
-                .is_ok_and(|descriptor| {
-                    descriptor.verify_signature(context.network_id())
-                        && !descriptor.is_expired_at(now_ms)
+                        || !descriptor.verify_signature(context.network_id())
+                        || descriptor.is_expired_at(now_ms)
                 })
         };
         self.publisher
-            .publish_replacing(context, std::iter::once(encoded), |observed| {
-                should_prune_observed_registry_value(
-                    observed,
-                    &replaces_observed_value,
-                    &preserves_observed_value,
-                )
-            })
+            .publish_replacing(context, std::iter::once(encoded), prunes_observed_value)
             .await?;
         Ok(descriptor)
     }
@@ -527,25 +536,6 @@ mod tests {
 
         assert_eq!(stale, vec![observed_self_old]);
         assert_eq!(known, current);
-    }
-
-    #[test]
-    fn test_registration_pruning_removes_replaced_or_unpreserved_observed_values() {
-        let observed_self_old = encoded("self-old");
-        let observed_live = encoded("other-live");
-        let observed_invalid = encoded("invalid");
-
-        let should_prune = |observed: &Encoded| {
-            should_prune_observed_registry_value(
-                observed,
-                &|value| value == &observed_self_old,
-                &|value| value == &observed_live,
-            )
-        };
-
-        assert!(should_prune(&observed_self_old));
-        assert!(!should_prune(&observed_live));
-        assert!(should_prune(&observed_invalid));
     }
 
     #[test]

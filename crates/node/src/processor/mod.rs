@@ -889,8 +889,9 @@ impl Processor {
 
     /// Store an entry on DHT storage, replacing its payloads.
     ///
-    /// Each stored payload expires individually at its write time plus the data element horizon
-    /// `H = EntryKind::Data.max_lifetime_ms()` (100 minutes) unless it is written again.
+    /// Each stored payload expires at the earlier of 100 minutes after it is written (the data
+    /// element horizon) and the topic's retention bound, 10 minutes after the latest write by
+    /// default, unless it is written again (see [`ChordStorageInterface`]).
     pub async fn storage_store(&self, entry: entry::Entry) -> Result<()> {
         self.swarm
             .storage_store(entry)
@@ -900,9 +901,10 @@ impl Processor {
 
     /// Append data to an entry on DHT storage.
     ///
-    /// The appended element expires individually at its write time plus the data element horizon
-    /// `H = EntryKind::Data.max_lifetime_ms()` (100 minutes), even while other writes keep the
-    /// topic alive; append it again within `H` to keep it.
+    /// The appended element expires at the earlier of 100 minutes after it is written (the data
+    /// element horizon) and the topic's retention bound, 10 minutes after the latest write by
+    /// default: a sole writer appends it again within 10 minutes, and every writer within 100
+    /// minutes even while other writes keep the topic alive (see [`ChordStorageInterface`]).
     pub async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         self.swarm
             .storage_append_data(topic, data)
@@ -972,8 +974,9 @@ impl Processor {
 
     /// Register this node under the service name `name`.
     ///
-    /// The registration is one appended element, so it expires at the data element horizon
-    /// (100 minutes) unless it is registered again within it.
+    /// The registration is one appended element, so it expires 10 minutes after it is made unless
+    /// other writes keep the service topic alive, and 100 minutes after it in any case, unless
+    /// it is registered again (see [`ChordStorageInterface`]).
     pub async fn register_service(&self, name: &str) -> Result<()> {
         let encoded_did = self
             .did()

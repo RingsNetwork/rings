@@ -107,7 +107,7 @@ async fn retire_unless_live(
     entry: Entry,
     now_ms: u128,
 ) -> Result<Option<Entry>> {
-    let entry = entry.retired_at(now_ms)?;
+    let entry = entry.retired_at(now_ms);
     if entry.is_live_at(now_ms) {
         return Ok(Some(entry));
     }
@@ -197,7 +197,7 @@ impl PeerRing {
         } else {
             incoming
         }
-        .retired_at(now_ms)?;
+        .retired_at(now_ms);
         self.storage.put(&key, &stored).await?;
         Ok(stored)
     }
@@ -242,7 +242,7 @@ impl PeerRing {
             Some(local) => local,
             None => op.gen_default_entry()?,
         };
-        let stored = local.operate(now_ms, op, self.did)?.retired_at(now_ms)?;
+        let stored = local.operate(now_ms, op, self.did)?.retired_at(now_ms);
         if stored.is_live_at(now_ms) {
             self.storage.put(&key, &stored).await
         } else {
@@ -414,7 +414,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         }
         let now_ms = get_epoch_ms();
         entry.validate_admissible_at(now_ms, self.network_id())?;
-        let entry = entry.retired_at(now_ms)?;
+        let entry = entry.try_into_storage_entry()?.retired_at(now_ms);
         self.cache.put(&entry.did.to_string(), &entry).await
     }
 

@@ -106,7 +106,8 @@ and expire, but a party with many identities can try to hold several positions o
 - **DHT storage.** Retention is capped at the maximum TTL; carriers are bounded in count and
   size; versions too far ahead of the receiver's clock are rejected. Each data-topic element
   expires at its own horizon, and a removal is collected only once every write it covers has
-  expired everywhere within the clock-skew tolerance, so a removed value is not resurrected. A relay inbox is
+  expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
+  while the carrier is retained. A relay inbox is
   verified by its owner, readable and removable only by its recipient, and capped at 64
   messages. Values are stored in the clear.
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
@@ -130,5 +131,8 @@ and expire, but a party with many identities can try to hold several positions o
 - #912: the browser replay store uses IndexedDB's default durability hint.
 - #915: a missing replay record restarts its stream from the first sequence.
 - #916: durable replay writes cap a node near 50 transitions per second on macOS.
-- #921: data-topic tombstones are bounded by rate, not by count: a writer that removes many
-  distinct values inflates a topic's metadata until the removals are collected.
+- #918: a registry holds about 25 KB of tombstones per registrant at the default heartbeat.
+- #920: storage byte-budget eviction can drop a removal before it is collected, resurrecting
+  the values it covered.
+- #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal
+  received by sync can hold a topic live for up to the horizon past the receiver's clock.

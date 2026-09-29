@@ -135,13 +135,15 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         // Pre S2': each ack in acks is contained in a
         // SyncEntriesWithSuccessorReport sent only after the receiver persisted
         // SyncedEntryAck { key, entry } at key.
-        // Post S2': a local key is removed only if canonical(local_before[key])
-        // == canonical(ack.entry). If the canonical local value differs, the
-        // local value is preserved and will be offered again by a later
-        // sync_entries_with_successor transition.
-        // Preservation #614: a write racing between copy and ack changes the
-        // canonical local value, so confirms_local_value is false and delete
-        // is skipped.
+        // Post S2': a local key is removed only if
+        // retire_now(canonical(local_before[key])) == retire_now(canonical(ack.entry)),
+        // with retire_now = Entry::retired_at at this node's clock (an element or
+        // remove that crossed its horizon since the copy is not a newer write). If the
+        // projected local value differs, the local value is preserved and will be
+        // offered again by a later sync_entries_with_successor transition.
+        // Preservation #614: a write racing between copy and ack is still live at this
+        // clock, so it changes the projected local value, confirms_local_value is false,
+        // and delete is skipped.
         let now_ms = get_epoch_ms();
         for ack in acks {
             let key = StorageKey::new(ack.entry.kind, ack.key);

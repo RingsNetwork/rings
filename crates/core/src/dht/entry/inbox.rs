@@ -32,9 +32,10 @@
 //! while the held message's sender proof is still live by the owner's clock (so the hold instant
 //! a holder signs cannot lie about the past), a relocation of the carrier only from the owner's
 //! authenticated predecessor as an ownership hand-off, and a removal only from `d`; a relay
-//! carrier is never fetched, cached, or replicated. Removal is per element by its add dot (an
-//! observed-remove), never by a reset floor, so a message the recipient has not seen is never
-//! dropped by a removal it did not issue.
+//! carrier is never fetched, cached, or replicated. Removal is per element by the add dot the
+//! recipient holds, as a covering remove of that payload up to that dot (every hold of one
+//! payload is the same hold), never by a reset floor, so a message the recipient has not seen
+//! is never dropped by a removal it did not issue.
 //!
 //! Both "responsible for `d`" (the holder's `(pred, self]`) and "routes `d` to" (the owner's
 //! successor list) are projections of failure detection: while an owner still lists the departed

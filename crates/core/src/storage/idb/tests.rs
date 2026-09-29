@@ -16,6 +16,7 @@ use crate::storage::idb::AccessClock;
 use crate::storage::idb::AccessStamp;
 use crate::storage::idb::IdbStorage;
 use crate::storage::idb::LegacyRow;
+use crate::storage::idb::UndecodableRows;
 use crate::storage::idb::ACCESS_STAMP_INDEX;
 use crate::storage::idb::CLOCK_LIMIT;
 use crate::storage::idb::SCHEMA_VERSION;
@@ -490,6 +491,33 @@ async fn missing_and_invalid_reads_preserve_storage() {
     assert!(invalid.is_err());
     let retained: Option<u32> = instance.get("number").await.unwrap();
     assert_eq!(retained, Some(42));
+    assert_eq!(instance.count().await.unwrap(), 1);
+}
+
+/// Under `Retire`, a row the caller's type cannot decode is deleted by the read that finds it
+/// and reported absent, by `get` and by `get_all` alike, and decodable rows are kept.
+#[wasm_bindgen_test]
+async fn retiring_store_deletes_undecodable_rows_on_read() {
+    // Rows of an incompatible type stand in for rows written by an earlier build.
+    let instance = create_db_instance(4)
+        .await
+        .with_undecodable_rows(UndecodableRows::Retire);
+    instance.put("old", &42_u32).await.unwrap();
+    instance.put("older", &7_u32).await.unwrap();
+    instance
+        .put("current", &TestDataStruct {
+            content: "kept".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let retired: Option<TestDataStruct> = instance.get("old").await.unwrap();
+    assert!(retired.is_none());
+    assert_eq!(instance.count().await.unwrap(), 2);
+
+    let all: Vec<(String, TestDataStruct)> = instance.get_all().await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all.first().map(|(key, _)| key.as_str()), Some("current"));
     assert_eq!(instance.count().await.unwrap(), 1);
 }
 

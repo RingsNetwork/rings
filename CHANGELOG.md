@@ -146,24 +146,32 @@
   instead of any `Serialize` value, with `reserve_transaction_sequences` taking the class.
 
 - Collect data-topic tombstones at a retention horizon and remove compaction (#867, #872, #874,
-  #871). Every data-topic element now expires individually at its dot's issue time plus
-  `H = EntryKind::Data.max_lifetime_ms()` (100 minutes), even while other writes keep its topic
-  alive; writing a value again refreshes it. Registries already refresh every 30 s; a plain
-  append (`storage_append_data`, `publishMessageToTopic`, `registerService`) must be refreshed
-  within `H`. A tombstone is collected `H + σ` after the dot it covers (`σ =
-  TS_OFFSET_TOLERANCE_MS`), and a data carrier holding an uncollected tombstone stays live until
-  then (`Entry::is_live_at`). The projection `Entry::retired_at` is applied on every storage and
-  fetch-cache read and to every stored value, and `SyncedEntryAck::confirms_local_value` takes
-  the clock it compares at. `EntryOperation::CompactData`, `Entry::compact_data` and
-  `storage_compact_data` (core `ChordStorageInterface` and node `Processor`) are removed, and the
-  registries no longer compact: a compaction floor stamped by one owner erased every concurrent
-  add that owner had not received, from every carrier that joined it (#867). Both registries are
-  now bounded by the horizon, the onion-exit registry included (#871). A removal now covers every
-  earlier dot of its value, so a stale replica holding a dot the remover had forgotten under a
-  later one can no longer resurrect it (#874): `EntryCrdt::tombstones` holds `EntryTombstone`
-  (a Keccak-256 `ElementDigest` of the value and the greatest dot it covers), at most one per
-  value. The wire format of storage entries and operations changes, a total cutover; the version
-  is bumped at release.
+  #871).
+  - Every data-topic element now expires at the earlier of its dot's issue time plus
+    `H = EntryKind::Data.max_lifetime_ms()` (100 minutes) and its topic's retention bound (the
+    latest bound any joined write requested; 10 minutes for a plain write). Writing a value
+    again refreshes both: a sole writer rewrites within 10 minutes, and every writer within `H`
+    even while other writes keep the topic alive. Registries already refresh every 30 s.
+  - A tombstone is collected `H + σ` after the dot it covers (`σ = TS_OFFSET_TOLERANCE_MS`), and
+    an overwrite register `H + σ` after it was issued. A data carrier stays live while it holds
+    either uncollected (`Entry::is_live_at`), but once its retention bound elapses it serves no
+    element. `Entry::retired_at` applies this on every storage and fetch-cache read and to every
+    stored value; `SyncedEntryAck::confirms_local_value` takes the clock it compares at.
+  - `EntryOperation::CompactData`, `Entry::compact_data` and `storage_compact_data` (core
+    `ChordStorageInterface` and node `Processor`) are removed, and the registries no longer
+    compact: a compaction floor stamped by one owner erased every concurrent add that owner had
+    not received, from every carrier that joined it (#867). Both registries, the onion-exit one
+    included, are bounded by the horizon alone (#871).
+  - A removal now covers every earlier dot of its value, so a stale replica holding a dot the
+    remover had forgotten under a later one can no longer resurrect it (#874).
+    `EntryCrdt::tombstones` holds `EntryTombstone` (a Keccak-256 `ElementDigest` of the value
+    and the greatest dot it covers), at most one per value.
+  - Cutover: the wire format of storage entries and operations changes, so every node of a
+    network must upgrade together; the version is bumped at release. Stored carriers of the old
+    format that hold a tombstone, relay inboxes with delivered messages included, no longer
+    decode: native file storage retires them on first read, and the browser entry store, now
+    opened with the new `UndecodableRows::Retire` policy of `IdbStorage`, deletes them on first
+    read or scan. Their owners' next writes and the registries' next heartbeats repopulate them.
 
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`
