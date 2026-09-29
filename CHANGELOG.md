@@ -2,29 +2,34 @@
 
 ## Unreleased
 
-- Fail a bad transaction replay record closed on its own stream only, and restore the replay
-  store once (#910). A record that does not restore (torn, corrupt, unreadable, misplaced, or
-  holding an invalid window) used to leave the whole replay store unloaded: every later
-  reservation and admission re-read the whole store (up to 32,768 records) under the replay lock
-  and failed again, so the node could neither sign nor accept traffic. Now the store is restored
-  from one scan and cached; each bad record is kept, logged once, and counted
+- Fail a bad transaction replay record closed on its own stream only, and restore the replay store
+  once (#910). A record that does not restore (torn, corrupt, unreadable, misfiled, misplaced, or
+  holding an invalid window) used to leave the whole replay store unloaded: every later reservation
+  and admission re-read the whole store (up to 32,768 records) under the replay lock and failed
+  again, so the node could neither sign nor accept traffic. Now the store is restored from one scan
+  and cached; each bad record is kept, logged once, and counted
   (`ReplayCounters::unrestorable_record`), and only the stream it is filed as refuses reservation
   and admission, with `Error::TransactionReplayStreamUnavailable { key, record }` (counted in
   `ReplayCounters::unavailable_stream`). Every other stream in the store runs normally; each bad
-  record holds one slot of both tables' stream bounds. An operator clears one stream by removing
-  the named record with the node stopped (see the replay chapter). An absent record still
-  restarts its stream from `First` (#915). Each reservation and admission now runs detached from
-  its caller (`rings_runtime::run_detached`): a caller cancelled mid-transition no longer lets a
-  stale record write land after a newer one, and its transition commits (its admission is
-  charged and its sequence consumed) exactly as if the caller had dropped the verdict.
+  record holds one slot of both tables' stream bounds. An operator clears one stream by removing the
+  named record with the node stopped (see the replay chapter). An absent record still restarts its
+  stream from `First` (#915). Each reservation and admission now runs detached from its caller
+  (`rings_runtime::run_detached`): a caller cancelled mid-transition no longer lets a stale record
+  write land after a newer one, and its transition commits (its admission is charged and its
+  sequence consumed) exactly as if the caller had dropped the verdict.
 
 - Open the native transaction replay store as an authoritative `FileStorage` (#909). On unix its
   `put` flushes the temporary file before the rename and the directory after it (removals, and
   the store's directory and its ancestors at open, are flushed too), so a crash leaves each
-  record whole at its previous or its new value. A record file that cannot be read, or whose
-  framing does not decode, is reported (`Error::StorageRecordUndecodable`, or per record by a
-  scan), naming its file and, when its key prefix is intact, its key; it is never deleted, so
-  replay fails closed on it instead of reopening its stream. An authoritative store evicts
+  record whole at its previous or its new value. A record file that cannot be read, whose
+  framing does not decode, or that is misfiled (a whole record under another key's file) is
+  reported (`Error::StorageRecordUndecodable`, or per record by a scan), naming its file and,
+  when its key prefix is intact, its key, or the key a misfiled record carries; it is never
+  deleted, so replay fails closed on it instead of reopening its stream (a misfiled record also
+  fails closed the stream it carries when that stream's own record is absent). Disposable
+  stores change too: a record entry that is present but unreadable (a dangling link) makes
+  `get` and `get_all` fail instead of reading as absent, and a misfiled record is retired by
+  the read that finds it instead of being returned by `get_all`. An authoritative store evicts
   nothing: a write beyond its budget, or an open under a lowered one, fails with
   `Error::StorageBudgetExhausted`, and a write into a root that vanished while open fails with
   `Error::StorageRootMissing`. The flush bounds replay transitions to about 50 per second on an
@@ -79,6 +84,9 @@
 
 ### Breaking changes
 
+- `FileStorage`'s `KvStorageInterface<V>` (and its new `KvStorageScan<V>`) require `V: Send` as
+  well as `Sync` (#909), since values cross to the blocking pool; `RecordAuthority` is
+  `#[non_exhaustive]`.
 - The native daemon's replay store flushes every write (#909), so the node-wide ceiling of replay
   transitions (every inbound admission and every sender reservation) falls from about 4,500 to
   about 50 per second on an Apple M1 Max SSD (`F_FULLFSYNC`); group commit is tracked in #916.

@@ -93,6 +93,7 @@ use crate::storage::UndecodableRecord;
 /// What a store's records are to their owner, which fixes how the store writes and reads them
 /// (the authority law of the module documentation).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RecordAuthority {
     /// A cache its owner can rebuild or do without: writes are not flushed, the budget evicts
     /// the oldest records, and a record the schema cannot decode is retired and reported
@@ -198,9 +199,9 @@ impl FileStorage {
     /// records are reported and kept.
     ///
     /// Post: the index mirrors the directory (stale `.tmp` files removed) and the budget law
-    /// holds: a disposable open retires the oldest files down to the capacity, while an
-    /// authoritative open over it fails, and flushes the store's directory entries (the
-    /// durability law).
+    /// holds: a disposable open retires the oldest files down to the capacity, and an
+    /// authoritative open over the budget fails. A successful authoritative open has flushed
+    /// the store's directory entries within the durability law's bound.
     pub async fn new_with_cap_path_and_authority<P>(
         byte_capacity: u32,
         path: P,
@@ -439,13 +440,19 @@ impl FileStore {
     }
 
     /// Classify a failed write of the temporary file under the root law: an authoritative
-    /// store whose root vanished after [`Self::ensure_root`] checked it reports the root
-    /// missing, not a bare I/O error.
+    /// store whose root vanished, or stopped being a directory, after [`Self::ensure_root`]
+    /// checked it reports the root missing, not a bare I/O error. A root that vanishes later
+    /// (between the rename and the flush, or during a removal) fails the operation with its
+    /// plain I/O error: the root law classifies the write's own check only, and every such
+    /// failure is closed.
     fn write_failure(&self, error: Error) -> Error {
         match error {
             Error::ServiceIOError(io)
                 if !self.authority.recreates_root()
-                    && io.kind() == std::io::ErrorKind::NotFound =>
+                    && matches!(
+                        io.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
             {
                 Error::StorageRootMissing(self.root.clone())
             }
@@ -527,19 +534,21 @@ impl FileStore {
 /// Decode `data`, the bytes of the file `name`, as the `(key, value)` record filed under it
 /// (pure).
 ///
-/// A record is the file's only if its key hashes to `name`: a pair that decodes but carries
-/// another key (a file copied or renamed over another record) is misfiled, and is reported as
-/// undecodable by its file alone, so that neither the key it is filed as nor the key it carries
-/// restores from it. An undecodable record is named by its file and, when its leading key
-/// decodes and hashes to `name` (a torn record loses its tail first), by its key as well.
+/// A record is the file's only if its key hashes to `name`: a pair that decodes but carries another
+/// key (a file copied or renamed over another record) is misfiled, and is reported as undecodable
+/// by its file, with the key it carries as `carried`, so that neither the key it is filed as nor
+/// the key it carries restores from it, and its owner can fail both closed. An undecodable record
+/// is named by its file and, when its leading key decodes and hashes to `name` (a torn record loses
+/// its tail first), by its key as well.
 fn decode_pair<V>(name: &str, data: &[u8]) -> std::result::Result<(String, V), UndecodableRecord>
 where V: DeserializeOwned {
     let files_as = |key: &String| file_name_for(key) == name;
     match rings_codec::deserialize::<(String, V)>(data) {
         Ok(pair) if files_as(&pair.0) => Ok(pair),
-        Ok(_) => Err(UndecodableRecord {
+        Ok((carried, _)) => Err(UndecodableRecord {
             name: name.to_owned(),
             key: None,
+            carried: Some(carried),
         }),
         Err(_) => Err(UndecodableRecord {
             name: name.to_owned(),
@@ -547,6 +556,7 @@ where V: DeserializeOwned {
                 .ok()
                 .map(|(key, _)| key)
                 .filter(files_as),
+            carried: None,
         }),
     }
 }
@@ -557,18 +567,24 @@ fn scan_record<V>((name, read): ReadRecord) -> ScannedRecord<V>
 where V: DeserializeOwned {
     match read {
         Ok(data) => decode_pair(&name, &data),
-        Err(_) => Err(UndecodableRecord { name, key: None }),
+        Err(_) => Err(UndecodableRecord {
+            name,
+            key: None,
+            carried: None,
+        }),
     }
 }
 
 /// Create the directory `root` and its missing ancestors; iff `flush`, flush `root` and its
-/// ancestors, deepest first, so that each directory entry on the path survives a crash, whoever
-/// created it (another store may have created a shared parent without flushing it).
+/// ancestors, deepest first, up to the first ancestor the process may not open, so that every
+/// directory entry below that ancestor survives a crash, whoever created it (another store may
+/// have created a shared parent without flushing it); this is the exact bound of the durability
+/// law.
 ///
-/// The walk stops at the first ancestor the process may not open (`PermissionDenied`), such as
-/// `/` under a sandbox or an execute-only home: its entries, and every entry above it, are left
-/// to whoever made them (the exact bound of the durability law). Any other failure fails the
-/// open.
+/// The walk stops at an ancestor that fails with `PermissionDenied`, such as `/` under a sandbox
+/// or an execute-only home: its entries, and every entry above it, are left to whoever made
+/// them. Any other failure fails the open. No fixture makes an ancestor unopenable for every
+/// user (root included), so the stop is covered by review only.
 fn create_directory(root: &Path, flush: bool) -> Result<()> {
     std::fs::create_dir_all(root).map_err(Error::ServiceIOError)?;
     if !flush {
@@ -680,6 +696,8 @@ where V: Serialize + DeserializeOwned + Send + Sync
             return Ok(None);
         };
         match decode_pair::<V>(&name, &data) {
+            // `decode_pair` already ties the key to the file name, so this differs from
+            // `Some(value)` only on a SHA-1 collision: a collision guard, not the misfiled check.
             Ok((stored_key, value)) => Ok((stored_key == key).then_some(value)),
             Err(undecodable) => {
                 self.settle_undecodable(undecodable, data).await?;
@@ -756,12 +774,14 @@ where V: Serialize + DeserializeOwned + Send + Sync
     }
 }
 
-/// The record name of a directory entry: a 40-character hex file name, or `None` for any other
-/// entry.
+/// The record name of a directory entry: a 40-character lower-case hex file name (the image of
+/// `file_name_for`), or `None` for any other entry.
 fn entry_file_name(path: &Path) -> Option<&str> {
     let file_name = path.file_name().and_then(|name| name.to_str())?;
-    (file_name.len() == 40 && file_name.as_bytes().iter().all(u8::is_ascii_hexdigit))
-        .then_some(file_name)
+    // The image of `file_name_for`: lower-case hex only, so an entry is a record iff it could
+    // be the file of some key.
+    let lower_hex = |byte: &u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte);
+    (file_name.len() == 40 && file_name.as_bytes().iter().all(lower_hex)).then_some(file_name)
 }
 
 impl std::fmt::Debug for FileStorage {

@@ -32,11 +32,16 @@ pub use crate::storage::memory::MemStorage;
 /// that the state it held is forfeit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UndecodableRecord {
-    /// The name the storage files the record under, [`KvStorageScan::record_name`] of its key:
-    /// the key itself, or the backend's image of it (`FileStorage`: the file name).
+    /// The name the record is filed under: [`KvStorageScan::record_name`] of the key it is
+    /// filed as, which is the key itself or the backend's image of it (`FileStorage`: the file
+    /// name).
     pub name: String,
-    /// The record's key, when the part of the record that carries it is intact.
+    /// The key the record is filed as, when the part of the record that carries it is intact
+    /// and names this file.
     pub key: Option<String>,
+    /// Another key the record carries whole (a misfiled record: one copied or renamed over
+    /// another's file), which its owner may have to fail closed as well.
+    pub carried: Option<String>,
 }
 
 /// One record of a [`KvStorageScan::scan`]: its key and value, or the record the storage
@@ -44,11 +49,13 @@ pub struct UndecodableRecord {
 pub type ScannedRecord<V> = std::result::Result<(String, V), UndecodableRecord>;
 
 impl std::fmt::Display for UndecodableRecord {
-    /// The record's name, and its key or that the key is unreadable.
+    /// The record's name, and its key, the key it carries when misfiled, or that its key is
+    /// unreadable.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.key.as_deref() {
-            Some(key) => write!(f, "record {} (key {key})", self.name),
-            None => write!(f, "record {} (key unreadable)", self.name),
+        match (self.key.as_deref(), self.carried.as_deref()) {
+            (_, Some(carried)) => write!(f, "record {} (misfiled: holds key {carried})", self.name),
+            (Some(key), None) => write!(f, "record {} (key {key})", self.name),
+            (None, None) => write!(f, "record {} (key unreadable)", self.name),
         }
     }
 }
@@ -85,17 +92,20 @@ pub trait KvStorageInterface<V> {
 /// or decode instead of failing or deleting, together with the naming that ties a reported
 /// record back to its key.
 ///
-/// **Law (agreement).** For every stored key `k`, a record of `k` that [`Self::scan`] cannot
-/// read or decode is reported as an [`UndecodableRecord`] whose `name` is
-/// [`Self::record_name`]`(k)`:
+/// **Law (agreement).** A scan and the naming agree in both directions: a decoded pair is the
+/// record filed under its own key's name, and a record that cannot be read, decoded or tied to
+/// its key is reported under the name it is filed under:
 ///
 /// ```text
-/// scan ∋ Err(u) ∧ u is the record of k  ⟹  u.name = record_name(k)
+/// scan ∋ Ok((k, v))                        ⟹  v is the record filed under record_name(k)
+/// scan ∋ Err(u) ∧ u is filed as key k      ⟹  u.name = record_name(k)
 /// ```
 ///
-/// An owner fails closed on exactly the keys whose names a scan reported, so both methods are
-/// required: a default for either could break the agreement for a backend that overrides the
-/// other.
+/// An owner restores exactly the pairs a scan decoded and fails closed on exactly the names it
+/// reported, so both methods are required: a default for either could break the agreement for
+/// a backend that overrides the other. A backend keyed by the key itself (memory, IndexedDB)
+/// satisfies the first direction by construction; `FileStorage`, which files by digest, reports
+/// a pair filed under another key's name as undecodable.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait KvStorageScan<V>: KvStorageInterface<V> {

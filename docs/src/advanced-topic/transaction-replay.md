@@ -128,7 +128,8 @@ records](#bad-records)). The native daemon opens the replay store as an authorit
 (#909). On unix each write is flushed to stable storage before its rename and the directory after
 it (`F_FULLFSYNC` on macOS), so a crash leaves every record whole at its previous or its new value;
 on other targets a rename's durability is the file system's own. A record file that cannot be read,
-or whose framing does not decode, is reported and never deleted. The file I/O runs on the tokio
+whose framing does not decode, or that is misfiled (a whole record copied or moved over another
+key's file) is reported and never deleted. The file I/O runs on the tokio
 blocking pool, so a flush never stalls an asynchronous worker.
 
 One lock serializes all replay transitions and is held across each record write, so the store's

@@ -496,6 +496,7 @@ where V: DeserializeOwned {
             UndecodableRecord {
                 name: key.clone().unwrap_or_else(|| format!("{primary_key:?}")),
                 key,
+                carried: None,
             }
         })
 }

@@ -271,6 +271,7 @@ async fn test_authoritative_store_reports_a_torn_record_and_keeps_it() {
     let expected = UndecodableRecord {
         name: name.clone(),
         key: Some("stream".to_owned()),
+        carried: None,
     };
 
     assert!(matches!(
@@ -300,6 +301,7 @@ async fn test_authoritative_store_reports_an_empty_record_by_its_file() {
     let expected = UndecodableRecord {
         name: name.clone(),
         key: None,
+        carried: None,
     };
     for _ in 0..2 {
         let storage = FileStorage::new_with_cap_path_and_authority(
@@ -331,7 +333,11 @@ async fn test_a_misfiled_key_prefix_is_not_reported_as_the_key() {
 
     assert!(matches!(
         <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
-        Err(Error::StorageRecordUndecodable(UndecodableRecord { name: ref reported, key: None }))
+        Err(Error::StorageRecordUndecodable(UndecodableRecord {
+            name: ref reported,
+            key: None,
+            carried: None,
+        }))
             if *reported == name
     ));
 }
@@ -395,6 +401,7 @@ async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
         Err(UndecodableRecord {
             name: name.clone(),
             key: Some("torn".to_owned()),
+            carried: None,
         }),
         Ok(("whole".to_owned(), "v".to_owned())),
     ]);
@@ -426,6 +433,7 @@ async fn test_scan_reports_a_directory_in_a_record_place() {
         Err(UndecodableRecord {
             name: directory,
             key: None,
+            carried: None,
         }),
         Ok(("whole".to_owned(), "v".to_owned())),
     ]);
@@ -461,6 +469,7 @@ async fn test_scan_reports_a_record_it_cannot_read() {
         Err(UndecodableRecord {
             name: looping,
             key: None,
+            carried: None,
         }),
         Ok(("whole".to_owned(), "v".to_owned())),
     ]);
@@ -486,7 +495,11 @@ async fn test_authoritative_open_indexes_an_entry_whose_metadata_fails() {
         <FileStorage as KvStorageScan<String>>::scan(&storage)
             .await
             .expect("scan"),
-        [Err(UndecodableRecord { name, key: None })]
+        [Err(UndecodableRecord {
+            name,
+            key: None,
+            carried: None
+        })]
     );
 }
 
@@ -509,7 +522,11 @@ async fn test_scan_reports_a_dangling_link_instead_of_hiding_it() {
         <FileStorage as KvStorageScan<String>>::scan(&storage)
             .await
             .expect("scan"),
-        [Err(UndecodableRecord { name, key: None })]
+        [Err(UndecodableRecord {
+            name,
+            key: None,
+            carried: None
+        })]
     );
 }
 
@@ -591,7 +608,7 @@ async fn test_authoritative_store_evicts_nothing() {
 /// reports it by its file alone, an authoritative `get` of either key does not return it, and a
 /// disposable `get` retires it.
 #[tokio::test]
-async fn test_a_misfiled_whole_record_is_neither_key_s_record() {
+async fn test_a_misfiled_whole_record_belongs_to_neither_key() {
     let root = temp_root("misfiled-whole");
     let copied = rings_codec::serialize(&("other", "v")).expect("record serializes");
     let name = plant_record(&root, "stream", &copied);
@@ -607,12 +624,16 @@ async fn test_a_misfiled_whole_record_is_neither_key_s_record() {
         [Err(UndecodableRecord {
             name: name.clone(),
             key: None,
+            carried: Some("other".to_owned()),
         })]
     );
     assert!(matches!(
         <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
-        Err(Error::StorageRecordUndecodable(UndecodableRecord { name: ref reported, key: None }))
-            if *reported == name
+        Err(Error::StorageRecordUndecodable(UndecodableRecord {
+            name: ref reported,
+            key: None,
+            carried: Some(ref carried),
+        })) if *reported == name && carried == "other"
     ));
     assert_eq!(
         <FileStorage as KvStorageInterface<String>>::get(&storage, "other")
@@ -634,10 +655,8 @@ async fn test_a_misfiled_whole_record_is_neither_key_s_record() {
     assert!(!root.join(&name).exists());
 }
 
-/// Root law: an authoritative root that is no longer a directory is reported missing, and a
-/// metadata error on it is reported as itself, never as the root's absence. The walk's stop at
-/// an ancestor the process may not open (`PermissionDenied`) has no fixture that holds for every
-/// user, so it is covered by review only.
+/// Root law: an authoritative root that is no longer a directory is reported missing, and the
+/// write changes nothing.
 #[tokio::test]
 async fn test_authoritative_root_replaced_by_a_file_is_missing() {
     let root = temp_root("root-file");
@@ -653,4 +672,33 @@ async fn test_authoritative_root_replaced_by_a_file_is_missing() {
         Err(Error::StorageRootMissing(_))
     ));
     std::fs::remove_file(root.as_ref()).expect("release the root");
+}
+
+/// Root law, the race after the check: a temporary write that fails because the root vanished
+/// (`NotFound`) or stopped being a directory (`NotADirectory`) is reported as the root missing
+/// by an authoritative store, and as itself by a disposable one.
+#[tokio::test]
+async fn test_a_write_that_loses_its_root_reports_the_root_missing() {
+    let root = temp_root("write-failure");
+    let authoritative =
+        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
+            .await
+            .expect("open");
+    let disposable = FileStorage::new_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+    for kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::NotADirectory,
+    ] {
+        let failed = || Error::ServiceIOError(std::io::Error::from(kind));
+        assert!(matches!(
+            authoritative.store.write_failure(failed()),
+            Error::StorageRootMissing(_)
+        ));
+        assert!(matches!(
+            disposable.store.write_failure(failed()),
+            Error::ServiceIOError(_)
+        ));
+    }
 }

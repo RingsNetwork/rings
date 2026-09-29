@@ -3,6 +3,7 @@
 //! restarting, restores the stream.
 
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -205,51 +206,94 @@ async fn test_an_unreadable_native_record_fails_only_its_stream() -> Result<()> 
     Ok(())
 }
 
-/// Fail closed per stream under a misfiled native record: a copy of stream 2's receiver record
-/// under stream 1's file name restores neither stream from the copy. Stream 1 is refused, named
-/// by its file, and stream 2 keeps its own, newer window, so the stale copy cannot roll it back.
-#[tokio::test]
-async fn test_a_record_copied_over_another_stream_restores_neither() -> Result<()> {
-    let root = TempRoot::new("replay-misfiled");
-    let open = || {
-        FileStorage::new_with_cap_path_and_authority(1 << 20, &root, RecordAuthority::Authoritative)
-    };
-    let (copied_from, copied_to) = {
-        let storage = open().await?;
-        let name =
-            |key: &str| <FileStorage as KvStorageScan<ReplayRecord>>::record_name(&storage, key);
-        (
-            root.join(name(&record_key(ReplayTable::Receiver, &stream(2))?)),
-            root.join(name(&record_key(ReplayTable::Receiver, &stream(1))?)),
+/// The native files of stream 2's and stream 1's receiver records in `root`.
+fn receiver_files(root: &TempRoot, storage: &FileStorage) -> Result<(PathBuf, PathBuf)> {
+    let name = |stream_key: &StreamKey| -> Result<PathBuf> {
+        let key = record_key(ReplayTable::Receiver, stream_key)?;
+        Ok(
+            root.join(<FileStorage as KvStorageScan<ReplayRecord>>::record_name(
+                storage, &key,
+            )),
         )
     };
-    {
-        let replay = TransactionReplay::new_shared(Box::new(open().await?));
-        replay.admit(stream(2), 0, digest(1)).await?;
-    }
-    std::fs::copy(&copied_from, &copied_to).map_err(Error::ServiceIOError)?;
-    {
-        let replay = TransactionReplay::new_shared(Box::new(open().await?));
-        replay.admit(stream(2), 1, digest(2)).await?;
-    }
+    Ok((name(&stream(2))?, name(&stream(1))?))
+}
 
-    let replay = TransactionReplay::new_shared(Box::new(open().await?));
-    let named = copied_to
-        .file_name()
+/// Open the authoritative replay store rooted at `root`.
+async fn open_authoritative(root: &TempRoot) -> Result<FileStorage> {
+    FileStorage::new_with_cap_path_and_authority(1 << 20, root, RecordAuthority::Authoritative)
+        .await
+}
+
+/// The file name of `path`, as the refusal names the record.
+fn file_name(path: &std::path::Path) -> Option<String> {
+    path.file_name()
         .and_then(|name| name.to_str())
-        .map(str::to_owned);
+        .map(str::to_owned)
+}
+
+/// Fail closed per stream under a copied native record: a stale copy of stream 2's receiver
+/// record under stream 1's file name, newer on disk than stream 2's own file, restores neither
+/// stream from the copy. Stream 1 is refused, named by its file, and stream 2 keeps its own,
+/// newer window: the stale copy, sorted last, cannot roll it back.
+#[tokio::test]
+async fn test_a_stale_copy_over_another_stream_restores_neither() -> Result<()> {
+    let root = TempRoot::new("replay-copied");
+    let (own, copy) = receiver_files(&root, &open_authoritative(&root).await?)?;
+    TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
+        .admit(stream(2), 0, digest(1))
+        .await?;
+    let stale = std::fs::read(&own).map_err(Error::ServiceIOError)?;
+    TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
+        .admit(stream(2), 1, digest(2))
+        .await?;
+    std::fs::write(&copy, stale).map_err(Error::ServiceIOError)?;
+    // The stale copy sorts after stream 2's own file, so a restore that took it would keep it.
+    let later = std::fs::metadata(&own)
+        .and_then(|metadata| metadata.modified())
+        .map_err(Error::ServiceIOError)?
+        + std::time::Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(&copy)
+        .and_then(|file| file.set_modified(later))
+        .map_err(Error::ServiceIOError)?;
+
+    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
     assert!(matches!(
         replay.admit(stream(1), 0, digest(1)).await,
         Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
-            if Some(record) == named.as_ref()
+            if Some(record) == file_name(&copy).as_ref()
     ));
-    for (sequence, value) in [(0, 1), (1, 2)] {
+    assert!(matches!(
+        replay.admit(stream(2), 1, digest(2)).await,
+        Err(Error::TransactionReplay { .. })
+    ));
+    assert_eq!(replay.counters().unrestorable_record, 1);
+    Ok(())
+}
+
+/// Fail closed per stream under a moved native record: stream 2's receiver record renamed over
+/// stream 1's file leaves stream 2 without its own record, so both streams are refused: stream
+/// 1 by the misfiled file, stream 2 by the key the misfiled file carries.
+#[tokio::test]
+async fn test_a_record_moved_over_another_stream_fails_both_closed() -> Result<()> {
+    let root = TempRoot::new("replay-moved");
+    let (own, moved) = receiver_files(&root, &open_authoritative(&root).await?)?;
+    TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
+        .admit(stream(2), 0, digest(1))
+        .await?;
+    std::fs::rename(&own, &moved).map_err(Error::ServiceIOError)?;
+
+    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
+    for (key, file) in [(stream(1), &moved), (stream(2), &own)] {
         assert!(matches!(
-            replay.admit(stream(2), sequence, digest(value)).await,
-            Err(Error::TransactionReplay { .. })
+            replay.admit(key, 0, digest(1)).await,
+            Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
+                if Some(record) == file_name(file).as_ref()
         ));
     }
-    assert_eq!(replay.counters().unrestorable_record, 1);
+    assert_eq!(replay.counters().unrestorable_record, 2);
     Ok(())
 }
 
