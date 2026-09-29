@@ -30,6 +30,7 @@ pub use crate::storage::memory::MemStorage;
 /// retires a record the current schema cannot decode, on the read that finds it, and reports it
 /// absent, while an authoritative store reports the decode error and keeps the record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RecordAuthority {
     /// A cache its owner can rebuild or do without.
     #[default]
