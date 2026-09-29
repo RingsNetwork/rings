@@ -184,8 +184,11 @@ reads the store again. A record restores its stream iff it decodes, holds a vali
 under the record key of the stream it carries. Any other record is kept and joins the set `U` of
 unrestorable records (#910): torn, corrupt, unreadable (any read error but the absence of the
 entry, such as a permission error, an I/O error, a dangling link, or a directory in the record's
-place), misfiled (a record copied over another's file), misplaced, or holding an invalid window.
-Its name is the storage's record name: the native file name, or the browser row key.
+place), misfiled (a whole or torn record copied or moved over another stream's file), misplaced,
+or holding an invalid window. Its name is the storage's record name: the native file name, or the
+browser row key. A misfiled record also fails closed the stream whose key it carries, unless that
+stream's own record restored it: that stream's entry holds no record of its own, and names the
+misfiled record as the one to clear.
 
 ```text
 unavailable(table, key)  ⟺  record_name(record_key(table, key)) ∈ U
@@ -216,8 +219,8 @@ the directory cannot be flushed.
 An operator clears a failed stream, and only that stream, by removing its record with the node
 stopped and then starting the node:
 
-1. Take the record name from the refusal or from the load's log line
-   (`replay record does not restore; its stream fails closed until it is cleared`).
+1. Take the record name from the refusal (`record`) or from the load's log line (`clear`, in
+   `replay record does not restore; its stream fails closed until it is cleared`).
 2. Stop the node. On native, stop the daemon. In a browser, close every tab of the origin that runs
    the node, then open one tab of the origin with the node not started.
 3. Delete the record:
@@ -238,6 +241,16 @@ This resets that stream's replay window alone, and no other stream's state chang
     because the same sequences now carry new transactions.
 
   The messages carried by the rejected sequences are lost.
+
+A misfiled record is the one case where a record holds two streams' fate. When stream B's record
+was moved over stream A's file, both refusals name that file (A's name), and the operator chooses
+one repair:
+- **Rename it back** to B's own record name (the one B's log line reports as `record`). B's window
+  is restored exactly; A's own record was destroyed by the move, so A starts from `First` (the
+  absent-record case of #915).
+- **Delete it.** Both A's and B's windows reset.
+
+A copied record (B's own file still present) fails only A closed, and is cleared like any other.
 
 ## Hard cutover
 

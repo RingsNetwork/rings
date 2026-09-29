@@ -122,7 +122,8 @@ pub enum Error {
     TransactionReplayStreamUnavailable {
         /// The stream that fails closed.
         key: crate::message::StreamKey,
-        /// Storage record name of the stream's unrestorable record, the one to clear.
+        /// Storage record name of the record to clear: the stream's own unrestorable record,
+        /// or the misfiled record its state was moved into.
         record: String,
     },
 

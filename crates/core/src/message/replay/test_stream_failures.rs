@@ -233,13 +233,16 @@ fn file_name(path: &std::path::Path) -> Option<String> {
 }
 
 /// Fail closed per stream under a copied native record: a stale copy of stream 2's receiver
-/// record under stream 1's file name, newer on disk than stream 2's own file, restores neither
-/// stream from the copy. Stream 1 is refused, named by its file, and stream 2 keeps its own,
-/// newer window: the stale copy, sorted last, cannot roll it back.
+/// record under stream 1's file name restores neither stream from the copy. Stream 1 is refused,
+/// named by its file, and stream 2 keeps its own, newer window: a scan yields records in file
+/// name order, and the copy's name sorts after stream 2's own, so a restore that took the copy
+/// would keep it last.
 #[tokio::test]
 async fn test_a_stale_copy_over_another_stream_restores_neither() -> Result<()> {
     let root = TempRoot::new("replay-copied");
     let (own, copy) = receiver_files(&root, &open_authoritative(&root).await?)?;
+    // The precondition that makes the stream-2 half discriminate.
+    assert!(file_name(&copy) > file_name(&own));
     TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
         .admit(stream(2), 0, digest(1))
         .await?;
@@ -248,16 +251,6 @@ async fn test_a_stale_copy_over_another_stream_restores_neither() -> Result<()> 
         .admit(stream(2), 1, digest(2))
         .await?;
     std::fs::write(&copy, stale).map_err(Error::ServiceIOError)?;
-    // The stale copy sorts after stream 2's own file, so a restore that took it would keep it.
-    let later = std::fs::metadata(&own)
-        .and_then(|metadata| metadata.modified())
-        .map_err(Error::ServiceIOError)?
-        + std::time::Duration::from_secs(60);
-    std::fs::File::options()
-        .write(true)
-        .open(&copy)
-        .and_then(|file| file.set_modified(later))
-        .map_err(Error::ServiceIOError)?;
 
     let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
     assert!(matches!(
@@ -273,27 +266,65 @@ async fn test_a_stale_copy_over_another_stream_restores_neither() -> Result<()> 
     Ok(())
 }
 
-/// Fail closed per stream under a moved native record: stream 2's receiver record renamed over
-/// stream 1's file leaves stream 2 without its own record, so both streams are refused: stream
-/// 1 by the misfiled file, stream 2 by the key the misfiled file carries.
-#[tokio::test]
-async fn test_a_record_moved_over_another_stream_fails_both_closed() -> Result<()> {
-    let root = TempRoot::new("replay-moved");
-    let (own, moved) = receiver_files(&root, &open_authoritative(&root).await?)?;
-    TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
+/// A store where stream 2's receiver record, holding sequence 0, was moved over stream 1's
+/// file; returns stream 2's own (now absent) file and the misfiled file.
+async fn store_with_a_moved_record(root: &TempRoot) -> Result<(PathBuf, PathBuf)> {
+    let (own, moved) = receiver_files(root, &open_authoritative(root).await?)?;
+    TransactionReplay::new_shared(Box::new(open_authoritative(root).await?))
         .admit(stream(2), 0, digest(1))
         .await?;
     std::fs::rename(&own, &moved).map_err(Error::ServiceIOError)?;
+    Ok((own, moved))
+}
+
+/// Fail closed per stream under a moved native record: stream 2's receiver record renamed over
+/// stream 1's file leaves stream 2 without its own record, so both streams are refused, and both
+/// refusals name the misfiled file, the one record to clear.
+#[tokio::test]
+async fn test_a_record_moved_over_another_stream_fails_both_closed() -> Result<()> {
+    let root = TempRoot::new("replay-moved");
+    let (_, moved) = store_with_a_moved_record(&root).await?;
 
     let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
-    for (key, file) in [(stream(1), &moved), (stream(2), &own)] {
+    for key in [stream(1), stream(2)] {
         assert!(matches!(
             replay.admit(key, 0, digest(1)).await,
             Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
-                if Some(record) == file_name(file).as_ref()
+                if Some(record) == file_name(&moved).as_ref()
         ));
     }
     assert_eq!(replay.counters().unrestorable_record, 2);
+    Ok(())
+}
+
+/// Recovery of a moved record, both repairs the refusal's record allows: renaming the misfiled
+/// file back restores stream 2's window exactly (stream 1's own record was destroyed by the
+/// move, so it starts from `First`); deleting it resets both streams' windows.
+#[tokio::test]
+async fn test_a_moved_record_is_cleared_by_renaming_it_back_or_deleting_it() -> Result<()> {
+    let renamed = TempRoot::new("replay-moved-back");
+    let (own, moved) = store_with_a_moved_record(&renamed).await?;
+    std::fs::rename(&moved, &own).map_err(Error::ServiceIOError)?;
+    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&renamed).await?));
+    assert!(matches!(
+        replay.admit(stream(2), 0, digest(1)).await,
+        Err(Error::TransactionReplay { .. })
+    ));
+    assert_eq!(
+        replay.admit(stream(1), 0, digest(1)).await?,
+        SequenceVerdict::First
+    );
+
+    let deleted = TempRoot::new("replay-moved-deleted");
+    let (_, moved) = store_with_a_moved_record(&deleted).await?;
+    std::fs::remove_file(&moved).map_err(Error::ServiceIOError)?;
+    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&deleted).await?));
+    for key in [stream(1), stream(2)] {
+        assert_eq!(
+            replay.admit(key, 0, digest(1)).await?,
+            SequenceVerdict::First
+        );
+    }
     Ok(())
 }
 

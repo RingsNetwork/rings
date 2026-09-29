@@ -30,7 +30,8 @@
 //!
 //! **Law (fail closed per stream, #910).** The first operation restores the store from one scan
 //! of the storage and caches the result, including every record that does not restore. For a
-//! stream `s` whose stored record is torn, corrupt or unreadable:
+//! stream `s` whose stored record is torn, corrupt, unreadable or misfiled, or whose record was
+//! moved into another stream's file (misfiled there):
 //!
 //! ```text
 //! ∀ transition t of s.   t = Err(TransactionReplayStreamUnavailable { s, record })
@@ -40,17 +41,16 @@
 //! cost(restore) = O(|store|), once;  cost(call) = 0 store reads + 1 record write
 //! ```
 //!
-//! so no replay is admitted from, and no sequence is reused by, a stream whose record is torn,
-//! corrupt or unreadable, while every stream already in the store keeps its guarantee; a new
-//! stream sees each such record hold one slot of its table's bound. The law covers the records
-//! the storage holds: a record that is absent (deleted, or never made durable, as a rename can
-//! be on a non-unix target) is indistinguishable from a stream never seen, and its stream
-//! restarts from `First` (tracked in #915). Each record write of the native store is flushed,
-//! which bounds the node-wide transition rate (about 50 per second on macOS, see the replay
-//! chapter; group commit is tracked in #916). The unrestorable records are counted
-//! ([`ReplayCounters::unrestorable_record`]), each refusal is counted
-//! ([`ReplayCounters::unavailable_stream`]), and each unrestorable record is logged once at
-//! load with its storage record name. A scan that fails as a whole restores nothing: it is
+//! so no replay is admitted from, and no sequence is reused by, such a stream, while every stream
+//! already in the store keeps its guarantee; a new stream sees each such record hold one slot of
+//! its table's bound. The law covers the records the storage holds: a record that is absent
+//! (deleted, or never made durable, as a rename can be on a non-unix target) is indistinguishable
+//! from a stream never seen, and its stream restarts from `First` (tracked in #915). Each record
+//! write of the native store is flushed, which bounds the node-wide transition rate (about 50 per
+//! second on macOS, see the replay chapter; group commit is tracked in #916). The unrestorable
+//! records are counted ([`ReplayCounters::unrestorable_record`]), each refusal is counted
+//! ([`ReplayCounters::unavailable_stream`]), and each entry is logged once at load with its storage
+//! record name and the record to clear. A scan that fails as a whole restores nothing: it is
 //! counted as a persistence failure, and the next operation scans again.
 //!
 //! **Recovery.** An operator clears one failed stream, accepting a replay-window reset for that
@@ -63,7 +63,10 @@
 //! sender stream restarts at sequence zero. Its destination rejects those sequences until they
 //! pass its retained high watermark: as `Stale` below the window, and as `Fork`, with signed
 //! [`TransactionForkEvidence`] against this node, inside it; the messages they carry are lost.
-//! No other stream is touched.
+//! No other stream is touched. A stream whose record was moved into another stream's file is the
+//! exception: its refusal names that misfiled file, which holds both streams' fate. Renaming it
+//! back to the moved stream's own name restores that stream exactly (the other stream's record
+//! was destroyed by the move, so it starts from `First`); deleting it resets both.
 //!
 //! The first load that finds the shared-stream
 //! snapshot of the key used before #898 deletes it without reading it (best effort, counted on
@@ -371,8 +374,9 @@ pub struct ReplayCounters {
     pub stale: u64,
     /// Replay store reads or writes that failed.
     pub persistence_failure: u64,
-    /// Records the load found that do not restore, each failing its stream closed; a gauge,
-    /// fixed once the store is loaded, and non-zero calls for an operator.
+    /// Entries of `U` the load found, each failing one stream closed: records that do not
+    /// restore, and streams whose record was moved into a misfiled record (whose own name holds
+    /// no record); a gauge, fixed once the store is loaded, and non-zero calls for an operator.
     pub unrestorable_record: u64,
     /// Reservations and admissions refused because their stream's record does not restore.
     pub unavailable_stream: u64,
@@ -533,6 +537,7 @@ impl TransactionReplay {
         for (record, unrestorable) in store.unrestorable.iter() {
             tracing::error!(
                 record = %record,
+                clear = %unrestorable.record_to_clear(record),
                 key = ?unrestorable.key,
                 failure = ?unrestorable.failure,
                 "replay record does not restore; its stream fails closed until it is cleared"

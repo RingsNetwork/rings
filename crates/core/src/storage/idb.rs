@@ -59,6 +59,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
 use crate::storage::KvStorageScan;
+use crate::storage::RecordIdentity;
 use crate::storage::ScannedRecord;
 use crate::storage::UndecodableRecord;
 use crate::utils::js_value;
@@ -495,8 +496,7 @@ where V: DeserializeOwned {
             let key = primary_key.as_string();
             UndecodableRecord {
                 name: key.clone().unwrap_or_else(|| format!("{primary_key:?}")),
-                key,
-                carried: None,
+                identity: key.map_or(RecordIdentity::Unreadable, RecordIdentity::FiledAs),
             }
         })
 }

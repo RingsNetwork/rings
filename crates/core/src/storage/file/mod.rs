@@ -87,6 +87,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
 use crate::storage::KvStorageScan;
+use crate::storage::RecordIdentity;
 use crate::storage::ScannedRecord;
 use crate::storage::UndecodableRecord;
 
@@ -534,30 +535,30 @@ impl FileStore {
 /// Decode `data`, the bytes of the file `name`, as the `(key, value)` record filed under it
 /// (pure).
 ///
-/// A record is the file's only if its key hashes to `name`: a pair that decodes but carries another
-/// key (a file copied or renamed over another record) is misfiled, and is reported as undecodable
-/// by its file, with the key it carries as `carried`, so that neither the key it is filed as nor
-/// the key it carries restores from it, and its owner can fail both closed. An undecodable record
-/// is named by its file and, when its leading key decodes and hashes to `name` (a torn record loses
-/// its tail first), by its key as well.
+/// A record is the file's only if its key hashes to `name`. A pair that decodes but names
+/// another key (a record copied or moved over another's file) is misfiled, and is reported as
+/// undecodable by its file, carrying that key, so that neither key restores from it and its
+/// owner can fail both closed. An undecodable record is named by its file, with the key its
+/// intact leading prefix names (a torn record loses its tail first): filed as that key when it
+/// hashes to `name`, and carrying it otherwise, so a torn misfiled record keeps its evidence
+/// too.
 fn decode_pair<V>(name: &str, data: &[u8]) -> std::result::Result<(String, V), UndecodableRecord>
 where V: DeserializeOwned {
-    let files_as = |key: &String| file_name_for(key) == name;
+    let identity = |key: String| match file_name_for(&key) == name {
+        true => RecordIdentity::FiledAs(key),
+        false => RecordIdentity::Carries(key),
+    };
+    let undecodable = |identity: RecordIdentity| UndecodableRecord {
+        name: name.to_owned(),
+        identity,
+    };
     match rings_codec::deserialize::<(String, V)>(data) {
-        Ok(pair) if files_as(&pair.0) => Ok(pair),
-        Ok((carried, _)) => Err(UndecodableRecord {
-            name: name.to_owned(),
-            key: None,
-            carried: Some(carried),
-        }),
-        Err(_) => Err(UndecodableRecord {
-            name: name.to_owned(),
-            key: rings_codec::deserialize_prefix::<String>(data)
-                .ok()
-                .map(|(key, _)| key)
-                .filter(files_as),
-            carried: None,
-        }),
+        Ok(pair) if file_name_for(&pair.0) == name => Ok(pair),
+        Ok((carried, _)) => Err(undecodable(RecordIdentity::Carries(carried))),
+        Err(_) => Err(undecodable(
+            rings_codec::deserialize_prefix::<String>(data)
+                .map_or(RecordIdentity::Unreadable, |(key, _)| identity(key)),
+        )),
     }
 }
 
@@ -569,8 +570,7 @@ where V: DeserializeOwned {
         Ok(data) => decode_pair(&name, &data),
         Err(_) => Err(UndecodableRecord {
             name,
-            key: None,
-            carried: None,
+            identity: RecordIdentity::Unreadable,
         }),
     }
 }
@@ -779,7 +779,9 @@ where V: Serialize + DeserializeOwned + Send + Sync
 fn entry_file_name(path: &Path) -> Option<&str> {
     let file_name = path.file_name().and_then(|name| name.to_str())?;
     // The image of `file_name_for`: lower-case hex only, so an entry is a record iff it could
-    // be the file of some key.
+    // be the file of some key. The trade: a record renamed to upper case is not a record at
+    // all (not indexed, scanned, counted or cleared), so its stream is absent rather than failed
+    // closed; a damaged file name is the absent-record case of #915.
     let lower_hex = |byte: &u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte);
     (file_name.len() == 40 && file_name.as_bytes().iter().all(lower_hex)).then_some(file_name)
 }

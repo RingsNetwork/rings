@@ -20,19 +20,21 @@
 //! decoded.
 //!
 //! **Law (fail closed per stream).** Let `name` be the storage's
-//! [`record_name`](crate::storage::KvStorageScan::record_name) and `U` the names of the
-//! records that do not restore: those the storage cannot read or decode (a torn, corrupt or
-//! unreadable file, reported by name, never deleted) and those that decode but fail the
-//! conditions above. Then
+//! [`record_name`](crate::storage::KvStorageScan::record_name) and `U` a set of names: the names
+//! of the records that do not restore (those the storage cannot read or decode, a torn, corrupt,
+//! unreadable or misfiled file reported by name and never deleted, and those that decode but
+//! fail the conditions above), together with the name of every key a misfiled record carries
+//! whose own record did not restore (a name that holds no record; its entry points at the
+//! misfiled record, the one to clear). Then
 //!
 //! ```text
 //! unavailable(table, key) ⟺ name(record_key(table, key)) ∈ U
 //! ```
 //!
-//! and an unavailable stream refuses every transition until its record is cleared, so no
-//! replay is admitted from a stream whose record is torn, corrupt or unreadable, and no sequence
-//! of such a sender stream is reused. The law is pointwise for the streams in the store: a record
-//! in `U` changes no other restored stream's state or availability, so each keeps its replay
+//! and an unavailable stream refuses every transition until its record is cleared, so no replay is
+//! admitted from a stream whose record is torn, corrupt, unreadable or misfiled, and no sequence of
+//! such a sender stream is reused. The law is pointwise for the streams in the store: a record in
+//! `U` changes no other restored stream's state or availability, so each keeps its replay
 //! guarantee; a new stream is affected only through the bounded-slots law below. [`restore`] is
 //! therefore total: it never fails as a whole.
 //!
@@ -57,6 +59,7 @@
 //! record without being decoded.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -67,7 +70,9 @@ use super::TRANSACTION_REPLAY_STREAM_CAPACITY;
 use super::TRANSACTION_REPLAY_WINDOW;
 use crate::error::Error;
 use crate::error::Result;
+use crate::storage::RecordIdentity;
 use crate::storage::ScannedRecord;
+use crate::storage::UndecodableRecord;
 
 /// Common prefix of the storage key of every stream record.
 const RECORD_KEY_PREFIX: &str = "rings-core:transaction-replay:stream";
@@ -221,15 +226,21 @@ pub(super) fn receiver_record(
     ))
 }
 
-/// Why one record of the store does not restore its stream.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Why an entry of `U` fails its stream closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RestoreFailure {
-    /// The storage cannot read or decode the record, or it is filed under another key's name:
-    /// a torn, corrupt, unreadable or misfiled record.
-    Undecodable,
-    /// The stream's own record is absent, but a misfiled record elsewhere carries its key: the
-    /// record was moved over another's file, so the stream's state is not where it belongs.
-    Misfiled,
+    /// The storage cannot read or decode the record (torn, corrupt or unreadable), or the
+    /// record names another key than the one it is filed as (misfiled): `carries` is that key.
+    Undecodable {
+        /// The key a misfiled record names, whose stream may have to fail closed too.
+        carries: Option<String>,
+    },
+    /// The stream's own record is absent, but the misfiled record `found_in` (a storage record
+    /// name) carries its key: the record was moved over another's file.
+    Misfiled {
+        /// The record name of the misfiled record that holds this stream's state.
+        found_in: String,
+    },
     /// The record's bytes decode as no stream.
     NotAStream,
     /// The record holds a receiver window that violates its invariant.
@@ -238,13 +249,28 @@ pub(super) enum RestoreFailure {
     Misplaced,
 }
 
-/// A record of the store that does not restore: its stream fails closed until it is cleared.
+/// An entry of `U`: a record that does not restore, or a stream whose record was moved into a
+/// misfiled record; its stream fails closed until the record is cleared.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct UnrestorableRecord {
-    /// The record's storage key, when the storage could read it.
+    /// The storage key of the stream the entry fails closed, when known: the key the record is
+    /// filed as (when readable), or, for [`RestoreFailure::Misfiled`], the key of the stream
+    /// whose record was moved.
     pub(super) key: Option<String>,
-    /// Why the record does not restore.
+    /// Why the entry fails its stream closed.
     pub(super) failure: RestoreFailure,
+}
+
+impl UnrestorableRecord {
+    /// The record an operator clears to restore service to this entry's stream, given the
+    /// entry's own `name`: the entry's own record, or, for a misfiled stream, the misfiled
+    /// record its state was moved into (the entry's own name holds no record).
+    pub(super) fn record_to_clear<'a>(&'a self, name: &'a str) -> &'a str {
+        match &self.failure {
+            RestoreFailure::Misfiled { found_in } => found_in.as_str(),
+            _ => name,
+        }
+    }
 }
 
 /// The replay store as one load restores it: the tables and the records that fail closed.
@@ -258,10 +284,9 @@ pub(super) struct ReplayStore {
 }
 
 impl ReplayStore {
-    /// The record name of stream `key` of `table` if its record is unrestorable, so that the
-    /// stream fails closed; `None` for an available stream (pure). `name` is the storage's
-    /// record naming. The lookup is one record key and one map probe, and none when `U` is
-    /// empty.
+    /// The record to clear if stream `key` of `table` is in `U`, so that the stream fails
+    /// closed; `None` for an available stream (pure). `name` is the storage's record naming.
+    /// The lookup is one record key and one map probe, and none when `U` is empty.
     pub(super) fn unavailable_record(
         &self,
         table: ReplayTable,
@@ -271,8 +296,11 @@ impl ReplayStore {
         if self.unrestorable.is_empty() {
             return Ok(None);
         }
-        let record = name(&record_key(table, key)?);
-        Ok(self.unrestorable.contains_key(&record).then_some(record))
+        let own = name(&record_key(table, key)?);
+        Ok(self
+            .unrestorable
+            .get(&own)
+            .map(|entry| entry.record_to_clear(&own).to_owned()))
     }
 
     /// Whether `table` may open one more stream: its streams and the unrestorable records,
@@ -329,49 +357,106 @@ fn restore_record(
         .ok_or(RestoreFailure::Misplaced)
 }
 
+/// Whether `storage_key` is the key of the shared-stream snapshot used before #898.
+fn is_shared_snapshot_key(storage_key: &str) -> bool {
+    storage_key == SHARED_STREAM_SNAPSHOT_KEY
+}
+
 /// What one scanned record contributes to the restored store.
 enum Contribution {
     /// The shared-stream snapshot of the key used before #898.
     SharedSnapshot,
-    /// A restored stream, with the storage key it restored from.
-    Stream(String, RestoredStream),
-    /// A record that does not restore, under its storage record name, with the storage key a
-    /// misfiled record carries.
-    Unrestorable(String, UnrestorableRecord, Option<String>),
+    /// A restored stream.
+    Stream {
+        /// The storage key it restored from.
+        storage_key: String,
+        /// The stream and its state.
+        stream: RestoredStream,
+    },
+    /// A record that does not restore.
+    Unrestorable {
+        /// Its storage record name.
+        name: String,
+        /// Its entry of `U`.
+        record: UnrestorableRecord,
+    },
 }
 
-/// Classify one scanned record (pure): the shared snapshot (named `shared_snapshot`, and never
-/// decoded), a restored stream, or an unrestorable record under its `name`.
+/// Classify one scanned record (pure): the shared snapshot (named `shared_snapshot`, never
+/// decoded, and recognised only while it names no other key), a restored stream, or an
+/// unrestorable record under its `name`.
 fn classify(
     record: ScannedRecord<ReplayRecord>,
     shared_snapshot: &str,
     name: &impl Fn(&str) -> String,
 ) -> Contribution {
     match record {
-        Err(undecodable) if undecodable.name == shared_snapshot => Contribution::SharedSnapshot,
-        Err(undecodable) => Contribution::Unrestorable(
-            undecodable.name,
-            UnrestorableRecord {
-                key: undecodable.key,
-                failure: RestoreFailure::Undecodable,
-            },
-            undecodable.carried,
-        ),
-        Ok((storage_key, _)) if storage_key == SHARED_STREAM_SNAPSHOT_KEY => {
+        Err(undecodable)
+            if undecodable.name == shared_snapshot
+                && !matches!(
+                    &undecodable.identity,
+                    RecordIdentity::Carries(key) if !is_shared_snapshot_key(key)
+                ) =>
+        {
+            Contribution::SharedSnapshot
+        }
+        Err(UndecodableRecord { name, identity }) => {
+            let (key, carries) = match identity {
+                RecordIdentity::Unreadable => (None, None),
+                RecordIdentity::FiledAs(key) => (Some(key), None),
+                RecordIdentity::Carries(key) => (None, Some(key)),
+            };
+            Contribution::Unrestorable {
+                name,
+                record: UnrestorableRecord {
+                    key,
+                    failure: RestoreFailure::Undecodable { carries },
+                },
+            }
+        }
+        Ok((storage_key, _)) if is_shared_snapshot_key(&storage_key) => {
             Contribution::SharedSnapshot
         }
         Ok((storage_key, ReplayRecord(bytes))) => match restore_record(&storage_key, &bytes) {
-            Ok(stream) => Contribution::Stream(storage_key, stream),
-            Err(failure) => Contribution::Unrestorable(
-                name(&storage_key),
-                UnrestorableRecord {
+            Ok(stream) => Contribution::Stream {
+                storage_key,
+                stream,
+            },
+            Err(failure) => Contribution::Unrestorable {
+                name: name(&storage_key),
+                record: UnrestorableRecord {
                     key: Some(storage_key),
                     failure,
                 },
-                None,
-            ),
+            },
         },
     }
+}
+
+/// The streams a restored store must also fail closed because a misfiled record carries their
+/// key while their own record did not restore (pure): each is `(name(k), entry)`, the entry
+/// naming the misfiled record it was found in.
+fn misfiled_streams(
+    unrestorable: &BTreeMap<String, UnrestorableRecord>,
+    restored_keys: &BTreeSet<String>,
+    name: &impl Fn(&str) -> String,
+) -> Vec<(String, UnrestorableRecord)> {
+    unrestorable
+        .iter()
+        .filter_map(|(found_in, entry)| match &entry.failure {
+            RestoreFailure::Undecodable {
+                carries: Some(carried),
+            } if !is_shared_snapshot_key(carried) && !restored_keys.contains(carried) => {
+                Some((name(carried), UnrestorableRecord {
+                    key: Some(carried.clone()),
+                    failure: RestoreFailure::Misfiled {
+                        found_in: found_in.clone(),
+                    },
+                }))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Restore the store from every record a scan returned (pure and total).
@@ -380,18 +465,19 @@ fn classify(
 /// Each record either restores its stream or joins the unrestorable records under its name
 /// (the fail-closed-per-stream law); the shared-stream snapshot is reported and never decoded,
 /// whether or not the storage could decode its framing. A misfiled record also fails closed the
-/// stream whose key it carries, unless that stream's own record restored it.
+/// stream whose key it carries, unless that stream's own record restored it, and that entry
+/// names the misfiled record as the one to clear.
 ///
 /// ```text
 /// restore = close ∘ foldl step (∅, ∅, false) ∘ map classify
 ///
 ///   scanned record r ──▶ classify
-///     r names the shared snapshot ─────────────▶ holds_shared_snapshot := true
-///     storage could not decode r ──────────────▶ U[r.name]       := Undecodable
-///     restore_record(r) = Err(failure) ────────▶ U[name(r.key)]  := failure
-///     restore_record(r) = Ok(stream) ──────────▶ tables[stream]  := stream.state
-///   close: ∀ k carried by a misfiled record, k not restored, k ≠ snapshot
-///                                   ──────────▶ U[name(k)]      := Misfiled
+///     r is the shared snapshot, naming no other key ──▶ holds_shared_snapshot := true
+///     storage could not decode r ─────────▶ U[r.name]      := Undecodable { carries }
+///     restore_record(r) = Err(failure) ───▶ U[name(r.key)] := failure
+///     restore_record(r) = Ok(stream) ─────▶ tables[stream] := stream.state
+///   close: ∀ U[f] = Undecodable { carries: k }, k not restored, k ≠ snapshot
+///                              ───────────▶ U[name(k)]     := Misfiled { found_in: f }
 /// ```
 pub(super) fn restore(
     records: Vec<ScannedRecord<ReplayRecord>>,
@@ -402,15 +488,17 @@ pub(super) fn restore(
         store: ReplayStore::default(),
         holds_shared_snapshot: false,
     };
-    let mut restored_keys = std::collections::BTreeSet::new();
-    let mut carried_keys = Vec::new();
+    let mut restored_keys = BTreeSet::new();
     for contribution in records
         .into_iter()
         .map(|record| classify(record, &shared_snapshot, &name))
     {
         match contribution {
             Contribution::SharedSnapshot => restored.holds_shared_snapshot = true,
-            Contribution::Stream(storage_key, stream) => {
+            Contribution::Stream {
+                storage_key,
+                stream,
+            } => {
                 restored_keys.insert(storage_key);
                 match stream {
                     RestoredStream::Sender(key, last) => {
@@ -421,23 +509,19 @@ pub(super) fn restore(
                     }
                 }
             }
-            Contribution::Unrestorable(record_name, record, carried) => {
-                restored.store.unrestorable.insert(record_name, record);
-                carried_keys.extend(carried);
+            Contribution::Unrestorable { name, record } => {
+                restored.store.unrestorable.insert(name, record);
             }
         }
     }
-    for carried in carried_keys {
-        if carried != SHARED_STREAM_SNAPSHOT_KEY && !restored_keys.contains(&carried) {
-            restored
-                .store
-                .unrestorable
-                .entry(name(&carried))
-                .or_insert(UnrestorableRecord {
-                    key: Some(carried),
-                    failure: RestoreFailure::Misfiled,
-                });
-        }
+    for (carried_name, entry) in
+        misfiled_streams(&restored.store.unrestorable, &restored_keys, &name)
+    {
+        restored
+            .store
+            .unrestorable
+            .entry(carried_name)
+            .or_insert(entry);
     }
     restored
 }
@@ -472,6 +556,7 @@ mod tests {
     use crate::message::replay::TransactionDigest;
     use crate::message::replay::TRANSACTION_REPLAY_WINDOW;
     use crate::message::MessageCategory;
+    use crate::storage::RecordIdentity;
     use crate::storage::ScannedRecord;
     use crate::storage::UndecodableRecord;
 
@@ -596,7 +681,7 @@ mod tests {
             .store
             .unrestorable
             .iter()
-            .map(|(name, record)| (name.clone(), record.key.clone(), record.failure))
+            .map(|(name, record)| (name.clone(), record.key.clone(), record.failure.clone()))
             .collect::<Vec<_>>();
         let mut expected = vec![
             (
@@ -638,13 +723,11 @@ mod tests {
         let records = vec![
             Err(UndecodableRecord {
                 name: by_digest(&torn_slot),
-                key: None,
-                carried: None,
+                identity: RecordIdentity::Unreadable,
             }),
             Err(UndecodableRecord {
                 name: by_digest(SHARED_STREAM_SNAPSHOT_KEY),
-                key: None,
-                carried: None,
+                identity: RecordIdentity::Unreadable,
             }),
             Ok(sender_record(&torn, 5)?),
         ];
@@ -655,7 +738,7 @@ mod tests {
             restored.store.unrestorable.get(&by_digest(&torn_slot)),
             Some(&UnrestorableRecord {
                 key: None,
-                failure: RestoreFailure::Undecodable,
+                failure: RestoreFailure::Undecodable { carries: None },
             })
         );
         assert_eq!(
@@ -680,6 +763,29 @@ mod tests {
         Ok(())
     }
 
+    /// A stream record moved over the former shared snapshot's name is not taken for the
+    /// snapshot (which would be deleted): it fails its carried stream closed like any misfiled
+    /// record.
+    #[test]
+    fn test_a_record_moved_over_the_snapshot_name_is_not_the_snapshot() -> Result<()> {
+        let carried = record_key(ReplayTable::Sender, &maximal_key(3))?;
+        let restored = restore(
+            vec![Err(UndecodableRecord {
+                name: by_digest(SHARED_STREAM_SNAPSHOT_KEY),
+                identity: RecordIdentity::Carries(carried.clone()),
+            })],
+            by_digest,
+        );
+        assert!(!restored.holds_shared_snapshot);
+        assert_eq!(
+            restored
+                .store
+                .unavailable_record(ReplayTable::Sender, &maximal_key(3), by_digest)?,
+            Some(by_digest(SHARED_STREAM_SNAPSHOT_KEY))
+        );
+        Ok(())
+    }
+
     /// A misfiled record fails closed the stream whose key it carries iff that stream's own
     /// record did not restore it; the file it is filed under fails closed either way.
     #[test]
@@ -689,8 +795,7 @@ mod tests {
         let misfiled = || {
             Err(UndecodableRecord {
                 name: by_digest(&filed_as),
-                key: None,
-                carried: Some(carried.clone()),
+                identity: RecordIdentity::Carries(carried.clone()),
             })
         };
 
@@ -699,10 +804,19 @@ mod tests {
             moved.store.unrestorable.get(&by_digest(&carried)),
             Some(&UnrestorableRecord {
                 key: Some(carried.clone()),
-                failure: RestoreFailure::Misfiled,
+                failure: RestoreFailure::Misfiled {
+                    found_in: by_digest(&filed_as),
+                },
             })
         );
         assert!(moved.store.unrestorable.contains_key(&by_digest(&filed_as)));
+        // The moved stream's refusal names the misfiled record, the one to clear.
+        assert_eq!(
+            moved
+                .store
+                .unavailable_record(ReplayTable::Receiver, &maximal_key(2), by_digest)?,
+            Some(by_digest(&filed_as))
+        );
 
         let copied = restore(
             vec![
@@ -737,7 +851,7 @@ mod tests {
             .unrestorable
             .insert("torn".to_owned(), UnrestorableRecord {
                 key: None,
-                failure: RestoreFailure::Undecodable,
+                failure: RestoreFailure::Undecodable { carries: None },
             });
         assert!(!store.admits_new_stream(ReplayTable::Sender));
         assert!(store.admits_new_stream(ReplayTable::Receiver));

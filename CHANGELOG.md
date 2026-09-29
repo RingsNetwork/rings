@@ -8,8 +8,9 @@
   and admission re-read the whole store (up to 32,768 records) under the replay lock and failed
   again, so the node could neither sign nor accept traffic. Now the store is restored from one scan
   and cached; each bad record is kept, logged once, and counted
-  (`ReplayCounters::unrestorable_record`), and only the stream it is filed as refuses reservation
-  and admission, with `Error::TransactionReplayStreamUnavailable { key, record }` (counted in
+  (`ReplayCounters::unrestorable_record`), and only the stream it is filed as (and, for a misfiled
+  record whose carried stream has no record of its own, that stream too) refuses reservation and
+  admission, with `Error::TransactionReplayStreamUnavailable { key, record }` (counted in
   `ReplayCounters::unavailable_stream`). Every other stream in the store runs normally; each bad
   record holds one slot of both tables' stream bounds. An operator clears one stream by removing the
   named record with the node stopped (see the replay chapter). An absent record still restarts its
