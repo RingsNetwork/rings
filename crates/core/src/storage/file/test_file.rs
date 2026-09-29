@@ -261,3 +261,127 @@ async fn test_reopen_restores_budget_in_write_order() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Write `bytes` as the record file of `key` under `root`, as a crash would have left it.
+fn plant_record(root: &std::path::Path, key: &str, bytes: &[u8]) -> String {
+    std::fs::create_dir_all(root).expect("root");
+    let name = file_name_for(key);
+    std::fs::write(root.join(&name), bytes).expect("plant record");
+    name
+}
+
+/// Decode law of an authoritative store: a torn record (its tail lost) is reported by `get`
+/// and `get_all` with its file and its intact key, and never deleted.
+#[tokio::test]
+async fn test_authoritative_store_reports_a_torn_record_and_keeps_it() {
+    let root = temp_root("torn");
+    let whole = rings_codec::serialize(&("stream", "window")).expect("record serializes");
+    let torn = whole.get(..whole.len() - 3).expect("torn prefix");
+    let name = plant_record(&root, "stream", torn);
+    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+    let expected = UndecodableRecord {
+        name: name.clone(),
+        key: Some("stream".to_owned()),
+    };
+
+    assert!(matches!(
+        <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
+        Err(Error::StorageRecordUndecodable(ref record)) if *record == expected
+    ));
+    assert!(matches!(
+        <FileStorage as KvStorageInterface<String>>::get_all(&storage).await,
+        Err(Error::StorageRecordUndecodable(ref record)) if *record == expected
+    ));
+    assert_eq!(std::fs::read(root.join(&name)).expect("record kept"), torn);
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::count(&storage)
+            .await
+            .expect("count"),
+        1
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Decode law of an authoritative store: a record truncated to nothing, which a crash between
+/// an unflushed write and its rename leaves behind, is reported by its file alone (its key is
+/// lost with its bytes) and never deleted, even across a reopen.
+#[tokio::test]
+async fn test_authoritative_store_reports_an_empty_record_by_its_file() {
+    let root = temp_root("empty");
+    let name = plant_record(&root, "stream", &[]);
+    let expected = UndecodableRecord {
+        name: name.clone(),
+        key: None,
+    };
+    for _ in 0..2 {
+        let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
+            .await
+            .expect("open");
+        assert!(matches!(
+            <FileStorage as KvStorageInterface<String>>::get_all(&storage).await,
+            Err(Error::StorageRecordUndecodable(ref record)) if *record == expected
+        ));
+        assert!(root.join(&name).exists());
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A key prefix that decodes but hashes to another file is not the record's key: the report
+/// names the file alone.
+#[tokio::test]
+async fn test_a_misfiled_key_prefix_is_not_reported_as_the_key() {
+    let root = temp_root("misfiled");
+    let other = rings_codec::serialize(&"other").expect("key serializes");
+    let name = plant_record(&root, "stream", &other);
+    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+
+    assert!(matches!(
+        <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
+        Err(Error::StorageRecordUndecodable(UndecodableRecord { name: ref reported, key: None }))
+            if *reported == name
+    ));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Durability law, observed through its effect: an authoritative store's writes, rewrites and
+/// removals round-trip through a reopen and leave no temporary file behind.
+#[tokio::test]
+async fn test_authoritative_writes_round_trip_through_a_reopen() {
+    let root = temp_root("authoritative");
+    {
+        let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
+            .await
+            .expect("open");
+        storage.put("a", &"v".to_string()).await.expect("put a");
+        storage.put("b", &"v".to_string()).await.expect("put b");
+        storage.put("a", &"w".to_string()).await.expect("rewrite a");
+        <FileStorage as KvStorageInterface<String>>::remove(&storage, "b")
+            .await
+            .expect("remove b");
+    }
+    let reopened = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
+        .await
+        .expect("reopen");
+    assert_eq!(stored_keys(&reopened).await, ["a"]);
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::get(&reopened, "a")
+            .await
+            .expect("get a"),
+        Some("w".to_owned())
+    );
+    let temporaries = std::fs::read_dir(&root)
+        .expect("list root")
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+        .count();
+    assert_eq!(temporaries, 0);
+
+    let _ = std::fs::remove_dir_all(root);
+}

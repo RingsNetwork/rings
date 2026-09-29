@@ -694,6 +694,10 @@ pub enum Error {
         capacity: u64,
     },
 
+    /// A storage holds a record it cannot decode; the record is kept, never deleted.
+    #[error("Storage cannot decode {0}")]
+    StorageRecordUndecodable(crate::storage::UndecodableRecord),
+
     /// Message invalid: {0}
     #[error("Message invalid: {0}")]
     InvalidMessage(String),

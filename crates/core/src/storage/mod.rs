@@ -22,6 +22,29 @@ use async_trait::async_trait;
 use crate::error::Result;
 pub use crate::storage::memory::MemStorage;
 
+/// A record a storage holds but cannot decode, named so that its owner can fail closed on it
+/// instead of losing it.
+///
+/// A storage that reports such a record keeps it: only its owner, or an operator, may decide
+/// that the state it held is forfeit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UndecodableRecord {
+    /// The name the storage files the record under: its key, or the backend's image of the
+    /// key where the backend does not file records by key (`FileStorage`: the file name).
+    pub name: String,
+    /// The record's key, when the part of the record that carries it is intact.
+    pub key: Option<String>,
+}
+
+impl std::fmt::Display for UndecodableRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.key.as_deref() {
+            Some(key) => write!(f, "record {} (key {key})", self.name),
+            None => write!(f, "record {} (key unreadable)", self.name),
+        }
+    }
+}
+
 /// Backend-neutral operations over stored key-value pairs.
 ///
 /// This interface does not imply a common capacity unit, eviction order, or overwrite effect.

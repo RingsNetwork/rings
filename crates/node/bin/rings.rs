@@ -879,8 +879,10 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         )
         .await?,
     );
+    // The replay store is the only copy of its streams' state: its writes are flushed and an
+    // undecodable record is reported and kept, so replay fails closed on it (#909).
     let per_transaction_replay_storage = Box::new(
-        FileStorage::new_with_cap_and_path(
+        FileStorage::new_authoritative_with_cap_and_path(
             TRANSACTION_REPLAY_STORAGE_CAPACITY,
             transaction_replay_storage_path(&data_storage.path),
         )

@@ -213,9 +213,11 @@ originators of one class can still reorder between reserving a sequence and subm
 The replay store keeps one record per stream, under
 `rings-core:transaction-replay:stream:{sender|receiver}:<hex key>`, each carrying its own stream
 key; a record under any other key, or not under its own key, makes the store invalid and fails
-closed. That covers the records the storage returns: the native file store deletes a file whose
-framing does not decode before replay sees it, and writes without `fsync`, so a torn file left by a
-crash is dropped and its stream forgotten, reopening replay for that stream (tracked in #909). A
+closed. The native daemon opens the replay store as an authoritative file store (#909): each write
+is flushed to stable storage before its rename and the directory after it, so a crash leaves every
+record whole at its previous or its new value, and a record whose framing does not decode is
+reported by its file (and its key, when intact) and never deleted, so the load fails closed on it
+too. A failed load leaves the tables unloaded and every later call retries it (tracked in #910). A
 load that finds the snapshot of the shared streams, stored under `rings-core:transaction-replay`,
 deletes it without decoding it, since its keys cannot name a class. The deletion is best effort: the
 former snapshot is never decoded, so a failed deletion is counted as a replay persistence failure

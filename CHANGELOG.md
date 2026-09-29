@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Open the native transaction replay store as an authoritative `FileStorage` (#909). Its `put`
+  flushes the temporary file before the rename and the directory after it (removals flush the
+  directory too), so a crash leaves each record whole at its previous or its new value. A record
+  whose framing does not decode is reported as `Error::StorageRecordUndecodable`, naming its file
+  and, when its key prefix is intact, its key; it is never deleted, so replay fails closed on it
+  instead of reopening its stream. `FileStorage::new_with_cap_and_path` keeps the disposable
+  behaviour (no flush, undecodable records retired) for the DHT, measurement, evidence and onion
+  entry-guard stores (the entry-guard store's policy is #911);
+  `FileStorage::new_authoritative_with_cap_and_path` opens the new mode.
+
 - Keep up to `OUTBOUND_LANE_WINDOW` (8) transfers in flight per outbound class lane instead of
   waiting for each delivery before the next (#899). On native, a delivery is the peer's SCTP
   SACK, which the receiver delays by up to 200 ms; a stop-and-wait lane paid that per message.

@@ -123,10 +123,12 @@ rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot windo
 A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
 (1161 bytes: a 92-byte key and a 1066-byte window, with tag and length prefix), so the cost of an
 admission does not grow with the number of streams retained. On load, every record must decode and
-sit under its own key, or the store is invalid and replay fails closed. This holds for the records
-the storage returns: the native file store deletes a file whose framing does not decode before
-replay sees it, and writes without `fsync`, so a torn file left by a crash is dropped and its stream
-forgotten, which reopens replay for that stream (tracked in #909). One lock serializes all replay
+sit under its own key, or the store is invalid and replay fails closed. The native daemon opens the
+replay store as an authoritative file store (#909): each write is flushed to stable storage before
+its rename and the directory after it, so a crash leaves every record whole at its previous or its
+new value, and a record whose framing does not decode is reported and never deleted, so the load
+fails closed on it too. A failed load leaves the tables unloaded, and every later call retries it
+(tracked in #910). One lock serializes all replay
 transitions and is held across each record write, so store write latency bounds the node-wide
 transition rate. Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams:
 every class stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each
