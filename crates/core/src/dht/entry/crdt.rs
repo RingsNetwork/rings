@@ -129,8 +129,19 @@ pub struct ElementDigest(pub [u8; 32]);
 thread_local! {
     /// Test instrumentation: the element digests computed on this thread, so a test can bound
     /// the hashing an operation performs.
-    pub(crate) static DIGESTS_COMPUTED: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
+    static DIGESTS_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test instrumentation: reset this thread's digest count.
+#[cfg(test)]
+pub(crate) fn reset_digests() {
+    DIGESTS_COMPUTED.with(|computed| computed.set(0));
+}
+
+/// Test instrumentation: the element digests computed on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn digests_computed() -> usize {
+    DIGESTS_COMPUTED.with(|computed| computed.get())
 }
 
 impl ElementDigest {

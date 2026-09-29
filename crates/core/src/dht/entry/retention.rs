@@ -344,7 +344,7 @@ impl Entry {
     /// elapsed. A carrier held live past its bound by an unstable remove or register serves no
     /// element, and answering it as found would shadow a replica that still holds data; it
     /// answers as absent, and its remove side still spreads by join on hand-off and repair.
-    pub(crate) fn answers_lookups_at(&self, now_ms: u128) -> bool {
+    pub fn answers_lookups_at(&self, now_ms: u128) -> bool {
         self.bound_live_at(now_ms)
     }
 

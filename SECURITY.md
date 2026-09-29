@@ -679,7 +679,7 @@ tombstones per registrant and never compacts: about 200, or 25 KB, per registran
 default 30 s heartbeat. Every registrant reads the registry on each heartbeat, so a registry of
 `N` registrants costs its owners about `N² × 25 KB` of replies per heartbeat interval, and one
 registrant's tombstones alone exceed one storage-sync batch, so a registry hand-off travels as
-an oversize single-entry batch. It does not prevent a Sybil
+an oversize single-entry batch. Signing and expiry do not prevent a Sybil
 operator from publishing many live descriptors or many exit candidates. The routes
 the privacy layer selects from these registries, and the caveat that follows from
 their candidate set, are specified under [Privacy layer](#privacy-layer).

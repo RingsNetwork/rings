@@ -84,10 +84,12 @@ impl FromStr for StorageKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Projection {
     /// Write it back, so retired payload bytes stop occupying the store: the store is the
-    /// replicated storage, whose reads run under the storage transition.
+    /// replicated storage, whose reads run under the storage transition, and the reader writes
+    /// nothing of its own.
     WrittenBack,
-    /// Return it only: the store is the fetch cache, which has no transition, so a write-back
-    /// could overwrite a concurrent put.
+    /// Return it only: the reader writes the slot itself under the transition (a join or an
+    /// operation), whose write subsumes the write-back, or the store is the fetch cache, which
+    /// has no transition, so a write-back could overwrite a concurrent put.
     ReturnedOnly,
 }
 
@@ -112,11 +114,14 @@ async fn live_entry(
     }
 }
 
-/// The counts a projection can only lower: elements, removes, and whether a register is held.
-/// [`Entry::retired_at`] only drops, so a projection with the same shape is the same value.
-fn projection_shape(entry: &Entry) -> (usize, usize, bool) {
+/// The counts a projection can change: elements, element dots, removes, and whether a register
+/// is held. On a stored value, which is normalized, [`Entry::retired_at`] only drops, so a
+/// projection with the same shape is the same value; a misaligned value (elements and dots of
+/// different lengths) differs in shape from its normalization, so it is written back once.
+fn projection_shape(entry: &Entry) -> (usize, usize, usize, bool) {
     (
         entry.data.len(),
+        entry.crdt.dots.len(),
         entry.crdt.tombstones.len(),
         entry.crdt.register.is_some(),
     )
@@ -244,12 +249,12 @@ impl PeerRing {
         let _transition = self.storage_transition.lock().await;
         // The join normalizes the union once, so the incoming value is normalized on its own
         // only when there is nothing to join it with.
-        let stored =
-            match live_entry(&self.storage, &key, now_ms, Projection::WrittenBack).await? {
-                Some(local) => local.join(incoming)?,
-                None => incoming.try_into_storage_entry()?,
-            }
-            .retired_at(now_ms);
+        let stored = match live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await?
+        {
+            Some(local) => local.join(incoming)?,
+            None => incoming.try_into_storage_entry()?,
+        }
+        .retired_at(now_ms);
         self.storage.put(&key, &stored).await?;
         Ok(stored)
     }
@@ -290,7 +295,7 @@ impl PeerRing {
         }
         let key = StorageKey::new(op.kind(), placement).to_string();
         let _transition = self.storage_transition.lock().await;
-        let local = match live_entry(&self.storage, &key, now_ms, Projection::WrittenBack).await? {
+        let local = match live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await? {
             Some(local) => local,
             None => op.gen_default_entry()?,
         };
@@ -458,6 +463,20 @@ impl PeerRing {
     }
 }
 
+impl PeerRing {
+    /// The live cached carrier at `entry_key`, projected at `now_ms`; the fetch cache has no
+    /// transition, so the projection is returned only.
+    async fn cached_at(&self, entry_key: Did, now_ms: u128) -> Result<Option<Entry>> {
+        live_entry(
+            &self.cache,
+            &entry_key.to_string(),
+            now_ms,
+            Projection::ReturnedOnly,
+        )
+        .await
+    }
+}
+
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageCache<PeerRingAction> for PeerRing {
@@ -477,13 +496,21 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         self.cache.put(&entry.did.to_string(), &entry).await
     }
 
+    /// Read a cached entry, as a lookup serves it.
+    ///
+    /// Post: a cached carrier past its retention bound, held live only by an unstable remove or
+    /// register, is served as absent, as a replica serves it (see
+    /// [`Entry::answers_lookups_at`]): a cache entry that serves no element must not answer a
+    /// fetch as a found, empty topic while the owners hold live data.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
-        live_entry(
-            &self.cache,
-            &entry_key.to_string(),
-            get_epoch_ms(),
-            Projection::ReturnedOnly,
-        )
-        .await
+        let now_ms = get_epoch_ms();
+        let held = self.cached_at(entry_key, now_ms).await?;
+        Ok(held.filter(|entry| entry.answers_lookups_at(now_ms)))
+    }
+
+    /// Read every live cached carrier, one past its bound that serves no element included: its
+    /// removes are what read-repair of a missed placement spreads.
+    async fn local_cache_held(&self, entry_key: Did) -> Result<Option<Entry>> {
+        self.cached_at(entry_key, get_epoch_ms()).await
     }
 }

@@ -107,6 +107,10 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 pub trait ChordStorageCache<Action>: Chord<Action> {
     /// Cache fetched resource locally.
     async fn local_cache_put(&self, entry: Entry) -> Result<()>;
-    /// Get a live cached entry.
+    /// Get a live cached entry as a lookup serves it: a carrier past its retention bound is
+    /// absent.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>>;
+    /// Get every live cached carrier, one past its bound that serves no element included, for
+    /// read-repair of a missed placement.
+    async fn local_cache_held(&self, entry_key: Did) -> Result<Option<Entry>>;
 }

@@ -38,6 +38,7 @@ use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
+use crate::processor::dht_lookup_poll_budget;
 use crate::processor::Processor;
 
 const DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -82,12 +83,15 @@ pub(crate) const fn default_advertise_presence() -> bool {
 /// A descriptor write requests the data default lifetime `L` (which bounds the registry of a
 /// sole registrant, and is below the element horizon), stamped on the publisher's clock; an
 /// owner whose clock runs up to `σ = TS_OFFSET_TOLERANCE_MS` ahead retires it at `L − σ` of the
-/// publisher's time. The next heartbeat must land before that, so the interval is below
-/// `L − σ`, and the publish latency must fit in what the interval leaves of it.
+/// publisher's time. Each heartbeat first fetches the registry, polling for up to the fetch-poll
+/// budget `P`, before it appends, so the interval is below `L − σ − P`; the append's own
+/// network latency must fit in what the interval leaves of it.
 pub(crate) fn registry_refresh_bound() -> Duration {
-    let lifetime_ms = u128::from(entry::EntryKind::Data.default_lifetime_ms());
-    let bound_ms = lifetime_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS);
-    Duration::from_millis(u64::try_from(bound_ms).unwrap_or(u64::MAX))
+    let lifetime = Duration::from_millis(entry::EntryKind::Data.default_lifetime_ms());
+    let skew = Duration::from_millis(u64::try_from(TS_OFFSET_TOLERANCE_MS).unwrap_or(u64::MAX));
+    lifetime
+        .saturating_sub(skew)
+        .saturating_sub(dht_lookup_poll_budget())
 }
 
 /// Validate a registry heartbeat interval against [`registry_refresh_bound`]; `setting` names
@@ -100,7 +104,7 @@ pub(crate) fn validate_registry_heartbeat(
     if heartbeat_interval >= bound {
         return Err(Error::InvalidConfig(format!(
             "{setting} ({heartbeat_interval:?}) must be less than {bound:?}, \
-             the lifetime of a registry descriptor"
+             a registry descriptor's lifetime less the clock-skew tolerance and the fetch-poll budget"
         )));
     }
     Ok(())

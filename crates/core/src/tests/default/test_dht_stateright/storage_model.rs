@@ -266,6 +266,7 @@ fn relay_add_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
     }
 }
 
+/// A relay-inbox removal of the held message `label`, covering its dots up to `dot`.
 fn relay_remove_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
     Entry {
         did,

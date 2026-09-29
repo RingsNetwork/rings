@@ -95,18 +95,18 @@
     remover had forgotten under a later one can no longer resurrect it (#874).
     `EntryCrdt::tombstones` holds `EntryTombstone` (a Keccak-256 `ElementDigest` of the value
     and the greatest dot it covers), at most one per value.
-  - A carrier past its retention bound answers lookups as absent, so the lookup asks the next
-    placement and read-repair joins the missed one, and a read that retires part of a stored
-    carrier writes the projection back.
-  - Registry heartbeat intervals must be below 597 s (the 10-minute descriptor lifetime less
-    the 3 s skew tolerance), for the online-node and onion-exit registries alike; a node whose
-    configuration exceeds it refuses to start.
-  - Stores are opened with a `RecordAuthority` (`rings_core::storage`): a disposable store
-    retires a record it cannot decode, an authoritative one reports it and keeps it.
+  - A carrier past its retention bound answers lookups as absent, from a replica and from a
+    reader's fetch cache alike, so the lookup asks the next placement and read-repair joins
+    the missed one; a read that retires part of a stored carrier writes the projection back.
+  - Registry heartbeat intervals must be below the descriptor lifetime less the clock-skew
+    tolerance and the fetch-poll budget (595 s by default), for the online-node and onion-exit
+    registries alike; a node whose configuration exceeds it refuses to start.
+  - IndexedDB stores are opened with a `RecordAuthority` (`rings_core::storage`): a disposable
+    store retires a record it cannot decode, an authoritative one reports it and keeps it.
     `IdbStorage::new_with_cap_and_name` now opens a disposable store, and the new
-    `IdbStorage::new_with_cap_name_and_authority` takes the authority; the browser replay
-    store is authoritative and every other browser store disposable, matching the native
-    stores of #914.
+    `IdbStorage::new_with_cap_name_and_authority` takes the authority; the browser replay store
+    is authoritative and every other browser store disposable. Native file storage is
+    unchanged here: it retires an undecodable record in every store.
   - Cutover: the wire format of storage entries and operations changes, so every node of a
     network must upgrade together; the version is bumped at release. Stored carriers of the old
     format that hold a tombstone no longer decode, and both native file storage and the browser
