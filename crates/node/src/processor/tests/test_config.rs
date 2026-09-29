@@ -108,7 +108,7 @@ fn test_registry_heartbeat_must_refresh_before_a_descriptor_expires() -> Result<
         ProcessorBuilder::from_config(&presence).and_then(ProcessorBuilder::build),
         Err(Error::InvalidConfig(message))
             if message.contains("online_node_heartbeat_interval")
-                && message.contains("lifetime of a registry descriptor")
+                && message.contains("registry descriptor's lifetime")
     ));
 
     let mut exit = ProcessorConfig::new(
@@ -126,7 +126,7 @@ fn test_registry_heartbeat_must_refresh_before_a_descriptor_expires() -> Result<
         ProcessorBuilder::from_config(&exit).and_then(ProcessorBuilder::build),
         Err(Error::InvalidConfig(message))
             if message.contains("onion_exit_heartbeat_interval")
-                && message.contains("lifetime of a registry descriptor")
+                && message.contains("registry descriptor's lifetime")
     ));
     Ok(())
 }

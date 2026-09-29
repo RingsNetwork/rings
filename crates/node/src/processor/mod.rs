@@ -116,7 +116,12 @@ pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
 
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
+const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: u32 = 40;
+
+/// The longest a DHT fetch polls the cache for its reply: its attempts times their interval.
+pub(crate) const fn dht_lookup_poll_budget() -> Duration {
+    DHT_LOOKUP_CACHE_POLL_INTERVAL.saturating_mul(DHT_LOOKUP_CACHE_POLL_ATTEMPTS)
+}
 
 async fn sleep_registration_interval_with_stop(
     interval: Duration,

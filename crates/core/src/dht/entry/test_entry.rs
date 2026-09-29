@@ -1164,9 +1164,9 @@ fn test_digest_work_is_bounded_on_a_full_carrier() -> Result<()> {
     assert_eq!(full.data.len(), ENTRY_DATA_MAX_LEN);
 
     let digests = |operation: &dyn Fn() -> Result<Entry>| -> Result<(Entry, usize)> {
-        DIGESTS_COMPUTED.with(|computed| computed.set(0));
+        reset_digests();
         let result = operation()?;
-        Ok((result, DIGESTS_COMPUTED.with(|computed| computed.get())))
+        Ok((result, digests_computed()))
     };
     let (untouched, hashed) = digests(&|| Ok(full.clone().retired_at(NOW_MS + 1)))?;
     assert_eq!((untouched == full, hashed), (true, 0));

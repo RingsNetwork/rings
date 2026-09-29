@@ -40,12 +40,12 @@ use crate::utils::get_epoch_ms;
 /// ChordStorageInterface should imply necessary method for DHT storage
 ///
 /// Element lifetime: every element of a data topic expires at the earlier of its dot's issue time
-/// plus the element horizon `H = EntryKind::Data.max_lifetime_ms()` (100 minutes) and its
-/// topic's retention bound, the latest bound any write joined into the topic requested (a plain
-/// write requests `DEFAULT_TTL_MS`, 10 minutes). Writing the value again issues a fresh dot and
-/// a fresh bound: rewrite each value within 10 minutes unless other writes keep the topic alive,
-/// and within `H` in any case. A removal covers every earlier dot of its value, and is collected
-/// `H + σ` after the dot it covers, with `σ = TS_OFFSET_TOLERANCE_MS`.
+/// plus the element horizon `H = EntryKind::Data.max_lifetime_ms()` and its topic's retention
+/// bound, the latest bound any write joined into the topic requested (a plain write requests
+/// `EntryKind::Data.default_lifetime_ms()`); writing the value again issues a fresh dot and a
+/// fresh bound. A removal covers every earlier dot of its value, and is collected `H + σ` after
+/// the dot it covers, with `σ = TS_OFFSET_TOLERANCE_MS`. The laws are stated in the `retention`
+/// module of `dht::entry`.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterface {
@@ -444,7 +444,7 @@ impl HandleMsg<FoundEntry> for MessageHandler {
             repair_observed_storage_misses(self.transport.clone(), data.clone(), msg.redundancy)
                 .await?;
         } else if !msg.misses.is_empty() {
-            if let Some(entry) = self.dht.local_cache_get(msg.resource).await? {
+            if let Some(entry) = self.dht.local_cache_held(msg.resource).await? {
                 repair_observed_storage_misses(self.transport.clone(), entry, msg.redundancy)
                     .await?;
             }

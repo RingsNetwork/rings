@@ -12,7 +12,9 @@ use super::sync::SYNC_BATCH_MAX_BYTES;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::delegation::DelegateeKey;
+use crate::dht::entry::digests_computed;
 use crate::dht::entry::inbox::inbox_key;
+use crate::dht::entry::reset_digests;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryDot;
 use crate::dht::entry::EntryKind;
@@ -23,7 +25,6 @@ use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
-use crate::dht::entry::DIGESTS_COMPUTED;
 use crate::dht::stabilization::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
 use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
@@ -1250,9 +1251,9 @@ fn carrier_with_a_remove(did: Did, now_ms: u128) -> Result<Entry> {
 
 /// Run `operation` and count the element digests it computes on this thread.
 async fn digests_of<T>(operation: impl std::future::Future<Output = Result<T>>) -> Result<usize> {
-    DIGESTS_COMPUTED.with(|computed| computed.set(0));
+    reset_digests();
     operation.await?;
-    Ok(DIGESTS_COMPUTED.with(|computed| computed.get()))
+    Ok(digests_computed())
 }
 
 /// Review B2-M2, a bound on the digest work of the production storage paths under the storage
@@ -1291,9 +1292,8 @@ fn drained_carrier(did: Did, now_ms: u128, expires_at_ms: u128) -> Entry {
 }
 
 /// Review A2-M1: a carrier past its retention bound, held live only by an unstable remove,
-/// answers a lookup as a miss, so the lookup does not stop at it and the placement is repaired,
-/// and the retired element side is written back; a drained carrier inside its bound still
-/// answers as found, so its removes reach the reader's cache.
+/// answers a lookup as a miss, and is kept; a drained carrier inside its bound still answers as
+/// found, so its removes reach the reader's cache.
 #[tokio::test]
 async fn test_carrier_past_its_bound_answers_lookups_as_absent() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
@@ -1349,5 +1349,67 @@ async fn test_read_writes_back_a_projection_that_retired_elements() -> Result<()
         .ok_or_else(|| Error::InvalidMessage("the remove holds the carrier".to_string()))?;
     assert!(read.data.is_empty());
     assert_eq!(node.storage.get(&key.to_string()).await?, Some(read));
+    Ok(())
+}
+
+/// Review A3-H1: a cached carrier past its retention bound, held live only by a remove, is
+/// served by the fetch cache as absent, as a replica serves it, while a drained carrier inside
+/// its bound is still served, so its removes reach the reader.
+#[tokio::test]
+async fn test_cache_serves_a_carrier_past_its_bound_as_absent() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let now_ms = get_epoch_ms();
+    let expired_key = Did::from(100u32);
+    let live_key = Did::from(200u32);
+    node.local_cache_put(drained_carrier(expired_key, now_ms, now_ms - 1))
+        .await?;
+    node.local_cache_put(drained_carrier(live_key, now_ms, now_ms + 60_000))
+        .await?;
+
+    assert_eq!(node.local_cache_get(expired_key).await?, None);
+    // Read-repair of a missed placement still reads the held carrier, whose removes it spreads.
+    assert!(node.local_cache_held(expired_key).await?.is_some());
+    let live = node
+        .local_cache_get(live_key)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("an in-bound carrier is served".to_string()))?;
+    assert!(live.data.is_empty());
+    assert_eq!(live.crdt.tombstones.len(), 1);
+    Ok(())
+}
+
+/// Review A2-M1 at redundancy 2: when the first placement holds a carrier past its bound, the
+/// lookup does not stop there but asks the next placement, which answers with its data, and the
+/// first placement is reported missed for read-repair.
+#[tokio::test]
+async fn test_lookup_moves_past_an_expired_placement_to_the_next() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let now_ms = get_epoch_ms();
+    let resource = Did::from(100u32);
+    let placements = resource.rotate_affine(2)?;
+    let (Some(expired), Some(live)) = (placements.first().copied(), placements.get(1).copied())
+    else {
+        return Err(Error::InvalidMessage("two placements".to_string()));
+    };
+    node.storage
+        .put(
+            &expired.to_string(),
+            &drained_carrier(resource, now_ms, now_ms - 1),
+        )
+        .await?;
+    node.storage
+        .put(
+            &live.to_string(),
+            &data_entry_with_data(resource, "descriptor"),
+        )
+        .await?;
+
+    let PeerRingAction::SomeEntry(evidence) = node.entry_lookup(resource, 2).await? else {
+        return Err(Error::InvalidMessage(
+            "the live placement answers".to_string(),
+        ));
+    };
+    assert_eq!(evidence.entry.data, vec![Encoded::from("descriptor")]);
+    assert_eq!(evidence.misses, vec![PlacementMiss::new(expired, node.did)]);
     Ok(())
 }

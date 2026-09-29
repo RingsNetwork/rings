@@ -407,6 +407,18 @@ impl IdbStorage {
         scope.rows.count(None).await.map_err(Error::IDBError)
     }
 
+    /// The decode law of this store's authority (module docs) on one row payload: the decoded
+    /// value, `None` for a payload a disposable store retires, or the decode error an
+    /// authoritative store reports.
+    fn decode_under_authority<V>(&self, data: JsValue) -> Result<Option<V>>
+    where V: DeserializeOwned {
+        match js_value::deserialize(data) {
+            Ok(value) => Ok(Some(value)),
+            Err(_) if self.authority.retires_undecodable() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Delete each row of `keys` that still does not decode as `V`, in one read-write
     /// transaction: a scan found them undecodable in a read-only one, and a row rewritten
     /// between the two is the writer's, and stays.
@@ -416,8 +428,10 @@ impl IdbStorage {
         for key in keys {
             let key = JsValue::from(key);
             let stored = scope.rows.get(&key).await.map_err(Error::IDBError)?;
-            let still_undecodable = js_value::deserialize::<Option<StoredRow>>(stored)?
-                .is_some_and(|row| js_value::deserialize::<V>(row.data).is_err());
+            let still_undecodable = match js_value::deserialize::<Option<StoredRow>>(stored)? {
+                Some(row) => self.decode_under_authority::<V>(row.data)?.is_none(),
+                None => false,
+            };
             if still_undecodable {
                 scope.rows.delete(&key).await.map_err(Error::IDBError)?;
             }
@@ -444,10 +458,9 @@ where V: DeserializeOwned + Serialize + Sized
             return Ok(None);
         };
         // Decode before scheduling any write, so a kept row stays untouched.
-        let value = match js_value::deserialize(row.data.clone()) {
-            Ok(value) => value,
-            Err(error) if !self.authority.retires_undecodable() => return Err(error),
-            Err(_) => {
+        let value = match self.decode_under_authority(row.data.clone())? {
+            Some(value) => value,
+            None => {
                 scope
                     .rows
                     .delete(&JsValue::from(row.key))
@@ -498,10 +511,9 @@ where V: DeserializeOwned + Serialize + Sized
         let mut undecodable = Vec::new();
         for (_key, row) in entries {
             let row: StoredRow = js_value::deserialize(row)?;
-            match js_value::deserialize(row.data) {
-                Ok(value) => decoded.push((row.key, value)),
-                Err(error) if !self.authority.retires_undecodable() => return Err(error),
-                Err(_) => undecodable.push(row.key),
+            match self.decode_under_authority(row.data)? {
+                Some(value) => decoded.push((row.key, value)),
+                None => undecodable.push(row.key),
             }
         }
         if !undecodable.is_empty() {
