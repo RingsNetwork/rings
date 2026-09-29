@@ -20,19 +20,21 @@
 //! decoded.
 //!
 //! **Law (fail closed per stream).** Let `name` be the storage's
-//! [`record_name`](crate::storage::KvStorageInterface::record_name) and `U` the names of the
-//! records that do not restore: those the storage cannot decode (a torn or corrupt file, reported
-//! by name, never deleted) and those that decode but fail the conditions above. Then
+//! [`record_name`](crate::storage::KvStorageScan::record_name) and `U` the names of the
+//! records that do not restore: those the storage cannot read or decode (a torn, corrupt or
+//! unreadable file, reported by name, never deleted) and those that decode but fail the
+//! conditions above. Then
 //!
 //! ```text
 //! unavailable(table, key) ⟺ name(record_key(table, key)) ∈ U
 //! ```
 //!
 //! and an unavailable stream refuses every transition until its record is cleared, so no
-//! replay is admitted from a stream whose record was lost or corrupted, and no sequence of such a
-//! sender stream is reused. The laws are pointwise: a record in `U` changes no other stream's
-//! restored state or availability, so every other stream keeps its replay guarantee. [`restore`]
-//! is therefore total: it never fails as a whole.
+//! replay is admitted from a stream whose record is torn, corrupt or unreadable, and no sequence
+//! of such a sender stream is reused. The law is pointwise for the streams in the store: a record
+//! in `U` changes no other restored stream's state or availability, so each keeps its replay
+//! guarantee; a new stream is affected only through the bounded-slots law below. [`restore`] is
+//! therefore total: it never fails as a whole.
 //!
 //! **Law (bounded slots).** A record in `U` may belong to either table (its name need not say),
 //! so it counts against both tables' stream bounds: a table admits a new stream only while its
@@ -40,11 +42,13 @@
 //! stream takes the store past [`TRANSACTION_REPLAY_STORE_MAX_RECORDS`] records, however many
 //! are unavailable.
 //!
-//! The laws cover every record the storage holds, provided the storage drops none itself. The
-//! native daemon opens the replay store as an authoritative file store (#909): each write is
-//! flushed before its rename and the directory after it, so a crash leaves a record whole at its
-//! previous or its new value, and a record whose `(key, record)` framing does not decode is
-//! reported by its file name, never deleted, so it joins `U` exactly as corrupt inner bytes do.
+//! The laws cover every record the storage holds, provided the storage drops none itself: an
+//! absent record is indistinguishable from a stream never seen (tracked in #915). The native
+//! daemon opens the replay store as an authoritative file store (#909), which evicts nothing and
+//! on unix flushes each write before its rename and the directory after it, so a crash leaves a
+//! record whole at its previous or its new value; a record file that cannot be read, or whose
+//! `(key, record)` framing does not decode, is reported by its file name, never deleted, so it
+//! joins `U` exactly as corrupt inner bytes do.
 //!
 //! The record is an opaque byte string to the storage, so browser storage never sees structured
 //! keys or `u64` counters, and the former snapshot (also an opaque byte string) loads as a
@@ -112,7 +116,8 @@ pub const TRANSACTION_REPLAY_RECORD_MAX_BYTES: usize =
 pub const TRANSACTION_REPLAY_STORE_MAX_RECORDS: usize = 2 * TRANSACTION_REPLAY_STREAM_CAPACITY;
 /// Upper bound of the canonical `(storage key, record)` encodings of a full replay store,
 /// summed over its records. A byte-budgeted store must hold at least this much, or its budget
-/// would evict a retained stream and reopen replay for it.
+/// would evict a retained stream and reopen replay for it (an evicting store) or refuse the
+/// writes of new streams (an authoritative file store, which evicts nothing).
 pub const TRANSACTION_REPLAY_STORE_MAX_BYTES: usize = TRANSACTION_REPLAY_STREAM_CAPACITY
     * (stored_pair_max_bytes(ReplayTable::Sender, SENDER_STREAM_MAX_BYTES)
         + stored_pair_max_bytes(ReplayTable::Receiver, RECEIVER_STREAM_MAX_BYTES));

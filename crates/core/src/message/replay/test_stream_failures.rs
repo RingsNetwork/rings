@@ -22,6 +22,7 @@ use crate::error::Result;
 use crate::message::MessageCategory;
 use crate::storage::file::FileStorage;
 use crate::storage::KvStorageInterface;
+use crate::storage::KvStorageScan;
 use crate::storage::MemStorage;
 use crate::storage::ScannedRecord;
 
@@ -81,11 +82,6 @@ impl KvStorageInterface<ReplayRecord> for SharedCountingStorage {
         self.0.inner.get_all().await
     }
 
-    async fn scan(&self) -> Result<Vec<ScannedRecord<ReplayRecord>>> {
-        self.0.scans.fetch_add(1, Ordering::SeqCst);
-        self.0.inner.scan().await
-    }
-
     async fn remove(&self, key: &str) -> Result<()> {
         self.0.inner.remove(key).await
     }
@@ -96,6 +92,18 @@ impl KvStorageInterface<ReplayRecord> for SharedCountingStorage {
 
     async fn count(&self) -> Result<u32> {
         self.0.inner.count().await
+    }
+}
+
+#[async_trait::async_trait]
+impl KvStorageScan<ReplayRecord> for SharedCountingStorage {
+    async fn scan(&self) -> Result<Vec<ScannedRecord<ReplayRecord>>> {
+        self.0.scans.fetch_add(1, Ordering::SeqCst);
+        self.0.inner.scan().await
+    }
+
+    fn record_name(&self, key: &str) -> String {
+        self.0.inner.record_name(key)
     }
 }
 
@@ -156,6 +164,72 @@ async fn test_one_corrupt_record_refuses_only_its_stream() -> Result<()> {
         storage.inner.get(corrupt.as_str()).await?,
         Some(ReplayRecord(vec![0xff; 3]))
     );
+    Ok(())
+}
+
+/// Law (fail closed per stream), sender side: a corrupt sender record refuses reservation on
+/// its stream, so no sequence of it is reused, is kept unchanged, and leaves other streams'
+/// reservations and its own receiver slot working.
+#[tokio::test]
+async fn test_a_corrupt_sender_record_refuses_reservation_on_its_stream() -> Result<()> {
+    let storage = CountingStorage::new();
+    let corrupt = record_key(ReplayTable::Sender, &stream(1))?;
+    storage
+        .inner
+        .put(corrupt.as_str(), &ReplayRecord(vec![0xff; 3]))
+        .await?;
+    let replay = runtime(&storage);
+
+    assert!(matches!(
+        replay.reserve(stream(1), NonZeroU64::MIN).await,
+        Err(Error::TransactionReplayStreamUnavailable { key, ref record })
+            if key == stream(1) && *record == corrupt
+    ));
+    assert_eq!(replay.counters().unavailable_stream, 1);
+    assert_eq!(
+        storage.inner.get(corrupt.as_str()).await?,
+        Some(ReplayRecord(vec![0xff; 3]))
+    );
+    assert_eq!(replay.reserve(stream(2), NonZeroU64::MIN).await?, 0..=0);
+    assert_eq!(
+        replay.admit(stream(1), 0, digest(1)).await?,
+        SequenceVerdict::First
+    );
+    Ok(())
+}
+
+/// A directory occupying a native record's name cannot be read as a record: it fails its
+/// stream closed without failing the load, so every other stream works and the refusal repeats
+/// from the cached load, never counted as a failed read of the store.
+#[tokio::test]
+async fn test_an_unreadable_native_record_fails_only_its_stream() -> Result<()> {
+    let root =
+        std::env::temp_dir().join(format!("rings-replay-unreadable-{}", uuid::Uuid::new_v4()));
+    let storage = FileStorage::new_authoritative_with_cap_and_path(1 << 20, &root).await?;
+    let occupied = record_key(ReplayTable::Receiver, &stream(1))?;
+    let name = <FileStorage as KvStorageScan<ReplayRecord>>::record_name(&storage, &occupied);
+    std::fs::create_dir(root.join(&name)).map_err(Error::ServiceIOError)?;
+    drop(storage);
+    let replay = TransactionReplay::new(Box::new(
+        FileStorage::new_authoritative_with_cap_and_path(1 << 20, &root).await?,
+    ));
+
+    for sequence in 0..4_u8 {
+        assert!(matches!(
+            replay.admit(stream(1), u64::from(sequence), digest(sequence)).await,
+            Err(Error::TransactionReplayStreamUnavailable { ref record, .. }) if *record == name
+        ));
+        assert!(replay
+            .admit(stream(2), u64::from(sequence), digest(sequence))
+            .await?
+            .permits_dispatch());
+    }
+    let counters = replay.counters();
+    assert_eq!(counters.unrestorable_record, 1);
+    assert_eq!(counters.unavailable_stream, 4);
+    assert_eq!(counters.persistence_failure, 0);
+    drop(replay);
+    let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
 
@@ -224,10 +298,8 @@ async fn test_a_torn_native_record_fails_its_stream_closed_until_cleared() -> Re
         storage.put(torn_key.as_str(), &torn_record).await?;
         let (intact_key, intact_record) = sender_record(&stream(2), 4)?;
         storage.put(intact_key.as_str(), &intact_record).await?;
-        let name = <FileStorage as KvStorageInterface<ReplayRecord>>::record_name(
-            &storage,
-            torn_key.as_str(),
-        );
+        let name =
+            <FileStorage as KvStorageScan<ReplayRecord>>::record_name(&storage, torn_key.as_str());
         root.join(name)
     };
     let whole = std::fs::read(&torn_file).map_err(Error::ServiceIOError)?;

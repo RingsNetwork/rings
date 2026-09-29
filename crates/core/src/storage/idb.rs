@@ -58,6 +58,7 @@ use wasm_bindgen::JsValue;
 use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
+use crate::storage::KvStorageScan;
 use crate::storage::ScannedRecord;
 use crate::storage::UndecodableRecord;
 use crate::utils::js_value;
@@ -440,20 +441,6 @@ where V: DeserializeOwned + Serialize + Sized
             .collect()
     }
 
-    /// Every row, decoded or reported by its primary key; a scan deletes nothing.
-    async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
-        let scope = self.scope(TransactionMode::ReadOnly)?;
-        let entries = scope
-            .rows
-            .get_all(None, None, None, None)
-            .await
-            .map_err(Error::IDBError)?;
-        Ok(entries
-            .into_iter()
-            .map(|(primary_key, row)| scan_row(primary_key, row))
-            .collect())
-    }
-
     async fn remove(&self, key: &str) -> Result<()> {
         let scope = self.scope(TransactionMode::ReadWrite)?;
         scope
@@ -470,6 +457,30 @@ where V: DeserializeOwned + Serialize + Sized
 
     async fn count(&self) -> Result<u32> {
         IdbStorage::count(self).await
+    }
+}
+
+/// Rows are keyed by the record key itself, so each record is named by its key.
+#[async_trait(?Send)]
+impl<V> KvStorageScan<V> for IdbStorage
+where V: DeserializeOwned + Serialize + Sized
+{
+    /// Every row, decoded or reported by its primary key; a scan deletes nothing.
+    async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
+        let scope = self.scope(TransactionMode::ReadOnly)?;
+        let entries = scope
+            .rows
+            .get_all(None, None, None, None)
+            .await
+            .map_err(Error::IDBError)?;
+        Ok(entries
+            .into_iter()
+            .map(|(primary_key, row)| scan_row(primary_key, row))
+            .collect())
+    }
+
+    fn record_name(&self, key: &str) -> String {
+        key.to_owned()
     }
 }
 

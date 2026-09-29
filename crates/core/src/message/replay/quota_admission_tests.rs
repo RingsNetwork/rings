@@ -4,7 +4,9 @@ use std::sync::atomic::Ordering;
 use super::*;
 use crate::message::MessageCategory;
 use crate::message::OriginQuotaLaneConfig;
+use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
+use crate::storage::ScannedRecord;
 
 const ONE_SECOND: u128 = 1_000_000_000;
 
@@ -228,6 +230,17 @@ impl KvStorageInterface<ReplayRecord> for FailFirstPutStorage {
 
     async fn count(&self) -> Result<u32> {
         self.inner.count().await
+    }
+}
+
+#[async_trait::async_trait]
+impl KvStorageScan<ReplayRecord> for FailFirstPutStorage {
+    async fn scan(&self) -> Result<Vec<ScannedRecord<ReplayRecord>>> {
+        self.inner.scan().await
+    }
+
+    fn record_name(&self, key: &str) -> String {
+        key.to_owned()
     }
 }
 

@@ -144,7 +144,7 @@ async fn test_refused_retirement_keeps_the_record_indexed() {
         .await
         .expect("open");
     storage.put("a", &"v".to_string()).await.expect("put a");
-    let path = storage.root.join(file_name_for("a"));
+    let path = storage.store.root.join(file_name_for("a"));
     let record = std::fs::read(&path).expect("read record a");
     std::fs::remove_file(&path).expect("remove record a");
     std::fs::create_dir(&path).expect("occupy record a's path");
@@ -165,7 +165,7 @@ async fn test_refused_retirement_keeps_the_record_indexed() {
             .expect("get b"),
         None
     );
-    let path_b = storage.root.join(file_name_for("b"));
+    let path_b = storage.store.root.join(file_name_for("b"));
     assert!(!path_b.exists());
     assert!(!path_b.with_extension("tmp").exists());
 
@@ -199,6 +199,7 @@ async fn test_undecodable_record_is_retired_only_while_unchanged() {
 
     // The bytes on disk are not the ones the read observed: the record is the writer's.
     storage
+        .store
         .retire_observed(&name, b"what an earlier read saw")
         .expect("retire nothing");
     assert!(root.join(&name).exists());
@@ -241,7 +242,7 @@ async fn test_reopen_restores_budget_in_write_order() {
             storage.put(key, &"v".to_string()).await.expect("put");
             let modified = std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(1_000 + index as u64);
-            std::fs::File::open(storage.root.join(file_name_for(key)))
+            std::fs::File::open(storage.store.root.join(file_name_for(key)))
                 .expect("open file")
                 .set_modified(modified)
                 .expect("set modified");
@@ -398,7 +399,7 @@ async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
         .expect("open");
     storage.put("whole", &"v".to_string()).await.expect("put");
 
-    let mut scanned = <FileStorage as KvStorageInterface<String>>::scan(&storage)
+    let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
         .await
         .expect("scan");
     scanned.sort_by_key(|record| record.is_ok());
@@ -411,9 +412,134 @@ async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
     ]);
     assert!(root.join(&name).exists());
     assert_eq!(
-        <FileStorage as KvStorageInterface<String>>::record_name(&storage, "torn"),
+        <FileStorage as KvStorageScan<String>>::record_name(&storage, "torn"),
         name
     );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Scan law under unreadable records: a directory occupying a record's name and a record file
+/// the process may not read are each reported by their file name, and the scan as a whole
+/// succeeds with the readable records.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_scan_reports_unreadable_records_one_by_one() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_root("unreadable");
+    let directory = file_name_for("directory");
+    std::fs::create_dir_all(root.join(&directory)).expect("occupy a record name");
+    let locked = plant_record(
+        &root,
+        "locked",
+        &rings_codec::serialize(&("locked", "v")).expect("record serializes"),
+    );
+    let locked_path = root.join(&locked);
+    std::fs::set_permissions(&locked_path, std::fs::Permissions::from_mode(0o000))
+        .expect("lock the record");
+    // A privileged process reads through the permission bits; the case needs an unprivileged one.
+    let unreadable = std::fs::read(&locked_path).is_err();
+    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+    storage.put("whole", &"v".to_string()).await.expect("put");
+
+    let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
+        .await
+        .expect("a bad file does not fail the scan");
+    scanned.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+    let mut expected = vec![
+        Err(UndecodableRecord {
+            name: directory,
+            key: None,
+        }),
+        Ok(("whole".to_owned(), "v".to_owned())),
+    ];
+    if unreadable {
+        expected.push(Err(UndecodableRecord {
+            name: locked.clone(),
+            key: None,
+        }));
+    } else {
+        expected.push(Ok(("locked".to_owned(), "v".to_owned())));
+    }
+    expected.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+    assert_eq!(scanned, expected);
+
+    std::fs::set_permissions(&locked_path, std::fs::Permissions::from_mode(0o600))
+        .expect("unlock the record");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Index law under unreadable metadata: when the directory lists a record whose metadata the
+/// process may not read, an authoritative open indexes it and a scan reports it, while a
+/// disposable open fails as before.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_authoritative_open_indexes_an_entry_whose_metadata_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_root("metadata");
+    let name = plant_record(
+        &root,
+        "stream",
+        &rings_codec::serialize(&("stream", "v")).expect("record serializes"),
+    );
+    // Listing without search permission: entries are readable, their metadata is not.
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o400)).expect("lock root");
+    let unprivileged = std::fs::metadata(root.join(&name)).is_err();
+    let authoritative = FileStorage::new_authoritative_with_cap_and_path(4096, &root).await;
+    let disposable = FileStorage::new_with_cap_and_path(4096, &root).await;
+    let scanned = match &authoritative {
+        Ok(storage) => <FileStorage as KvStorageScan<String>>::scan(storage).await,
+        Err(_) => Ok(Vec::new()),
+    };
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).expect("unlock root");
+
+    if unprivileged {
+        assert!(disposable.is_err());
+        assert_eq!(scanned.expect("scan"), [Err(UndecodableRecord {
+            name,
+            key: None
+        })]);
+    }
+    assert!(authoritative.is_ok());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Budget law of an authoritative store: a write that does not fit fails and evicts nothing,
+/// and an open under a lowered budget fails instead of retiring records.
+#[tokio::test]
+async fn test_authoritative_store_evicts_nothing() {
+    let root = temp_root("no-eviction");
+    let one = record_len("a", "v");
+    {
+        let storage = FileStorage::new_authoritative_with_cap_and_path(one * 2, &root)
+            .await
+            .expect("open");
+        storage.put("a", &"v".to_string()).await.expect("put a");
+        storage.put("b", &"v".to_string()).await.expect("put b");
+        storage
+            .put("a", &"w".to_string())
+            .await
+            .expect("rewrite a in place");
+        assert!(matches!(
+            storage.put("c", &"v".to_string()).await,
+            Err(Error::StorageBudgetExhausted { .. })
+        ));
+        assert_eq!(stored_keys(&storage).await, ["a", "b"]);
+        assert!(!root.join(file_name_for("c")).exists());
+        assert!(!root.join(file_name_for("c")).with_extension("tmp").exists());
+    }
+    assert!(matches!(
+        FileStorage::new_authoritative_with_cap_and_path(one, &root).await,
+        Err(Error::StorageBudgetExhausted { .. })
+    ));
+    let reopened = FileStorage::new_authoritative_with_cap_and_path(one * 2, &root)
+        .await
+        .expect("reopen");
+    assert_eq!(stored_keys(&reopened).await, ["a", "b"]);
 
     let _ = std::fs::remove_dir_all(root);
 }

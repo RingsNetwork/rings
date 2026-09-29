@@ -66,8 +66,8 @@ const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
 /// Byte budget of the native replay store: every record of a full store
 /// (`rings_core::message::TRANSACTION_REPLAY_STORE_MAX_BYTES`, about 27 MiB), with room left
 /// for the former shared-stream snapshot until the first load after the #898 upgrade deletes
-/// it. The file store evicts its oldest records beyond its budget, and an evicted replay record
-/// would reopen replay for its stream, so the budget must never be reached.
+/// it. The store is authoritative and evicts nothing: a write beyond the budget fails, which
+/// fails that transition closed, so the budget must never be reached.
 const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 40 * 1024 * 1024;
 
 fn onion_entry_guard_storage_path(data_storage_path: &str) -> String {

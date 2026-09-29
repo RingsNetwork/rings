@@ -125,21 +125,38 @@ A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RE
 admission does not grow with the number of streams retained. On load, every record must decode and
 sit under its own key, or the stream it is filed as fails closed (see [Bad
 records](#bad-records)). The native daemon opens the replay store as an authoritative file store
-(#909): each write is flushed to stable storage before its rename and the directory after it, so a
-crash leaves every record whole at its previous or its new value, and a record whose framing does
-not decode is reported and never deleted. One lock serializes all replay transitions and is held
-across each record write, so store write latency bounds the node-wide transition rate. Each
-table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams:
-every class stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each
-receiver stream has exactly 32 hot digest slots. A full store is at most
-`TRANSACTION_REPLAY_STORE_MAX_RECORDS` (32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES`
-(28,295,168 bytes). New streams fail closed at the bound; there is no LRU eviction or
-sender-controlled reset. The native daemon keeps the records in a dedicated 40 MiB atomic file
-store, and browser providers keep them in a dedicated IndexedDB store with one row more than the
-record bound: both stores evict beyond their limits, and an evicted record would reopen replay for
-its stream, so both are sized never to reach them. A custom `SwarmBuilder` or `ProcessorBuilder`
-must supply durable `ReplayStorage` to retain the restart guarantee; their in-memory default
-guarantees replay rejection only for the lifetime of that runtime.
+(#909). On unix each write is flushed to stable storage before its rename and the directory after
+it (`F_FULLFSYNC` on macOS), so a crash leaves every record whole at its previous or its new value;
+on other targets a rename's durability is the file system's own. A record file that cannot be read,
+or whose framing does not decode, is reported and never deleted. The file I/O runs on the tokio
+blocking pool, so a flush never stalls an asynchronous worker.
+
+One lock serializes all replay transitions and is held across each record write, so the store's
+write latency bounds the node-wide transition rate. With the flushed native store that bound is the
+flush latency. `test_durable_throughput_of_replay_admissions` (ignored by default; run it with
+`--ignored --nocapture`) measures it. On an Apple M1 Max SSD (APFS) it measured:
+
+| Store | Admissions/s | p50 | p99 |
+|---|---|---|---|
+| authoritative file | 53–57 | ~17 ms | ~30 ms |
+| disposable file | ~4,400 | ~0.2 ms | ~0.5 ms |
+| memory | ~400,000 | ~2 µs | ~6 µs |
+
+Sender reservations pay the same cost. The ceiling is far below the outbound lane rate, and group
+commit is tracked in #916.
+
+Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class
+stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each receiver stream
+has exactly 32 hot digest slots. A full store is at most `TRANSACTION_REPLAY_STORE_MAX_RECORDS`
+(32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,295,168 bytes). New streams fail
+closed at the bound; there is no LRU eviction or sender-controlled reset. The native daemon keeps
+the records in a dedicated 40 MiB authoritative file store, which evicts nothing: a write beyond its
+budget fails with `StorageBudgetExhausted`, and so does an open under a lowered budget. Browser
+providers keep them in a dedicated IndexedDB store with one row more than the record bound, which
+evicts beyond its limit, and an evicted record would reopen replay for its stream. Both are sized
+never to reach their limits. A custom `SwarmBuilder` or `ProcessorBuilder` must supply durable
+`ReplayStorage` to retain the restart guarantee; their in-memory default guarantees replay rejection
+only for the lifetime of that runtime.
 
 Deleting or replacing the replay store deletes the guarantee for its streams. There is no safe
 incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail
@@ -150,25 +167,35 @@ unrestorable records and the calls refused on their streams.
 
 The first replay operation restores the store from one scan and caches the result; no later call
 reads the store again. A record restores its stream iff it decodes, holds a valid window and sits
-under the record key of the stream it carries. Any other record (torn, corrupt, misplaced, or
-holding an invalid window) is kept and joins the set `U` of unrestorable records, named by the
-storage's record name (the native file name, or the browser row key), and (#910):
+under the record key of the stream it carries. Any other record is kept and joins the set `U` of
+unrestorable records (#910): torn, corrupt, unreadable (any read error but absence, such as a
+permission error, an I/O error, or a directory in the record's place), misplaced, or holding an
+invalid window. Its name is the storage's record name: the native file name, or the browser row
+key.
 
 ```text
 unavailable(table, key)  ⟺  record_name(record_key(table, key)) ∈ U
 ```
 
 - An unavailable stream refuses every reservation and admission with
-  `TransactionReplayStreamUnavailable { key, record }`, so no replay is admitted from, and no
-  sequence is reused by, a stream whose record was lost or corrupted.
-- Every other stream restores and runs exactly as it would without the bad record.
-- Restore costs one read of the whole store, once; each later call reads nothing and writes one
+  `TransactionReplayStreamUnavailable { key, record }`. No replay is admitted from, and no sequence
+  is reused by, a stream whose record is torn, corrupt or unreadable.
+- Every other stream already in the store restores and runs exactly as it would without the bad
+  record. A new stream is affected only by the bound: each unrestorable record holds a slot of both
+  tables' stream bounds.
+- Restore costs one read of the whole store, once. Each later call reads nothing and writes one
   record.
-- Each unrestorable record is logged once at load, counted in `unrestorable_record`, and holds a
-  slot of both tables' stream bounds; each refused call is counted in `unavailable_stream`.
+- Each unrestorable record is logged once at load and counted in `unrestorable_record`. Each refused
+  call is counted in `unavailable_stream`.
 
-A scan that fails as a whole (the storage itself is unreadable) restores nothing: it is counted as
-a persistence failure, the call fails closed, and the next call scans again.
+A scan fails as a whole only when the store itself cannot be listed, for example when its index
+lock is poisoned. Such a scan restores nothing: it is counted as a persistence failure, the call
+fails closed, and the next call scans again.
+
+The law covers the records the store holds. A record that is absent is indistinguishable from a
+stream never seen, and its stream restarts from `First` (tracked in #915). Records go absent when
+they are deleted, when a file name is damaged, or when a rename is rolled back on a target where
+the directory cannot be flushed.
 
 ### Clearing one stream
 
@@ -177,15 +204,26 @@ stopped and then starting the node:
 
 1. Take the record name from the refusal or from the load's log line
    (`replay record does not restore; its stream fails closed until it is cleared`).
-2. Stop the node. On native, delete the file of that name in the `transaction-replay` directory
-   beside the data store. In a browser provider, delete the row of that key from the replay
-   IndexedDB store.
-3. Start the node. The stream starts again from `First`.
+2. Stop the node. On native, stop the daemon. In a browser, close every tab of the origin that runs
+   the node, then open one tab of the origin with the node not started.
+3. Delete the record:
+   - On native, delete the file of that name in the `transaction-replay` directory beside the data
+     store.
+   - In a browser, open DevTools, go to Application, then IndexedDB, and select the database
+     `<storage name>/transaction-replay`; for the default provider this is
+     `rings-node/transaction-replay`. In its object store of the same name, delete the row whose
+     key is the record name.
+4. Start the node. The stream starts again from `First`.
 
-This resets that stream's replay window alone. An unexpired transaction of a cleared receiver
-stream may be admitted once more. A cleared sender stream restarts at sequence zero, and its
-destination rejects those sequences (as `Stale`, `Replay` or `Fork`) until they pass the
-destination's retained high watermark. No other stream's state changes.
+This resets that stream's replay window alone, and no other stream's state changes.
+- **Cleared receiver stream.** An unexpired transaction of the stream may be admitted once more.
+- **Cleared sender stream.** The stream restarts at sequence zero. Its destination rejects those
+  sequences until they pass the destination's retained high watermark:
+  - below the window, as `Stale`;
+  - inside the window, as `Fork`, with a signed `TransactionForkEvidence` against this node,
+    because the same sequences now carry new transactions.
+
+  The messages carried by the rejected sequences are lost.
 
 ## Hard cutover
 

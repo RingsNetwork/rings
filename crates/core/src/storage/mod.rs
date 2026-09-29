@@ -22,21 +22,21 @@ use async_trait::async_trait;
 use crate::error::Result;
 pub use crate::storage::memory::MemStorage;
 
-/// A record a storage holds but cannot decode, named so that its owner can fail closed on it
-/// instead of losing it.
+/// A record a storage holds but cannot read or decode, named so that its owner can fail closed
+/// on it instead of losing it.
 ///
 /// A storage that reports such a record keeps it: only its owner, or an operator, may decide
 /// that the state it held is forfeit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UndecodableRecord {
-    /// The name the storage files the record under, [`KvStorageInterface::record_name`] of its
-    /// key: the key itself, or the backend's image of it (`FileStorage`: the file name).
+    /// The name the storage files the record under, [`KvStorageScan::record_name`] of its key:
+    /// the key itself, or the backend's image of it (`FileStorage`: the file name).
     pub name: String,
     /// The record's key, when the part of the record that carries it is intact.
     pub key: Option<String>,
 }
 
-/// One record of a [`KvStorageInterface::scan`]: its key and value, or the record the storage
+/// One record of a [`KvStorageScan::scan`]: its key and value, or the record the storage
 /// holds but cannot decode.
 pub type ScannedRecord<V> = std::result::Result<(String, V), UndecodableRecord>;
 
@@ -67,22 +67,6 @@ pub trait KvStorageInterface<V> {
     /// Return every key value pair in this storage.
     async fn get_all(&self) -> Result<Vec<(String, V)>>;
 
-    /// Return every record of this storage, each decoded or reported undecodable.
-    ///
-    /// Law: a scan deletes nothing, and it reports each record the storage cannot decode as an
-    /// [`UndecodableRecord`] whose `name` is [`Self::record_name`] of the record's key, so its
-    /// owner can fail closed on exactly that key without reading the record again. The default
-    /// serves a backend whose records always decode, since it holds values, not bytes.
-    async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
-        Ok(self.get_all().await?.into_iter().map(Ok).collect())
-    }
-
-    /// The name under which this storage files the record of `key`, and under which
-    /// [`Self::scan`] reports it when it cannot decode it: the key itself by default.
-    fn record_name(&self, key: &str) -> String {
-        key.to_owned()
-    }
-
     /// Remove an `entry` by `key`.
     async fn remove(&self, key: &str) -> Result<()>;
 
@@ -91,4 +75,31 @@ pub trait KvStorageInterface<V> {
 
     /// Get the current storage usage.
     async fn count(&self) -> Result<u32>;
+}
+
+/// A key-value storage that enumerates its records one by one, reporting those it cannot read
+/// or decode instead of failing or deleting, together with the naming that ties a reported
+/// record back to its key.
+///
+/// **Law (agreement).** For every stored key `k`, a record of `k` that [`Self::scan`] cannot
+/// read or decode is reported as an [`UndecodableRecord`] whose `name` is
+/// [`Self::record_name`]`(k)`:
+///
+/// ```text
+/// scan ∋ Err(u) ∧ u is the record of k  ⟹  u.name = record_name(k)
+/// ```
+///
+/// An owner fails closed on exactly the keys whose names a scan reported, so both methods are
+/// required: a default for either could break the agreement for a backend that overrides the
+/// other.
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+pub trait KvStorageScan<V>: KvStorageInterface<V> {
+    /// Return every record of this storage, each decoded or reported as an
+    /// [`UndecodableRecord`]; a scan deletes nothing.
+    async fn scan(&self) -> Result<Vec<ScannedRecord<V>>>;
+
+    /// The name under which this storage files the record of `key`, and under which
+    /// [`Self::scan`] reports that record when it cannot read or decode it.
+    fn record_name(&self, key: &str) -> String;
 }

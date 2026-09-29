@@ -706,7 +706,19 @@ pub enum Error {
         capacity: u64,
     },
 
-    /// A storage holds a record it cannot decode; the record is kept, never deleted.
+    /// An authoritative storage is full: it evicts nothing, so a write that does not fit, or an
+    /// open over a lowered budget, fails and changes nothing.
+    #[error("Authoritative storage holds {used} of {capacity} bytes; {required} more do not fit")]
+    StorageBudgetExhausted {
+        /// Bytes the stored records occupy.
+        used: u64,
+        /// Bytes the write needs (zero at open).
+        required: u64,
+        /// Total byte budget of the storage.
+        capacity: u64,
+    },
+
+    /// A storage holds a record it cannot read or decode; the record is kept, never deleted.
     #[error("Storage cannot decode {0}")]
     StorageRecordUndecodable(crate::storage::UndecodableRecord),
 

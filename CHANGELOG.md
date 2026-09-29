@@ -3,27 +3,35 @@
 ## Unreleased
 
 - Fail a bad transaction replay record closed on its own stream only, and restore the replay
-  store once (#910). A record that does not restore (torn, corrupt, misplaced, or holding an
-  invalid window) used to leave the whole replay store unloaded: every later reservation and
-  admission re-read the whole store (up to 32,768 records) under the replay lock and failed
-  again, so the node could neither sign nor accept traffic. Now the store is restored from one
-  scan and cached; each bad record is kept, logged once, and counted
+  store once (#910). A record that does not restore (torn, corrupt, unreadable, misplaced, or
+  holding an invalid window) used to leave the whole replay store unloaded: every later
+  reservation and admission re-read the whole store (up to 32,768 records) under the replay lock
+  and failed again, so the node could neither sign nor accept traffic. Now the store is restored
+  from one scan and cached; each bad record is kept, logged once, and counted
   (`ReplayCounters::unrestorable_record`), and only the stream it is filed as refuses reservation
   and admission, with `Error::TransactionReplayStreamUnavailable { key, record }` (counted in
-  `ReplayCounters::unavailable_stream`). Every other stream runs normally. An operator clears one
-  stream by removing the named record with the node stopped (see the replay chapter).
-  `KvStorageInterface` gains `scan` (every record, decoded or reported as an
-  `UndecodableRecord`, deleting nothing) and `record_name`, both with defaults; `FileStorage` and
-  `IdbStorage` report undecodable records per record.
+  `ReplayCounters::unavailable_stream`). Every other stream in the store runs normally; each bad
+  record holds one slot of both tables' stream bounds. An operator clears one stream by removing
+  the named record with the node stopped (see the replay chapter). An absent record still
+  restarts its stream from `First` (#915). The new `KvStorageScan` trait (implemented by
+  `MemStorage`, `FileStorage` and `IdbStorage`) adds `scan` (every record, decoded or reported as
+  an `UndecodableRecord`, deleting nothing) and `record_name`, both required, and
+  `ReplayStorage` now boxes a `KvStorageScan`.
 
-- Open the native transaction replay store as an authoritative `FileStorage` (#909). Its `put`
-  flushes the temporary file before the rename and the directory after it (removals flush the
-  directory too), so a crash leaves each record whole at its previous or its new value. A record
-  whose framing does not decode is reported as `Error::StorageRecordUndecodable`, naming its file
-  and, when its key prefix is intact, its key; it is never deleted, so replay fails closed on it
-  instead of reopening its stream. `FileStorage::new_with_cap_and_path` keeps the disposable
-  behaviour (no flush, undecodable records retired) for the DHT, measurement, evidence and onion
-  entry-guard stores (the entry-guard store's policy is #911);
+- Open the native transaction replay store as an authoritative `FileStorage` (#909). On unix its
+  `put` flushes the temporary file before the rename and the directory after it (removals, and
+  the parent of the store's directory at open, are flushed too), so a crash leaves each record
+  whole at its previous or its new value. A record file that cannot be read, or whose framing
+  does not decode, is reported (`Error::StorageRecordUndecodable`, or per record by a scan),
+  naming its file and, when its key prefix is intact, its key; it is never deleted, so replay
+  fails closed on it instead of reopening its stream. An authoritative store evicts nothing: a
+  write beyond its budget, or an open under a lowered one, fails with
+  `Error::StorageBudgetExhausted`. The flush bounds replay transitions to about 55 per second on
+  an Apple M1 Max SSD (`F_FULLFSYNC`), against about 4,400 unflushed; group commit is tracked in
+  #916. Every `FileStorage` now runs its file I/O on the tokio blocking pool.
+  `FileStorage::new_with_cap_and_path` keeps the disposable behaviour (no flush, oldest records
+  evicted, undecodable records retired) for the DHT, measurement, evidence and onion entry-guard
+  stores (the entry-guard store's policy is #911);
   `FileStorage::new_authoritative_with_cap_and_path` opens the new mode.
 
 - Keep up to `OUTBOUND_LANE_WINDOW` (8) transfers in flight per outbound class lane instead of
