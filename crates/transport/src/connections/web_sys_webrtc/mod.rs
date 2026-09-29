@@ -45,8 +45,9 @@ use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
-use crate::delivery::closed_before_flush;
-use crate::delivery::delivery_flushed;
+use crate::delivery::tracker::BufferedChannel;
+use crate::delivery::tracker::DeliveryTracker;
+use crate::delivery::tracker::RoundLease;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
@@ -66,39 +67,65 @@ const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
 /// pool size of data channel
 const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
-/// How often the delivery future re-checks whether a message has been flushed.
-const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(300);
+/// A data channel paired with its delivery tracker, which owns the monotonic
+/// counter of the total bytes ever enqueued onto it. See the native backend
+/// for the rationale; the counter lets the delivery future tell, per message,
+/// whether the bytes have left the local send buffer
+/// (`enqueued_total - buffered_amount`).
+type TrackedChannel = (RtcDataChannel, Arc<DeliveryTracker>);
 
-/// A data channel paired with a monotonic counter of the total bytes ever
-/// enqueued onto it. See the native backend for the rationale; the counter
-/// lets the delivery future tell, per message, whether the bytes have left the
-/// local send buffer (`enqueued_total - buffered_amount`).
-type TrackedChannel = (RtcDataChannel, Arc<AtomicU64>);
+impl BufferedChannel for RtcDataChannel {
+    async fn arm_low_threshold(&self, threshold: u64) {
+        // Never saturates: a round waits for the event only when τ < b, and the
+        // browser's `bufferedAmount` is a u32. Saturating keeps the conversion
+        // total.
+        self.set_buffered_amount_low_threshold(u32::try_from(threshold).unwrap_or(u32::MAX));
+    }
+
+    async fn observe_buffered(&self) -> u64 {
+        u64::from(self.buffered_amount())
+    }
+}
+
+/// Run a delivery settle round as a browser task. Both channel effects are
+/// synchronous, so one poll runs the whole round between two browser tasks.
+fn spawn_delivery_round(lease: Option<RoundLease>, channel: RtcDataChannel) {
+    if let Some(lease) = lease {
+        spawn_local(async move { lease.run(&channel).await });
+    }
+}
 
 /// Build the future that resolves once the message ending at `end_offset` on
 /// this channel has been flushed to the wire, or errors if the channel closes
-/// first. It re-checks on a timer, driving its own wake-ups.
+/// first. Registering it re-arms the channel's low-water threshold.
 fn delivery_future(
     channel: RtcDataChannel,
-    enqueued: Arc<AtomicU64>,
+    delivery: &Arc<DeliveryTracker>,
     end_offset: u64,
 ) -> DeliveryFuture {
-    Box::pin(async move {
-        loop {
-            let buffered = channel.buffered_amount() as u64;
-            if delivery_flushed(enqueued.load(Ordering::SeqCst), buffered, end_offset) {
-                return Ok(());
-            }
-            if matches!(
-                channel.ready_state(),
-                RtcDataChannelState::Closing | RtcDataChannelState::Closed
-            ) {
-                return Err(closed_before_flush());
-            }
-            // A timer the browser cannot run stops the poll instead of spinning it.
-            rings_runtime::sleep(DELIVERY_POLL_INTERVAL).await?;
-        }
-    })
+    let (wait, lease) = delivery.track(end_offset);
+    spawn_delivery_round(lease, channel);
+    Box::pin(wait)
+}
+
+/// Drive a channel's delivery tracker from its `bufferedamountlow` and `error`
+/// events. `close` is wired with the pool's close handler.
+fn wire_delivery_events(channel: &RtcDataChannel, delivery: &Arc<DeliveryTracker>) {
+    let low_channel = channel.clone();
+    let low_delivery = Arc::clone(delivery);
+    let on_low = Closure::wrap(Box::new(move || {
+        spawn_delivery_round(low_delivery.notify(), low_channel.clone());
+    }) as Box<dyn FnMut()>);
+    channel.set_onbufferedamountlow(Some(on_low.as_ref().unchecked_ref()));
+    on_low.forget();
+
+    let error_delivery = Arc::clone(delivery);
+    let on_error = Closure::wrap(Box::new(move || {
+        tracing::warn!("data channel failed; pending deliveries are lost");
+        error_delivery.close();
+    }) as Box<dyn FnMut()>);
+    channel.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+    on_error.forget();
 }
 
 impl WebSysWebrtcConnection {
@@ -128,19 +155,19 @@ impl WebSysWebrtcConnection {
         msg: TransportMessage,
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
-        let (channel, enqueued) = self.webrtc_data_channel.select()?;
+        let (channel, delivery) = self.webrtc_data_channel.select()?;
         let data = rings_codec::serialize(&msg)?;
         let bytes = u64::try_from(data.len()).map_err(|_| Error::SendByteCountOverflow)?;
         // The primitive runs only after shared queue admission; failures do not advance offsets.
         let end_offset = self
-            .send_after_permit(permit, Arc::clone(&enqueued), bytes, || {
+            .send_after_permit(permit, Arc::clone(delivery.enqueued()), bytes, || {
                 channel
                     .send_with_u8_array(&data)
                     .map_err(Error::WebSysWebrtc)
             })
             .await
             .inspect_err(|error| tracing::error!(%error, bytes, "browser send failed"))?;
-        Ok(delivery_future(channel, enqueued, end_offset))
+        Ok(delivery_future(channel, &delivery, end_offset))
     }
 }
 
@@ -469,10 +496,15 @@ fn create_outbound_data_channels(
         channel.set_onopen(Some(on_open.as_ref().unchecked_ref()));
         on_open.forget();
 
+        let delivery = Arc::new(DeliveryTracker::default());
+        wire_delivery_events(&channel, &delivery);
+
         let close_pool = channel_pool.clone();
         let close_cb = inner_cb.clone();
         let close_state = connection_state.clone();
+        let close_delivery = Arc::clone(&delivery);
         let on_close = Closure::wrap(Box::new(move || {
+            close_delivery.close();
             close_state.observe_outbound_data_channels(false);
             let all_closed = matches!(
                 close_pool.all(|(candidate, _)| {
@@ -490,7 +522,7 @@ fn create_outbound_data_channels(
         channel.set_onclose(Some(on_close.as_ref().unchecked_ref()));
         on_close.forget();
 
-        channel_pool.push((channel, Arc::new(AtomicU64::new(0))))?;
+        channel_pool.push((channel, delivery))?;
     }
     Ok(())
 }
@@ -786,8 +818,11 @@ mod tests {
     async fn test_round_robin_backend_checks_permit_before_real_browser_send() {
         let connection = RtcPeerConnection::new().expect("browser peer connection must construct");
         let channel = connection.create_data_channel("permit-boundary-test");
-        let enqueued = Arc::new(AtomicU64::new(0));
-        let pool = Rc::new(RoundRobinPool::from_vec(vec![(channel, enqueued.clone())]));
+        let delivery = Arc::new(DeliveryTracker::default());
+        let pool = Rc::new(RoundRobinPool::from_vec(vec![(
+            channel,
+            Arc::clone(&delivery),
+        )]));
         let backend = WebSysWebrtcConnection::new(
             connection.clone(),
             pool,
@@ -804,7 +839,7 @@ mod tests {
 
         connection.close();
         assert!(matches!(result, Err(Error::SendPermitRevoked)));
-        assert_eq!(enqueued.load(Ordering::SeqCst), 0);
+        assert_eq!(delivery.enqueued().load(Ordering::SeqCst), 0);
     }
     /// Offset exhaustion must reject before browser IO and before irrevocable admission.
     #[wasm_bindgen_test]

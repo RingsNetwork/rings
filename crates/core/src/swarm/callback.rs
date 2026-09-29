@@ -248,6 +248,26 @@ pub trait SwarmCallback {
     async fn on_event(&self, _event: &SwarmEvent) -> Result<(), CallbackError> {
         Ok(())
     }
+
+    /// Whether the namespace of an application payload (the bytes of a
+    /// [`CustomMessage`](crate::message::CustomMessage)) declared delegated admission: it admits
+    /// its own direct-edge traffic, per sending neighbour, before its own processing and after
+    /// core's admission.
+    ///
+    /// The swarm consults this only for Application messages whose origin is the authenticated
+    /// neighbour that delivered them, before replay and quota admission. For those it then skips
+    /// the per-origin message-count limit and charges at least
+    /// [`DELEGATED_MIN_CHARGE`](crate::message::DELEGATED_MIN_CHARGE) bytes; the byte limit and
+    /// the record bound still apply (see
+    /// [`MessageLimit`](crate::message::MessageLimit)). It runs on the inbound admission path, so
+    /// it must be a cheap, non-blocking lookup. The default delegates nothing.
+    ///
+    /// Delegation is trusted local configuration: implementers hold the authority of the
+    /// operator who configures the quota, and a delegating namespace must enforce its own
+    /// per-neighbour admission.
+    fn delegates_admission(&self, _application_payload: &[u8]) -> bool {
+        false
+    }
 }
 
 /// The logical stage of the inbound pipeline, independent of any connection: application

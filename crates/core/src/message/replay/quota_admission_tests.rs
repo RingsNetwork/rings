@@ -45,7 +45,7 @@ async fn admit_at(
             key,
             sequence,
             digest,
-            MessageCategory::Application,
+            MessageCategory::Application.into(),
             1,
             OriginQuotaInstant::from_nanos(now),
         )

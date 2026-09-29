@@ -4,6 +4,11 @@
 //! owns independent fixed-point message and byte token buckets. [`OriginQuota::admit`] is the
 //! pure transition; the destination replay runtime owns the bounded table and supplies monotonic
 //! time. Quota records are intentionally absent from the durable replay snapshot.
+//!
+//! An admission either enforces the message limit or, for traffic whose namespace delegated its
+//! admission, skips it ([`MessageLimit`]); the byte limit and the record bound always apply. A
+//! delegated admission pays at least [`DELEGATED_MIN_CHARGE`] bytes, so the byte bucket also
+//! bounds how many messages core admits for it.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
@@ -13,6 +18,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::dht::Did;
+use crate::message::admission_delegation::MessageLimit;
 use crate::message::types::MessageCategory;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
@@ -27,6 +33,17 @@ pub const DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
 /// This exceeds the 60 MB logical-message protocol ceiling, so every valid message can fit an
 /// otherwise full bucket.
 pub const DEFAULT_ORIGIN_QUOTA_BYTE_BURST: u64 = 64 * 1024 * 1024;
+/// Minimum byte charge of a delegated admission.
+///
+/// Every admitted final-destination message costs core a fixed amount of work: the
+/// replay-snapshot persist under the replay lock, then its logical lane, validation and dispatch.
+/// A delegated admission skips the message limit, so without a floor only the byte bucket would
+/// bound how many messages are admitted, and tiny messages would multiply that work. Charging
+/// `max(len, DELEGATED_MIN_CHARGE)` bounds a neighbour's delegated admissions to
+/// `byte_rate / 16 KiB` per second (256/s under the default 4 MiB/s), with a burst of
+/// `byte_burst / 16 KiB` (4096 by default). Messages of at least 16 KiB pay exactly their
+/// length. The decode and signature checks run before the quota and are not bounded by it.
+pub const DELEGATED_MIN_CHARGE: usize = 16 * 1024;
 /// Default number of runtime-local origin records retained per logical lane.
 pub const DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE: usize = 1024;
 
@@ -322,17 +339,22 @@ impl OriginQuota {
     ///
     /// Rejected transitions retain any refill but consume neither dimension. The byte cost is the
     /// verified transaction's serialized logical `data` length; chunk-envelope sizes never enter
-    /// this transition.
+    /// this transition. Under [`MessageLimit::Delegated`] the message cost is zero: the message
+    /// bucket is neither checked nor consumed, while the byte bucket is charged at least
+    /// [`DELEGATED_MIN_CHARGE`].
     pub fn admit(
         self,
         config: OriginQuotaLaneConfig,
+        message_limit: MessageLimit,
         byte_cost: usize,
         now: OriginQuotaInstant,
     ) -> Result<(Self, OriginQuotaVerdict), OriginQuotaArithmeticError> {
         let mut next = self.refilled(config, now)?;
-        if !next.messages.has(NANOS_PER_SECOND) {
+        let message_cost = scaled_message_cost(message_limit);
+        if !next.messages.has(message_cost) {
             return Ok((next, OriginQuotaVerdict::MessageRateExhausted));
         }
+        let byte_cost = charged_bytes(message_limit, byte_cost);
         let byte_cost =
             u128::try_from(byte_cost).map_err(|_| OriginQuotaArithmeticError::ByteCostOverflow)?;
         let scaled_byte_cost = byte_cost
@@ -341,7 +363,7 @@ impl OriginQuota {
         if !next.bytes.has(scaled_byte_cost) {
             return Ok((next, OriginQuotaVerdict::ByteRateExhausted));
         }
-        next.messages.consume(NANOS_PER_SECOND);
+        next.messages.consume(message_cost);
         next.bytes.consume(scaled_byte_cost);
         Ok((next, OriginQuotaVerdict::Admitted))
     }
@@ -386,6 +408,23 @@ impl OriginQuota {
     #[cfg(test)]
     fn whole_byte_tokens(self) -> u128 {
         self.bytes.scaled_tokens / NANOS_PER_SECOND
+    }
+}
+
+/// Scaled message tokens one admission costs: one token, or none when admission is delegated.
+const fn scaled_message_cost(message_limit: MessageLimit) -> u128 {
+    match message_limit {
+        MessageLimit::Enforced => NANOS_PER_SECOND,
+        MessageLimit::Delegated => 0,
+    }
+}
+
+/// Bytes one admission of `byte_cost` logical bytes is charged: its length, raised to
+/// [`DELEGATED_MIN_CHARGE`] when admission is delegated.
+fn charged_bytes(message_limit: MessageLimit, byte_cost: usize) -> usize {
+    match message_limit {
+        MessageLimit::Enforced => byte_cost,
+        MessageLimit::Delegated => byte_cost.max(DELEGATED_MIN_CHARGE),
     }
 }
 
@@ -511,13 +550,14 @@ impl OriginQuotaTable {
     pub(super) fn reserve(
         &mut self,
         key: OriginQuotaKey,
+        message_limit: MessageLimit,
         byte_cost: usize,
         now: OriginQuotaInstant,
     ) -> Result<OriginQuotaReservation, OriginQuotaAdmissionError> {
         let lane_config = self.config.lane(key.lane);
         if let Some(previous) = self.records.get(&key).copied() {
             let (next, verdict) = previous
-                .admit(lane_config, byte_cost, now)
+                .admit(lane_config, message_limit, byte_cost, now)
                 .map_err(OriginQuotaAdmissionError::Arithmetic)?;
             self.records.insert(key, next);
             if let Some(rejection) = verdict.rejection() {
@@ -531,7 +571,7 @@ impl OriginQuotaTable {
         }
 
         let (next, verdict) = OriginQuota::full(lane_config, now)
-            .admit(lane_config, byte_cost, now)
+            .admit(lane_config, message_limit, byte_cost, now)
             .map_err(OriginQuotaAdmissionError::Arithmetic)?;
         if let Some(rejection) = verdict.rejection() {
             return Err(OriginQuotaAdmissionError::Verdict(rejection));
@@ -590,6 +630,14 @@ impl OriginQuotaTable {
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.records.len()
+    }
+
+    /// The whole `(message, byte)` tokens `key`'s record held after its last admission.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn whole_tokens(&self, key: OriginQuotaKey) -> Option<(u128, u128)> {
+        self.records
+            .get(&key)
+            .map(|quota| (quota.whole_message_tokens(), quota.whole_byte_tokens()))
     }
 
     #[cfg(test)]
@@ -757,13 +805,13 @@ mod tests {
         let config = config(2, 2, 10, 10, 4);
         let start = OriginQuota::full(config, OriginQuotaInstant::ZERO);
         let (depleted, admitted) = start
-            .admit(config, 10, OriginQuotaInstant::ZERO)
+            .admit(config, MessageLimit::Enforced, 10, OriginQuotaInstant::ZERO)
             .expect("first transition is valid");
         assert_eq!(admitted, OriginQuotaVerdict::Admitted);
 
         let half_second = OriginQuotaInstant::from_nanos(NANOS_PER_SECOND / 2);
         let (refilled, admitted) = depleted
-            .admit(config, 5, half_second)
+            .admit(config, MessageLimit::Enforced, 5, half_second)
             .expect("refill transition is valid");
         assert_eq!(admitted, OriginQuotaVerdict::Admitted);
         assert_eq!(refilled.whole_message_tokens(), 1);
@@ -775,13 +823,13 @@ mod tests {
         let config = config(1, 2, 4, 8, 4);
         let quota = OriginQuota::full(config, OriginQuotaInstant::ZERO);
         let (quota, first) = quota
-            .admit(config, 4, OriginQuotaInstant::ZERO)
+            .admit(config, MessageLimit::Enforced, 4, OriginQuotaInstant::ZERO)
             .expect("first transition is valid");
         let (quota, second) = quota
-            .admit(config, 4, OriginQuotaInstant::ZERO)
+            .admit(config, MessageLimit::Enforced, 4, OriginQuotaInstant::ZERO)
             .expect("second transition is valid");
         let (quota, exhausted) = quota
-            .admit(config, 0, OriginQuotaInstant::ZERO)
+            .admit(config, MessageLimit::Enforced, 0, OriginQuotaInstant::ZERO)
             .expect("zero elapsed transition is valid");
 
         assert_eq!(first, OriginQuotaVerdict::Admitted);
@@ -796,10 +844,10 @@ mod tests {
         let config = config(1, 3, 1, 8, 4);
         let quota = OriginQuota::full(config, OriginQuotaInstant::ZERO);
         let (quota, first) = quota
-            .admit(config, 8, OriginQuotaInstant::ZERO)
+            .admit(config, MessageLimit::Enforced, 8, OriginQuotaInstant::ZERO)
             .expect("first transition is valid");
         let (quota, exhausted) = quota
-            .admit(config, 1, OriginQuotaInstant::ZERO)
+            .admit(config, MessageLimit::Enforced, 1, OriginQuotaInstant::ZERO)
             .expect("byte rejection is valid");
 
         assert_eq!(first, OriginQuotaVerdict::Admitted);
@@ -813,9 +861,17 @@ mod tests {
         let config = config(3, 3, 7, 7, 4);
         let quota = OriginQuota::full(config, OriginQuotaInstant::from_nanos(10));
         let input = OriginQuotaInstant::from_nanos(20);
-        assert_eq!(quota.admit(config, 2, input), quota.admit(config, 2, input));
         assert_eq!(
-            quota.admit(config, 2, OriginQuotaInstant::from_nanos(9)),
+            quota.admit(config, MessageLimit::Enforced, 2, input),
+            quota.admit(config, MessageLimit::Enforced, 2, input)
+        );
+        assert_eq!(
+            quota.admit(
+                config,
+                MessageLimit::Enforced,
+                2,
+                OriginQuotaInstant::from_nanos(9)
+            ),
             Err(OriginQuotaArithmeticError::MonotonicTimeRegressed)
         );
     }
@@ -829,7 +885,12 @@ mod tests {
             last_refill: OriginQuotaInstant::ZERO,
         };
         let (refilled, verdict) = quota
-            .admit(config, 7, OriginQuotaInstant::from_nanos(u128::MAX))
+            .admit(
+                config,
+                MessageLimit::Enforced,
+                7,
+                OriginQuotaInstant::from_nanos(u128::MAX),
+            )
             .expect("saturating refill remains defined");
 
         assert_eq!(verdict, OriginQuotaVerdict::Admitted);
@@ -844,19 +905,39 @@ mod tests {
         let now = OriginQuotaInstant::ZERO;
 
         table
-            .reserve(key(1, MessageCategory::Application), 1, now)
+            .reserve(
+                key(1, MessageCategory::Application),
+                MessageLimit::Enforced,
+                1,
+                now,
+            )
             .expect("origin A uses its application allowance");
         assert!(matches!(
-            table.reserve(key(1, MessageCategory::Application), 1, now),
+            table.reserve(
+                key(1, MessageCategory::Application),
+                MessageLimit::Enforced,
+                1,
+                now
+            ),
             Err(OriginQuotaAdmissionError::Verdict(
                 OriginQuotaRejection::MessageRate
             ))
         ));
         table
-            .reserve(key(2, MessageCategory::Application), 1, now)
+            .reserve(
+                key(2, MessageCategory::Application),
+                MessageLimit::Enforced,
+                1,
+                now,
+            )
             .expect("origin B keeps its application allowance");
         table
-            .reserve(key(1, MessageCategory::Storage), 1, now)
+            .reserve(
+                key(1, MessageCategory::Storage),
+                MessageLimit::Enforced,
+                1,
+                now,
+            )
             .expect("origin A keeps its storage allowance");
     }
 
@@ -867,6 +948,7 @@ mod tests {
         table
             .reserve(
                 key(2, MessageCategory::Application),
+                MessageLimit::Enforced,
                 1,
                 OriginQuotaInstant::ZERO,
             )
@@ -874,6 +956,7 @@ mod tests {
         table
             .reserve(
                 key(1, MessageCategory::Application),
+                MessageLimit::Enforced,
                 1,
                 OriginQuotaInstant::from_nanos(1),
             )
@@ -881,6 +964,7 @@ mod tests {
         assert!(matches!(
             table.reserve(
                 key(3, MessageCategory::Application),
+                MessageLimit::Enforced,
                 1,
                 OriginQuotaInstant::from_nanos(2)
             ),
@@ -892,6 +976,7 @@ mod tests {
         table
             .reserve(
                 key(3, MessageCategory::Application),
+                MessageLimit::Enforced,
                 1,
                 OriginQuotaInstant::from_nanos(NANOS_PER_SECOND + 1),
             )
@@ -900,6 +985,109 @@ mod tests {
         assert!(table.get(key(1, MessageCategory::Application)).is_some());
         assert!(table.get(key(2, MessageCategory::Application)).is_none());
         assert!(table.get(key(3, MessageCategory::Application)).is_some());
+    }
+
+    /// Acceptance of #888. One neighbour's Application record under the default limits carries
+    /// a delegated namespace at 98 messages/s of 16 KiB, the floor itself, and another namespace
+    /// at 20 messages/s for half an hour, interleaved on one simulated clock. The delegated
+    /// traffic is never refused, and the other namespace still is, beyond `burst + 8·T`.
+    #[test]
+    fn delegated_namespace_is_never_refused_while_another_namespace_still_is() {
+        let config = OriginQuotaLaneConfig::default();
+        let seconds: u128 = 1_800;
+        let message_bytes = DELEGATED_MIN_CHARGE;
+        let mut schedule: Vec<(u128, MessageLimit)> = (0..98 * seconds)
+            .map(|index| (index * NANOS_PER_SECOND / 98, MessageLimit::Delegated))
+            .chain(
+                (0..20 * seconds)
+                    .map(|index| (index * NANOS_PER_SECOND / 20, MessageLimit::Enforced)),
+            )
+            .collect();
+        schedule.sort_by_key(|(at, _)| *at);
+
+        let mut quota = OriginQuota::full(config, OriginQuotaInstant::ZERO);
+        let (mut delegated_refused, mut enforced_admitted) = (0_u128, 0_u128);
+        for (at, message_limit) in schedule {
+            let now = OriginQuotaInstant::from_nanos(at);
+            let (next, verdict) = quota
+                .admit(config, message_limit, message_bytes, now)
+                .expect("monotonic schedule");
+            quota = next;
+            let admitted = verdict == OriginQuotaVerdict::Admitted;
+            match message_limit {
+                MessageLimit::Delegated => delegated_refused += u128::from(!admitted),
+                MessageLimit::Enforced => enforced_admitted += u128::from(admitted),
+            }
+        }
+
+        assert_eq!(delegated_refused, 0);
+        assert!(enforced_admitted <= 32 + 8 * seconds + 1);
+        assert!(enforced_admitted < 20 * seconds);
+    }
+
+    /// A delegated admission neither needs nor consumes a message token, and still pays bytes:
+    /// the floor for a small message, the exact length for a message above it.
+    #[test]
+    fn delegated_admission_skips_the_message_bucket_but_not_the_byte_bucket() {
+        let floor = u64::try_from(DELEGATED_MIN_CHARGE).expect("floor fits u64");
+        let config = config(1, 1, 1, 3 * floor, 4);
+        let quota = OriginQuota::full(config, OriginQuotaInstant::ZERO);
+        let (quota, first) = quota
+            .admit(config, MessageLimit::Enforced, 1, OriginQuotaInstant::ZERO)
+            .expect("first transition is valid");
+        let (quota, small) = quota
+            .admit(config, MessageLimit::Delegated, 4, OriginQuotaInstant::ZERO)
+            .expect("delegated transition is valid");
+        assert_eq!(quota.whole_byte_tokens(), u128::from(3 * floor - 1 - floor));
+        let (quota, large) = quota
+            .admit(
+                config,
+                MessageLimit::Delegated,
+                DELEGATED_MIN_CHARGE + 7,
+                OriginQuotaInstant::ZERO,
+            )
+            .expect("delegated transition is valid");
+        let (quota, byte_refused) = quota
+            .admit(config, MessageLimit::Delegated, 1, OriginQuotaInstant::ZERO)
+            .expect("byte rejection is valid");
+
+        assert_eq!(first, OriginQuotaVerdict::Admitted);
+        assert_eq!(small, OriginQuotaVerdict::Admitted);
+        assert_eq!(large, OriginQuotaVerdict::Admitted);
+        assert_eq!(byte_refused, OriginQuotaVerdict::ByteRateExhausted);
+        assert_eq!(quota.whole_message_tokens(), 0);
+        assert_eq!(quota.whole_byte_tokens(), u128::from(floor - 1 - 7));
+    }
+
+    /// The floor bounds how many delegated messages core admits: a neighbour flooding 50-byte
+    /// delegated messages at 1000/s for a minute is admitted exactly as often as floors of bytes
+    /// become available, `byte_burst / floor + t · byte_rate / floor` (4096 + 256·t by default).
+    #[test]
+    fn small_delegated_messages_are_bounded_by_the_floor_rate() {
+        let config = OriginQuotaLaneConfig::default();
+        let floor = u128::try_from(DELEGATED_MIN_CHARGE).expect("floor fits u128");
+        let seconds: u128 = 60;
+        let mut quota = OriginQuota::full(config, OriginQuotaInstant::ZERO);
+        let mut admitted = 0_u128;
+        for index in 0..1_000 * seconds {
+            let now = OriginQuotaInstant::from_nanos(index * NANOS_PER_SECOND / 1_000);
+            let (next, verdict) = quota
+                .admit(config, MessageLimit::Delegated, 50, now)
+                .expect("monotonic schedule");
+            quota = next;
+            admitted += u128::from(verdict == OriginQuotaVerdict::Admitted);
+        }
+        // Attempts every millisecond outpace the refill of one floor (about 4 ms), and after the
+        // first admission the bucket never refills to its cap. So every floor's worth of bytes
+        // available by the last attempt, at `t_last = T − 1 ms`, is admitted, and no more:
+        // `⌊(byte_burst + byte_rate · t_last) / floor⌋`. A per-message charge above the floor
+        // would admit fewer.
+        let last_attempt_millis = 1_000 * seconds - 1;
+        let available = u128::from(DEFAULT_ORIGIN_QUOTA_BYTE_BURST) * 1_000
+            + u128::from(DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND) * last_attempt_millis;
+        assert_eq!(admitted, available / (floor * 1_000));
+        // 4096 in the burst plus 256 per second for 59.999 s.
+        assert_eq!(admitted, 4_096 + 256 * last_attempt_millis / 1_000);
     }
 
     #[test]
