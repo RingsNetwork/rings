@@ -123,14 +123,13 @@ rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot windo
 A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
 (1161 bytes: a 92-byte key and a 1066-byte window, with tag and length prefix), so the cost of an
 admission does not grow with the number of streams retained. On load, every record must decode and
-sit under its own key, or the store is invalid and replay fails closed. The native daemon opens the
-replay store as an authoritative file store (#909): each write is flushed to stable storage before
-its rename and the directory after it, so a crash leaves every record whole at its previous or its
-new value, and a record whose framing does not decode is reported and never deleted, so the load
-fails closed on it too. A failed load leaves the tables unloaded, and every later call retries it
-(tracked in #910). One lock serializes all replay
-transitions and is held across each record write, so store write latency bounds the node-wide
-transition rate. Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams:
+sit under its own key, or the stream it is filed as fails closed (see [Bad
+records](#bad-records)). The native daemon opens the replay store as an authoritative file store
+(#909): each write is flushed to stable storage before its rename and the directory after it, so a
+crash leaves every record whole at its previous or its new value, and a record whose framing does
+not decode is reported and never deleted. One lock serializes all replay transitions and is held
+across each record write, so store write latency bounds the node-wide transition rate. Each
+table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams:
 every class stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each
 receiver stream has exactly 32 hot digest slots. A full store is at most
 `TRANSACTION_REPLAY_STORE_MAX_RECORDS` (32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES`
@@ -144,7 +143,49 @@ guarantees replay rejection only for the lifetime of that runtime.
 
 Deleting or replacing the replay store deletes the guarantee for its streams. There is no safe
 incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail
-closed on storage errors. Counters expose `Replay`, `Fork`, `Stale`, and persistence failures.
+closed on storage errors. Counters expose `Replay`, `Fork`, `Stale`, persistence failures,
+unrestorable records and the calls refused on their streams.
+
+## Bad records
+
+The first replay operation restores the store from one scan and caches the result; no later call
+reads the store again. A record restores its stream iff it decodes, holds a valid window and sits
+under the record key of the stream it carries. Any other record (torn, corrupt, misplaced, or
+holding an invalid window) is kept and joins the set `U` of unrestorable records, named by the
+storage's record name (the native file name, or the browser row key), and (#910):
+
+```text
+unavailable(table, key)  ⟺  record_name(record_key(table, key)) ∈ U
+```
+
+- An unavailable stream refuses every reservation and admission with
+  `TransactionReplayStreamUnavailable { key, record }`, so no replay is admitted from, and no
+  sequence is reused by, a stream whose record was lost or corrupted.
+- Every other stream restores and runs exactly as it would without the bad record.
+- Restore costs one read of the whole store, once; each later call reads nothing and writes one
+  record.
+- Each unrestorable record is logged once at load, counted in `unrestorable_record`, and holds a
+  slot of both tables' stream bounds; each refused call is counted in `unavailable_stream`.
+
+A scan that fails as a whole (the storage itself is unreadable) restores nothing: it is counted as
+a persistence failure, the call fails closed, and the next call scans again.
+
+### Clearing one stream
+
+An operator clears a failed stream, and only that stream, by removing its record with the node
+stopped and then starting the node:
+
+1. Take the record name from the refusal or from the load's log line
+   (`replay record does not restore; its stream fails closed until it is cleared`).
+2. Stop the node. On native, delete the file of that name in the `transaction-replay` directory
+   beside the data store. In a browser provider, delete the row of that key from the replay
+   IndexedDB store.
+3. Start the node. The stream starts again from `First`.
+
+This resets that stream's replay window alone. An unexpired transaction of a cleared receiver
+stream may be admitted once more. A cleared sender stream restarts at sequence zero, and its
+destination rejects those sequences (as `Stale`, `Replay` or `Fork`) until they pass the
+destination's retained high watermark. No other stream's state changes.
 
 ## Hard cutover
 

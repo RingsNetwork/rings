@@ -58,6 +58,8 @@ use wasm_bindgen::JsValue;
 use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
+use crate::storage::ScannedRecord;
+use crate::storage::UndecodableRecord;
 use crate::utils::js_value;
 
 /// IndexedDB schema version; 2 replaced wall-clock recency with the store-wide access clock.
@@ -438,6 +440,20 @@ where V: DeserializeOwned + Serialize + Sized
             .collect()
     }
 
+    /// Every row, decoded or reported by its primary key; a scan deletes nothing.
+    async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
+        let scope = self.scope(TransactionMode::ReadOnly)?;
+        let entries = scope
+            .rows
+            .get_all(None, None, None, None)
+            .await
+            .map_err(Error::IDBError)?;
+        Ok(entries
+            .into_iter()
+            .map(|(primary_key, row)| scan_row(primary_key, row))
+            .collect())
+    }
+
     async fn remove(&self, key: &str) -> Result<()> {
         let scope = self.scope(TransactionMode::ReadWrite)?;
         scope
@@ -455,6 +471,21 @@ where V: DeserializeOwned + Serialize + Sized
     async fn count(&self) -> Result<u32> {
         IdbStorage::count(self).await
     }
+}
+
+/// Decode one row of a scan as a record (pure). An undecodable row is named by its primary
+/// key, which is the row's key (the key path is inline), so the name is the record's key.
+fn scan_row<V>(primary_key: JsValue, row: JsValue) -> ScannedRecord<V>
+where V: DeserializeOwned {
+    js_value::deserialize::<StoredRow>(row)
+        .and_then(|row| Ok((row.key, js_value::deserialize(row.data)?)))
+        .map_err(|_| {
+            let key = primary_key.as_string();
+            UndecodableRecord {
+                name: key.clone().unwrap_or_else(|| format!("{primary_key:?}")),
+                key,
+            }
+        })
 }
 
 impl std::fmt::Debug for IdbStorage {

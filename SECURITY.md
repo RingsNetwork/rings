@@ -216,8 +216,16 @@ key; a record under any other key, or not under its own key, makes the store inv
 closed. The native daemon opens the replay store as an authoritative file store (#909): each write
 is flushed to stable storage before its rename and the directory after it, so a crash leaves every
 record whole at its previous or its new value, and a record whose framing does not decode is
-reported by its file (and its key, when intact) and never deleted, so the load fails closed on it
-too. A failed load leaves the tables unloaded and every later call retries it (tracked in #910). A
+reported by its file (and its key, when intact) and never deleted. Failure is per stream (#910): a
+record that does not restore, whether torn, corrupt, misplaced or holding an invalid window, makes
+only the stream it is filed as unavailable, and that stream refuses every reservation and admission
+with `TransactionReplayStreamUnavailable` until an operator removes that one record with the node
+stopped, which resets that stream's replay window alone (see the replay chapter). No replay is
+admitted from, and no sequence is reused by, a stream whose record was lost, and every other stream
+keeps its guarantee. The store is read once, on the first replay operation; later calls read nothing
+and write one record. Unrestorable records and refused calls are counted in `ReplayCounters` and
+each unrestorable record is logged at load. The browser store commits each record in an atomic
+IndexedDB transaction under the default durability hint (tracked in #912). A
 load that finds the snapshot of the shared streams, stored under `rings-core:transaction-replay`,
 deletes it without decoding it, since its keys cannot name a class. The deletion is best effort: the
 former snapshot is never decoded, so a failed deletion is counted as a replay persistence failure

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Fail a bad transaction replay record closed on its own stream only, and restore the replay
+  store once (#910). A record that does not restore (torn, corrupt, misplaced, or holding an
+  invalid window) used to leave the whole replay store unloaded: every later reservation and
+  admission re-read the whole store (up to 32,768 records) under the replay lock and failed
+  again, so the node could neither sign nor accept traffic. Now the store is restored from one
+  scan and cached; each bad record is kept, logged once, and counted
+  (`ReplayCounters::unrestorable_record`), and only the stream it is filed as refuses reservation
+  and admission, with `Error::TransactionReplayStreamUnavailable { key, record }` (counted in
+  `ReplayCounters::unavailable_stream`). Every other stream runs normally. An operator clears one
+  stream by removing the named record with the node stopped (see the replay chapter).
+  `KvStorageInterface` gains `scan` (every record, decoded or reported as an
+  `UndecodableRecord`, deleting nothing) and `record_name`, both with defaults; `FileStorage` and
+  `IdbStorage` report undecodable records per record.
+
 - Open the native transaction replay store as an authoritative `FileStorage` (#909). Its `put`
   flushes the temporary file before the rename and the directory after it (removals flush the
   directory too), so a crash leaves each record whole at its previous or its new value. A record

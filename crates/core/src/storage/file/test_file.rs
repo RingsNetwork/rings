@@ -385,3 +385,35 @@ async fn test_authoritative_writes_round_trip_through_a_reopen() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Scan law: a scan reports each record decoded or undecodable (named by its file and its intact
+/// key) and deletes nothing, even in a disposable store whose reads would retire the record.
+#[tokio::test]
+async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
+    let root = temp_root("scan");
+    let whole = rings_codec::serialize(&("torn", "window")).expect("record serializes");
+    let name = plant_record(&root, "torn", whole.get(..whole.len() - 1).expect("prefix"));
+    let storage = FileStorage::new_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+    storage.put("whole", &"v".to_string()).await.expect("put");
+
+    let mut scanned = <FileStorage as KvStorageInterface<String>>::scan(&storage)
+        .await
+        .expect("scan");
+    scanned.sort_by_key(|record| record.is_ok());
+    assert_eq!(scanned, [
+        Err(UndecodableRecord {
+            name: name.clone(),
+            key: Some("torn".to_owned()),
+        }),
+        Ok(("whole".to_owned(), "v".to_owned())),
+    ]);
+    assert!(root.join(&name).exists());
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::record_name(&storage, "torn"),
+        name
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

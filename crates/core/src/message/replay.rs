@@ -26,7 +26,37 @@
 //!
 //! Persistence is one record per stream (see [`store`]): a transition writes only its stream's
 //! record, at most [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`], so the cost of an admission does not
-//! grow with the number of streams retained. The first load that finds the shared-stream
+//! grow with the number of streams retained.
+//!
+//! **Law (fail closed per stream, #910).** The first operation restores the store from one scan
+//! of the storage and caches the result, including every record that does not restore. For a
+//! stream `s` whose record was lost to a torn write or corrupted:
+//!
+//! ```text
+//! ∀ transition t of s.   t = Err(TransactionReplayStreamUnavailable { s, record })
+//!                        until the record is cleared and the node restarts
+//! ∀ s′ ≠ s.              state(s′) and the verdicts of s′ are those of a store without s
+//! cost(restore) = O(|store|), once;  cost(call) = 0 store reads + 1 record write
+//! ```
+//!
+//! so no replay is admitted from, and no sequence is reused by, a stream whose record was lost,
+//! while every other stream keeps its guarantee. The unrestorable records are counted
+//! ([`ReplayCounters::unrestorable_record`]), each refusal is counted
+//! ([`ReplayCounters::unavailable_stream`]), and each unrestorable record is logged once at
+//! load with its storage record name. A scan that fails as a whole restores nothing: it is
+//! counted as a persistence failure, and the next operation scans again.
+//!
+//! **Recovery.** An operator clears one failed stream, accepting a replay-window reset for that
+//! stream alone, by removing the record the refusal and the log name while the node is stopped,
+//! and then starting it: the native daemon keeps each record as the file of that name in the
+//! `transaction-replay` directory beside its data store, and a browser provider keeps it as the
+//! IndexedDB row of that key in its replay store. After the restart the stream starts from
+//! `First`: an unexpired transaction of a cleared receiver stream may be admitted once more, and
+//! a cleared sender stream restarts at sequence zero, whose sequences its destination rejects
+//! (as `Stale`, `Replay` or `Fork`) until they pass the destination's retained high watermark.
+//! No other stream is touched.
+//!
+//! The first load that finds the shared-stream
 //! snapshot of the key used before #898 deletes it without reading it (best effort, counted on
 //! failure); once it is gone no later load touches it. Sender and receiver tables each have a
 //! hard stream-count bound and never evict: once the bound is reached, a new stream fails
@@ -66,7 +96,8 @@ use self::store::receiver_record;
 use self::store::restore;
 use self::store::sender_record;
 pub use self::store::ReplayRecord;
-use self::store::ReplayTables;
+use self::store::ReplayStore;
+use self::store::ReplayTable;
 use self::store::SHARED_STREAM_SNAPSHOT_KEY;
 pub use self::store::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
 pub use self::store::TRANSACTION_REPLAY_STORE_MAX_BYTES;
@@ -303,7 +334,7 @@ pub fn observe(
 /// Storage accepted by the transaction replay runtime.
 pub type ReplayStorage = Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<ReplayRecord>)>;
 
-/// Observable rejected-verdict and persistence-failure counters.
+/// Observable rejected-verdict, persistence-failure and unavailable-stream counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReplayCounters {
     /// Exact duplicate transactions rejected.
@@ -314,23 +345,34 @@ pub struct ReplayCounters {
     pub stale: u64,
     /// Replay store reads or writes that failed.
     pub persistence_failure: u64,
+    /// Records the load found that do not restore, each failing its stream closed; a gauge,
+    /// fixed once the store is loaded, and non-zero calls for an operator.
+    pub unrestorable_record: u64,
+    /// Reservations and admissions refused because their stream's record does not restore.
+    pub unavailable_stream: u64,
 }
 
+/// The atomic cells behind [`ReplayCounters`].
 #[derive(Default)]
 struct ReplayCounterState {
     replay: AtomicU64,
     fork: AtomicU64,
     stale: AtomicU64,
     persistence_failure: AtomicU64,
+    unrestorable_record: AtomicU64,
+    unavailable_stream: AtomicU64,
 }
 
 impl ReplayCounterState {
+    /// The current value of every counter.
     fn snapshot(&self) -> ReplayCounters {
         ReplayCounters {
             replay: self.replay.load(Ordering::Relaxed),
             fork: self.fork.load(Ordering::Relaxed),
             stale: self.stale.load(Ordering::Relaxed),
             persistence_failure: self.persistence_failure.load(Ordering::Relaxed),
+            unrestorable_record: self.unrestorable_record.load(Ordering::Relaxed),
+            unavailable_stream: self.unavailable_stream.load(Ordering::Relaxed),
         }
     }
 }
@@ -351,14 +393,14 @@ pub(crate) struct TransactionReplay {
 }
 
 struct TransactionAdmissionState {
-    /// The replay tables, loaded on the first operation.
-    tables: Option<ReplayTables>,
+    /// The replay store, restored once on the first operation and cached from then on.
+    store: Option<ReplayStore>,
     /// Runtime-local origin quotas.
     quota: OriginQuotaTable,
 }
 
 impl TransactionReplay {
-    /// Construct a replay runtime. The tables are loaded lazily on its first operation.
+    /// Construct a replay runtime. The store is restored lazily on its first operation.
     #[cfg(test)]
     pub(crate) fn new(storage: ReplayStorage) -> Self {
         Self::new_with_quota(storage, OriginQuotaConfig::default())
@@ -369,7 +411,7 @@ impl TransactionReplay {
         Self {
             storage,
             state: Mutex::new(TransactionAdmissionState {
-                tables: None,
+                store: None,
                 quota: OriginQuotaTable::new(quota_config),
             }),
             started_at: Instant::now(),
@@ -388,29 +430,85 @@ impl TransactionReplay {
         self.quota_counters.snapshot()
     }
 
-    /// The tables, restored from every record of the store on the first operation.
+    /// The replay store, restored from one scan of the storage on the first operation and
+    /// cached from then on, unrestorable records included, so no later operation reads the
+    /// storage again.
     ///
     /// A load that finds the shared-stream snapshot of the key used before #898 retires it, so
-    /// once its deletion succeeds no later load, in this run or after a restart, touches it.
-    async fn load_tables<'a>(
+    /// once its deletion succeeds no later load, in this run or after a restart, touches it. A
+    /// scan that fails as a whole restores nothing: it is counted, the operation fails closed,
+    /// and the next operation scans again.
+    ///
+    /// ```text
+    /// slot cached? ── yes ──────────────────────────────────────────────▶ slot
+    ///      │ no
+    /// scan storage ── Err ──▶ count persistence failure ──▶ Err(load) (slot stays empty)
+    ///      │ Ok(records)
+    /// restore (pure, total) ──▶ count + log unrestorable ──▶ retire shared snapshot?
+    ///      └────────────────────────────────▶ slot := store ──▶ slot
+    /// ```
+    async fn load_store<'a>(
         &self,
-        slot: &'a mut Option<ReplayTables>,
-    ) -> Result<&'a mut ReplayTables> {
+        slot: &'a mut Option<ReplayStore>,
+    ) -> Result<&'a mut ReplayStore> {
         if slot.is_none() {
-            let records = self.storage.get_all().await.map_err(|source| {
+            let records = self.storage.scan().await.map_err(|source| {
                 self.count_persistence_failure();
                 Error::TransactionReplayPersistence {
                     operation: "load",
                     source: Box::new(source),
                 }
             })?;
-            let restored = restore(records).inspect_err(|_| self.count_persistence_failure())?;
+            let restored = restore(records, self.record_naming());
+            self.report_unrestorable(&restored.store);
             if restored.holds_shared_snapshot {
                 self.retire_shared_stream_snapshot().await;
             }
-            *slot = Some(restored.tables);
+            *slot = Some(restored.store);
         }
         slot.as_mut().ok_or(Error::TransactionReplayStateInvalid)
+    }
+
+    /// The storage's record naming, under which it files each record and reports the records it
+    /// cannot decode.
+    fn record_naming(&self) -> impl Fn(&str) -> String + '_ {
+        |storage_key| self.storage.record_name(storage_key)
+    }
+
+    /// Count and log the unrestorable records of a freshly restored store; each fails its
+    /// stream closed until an operator clears it (see the module documentation).
+    fn report_unrestorable(&self, store: &ReplayStore) {
+        let count = u64::try_from(store.unrestorable.len()).unwrap_or(u64::MAX);
+        self.counters
+            .unrestorable_record
+            .store(count, Ordering::Relaxed);
+        for (record, unrestorable) in store.unrestorable.iter() {
+            tracing::error!(
+                record = %record,
+                key = ?unrestorable.key,
+                failure = ?unrestorable.failure,
+                "replay record does not restore; its stream fails closed until it is cleared"
+            );
+        }
+    }
+
+    /// Refuse, and count, a transition of stream `key` of `table` whose record does not
+    /// restore (the fail-closed-per-stream law of [`store`]).
+    fn refuse_unavailable(
+        &self,
+        store: &ReplayStore,
+        table: ReplayTable,
+        key: StreamKey,
+    ) -> Result<()> {
+        match store.unavailable_record(table, &key, self.record_naming())? {
+            None => Ok(()),
+            Some(record) => {
+                self.counters
+                    .unavailable_stream
+                    .fetch_add(1, Ordering::Relaxed);
+                Err(Error::TransactionReplayStreamUnavailable { key, record })
+            }
+        }
     }
 
     /// Count one failed replay-store read or write.
@@ -457,9 +555,10 @@ impl TransactionReplay {
         count: NonZeroU64,
     ) -> Result<RangeInclusive<u64>> {
         let mut state = self.state.lock().await;
-        let tables = self.load_tables(&mut state.tables).await?;
-        let previous = tables.sender.get(&key).copied();
-        if previous.is_none() && tables.sender.len() >= TRANSACTION_REPLAY_STREAM_CAPACITY {
+        let store = self.load_store(&mut state.store).await?;
+        self.refuse_unavailable(store, ReplayTable::Sender, key)?;
+        let previous = store.tables.sender.get(&key).copied();
+        if previous.is_none() && !store.admits_new_stream(ReplayTable::Sender) {
             return Err(Error::TransactionReplayStreamCapacityExceeded {
                 capacity: TRANSACTION_REPLAY_STREAM_CAPACITY,
             });
@@ -474,7 +573,7 @@ impl TransactionReplay {
             .checked_add(count.get().saturating_sub(1))
             .ok_or(Error::TransactionSequenceExhausted { key })?;
         self.persist(sender_record(&key, last)?).await?;
-        tables.sender.insert(key, last);
+        store.tables.sender.insert(key, last);
         Ok(first..=last)
     }
 
@@ -506,10 +605,11 @@ impl TransactionReplay {
         now: OriginQuotaInstant,
     ) -> Result<SequenceVerdict> {
         let mut state = self.state.lock().await;
-        let TransactionAdmissionState { tables, quota } = &mut *state;
-        let tables = self.load_tables(tables).await?;
-        let previous = tables.receiver.get(&key);
-        if previous.is_none() && tables.receiver.len() >= TRANSACTION_REPLAY_STREAM_CAPACITY {
+        let TransactionAdmissionState { store, quota } = &mut *state;
+        let store = self.load_store(store).await?;
+        self.refuse_unavailable(store, ReplayTable::Receiver, key)?;
+        let previous = store.tables.receiver.get(&key);
+        if previous.is_none() && !store.admits_new_stream(ReplayTable::Receiver) {
             return Err(Error::TransactionReplayStreamCapacityExceeded {
                 capacity: TRANSACTION_REPLAY_STREAM_CAPACITY,
             });
@@ -558,7 +658,7 @@ impl TransactionReplay {
             quota_reservation.rollback(quota);
             return Err(error);
         }
-        tables.receiver.insert(key, next);
+        store.tables.receiver.insert(key, next);
         Ok(verdict)
     }
 
@@ -938,14 +1038,17 @@ mod tests {
         let destination = Did::from(u32::MAX);
         {
             let mut state = runtime.state.lock().await;
-            let tables = runtime.load_tables(&mut state.tables).await?;
+            let store = runtime.load_store(&mut state.store).await?;
             for origin in 0..pairs {
                 for class in CLASSES {
                     let key = StreamKey::new(1, Did::from(origin), destination, class);
-                    tables.sender.insert(key, 0);
+                    store.tables.sender.insert(key, 0);
                 }
             }
-            assert_eq!(tables.sender.len(), TRANSACTION_REPLAY_STREAM_CAPACITY);
+            assert_eq!(
+                store.tables.sender.len(),
+                TRANSACTION_REPLAY_STREAM_CAPACITY
+            );
         }
         let new_key = StreamKey::new(
             1,
@@ -1004,6 +1107,64 @@ mod tests {
         );
         assert!(matches!(
             restarted.admit(key, u64::MAX, digest(1)).await,
+            Err(Error::TransactionReplay { .. })
+        ));
+    }
+
+    /// Fail closed per stream in the browser store: a row under stream 1's receiver record key
+    /// that does not decode as a record refuses that stream alone, is kept, and removing it
+    /// before a reopen restores the stream while the others keep their windows.
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn test_browser_store_fails_closed_only_on_the_stream_of_an_undecodable_row() {
+        const STORAGE_NAME: &str = "rings-core/replay-store-undecodable-row";
+        let open = || crate::storage::idb::IdbStorage::new_with_cap_and_name(4, STORAGE_NAME);
+        let storage = open().await.expect("IndexedDB opens");
+        <crate::storage::idb::IdbStorage as KvStorageInterface<ReplayRecord>>::clear(&storage)
+            .await
+            .expect("IndexedDB clears");
+        let corrupt = StreamKey::new(7, Did::from(1_u32), Did::from(99_u32), MessageCategory::E2e);
+        let intact = StreamKey::new(7, Did::from(2_u32), Did::from(99_u32), MessageCategory::E2e);
+        let corrupt_key = super::store::record_key(super::store::ReplayTable::Receiver, &corrupt)
+            .expect("record key encodes");
+        storage
+            .put(corrupt_key.as_str(), &42_u32)
+            .await
+            .expect("foreign row stores");
+        let replay = TransactionReplay::new(Box::new(storage));
+
+        assert!(matches!(
+            replay.admit(corrupt, 0, digest(1)).await,
+            Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
+                if *record == corrupt_key
+        ));
+        assert_eq!(
+            replay
+                .admit(intact, 0, digest(1))
+                .await
+                .expect("the intact stream admits"),
+            SequenceVerdict::First
+        );
+        assert_eq!(replay.counters().unrestorable_record, 1);
+        drop(replay);
+
+        let reopened = open().await.expect("IndexedDB reopens");
+        <crate::storage::idb::IdbStorage as KvStorageInterface<ReplayRecord>>::remove(
+            &reopened,
+            corrupt_key.as_str(),
+        )
+        .await
+        .expect("the operator removes the row");
+        let restarted = TransactionReplay::new(Box::new(reopened));
+        assert_eq!(
+            restarted
+                .admit(corrupt, 0, digest(1))
+                .await
+                .expect("the cleared stream admits"),
+            SequenceVerdict::First
+        );
+        assert!(matches!(
+            restarted.admit(intact, 0, digest(1)).await,
             Err(Error::TransactionReplay { .. })
         ));
     }
@@ -1268,3 +1429,5 @@ mod tests {
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod quota_admission_tests;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_stream_failures;

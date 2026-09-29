@@ -29,12 +29,16 @@ pub use crate::storage::memory::MemStorage;
 /// that the state it held is forfeit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UndecodableRecord {
-    /// The name the storage files the record under: its key, or the backend's image of the
-    /// key where the backend does not file records by key (`FileStorage`: the file name).
+    /// The name the storage files the record under, [`KvStorageInterface::record_name`] of its
+    /// key: the key itself, or the backend's image of it (`FileStorage`: the file name).
     pub name: String,
     /// The record's key, when the part of the record that carries it is intact.
     pub key: Option<String>,
 }
+
+/// One record of a [`KvStorageInterface::scan`]: its key and value, or the record the storage
+/// holds but cannot decode.
+pub type ScannedRecord<V> = std::result::Result<(String, V), UndecodableRecord>;
 
 impl std::fmt::Display for UndecodableRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -62,6 +66,22 @@ pub trait KvStorageInterface<V> {
 
     /// Return every key value pair in this storage.
     async fn get_all(&self) -> Result<Vec<(String, V)>>;
+
+    /// Return every record of this storage, each decoded or reported undecodable.
+    ///
+    /// Law: a scan deletes nothing, and it reports each record the storage cannot decode as an
+    /// [`UndecodableRecord`] whose `name` is [`Self::record_name`] of the record's key, so its
+    /// owner can fail closed on exactly that key without reading the record again. The default
+    /// serves a backend whose records always decode, since it holds values, not bytes.
+    async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
+        Ok(self.get_all().await?.into_iter().map(Ok).collect())
+    }
+
+    /// The name under which this storage files the record of `key`, and under which
+    /// [`Self::scan`] reports it when it cannot decode it: the key itself by default.
+    fn record_name(&self, key: &str) -> String {
+        key.to_owned()
+    }
 
     /// Remove an `entry` by `key`.
     async fn remove(&self, key: &str) -> Result<()>;

@@ -114,7 +114,19 @@ pub enum Error {
         capacity: usize,
     },
 
-    /// The replay store holds a record that violates its structural bounds.
+    /// A replay stream whose stored record does not restore refuses every transition until an
+    /// operator clears that record.
+    #[error(
+        "Transaction replay stream {key:?} is unavailable: its record {record} does not restore"
+    )]
+    TransactionReplayStreamUnavailable {
+        /// The stream that fails closed.
+        key: crate::message::StreamKey,
+        /// Storage record name of the stream's unrestorable record, the one to clear.
+        record: String,
+    },
+
+    /// Replay state violates an invariant of the replay runtime.
     #[error("Transaction replay state is invalid")]
     TransactionReplayStateInvalid,
 

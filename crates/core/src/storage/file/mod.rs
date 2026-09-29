@@ -47,7 +47,6 @@ use std::sync::RwLockWriteGuard;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use itertools::Itertools;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha1::Digest;
@@ -57,6 +56,7 @@ use super::write_ordered::WriteOrderedMap;
 use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
+use crate::storage::ScannedRecord;
 use crate::storage::UndecodableRecord;
 
 /// What a store's records are to their owner, which fixes how the store writes and reads them
@@ -267,6 +267,21 @@ impl FileStorage {
         self.index.write().map_err(|_| Error::LockPoisoned)
     }
 
+    /// The bytes of every indexed record file, by file name, read under the read guard; a file
+    /// removed since it was indexed is skipped.
+    fn read_records(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let index = self.read_index()?;
+        let mut records = Vec::with_capacity(index.files.len());
+        for (name, _) in index.files.iter() {
+            match std::fs::read(self.root.join(name)) {
+                Ok(data) => records.push((name.to_owned(), data)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(Error::ServiceIOError(error)),
+            }
+        }
+        Ok(records)
+    }
+
     /// Remove the record stored as `name` and forget it; an authoritative store flushes the
     /// removal (the durability law).
     fn retire(&self, name: &str) -> Result<()> {
@@ -425,26 +440,28 @@ where V: Serialize + DeserializeOwned + Sync
     }
 
     async fn get_all(&self) -> Result<Vec<(String, V)>> {
-        let records = {
-            let index = self.read_index()?;
-            index
-                .files
-                .iter()
-                .map(|(name, _)| (name.to_owned(), std::fs::read(self.root.join(name))))
-                .collect_vec()
-        };
+        let records = self.read_records()?;
         let mut decoded = Vec::with_capacity(records.len());
         for (name, data) in records {
-            let data = match data {
-                Ok(data) => data,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(Error::ServiceIOError(error)),
-            };
             if let Some(record) = self.decode_record::<V>(&name, &data)? {
                 decoded.push(record);
             }
         }
         Ok(decoded)
+    }
+
+    /// Every record file, decoded or reported by its file name (and its key when intact);
+    /// unlike `get_all`, a scan never retires, whatever the store's authority.
+    async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
+        Ok(self
+            .read_records()?
+            .into_iter()
+            .map(|(name, data)| decode_pair(&name, &data))
+            .collect())
+    }
+
+    fn record_name(&self, key: &str) -> String {
+        file_name_for(key)
     }
 
     async fn remove(&self, key: &str) -> Result<()> {
