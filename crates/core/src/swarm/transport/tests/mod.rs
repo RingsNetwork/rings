@@ -493,9 +493,9 @@ fn transport_with_key_measure_and_reassembly_limits(
         delegatee_key,
         dht,
         measure: Some(measure),
-        transaction_replay: Arc::new(crate::message::TransactionReplay::new(Box::new(
+        transaction_replay: crate::message::TransactionReplay::new(Box::new(
             crate::storage::MemStorage::new(),
-        ))),
+        )),
         settings: SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
         callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
         observer: Arc::new(crate::swarm::observer::NoopSwarmObserver),

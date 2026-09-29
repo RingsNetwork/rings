@@ -718,6 +718,16 @@ pub enum Error {
         capacity: u64,
     },
 
+    /// A storage could not run its blocking file work: no runtime was current, or the work
+    /// ended without publishing its result.
+    #[error("Storage file work did not run: {0}")]
+    StorageWorkUnscheduled(rings_runtime::DetachedError),
+
+    /// A replay transition could not run detached from its caller: no runtime was current, or
+    /// the transition ended without publishing its result.
+    #[error("Transaction replay transition did not run: {0}")]
+    TransactionReplayUnscheduled(rings_runtime::DetachedError),
+
     /// A storage holds a record it cannot read or decode; the record is kept, never deleted.
     #[error("Storage cannot decode {0}")]
     StorageRecordUndecodable(crate::storage::UndecodableRecord),

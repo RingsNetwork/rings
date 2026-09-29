@@ -240,7 +240,7 @@ impl KvStorageScan<ReplayRecord> for FailFirstPutStorage {
     }
 
     fn record_name(&self, key: &str) -> String {
-        key.to_owned()
+        self.inner.record_name(key)
     }
 }
 

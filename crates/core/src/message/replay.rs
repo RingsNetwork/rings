@@ -79,8 +79,10 @@ use std::num::NonZeroU64;
 use std::ops::RangeInclusive;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use futures::lock::Mutex;
+use rings_runtime::MaybeSend;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -340,6 +342,21 @@ pub fn observe(
     (state, verdict)
 }
 
+/// Run one replay transition detached from its caller (the law of whole transitions of
+/// [`TransactionReplay`]).
+///
+/// Post: `Err(TransactionReplayUnscheduled)` when no runtime is current (the transition never
+/// started) or the transition panicked; otherwise the transition's own result.
+async fn run_whole<T, F>(transition: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>> + MaybeSend + 'static,
+    T: MaybeSend + 'static,
+{
+    rings_runtime::run_detached(transition)
+        .await
+        .map_err(Error::TransactionReplayUnscheduled)?
+}
+
 /// Storage accepted by the transaction replay runtime.
 pub type ReplayStorage = Box<rings_runtime::maybe_send_sync!(dyn KvStorageScan<ReplayRecord>)>;
 
@@ -393,6 +410,20 @@ impl ReplayCounterState {
 /// transitions node-wide. Each write is one record of at most
 /// [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`]; a lock per stream would let writes of different
 /// streams overlap.
+///
+/// **Law (whole transitions).** A transition, once started, runs to its end: lock, persist the
+/// stream's record, update the in-memory table, unlock. [`Self::reserve`] and
+/// [`Self::admit_with_quota`] hand it to the runtime ([`rings_runtime::run_detached`]), so
+/// cancelling the caller abandons only the wait. Otherwise a cancelled caller would release the
+/// mutex while its record write still ran, the next transition of the stream would compute from
+/// a table without that write, and the stale write could land last on disk: a receiver replay,
+/// or re-signed sender sequences, after a restart.
+///
+/// ```text
+/// caller ──call──▶ run_detached ─▶ [lock ─▶ persist ─▶ table := next ─▶ unlock]
+///   │ drop                                   (owned by the runtime, never torn)
+///   └──────────▶ only the wait is abandoned
+/// ```
 pub(crate) struct TransactionReplay {
     storage: ReplayStorage,
     state: Mutex<TransactionAdmissionState>,
@@ -409,10 +440,11 @@ struct TransactionAdmissionState {
 }
 
 impl TransactionReplay {
-    /// Construct a replay runtime. The store is restored lazily on its first operation.
+    /// Construct a shared replay runtime, as the transport holds it. The store is restored
+    /// lazily on its first operation.
     #[cfg(test)]
-    pub(crate) fn new(storage: ReplayStorage) -> Self {
-        Self::new_with_quota(storage, OriginQuotaConfig::default())
+    pub(crate) fn new(storage: ReplayStorage) -> Arc<Self> {
+        Arc::new(Self::new_with_quota(storage, OriginQuotaConfig::default()))
     }
 
     /// Construct a replay runtime with explicit runtime-local origin quotas.
@@ -558,7 +590,21 @@ impl TransactionReplay {
     }
 
     /// Reserve and persist `count` sender sequences before returning the range to the signer.
+    ///
+    /// The transition runs detached from the caller (the law of whole transitions): cancelling
+    /// the caller abandons only the wait.
     pub(crate) async fn reserve(
+        self: &Arc<Self>,
+        key: StreamKey,
+        count: NonZeroU64,
+    ) -> Result<RangeInclusive<u64>> {
+        let replay = Arc::clone(self);
+        run_whole(async move { replay.commit_reservation(key, count).await }).await
+    }
+
+    /// The reservation transition: lock, load, reserve, persist the stream's record, then update
+    /// the table.
+    async fn commit_reservation(
         &self,
         key: StreamKey,
         count: NonZeroU64,
@@ -587,8 +633,11 @@ impl TransactionReplay {
     }
 
     /// Atomically commit replay classification and origin-quota admission before dispatch.
+    ///
+    /// The transition runs detached from the caller (the law of whole transitions): cancelling
+    /// the caller abandons only the wait.
     pub(crate) async fn admit_with_quota(
-        &self,
+        self: &Arc<Self>,
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
@@ -600,10 +649,17 @@ impl TransactionReplay {
                 .saturating_duration_since(self.started_at)
                 .as_nanos(),
         );
-        self.admit_at(key, sequence, digest, charge, byte_cost, now)
-            .await
+        let replay = Arc::clone(self);
+        run_whole(async move {
+            replay
+                .admit_at(key, sequence, digest, charge, byte_cost, now)
+                .await
+        })
+        .await
     }
 
+    /// The admission transition at quota time `now`: lock, load, classify, reserve quota,
+    /// persist the stream's record, then update the table.
     async fn admit_at(
         &self,
         key: StreamKey,
@@ -968,7 +1024,7 @@ mod tests {
         let destination: Did = SecretKey::random().address().into();
         let key = stream(destination);
         let storage = std::sync::Arc::new(crate::storage::MemStorage::new());
-        let first_runtime = TransactionReplay::new(Box::new(SharedStorage(storage.clone())));
+        let first_runtime = TransactionReplay::new(Box::new(storage.clone()));
         assert_eq!(first_runtime.reserve(key, NonZeroU64::MIN).await?, 0..=0);
         assert_eq!(
             first_runtime.admit(key, 0, digest(1)).await?,
@@ -976,7 +1032,7 @@ mod tests {
         );
         drop(first_runtime);
 
-        let restarted = TransactionReplay::new(Box::new(SharedStorage(storage)));
+        let restarted = TransactionReplay::new(Box::new(storage));
         assert_eq!(restarted.reserve(key, NonZeroU64::MIN).await?, 1..=1);
         assert!(matches!(
             restarted.admit(key, 0, digest(1)).await,
@@ -1340,7 +1396,7 @@ mod tests {
         }
 
         fn record_name(&self, key: &str) -> String {
-            key.to_owned()
+            self.inner.record_name(key)
         }
     }
 
@@ -1352,7 +1408,7 @@ mod tests {
     async fn test_first_load_deletes_the_shared_stream_snapshot_unread() -> Result<()> {
         let storage =
             std::sync::Arc::new(CutoverStorage::holding_a_shared_stream_snapshot(false).await?);
-        let runtime = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        let runtime = TransactionReplay::new(Box::new(storage.clone()));
         let key = stream(SecretKey::random().address().into());
 
         assert_eq!(
@@ -1371,7 +1427,7 @@ mod tests {
             .is_some());
         assert_eq!(runtime.counters().persistence_failure, 0);
 
-        let restarted = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        let restarted = TransactionReplay::new(Box::new(storage.clone()));
         assert_eq!(
             restarted.admit(key, 1, digest(2)).await?,
             SequenceVerdict::Advance
@@ -1387,7 +1443,7 @@ mod tests {
     async fn test_failed_shared_stream_deletion_is_counted_and_admission_continues() -> Result<()> {
         let storage =
             std::sync::Arc::new(CutoverStorage::holding_a_shared_stream_snapshot(true).await?);
-        let runtime = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        let runtime = TransactionReplay::new(Box::new(storage.clone()));
         let key = stream(SecretKey::random().address().into());
 
         assert_eq!(
@@ -1401,7 +1457,7 @@ mod tests {
             .await?
             .is_some());
 
-        let restarted = TransactionReplay::new(Box::new(SharedCutoverStorage(storage.clone())));
+        let restarted = TransactionReplay::new(Box::new(storage.clone()));
         assert_eq!(
             restarted.admit(key, 1, digest(2)).await?,
             SequenceVerdict::Advance
@@ -1409,93 +1465,6 @@ mod tests {
         assert_eq!(restarted.counters().persistence_failure, 1);
         assert_eq!(storage.removals.load(Ordering::SeqCst), 2);
         Ok(())
-    }
-
-    /// Shares one [`CutoverStorage`] between the runtime and the test's assertions.
-    #[cfg(not(target_family = "wasm"))]
-    struct SharedCutoverStorage(std::sync::Arc<CutoverStorage>);
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl KvStorageInterface<ReplayRecord> for SharedCutoverStorage {
-        async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
-            self.0.get(key).await
-        }
-
-        async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
-            self.0.put(key, value).await
-        }
-
-        async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-            self.0.get_all().await
-        }
-
-        async fn remove(&self, key: &str) -> Result<()> {
-            self.0.remove(key).await
-        }
-
-        async fn clear(&self) -> Result<()> {
-            self.0.clear().await
-        }
-
-        async fn count(&self) -> Result<u32> {
-            self.0.count().await
-        }
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl KvStorageScan<ReplayRecord> for SharedCutoverStorage {
-        async fn scan(&self) -> Result<Vec<ScannedRecord<ReplayRecord>>> {
-            self.0.scan().await
-        }
-
-        fn record_name(&self, key: &str) -> String {
-            key.to_owned()
-        }
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    struct SharedStorage(std::sync::Arc<crate::storage::MemStorage<ReplayRecord>>);
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl KvStorageInterface<ReplayRecord> for SharedStorage {
-        async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
-            self.0.get(key).await
-        }
-
-        async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
-            self.0.put(key, value).await
-        }
-
-        async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-            self.0.get_all().await
-        }
-
-        async fn remove(&self, key: &str) -> Result<()> {
-            self.0.remove(key).await
-        }
-
-        async fn clear(&self) -> Result<()> {
-            self.0.clear().await
-        }
-
-        async fn count(&self) -> Result<u32> {
-            self.0.count().await
-        }
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl KvStorageScan<ReplayRecord> for SharedStorage {
-        async fn scan(&self) -> Result<Vec<ScannedRecord<ReplayRecord>>> {
-            self.0.scan().await
-        }
-
-        fn record_name(&self, key: &str) -> String {
-            key.to_owned()
-        }
     }
 }
 
@@ -1505,3 +1474,5 @@ mod quota_admission_tests;
 mod test_durable_throughput;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_stream_failures;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_whole_transitions;

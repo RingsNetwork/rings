@@ -226,7 +226,9 @@ admitted from, and no sequence is reused by, a stream whose record is torn, corr
 and every other stream in the store keeps its guarantee; each such record holds one slot of both
 tables' stream bounds. A record that is absent is indistinguishable from a stream never seen, so its
 stream restarts from `First` (tracked in #915). The store is read once, on the first replay
-operation; later calls read nothing and write one flushed record, which bounds the node-wide
+operation; later calls read nothing and write one flushed record. Each transition runs detached
+from its caller (lock, persist, update, unlock), so a cancelled caller never leaves a record write
+in flight to land after a newer one. The flushed write bounds the node-wide
 transition rate (about 55 per second on macOS; group commit is tracked in #916). Unrestorable
 records and refused calls are counted in `ReplayCounters` and each unrestorable record is logged at
 load. The browser store commits each record in an atomic IndexedDB transaction under the default

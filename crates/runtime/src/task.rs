@@ -5,9 +5,10 @@
 //! ```text
 //!   spawn_detached : F → Result<(), Unscheduled F>        fire and forget
 //!   run_detached   : F → Future (Result<T, DetachedError>) awaited, but owned by the runtime
+//!   run_blocking   : (() → T) → Future (Result<T, DetachedError>)   native blocking pool
 //! ```
 //!
-//! Both hand ownership of the future to the executor at the call, not at a later poll:
+//! All three hand ownership of the work to the executor at the call, not at a later poll:
 //! cancelling the caller (dropping the future that awaits [`run_detached`]) never cancels
 //! the work. Neither returns a handle that aborts the work — work whose lifetime the caller
 //! must own is not *detached*, and a caller that needs it keeps its own abort handle
@@ -169,6 +170,26 @@ where
     async move { Ok(output?.await?) }
 }
 
+/// Start the blocking `operation` on the current executor's blocking thread pool now and return
+/// a future of its output (native only: the browser event loop has no blocking pool).
+///
+/// Post: the returned future yields `Unavailable` at once when no executor is current, and
+/// `Abandoned` when `operation` panicked; otherwise the ownership law of [`run_detached`] holds:
+/// dropping the returned future abandons only the wait, and `operation` still runs to its end.
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+pub fn run_blocking<F, T>(
+    operation: F,
+) -> impl Future<Output = Result<T, DetachedError>> + Send + 'static
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let joined = tokio::runtime::Handle::try_current()
+        .map(|handle| handle.spawn_blocking(operation))
+        .map_err(|_| RuntimeUnavailable);
+    async move { Ok(joined?.await.map_err(|_| Abandoned)?) }
+}
+
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use std::sync::atomic::AtomicBool;
@@ -178,6 +199,7 @@ mod tests {
 
     use tokio::sync::Notify;
 
+    use super::run_blocking;
     use super::run_detached;
     use super::spawn_detached;
     use super::Abandoned;
@@ -288,6 +310,34 @@ mod tests {
             panic!("injected detached task failure");
         })
         .await;
+
+        assert_eq!(result, Err(DetachedError::Abandoned(Abandoned)));
+    }
+
+    #[test]
+    fn test_run_blocking_outside_a_runtime_is_unavailable() {
+        let result = futures::executor::block_on(run_blocking(|| ()));
+
+        assert_eq!(result, Err(DetachedError::Unavailable(RuntimeUnavailable)));
+    }
+
+    /// Law: the blocking work starts at the call and outlives a dropped waiter.
+    #[tokio::test]
+    async fn test_dropping_the_waiter_does_not_cancel_blocking_work() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        drop(run_blocking(move || sender.send(()).expect("receiver alive")));
+
+        tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(10)))
+            .await
+            .expect("waiting thread")
+            .expect("blocking work must run although its waiter was dropped");
+    }
+
+    #[tokio::test]
+    async fn test_panicking_blocking_work_is_abandoned() {
+        let result: Result<(), DetachedError> =
+            run_blocking(|| panic!("injected blocking failure")).await;
 
         assert_eq!(result, Err(DetachedError::Abandoned(Abandoned)));
     }

@@ -25,12 +25,14 @@
 //! budget), and the directory is owned exclusively by this instance while it is open. Every
 //! entry with a record's name is indexed, whatever its file type. An entry whose metadata
 //! cannot be read fails a disposable open; an authoritative open indexes it at zero bytes so
-//! that a scan reports it rather than hiding it.
+//! that a scan reports it rather than hiding it. A directory listing that fails part-way skips
+//! the unlisted entries of a disposable store, and fails an authoritative open as a whole,
+//! since an entry it cannot list it cannot name.
 //!
 //! Durability law: an authoritative `put` flushes the temporary file to stable storage before
 //! renaming it over the record, and flushes the directory after the rename; an authoritative
-//! removal flushes the directory after it, and an authoritative open flushes the parent of
-//! every directory it created and of the root, so the store's own directory entry survives.
+//! removal flushes the directory after it, and an authoritative open flushes the root and every
+//! ancestor of it, so each directory entry on the store's path survives, whoever created it.
 //! On unix a crash therefore leaves each record either whole at its previous value or whole at
 //! its new one, never torn, and a completed write or removal is not rolled back. The flushes
 //! are `File::sync_all`, which the standard library maps to `fcntl(F_FULLFSYNC)` on Apple
@@ -219,16 +221,18 @@ impl FileStorage {
     }
 }
 
-/// Run the blocking `operation` on the tokio blocking pool; a task that panics or is cancelled
-/// is reported as an I/O error.
+/// Run the blocking `operation` on the runtime's blocking pool (the execution law).
+///
+/// Post: `Err(StorageWorkUnscheduled)` when no runtime is current (nothing ran) or the work
+/// panicked; dropping the returned future abandons only the wait, never the work.
 async fn blocking<T, F>(operation: F) -> Result<T>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(operation)
+    rings_runtime::run_blocking(operation)
         .await
-        .map_err(|joined| Error::ServiceIOError(std::io::Error::other(joined)))?
+        .map_err(Error::StorageWorkUnscheduled)?
 }
 
 impl FileStore {
@@ -264,7 +268,13 @@ impl FileStore {
             Err(error) => return Err(Error::ServiceIOError(error)),
         };
         let mut files = Vec::new();
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                // An unlisted record cannot be named, so an authoritative store fails whole.
+                Err(error) if self.authority.flushes() => return Err(Error::ServiceIOError(error)),
+                Err(_) => continue,
+            };
             let path = entry.path();
             if path.extension().is_some_and(|extension| extension == "tmp") {
                 remove_file_if_present(&path)?;
@@ -398,11 +408,7 @@ impl FileStore {
     /// The bytes of the record file `name`, read under the read guard; `None` if it is absent.
     fn read_record(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let _guard = self.read_index()?;
-        match std::fs::read(self.root.join(name)) {
-            Ok(data) => Ok(Some(data)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(Error::ServiceIOError(error)),
-        }
+        read_file_if_present(&self.root.join(name)).map_err(Error::ServiceIOError)
     }
 
     /// Read every indexed record file under the read guard, each to its bytes or to the error
@@ -413,9 +419,9 @@ impl FileStore {
         Ok(index
             .files
             .iter()
-            .map(|(name, _)| (name.to_owned(), std::fs::read(self.root.join(name))))
-            .filter(|(_, read)| {
-                !matches!(read, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            .filter_map(|(name, _)| {
+                let read = read_file_if_present(&self.root.join(name)).transpose()?;
+                Some((name.to_owned(), read))
             })
             .collect())
     }
@@ -451,12 +457,8 @@ impl FileStore {
     /// have replaced the record meanwhile; that record is the writer's to keep.
     fn retire_observed(&self, name: &str, observed: &[u8]) -> Result<()> {
         let mut index = self.write_index()?;
-        let current = match std::fs::read(self.root.join(name)) {
-            Ok(current) => current,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(Error::ServiceIOError(error)),
-        };
-        if current == observed {
+        let current = read_file_if_present(&self.root.join(name)).map_err(Error::ServiceIOError)?;
+        if current.as_deref() == Some(observed) {
             self.retire_indexed(&mut index, name)?;
         }
         Ok(())
@@ -488,27 +490,21 @@ where V: DeserializeOwned {
     }
 }
 
-/// Create the directory `root` and its missing ancestors; iff `flush`, flush the parent of
-/// every directory created and of `root`, so that the directory entries survive a crash.
+/// Create the directory `root` and its missing ancestors; iff `flush`, flush `root` and every
+/// ancestor, deepest first, so that each directory entry on the path survives a crash, whoever
+/// created it (another store may have created a shared parent without flushing it).
 fn create_directory(root: &Path, flush: bool) -> Result<()> {
-    let missing = root
-        .ancestors()
-        .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
-        .map(Path::to_path_buf)
-        .collect::<Vec<_>>();
     std::fs::create_dir_all(root).map_err(Error::ServiceIOError)?;
     if !flush {
         return Ok(());
     }
-    // Deepest first, so each flush makes a directory durable whose entries are already flushed.
-    let flushed = missing
-        .iter()
-        .map(PathBuf::as_path)
-        .chain(std::iter::once(root))
-        .filter_map(Path::parent)
-        .filter(|parent| !parent.as_os_str().is_empty());
-    for parent in flushed {
-        sync_directory(parent)?;
+    for directory in root.ancestors() {
+        // A relative path's last ancestor is empty: the working directory.
+        let directory = match directory.as_os_str().is_empty() {
+            true => Path::new("."),
+            false => directory,
+        };
+        sync_directory(directory)?;
     }
     Ok(())
 }
@@ -551,6 +547,15 @@ fn file_name_for(key: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(key.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Read the file `path`, treating an absent file as `None`.
+fn read_file_if_present(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(data) => Ok(Some(data)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Remove the file `path`, treating an already absent file as removed.
@@ -622,7 +627,9 @@ where V: Serialize + DeserializeOwned + Send + Sync
     }
 
     async fn count(&self) -> Result<u32> {
-        let count = self.store.read_index()?.files.len();
+        let count = self
+            .on_store(|store| Ok(store.read_index()?.files.len()))
+            .await?;
         u32::try_from(count).map_err(|_| Error::StorageCountOverflow)
     }
 }
@@ -670,3 +677,5 @@ impl std::fmt::Debug for FileStorage {
 
 #[cfg(test)]
 mod test_file;
+#[cfg(test)]
+pub(crate) mod test_root;

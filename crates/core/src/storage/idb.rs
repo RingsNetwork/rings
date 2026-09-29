@@ -479,6 +479,7 @@ where V: DeserializeOwned + Serialize + Sized
             .collect())
     }
 
+    /// The key itself: a row's primary key is its record key (the key path is inline).
     fn record_name(&self, key: &str) -> String {
         key.to_owned()
     }

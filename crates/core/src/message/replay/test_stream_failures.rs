@@ -20,6 +20,7 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::MessageCategory;
+use crate::storage::file::test_root::TempRoot;
 use crate::storage::file::FileStorage;
 use crate::storage::KvStorageInterface;
 use crate::storage::KvStorageScan;
@@ -64,52 +65,49 @@ impl CountingStorage {
     }
 }
 
-/// A runtime handle on a [`CountingStorage`] the test keeps.
-struct SharedCountingStorage(Arc<CountingStorage>);
-
 #[async_trait::async_trait]
-impl KvStorageInterface<ReplayRecord> for SharedCountingStorage {
+impl KvStorageInterface<ReplayRecord> for CountingStorage {
     async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
-        self.0.inner.get(key).await
+        self.inner.get(key).await
     }
 
     async fn put(&self, key: &str, value: &ReplayRecord) -> Result<()> {
-        self.0.inner.put(key, value).await
+        self.inner.put(key, value).await
     }
 
     async fn get_all(&self) -> Result<Vec<(String, ReplayRecord)>> {
-        self.0.scans.fetch_add(1, Ordering::SeqCst);
-        self.0.inner.get_all().await
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        self.inner.get_all().await
     }
 
     async fn remove(&self, key: &str) -> Result<()> {
-        self.0.inner.remove(key).await
+        self.inner.remove(key).await
     }
 
     async fn clear(&self) -> Result<()> {
-        self.0.inner.clear().await
+        self.inner.clear().await
     }
 
     async fn count(&self) -> Result<u32> {
-        self.0.inner.count().await
+        self.inner.count().await
     }
 }
 
 #[async_trait::async_trait]
-impl KvStorageScan<ReplayRecord> for SharedCountingStorage {
+impl KvStorageScan<ReplayRecord> for CountingStorage {
     async fn scan(&self) -> Result<Vec<ScannedRecord<ReplayRecord>>> {
-        self.0.scans.fetch_add(1, Ordering::SeqCst);
-        self.0.inner.scan().await
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        self.inner.scan().await
     }
 
     fn record_name(&self, key: &str) -> String {
-        self.0.inner.record_name(key)
+        self.inner.record_name(key)
     }
 }
 
 /// A runtime over `storage`, as one run of a node opens it.
-fn runtime(storage: &Arc<CountingStorage>) -> TransactionReplay {
-    TransactionReplay::new(Box::new(SharedCountingStorage(storage.clone())))
+fn runtime(storage: &Arc<CountingStorage>) -> Arc<TransactionReplay> {
+    TransactionReplay::new(Box::new(Arc::clone(storage)))
 }
 
 /// A store holding a receiver record of stream 1 whose inner bytes decode as no stream, next
@@ -203,8 +201,7 @@ async fn test_a_corrupt_sender_record_refuses_reservation_on_its_stream() -> Res
 /// from the cached load, never counted as a failed read of the store.
 #[tokio::test]
 async fn test_an_unreadable_native_record_fails_only_its_stream() -> Result<()> {
-    let root =
-        std::env::temp_dir().join(format!("rings-replay-unreadable-{}", uuid::Uuid::new_v4()));
+    let root = TempRoot::new("replay-unreadable");
     let storage = FileStorage::new_authoritative_with_cap_and_path(1 << 20, &root).await?;
     let occupied = record_key(ReplayTable::Receiver, &stream(1))?;
     let name = <FileStorage as KvStorageScan<ReplayRecord>>::record_name(&storage, &occupied);
@@ -229,7 +226,6 @@ async fn test_an_unreadable_native_record_fails_only_its_stream() -> Result<()> 
     assert_eq!(counters.unavailable_stream, 4);
     assert_eq!(counters.persistence_failure, 0);
     drop(replay);
-    let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
 
@@ -289,7 +285,7 @@ async fn test_clearing_the_record_restores_the_stream() -> Result<()> {
 /// before the next restart restores stream 1.
 #[tokio::test]
 async fn test_a_torn_native_record_fails_its_stream_closed_until_cleared() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("rings-replay-torn-{}", uuid::Uuid::new_v4()));
+    let root = TempRoot::new("replay-torn");
     let open = || FileStorage::new_authoritative_with_cap_and_path(1 << 20, &root);
     let torn_file = {
         let storage = open().await?;
@@ -329,6 +325,5 @@ async fn test_a_torn_native_record_fails_its_stream_closed_until_cleared() -> Re
     );
     assert_eq!(restarted.reserve(stream(2), NonZeroU64::MIN).await?, 6..=6);
     drop(restarted);
-    let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }

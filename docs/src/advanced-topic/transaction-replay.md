@@ -132,7 +132,12 @@ or whose framing does not decode, is reported and never deleted. The file I/O ru
 blocking pool, so a flush never stalls an asynchronous worker.
 
 One lock serializes all replay transitions and is held across each record write, so the store's
-write latency bounds the node-wide transition rate. With the flushed native store that bound is the
+write latency bounds the node-wide transition rate. Each transition runs detached from its caller
+on the runtime: lock, persist the stream's record, update the table, unlock. Cancelling a caller
+abandons only its wait, so a record write is never left in flight while the next transition of its
+stream runs, and a stale write can never land after a newer one.
+
+With the flushed native store that bound is the
 flush latency. `test_durable_throughput_of_replay_admissions` (ignored by default; run it with
 `--ignored --nocapture`) measures it. On an Apple M1 Max SSD (APFS) it measured:
 

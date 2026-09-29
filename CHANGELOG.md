@@ -16,7 +16,10 @@
   restarts its stream from `First` (#915). The new `KvStorageScan` trait (implemented by
   `MemStorage`, `FileStorage` and `IdbStorage`) adds `scan` (every record, decoded or reported as
   an `UndecodableRecord`, deleting nothing) and `record_name`, both required, and
-  `ReplayStorage` now boxes a `KvStorageScan`.
+  `ReplayStorage` now boxes a `KvStorageScan`, and a shared `Arc` of either storage trait is one
+  itself. Each reservation and admission now runs detached from its caller
+  (`rings_runtime::run_detached`), so cancelling a caller mid-persist can no longer let a stale
+  record write land after a newer one.
 
 - Open the native transaction replay store as an authoritative `FileStorage` (#909). On unix its
   `put` flushes the temporary file before the rename and the directory after it (removals, and
@@ -28,7 +31,8 @@
   write beyond its budget, or an open under a lowered one, fails with
   `Error::StorageBudgetExhausted`. The flush bounds replay transitions to about 55 per second on
   an Apple M1 Max SSD (`F_FULLFSYNC`), against about 4,400 unflushed; group commit is tracked in
-  #916. Every `FileStorage` now runs its file I/O on the tokio blocking pool.
+  #916. Every `FileStorage` now runs its file I/O on the runtime's blocking pool through the new
+  `rings_runtime::run_blocking` (fallible: `Error::StorageWorkUnscheduled` outside a runtime).
   `FileStorage::new_with_cap_and_path` keeps the disposable behaviour (no flush, oldest records
   evicted, undecodable records retired) for the DHT, measurement, evidence and onion entry-guard
   stores (the entry-guard store's policy is #911);

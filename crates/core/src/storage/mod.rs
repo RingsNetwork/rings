@@ -17,7 +17,10 @@ pub mod idb;
 pub mod memory;
 mod write_ordered;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use rings_runtime::MaybeSendSync;
 
 use crate::error::Result;
 pub use crate::storage::memory::MemStorage;
@@ -102,4 +105,55 @@ pub trait KvStorageScan<V>: KvStorageInterface<V> {
     /// The name under which this storage files the record of `key`, and under which
     /// [`Self::scan`] reports that record when it cannot read or decode it.
     fn record_name(&self, key: &str) -> String;
+}
+
+/// A shared storage is the storage it shares: every operation delegates to it, so a wrapper
+/// never restates (or mistakes) the naming its scan must agree with.
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl<V, S> KvStorageInterface<V> for Arc<S>
+where
+    V: MaybeSendSync,
+    S: KvStorageInterface<V> + MaybeSendSync + ?Sized,
+{
+    async fn get(&self, key: &str) -> Result<Option<V>> {
+        self.as_ref().get(key).await
+    }
+
+    async fn put(&self, key: &str, value: &V) -> Result<()> {
+        self.as_ref().put(key, value).await
+    }
+
+    async fn get_all(&self) -> Result<Vec<(String, V)>> {
+        self.as_ref().get_all().await
+    }
+
+    async fn remove(&self, key: &str) -> Result<()> {
+        self.as_ref().remove(key).await
+    }
+
+    async fn clear(&self) -> Result<()> {
+        self.as_ref().clear().await
+    }
+
+    async fn count(&self) -> Result<u32> {
+        self.as_ref().count().await
+    }
+}
+
+/// A shared scannable storage scans and names exactly as the storage it shares.
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl<V, S> KvStorageScan<V> for Arc<S>
+where
+    V: MaybeSendSync,
+    S: KvStorageScan<V> + MaybeSendSync + ?Sized,
+{
+    async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
+        self.as_ref().scan().await
+    }
+
+    fn record_name(&self, key: &str) -> String {
+        self.as_ref().record_name(key)
+    }
 }

@@ -19,6 +19,7 @@ use super::TransactionReplay;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::message::MessageCategory;
+use crate::storage::file::test_root::TempRoot;
 use crate::storage::file::FileStorage;
 use crate::storage::MemStorage;
 
@@ -64,7 +65,7 @@ fn report(label: &str, latencies: &[Duration]) {
 #[ignore = "benchmark: its figure depends on the disk"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_durable_throughput_of_replay_admissions() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("rings-replay-bench-{}", uuid::Uuid::new_v4()));
+    let root = TempRoot::new("replay-bench");
     let authoritative =
         FileStorage::new_authoritative_with_cap_and_path(1 << 24, root.join("authoritative"))
             .await?;
@@ -81,6 +82,5 @@ async fn test_durable_throughput_of_replay_admissions() -> Result<()> {
         "memory",
         &admission_latencies(Box::new(MemStorage::new())).await?,
     );
-    let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }

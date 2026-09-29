@@ -135,10 +135,12 @@ where V: Clone + Send + Sync
 impl<V> KvStorageScan<V> for MemStorage<V>
 where V: Clone + Send + Sync
 {
+    /// Every stored value, each decoded by construction.
     async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
         Ok(self.get_all().await?.into_iter().map(Ok).collect())
     }
 
+    /// The key itself: a memory store files each value under its key.
     fn record_name(&self, key: &str) -> String {
         key.to_owned()
     }

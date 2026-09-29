@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::test_root::TempRoot;
 use super::*;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,17 +57,11 @@ async fn test_kv_storage_put_get_count_and_clear() {
         .expect("count reads");
     assert_eq!(count, 0);
     drop(storage);
-    let _ = std::fs::remove_dir_all(root);
 }
 
-fn temp_root(label: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "rings-file-kv-{label}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos()
-    ))
+/// A fresh store root for one test, removed on drop.
+fn temp_root(label: &str) -> TempRoot {
+    TempRoot::new(&format!("file-kv-{label}"))
 }
 
 fn record_len(key: &str, value: &str) -> u32 {
@@ -109,8 +104,6 @@ async fn test_put_beyond_budget_retires_least_recently_written_keys() {
             .expect("get b"),
         None
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Budget law: a value larger than the whole budget is rejected and nothing is retired.
@@ -129,8 +122,6 @@ async fn test_value_larger_than_budget_is_rejected_without_change() {
         Err(Error::StorageValueExceedsCapacity { .. })
     ));
     assert_eq!(stored_keys(&storage).await, ["a"]);
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Index law under a refused removal: a record the file system will not remove (its path is
@@ -173,8 +164,6 @@ async fn test_refused_retirement_keeps_the_record_indexed() {
     std::fs::write(&path, record).expect("restore record a");
     storage.put("b", &"v".to_string()).await.expect("put b");
     assert_eq!(stored_keys(&storage).await, ["b"]);
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Decode law: a record the current schema cannot read is reported absent and retired on the
@@ -224,8 +213,6 @@ async fn test_undecodable_record_is_retired_only_while_unchanged() {
             .expect("count"),
         0
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Budget law across restarts: reopening rebuilds the index from the directory in modification
@@ -259,8 +246,6 @@ async fn test_reopen_restores_budget_in_write_order() {
             .expect("count"),
         2
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Write `bytes` as the record file of `key` under `root`, as a crash would have left it.
@@ -302,8 +287,6 @@ async fn test_authoritative_store_reports_a_torn_record_and_keeps_it() {
             .expect("count"),
         1
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Decode law of an authoritative store: a record truncated to nothing, which a crash between
@@ -327,8 +310,6 @@ async fn test_authoritative_store_reports_an_empty_record_by_its_file() {
         ));
         assert!(root.join(&name).exists());
     }
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// A key prefix that decodes but hashes to another file is not the record's key: the report
@@ -347,8 +328,6 @@ async fn test_a_misfiled_key_prefix_is_not_reported_as_the_key() {
         Err(Error::StorageRecordUndecodable(UndecodableRecord { name: ref reported, key: None }))
             if *reported == name
     ));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Durability law, observed through its effect: an authoritative store's writes, rewrites and
@@ -383,8 +362,6 @@ async fn test_authoritative_writes_round_trip_through_a_reopen() {
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
         .count();
     assert_eq!(temporaries, 0);
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Scan law: a scan reports each record decoded or undecodable (named by its file and its intact
@@ -415,21 +392,54 @@ async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
         <FileStorage as KvStorageScan<String>>::record_name(&storage, "torn"),
         name
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
-/// Scan law under unreadable records: a directory occupying a record's name and a record file
-/// the process may not read are each reported by their file name, and the scan as a whole
-/// succeeds with the readable records.
+/// Whether this process can read the `locked` file despite its permission bits (it runs as
+/// root), which the permission-based cases need it not to; such a case then says it was skipped
+/// instead of passing vacuously.
+#[cfg(unix)]
+fn reads_through_permissions(case: &str, locked: &std::path::Path) -> bool {
+    let privileged = std::fs::read(locked).is_ok();
+    if privileged {
+        eprintln!("skipped {case}: the process reads through permission bits");
+    }
+    privileged
+}
+
+/// Scan law under an unreadable entry: a directory occupying a record's name is reported by its
+/// file name, and the scan as a whole succeeds with the readable records.
+#[tokio::test]
+async fn test_scan_reports_a_directory_in_a_record_place() {
+    let root = temp_root("directory");
+    let directory = file_name_for("directory");
+    std::fs::create_dir_all(root.join(&directory)).expect("occupy a record name");
+    let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
+        .await
+        .expect("open");
+    storage.put("whole", &"v".to_string()).await.expect("put");
+
+    let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
+        .await
+        .expect("a bad entry does not fail the scan");
+    scanned.sort_by_key(|record| record.is_ok());
+    assert_eq!(scanned, [
+        Err(UndecodableRecord {
+            name: directory,
+            key: None,
+        }),
+        Ok(("whole".to_owned(), "v".to_owned())),
+    ]);
+}
+
+/// Scan law under an unreadable file: a record file the process may not read is reported by its
+/// file name, and the scan as a whole succeeds with the readable records. Skipped, saying so,
+/// when the process reads through permission bits.
 #[cfg(unix)]
 #[tokio::test]
-async fn test_scan_reports_unreadable_records_one_by_one() {
+async fn test_scan_reports_a_record_it_may_not_read() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = temp_root("unreadable");
-    let directory = file_name_for("directory");
-    std::fs::create_dir_all(root.join(&directory)).expect("occupy a record name");
     let locked = plant_record(
         &root,
         "locked",
@@ -438,8 +448,9 @@ async fn test_scan_reports_unreadable_records_one_by_one() {
     let locked_path = root.join(&locked);
     std::fs::set_permissions(&locked_path, std::fs::Permissions::from_mode(0o000))
         .expect("lock the record");
-    // A privileged process reads through the permission bits; the case needs an unprivileged one.
-    let unreadable = std::fs::read(&locked_path).is_err();
+    if reads_through_permissions("test_scan_reports_a_record_it_may_not_read", &locked_path) {
+        return;
+    }
     let storage = FileStorage::new_authoritative_with_cap_and_path(4096, &root)
         .await
         .expect("open");
@@ -448,33 +459,22 @@ async fn test_scan_reports_unreadable_records_one_by_one() {
     let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
         .await
         .expect("a bad file does not fail the scan");
-    scanned.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
-    let mut expected = vec![
+    scanned.sort_by_key(|record| record.is_ok());
+    assert_eq!(scanned, [
         Err(UndecodableRecord {
-            name: directory,
+            name: locked,
             key: None,
         }),
         Ok(("whole".to_owned(), "v".to_owned())),
-    ];
-    if unreadable {
-        expected.push(Err(UndecodableRecord {
-            name: locked.clone(),
-            key: None,
-        }));
-    } else {
-        expected.push(Ok(("locked".to_owned(), "v".to_owned())));
-    }
-    expected.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
-    assert_eq!(scanned, expected);
-
+    ]);
     std::fs::set_permissions(&locked_path, std::fs::Permissions::from_mode(0o600))
         .expect("unlock the record");
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Index law under unreadable metadata: when the directory lists a record whose metadata the
 /// process may not read, an authoritative open indexes it and a scan reports it, while a
-/// disposable open fails as before.
+/// disposable open fails as before. Skipped, saying so, when the process reads through
+/// permission bits.
 #[cfg(unix)]
 #[tokio::test]
 async fn test_authoritative_open_indexes_an_entry_whose_metadata_fails() {
@@ -488,7 +488,12 @@ async fn test_authoritative_open_indexes_an_entry_whose_metadata_fails() {
     );
     // Listing without search permission: entries are readable, their metadata is not.
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o400)).expect("lock root");
-    let unprivileged = std::fs::metadata(root.join(&name)).is_err();
+    let case = "test_authoritative_open_indexes_an_entry_whose_metadata_fails";
+    if reads_through_permissions(case, &root.join(&name)) {
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock root");
+        return;
+    }
     let authoritative = FileStorage::new_authoritative_with_cap_and_path(4096, &root).await;
     let disposable = FileStorage::new_with_cap_and_path(4096, &root).await;
     let scanned = match &authoritative {
@@ -497,15 +502,12 @@ async fn test_authoritative_open_indexes_an_entry_whose_metadata_fails() {
     };
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).expect("unlock root");
 
-    if unprivileged {
-        assert!(disposable.is_err());
-        assert_eq!(scanned.expect("scan"), [Err(UndecodableRecord {
-            name,
-            key: None
-        })]);
-    }
     assert!(authoritative.is_ok());
-    let _ = std::fs::remove_dir_all(root);
+    assert!(disposable.is_err());
+    assert_eq!(scanned.expect("scan"), [Err(UndecodableRecord {
+        name,
+        key: None
+    })]);
 }
 
 /// Budget law of an authoritative store: a write that does not fit fails and evicts nothing,
@@ -540,6 +542,4 @@ async fn test_authoritative_store_evicts_nothing() {
         .await
         .expect("reopen");
     assert_eq!(stored_keys(&reopened).await, ["a", "b"]);
-
-    let _ = std::fs::remove_dir_all(root);
 }
