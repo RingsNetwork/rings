@@ -7,6 +7,7 @@ use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
 use rings_transport::core::pool::ChannelLane;
+use rings_transport::core::transport::LaneCreditReservation;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::delivery::DeliveryFuture;
 
@@ -288,9 +289,16 @@ pub(super) struct FrameTarget {
     pub(super) context: &'static str,
 }
 
+/// Send one frame under `credit`, its lane's transport credit, timing only the transport's
+/// acceptance.
+///
+/// Pre: `credit` was reserved by the scheduler ahead of the send, so the receiver's
+/// backpressure is never charged to the accept timeout. Without one (its connection could not
+/// grant credit) the transport reserves itself and fails as the connection does.
 pub(super) async fn send_data_with_timeout(
     admitted: &AdmittedConnection,
     data: Bytes,
+    credit: Option<LaneCreditReservation>,
     permit: &ChunkSendPermit,
     stop: &TransferStop,
     detached_admission: Option<&DetachedAdmission>,
@@ -299,6 +307,10 @@ pub(super) async fn send_data_with_timeout(
     let FrameTarget { did, lane, context } = target;
     let bytes = data.len();
     let send_permit = build_transport_send_permit(admitted, permit, stop, detached_admission);
+    let send_permit = match credit {
+        Some(credit) => send_permit.with_credit(credit),
+        None => send_permit,
+    };
     let acceptance = send_permit.acceptance();
     let send = admitted
         .connection()

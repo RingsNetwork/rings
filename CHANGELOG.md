@@ -191,6 +191,85 @@
     drained a message holds a tombstone, so it is retired with the messages it still held for
     its offline recipient: those undelivered messages are lost at the cutover.
 
+- Make receive-side admission lossless with per-lane credit flow control in the transport (#924).
+
+  **Before.** The transport's node-wide raw-frame gate (256 frames, blind to traffic class)
+  silently dropped frames once full. A storage burst could therefore drop liveness probes and
+  falsely disconnect healthy peers. In the N=50 hotspot sync storm, 38 of 49 probes were dropped.
+
+  **Credit.**
+  - Each of a connection's four lanes is now credit flow controlled. A receiver holds at most
+    `LANE_CREDIT_WINDOW` (16) frames of a lane, and advertises more as its protocol takes frames
+    over, through the new `TransportMessage::Credit(u64)` variant: the cumulative credit of the
+    lane it travels on, idempotent.
+  - A sender holds a custom frame until its lane has credit. The wait is backpressure, not a
+    verdict on the peer: it ends only when credit arrives or the connection generation reaches a
+    terminal state (`LinkCreditClosed`), and never retires a link. A wait that pins a budget is
+    bounded by that budget's purpose: a link-control frame waits at most the session hold, then
+    is dropped. A send that carries a credit reserved on another connection fails with
+    `ForeignCredit`, and a native connection that cannot spawn its credit pump fails with
+    `CreditPumpUnavailable`. A credit whose send fails is sent again after a pause, until the
+    connection is gone. An abandoned wait leaves no registration behind.
+  - `ConnectionInterface::reserve_send_credit` and `SendPermit::with_credit` let a caller wait
+    for credit apart from a send it bounds in time; the wait (`SendCreditWait`) owns only the
+    lane's credit state, so it keeps no connection alive.
+  - A node defers new credit while its connections hold more than
+    `NODE_RECEIVE_SOFT_LIMIT_BYTES` (16 MiB) of received frames, counted in the transport's
+    `NodeReceiveLoad`, which `InnerTransportCallback::new` takes; the release that brings it
+    below the limit advertises what was deferred. The bound is soft; a hard node-wide bound
+    needs credit that can be taken back (#934).
+  - The pure algebra (`rings_transport::core::credit`) is model checked: no honest violation,
+    bounded occupancy, deadlock freedom with deferred advertisements and failed credit sends,
+    completion, and refusal of a flooding sender, each refuted by a broken algebra.
+
+  **Receiving.**
+  - A credit frame is applied on arrival.
+  - Custom frames are queued per lane and handed to the protocol in order, so reading a channel
+    never waits on the protocol.
+  - A frame beyond the advertised credit is refused and reported as invalid.
+  - `InboundFrameCapacity`, its node-wide bounds and `TransportInterface::inbound_frame_capacity`
+    are removed; `InboundFrameAdmission::CapacityExceeded` becomes `CreditExceeded`, and a new
+    `Credit` variant is added.
+  - `admit_inbound_frame` and `prepare_inbound_frame` take the frame's lane.
+  - `InnerTransportCallback::for_transport` becomes `InnerTransportCallback::new`, and
+    `InboundFrameCapacityLease` becomes `InboundCreditLease`.
+  - Remote-created data channels are admitted only by their lane label, once per lane.
+
+  **Core.**
+  - The outbound worker serves only lanes that hold credit, so one lane's backpressure never
+    stalls another. A forwarded or relayed payload is released once it is queued: it takes its
+    outbound capacity without waiting, returns, and frees the inbound lane that carried it, so
+    a next hop's backpressure never reaches upstream links. Its first frame is awaited apart
+    from it for at most 25 s, credit included; one that waits longer is dropped as local
+    backpressure. A payload this node originates still returns once its first frame is
+    admitted.
+  - Liveness judges a peer that withholds credit. A probe counts as sent once it is queued, so
+    a probe the peer's control lane will not take is unanswered and the peer is evicted after
+    the answer window; a peer waited on for credit for the idle interval is probed however
+    recently it sent anything; and probes are sent concurrently, so a starved peer delays no
+    other peer's probe.
+  - The session-link holds of every connection keep at most 256 frames together, since their
+    frames have given their credit back.
+  - A frame the session-link hold keeps gives its transport credit back, so held frames never
+    fill the lane that carries the link-control answer releasing them.
+  - The inbound mailbox makes an arrival wait instead of refusing it, in resource order: first
+    come first served per exhausted resource (a peer's budget, a lane's share, the shared pool)
+    and per peer and lane, so a frame within its lane's reservation, such as DHT control, never
+    waits behind another lane's borrower, and no peer waits behind another peer's budget. The
+    order is `fair_admission::ResourceOrderedQueue`, model checked with stateright.
+
+  **Logging.** Both waits are logged at `warn` as backpressure.
+
+  **Sync storm.**
+  - Its scenarios derive their backlogs from the credit law.
+  - The legacy witness now shows the feedback loop broken at the reassembly barrier: per-lane
+    dispatch bounds the barrier's wait to one hand-over.
+  - The barrier-exemption ablation no longer violates its proposition (#927 evaluates removing
+    the layer).
+  - A new boundary test saturates one lane and conserves every frame.
+
+  **Cutover.** This is a wire change, and part of the storage-entry cutover above.
+
 - Store and send data-topic and relay-inbox elements as bytes, not base58-check text (#926).
   `Entry::data` is `Vec<Bytes>`; an element is the application's own bytes, and its
   `ElementDigest` is the Keccak-256 of those bytes. A held relay message is its wire encoding

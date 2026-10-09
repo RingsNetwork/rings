@@ -5,7 +5,10 @@ use crate::core::transport::TransportMessage;
 
 #[test]
 fn test_borrowed_and_owned_transport_envelopes_share_the_complete_wire_schema() {
-    let messages = [TransportMessage::Custom(Bytes::from_static(b"payload"))];
+    let messages = [
+        TransportMessage::Custom(Bytes::from_static(b"payload")),
+        TransportMessage::Credit(u64::MAX),
+    ];
 
     for message in messages {
         let raw = rings_codec::serialize(&message).expect("transport frame must serialize");
@@ -17,6 +20,10 @@ fn test_borrowed_and_owned_transport_envelopes_share_the_complete_wire_schema() 
             (TransportMessage::Custom(owned), BorrowedTransportMessage::Custom(view)) => {
                 assert_eq!(owned.as_ref(), view);
             }
+            (TransportMessage::Credit(owned), BorrowedTransportMessage::Credit(view)) => {
+                assert_eq!(owned, view);
+            }
+            _ => panic!("borrowed and owned envelopes disagree on the variant"),
         }
     }
 }

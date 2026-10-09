@@ -113,7 +113,9 @@ fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
         let now_ms = get_epoch_ms();
         match LinkFrame::from_wire(&wire) {
             Ok(LinkFrame::Payload(frame)) => {
-                if let Ok(FrameArrival::Resolved(resolved)) = receiver.arrive(frame, case, now_ms) {
+                if let Ok(FrameArrival::Resolved(resolved)) =
+                    receiver.arrive(frame, case, now_ms, true)
+                {
                     judge_payload(&resolved.payload);
                     if resolved
                         .payload

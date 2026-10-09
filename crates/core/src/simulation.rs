@@ -36,10 +36,11 @@ pub(crate) use observations::observe_outbound_global_capacity;
 pub(crate) use observations::observe_outbound_peer_capacity;
 pub(crate) use observations::observe_reassembly_capacity;
 pub(crate) use observations::record_barrier_control_blocked;
-pub(crate) use observations::record_barrier_control_deadline_miss;
+pub(crate) use observations::record_barrier_control_completion;
 pub(crate) use observations::record_outbound_submission;
 pub(crate) use observations::record_protection_violation;
 pub(crate) use observations::record_reassembly_advance;
+pub(crate) use observations::record_rejected_frame;
 pub(crate) use observations::record_repair_entries;
 pub(crate) use observations::record_storage_actor_yield;
 pub(crate) use observations::record_storage_persisted;
@@ -47,9 +48,10 @@ pub(crate) use observations::record_storage_progress;
 pub(crate) use observations::record_storage_progress_between_entries;
 pub(crate) use observations::signal_storage_progress_probe;
 pub(crate) use observations::storage_progress_epoch;
-use observations::DeadlineMissWitness;
+use observations::ControlCompletionWitness;
 pub(crate) use observations::ProductionCapacityObservations;
 pub(crate) use observations::ProductionTraceObservation;
+pub(crate) use service::reassembly_frame_service_ms;
 pub(crate) use service::wait_reassembly_service;
 pub(crate) use spawn::spawn_storage_progress_observer;
 
@@ -300,7 +302,7 @@ impl SimulationRuntimeState {
 pub(crate) struct ProtectionObservations {
     violations: BTreeSet<ProtectionLayer>,
     barrier_control_blocked: bool,
-    barrier_deadline_miss: Option<DeadlineMissWitness>,
+    barrier_control_completion: Option<ControlCompletionWitness>,
     storage_progress_between_entries: bool,
 }
 
@@ -322,15 +324,15 @@ impl ProtectionObservations {
     fn record_barrier_blocked(&mut self) {
         self.barrier_control_blocked = true;
         if self
-            .barrier_deadline_miss
+            .barrier_control_completion
             .is_some_and(|witness| witness.observed_virtual_ms > witness.deadline_virtual_ms)
         {
             self.record(ProtectionLayer::BarrierControlExemption);
         }
     }
 
-    fn record_barrier_deadline_miss(&mut self, witness: DeadlineMissWitness) {
-        self.barrier_deadline_miss = Some(witness);
+    fn record_barrier_control_completion(&mut self, witness: ControlCompletionWitness) {
+        self.barrier_control_completion = Some(witness);
         if self.barrier_control_blocked && witness.observed_virtual_ms > witness.deadline_virtual_ms
         {
             self.record(ProtectionLayer::BarrierControlExemption);

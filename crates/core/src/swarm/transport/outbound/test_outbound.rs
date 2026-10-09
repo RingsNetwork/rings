@@ -65,7 +65,7 @@ fn finalize_shutdown_probe(mut probe: ShutdownProbe) -> Option<ShutdownProbeComp
 }
 
 fn pop_and_finish(queues: &mut TransferQueues<TestTransfer>) -> Option<&'static str> {
-    let transfer = queues.pop()?;
+    let transfer = queues.pop(|_| true)?;
     queues.record_frame_admitted(transfer.class());
     let (_, item) = queues.finish_transfer(transfer);
     Some(item)
@@ -129,7 +129,9 @@ fn admit_single_frame_transfer(
     queues: &mut TransferQueues<TestTransfer>,
     delivery_id: u64,
 ) -> &'static str {
-    let active = queues.pop().expect("a runnable transfer must exist");
+    let active = queues
+        .pop(|_| true)
+        .expect("a runnable transfer must exist");
     let class = active.class();
     let label = active.item().1;
     queues.record_frame_admitted(class);
@@ -138,7 +140,9 @@ fn admit_single_frame_transfer(
         .take_waiting(class, delivery_id)
         .expect("the matching delivery must own the lane head");
     queues.make_runnable(delivered);
-    let completion_probe = queues.pop().expect("completion probe must be runnable");
+    let completion_probe = queues
+        .pop(|_| true)
+        .expect("completion probe must be runnable");
     assert_eq!(completion_probe.item().1, label);
     queues.finish_transfer(completion_probe);
     label
@@ -182,7 +186,9 @@ fn test_completion_probes_do_not_consume_control_frame_burst() {
         admitted.push(admit_single_frame_transfer(&mut queues, delivery_id));
     }
 
-    let active = queues.pop().expect("fourth control transfer must exist");
+    let active = queues
+        .pop(|_| true)
+        .expect("fourth control transfer must exist");
     assert_eq!(active.item().1, "dht-4");
     let class = active.class();
     queues.record_frame_admitted(class);
@@ -195,7 +201,7 @@ fn test_completion_probes_do_not_consume_control_frame_burst() {
 
     admitted.push(pop_and_finish(&mut queues).expect("application frame must receive its slot"));
     let completed_control = queues
-        .pop()
+        .pop(|_| true)
         .expect("fourth control completion probe must remain runnable");
     assert_eq!(completed_control.item().1, "dht-4");
     queues.finish_transfer(completed_control);
@@ -237,7 +243,9 @@ fn test_every_transfer_class_uses_its_own_lane() {
     }
 
     for _ in classes {
-        let transfer = queues.pop().expect("every indexed lane must be reachable");
+        let transfer = queues
+            .pop(|_| true)
+            .expect("every indexed lane must be reachable");
         assert_eq!(transfer.class(), transfer.item().0);
         queues.finish_transfer(transfer);
     }
@@ -260,7 +268,7 @@ fn test_lower_cursor_wraps_and_skips_idle_lanes() {
             push(&mut queues, class, "round-robin");
         }
         assert_eq!(
-            queues.pop().map(|transfer| transfer.class()),
+            queues.pop(|_| true).map(|transfer| transfer.class()),
             Some(expected)
         );
     }
@@ -269,7 +277,7 @@ fn test_lower_cursor_wraps_and_skips_idle_lanes() {
     sparse.record_frame_admitted(TransferClass::Storage);
     push(&mut sparse, TransferClass::Application, "sparse");
     assert_eq!(
-        sparse.pop().map(|transfer| transfer.class()),
+        sparse.pop(|_| true).map(|transfer| transfer.class()),
         Some(TransferClass::Application)
     );
 }
@@ -282,14 +290,14 @@ fn test_terminal_attempt_advances_the_lower_class_cursor() {
     push(&mut queues, TransferClass::Application, "application");
 
     let stale = queues
-        .pop()
+        .pop(|_| true)
         .expect("storage must start at the initial cursor");
     assert_eq!(stale.item().1, "stale-storage");
     queues.fail_attempt(stale);
     push(&mut queues, TransferClass::Storage, "more-stale-storage");
 
     let next = queues
-        .pop()
+        .pop(|_| true)
         .expect("a failed attempt must yield to the next lower class");
     assert_eq!(next.item().1, "e2e");
 }
@@ -301,7 +309,7 @@ fn test_cancelled_control_attempts_consume_the_control_burst() {
     for index in 0..OUTBOUND_CONTROL_BURST {
         push(&mut queues, TransferClass::DhtControl, "cancelled-control");
         let control = queues
-            .pop()
+            .pop(|_| true)
             .expect("control must run while its burst remains");
         assert_eq!(
             control.item().1,
@@ -313,7 +321,7 @@ fn test_cancelled_control_attempts_consume_the_control_burst() {
     push(&mut queues, TransferClass::DhtControl, "fifth-control");
 
     let next = queues
-        .pop()
+        .pop(|_| true)
         .expect("lower work must run after failed control consumes the burst");
     assert_eq!(next.item().1, "application");
 }
@@ -325,7 +333,9 @@ fn test_waiting_lane_preserves_same_class_fifo_and_allows_control_preemption() {
     push(&mut queues, TransferClass::Application, "app-1");
     push(&mut queues, TransferClass::Application, "app-2");
 
-    let active = queues.pop().expect("first application transfer must exist");
+    let active = queues
+        .pop(|_| true)
+        .expect("first application transfer must exist");
     assert_eq!(active.item(), &(TransferClass::Application, "app-1"));
     queues.record_frame_admitted(TransferClass::Application);
     queues.wait_for_delivery(7, FrameRemainder::Final, active);
@@ -347,7 +357,7 @@ fn test_draining_a_waiting_lane_returns_its_active_and_queued_transfers() {
     push(&mut queues, TransferClass::Application, "app-2");
 
     let active = queues
-        .pop()
+        .pop(|_| true)
         .expect("active transfer must exist before drain");
     queues.record_frame_admitted(TransferClass::Application);
     queues.wait_for_delivery(11, FrameRemainder::Final, active);
@@ -369,7 +379,7 @@ fn test_removing_ready_items_preserves_waiting_heads_and_fifo_order() {
     push(&mut queues, TransferClass::Application, "cancel-1");
     push(&mut queues, TransferClass::Application, "keep");
     push(&mut queues, TransferClass::Application, "cancel-2");
-    let waiting = queues.pop().expect("lane head must be runnable");
+    let waiting = queues.pop(|_| true).expect("lane head must be runnable");
     queues.wait_for_delivery(17, FrameRemainder::Final, waiting);
 
     let removed = queues.remove_ready_where(|(_, label)| label.starts_with("cancel"));
@@ -502,7 +512,7 @@ fn test_worker_drop_stops_generation_and_closes_ingress_without_a_normal_run_exi
         stop.clone(),
         measurements,
         peer,
-        SharedAnnouncedDelegations::new(),
+        PeerLinkState::new(),
     );
 
     drop(worker);
@@ -535,13 +545,7 @@ async fn test_worker_drop_allows_registry_to_replace_the_stopped_generation() {
     };
     schedulers.lock_registry().peers.insert(peer, stale.clone());
     let (measurements, _measurement_receiver) = MeasurementRecorder::channel(None, peer);
-    let worker = OutboundWorker::new(
-        receiver,
-        stop,
-        measurements,
-        peer,
-        SharedAnnouncedDelegations::new(),
-    );
+    let worker = OutboundWorker::new(receiver, stop, measurements, peer, PeerLinkState::new());
 
     drop(worker);
     let replacement = schedulers

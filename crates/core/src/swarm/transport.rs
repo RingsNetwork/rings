@@ -28,6 +28,7 @@ use rings_transport::connections::WebrtcConnection as ConnectionOwner;
 use rings_transport::connections::WebrtcTransport as Transport;
 use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::LaneCreditReservation;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::TransportMessage;
@@ -67,6 +68,7 @@ mod delivery;
 mod event_delivery;
 #[cfg(test)]
 mod frame_ledger;
+mod hold_budget;
 mod link_control;
 mod liveness;
 mod measurement;
@@ -98,6 +100,8 @@ pub(crate) use self::frame_ledger::FrameInFlight;
 use self::frame_ledger::FrameLedger;
 #[cfg(test)]
 pub(crate) use self::frame_ledger::FrameSample;
+pub(crate) use self::hold_budget::SessionHoldBudget;
+pub(crate) use self::hold_budget::SessionHoldPermit;
 use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -183,6 +187,8 @@ pub struct SwarmTransport {
     reassembly_limits: ReassemblyLimits,
     reassembly_budget: Arc<ReassemblyBudget>,
     inbound_capacity: Arc<InboundCapacity>,
+    /// The frames every connection's session-link hold keeps, together.
+    session_hold_budget: SessionHoldBudget,
     connection_lifecycle: ConnectionLifecycleBoundary,
     swarm_event_delivery: SwarmEventDeliveryLocks,
     callback: SwarmCallbackSlot,
@@ -318,6 +324,7 @@ impl SwarmTransport {
             reassembly_limits: settings.reassembly_limits,
             reassembly_budget: Arc::new(ReassemblyBudget::new(settings.reassembly_limits)),
             inbound_capacity: Arc::new(InboundCapacity::new()),
+            session_hold_budget: SessionHoldBudget::new(),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             swarm_event_delivery: SwarmEventDeliveryLocks::new(),
             callback,
@@ -349,6 +356,11 @@ impl SwarmTransport {
     /// Borrow the configured operational observer for lookup lifecycle reporting.
     pub(crate) fn observer(&self) -> &SharedSwarmObserver {
         &self.observer
+    }
+
+    /// The node-wide budget of the session-link holds.
+    pub(crate) fn session_hold_budget(&self) -> &SessionHoldBudget {
+        &self.session_hold_budget
     }
 
     /// Redundancy used by storage repair and anti-entropy.
@@ -1046,6 +1058,17 @@ impl SwarmConnection {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn dummy_generation_id(&self) -> Result<String> {
         self.connection.dummy_generation_id().map_err(Into::into)
+    }
+
+    /// Wait for one credit to send a frame on `lane`: the receiver's backpressure, untimed (see
+    /// `rings_transport::core::credit`). The wait owns the lane's credit state only, so it
+    /// keeps no connection alive however long it lasts.
+    fn reserve_send_credit(
+        &self,
+        lane: ChannelLane,
+    ) -> impl std::future::Future<Output = Result<LaneCreditReservation>> + 'static {
+        let wait = self.connection.reserve_send_credit(lane);
+        async move { wait.await.map_err(Into::into) }
     }
 
     /// Hand one frame to the transport on `lane`; the sole send of every frame to another node.

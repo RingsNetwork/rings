@@ -6,7 +6,6 @@ use crate::message::CustomMessage;
 use crate::message::FoundEntry;
 use crate::message::MessageSigner;
 use crate::swarm::callback::inbound_application_capacity_for_test;
-use crate::swarm::callback::inbound_mailbox_capacity_for_test;
 use crate::swarm::callback::inbound_peer_capacity_for_test;
 use crate::swarm::callback::InboundLane;
 use crate::tests::TEST_NETWORK_ID;
@@ -529,19 +528,23 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         })
         .await;
 
-    let overflow = callback
-        .on_admitted_message_for_test(&control_cid, &overflow_message)
-        .await
-        .expect_err("work beyond active and queued capacity must be rejected");
-    assert!(matches!(
-        overflow.downcast_ref::<Error>(),
-        Some(Error::InboundMailboxCapacityExceeded { capacity })
-            if *capacity == inbound_mailbox_capacity_for_test()
-    ));
+    // Work beyond the active and queued capacity is not refused: it waits, holding its
+    // sender's credit, until the mailbox drains.
+    let overflow_callback = Arc::clone(&callback);
+    let overflow_cid = control_cid.clone();
+    let overflow = tokio::spawn(async move {
+        overflow_callback
+            .on_admitted_message_for_test(&overflow_cid, &overflow_message)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))
+    });
+    callback
+        .await_inbound_waiting_for_test(|waiting| waiting == 1)
+        .await;
 
-    // The reserved control lane is independent of the held application lane:
-    // the control frame is admitted, validated, and delivered while every
-    // application permit stays held.
+    // The reserved control lane is independent of the held application lane, and of the
+    // same peer's waiting application arrival: the control frame is admitted, validated, and
+    // delivered while every application permit stays held and the overflow still waits.
     callback
         .on_admitted_message_for_test(&control_cid, &control)
         .await
@@ -551,6 +554,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         callback.inbound_admitted_count_for_test(),
         inbound_application_capacity_for_test()
     );
+    assert!(!overflow.is_finished());
 
     drop(application_hold);
     for delivery in deliveries {
@@ -558,6 +562,9 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
             .await
             .map_err(|_| Error::InvalidMessage("inbound mailbox task panicked".to_string()))??;
     }
+    overflow
+        .await
+        .map_err(|_| Error::InvalidMessage("inbound overflow task panicked".to_string()))??;
     assert_eq!(callback.inbound_admitted_count_for_test(), 0);
     Ok(())
 }

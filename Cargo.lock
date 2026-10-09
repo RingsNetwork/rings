@@ -3496,6 +3496,7 @@ dependencies = [
  "rings-test-support",
  "serde",
  "serde_json",
+ "stateright",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",

@@ -227,6 +227,12 @@ mod tests {
             ))
         }
 
+        fn reserve_send_credit(&self, _: ChannelLane) -> crate::delivery::SendCreditWait<Error> {
+            Box::pin(std::future::ready(Err(Error::DataChannelOpen(
+                "test connection cannot send".to_string(),
+            ))))
+        }
+
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {
             self.state
                 .lock()

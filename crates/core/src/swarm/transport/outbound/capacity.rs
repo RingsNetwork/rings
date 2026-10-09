@@ -119,6 +119,18 @@ enum CapacityScope {
     Shared,
 }
 
+/// The no-wait form of [`acquire_with_fixed_reservation`]: the class's reserved share, else the
+/// shared capacity only while no waiter is queued, so a request that cannot wait never overtakes
+/// one that does.
+fn admit_with_fixed_reservation<T>(
+    waiters: &FairWaitQueue,
+    capacity_error: Error,
+    try_reserved: impl FnOnce() -> Result<T>,
+    try_shared: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    try_reserved().or_else(|_| waiters.try_admit_unqueued(capacity_error, try_shared))
+}
+
 async fn acquire_with_fixed_reservation<T>(
     waiters: &Arc<FairWaitQueue>,
     bytes: usize,
@@ -127,11 +139,11 @@ async fn acquire_with_fixed_reservation<T>(
     try_reserved: impl FnOnce() -> Result<T>,
     mut try_shared: impl FnMut() -> Result<T>,
 ) -> Result<T> {
+    if bytes <= fixed_request_limit {
+        return admit_with_fixed_reservation(waiters, capacity_error(), try_reserved, try_shared);
+    }
     if let Ok(permit) = try_reserved() {
         return Ok(permit);
-    }
-    if bytes <= fixed_request_limit {
-        return waiters.try_admit_unqueued(capacity_error(), try_shared);
     }
     acquire_fair(
         waiters,
@@ -199,6 +211,21 @@ impl GlobalTransferCapacity {
             class,
             bytes,
         })
+    }
+
+    /// [`Self::acquire`] without waiting: refused at once where it would queue.
+    fn admit_now(
+        self: &Arc<Self>,
+        peer: Did,
+        class: TransferClass,
+        bytes: usize,
+    ) -> Result<GlobalCapacityPermit> {
+        admit_with_fixed_reservation(
+            &self.waiters,
+            memory_capacity_error(peer, bytes, global_byte_limit(class)),
+            || self.try_acquire_inner(peer, class, bytes, CapacityScope::FixedReservation),
+            || self.try_acquire_inner(peer, class, bytes, CapacityScope::Shared),
+        )
     }
 
     async fn acquire(
@@ -355,6 +382,32 @@ impl TransferCapacity {
         let global_permit =
             self.global
                 .try_acquire_inner(peer, class, bytes, CapacityScope::Shared)?;
+        Ok(TransferCapacityPermit {
+            _peer: peer_permit,
+            _global: global_permit,
+        })
+    }
+
+    /// [`Self::acquire`] without waiting: a permit if both the peer's and the node's capacity
+    /// admit `bytes` now, otherwise the refusal a wait would have started from.
+    ///
+    /// Law: it never overtakes a queued waiter, so a request that cannot wait (a forward, which
+    /// holds the inbound lane that carried it) costs the fair waiters nothing.
+    pub(super) fn admit_now(
+        self: &Arc<Self>,
+        peer: Did,
+        class: TransferClass,
+        bytes: usize,
+    ) -> Result<TransferCapacityPermit> {
+        validate_memory_request(peer, class, bytes)?;
+        let bytes = bytes.max(1);
+        let peer_permit = admit_with_fixed_reservation(
+            &self.waiters,
+            memory_capacity_error(peer, bytes, peer_byte_limit(class)),
+            || self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::FixedReservation),
+            || self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::Shared),
+        )?;
+        let global_permit = self.global.admit_now(peer, class, bytes)?;
         Ok(TransferCapacityPermit {
             _peer: peer_permit,
             _global: global_permit,
@@ -522,6 +575,30 @@ fn validate_memory_request(peer: Did, class: TransferClass, requested_bytes: usi
         return Err(memory_capacity_error(peer, requested_bytes, limit));
     }
     Ok(())
+}
+
+/// A strong hold on a peer's [`TransferCapacity`]: the peer registry keeps only a `Weak`, so
+/// the capacity lives as long as some handle or permit anchors it.
+pub(super) struct TransferCapacityAnchor {
+    _capacity: Arc<TransferCapacity>,
+}
+
+impl TransferCapacityAnchor {
+    pub(super) fn new(capacity: Arc<TransferCapacity>) -> Self {
+        Self {
+            _capacity: capacity,
+        }
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(super) fn try_acquire(
+        &self,
+        peer: Did,
+        class: TransferClass,
+        bytes: usize,
+    ) -> Result<TransferCapacityPermit> {
+        self._capacity.try_acquire(peer, class, bytes)
+    }
 }
 
 #[cfg(test)]

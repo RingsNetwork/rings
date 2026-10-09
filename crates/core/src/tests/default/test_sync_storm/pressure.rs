@@ -4,8 +4,8 @@ use std::pin::Pin;
 use super::*;
 
 const BARRIER_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
-const STARTED_REASSEMBLY_FRAMES: usize = 28;
-
+/// The frames one lane may have in flight: its credit window.
+const LANE_CREDIT_WINDOW_FRAMES: usize = rings_transport::core::credit::LANE_CREDIT_WINDOW as usize;
 pub(super) async fn exercise_per_entry_yield(
     runtime: &SimulationRuntimeGuard,
     nodes: &[Node],
@@ -306,9 +306,10 @@ pub(super) async fn exercise_barrier_control_exemption(
     driver.observe_barrier(&control, blocked_control);
     persist_runtime_artifact("barrier-control-verdict", runtime)
         .expect("barrier verdict artifact must be writable");
-    if blocked_control {
-        observe_barrier_deadline_miss(runtime, deadline, control_delivery.as_mut()).await;
+    if !control_complete && blocked_control {
+        await_one_handover(runtime, control_delivery.as_mut(), &reassembly, deadline).await;
     }
+    let control_complete = control_complete || blocked_control;
     drain_started_reassembly(runtime, &mut reassembly_deliveries).await;
     for delivery in &reassembly {
         driver.observe_delivery(runtime, delivery);
@@ -360,24 +361,9 @@ async fn start_barrier_backlog<'a>(
     runtime
         .enable_reassembly_service()
         .expect("deterministic reassembly service must enable");
-    let reassembly = runtime
-        .pending_deliveries()
-        .expect("barrier reassembly frames must classify")
-        .into_iter()
-        .filter(|delivery| delivery.class == ScheduledDeliveryClass::Reassembly)
-        .take(STARTED_REASSEMBLY_FRAMES)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        reassembly.len(),
-        STARTED_REASSEMBLY_FRAMES,
-        "barrier pressure must fill the real inbound reassembly lane"
-    );
+    let reassembly = in_flight_reassembly(runtime);
     driver.observe_pending(runtime, &reassembly);
-    let mut reassembly_deliveries = start_controlled_deliveries(runtime, reassembly.clone());
-    assert!(matches!(
-        futures::poll!(reassembly_deliveries.next()),
-        std::task::Poll::Pending
-    ));
+    let reassembly_deliveries = start_lane_handover(runtime, reassembly.clone()).await;
     settle_one_poll().await;
     for delivery in &reassembly {
         driver.observe_dispatch(delivery);
@@ -424,6 +410,51 @@ where
 pub(super) type ControlledDelivery<'a> =
     futures::future::LocalBoxFuture<'a, Result<bool, crate::simulation::SimulationRuntimeError>>;
 
+/// Every chunk frame in flight, the backlog a reassembly-pressure scenario starts.
+///
+/// Law: flow control lets a sender have at most its lane's free credit in flight,
+/// `limit − committed`, which the credit law bounds by one window and the batched advertising
+/// keeps above zero; the rest of a longer transfer waits at its sender.
+pub(super) fn in_flight_reassembly(runtime: &SimulationRuntimeGuard) -> Vec<ScheduledDelivery> {
+    let reassembly = runtime
+        .pending_deliveries()
+        .expect("reassembly frames in flight must classify")
+        .into_iter()
+        .filter(|delivery| delivery.class == ScheduledDeliveryClass::Reassembly)
+        .collect::<Vec<_>>();
+    assert!(
+        !reassembly.is_empty(),
+        "reassembly pressure must put chunk frames in flight"
+    );
+    assert!(
+        reassembly.len() <= LANE_CREDIT_WINDOW_FRAMES,
+        "flow control must bound the frames in flight on one lane by its credit window"
+    );
+    reassembly
+}
+
+/// Start the deliveries of one lane's frames, under an enabled reassembly service, and return
+/// the deliveries still in progress.
+///
+/// Law: arrival never waits on the protocol. Every frame but the one being handed over joins
+/// the lane's FIFO at once and its delivery completes; the hand-over waits for the reassembly
+/// service, so exactly the draining delivery remains.
+pub(super) async fn start_lane_handover<'a>(
+    runtime: &'a SimulationRuntimeGuard,
+    deliveries: Vec<ScheduledDelivery>,
+) -> FuturesUnordered<ControlledDelivery<'a>> {
+    let mut started = start_controlled_deliveries(runtime, deliveries);
+    while let std::task::Poll::Ready(Some(arrived)) = futures::poll!(started.next()) {
+        assert!(arrived.expect("reassembly arrival must remain stable"));
+    }
+    assert_eq!(
+        started.len(),
+        1,
+        "exactly the hand-over waits for the reassembly service; every other arrival completes"
+    );
+    started
+}
+
 pub(super) fn start_controlled_deliveries<'a>(
     runtime: &'a SimulationRuntimeGuard,
     deliveries: Vec<ScheduledDelivery>,
@@ -455,30 +486,61 @@ pub(super) async fn drain_started_reassembly(
     }
 }
 
-async fn observe_barrier_deadline_miss<F>(
+/// Witness of the reassembly barrier's bound under per-lane credit dispatch (#924, #927).
+///
+/// Law: a transport lane hands its frames to core one at a time, so a control frame the barrier
+/// blocks waits behind the one reassembly frame being handed over, never behind the lane's
+/// whole backlog. It therefore completes within that frame's service cost, which fits the
+/// control deadline: the barrier delays control but cannot starve it.
+///
+/// Post: the control delivery is complete and its completion recorded against the deadline,
+/// so a starvation would surface as a `BarrierControlExemption` violation.
+pub(super) async fn await_one_handover<F>(
     runtime: &SimulationRuntimeGuard,
+    control_delivery: Pin<&mut F>,
+    reassembly: &[ScheduledDelivery],
     deadline: u64,
-    mut control_delivery: Pin<&mut F>,
 ) where
     F: Future<Output = Result<bool, crate::simulation::SimulationRuntimeError>> + ?Sized,
 {
-    let elapsed = u64::try_from(runtime.elapsed_ms().expect("elapsed time must fit"))
+    let blocked_at = u64::try_from(runtime.elapsed_ms().expect("elapsed time must fit"))
         .expect("pressure time must fit u64");
-    let delta_ms = deadline.saturating_sub(elapsed).saturating_add(1);
+    let handover = reassembly
+        .iter()
+        .map(|delivery| crate::simulation::reassembly_frame_service_ms(delivery.bytes))
+        .max()
+        .expect("a blocked control frame waits behind a reassembly frame");
+    assert!(
+        blocked_at.saturating_add(handover) < deadline,
+        "one reassembly hand-over must fit the control deadline"
+    );
     runtime
-        .advance(std::time::Duration::from_millis(delta_ms))
+        .advance(std::time::Duration::from_millis(handover))
         .await
-        .expect("barrier deadline must advance deterministically");
+        .expect("one hand-over must advance deterministically");
+    // Tokio time is paused and auto-advances only while every task waits on a timer, so the
+    // control completing with the clock still here is the witness that it waited on the
+    // hand-over alone: a wait behind further service (another frame of the backlog) moves the
+    // clock and fails below. The timeout is a hang guard, not a pace.
+    let handed_over_at = tokio::time::Instant::now();
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(60), control_delivery)
+        .await
+        .expect("blocked control must complete once its hand-over is done, not starve")
+        .expect("blocked control delivery must remain stable");
+    assert!(
+        delivered,
+        "blocked control must complete once its hand-over is done"
+    );
+    assert_eq!(
+        tokio::time::Instant::now(),
+        handed_over_at,
+        "blocked control must complete with no time past its one hand-over"
+    );
     let observed = u64::try_from(runtime.elapsed_ms().expect("elapsed time must fit"))
         .expect("pressure time must fit u64");
-    assert!(observed > deadline);
-    assert!(matches!(
-        futures::poll!(control_delivery.as_mut()),
-        std::task::Poll::Pending
-    ));
-    crate::simulation::record_barrier_control_deadline_miss(observed, deadline);
-    persist_runtime_artifact("barrier-control-deadline-miss", runtime)
-        .expect("barrier deadline artifact must be writable");
+    // The completion is the barrier's witness: past the deadline it records the starvation the
+    // exemption protects against, which every caller rules out.
+    crate::simulation::record_barrier_control_completion(observed, deadline);
 }
 
 async fn wait_for_class_while_sending<F, T, E>(
@@ -568,4 +630,38 @@ async fn drain_pressure_futures(
         settle_one_poll().await;
     }
     panic!("scheduler-pressure workload did not quiesce within the derived harness bound");
+}
+
+/// The deliveries queued since the last inspection, once `controls` control frames are among
+/// them. A probe pass returns when its probes are queued in core, before the outbound workers
+/// dispatch them, so this waits for each frame woken by the queue's enqueue signal, enabled
+/// before the queue is read; the timeout is a hang guard, not a pace.
+pub(super) async fn new_deliveries_with_controls(
+    runtime: &SimulationRuntimeGuard,
+    controls: usize,
+) -> Vec<ScheduledDelivery> {
+    let collect = async {
+        let mut seen = Vec::new();
+        loop {
+            let signal = dummy_controlled::enqueue_signal();
+            let mut enqueued = std::pin::pin!(signal.notified());
+            enqueued.as_mut().enable();
+            seen.extend(
+                runtime
+                    .new_pending_deliveries()
+                    .expect("queued deliveries must classify"),
+            );
+            let queued = seen
+                .iter()
+                .filter(|delivery| delivery.class == ScheduledDeliveryClass::Control)
+                .count();
+            if queued >= controls {
+                return seen;
+            }
+            enqueued.await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), collect)
+        .await
+        .expect("every queued probe must reach the delivery queue")
 }

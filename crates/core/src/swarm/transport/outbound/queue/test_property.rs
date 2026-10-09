@@ -92,7 +92,7 @@ impl SchedulerHarness {
 
     fn pop_attempt(&mut self) -> Option<RunnableTransfer<ModelTransfer>> {
         loop {
-            let actual = self.actual.pop()?;
+            let actual = self.actual.pop(|_| true)?;
             let item = *actual.item();
             assert!(self.live.contains(&item.id));
             assert!(!self.terminated.contains(&item.id));
@@ -242,7 +242,7 @@ impl SchedulerHarness {
 
 fn admit_single_frame(queue: &mut TransferQueues<u16>) -> (TransferClass, u16) {
     let selected = queue
-        .pop()
+        .pop(|_| true)
         .expect("continuous fixture must remain runnable");
     let class = selected.class();
     queue.record_frame_admitted(class);
@@ -352,14 +352,14 @@ fn test_lane_pipelines_up_to_its_window_and_then_waits() {
         queue.push(TransferClass::Application, id);
     }
     for delivery in 0..u64::try_from(window).expect("small window") {
-        let sent = queue.pop().expect("a free window slot is runnable");
+        let sent = queue.pop(|_| true).expect("a free window slot is runnable");
         assert_eq!(*sent.item(), delivery, "first frames leave in push order");
         queue.record_frame_admitted(TransferClass::Application);
         queue.wait_for_delivery(delivery, FrameRemainder::Final, sent);
     }
     assert_eq!(queue.in_flight(TransferClass::Application), window);
     assert!(
-        queue.pop().is_none(),
+        queue.pop(|_| true).is_none(),
         "the window is full until a transfer finishes"
     );
 
@@ -369,7 +369,7 @@ fn test_lane_pipelines_up_to_its_window_and_then_waits() {
     assert_eq!(*delivered.item(), 0);
     assert_eq!(queue.finish_transfer(delivered), 0);
     let next = queue
-        .pop()
+        .pop(|_| true)
         .expect("the released slot admits the next transfer");
     assert_eq!(*next.item(), transfers - 1);
 }

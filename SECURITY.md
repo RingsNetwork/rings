@@ -109,6 +109,15 @@ and expire, but a party with many identities can try to hold several positions o
   expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
   while the carrier is retained. A relay inbox is verified by its owner, readable and
   removable only by its recipient, and capped at 64 messages. Values are stored in the clear.
+- **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
+  holds at most 16 frames per lane, refuses and reports a frame beyond its advertised credit,
+  and refuses no honest frame for want of credit. Overload is pushed back to the sender and
+  every wait is logged. Above 16 MiB of received frames a node defers new credit, a soft
+  bound; the hard bound is per connection (4 MiB), so a node's worst case grows with its
+  admitted connections (#934). A peer that withholds the control lane's credit is evicted by
+  liveness within its idle interval plus the answer window, and one peer's backpressure never
+  holds another's link: a forward is released once queued.
+  [Details](docs/src/advanced-topic/transport-flow-control.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.
 - **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures
@@ -135,3 +144,4 @@ and expire, but a party with many identities can try to hold several positions o
   the values it covered.
 - #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal
   received by sync can hold a topic live for up to the horizon past the receiver's clock.
+- #932: a reassembled message whose full-size mailbox charge does not fit is dropped.

@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::net::IpAddr;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -27,13 +28,17 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::callback::admit_inbound_data_channel;
-use crate::callback::InboundFrameCapacity;
+use crate::callback::data_channel_label;
+use crate::callback::link_credit::pump_lane_credits;
 use crate::callback::InnerTransportCallback;
+use crate::callback::NodeReceiveLoad;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::credit::CreditIndex;
 use crate::core::pool::ChannelLane;
 use crate::core::pool::ChannelPool;
 use crate::core::pool::LanePool;
+use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
@@ -49,6 +54,7 @@ use crate::delivery::tracker::BufferedChannel;
 use crate::delivery::tracker::DeliveryTracker;
 use crate::delivery::tracker::RoundLease;
 use crate::delivery::DeliveryFuture;
+use crate::delivery::SendCreditWait;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
@@ -83,8 +89,6 @@ use send_runtime::NativeRetirementFence;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
-/// pool size of data channel
-const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
 #[cfg(test)]
 const NATIVE_SEND_TEST_COMPLETION_TIMEOUT: Duration = Duration::from_millis(100);
@@ -345,6 +349,8 @@ pub struct WebrtcConnection {
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
     physical_close_completed: PhysicalCloseCompletion,
+    /// The connection's callback: its credit gates every custom send.
+    callback: Arc<InnerTransportCallback>,
 }
 
 /// Write side of [`NativePhysicalCloseWitness`]: the fact "`RTCPeerConnection::close()`
@@ -411,7 +417,8 @@ pub struct WebrtcTransport {
     external_address: Option<String>,
     udp_port_range: Option<WebrtcUdpPortRange>,
     pool: Pool<WebrtcConnection>,
-    inbound_frames: Arc<InboundFrameCapacity>,
+    /// The frames this node lends its connections' lanes, shared by every connection.
+    receive_pool: NodeReceiveLoad,
 }
 
 impl WebrtcConnection {
@@ -421,6 +428,7 @@ impl WebrtcConnection {
         webrtc_data_channel_state_notifier: Notifier,
         connection_state: ConnectionStateCell,
         sdp_extra_host_candidates: Vec<String>,
+        callback: Arc<InnerTransportCallback>,
     ) -> Self {
         let cancel_token = CancellationToken::new();
         let retirement_fence =
@@ -435,6 +443,7 @@ impl WebrtcConnection {
             sdp_extra_host_candidates,
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
             physical_close_completed: PhysicalCloseCompletion::new(),
+            callback,
         }
     }
 
@@ -510,7 +519,7 @@ impl WebrtcTransport {
             external_address,
             udp_port_range,
             pool: Pool::new(),
-            inbound_frames: Arc::new(InboundFrameCapacity::new()),
+            receive_pool: NodeReceiveLoad::new(),
         }
     }
 }
@@ -585,9 +594,13 @@ impl ConnectionInterface for WebrtcConnection {
         &self,
         msg: TransportMessage,
         lane: ChannelLane,
-        permit: SendPermit,
+        mut permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
+        let _credit = self
+            .callback
+            .credit_for_send(&msg, lane, &mut permit)
+            .await?;
         let runtime = native_send_runtime()?;
         let acceptance = permit.acceptance();
         let pool = self.webrtc_data_channel.clone();
@@ -605,6 +618,10 @@ impl ConnectionInterface for WebrtcConnection {
             close_failed_native_send(connection, physical_close_completed),
         )
         .await
+    }
+
+    fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
+        Box::pin(self.callback.reserve_credit(lane))
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -735,26 +752,28 @@ fn wire_received_data_channels(
     // Inbound channels carry messages only. One remote-created channel closing
     // does not prove the SCTP association is gone; outbound-pool state owns
     // readiness and emits the terminal data-channel callback when all close.
-    let admitted_channels = AtomicUsize::new(0);
+    let admitted_channels = AtomicU8::new(0);
     webrtc_conn.on_data_channel(Box::new(move |channel: Arc<RTCDataChannel>| {
-        if !admit_inbound_data_channel(&admitted_channels) {
+        let Some(lane) = admit_inbound_data_channel(&admitted_channels, channel.label()) else {
             tracing::warn!(
                 peer = %inner_cb.cid(),
                 label = channel.label(),
-                "rejected excess inbound data channel"
+                "rejected an inbound data channel that names no lane, or a lane already open"
             );
             return Box::pin(async move {
                 if let Err(error) = channel.close().await {
-                    tracing::debug!(%error, "failed to close excess inbound data channel");
+                    tracing::debug!(%error, "failed to close rejected inbound data channel");
                 }
             });
-        }
+        };
         tracing::debug!(
             label = channel.label(),
             id = channel.id(),
             "new received data channel"
         );
         let message_cb = Arc::clone(&inner_cb);
+        // The read loop awaits this handler, so it returns at once: a credit frame is applied
+        // and a custom frame is queued on its lane, never waiting on the protocol.
         channel.on_message(Box::new(move |msg: DataChannelMessage| {
             let bytes = msg.data.len();
             tracing::debug!(
@@ -763,11 +782,8 @@ fn wire_received_data_channels(
                 bytes,
                 "received data-channel message"
             );
-            let Some(frame) = message_cb.prepare_inbound_frame(msg.data) else {
-                return Box::pin(async {});
-            };
-            let cb = Arc::clone(&message_cb);
-            Box::pin(async move { cb.handle_admitted_frame(frame).await })
+            message_cb.receive_inbound_frame(msg.data, lane);
+            Box::pin(async {})
         }));
         Box::pin(async {})
     }));
@@ -817,7 +833,7 @@ async fn create_outbound_data_channels(
 ) -> Result<()> {
     for index in 0..DATA_CHANNEL_POOL_SIZE {
         let channel = webrtc_conn
-            .create_data_channel(&format!("rings_data_channel_{index}"), None)
+            .create_data_channel(&data_channel_label(ChannelLane::new(index)), None)
             .await?;
         let open_pool = Arc::clone(channel_pool);
         let open_cb = Arc::clone(inner_cb);
@@ -873,10 +889,6 @@ impl TransportInterface for WebrtcTransport {
     type Connection = WebrtcConnection;
     type Error = Error;
 
-    fn inbound_frame_capacity(&self) -> &Arc<InboundFrameCapacity> {
-        &self.inbound_frames
-    }
-
     async fn new_connection(
         &self,
         cid: &str,
@@ -891,11 +903,11 @@ impl TransportInterface for WebrtcTransport {
         //
         let webrtc_data_channel_state_notifier = Notifier::default();
         let connection_state = ConnectionStateCell::new();
-        let inner_cb = Arc::new(InnerTransportCallback::for_transport(
-            self,
+        let inner_cb = Arc::new(InnerTransportCallback::new(
             cid,
             callback,
             webrtc_data_channel_state_notifier.clone(),
+            self.receive_pool.clone(),
         ));
 
         // Wire open/close on the channels *this* side creates (the pool), not
@@ -922,9 +934,24 @@ impl TransportInterface for WebrtcTransport {
             webrtc_data_channel_state_notifier,
             connection_state,
             sdp_extra_host_candidates,
+            Arc::clone(&inner_cb),
         );
 
-        self.pool.safely_insert(cid, conn).await
+        let connection = self.pool.safely_insert(cid, conn).await?;
+        let spawned = CreditIndex::ALL.into_iter().all(|index| {
+            let pump = pump_lane_credits(
+                Arc::clone(inner_cb.link_credit()),
+                connection.clone(),
+                index,
+            );
+            rings_runtime::spawn_detached(pump).is_ok()
+        });
+        if !spawned {
+            // Without its pump the connection would advertise no credit after the first window.
+            self.close_connection_if_current(&connection).await?;
+            return Err(Error::CreditPumpUnavailable(cid.to_string()));
+        }
+        Ok(connection)
     }
 
     async fn close_connection_if_current(

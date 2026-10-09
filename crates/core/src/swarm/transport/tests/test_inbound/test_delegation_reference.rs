@@ -702,3 +702,134 @@ async fn test_an_expired_announcement_is_refused_and_charged() -> Result<()> {
     transport.disconnect(pending.peer).await?;
     Ok(())
 }
+
+/// The real transport callback in front of `pending`'s core callback, so a frame reaches the
+/// link stage with the transport credit it was admitted under.
+struct CreditedPeer(Arc<PendingPeer>);
+
+#[async_trait]
+impl TransportCallback for CreditedPeer {
+    async fn on_admitted_message(
+        &self,
+        message: rings_transport::core::callback::AdmittedInboundMessage<'_>,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        TransportCallback::on_admitted_message(&self.0.callback, message).await
+    }
+}
+
+/// Law (no self-held answer, #913 R5 H1): a frame the session-link hold keeps gives its
+/// transport credit back. A full hold on one lane, at least the lane's whole credit window,
+/// still leaves that lane able to admit the next frame, so the link-control answer that would
+/// release them is never shut out by the frames waiting for it.
+#[tokio::test]
+async fn test_held_frames_give_their_transport_credit_back() -> Result<()> {
+    use rings_transport::callback::InboundFrameAdmission;
+    use rings_transport::callback::InnerTransportCallback;
+    use rings_transport::core::credit::LANE_CREDIT_WINDOW;
+    use rings_transport::core::pool::ChannelLane;
+    use rings_transport::core::transport::TransportMessage;
+
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let pending = Arc::new(pending_peer(&transport, &app_callback).await?);
+    pending.admit(&transport).await?;
+    let window = usize::try_from(LANE_CREDIT_WINDOW).map_err(|_| Error::MessageSizeOverflow)?;
+    assert!(
+        SESSION_HOLD_CAPACITY >= window,
+        "the hold fills the lane's window"
+    );
+    let credited = InnerTransportCallback::new(
+        &pending.peer.to_string(),
+        Box::new(CreditedPeer(Arc::clone(&pending))),
+        rings_transport::notifier::Notifier::default(),
+        rings_transport::callback::NodeReceiveLoad::new(),
+    );
+    let lane = ChannelLane::new(0);
+    let raw = |payload: &MessagePayload| -> Result<bytes::Bytes> {
+        rings_codec::serialize(&TransportMessage::Custom(referenced_wire(payload)?.into()))
+            .map(bytes::Bytes::from)
+            .map_err(Error::CodecSerialize)
+    };
+
+    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    for index in 0..SESSION_HOLD_CAPACITY {
+        let held = stranger_payload(&pending, &transport, &stranger, &index.to_be_bytes())?;
+        let InboundFrameAdmission::Admitted(frame) =
+            credited.admit_inbound_frame(raw(&held)?, lane)
+        else {
+            return Err(Error::InvalidMessage(
+                "a frame within the window is admitted".into(),
+            ));
+        };
+        credited.handle_admitted_frame(frame).await;
+    }
+    assert_eq!(
+        pending.callback.session_hold_count_for_test(),
+        SESSION_HOLD_CAPACITY
+    );
+
+    let next = stranger_payload(&pending, &transport, &stranger, b"beyond the window")?;
+    assert!(matches!(
+        credited.admit_inbound_frame(raw(&next)?, lane),
+        InboundFrameAdmission::Admitted(_)
+    ));
+    transport.disconnect(pending.peer).await?;
+    Ok(())
+}
+
+/// Law (bounded by its purpose, #913 R6 H1): a link-control frame whose lane holds no credit
+/// waits at most the session hold, then is dropped and gives its permit back; the connection
+/// is not retired, since a receiver that grants no credit is backpressure, not a dead peer.
+#[tokio::test]
+async fn test_link_control_without_credit_expires_and_keeps_the_connection() -> Result<()> {
+    use futures::FutureExt;
+
+    use crate::swarm::transport::outbound::channel_lane;
+    use crate::swarm::transport::outbound::TransferClass;
+    use crate::tests::activity::probe_on_activity;
+    use crate::tests::default::TEST_HANG_GUARD;
+
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let pending = pending_peer(&transport, &app_callback).await?;
+    pending.admit(&transport).await?;
+    let connection = transport
+        .admitted_connection(pending.peer)?
+        .ok_or(Error::SwarmMissDidInTable(pending.peer))?;
+    let lane = channel_lane(TransferClass::DhtControl);
+    // Hold every credit the peer has granted on the lane, however much that is.
+    let mut window = Vec::new();
+    while let Some(credit) = connection.reserve_send_credit(lane).now_or_never() {
+        window.push(credit?);
+    }
+
+    // An inline frame teaches its session; its confirmation now waits for credit, which the
+    // held window never grants, so it cannot be sent.
+    pending
+        .receive(&pending.custom_message_wire(&transport, b"confirmed-without-credit")?)
+        .await?;
+    app_callback.wait_for_inbounds_at_least(1).await;
+    probe_on_activity("the confirmation holds its permit", TEST_HANG_GUARD, || {
+        let held = transport
+            .outbound_schedulers
+            .link_control_in_flight_for_test(pending.peer);
+        async move { Ok((held == 1).then_some(())) }
+    })
+    .await?;
+    probe_on_activity("the confirmation expires", TEST_HANG_GUARD, || {
+        let held = transport
+            .outbound_schedulers
+            .link_control_in_flight_for_test(pending.peer);
+        async move { Ok((held == 0).then_some(())) }
+    })
+    .await?;
+
+    assert!(transport.admitted_connection(pending.peer)?.is_some());
+    drop(window);
+    transport.disconnect(pending.peer).await?;
+    Ok(())
+}

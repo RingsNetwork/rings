@@ -38,7 +38,7 @@
 use std::str::FromStr;
 
 use bytes::Bytes;
-use rings_transport::core::callback::InboundFrameCapacityLease;
+use rings_transport::core::callback::InboundCreditLease;
 
 use super::processor::HeldFrameDrop;
 use super::FrameProvenance;
@@ -76,7 +76,7 @@ impl InnerSwarmCallback {
         &self,
         cid: &str,
         msg: Bytes,
-        transport_capacity: Option<InboundFrameCapacityLease>,
+        transport_credit: Option<InboundCreditLease>,
     ) -> std::result::Result<(), TransportCallbackError> {
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         let _depth_guard = OnMessageRecursionDepthGuard::enter();
@@ -100,21 +100,41 @@ impl InnerSwarmCallback {
             }
             LinkFrame::Payload(frame) => frame,
         };
-        let lease = InboundFrameLease {
+        let mut lease = InboundFrameLease {
             bytes: msg,
-            transport_capacity,
+            transport_credit,
+            held: None,
             #[cfg(test)]
             in_flight,
         };
         let Some(link) = self.bound_attempt(peer) else {
             return self.submit_off_link(peer, frame, lease).await;
         };
-        let arrival = self
+        // Law (no self-held answer): a frame the session-link hold keeps gives its transport
+        // credit back on entry. The hold is core's buffer, bounded by its own capacity and
+        // timeout; keeping the credit would let held frames fill the lane window that carries
+        // the link-control answer releasing them, so the answer could never be sent. A frame
+        // that resolves keeps its credit until core admits it, as every other frame does. Since
+        // no credit window bounds the hold, a frame enters it only with room in the node's
+        // session-hold budget, which every link's hold shares.
+        let credit = lease.transport_credit.take();
+        lease.held = self
             .processor
-            .session_link()
-            .arrive(frame, lease, self.processor.now_ms());
+            .logical
+            .transport
+            .session_hold_budget()
+            .try_reserve();
+        let node_has_room = lease.held.is_some();
+        let arrival = self.processor.session_link().arrive(
+            frame,
+            lease,
+            self.processor.now_ms(),
+            node_has_room,
+        );
         match arrival {
-            Ok(FrameArrival::Resolved(resolved)) => {
+            Ok(FrameArrival::Resolved(mut resolved)) => {
+                resolved.carrier.held = None;
+                resolved.carrier.transport_credit = credit;
                 self.admit_on_link(link, resolved, FrameProvenance::Arrived)
                     .await
             }
@@ -126,7 +146,8 @@ impl InnerSwarmCallback {
             Ok(FrameArrival::Overflow { carrier, request }) => {
                 tracing::debug!(
                     peer = %link.peer(),
-                    "dropping message; the hold for unresolved delegation references is full"
+                    "dropping message; the hold for unresolved delegation references is full \
+                     on this link or across the node"
                 );
                 // Dropping the carrier is the effect: it releases the frame's transport lease.
                 drop(carrier);

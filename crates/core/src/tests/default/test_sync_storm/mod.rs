@@ -62,7 +62,6 @@ use crate::swarm::transport::OUTBOUND_CONTROL_BURST;
 use crate::swarm::transport::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
-use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::prepare_node;
 use crate::tests::default::Node;
@@ -941,9 +940,7 @@ async fn begin_liveness_under_storm(
             .await
             .expect("real liveness probe pass must succeed");
     }
-    let probes = runtime
-        .new_pending_deliveries()
-        .expect("real liveness probes must classify");
+    let probes = new_deliveries_with_controls(runtime, driver.endpoints.len()).await;
     driver.observe_pending(runtime, &probes);
     let control_probe_count = probes
         .iter()
@@ -1070,9 +1067,10 @@ use artifacts::persist_trace_artifact;
 use artifacts::runtime_replay_snapshot;
 use artifacts::FailureState;
 use artifacts::ScenarioFailureGuard;
-use legacy::legacy_feedback_loop_state;
+use legacy::legacy_storm_state;
 use pressure::exercise_barrier_control_exemption;
 use pressure::exercise_bounded_control_burst;
 use pressure::exercise_per_entry_yield;
+use pressure::new_deliveries_with_controls;
 use scenario::run_scenario;
 use trace::TraceDriver;

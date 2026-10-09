@@ -7,7 +7,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
-use rings_transport::core::callback::InboundFrameCapacityLease;
+use rings_transport::core::callback::InboundCreditLease;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::chunk::MessageReassembler;
@@ -18,6 +18,7 @@ use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::swarm::session_link::ReferencedDelegations;
 use crate::swarm::transport::PendingConnectionAttempt;
+use crate::swarm::transport::SessionHoldPermit;
 use crate::swarm::transport::SwarmTransport;
 
 mod inbound;
@@ -31,11 +32,6 @@ pub(crate) use inbound::InboundCapacity;
 pub(crate) use inbound::InboundLane;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use processor::prepare_transport_frame_lane_for_test;
-
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) const fn inbound_mailbox_capacity_for_test() -> usize {
-    inbound::capacity_for_test()
-}
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) const fn inbound_application_capacity_for_test() -> usize {
@@ -306,7 +302,9 @@ pub(super) struct InboundProcessor {
 /// occupy until the inbound actor releases it.
 pub(super) struct InboundFrameLease {
     bytes: Bytes,
-    transport_capacity: Option<InboundFrameCapacityLease>,
+    transport_credit: Option<InboundCreditLease>,
+    /// The frame's place in the node's session-hold budget, while the session link holds it.
+    held: Option<SessionHoldPermit>,
     /// Test builds: the frame's conservation witness, released with the lease.
     #[cfg(test)]
     in_flight: crate::swarm::transport::FrameInFlight,
@@ -323,8 +321,10 @@ struct HeldInboundFrame {
 }
 
 /// Frames one connection may hold for a session the peer has not backed yet: half the
-/// pre-admission hold, so both holds together leave a quarter of the transport's per-peer
-/// frames for the link-control frames that release them.
+/// pre-admission hold. A held frame has given its transport credit back (see
+/// `submit_inbound_message`), so the hold never occupies the lane window that carries the
+/// link-control answer releasing it; the holds of every connection together are bounded by the
+/// node's [`SessionHoldBudget`](crate::swarm::transport::SessionHoldBudget).
 pub(super) const SESSION_HOLD_CAPACITY: usize = inbound::peer_capacity() / 2;
 
 /// Where a verified frame comes from, which decides how far its delivery is waited for and

@@ -10,6 +10,7 @@ use crate::ecc::SecretKey;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::Swarm;
 use crate::tests::fixed_secret_keys;
 
@@ -141,11 +142,11 @@ async fn test_cancellation_after_scan_releases_successor_behind_waiting_head() {
         StopSource::new(),
         measurements,
         peer,
-        SharedAnnouncedDelegations::new(),
+        PeerLinkState::new(),
     );
     let (head, head_completion) = scheduled_transfer(&node, peer, &capacity, &StopSource::new());
     worker.enqueue_transfer(head);
-    let waiting = worker.ready.pop().expect("head runnable");
+    let waiting = worker.ready.pop(|_| true).expect("head runnable");
     worker
         .ready
         .wait_for_delivery(1, FrameRemainder::Final, waiting);
@@ -212,5 +213,58 @@ async fn test_cancellation_after_scan_releases_successor_behind_waiting_head() {
             completion.now_or_never(),
             Some(Ok(Ok(SendCompletionOutcome::Cancelled)))
         ));
+    }
+}
+
+/// Law (generation): a class slot's credit or verdict counts only for transfers on the
+/// generation it was reserved on. A slot left with an older generation's verdict admits no
+/// frame of the current generation; the next credit acquisition returns it and settles the
+/// slot on the current generation, which then admits the frame.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), tokio::test)]
+async fn test_a_class_credit_of_another_generation_is_not_spent() {
+    let [node_key, peer_key] = fixed_secret_keys::<2>().expect("fixed test keys are valid");
+    let node = test_swarm(node_key).await;
+    let peer: Did = peer_key.address().into();
+    admit_detached_peer(&node, peer).await;
+    let capacity = Arc::new(TransferCapacity::new(Arc::new(
+        GlobalTransferCapacity::new(),
+    )));
+    let (_sender, receiver) = mailbox::channel();
+    let (measurements, _measurement_receiver) = MeasurementRecorder::channel(None, peer);
+    let mut worker = OutboundWorker::new(
+        receiver,
+        StopSource::new(),
+        measurements,
+        peer,
+        PeerLinkState::new(),
+    );
+    let (transfer, _completion) = scheduled_transfer(&node, peer, &capacity, &StopSource::new());
+    let current = transfer.transfer.admitted.attempt();
+    worker.enqueue_transfer(transfer);
+    let class = TransferClass::Application;
+    let stale = PendingConnectionAttempt {
+        peer,
+        generation: current.generation.wrapping_sub(1),
+    };
+    // A verdict and a pending reservation of the stale generation are both reset; a pending one
+    // would otherwise gate the class until the stale link closed.
+    for slot in [
+        ClassCredit::Unavailable(stale),
+        ClassCredit::Awaiting(stale, 0),
+    ] {
+        if let Some(credit) = worker.credits.get_mut(class.index()) {
+            *credit = slot;
+        }
+        assert!(!worker.grants_a_frame(class));
+
+        worker.acquire_credits();
+        let settled = worker
+            .credits
+            .get(class.index())
+            .and_then(ClassCredit::attempt);
+        // The detached generation has no link, so its reservation settles at once.
+        assert_eq!(settled, Some(current));
+        assert!(worker.grants_a_frame(class));
     }
 }

@@ -189,7 +189,7 @@ mod tests {
             queues.push(class, ());
         }
         assert_eq!(
-            queues.pop().expect("runnable control").class(),
+            queues.pop(|_| true).expect("runnable control").class(),
             TransferClass::DhtControl
         );
         #[cfg(not(target_family = "wasm"))]

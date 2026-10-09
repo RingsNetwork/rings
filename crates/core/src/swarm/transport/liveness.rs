@@ -1,6 +1,11 @@
 use std::collections::BTreeMap;
 use std::sync::MutexGuard;
 
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+use rings_transport::core::pool::ChannelLane;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+use rings_transport::core::transport::LaneCreditReservation;
+
 use super::pending::ActiveConnectionSet;
 use crate::dht::Did;
 use crate::error::Error;
@@ -63,8 +68,18 @@ impl PeerLiveness {
         self.unanswered_probe_since_ms = None;
     }
 
-    fn should_probe(&self, now_ms: i64) -> bool {
-        now_ms.saturating_sub(self.last_inbound_ms) >= PEER_LIVENESS_IDLE_MS
+    /// Whether the peer is due a probe at `now_ms`: it has sent nothing for
+    /// [`PEER_LIVENESS_IDLE_MS`], or this end has waited that long for its credit
+    /// (`credit_stalled_since_ms`), and no probe was sent within that interval.
+    ///
+    /// A credit stall makes a probe due however recently the peer sent anything: the probe
+    /// rides the control lane, so a peer that withholds only a data lane's credit answers it,
+    /// and one that withholds the control lane's leaves it unanswered and is evicted.
+    fn should_probe(&self, now_ms: i64, credit_stalled_since_ms: Option<i64>) -> bool {
+        let idle = now_ms.saturating_sub(self.last_inbound_ms) >= PEER_LIVENESS_IDLE_MS;
+        let stalled = credit_stalled_since_ms
+            .is_some_and(|since_ms| now_ms.saturating_sub(since_ms) >= PEER_LIVENESS_IDLE_MS);
+        (idle || stalled)
             && self
                 .last_probe_ms
                 .map(|last_probe_ms| now_ms.saturating_sub(last_probe_ms) >= PEER_LIVENESS_IDLE_MS)
@@ -172,6 +187,7 @@ impl PeerLivenessMap {
         &mut self,
         active: &ActiveConnectionSet,
         now_ms: i64,
+        credit_stalled_since_ms: impl Fn(Did) -> Option<i64>,
     ) -> Vec<PendingConnectionAttempt> {
         self.retain_active(active);
         for attempt in active.iter() {
@@ -183,9 +199,9 @@ impl PeerLivenessMap {
         active
             .iter()
             .filter(|attempt| {
-                self.peers
-                    .get(&attempt.peer)
-                    .is_some_and(|liveness| liveness.should_probe(now_ms))
+                self.peers.get(&attempt.peer).is_some_and(|liveness| {
+                    liveness.should_probe(now_ms, credit_stalled_since_ms(attempt.peer))
+                })
             })
             .collect()
     }
@@ -374,7 +390,18 @@ impl SwarmTransport {
     ) -> Result<Vec<PendingConnectionAttempt>> {
         self.with_connection_lifecycle(|| {
             let active = self.active_connections()?;
-            Ok(self.peer_liveness()?.probe_candidates(&active, now_ms))
+            // Read before the liveness lock: the outbound registry is never locked under it.
+            let stalls = active
+                .iter()
+                .filter_map(|attempt| {
+                    self.outbound_schedulers
+                        .credit_stalled_since_ms(attempt.peer)
+                        .map(|since_ms| (attempt.peer, since_ms))
+                })
+                .collect::<BTreeMap<_, _>>();
+            Ok(self
+                .peer_liveness()?
+                .probe_candidates(&active, now_ms, |peer| stalls.get(&peer).copied()))
         })
     }
 
@@ -514,6 +541,33 @@ impl SwarmTransport {
                 .force_probe_sent_at(peer, attempt.generation, sent_at_ms);
             Ok(())
         })
+    }
+
+    /// Hold every credit `peer` has granted this end on `lane`, as a peer that withholds the
+    /// lane's credit leaves this end: the reservations give it back when dropped.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn hold_lane_credit_for_test(
+        &self,
+        peer: Did,
+        lane: ChannelLane,
+    ) -> Result<Vec<LaneCreditReservation>> {
+        use futures::FutureExt;
+
+        let connection = self
+            .admitted_connection(peer)?
+            .ok_or(Error::SwarmMissDidInTable(peer))?;
+        let mut held = Vec::new();
+        while let Some(credit) = connection.reserve_send_credit(lane).now_or_never() {
+            held.push(credit?);
+        }
+        Ok(held)
+    }
+
+    /// Record that this end has waited for `peer`'s credit since `since_ms`.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn force_credit_stall_for_test(&self, peer: Did, since_ms: i64) {
+        self.outbound_schedulers
+            .force_credit_stall_for_test(peer, since_ms);
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

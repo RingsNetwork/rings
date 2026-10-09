@@ -14,10 +14,11 @@ use tokio::sync::oneshot;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
+use crate::callback::NodeReceiveLoad;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::credit::CreditIndex;
 use crate::core::pool::ChannelLane;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
@@ -28,6 +29,7 @@ use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::delivery::DeliveryFuture;
+use crate::delivery::SendCreditWait;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
@@ -52,6 +54,7 @@ use self::state::CONTROLLED;
 use self::state::CONTROLLED_RNG_STATE;
 use self::state::CONTROLLED_VIRTUAL_MS;
 use self::state::DELIVERY;
+use self::state::DELIVERY_ENQUEUED;
 use self::state::DELIVERY_FUTURE_PENDING;
 use self::state::DROP_MESSAGES;
 use self::state::HELD_DELIVERY_GATE;
@@ -68,6 +71,7 @@ use self::state::SEND_MESSAGE_PENDING;
 use self::state::SEND_MESSAGE_PENDING_AFTER_SENT_COUNT;
 use self::state::SENT_COUNT;
 use self::state::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
+use self::state::WITHHELD_CREDIT;
 
 /// Max delay in ms on sending message
 const DUMMY_DELAY_MAX: u64 = 100;
@@ -166,429 +170,7 @@ mod test_dummy;
 /// drive the exact ordering and deterministically explore the timing-state space
 /// (see `rings_core`'s `tests::default::test_dht_schedule`). Off by default; no effect
 /// on normal runs.
-pub mod controlled {
-    use std::sync::Arc;
-
-    use bytes::Bytes;
-
-    pub use super::delay::mix_seed;
-    use super::ACTIVE_DELIVERY_GATE;
-    use super::CLOSE_PENDING;
-    use super::CONNS;
-    use super::CONTROLLED;
-    use super::CONTROLLED_RNG_STATE;
-    use super::CONTROLLED_VIRTUAL_MS;
-    use super::DELIVERY;
-    use super::DELIVERY_FUTURE_PENDING;
-    use super::DROP_MESSAGES;
-    use super::HELD_DELIVERY_GATE;
-    use super::IRREVOCABLE_SEND_GATE;
-    use super::IRREVOCABLE_SEND_GATE_WAITING;
-    use super::MAX_MESSAGE_SIZE;
-    use super::NEXT_CALLBACK_CID;
-    use super::NEXT_DELIVERY_GATE;
-    use super::POST_PERMIT_SEND_GATE;
-    use super::POST_PERMIT_SEND_GATE_WAITING;
-    use super::SEND_MESSAGE_GATE;
-    use super::SEND_MESSAGE_GATE_WAITING;
-    use super::SEND_MESSAGE_PENDING;
-    use super::SEND_MESSAGE_PENDING_AFTER_SENT_COUNT;
-    use super::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
-    use crate::core::transport::WebrtcConnectionState;
-
-    /// Atomic observation of the current thread's controlled delivery queue.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub struct DeliverySnapshot {
-        pending: usize,
-        generation: u64,
-    }
-
-    impl DeliverySnapshot {
-        pub(super) const fn new(pending: usize, generation: u64) -> Self {
-            Self {
-                pending,
-                generation,
-            }
-        }
-
-        /// Return whether no controlled event is currently queued.
-        pub const fn is_idle(self) -> bool {
-            self.pending == 0
-        }
-
-        /// Return the number of controlled events currently queued.
-        pub const fn pending(self) -> usize {
-            self.pending
-        }
-
-        /// Return the queue generation, advanced on every enqueue or removal.
-        pub const fn generation(self) -> u64 {
-            self.generation
-        }
-    }
-
-    /// Stable observation of one event waiting in the controlled queue.
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub struct QueuedDelivery {
-        sequence: u64,
-        connection_id: String,
-        kind: QueuedDeliveryKind,
-        enqueued_virtual_ms: u64,
-    }
-
-    impl QueuedDelivery {
-        pub(super) fn new(
-            sequence: u64,
-            connection_id: String,
-            kind: QueuedDeliveryKind,
-            enqueued_virtual_ms: u64,
-        ) -> Self {
-            Self {
-                sequence,
-                connection_id,
-                kind,
-                enqueued_virtual_ms,
-            }
-        }
-
-        /// Monotonic enqueue sequence within the active controlled runtime.
-        pub const fn sequence(&self) -> u64 {
-            self.sequence
-        }
-
-        /// Dummy connection identifier receiving this event.
-        pub fn connection_id(&self) -> &str {
-            &self.connection_id
-        }
-
-        /// Semantic event kind and message bytes, when this is a message event.
-        pub const fn kind(&self) -> &QueuedDeliveryKind {
-            &self.kind
-        }
-
-        /// Virtual monotonic time at which this event entered the controlled queue.
-        pub const fn enqueued_virtual_ms(&self) -> u64 {
-            self.enqueued_virtual_ms
-        }
-    }
-
-    /// Observable event kinds retained by the controlled dummy scheduler.
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub enum QueuedDeliveryKind {
-        /// A WebRTC state transition.
-        PeerConnectionStateChange(WebrtcConnectionState),
-        /// The data channel became writable.
-        DataChannelOpen,
-        /// The data channel closed.
-        DataChannelClose,
-        /// One exact callback payload, before core decoding and dispatch.
-        Message(Bytes),
-    }
-
-    /// Turn the controlled scheduler on/off for the current thread. Turning it
-    /// off clears this thread's queue.
-    pub fn enable(on: bool) {
-        CONTROLLED.with(|c| c.set(on));
-        if on {
-            DELIVERY.with(|state| state.borrow_mut().reset());
-        } else {
-            DELIVERY.with(|state| state.borrow_mut().clear());
-            super::SENT_COUNT.with(|count| count.set(0));
-            MAX_MESSAGE_SIZE.with(|size| size.set(0));
-            NEXT_CALLBACK_CID.with(|next| {
-                *next.borrow_mut() = None;
-            });
-            WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.set(false));
-            SEND_MESSAGE_PENDING.with(|pending| pending.set(false));
-            release_send_message_gate();
-            release_post_permit_send_gate();
-            release_irrevocable_send_gate();
-            SEND_MESSAGE_PENDING_AFTER_SENT_COUNT.with(|threshold| threshold.set(None));
-            DELIVERY_FUTURE_PENDING.with(|pending| pending.set(false));
-            CLOSE_PENDING.with(|pending| pending.set(false));
-            release_delivery_future_gate();
-            DROP_MESSAGES.with(|drop| drop.set(false));
-            CONTROLLED_RNG_STATE.with(|state| state.set(None));
-            CONTROLLED_VIRTUAL_MS.with(|time| time.set(0));
-        }
-    }
-
-    /// Seed dummy connection identifiers used by a controlled simulation.
-    pub fn set_seed(seed: u64) {
-        CONTROLLED_RNG_STATE.with(|state| state.set(Some(seed)));
-    }
-    /// Set the virtual monotonic clock attached to subsequent queue admissions.
-    pub fn set_virtual_time(now_ms: u64) {
-        CONTROLLED_VIRTUAL_MS.with(|time| time.set(now_ms));
-    }
-
-    /// Whether explicit controlled delivery is active on this test thread.
-    pub fn is_enabled() -> bool {
-        CONTROLLED.with(|controlled| controlled.get())
-    }
-
-    /// Whether dummy identifiers and delay choices have a deterministic seed.
-    pub fn is_seeded() -> bool {
-        CONTROLLED_RNG_STATE.with(|state| state.get().is_some())
-    }
-    /// Whether the process-wide registry retains this connection generation.
-    pub fn is_connection_registered(id: &str) -> bool {
-        CONNS.contains_key(id)
-    }
-
-    /// Test hook: override the `max_message_size` the dummy backend reports on this thread (`0`
-    /// restores the default). Lets a test drive the chunked send path and reassembly end to end.
-    pub fn set_max_message_size(n: usize) {
-        MAX_MESSAGE_SIZE.with(|m| m.set(n));
-    }
-
-    /// Test hook: rewrite the next queued lifecycle callback to use `cid`.
-    ///
-    /// This applies only to peer-state and data-channel events delivered through
-    /// [`deliver`]. Message events keep their real connection id.
-    pub fn set_next_callback_cid(cid: impl Into<String>) {
-        NEXT_CALLBACK_CID.with(|next| {
-            *next.borrow_mut() = Some(cid.into());
-        });
-    }
-
-    /// Test hook: force `webrtc_wait_for_data_channel_open` on this thread to never complete.
-    pub fn set_wait_for_data_channel_open_pending(on: bool) {
-        WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.set(on));
-    }
-
-    /// Test hook: force `send_message` to stay pending after the data channel is open.
-    pub fn set_send_message_pending(on: bool) {
-        SEND_MESSAGE_PENDING.with(|pending| pending.set(on));
-    }
-
-    /// Test hook: suspend the next dummy send immediately before dispatch.
-    pub fn pause_send_message_at_dispatch() {
-        SEND_MESSAGE_GATE.with(|gate| {
-            *gate.borrow_mut() = Some(Arc::new(tokio::sync::Notify::new()));
-        });
-    }
-
-    /// Test hook: release a send suspended by [`pause_send_message_at_dispatch`].
-    pub fn release_send_message_gate() {
-        let gate = SEND_MESSAGE_GATE.with(|gate| gate.borrow_mut().take());
-        if let Some(gate) = gate {
-            gate.notify_waiters();
-        }
-        SEND_MESSAGE_GATE_WAITING.with(|waiting| waiting.set(false));
-    }
-
-    /// Return whether a dummy send reached the releasable dispatch gate.
-    pub fn send_message_waiting_at_dispatch() -> bool {
-        SEND_MESSAGE_GATE_WAITING.with(|waiting| waiting.get())
-    }
-
-    /// Test hook: suspend the next dummy send after its initial permit check but
-    /// before the final cancellable check.
-    pub fn pause_send_message_after_permit() {
-        POST_PERMIT_SEND_GATE.with(|gate| {
-            *gate.borrow_mut() = Some(Arc::new(tokio::sync::Notify::new()));
-        });
-    }
-
-    /// Test hook: release a send suspended before its final cancellable check.
-    pub fn release_post_permit_send_gate() {
-        let gate = POST_PERMIT_SEND_GATE.with(|gate| gate.borrow_mut().take());
-        if let Some(gate) = gate {
-            gate.notify_waiters();
-        }
-        POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
-    }
-
-    /// Return whether a send is suspended before its final cancellable check.
-    pub fn post_permit_send_gate_waiting() -> bool {
-        POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.get())
-    }
-
-    /// Test hook: suspend the next dummy send after its final cancellable boundary.
-    pub fn pause_irrevocable_send() {
-        IRREVOCABLE_SEND_GATE.with(|gate| {
-            *gate.borrow_mut() = Some(Arc::new(tokio::sync::Notify::new()));
-        });
-    }
-
-    /// Test hook: release a send suspended after it became irrevocable.
-    pub fn release_irrevocable_send_gate() {
-        let gate = IRREVOCABLE_SEND_GATE.with(|gate| gate.borrow_mut().take());
-        if let Some(gate) = gate {
-            gate.notify_waiters();
-        } else {
-            IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
-        }
-    }
-
-    /// Return whether a background dummy send is waiting past its irrevocable boundary.
-    pub fn irrevocable_send_gate_waiting() -> bool {
-        IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.get())
-    }
-
-    /// Test hook: force `send_message` to stay pending once this thread has already dispatched
-    /// `threshold` messages. `None` disables the hook.
-    pub fn set_send_message_pending_after_sent_count(threshold: Option<usize>) {
-        SEND_MESSAGE_PENDING_AFTER_SENT_COUNT.with(|pending_after| pending_after.set(threshold));
-    }
-
-    /// Test hook: make an accepted send return a delivery future that never completes.
-    pub fn set_delivery_future_pending(on: bool) {
-        DELIVERY_FUTURE_PENDING.with(|pending| pending.set(on));
-    }
-
-    /// Test hook: make connection cleanup never complete.
-    pub fn set_close_pending(on: bool) {
-        CLOSE_PENDING.with(|pending| pending.set(on));
-    }
-
-    /// Hold the delivery future of every send accepted from now on until
-    /// [`release_held_delivery_futures`], so a whole in-flight window stays pending.
-    pub fn hold_delivery_futures() {
-        HELD_DELIVERY_GATE.with(|slot| {
-            *slot.borrow_mut() = Some(Arc::new(super::HeldDeliveries::new()));
-        });
-    }
-
-    /// Delivery futures currently parked by [`hold_delivery_futures`].
-    pub fn held_delivery_futures_waiting() -> usize {
-        HELD_DELIVERY_GATE.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .map_or(0, |gate| gate.waiting.load(super::Ordering::Acquire))
-        })
-    }
-
-    /// Let exactly one delivery future held by [`hold_delivery_futures`] complete.
-    pub fn release_one_held_delivery_future() {
-        if let Some(gate) = HELD_DELIVERY_GATE.with(|slot| slot.borrow().clone()) {
-            gate.release_one();
-        }
-    }
-
-    /// Release every delivery future held by [`hold_delivery_futures`] and stop holding.
-    pub fn release_held_delivery_futures() {
-        if let Some(gate) = HELD_DELIVERY_GATE.with(|slot| slot.borrow_mut().take()) {
-            gate.release();
-        }
-    }
-
-    /// Suspend exactly the next accepted send's delivery future.
-    pub fn pause_next_delivery_future() {
-        NEXT_DELIVERY_GATE.with(|slot| {
-            *slot.borrow_mut() = Some(Arc::new(super::DeliveryGate::new()));
-        });
-    }
-
-    /// Return whether the one-shot delivery future reached its gate.
-    pub fn delivery_future_waiting() -> bool {
-        ACTIVE_DELIVERY_GATE.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .is_some_and(|gate| gate.waiting.load(super::Ordering::Acquire))
-        })
-    }
-
-    /// Release a delivery future suspended by [`pause_next_delivery_future`].
-    pub fn release_delivery_future_gate() {
-        let gate = ACTIVE_DELIVERY_GATE
-            .with(|slot| slot.borrow_mut().take())
-            .or_else(|| NEXT_DELIVERY_GATE.with(|slot| slot.borrow_mut().take()));
-        if let Some(gate) = gate {
-            gate.notify.notify_one();
-        }
-    }
-
-    /// Test hook: make dummy sends disappear while still returning a successful
-    /// local send. This models a silent remote failure where the local data
-    /// channel remains open and `Connected`.
-    pub fn set_drop_messages(on: bool) {
-        DROP_MESSAGES.with(|drop| drop.set(on));
-    }
-
-    /// Test hook: number of data-channel messages `send_message` has dispatched on this thread.
-    /// Paired with [`reset_sent_count`] to assert that a failed send enqueued nothing.
-    pub fn sent_count() -> usize {
-        super::SENT_COUNT.with(|c| c.get())
-    }
-
-    /// Test hook: reset the [`sent_count`] counter for this thread.
-    pub fn reset_sent_count() {
-        super::SENT_COUNT.with(|c| c.set(0));
-    }
-
-    /// Number of events currently queued on the current thread.
-    pub fn pending() -> usize {
-        snapshot().pending()
-    }
-
-    /// Atomically observe queue depth and lifecycle generation on the current thread.
-    pub fn snapshot() -> DeliverySnapshot {
-        DELIVERY.with(|state| state.borrow().snapshot())
-    }
-
-    /// Inspect events with a stable sequence newer than `sequence`.
-    pub fn inspect_after(sequence: Option<u64>) -> Vec<QueuedDelivery> {
-        DELIVERY.with(|state| state.borrow().inspect_after(sequence))
-    }
-
-    /// Remove one queued event by stable sequence without invoking its callback.
-    pub fn discard_sequence(sequence: u64) -> bool {
-        DELIVERY.with(|state| state.borrow_mut().remove_sequence(sequence).is_some())
-    }
-
-    /// Deliver the queued event at `index` to its target connection — invoking
-    /// the real handler, which may enqueue further events. Returns false if the
-    /// index is out of range or the target connection is gone.
-    pub async fn deliver(index: usize) -> bool {
-        let entry = DELIVERY.with(|state| state.borrow_mut().remove(index));
-        deliver_entry(entry).await
-    }
-
-    /// Deliver a queued event by stable sequence in logarithmic queue time.
-    pub async fn deliver_sequence(sequence: u64) -> bool {
-        let entry = DELIVERY.with(|state| state.borrow_mut().remove_sequence(sequence));
-        deliver_entry(entry).await
-    }
-
-    async fn deliver_entry(entry: Option<super::ControlledDeliveryEntry>) -> bool {
-        let Some(super::ControlledDeliveryEntry {
-            connection_id: rand_id,
-            mut event,
-            ..
-        }) = entry
-        else {
-            return false;
-        };
-        let Some(conn) = CONNS.get(&rand_id).map(|c| c.clone()) else {
-            return false;
-        };
-        if event.is_lifecycle_event() {
-            if let Some(cid) = NEXT_CALLBACK_CID.with(|next| next.borrow_mut().take()) {
-                event.set_callback_cid(cid);
-            }
-        }
-        conn.handle_event(event).await;
-        true
-    }
-
-    /// Deliver the next queued data-channel-open event with a rewritten callback cid.
-    pub async fn deliver_next_data_channel_open_with_cid(cid: impl Into<String>) -> bool {
-        let index = DELIVERY.with(|state| {
-            state
-                .borrow()
-                .queue
-                .values()
-                .position(|entry| matches!(entry.event, super::Event::DataChannelOpen(_)))
-        });
-        let Some(index) = index else {
-            return false;
-        };
-        set_next_callback_cid(cid);
-        deliver(index).await
-    }
-}
+pub mod controlled;
 
 /// A dummy connection for local testing.
 /// Implements the [ConnectionInterface] trait with no real network.
@@ -632,7 +214,8 @@ pub struct DummyConnection {
 /// provides methods to create, get and close connections.
 pub struct DummyTransport {
     pool: Pool<DummyConnection>,
-    inbound_frames: Arc<InboundFrameCapacity>,
+    /// The frames this node lends its connections' lanes, shared by every connection.
+    receive_pool: NodeReceiveLoad,
 }
 
 impl DummyConnection {
@@ -677,6 +260,33 @@ impl DummyConnection {
         }
     }
 
+    /// Start this connection's credit pumps, one per lane: every credit its receive side
+    /// advertises is granted to the paired connection directly, the dummy link carrying credit
+    /// without latency. A credit is released only for a frame that arrived, so it always has a
+    /// paired connection to go to; once that connection is gone its senders are gone with it,
+    /// and the credit has no one to reach. The pumps stop when this connection's callback is
+    /// dropped. Post: `false` when a pump cannot be spawned.
+    fn spawn_credit_pumps(self: &Arc<Self>) -> bool {
+        CreditIndex::ALL.into_iter().all(|index| {
+            let link = Arc::clone(self.callback.link_credit());
+            let connection = Arc::downgrade(self);
+            let pump = async move {
+                while let Some(credit) = link.next_credit(index).await {
+                    let Some(conn) = connection.upgrade() else {
+                        continue;
+                    };
+                    if WITHHELD_CREDIT.with(|withheld| withheld.borrow().contains(&conn.rand_id)) {
+                        continue;
+                    }
+                    if let Some(remote) = conn.remote_conn() {
+                        remote.callback.link_credit().grant(index.lane(), credit);
+                    }
+                }
+            };
+            rings_runtime::spawn_detached(pump).is_ok()
+        })
+    }
+
     fn retirement_fence(&self) -> DummyRetirementFence {
         DummyRetirementFence::new(self)
     }
@@ -706,11 +316,22 @@ impl DummyConnection {
                     self.callback.on_data_channel_close().await;
                 }
             }
-            Event::Message(frame) => {
-                if SEND_MESSAGE_DELAY && !CONTROLLED.with(|c| c.get()) {
+            Event::Message(frame, lane) => {
+                if CONTROLLED.with(|c| c.get()) {
+                    // The deterministic scheduler delivers one event at a time, and a delivery
+                    // means the event was processed: the lane is drained inline, the
+                    // interleaving in which its drainer runs at once.
+                    self.callback
+                        .dispatch_admitted_frame_inline(frame, lane)
+                        .await;
+                    return;
+                }
+                if SEND_MESSAGE_DELAY {
                     random_delay().await;
                 }
-                self.callback.handle_admitted_frame(frame).await
+                // Arrival never waits on the protocol: the frame joins its lane's FIFO, as a
+                // native or browser channel's frames do (see `InnerTransportCallback`).
+                self.callback.dispatch_admitted_frame(frame, lane);
             }
         }
     }
@@ -802,7 +423,7 @@ impl DummyTransport {
 
         Self {
             pool: Pool::new(),
-            inbound_frames: Arc::new(InboundFrameCapacity::new()),
+            receive_pool: NodeReceiveLoad::new(),
         }
     }
 }
@@ -815,14 +436,15 @@ enum DummySendTarget {
 fn complete_irrevocable_send<F: FnOnce()>(
     connection_state: &Arc<Mutex<DummyConnectionState>>,
     data: Bytes,
+    lane: ChannelLane,
     target: DummySendTarget,
     permit: IrrevocableSendGuard<F>,
 ) -> Result<DeliveryFuture> {
     commit_irrevocable_dispatch(connection_state, permit, || {
         match target {
             DummySendTarget::Deliver(remote) => {
-                if let Some(frame) = remote.callback.prepare_inbound_frame(data) {
-                    if !remote.dispatch(Event::Message(frame)) {
+                if let Some(frame) = remote.callback.prepare_inbound_frame(data, lane) {
+                    if !remote.dispatch(Event::Message(frame, lane)) {
                         return Err(Error::DummyRemoteConnectionClosed);
                     }
                 }
@@ -893,10 +515,14 @@ impl ConnectionInterface for DummyConnection {
     async fn send_message_with_permit(
         &self,
         msg: TransportMessage,
-        _lane: ChannelLane,
-        permit: SendPermit,
+        lane: ChannelLane,
+        mut permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
+        let _credit = self
+            .callback
+            .credit_for_send(&msg, lane, &mut permit)
+            .await?;
         if SEND_MESSAGE_PENDING.with(|pending| pending.get())
             || SEND_MESSAGE_PENDING_AFTER_SENT_COUNT.with(|threshold| {
                 threshold
@@ -949,15 +575,30 @@ impl ConnectionInterface for DummyConnection {
                 IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(true));
                 irrevocable_gate.notified().await;
                 IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
-                let result =
-                    complete_irrevocable_send(&connection_state, data, target, permit_retirement);
+                let result = complete_irrevocable_send(
+                    &connection_state,
+                    data,
+                    lane,
+                    target,
+                    permit_retirement,
+                );
                 let _ = result_sender.send(result);
             });
             return result_receiver
                 .await
                 .map_err(|_| Error::DummyIrrevocableSendTaskStopped)?;
         }
-        complete_irrevocable_send(&self.connection_state, data, target, permit_retirement)
+        complete_irrevocable_send(
+            &self.connection_state,
+            data,
+            lane,
+            target,
+            permit_retirement,
+        )
+    }
+
+    fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
+        Box::pin(self.callback.reserve_credit(lane))
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -1033,10 +674,6 @@ impl TransportInterface for DummyTransport {
     type Connection = DummyConnection;
     type Error = Error;
 
-    fn inbound_frame_capacity(&self) -> &Arc<InboundFrameCapacity> {
-        &self.inbound_frames
-    }
-
     async fn new_connection(
         &self,
         cid: &str,
@@ -1044,12 +681,21 @@ impl TransportInterface for DummyTransport {
     ) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.ensure_peer_slot_available(cid)?;
 
-        let inner_callback =
-            InnerTransportCallback::for_transport(self, cid, callback, Notifier::default());
+        let inner_callback = InnerTransportCallback::new(
+            cid,
+            callback,
+            Notifier::default(),
+            self.receive_pool.clone(),
+        );
         let conn = DummyConnection::new(inner_callback);
 
         let connection = self.pool.safely_insert(cid, conn).await?;
         let conn = connection.upgrade()?;
+        if !conn.spawn_credit_pumps() {
+            // Without its pumps the connection would advertise no credit after the first window.
+            self.close_connection_if_current(&connection).await?;
+            return Err(Error::CreditPumpUnavailable(cid.to_string()));
+        }
         CONNS.insert(conn.rand_id.clone(), conn);
 
         Ok(connection)

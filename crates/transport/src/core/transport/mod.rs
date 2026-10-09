@@ -30,5 +30,7 @@ pub(crate) use state::ConnectionStateCell;
 pub use state::ConnectionStateSnapshot;
 pub use state::WebrtcConnectionState;
 
+pub use crate::callback::link_credit::LaneCreditReservation;
+
 #[cfg(test)]
 mod tests;

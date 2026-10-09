@@ -24,6 +24,10 @@ use crate::error::Result;
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ChannelLane(u8);
 
+/// The data channels every connection opens, one per lane residue: `|pool|` in
+/// `channel(lane) ≜ pool[lane mod |pool|]`.
+pub const DATA_CHANNEL_POOL_SIZE: u8 = 4;
+
 impl ChannelLane {
     /// Name lane `index`.
     pub const fn new(index: u8) -> Self {

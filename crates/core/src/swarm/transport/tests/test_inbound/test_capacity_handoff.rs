@@ -1,7 +1,10 @@
 use rings_transport::callback::AdmittedInboundFrame;
 use rings_transport::callback::InboundFrameAdmission;
 use rings_transport::callback::InnerTransportCallback;
+use rings_transport::callback::NodeReceiveLoad;
 use rings_transport::core::callback::AdmittedInboundMessage;
+use rings_transport::core::credit::LANE_CREDIT_WINDOW;
+use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::TransportMessage;
 use rings_transport::notifier::Notifier;
 
@@ -41,7 +44,7 @@ fn admit_raw_frame(
     callback: &InnerTransportCallback,
     raw: bytes::Bytes,
 ) -> Result<AdmittedInboundFrame> {
-    match callback.admit_inbound_frame(raw) {
+    match callback.admit_inbound_frame(raw, ChannelLane::default()) {
         InboundFrameAdmission::Admitted(frame) => Ok(frame),
         _ => Err(Error::InvalidMessage(
             "valid raw transport frame was not admitted".to_string(),
@@ -49,21 +52,27 @@ fn admit_raw_frame(
     }
 }
 
-/// Await the core handoff that releases the dispatched frame's raw lease, then
-/// witness the freed capacity with one admission. The lease drop releases
-/// synchronously before the handoff is published, so no retry is needed.
+/// Await the core handoff that releases the dispatched frame's raw lease, then witness the
+/// release through the credit law: with the rest of the window held, releasing half a window
+/// less one of the held frames completes a batch, and so advertises more credit, only if the
+/// dispatched frame's release was counted. The lease drop releases synchronously before the
+/// handoff is published, so no retry is needed.
 async fn wait_for_raw_capacity_release(
     core_callback: &InnerSwarmCallback,
     callback: &InnerTransportCallback,
     raw: &bytes::Bytes,
+    held: &mut Vec<AdmittedInboundFrame>,
 ) -> Result<AdmittedInboundFrame> {
     core_callback
         .await_inbound_handoffs_for_test(|handoffs| handoffs >= 1)
         .await;
-    match callback.admit_inbound_frame(raw.clone()) {
+    let batch = usize::try_from(LANE_CREDIT_WINDOW / 2)
+        .map_err(|_| Error::InvalidMessage("the credit batch must fit usize".to_string()))?;
+    held.truncate(held.len().saturating_sub(batch.saturating_sub(1)));
+    match callback.admit_inbound_frame(raw.clone(), ChannelLane::default()) {
         InboundFrameAdmission::Admitted(frame) => Ok(frame),
-        InboundFrameAdmission::CapacityExceeded => Err(Error::InvalidMessage(
-            "raw transport capacity was not released at the core handoff".to_string(),
+        InboundFrameAdmission::CreditExceeded { .. } => Err(Error::InvalidMessage(
+            "the lane's credit was not released at the core handoff".to_string(),
         )),
         _ => Err(Error::InvalidMessage(
             "valid raw transport frame became invalid".to_string(),
@@ -94,13 +103,17 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
         application.clone(),
     ));
     let admission_blocker = core_callback.hold_application_admission_for_test()?;
-    let transport_callback = Arc::new(InnerTransportCallback::for_transport(
-        &transport.transport,
+    let transport_callback = Arc::new(InnerTransportCallback::new(
         &peer.to_string(),
         Box::new(SharedCoreCallback(Arc::clone(&core_callback))),
         Notifier::default(),
+        NodeReceiveLoad::new(),
     ));
     let frame = admit_raw_frame(&transport_callback, raw.clone())?;
+    // Fill the rest of the lane's window, so only the dispatched frame's release can admit more.
+    let mut window = (1..LANE_CREDIT_WINDOW)
+        .map(|_| admit_raw_frame(&transport_callback, raw.clone()))
+        .collect::<Result<Vec<_>>>()?;
     let dispatch_callback = Arc::clone(&transport_callback);
     let dispatch = tokio::spawn(async move {
         dispatch_callback.handle_admitted_frame(frame).await;
@@ -109,10 +122,12 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
     // The raw lease is released at the core handoff, once core capacity admits
     // the decoded frame and before the application sees it: the application
     // lane is still held, so `on_validate` has not started.
-    let released = wait_for_raw_capacity_release(&core_callback, &transport_callback, &raw).await?;
+    let released =
+        wait_for_raw_capacity_release(&core_callback, &transport_callback, &raw, &mut window)
+            .await?;
     assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
     assert!(!application.started.is_set());
-    drop(released);
+    drop((released, window));
 
     drop(admission_blocker);
     application.started.wait().await;
