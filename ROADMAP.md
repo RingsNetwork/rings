@@ -14,6 +14,17 @@ This document tracks what is shipped versus where each track is heading. Items u
 
 ---
 
+## Milestones
+
+- **Pre-1.0 (now).** The wire protocol is not versioned; a release that changes it is a
+  network-wide upgrade, marked in the [CHANGELOG](./CHANGELOG.md).
+- **1.0: a stable network.** The protocol is frozen once connectivity, churn handling, and
+  convergence are stable.
+- **2.0: DRanking.** Verifiable ranking of peers from service receipts
+  ([paper](./papers/dranking.pdf)).
+
+---
+
 ## Foundations (shipped)
 
 The substrate both layers build on:
@@ -28,7 +39,12 @@ The substrate both layers build on:
 - **Extension/protocol model** — pure `Protocol` + namespace-scoped `Interpret` shells, with
   inbound envelopes routed by namespace (RFC #594; `crates/node/src/extension`).
 - **Control & embedding surfaces** — native daemon + `rings` CLI, JSON-RPC over HTTP, C FFI,
-  and a browser/WASM provider.
+  and a browser/WASM provider; the hosted browser console at [rings.rs](https://rings.rs/#node).
+- **Message admission** — at-most-once dispatch through a persisted per-origin replay window,
+  per-origin rate limits at the destination, and delegations sent once per link and then
+  referenced by content address (`crates/core/src/message`).
+- **Bounded state** — connection admission bounded by the topology's reference slots, and DHT
+  storage bounded in retention, element count, and bytes.
 
 ---
 
@@ -45,9 +61,13 @@ The substrate both layers build on:
 
 **In progress**
 - WebTransport-backed relay in the browser (compile-checked; runtime hardening).
-- Connection resilience / optimistic send on the overlay.
+- Churn handling for 1.0: a churn simulator, successor lists sized from network estimates,
+  RTT-derived liveness with ICE restart, inbox replication, stability-weighted storage, and
+  browser lifecycle handling (#773–#779).
 
 **Planned**
+- Epoch-randomized ring positions, `pos(did, e) = H(did, beacon(e))`, so identities cannot
+  choose where they land on the ring (#780).
 - Decentralized peer discovery / bootstrapping.
 - Richer routing primitives over the extension layer (pub/sub, service discovery as protocols).
 
@@ -69,6 +89,12 @@ The substrate both layers build on:
 - A path-less relay on the communication layer: the carrier names only the next hop, the
   destination, and a hop budget, so no hop learns the route
   (`crates/core/src/message/protocols/relay`).
+- Persisted entry guards, and onion exits for TCP and HTTPS.
+- Onion transport for applications: the native TUN gateway (`crates/gateway`) and the
+  browser WebView that browses sites through circuits (`crates/webview`).
+
+**In progress**
+- Onion circuits as client-sealed loops of registered operation symbols (#834).
 
 **Planned**
 - User-installed zero-knowledge identity and verifiable off-chain compute protocols.

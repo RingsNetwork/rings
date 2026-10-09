@@ -13,21 +13,56 @@
 
 **A peer-to-peer network for the sovereign age.**
 
-Rings is a browser-native, structured peer-to-peer network for applications that need
-their own network layer instead of a server-owned data path. Browser tabs and native
-daemons can join the same overlay, discover peers by DID, and exchange messages over
-direct WebRTC datachannels routed by a Chord DHT.
+Rings is a structured peer-to-peer network that runs in the browser. A browser tab or a
+native daemon joins the same Chord DHT overlay, is addressed by a DID, and talks to other
+peers over direct WebRTC datachannels, with no application server in the data path.
 
-The threat model and the contract of each layer are documented in
-[SECURITY.md](./SECURITY.md). DID authentication proves key control; it is not, by
-itself, Sybil or eclipse resistance for permissionless public membership. The overlay
-routes and, after an E2E handshake, encrypts; it does not hide who is talking to whom.
-That is the job of the privacy layer, the onion circuits in `crates/node/src/onion`.
+## Why Rings
 
-At the application layer, Rings gives developers a namespace-scoped protocol runtime:
-write a pure state machine, attach an interpreter shell, and run it over a decentralized
-overlay. Built-in protocols cover peer service relay and echo; the roadmap extends
-both the network layer and the privacy layer.
+- **A browser tab is a full peer.** The node compiled to WebAssembly joins the DHT, routes
+  and stores for other peers, and connects browser to browser, without a light-client mode
+  or a gateway between it and the network.
+- **A privacy layer ships with the overlay.** Onion circuits with layered ElGamal-AEAD,
+  fixed-batch cover cells, pacing, and persisted entry guards run on native nodes and in
+  the browser: the [hosted console](https://rings.rs/#node) sends HTTPS requests and
+  browses sites through circuits from a tab.
+- **One overlay for many key systems.** Peers sign with secp256k1 (including MetaMask's
+  EIP-191), ed25519 (including Phantom), WebCrypto P-256, or bip137, and every signature is
+  bound to its overlay and message family.
+- **Protocols are pure state machines.** An application registers a namespace, writes a
+  pure `step` function, and performs IO in an interpreter shell that can only act in its
+  own namespace.
+- **Built for hostile input.** Every message is signed by its origin, verified before
+  dispatch, delivered at most once through a persisted replay window, and rate-limited per
+  origin account at its destination. Connection, storage, and queue state is bounded. CI
+  model-checks Chord rejoin races, runs Miri on core invariants and ASan/LSan on the FFI,
+  feeds every wire decoder generated malformed input, and replays ring scenarios
+  deterministically; production code denies `unwrap`, `expect`, and `panic`.
+
+## Try it
+
+- **In the browser, nothing to install:** open [rings.rs/#node](https://rings.rs/#node),
+  pick an account, start the node, and connect through the public seed `node.rings.rs`.
+- **Native daemon:** download `rings` for macOS or Linux from
+  [Releases](https://github.com/RingsNetwork/rings/releases), then `rings init` and
+  `rings run`. Other ways to install are under [Installation](#installation).
+- **In your web app:** `npm install @ringsnetwork/rings-node`; the
+  [guide](https://rings.rs/#guide) has the first commands for every runtime.
+
+## Project status
+
+Rings is pre-1.0, and a public overlay runs behind the seed `node.rings.rs`.
+Before 1.0 the wire protocol is not versioned: a release that changes it is marked in the
+[CHANGELOG](./CHANGELOG.md) as a network-wide upgrade. 1.0 freezes the protocol once
+connectivity and churn handling are stable; the DRanking ranking protocol ships as 2.0.
+See [ROADMAP.md](./ROADMAP.md).
+
+[SECURITY.md](./SECURITY.md) states what each layer guarantees and where it stops. In
+short: the overlay authenticates every peer and message and, after an E2E handshake,
+encrypts payloads; hiding who talks to whom is the privacy layer's job; and making
+identities scarce for open public membership is planned work
+([#780](https://github.com/RingsNetwork/rings/issues/780)), so public deployments add
+their own admission policy today.
 
 ## Where Rings fits
 
@@ -74,9 +109,9 @@ The canonical protocol paper is maintained in this repository:
 - [Rings whitepaper PDF](./papers/rings.pdf)
 - [LaTeX source](./papers/rings.tex)
 - [Paper assets and build notes](./papers/README.md)
-- [DRanking paper](./papers/dranking.pdf): proposed verifiable ranking and admission;
-  the current [provisional service receipts](./docs/src/advanced-topic/dranking-service-receipts.md)
-  implement only an evidence-collection slice, not the full ranking or admission protocol.
+- [DRanking paper](./papers/dranking.pdf): the verifiable ranking protocol planned for 2.0;
+  the [provisional service receipts](./docs/src/advanced-topic/dranking-service-receipts.md)
+  shipped today collect its evidence and do not affect routing or credit.
 - [Finger-convergence specification](./papers/finger-convergence.pdf): range-proved
   finger convergence and its assumptions.
 
@@ -106,15 +141,13 @@ browser-to-browser connections without an application server in the data path.
 Peers are addressed by decentralized identifiers backed by selectable signature
 schemes, including secp256k1, secp256r1, ed25519, BLS, and bip137. This lets Rings
 bridge browser, daemon, and wallet-oriented identity workflows without binding the
-network to one key system. See [the threat model](./SECURITY.md#did-identity) for
-the boundary between DID authentication and Sybil resistance.
+network to one key system.
 
 ### Structured peer routing
 
 The overlay uses a Chord DHT for successor/finger-table routing, DID lookup, message
 relay, stabilization, and `network_id` isolation. Independent overlays stay separate
-while retaining deterministic routing behavior. Chord routing assumes an acceptable
-membership model; see [the overlay threat model](./SECURITY.md#chord-routing).
+while retaining deterministic, loop-free routing.
 
 ### Privacy layer
 
@@ -135,14 +168,22 @@ That keeps protocol logic extensible without adding a global effect bus to the c
 
 ## Installation
 
-You can install rings-node either from Cargo or from source.
+The browser node needs no installation: open [rings.rs/#node](https://rings.rs/#node).
+For the `rings` CLI, use a prebuilt release, Cargo, or a source checkout.
+
+### Prebuilt binaries
+
+Every [release](https://github.com/RingsNetwork/rings/releases) ships `rings` for macOS
+(`aarch64`, `x86_64`) and Linux (`x86_64` musl, static), plus the WebAssembly package.
 
 ### From Cargo
 
-Install the `rings` CLI from crates.io:
+The workspace denies compiler warnings, so build with the Rust release pinned in
+[`rust-toolchain.toml`](./rust-toolchain.toml); a newer compiler can add a warning that
+fails the build:
 
 ```sh
-cargo install rings-node
+cargo +1.97.0 install --locked rings-node
 ```
 
 ### From source
@@ -224,7 +265,7 @@ execute, or maintain a proving backend.
 | Resource | Link | Notes |
 |---|---|---|
 | Rings Whitepaper | [PDF](./papers/rings.pdf), [LaTeX source](./papers/rings.tex), [citation](#whitepaper) | Canonical protocol paper |
-| Security model | [SECURITY.md](./SECURITY.md) | Overlay assumptions, deployment models, Sybil boundary, and the communication-layer / privacy-layer contracts |
+| Security model | [SECURITY.md](./SECURITY.md) | Vulnerability reporting, threat model, the communication-layer / privacy-layer contracts, and each subsystem's guarantees |
 | Browser frontend | [`frontend`](./frontend) | Landing guide, web app, and extension workflow |
 | Documentation | [rings.rs/docs](https://rings.rs/docs/), [source](./docs) | mdBook book, published with the site |
 | Guide | [rings.rs/#guide](https://rings.rs/#guide) | One card per runtime with the first commands; the book is the reference |
@@ -234,23 +275,30 @@ execute, or maintain a proving backend.
 
 ## Components
 
-* core: DHT, swarm, DID routing, messages, and cryptographic identity primitives.
+* core: DHT, swarm, DID routing, messages, replay and quota admission, and cryptographic identity primitives.
 
-* node: Native daemon, browser/WASM provider, extension runtime, relay protocol, and FFI provider.
+* node: Native daemon, browser/WASM provider, extension runtime, built-in protocols, the onion privacy layer, and the FFI provider.
+
+* transport: Native WebRTC transport and `web_sys`-based browser transport.
 
 * rpc: Rings RPC shared types and the JSON-RPC client/handlers (over HTTP).
 
-* derive: Rings macros, including `wasm_export` macro.
+* measure: Local peer credit and reliability.
 
-* transport: Native WebRTC transport and `web_sys`-based browser transport.
+* gateway: Native TUN gateway that carries selected TCP destinations over onion circuits.
+
+* webview: Onion-backed WebView gateway primitives.
+
+* network-policy: Public-network admission policy for egress targets.
+
+* codec, derive: The serde wire codec, and Rings macros including `wasm_export`.
 
 ## Architecture
 
 Rings separates peer connectivity, overlay routing, privacy circuits, and application
 protocols. Direct WebRTC connections can carry traffic without an application server;
 bootstrap, signaling, and ICE infrastructure still matter, and a selected TURN relay
-carries transport traffic. This does not establish permissionless Sybil resistance;
-see [SECURITY.md](./SECURITY.md). Each layer maps to a crate or module:
+carries transport traffic. Each layer maps to a crate or module:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -302,26 +350,13 @@ see [SECURITY.md](./SECURITY.md). Each layer maps to a crate or module:
   an echo protocol used by examples and tests. Register your own with
   `provider.register_protocol(..)` (Rust) or `provider.on(namespace, ..)` (JS).
 
-The **privacy layer** exists today as `crates/node/src/onion`; where it and the **network layer**
-are heading — a fully server-less, sovereign network — is described in [ROADMAP.md](./ROADMAP.md).
+Both the network layer and the privacy layer are shipped; [ROADMAP.md](./ROADMAP.md) tracks the
+work toward 1.0 and the fully server-less network beyond it.
 
 ## Contributing
 
-We welcome contributions to rings-node!
-
-If you have a bug report or feature request, please open an issue on GitHub.
-
-If you'd like to contribute code, please follow these steps:
-
-```text
-    Fork the repository on GitHub.
-    Create a new branch for your changes.
-    Make your changes and commit them with descriptive commit messages.
-    Push your changes to your fork.
-    Create a pull request from your branch to the main repository.
-```
-
-We'll review your pull request as soon as we can, and we appreciate your contributions!
+Contributions are welcome. [CONTRIBUTING.md](./CONTRIBUTING.md) covers the development setup,
+the checks CI runs, and how to report a vulnerability privately.
 
 ## License
 

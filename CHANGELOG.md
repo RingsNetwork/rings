@@ -7,6 +7,13 @@
   open known limitations. Implementation invariants it used to repeat stay in the mdBook chapters
   (replay, delegation references, service receipts, measurement storage), the CHANGELOG, and the
   owning crates' documentation.
+- Lead README.md with what Rings offers (a browser tab as a full peer, the shipped privacy layer,
+  multi-wallet identity, pure protocols, hardening), a zero-install way to try it, and the project
+  status: pre-1.0 version semantics and the 1.0 and 2.0 milestones, which ROADMAP.md now states
+  along with the shipped admission work and the churn (#773-#779) and Sybil (#780) tracks.
+  llms.txt gains a Status section for agents that evaluate the project. Every `cargo install
+  rings-node` command now names the pinned toolchain with `--locked`, because the workspace denies
+  warnings and a newer compiler can fail the build.
 
 - Fail a bad transaction replay record closed on its own stream only, and restore the replay store
   once (#910). A record that does not restore (torn, corrupt, unreadable, misplaced, or holding an

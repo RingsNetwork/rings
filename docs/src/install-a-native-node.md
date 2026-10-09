@@ -16,15 +16,18 @@ static binary that runs on any distribution), plus the WebAssembly package for b
 Download the archive for your platform, unpack it, and put `rings` on your `PATH`:
 
 ```bash
-unzip rings-v0.21.2-aarch64-apple-darwin.zip
+unzip rings-v0.32.0-aarch64-apple-darwin.zip
 install -m 755 rings /usr/local/bin/rings
 rings --version
 ```
 
 ### From Cargo
 
+The workspace denies compiler warnings, so build with the Rust release pinned in the
+repository's `rust-toolchain.toml`; a newer compiler can add a warning that fails the build:
+
 ```
-cargo install rings-node
+cargo +1.97.0 install --locked rings-node
 ```
 
  > Rings Network is written in [Rust](https://www.rust-lang.org/). [Cargo](https://crates.io/) is a package management tool for the Rust language. You can learn about how to install and use Cargo [here](https://doc.rust-lang.org/cargo/getting-started/installation.html).
