@@ -144,12 +144,22 @@ fn test_a_disposable_put_can_be_torn_by_a_crash() {
     assert!(put_outcomes(put_effects(plan)).contains(&Outcome::Torn));
 }
 
-/// Durability law of an authoritative removal: a completed removal is never rolled back; a
-/// removal a crash interrupts may be.
+/// Durability law of an authoritative removal: at every crash point the record is old or
+/// removed, and removed once the plan completes; an interrupted removal, or a disposable one,
+/// may be rolled back.
 #[test]
 fn test_a_completed_authoritative_removal_is_not_rolled_back() {
     let plan = RecordAuthority::Authoritative.remove_plan();
+    for crash in 0..=plan.len() {
+        let outcomes = remove_outcomes(plan.get(..crash).unwrap_or_default());
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, Outcome::Old | Outcome::Removed)),
+            "crash after {crash} steps: {outcomes:?}"
+        );
+    }
     assert_eq!(remove_outcomes(plan), [Outcome::Removed]);
-    assert!(remove_outcomes(&plan[..1]).contains(&Outcome::Old));
+    assert!(remove_outcomes(plan.get(..1).unwrap_or_default()).contains(&Outcome::Old));
     assert!(remove_outcomes(RecordAuthority::Disposable.remove_plan()).contains(&Outcome::Old));
 }

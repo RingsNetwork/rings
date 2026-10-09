@@ -28,19 +28,19 @@
 //! part-way skips the unlisted entries of a disposable store, and fails an authoritative open as
 //! a whole, since an entry it cannot list it cannot name.
 //!
-//! Durability law: every write and removal runs a fixed plan of file-system steps, data
-//! interpreted by the store (`PutStep`, `RemoveStep`). An authoritative `put` writes the
-//! temporary file, flushes it, renames it over the record, and flushes the directory; an
-//! authoritative removal removes the record and flushes the directory; an authoritative open
-//! flushes the root and its ancestors, so the store's own directory entry survives. On unix a
-//! crash therefore leaves each record either whole at its previous value or whole at its new
-//! one, never torn, and a completed write or removal is not rolled back (checked over every
-//! crash point by the model in `test_durability`). The flushes are `File::sync_all`, which the
-//! standard library maps to `fcntl(F_FULLFSYNC)` on Apple targets (flushing the drive cache as
-//! well) and to `fsync` elsewhere; the law rests on that mapping. On other targets a directory
-//! cannot be flushed, so the durability of a rename or a removal is the file system's own. A
-//! disposable store's plans skip every flush: a crash may lose its latest writes or tear a
-//! record, which its decode law then discards.
+//! Durability law: every write and removal runs a fixed plan of file-system steps, data interpreted
+//! by the store (`PutStep`, `RemoveStep`). An authoritative `put` writes the temporary file,
+//! flushes it, renames it over the record, and flushes the directory; an authoritative removal
+//! removes the record and flushes the directory; an authoritative open flushes the root and its
+//! ancestors, so the store's own directory entry survives. On unix a crash therefore leaves each
+//! record either whole at its previous value or whole at its new one, never torn, and a completed
+//! write or removal is not rolled back. `test_durability` model-checks the plans over every crash
+//! point; each step's effect is its one-line arm in the interpreter. The flushes are
+//! `File::sync_all`, which the standard library maps to `fcntl(F_FULLFSYNC)` on Apple targets
+//! (flushing the drive cache as well) and to `fsync` elsewhere; the law rests on that mapping. On
+//! other targets a directory cannot be flushed, so the durability of a rename or a removal is the
+//! file system's own. A disposable store's plans skip every flush: a crash may lose its latest
+//! writes or tear a record, which its decode law then discards.
 //!
 //! Decode law: a record is the file's only if it decodes whole as `(key, V)` and its key hashes
 //! to the file name; the store writes nothing else. Any other record is undecodable for the name
@@ -481,6 +481,10 @@ impl FileStore {
 
     /// Remove the records `names` and forget them by running the store's
     /// [`RecordAuthority::remove_plan`] (the durability law).
+    ///
+    /// Post: a failed removal leaves the record it could not remove indexed (the index law); an
+    /// error from the final directory flush leaves every removal made and forgotten, its survival
+    /// of a crash unknown, and the caller treats the removal as failed.
     fn remove_records(&self, index: &mut FileIndex, names: &[String]) -> Result<()> {
         for step in self.authority.remove_plan() {
             match step {

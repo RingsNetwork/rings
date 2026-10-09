@@ -35,8 +35,10 @@ fn stream(destination: Did) -> StreamKey {
     )
 }
 
+/// A store that cannot be read fails the load closed: the transition is refused and the failed
+/// read is counted.
 #[tokio::test]
-async fn load_failure_fails_closed_and_is_counted() {
+async fn test_load_failure_fails_closed_and_is_counted() {
     let runtime = TransactionReplay::new_shared(Box::new(Hooked::new(Unavailable)));
     let key = stream(SecretKey::random().address().into());
 
@@ -50,8 +52,10 @@ async fn load_failure_fails_closed_and_is_counted() {
     assert_eq!(runtime.counters().persistence_failure, 1);
 }
 
+/// A store that refuses the record write fails the admission closed before it is admitted, and
+/// the failed write is counted.
 #[tokio::test]
-async fn store_failure_fails_closed_before_admission_and_is_counted() {
+async fn test_store_failure_fails_closed_before_admission_and_is_counted() {
     let runtime = TransactionReplay::new_shared(Box::new(Hooked::new(WritesRefused)));
     let key = stream(SecretKey::random().address().into());
 
@@ -72,11 +76,6 @@ struct Unavailable;
 
 #[async_trait::async_trait]
 impl StorageHooks for Unavailable {
-    /// Runs before a `get`.
-    async fn before_get(&self, _key: &str) -> Result<()> {
-        Err(Error::InvalidTransport)
-    }
-
     /// Runs before a `put`.
     async fn before_put(&self, _key: &str) -> Result<()> {
         Err(Error::InvalidTransport)
@@ -100,8 +99,9 @@ impl StorageHooks for WritesRefused {
 }
 
 /// Hooks of a store that still holds a shared-stream snapshot under the key used before
-/// #898. The snapshot's bytes decode as no stream, so a passing test proves the cutover
-/// never decodes it, and reading the key alone is an error.
+/// #898, counting removals. The snapshot's bytes decode as no stream: had a load decoded them,
+/// the snapshot would be an unrestorable record, not the snapshot, and would never be removed,
+/// so the removal count is the witness that the cutover never decodes it.
 struct Cutover {
     /// Whether removing a record fails.
     fail_remove: bool,
@@ -111,14 +111,6 @@ struct Cutover {
 
 #[async_trait::async_trait]
 impl StorageHooks for Cutover {
-    /// Runs before a `get`.
-    async fn before_get(&self, key: &str) -> Result<()> {
-        match key == SHARED_STREAM_SNAPSHOT_KEY {
-            true => Err(Error::InvalidTransport),
-            false => Ok(()),
-        }
-    }
-
     /// Runs before a `remove`.
     async fn before_remove(&self, _key: &str) -> Result<()> {
         self.removals.fetch_add(1, Ordering::SeqCst);

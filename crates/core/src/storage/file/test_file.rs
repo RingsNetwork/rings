@@ -350,8 +350,8 @@ async fn test_authoritative_writes_round_trip_through_a_reopen() {
     assert_eq!(temporaries, 0);
 }
 
-/// Scan law: a scan reports each record decoded or undecodable (named by its file and its intact
-/// key) and deletes nothing, even in a disposable store whose reads would retire the record.
+/// Scan law: a scan reports each record decoded or undecodable (named by its file) and deletes
+/// nothing, even in a disposable store whose reads would retire the record.
 #[tokio::test]
 async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
     let root = temp_root("scan");

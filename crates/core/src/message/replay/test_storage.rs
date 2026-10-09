@@ -2,7 +2,7 @@
 //! before its operations, so each double states only the behaviour it changes.
 //!
 //! ```text
-//! Hooked<H> = H ∘ MemStorage     get k ↦ H.before_get k; put k ↦ H.before_put k;
+//! Hooked<H> = H ∘ MemStorage     put k ↦ H.before_put k;
 //!                                get_all, scan ↦ H.before_scan; remove k ↦ H.before_remove k
 //! ```
 //!
@@ -19,11 +19,6 @@ use crate::storage::ScannedRecord;
 /// The behaviour a test double adds in front of its memory store; each hook passes by default.
 #[async_trait::async_trait]
 pub(super) trait StorageHooks: Send + Sync {
-    /// Runs before every `get` of `key`; an error fails the read.
-    async fn before_get(&self, _key: &str) -> Result<()> {
-        Ok(())
-    }
-
     /// Runs before every `put` of `key`; an error fails the write.
     async fn before_put(&self, _key: &str) -> Result<()> {
         Ok(())
@@ -60,9 +55,8 @@ impl<H> Hooked<H> {
 
 #[async_trait::async_trait]
 impl<H: StorageHooks> KvStorageInterface<ReplayRecord> for Hooked<H> {
-    /// The hook, then the memory store's `get`.
+    /// The memory store's `get` (the replay runtime reads only by scan).
     async fn get(&self, key: &str) -> Result<Option<ReplayRecord>> {
-        self.hooks.before_get(key).await?;
         self.inner.get(key).await
     }
 

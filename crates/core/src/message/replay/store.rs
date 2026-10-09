@@ -678,19 +678,31 @@ mod tests {
         RecordState::Undecodable,
     ];
 
-    /// The scanned record of receiver stream `key` in `state`, and the entry of `U` it must
-    /// produce (none for an intact record).
+    /// The record of `stream` in a table: a sender record (its last sequence) or a receiver
+    /// record (a full window), as `(storage key, record)`.
+    fn table_record(table: ReplayTable, stream: &StreamKey) -> Result<(String, ReplayRecord)> {
+        match table {
+            ReplayTable::Sender => sender_record(stream, 7),
+            ReplayTable::Receiver => receiver_record(stream, &full_window()),
+        }
+    }
+
+    /// The scanned record of `stream` in `table` and `state`, and the entry of `U` it must
+    /// produce (none for an intact record); a misplaced record holds `other`'s record of the
+    /// same table.
     fn record_in(
-        key: &StreamKey,
+        table: ReplayTable,
+        stream: &StreamKey,
+        other: &StreamKey,
         state: RecordState,
     ) -> Result<(ScannedRecord<ReplayRecord>, Option<RestoreFailure>)> {
-        let own = record_key(ReplayTable::Receiver, key)?;
+        let own = record_key(table, stream)?;
         let defective = |defect| RestoreFailure::Defective {
             key: own.clone(),
             defect,
         };
         Ok(match state {
-            RecordState::Intact => (filed(receiver_record(key, &full_window())?), None),
+            RecordState::Intact => (filed(table_record(table, stream)?), None),
             RecordState::NotAStream => (
                 filed((own.clone(), ReplayRecord(vec![0xff; 3]))),
                 Some(defective(Defect::NotAStream)),
@@ -698,14 +710,14 @@ mod tests {
             RecordState::InvalidWindow => {
                 let mut invalid = full_window();
                 invalid.accepted = [None; TRANSACTION_REPLAY_WINDOW];
-                let (_, record) = receiver_record(key, &invalid)?;
+                let (_, record) = receiver_record(stream, &invalid)?;
                 (
                     filed((own.clone(), record)),
                     Some(defective(Defect::InvalidWindow)),
                 )
             }
             RecordState::Misplaced => {
-                let (_, record) = receiver_record(&maximal_key(u32::MAX), &full_window())?;
+                let (_, record) = table_record(table, other)?;
                 (
                     filed((own.clone(), record)),
                     Some(defective(Defect::Misplaced)),
@@ -718,26 +730,33 @@ mod tests {
         })
     }
 
-    /// The fail-closed-per-stream law, checked exhaustively over three streams and every state
-    /// of each (125 stores): the tables are exactly those of the intact records alone, and `U`
-    /// holds exactly the bad records, each under its own name with its own failure.
+    /// The fail-closed-per-stream law, checked exhaustively over three streams, each holding one
+    /// record in either table, in every state (10 choices each, 1000 stores; a misplaced record
+    /// holds the next enumerated stream's record): the tables are exactly those of the intact
+    /// records alone, and `U` holds exactly the bad records, each under its own name with its
+    /// own failure, whatever the other streams' records.
     #[test]
     fn test_restore_is_pointwise_over_every_store_of_three_streams() -> Result<()> {
         let keys = [maximal_key(1), maximal_key(2), maximal_key(3)];
-        for first in RECORD_STATES {
-            for second in RECORD_STATES {
-                for third in RECORD_STATES {
-                    let states = [first, second, third];
+        let choices = [ReplayTable::Sender, ReplayTable::Receiver]
+            .into_iter()
+            .flat_map(|table| RECORD_STATES.into_iter().map(move |state| (table, state)))
+            .collect::<Vec<_>>();
+        for first in choices.iter() {
+            for second in choices.iter() {
+                for third in choices.iter() {
+                    let store = [*first, *second, *third];
                     let mut records = Vec::new();
                     let mut intact = Vec::new();
                     let mut expected = std::collections::BTreeMap::new();
-                    for (key, state) in keys.iter().zip(states) {
-                        let (record, failure) = record_in(key, state)?;
+                    for (index, (table, state)) in store.into_iter().enumerate() {
+                        let stream = &keys[index];
+                        let other = &keys[(index + 1) % keys.len()];
+                        let (record, failure) = record_in(table, stream, other, state)?;
                         match failure {
                             None => intact.push(record.clone()),
                             Some(failure) => {
-                                let name = by_digest(&record_key(ReplayTable::Receiver, key)?);
-                                expected.insert(name, failure);
+                                expected.insert(by_digest(&record_key(table, stream)?), failure);
                             }
                         }
                         records.push(record);
@@ -746,9 +765,9 @@ mod tests {
                     assert_eq!(
                         restored.store.tables,
                         restore(intact, by_digest).store.tables,
-                        "{states:?}"
+                        "{store:?}"
                     );
-                    assert_eq!(restored.store.unrestorable, expected, "{states:?}");
+                    assert_eq!(restored.store.unrestorable, expected, "{store:?}");
                 }
             }
         }
