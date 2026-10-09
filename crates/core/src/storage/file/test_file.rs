@@ -317,11 +317,11 @@ async fn test_authoritative_store_reports_an_empty_record_by_its_file() {
     }
 }
 
-/// Damage is never taken for a move: a record that does not decode whole, whose key prefix
-/// decodes but hashes to another file, is undecodable with no key, not misfiled.
+/// A record that does not decode whole, whose key prefix decodes but hashes to another file, is
+/// undecodable with no key: the prefix is not the key it is filed as.
 #[tokio::test]
-async fn test_a_foreign_key_prefix_is_not_a_misfiled_record() {
-    let root = temp_root("misfiled");
+async fn test_a_foreign_key_prefix_is_not_reported_as_the_key() {
+    let root = temp_root("foreign-prefix");
     let other = rings_codec::serialize(&"other").expect("key serializes");
     let name = plant_record(&root, "stream", &other);
     let storage =
@@ -610,14 +610,14 @@ async fn test_authoritative_store_evicts_nothing() {
     assert_eq!(stored_keys(&reopened).await, ["a", "b"]);
 }
 
-/// Decode law under a misfiled record: a whole, decodable record copied over another key's
-/// file holds a key that does not hash to its file name, so it is neither key's record: a scan
-/// reports it as misfiled, with the key and value it holds, an authoritative `get` of the key it
-/// is filed as fails naming it, a `get` of the key it holds does not see it, and a disposable
-/// `get` retires it.
+/// Decode law under a record of another key: a whole, decodable record copied over another
+/// key's file holds a key that does not hash to its file name, so it is undecodable for that
+/// name: a scan reports it by its file alone, an authoritative `get` of the key it is filed as
+/// fails naming it, a `get` of the key it holds does not see it, and a disposable `get` or
+/// `get_all` retires it.
 #[tokio::test]
-async fn test_a_misfiled_whole_record_belongs_to_neither_key() {
-    let root = temp_root("misfiled-whole");
+async fn test_a_record_of_another_key_is_undecodable_for_its_name() {
+    let root = temp_root("another-key");
     let copied = rings_codec::serialize(&("other", "v")).expect("record serializes");
     let name = plant_record(&root, "stream", &copied);
     let storage =
@@ -629,18 +629,17 @@ async fn test_a_misfiled_whole_record_belongs_to_neither_key() {
         <FileStorage as KvStorageScan<String>>::scan(&storage)
             .await
             .expect("scan"),
-        [ScannedRecord::Misfiled {
+        [ScannedRecord::Undecodable(UndecodableRecord {
             name: name.clone(),
-            key: "other".to_owned(),
-            value: "v".to_owned(),
-        }]
+            key: None,
+        })]
     );
     assert!(matches!(
         <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
-        Err(Error::StorageRecordMisfiled {
-            ref record,
-            ref key,
-        }) if *record == name && key == "other"
+        Err(Error::StorageRecordUndecodable(UndecodableRecord {
+            name: ref reported,
+            key: None,
+        })) if *reported == name
     ));
     assert_eq!(
         <FileStorage as KvStorageInterface<String>>::get(&storage, "other")
@@ -658,6 +657,19 @@ async fn test_a_misfiled_whole_record_belongs_to_neither_key() {
             .await
             .expect("retired"),
         None
+    );
+    assert!(!root.join(&name).exists());
+
+    // A disposable `get_all` retires such a record too, and returns neither key.
+    plant_record(&root, "stream", &copied);
+    let disposable = FileStorage::new_with_cap_and_path(4096, &root)
+        .await
+        .expect("reopen");
+    assert_eq!(
+        <FileStorage as KvStorageInterface<String>>::get_all(&disposable)
+            .await
+            .expect("retired"),
+        []
     );
     assert!(!root.join(&name).exists());
 }

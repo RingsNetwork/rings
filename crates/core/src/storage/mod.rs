@@ -36,8 +36,8 @@ pub struct UndecodableRecord {
     /// filed as, which is the key itself or the backend's image of it (`FileStorage`: the file
     /// name).
     pub name: String,
-    /// The key the record is filed as, when the intact part of the record names it (and that
-    /// key's name is this record's name); `None` when no such key can be recovered.
+    /// The key the record is filed as, when the intact part of the record names a key whose
+    /// name is this record's name; `None` otherwise.
     pub key: Option<String>,
 }
 
@@ -51,18 +51,8 @@ pub enum ScannedRecord<V> {
         /// The record's value.
         value: V,
     },
-    /// A whole record of `key` filed under another key's name `name` (a record copied or moved
-    /// over another's file): it is the record of neither key, and is reported with its value so
-    /// that its owner can judge it.
-    Misfiled {
-        /// The name it is filed under.
-        name: String,
-        /// The key the record holds.
-        key: String,
-        /// The value the record holds.
-        value: V,
-    },
-    /// A record the storage cannot read or decode.
+    /// Anything else found under a record's name: a record the storage cannot read or decode,
+    /// or one that is not filed under its own key's name.
     Undecodable(UndecodableRecord),
 }
 
@@ -108,22 +98,18 @@ pub trait KvStorageInterface<V> {
 /// or decode instead of failing or deleting, together with the naming that ties a reported
 /// record back to its key.
 ///
-/// **Law (agreement).** A scan and the naming agree: every record is reported under the name it
-/// is filed under, and as exactly one of three cases, decided by whether it decodes whole and
-/// whether its key's name is the name it is filed under:
+/// **Law (agreement).** A decoded pair is reported only under its own key's name; anything else
+/// found under a record's name is undecodable for that name:
 ///
 /// ```text
-/// Filed { k, v }           ⟺  a whole record (k, v) filed under record_name(k)
-/// Misfiled { n, k, v }     ⟺  a whole record (k, v) filed under n ≠ record_name(k)
-/// Undecodable(u)           ⟺  a record that does not decode whole, filed under u.name;
-///                              u.key = Some(k) ⟹ record_name(k) = u.name
+/// Filed { k, v }   ⟺  a whole record (k, v) filed under record_name(k)
+/// Undecodable(u)   ⟺  anything else filed under u.name;
+///                      u.key = Some(k) ⟹ record_name(k) = u.name
 /// ```
 ///
-/// An owner restores exactly the `Filed` records and decides on the others by name, so both
-/// methods are required: a default for either could break the agreement for a backend that
-/// overrides the other. A backend keyed by the key itself (memory, IndexedDB) never reports
-/// `Misfiled`, since a record cannot sit under another key's name there; `FileStorage`, which
-/// files by digest, reports it.
+/// An owner restores exactly the `Filed` records and fails closed on the names of the rest, so
+/// both methods are required: a default for either could break the agreement for a backend that
+/// overrides the other.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait KvStorageScan<V>: KvStorageInterface<V> {

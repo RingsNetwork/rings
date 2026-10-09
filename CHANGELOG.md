@@ -13,28 +13,25 @@
   `ReplayCounters::unavailable_stream`). Every other stream in the store runs normally; each bad
   record holds one slot of both tables' stream bounds. An operator clears one stream by removing the
   named record with the node stopped (see the replay chapter). An absent record still restarts its
-  stream from `First` (#915). A misfiled record (a whole, consistent stream record filed under
-  another stream's name, which only copying or moving a file produces) closes replay for every
-  stream with `Error::TransactionReplayStoreMisfiled { records }`, naming every such file, until an
-  operator resolves each and restarts (counted in `ReplayCounters::misfiled_record`); damage never
-  produces one. Each reservation and admission now runs detached from its caller
-  (`rings_runtime::run_detached`): a caller cancelled mid-transition no longer lets a stale record
-  write land after a newer one, and its transition commits (its admission is charged and its
-  sequence consumed) exactly as if the caller had dropped the verdict.
+  stream from `First` (#915), as does a stream whose record was moved or renamed away; the file it
+  lands in is undecodable for its own name. Each reservation and admission now runs detached from
+  its caller (`rings_runtime::run_detached`): a caller cancelled mid-transition no longer lets a
+  stale record write land after a newer one, and its transition commits (its admission is charged
+  and its sequence consumed) exactly as if the caller had dropped the verdict.
 
 - Open the native transaction replay store as an authoritative `FileStorage` (#909). On unix its
   `put` flushes the temporary file before the rename and the directory after it (removals, and the
   store's directory and its ancestors at open, are flushed too), so a crash leaves each record whole
   at its previous or its new value. A record file that cannot be read or does not decode whole is
   reported (`Error::StorageRecordUndecodable`), naming its file and, when its key prefix is intact,
-  its key; a whole record of another key under a file's name is reported as misfiled
-  (`Error::StorageRecordMisfiled`); a scan reports each record as `ScannedRecord::Filed`, `Misfiled`
-  or `Undecodable`. Neither is ever deleted, so replay fails closed on it instead of reopening its
-  stream. A directory or other non-file entry in a record's place is indexed but charges nothing
-  against the budget. Disposable stores change too: a record entry that is present but unreadable (a
-  dangling link) makes `get` and `get_all` fail instead of reading as absent, and a misfiled record
-  is retired by the read that finds it instead of being returned by `get_all`. An authoritative
-  store evicts nothing: a write beyond its budget, or an open under a lowered one, fails with
+  its key; a whole record of another key under a file's name is undecodable for that name; a scan
+  reports each record as `ScannedRecord::Filed` or `Undecodable`. Neither is ever deleted, so replay
+  fails closed on it instead of reopening its stream. A directory or other non-file entry in a
+  record's place is indexed but charges nothing against the budget. Disposable stores change too: a
+  record entry that is present but unreadable (a dangling link) makes `get` and `get_all` fail
+  instead of reading as absent, and a record holding another key's record is retired by the read
+  that finds it instead of being returned by `get_all`. An authoritative store evicts nothing: a
+  write beyond its budget, or an open under a lowered one, fails with
   `Error::StorageBudgetExhausted`, and a write into a root that vanished while open fails with
   `Error::StorageRootMissing`. The flush bounds replay transitions to about 50 per second on an
   Apple M1 Max SSD (`F_FULLFSYNC`), against about 4,500 unflushed; group commit is tracked in #916.
@@ -94,16 +91,15 @@
 - The native daemon's replay store flushes every write (#909), so the node-wide ceiling of replay
   transitions (every inbound admission and every sender reservation) falls from about 4,500 to about
   50 per second on an Apple M1 Max SSD (`F_FULLFSYNC`); group commit is tracked in #916.
-- `ReplayCounters` gains the public fields `unrestorable_record`, `unavailable_stream` and
-  `misfiled_record` (#910); it is not `#[non_exhaustive]`, so a downstream struct literal or
-  exhaustive pattern must add them.
+- `ReplayCounters` gains the public fields `unrestorable_record` and `unavailable_stream` (#910); it
+  is not `#[non_exhaustive]`, so a downstream struct literal or exhaustive pattern must add them.
 - `ReplayStorage` boxes a `KvStorageScan<ReplayRecord>` (#910), a new trait over
-  `KvStorageInterface` with two required methods: `scan` (every record as a `ScannedRecord`:
-  `Filed`, `Misfiled` with the key and value it holds, or `Undecodable`; deleting nothing) and
-  `record_name` (the name a key's record is filed under), bound by the agreement law on the
-  trait. `MemStorage`, `FileStorage` and `IdbStorage` implement it; a custom replay storage
+  `KvStorageInterface` with two required methods: `scan` (every record as a `ScannedRecord`,
+  `Filed` under its own key's name or `Undecodable` for the name it was found under; deleting
+  nothing) and `record_name` (the name a key's record is filed under), bound by the agreement law
+  on the trait. `MemStorage`, `FileStorage` and `IdbStorage` implement it; a custom replay storage
   passed to `SwarmBuilder::replay_storage` or `ProcessorBuilder::replay_storage` must implement it
-  too, and report a whole record filed under another key's name as `Misfiled`.
+  too.
 - `Arc<S>` implements `KvStorageInterface<V>` and `KvStorageScan<V>` whenever `S` does (#910),
   so a downstream `impl KvStorageInterface<_> for Arc<_>` now conflicts.
 - Every `FileStorage` operation, disposable stores' included, runs its file I/O on the runtime's

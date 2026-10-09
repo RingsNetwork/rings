@@ -30,8 +30,8 @@
 //!
 //! **Law (fail closed per stream, #910).** The first operation restores the store from one scan
 //! of the storage and caches the result, including every record that does not restore. For a
-//! stream `s` whose stored record is damaged (torn, corrupt or unreadable, or not a consistent
-//! record of the key it holds):
+//! stream `s` whose stored record is damaged (torn, corrupt or unreadable, or holding another
+//! key's record):
 //!
 //! ```text
 //! ∀ transition t of s.   t = Err(TransactionReplayStreamUnavailable { s, record })
@@ -53,13 +53,6 @@
 //! record name. A scan that fails as a whole restores nothing: it is counted as a persistence
 //! failure, and the next operation scans again.
 //!
-//! **Law (misfiled records close replay).** A whole, consistent stream record filed under another
-//! stream's name was copied or moved there (damage cannot produce one; see [`store`]). A load
-//! that finds any refuses every transition of every stream with
-//! `TransactionReplayStoreMisfiled { records }`, naming every such file, until an operator
-//! resolves each and restarts the node; the refusal is cached, counted
-//! ([`ReplayCounters::misfiled_record`]) and logged once per file with the key it holds.
-//!
 //! **Recovery.** An operator clears one failed stream, accepting a replay-window reset for that
 //! stream alone, by removing the record the refusal and the log name while the node is stopped,
 //! and then starting it: the native daemon keeps each record as the file of that name in the
@@ -70,10 +63,7 @@
 //! sender stream restarts at sequence zero. Its destination rejects those sequences until they
 //! pass its retained high watermark: as `Stale` below the window, and as `Fork`, with signed
 //! [`TransactionForkEvidence`] against this node, inside it; the messages they carry are lost.
-//! No other stream is touched. Misfiled records are resolved the same way, all at once: with the
-//! node stopped, the operator fixes or removes every file the refusal names (renaming one back
-//! to the name of the key it holds, when that key's own record is absent, restores that stream
-//! exactly; removing it resets the windows of the streams involved), then starts the node.
+//! No other stream is touched.
 //!
 //! The first load that finds the shared-stream
 //! snapshot of the key used before #898 deletes it without reading it (best effort, counted on
@@ -85,6 +75,7 @@
 //! the corresponding replay guarantee. Runtime-local origin quota state shares the serialized
 //! receiver commit boundary but is not part of the store.
 
+use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::ops::RangeInclusive;
 use std::sync::atomic::AtomicU64;
@@ -116,10 +107,10 @@ mod store;
 use self::store::receiver_record;
 use self::store::restore;
 use self::store::sender_record;
-use self::store::MisfiledRecords;
 pub use self::store::ReplayRecord;
 use self::store::ReplayStore;
 use self::store::ReplayTable;
+use self::store::RestoreFailure;
 use self::store::SHARED_STREAM_SNAPSHOT_KEY;
 pub use self::store::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
 pub use self::store::TRANSACTION_REPLAY_STORE_MAX_BYTES;
@@ -353,9 +344,6 @@ pub fn observe(
     (state, verdict)
 }
 
-/// A load's outcome: the restored store, or the misfiled records that refuse it as a whole.
-type LoadedStore = std::result::Result<ReplayStore, MisfiledRecords>;
-
 /// Run one replay transition detached from its caller (the law of whole transitions of
 /// [`TransactionReplay`]).
 ///
@@ -390,9 +378,6 @@ pub struct ReplayCounters {
     pub unrestorable_record: u64,
     /// Reservations and admissions refused because their stream's record does not restore.
     pub unavailable_stream: u64,
-    /// Misfiled stream records the load found, which close replay for every stream until they
-    /// are resolved; a gauge, fixed once the store is loaded, and non-zero calls for an operator.
-    pub misfiled_record: u64,
 }
 
 /// The atomic cells behind [`ReplayCounters`].
@@ -404,7 +389,6 @@ struct ReplayCounterState {
     persistence_failure: AtomicU64,
     unrestorable_record: AtomicU64,
     unavailable_stream: AtomicU64,
-    misfiled_record: AtomicU64,
 }
 
 impl ReplayCounterState {
@@ -417,7 +401,6 @@ impl ReplayCounterState {
             persistence_failure: self.persistence_failure.load(Ordering::Relaxed),
             unrestorable_record: self.unrestorable_record.load(Ordering::Relaxed),
             unavailable_stream: self.unavailable_stream.load(Ordering::Relaxed),
-            misfiled_record: self.misfiled_record.load(Ordering::Relaxed),
         }
     }
 }
@@ -459,9 +442,8 @@ pub(crate) struct TransactionReplay {
 }
 
 struct TransactionAdmissionState {
-    /// The replay store, restored once on the first operation and cached from then on, or the
-    /// misfiled records that refused it.
-    store: Option<LoadedStore>,
+    /// The replay store, restored once on the first operation and cached from then on.
+    store: Option<ReplayStore>,
     /// Runtime-local origin quotas.
     quota: OriginQuotaTable,
 }
@@ -499,29 +481,25 @@ impl TransactionReplay {
     }
 
     /// The replay store, restored from one scan of the storage on the first operation and
-    /// cached from then on, unrestorable and misfiled records included, so no later operation
-    /// reads the storage again.
+    /// cached from then on, unrestorable records included, so no later operation reads the
+    /// storage again.
     ///
     /// A load that finds the shared-stream snapshot of the key used before #898 retires it, so
     /// once its deletion succeeds no later load, in this run or after a restart, touches it. A
-    /// load that finds misfiled stream records restores nothing and touches nothing: it caches
-    /// the refusal, and every operation fails with it until the records are resolved and the
-    /// node restarts. A scan that fails as a whole restores nothing: it is counted, the
-    /// operation fails closed, and the next operation scans again.
+    /// scan that fails as a whole restores nothing: it is counted, the operation fails closed,
+    /// and the next operation scans again.
     ///
     /// ```text
-    /// slot cached? ── yes ──────────────────────────────────────────────────▶ slot
+    /// slot cached? ── yes ──────────────────────────────────────────────▶ slot
     ///      │ no
     /// scan storage ── Err ──▶ count persistence failure ──▶ Err(load) (slot stays empty)
     ///      │ Ok(records)
-    /// restore (pure) ── Err(M) ──▶ count + log misfiled ──▶ slot := Err(M)
-    ///      │ Ok
-    /// count + log unrestorable ──▶ retire shared snapshot? ──▶ slot := Ok(store)
-    /// slot = Ok(store) ──▶ store;  slot = Err(M) ──▶ Err(TransactionReplayStoreMisfiled(M))
+    /// restore (pure, total) ──▶ count + log unrestorable ──▶ retire shared snapshot?
+    ///      └────────────────────────────────▶ slot := store ──▶ slot
     /// ```
     async fn load_store<'a>(
         &self,
-        slot: &'a mut Option<LoadedStore>,
+        slot: &'a mut Option<ReplayStore>,
     ) -> Result<&'a mut ReplayStore> {
         if slot.is_none() {
             let records = self.storage.scan().await.map_err(|source| {
@@ -531,44 +509,14 @@ impl TransactionReplay {
                     source: Box::new(source),
                 }
             })?;
-            let loaded = match restore(records, self.record_naming()) {
-                Ok(restored) => {
-                    self.report_unrestorable(&restored.store);
-                    if restored.holds_shared_snapshot {
-                        self.retire_shared_stream_snapshot().await;
-                    }
-                    Ok(restored.store)
-                }
-                Err(misfiled) => {
-                    self.report_misfiled(&misfiled);
-                    Err(misfiled)
-                }
-            };
-            *slot = Some(loaded);
+            let restored = restore(records, self.record_naming());
+            self.report_unrestorable(&restored.store.unrestorable);
+            if restored.holds_shared_snapshot {
+                self.retire_shared_stream_snapshot().await;
+            }
+            *slot = Some(restored.store);
         }
-        match slot.as_mut() {
-            Some(Ok(store)) => Ok(store),
-            Some(Err(MisfiledRecords(misfiled))) => Err(Error::TransactionReplayStoreMisfiled {
-                records: misfiled.keys().cloned().collect(),
-            }),
-            None => Err(Error::TransactionReplayStateInvalid),
-        }
-    }
-
-    /// Count and log the misfiled stream records that fail a load as a whole (the misfiled law
-    /// of [`store`]); each names the file to resolve and the key whose record it holds.
-    fn report_misfiled(&self, misfiled: &MisfiledRecords) {
-        let count = u64::try_from(misfiled.0.len()).unwrap_or(u64::MAX);
-        self.counters
-            .misfiled_record
-            .store(count, Ordering::Relaxed);
-        for (record, holds) in misfiled.0.iter() {
-            tracing::error!(
-                record = %record,
-                holds = %holds,
-                "replay record is misfiled; replay is closed for every stream until it is resolved"
-            );
-        }
+        slot.as_mut().ok_or(Error::TransactionReplayStateInvalid)
     }
 
     /// The storage's record naming, under which it files each record and reports the records it
@@ -577,14 +525,14 @@ impl TransactionReplay {
         |storage_key| self.storage.record_name(storage_key)
     }
 
-    /// Count and log the unrestorable records of a freshly restored store; each fails its
-    /// stream closed until an operator clears it (see the module documentation).
-    fn report_unrestorable(&self, store: &ReplayStore) {
-        let count = u64::try_from(store.unrestorable.len()).unwrap_or(u64::MAX);
+    /// Count and log the `unrestorable` records of a fresh load; each fails its stream closed
+    /// until an operator clears it (see the module documentation).
+    fn report_unrestorable(&self, unrestorable: &BTreeMap<String, RestoreFailure>) {
+        let count = u64::try_from(unrestorable.len()).unwrap_or(u64::MAX);
         self.counters
             .unrestorable_record
             .store(count, Ordering::Relaxed);
-        for (record, failure) in store.unrestorable.iter() {
+        for (record, failure) in unrestorable.iter() {
             tracing::error!(
                 record = %record,
                 failure = ?failure,

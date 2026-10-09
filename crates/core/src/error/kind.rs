@@ -126,15 +126,6 @@ pub enum Error {
         record: String,
     },
 
-    /// The replay store holds whole stream records filed under another stream's name (copied
-    /// or moved over another's file): replay is closed for every stream until an operator
-    /// resolves each and restarts the node.
-    #[error("Transaction replay store holds misfiled records {records:?}")]
-    TransactionReplayStoreMisfiled {
-        /// The storage record names of the misfiled records, the files to resolve.
-        records: Vec<String>,
-    },
-
     /// Replay state violates an invariant of the replay runtime.
     #[error("Transaction replay state is invalid")]
     TransactionReplayStateInvalid,
@@ -741,16 +732,6 @@ pub enum Error {
     /// the transition ended without publishing its result.
     #[error("Transaction replay transition did not run: {0}")]
     TransactionReplayUnscheduled(rings_runtime::DetachedError),
-
-    /// An authoritative storage holds, under one key's name, a whole record of another key (a
-    /// record copied or moved over another's file); the record is kept, never deleted.
-    #[error("Storage record {record} is misfiled: it holds the record of key {key}")]
-    StorageRecordMisfiled {
-        /// The name the record is filed under.
-        record: String,
-        /// The key the record holds.
-        key: String,
-    },
 
     /// A storage holds a record it cannot read or decode; the record is kept, never deleted.
     #[error("Storage cannot decode {0}")]

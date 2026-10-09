@@ -123,14 +123,13 @@ rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot windo
 A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
 (1161 bytes: a 92-byte key and a 1066-byte window, with tag and length prefix), so the cost of an
 admission does not grow with the number of streams retained. On load, every record must decode and
-sit under its own key, or the stream it is filed as fails closed (see [Bad
-records](#bad-records)). The native daemon opens the replay store as an authoritative file store
-(#909). On unix each write is flushed to stable storage before its rename and the directory after
-it (`F_FULLFSYNC` on macOS), so a crash leaves every record whole at its previous or its new value;
-on other targets a rename's durability is the file system's own. A record file that cannot be read,
-that does not decode whole, or that is misfiled (a whole record of another key, copied or moved
-over this file) is reported and never deleted. The file I/O runs on the tokio blocking pool, so a
-flush never stalls an asynchronous worker.
+sit under its own key, or the stream it is filed as fails closed (see [Bad records](#bad-records)).
+The native daemon opens the replay store as an authoritative file store (#909). On unix each write
+is flushed to stable storage before its rename and the directory after it (`F_FULLFSYNC` on macOS),
+so a crash leaves every record whole at its previous or its new value; on other targets a rename's
+durability is the file system's own. A record file that cannot be read, that does not decode whole,
+or that holds a whole record of another key is reported and never deleted. The file I/O runs on the
+tokio blocking pool, so a flush never stalls an asynchronous worker.
 
 One lock serializes all replay transitions and is held across each record write, so the store's
 write latency bounds the node-wide transition rate. Each transition runs detached from its caller
@@ -182,12 +181,12 @@ unrestorable records and the calls refused on their streams.
 The first replay operation restores the store from one scan and caches the result; no later call
 reads the store again. A record restores its stream iff it decodes, holds a valid window and sits
 under the record key of the stream it carries. Any other record is kept and joins the set `U` of
-unrestorable records (#910): torn, corrupt, unreadable (any read error but the absence of the
-entry, such as a permission error, an I/O error, a dangling link, or a directory in the record's
-place), a whole record of another key that is not a consistent stream record of it (a bit flip in
-its key text, or a foreign file), misplaced, or holding an invalid window. Its name is the
-storage's record name: the native file name, or the browser row key. A directory or other
-non-file entry in a record's place charges nothing against the store's budget.
+unrestorable records (#910): torn, corrupt, unreadable (any read error but the absence of the entry,
+such as a permission error, an I/O error, a dangling link, or a directory in the record's place),
+holding another key's record (copied, moved or renamed there from outside the store, or a bit flip
+in its key text), misplaced, or holding an invalid window. Its name is the storage's record name:
+the native file name, or the browser row key. A directory or other non-file entry in a record's
+place charges nothing against the store's budget.
 
 ```text
 unavailable(table, key)  ⟺  record_name(record_key(table, key)) ∈ U
@@ -210,15 +209,16 @@ fails closed, and the next call scans again.
 
 The law covers the records the store holds. A record that is absent is indistinguishable from a
 stream never seen, and its stream restarts from `First` (tracked in #915). Records go absent when
-they are deleted, when a file name is damaged, or when a rename is rolled back on a target where
-the directory cannot be flushed.
+they are deleted, moved or renamed away (the file they land in is undecodable for its own name,
+so the stream that name denotes fails closed), when a file name is damaged, or when a rename is
+rolled back on a target where the directory cannot be flushed.
 
 ### Clearing one stream
 
 An operator clears a failed stream, and only that stream, by removing its record with the node
 stopped and then starting the node:
 
-1. Take the record name from the refusal (`record`) or from the load's log line (`clear`, in
+1. Take the record name from the refusal (`record`) or from the load's log line (`record`, in
    `replay record does not restore; its stream fails closed until it is cleared`).
 2. Stop the node. On native, stop the daemon. In a browser, close every tab of the origin that runs
    the node, then open one tab of the origin with the node not started.
@@ -240,26 +240,6 @@ This resets that stream's replay window alone, and no other stream's state chang
     because the same sequences now carry new transactions.
 
   The messages carried by the rejected sequences are lost.
-
-## Misfiled records
-
-A misfiled record is a whole, consistent stream record of one stream filed under another
-stream's name: only copying or moving a file produces one, since damage would have to leave the
-record whole and change its key and its body consistently. It means a stream's record may have
-been lost and another's overwritten, so the load does not guess: replay is closed for every
-stream, and every transition fails with `TransactionReplayStoreMisfiled { records }`, which names
-every misfiled file. The load logs each (`replay record is misfiled`, with the key it holds) and
-counts them in `misfiled_record`; the refusal is cached, so the store is not read again.
-
-To resolve it, stop the node and, for every named file:
-- **rename it back** to the record name of the key it holds, when that key's own record is
-  absent (a move): that stream's window is restored exactly, and the stream whose file it
-  overwrote starts from `First` (its record was destroyed by the move, the absent-record case of
-  #915); or
-- **delete it** (a stale copy, or when its state is not wanted): the windows of the streams
-  involved reset, with the consequences listed above.
-
-Then start the node.
 
 ## Hard cutover
 

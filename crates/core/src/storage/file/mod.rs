@@ -23,9 +23,10 @@
 //! retirement updates it under the same lock only after the file system operation succeeded
 //! (so a file the file system refused to remove stays indexed and stays counted against the
 //! budget), and the directory is owned exclusively by this instance while it is open. Every
-//! entry with a record's name is indexed, whatever its file type; it is charged the length of
-//! the regular file it resolves to, and nothing if it resolves to anything else (a directory or
-//! a device), since such an entry holds no record's bytes. An entry whose metadata
+//! regular file, directory or symbolic link with a record's name is indexed; it is charged the
+//! length of the regular file it resolves to, and nothing if it resolves to anything else, since
+//! such an entry holds no record's bytes. A FIFO or a device in a record's place is outside these
+//! laws: reading one may block or not end. An entry whose metadata
 //! cannot be read fails a disposable open; an authoritative open indexes it at zero bytes so
 //! that a scan reports it rather than hiding it, and an entry whose target is missing (a
 //! dangling symbolic link) is present, so a scan reports it as unreadable. A directory listing
@@ -49,19 +50,18 @@
 //! latest writes or tear a record, which its decode law then discards.
 //!
 //! Decode law: a record is the file's only if it decodes whole as `(key, V)` and its key hashes
-//! to the file name. Any other record is undecodable (it does not decode whole: written by an
-//! earlier build, torn, or corrupt) or misfiled (a whole record of another key, copied or moved
-//! over this file); only a whole record can be misfiled, so damage is never taken for a move. A
-//! disposable store retires such a record on the read that discovers it and reports it absent,
-//! so it neither serves stale data nor occupies the budget; the retirement removes exactly the
-//! bytes the read observed, so a record rewritten between the read and the retirement is the
-//! writer's, and stays. An authoritative store never deletes it: the read that discovers it
-//! fails with `Error::StorageRecordUndecodable` (naming the file and, when the record's key
-//! prefix is intact, its key) or `Error::StorageRecordMisfiled` (naming the file and the key it
-//! holds), and the record stays until its owner or an operator removes it. A
-//! [`scan`](crate::storage::KvStorageScan::scan) deletes nothing under either authority, and
-//! reports every record as filed, misfiled or undecodable by its file name, a record it cannot
-//! read (any error but the absence of the entry) included.
+//! to the file name; the store writes nothing else. Any other record is undecodable for the name
+//! it is found under: it does not decode whole (written by an earlier build, torn, or corrupt),
+//! or it holds another key (which only something outside the store can produce). A disposable
+//! store retires such a record on the read that discovers it and reports it absent, so it
+//! neither serves stale data nor occupies the budget; the retirement removes exactly the bytes
+//! the read observed, so a record rewritten between the read and the retirement is the writer's,
+//! and stays. An authoritative store never deletes it: the read that discovers it fails with
+//! `Error::StorageRecordUndecodable`, naming the file and, when the record's key prefix is intact
+//! and names the file, its key, and the record stays until its owner or an operator removes it.
+//! A [`scan`](crate::storage::KvStorageScan::scan) deletes nothing under either authority, and
+//! reports every record as filed or undecodable by its file name, a record it cannot read (any
+//! error but the absence of the entry) included.
 //!
 //! Root law: a disposable store recreates its root directory if it vanished while open; an
 //! authoritative store fails the write with `Error::StorageRootMissing`, since a vanished root
@@ -230,35 +230,37 @@ impl FileStorage {
         blocking(move || operation(store.as_ref())).await
     }
 
-    /// Settle a record that is not the whole record of its file's key (undecodable, or
-    /// misfiled), whose file `name` held `data`, under the decode law: a disposable store
-    /// retires it (iff the file still holds `data`) and reports it absent with `Ok`; an
-    /// authoritative store fails with `refusal`, which names the record, and keeps it.
-    async fn settle_unfiled(&self, name: String, data: Vec<u8>, refusal: Error) -> Result<()> {
+    /// Settle a record that is not the whole record of its file's key, whose file held `data`,
+    /// under the decode law: a disposable store retires it (iff the file still holds `data`)
+    /// and reports it absent with `Ok`; an authoritative store fails with it named, and keeps
+    /// it.
+    async fn settle_undecodable(
+        &self,
+        undecodable: UndecodableRecord,
+        data: Vec<u8>,
+    ) -> Result<()> {
         if !self.store.authority.retires_undecodable() {
-            return Err(refusal);
+            return Err(Error::StorageRecordUndecodable(undecodable));
         }
+        let name = undecodable.name;
         self.on_store(move |store| store.retire_observed(&name, &data))
             .await
     }
 
-    /// The value of `record`, the record read from file `name` whose bytes are `data`, if it is
-    /// filed there under its own key; any other record is settled ([`Self::settle_unfiled`]).
-    async fn filed_value<V>(
+    /// The pair `record` holds if it is filed under its own key; an undecodable record, read
+    /// from bytes `data`, is settled ([`Self::settle_undecodable`]) and yields `None`.
+    async fn filed_pair<V>(
         &self,
-        name: String,
         data: Vec<u8>,
         record: ScannedRecord<V>,
     ) -> Result<Option<(String, V)>> {
-        let refusal = match record {
-            ScannedRecord::Filed { key, value } => return Ok(Some((key, value))),
-            ScannedRecord::Misfiled { name, key, .. } => {
-                Error::StorageRecordMisfiled { record: name, key }
+        match record {
+            ScannedRecord::Filed { key, value } => Ok(Some((key, value))),
+            ScannedRecord::Undecodable(undecodable) => {
+                self.settle_undecodable(undecodable, data).await?;
+                Ok(None)
             }
-            ScannedRecord::Undecodable(undecodable) => Error::StorageRecordUndecodable(undecodable),
-        };
-        self.settle_unfiled(name, data, refusal).await?;
-        Ok(None)
+        }
     }
 }
 
@@ -550,24 +552,25 @@ impl FileStore {
 }
 
 /// Scan `data`, the bytes of the file `name` (pure): the whole record filed there under its own
-/// key, a whole record of another key (misfiled: copied or moved over this file), or an
-/// undecodable record.
+/// key, or an undecodable record.
 ///
-/// A record is the file's only if its key hashes to `name`. Only a record that decodes whole
-/// can be misfiled: a torn or corrupt record is undecodable, named by its file, with the key its
-/// intact leading prefix names when that key hashes to `name` (a torn record loses its tail
-/// first), so damage is never taken for a move.
+/// A record is the file's only if it decodes whole and its key hashes to `name`; anything else
+/// (a torn or corrupt record, or a whole record of another key, which only something outside
+/// the store can put there) is undecodable for `name`, with the key its intact leading prefix
+/// names when that key hashes to `name` (a torn record loses its tail first).
 fn scan_bytes<V>(name: String, data: &[u8]) -> ScannedRecord<V>
 where V: DeserializeOwned {
     let filed = |key: &str| file_name_for(key) == name;
     match rings_codec::deserialize::<(String, V)>(data) {
         Ok((key, value)) if filed(&key) => ScannedRecord::Filed { key, value },
-        Ok((key, value)) => ScannedRecord::Misfiled { name, key, value },
-        Err(_) => {
-            let key = rings_codec::deserialize_prefix::<String>(data)
-                .ok()
-                .map(|(key, _)| key)
-                .filter(|key| filed(key));
+        decoded => {
+            let key = match decoded {
+                Ok(_) => None,
+                Err(_) => rings_codec::deserialize_prefix::<String>(data)
+                    .ok()
+                    .map(|(key, _)| key)
+                    .filter(|key| filed(key)),
+            };
             ScannedRecord::Undecodable(UndecodableRecord { name, key })
         }
     }
@@ -713,11 +716,11 @@ where V: Serialize + DeserializeOwned + Send + Sync
         else {
             return Ok(None);
         };
-        let record = scan_bytes::<V>(name.clone(), &data);
+        let record = scan_bytes::<V>(name, &data);
         // `scan_bytes` already ties a filed key to the file name, so this differs from
-        // `Some(value)` only on a SHA-1 collision: a collision guard, not the misfiled check.
+        // `Some(value)` only on a SHA-1 collision: a collision guard, not the name check.
         Ok(self
-            .filed_value(name, data, record)
+            .filed_pair(data, record)
             .await?
             .and_then(|(stored_key, value)| (stored_key == key).then_some(value)))
     }
@@ -742,8 +745,8 @@ where V: Serialize + DeserializeOwned + Send + Sync
         let mut decoded = Vec::with_capacity(records.len());
         for (name, read) in records {
             let data = read.map_err(Error::ServiceIOError)?;
-            let record = scan_bytes::<V>(name.clone(), &data);
-            decoded.extend(self.filed_value(name, data, record).await?);
+            let record = scan_bytes::<V>(name, &data);
+            decoded.extend(self.filed_pair(data, record).await?);
         }
         Ok(decoded)
     }
@@ -769,9 +772,10 @@ where V: Serialize + DeserializeOwned + Send + Sync
 impl<V> KvStorageScan<V> for FileStorage
 where V: Serialize + DeserializeOwned + Send + Sync
 {
-    /// Every record file, as filed, misfiled or undecodable, by its file name; a file that
-    /// cannot be read is reported too, so one bad file never fails the whole scan. Unlike
-    /// `get_all`, a scan never retires, whatever the store's authority.
+    /// Every record file, as filed or undecodable, by its file name; a file that cannot
+    /// be read is reported too, so one bad regular file, directory or link never fails the whole
+    /// scan (a FIFO or device in a record's place is outside the index law). Unlike `get_all`, a
+    /// scan never retires, whatever the store's authority.
     async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
         Ok(self
             .on_store(FileStore::read_records)
