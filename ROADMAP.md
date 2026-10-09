@@ -37,7 +37,6 @@ directly. *In progress* and *Planned* items are direction, not commitments.
   estimates, RTT-derived liveness with ICE restart, inbox replication, stability-weighted
   storage, and browser lifecycle handling.
 - Onion circuits as client-sealed loops of registered operation symbols (#834).
-- WebTransport-backed relay in the browser.
 
 ## Planned
 
