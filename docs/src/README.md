@@ -63,6 +63,7 @@ metadata protection, separate from payload encryption.
 - **Nym:** [mixnet design](https://nym.com/nym-whitepaper.pdf), [browser SDK](https://nym.com/blog/introducing-the-nym-sdk-powerful-privacy-served-directly-to-your-browser), [client-to-client encryption](https://nym.com/blog/nym-gateways-gateways-to-privacy).
 - **Tor:** [relay network](https://community.torproject.org/relay/types-of-relays/), [onion-service E2E encryption](https://community.torproject.org/onion-services/overview/), [HTTPS and exit traffic](https://support.torproject.org/about-tor/security/https-encryption-and-tor/).
 - **I2P:** [Kademlia-based network database](https://i2p.net/en/docs/overview/network-database/), [tunnels and destination-to-destination encryption](https://i2p.net/en/docs/overview/intro/).
+- **WebRTC standards:** [ICE, RFC 8445](https://www.rfc-editor.org/rfc/rfc8445), [IP address handling, RFC 8828](https://www.rfc-editor.org/rfc/rfc8828), [data channels, RFC 8831](https://www.rfc-editor.org/rfc/rfc8831), [DCEP, RFC 8832](https://www.rfc-editor.org/rfc/rfc8832).
 - **WebTorrent (browser):** [browser-to-browser WebRTC and tracker discovery](https://webtorrent.io/faq), [WebRTC data-channel encryption](https://www.rfc-editor.org/rfc/rfc8831). The row covers browser peers, not the native client's DHT support.
 
 Sources checked September 22, 2026.

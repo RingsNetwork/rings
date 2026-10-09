@@ -15,10 +15,10 @@ This file follows https://llmstxt.org/. It is for agents that evaluate Rings, bu
 
 ## Status
 
-- Shipped and running: the overlay, the browser and native nodes, the onion privacy layer (native and in the browser, with TCP and HTTPS exits, the TUN gateway, and the onion WebView), destination replay protection and per-origin rate limits, a public seed (https://node.rings.rs), and the hosted browser console (https://rings.rs/#node).
-- Version semantics: pre-1.0 the wire protocol is not versioned, and a release that changes it is a network-wide upgrade marked in CHANGELOG.md. 1.0 freezes the protocol once connectivity and churn handling are stable; DRanking (ranking from service receipts) is 2.0.
-- In progress toward 1.0: churn handling (#773-#779) and onion circuits as client-sealed loops (#834). Planned: epoch-randomized ring positions (#780). ROADMAP.md is the full list.
-- To evaluate Rings, read README.md (positioning, status), SECURITY.md (guarantees and non-goals per layer), and ROADMAP.md, in that order.
+- Shipped: the overlay, native and browser nodes, the onion privacy layer (TCP/HTTPS exits, TUN gateway, onion WebView), replay protection and per-origin rate limits, a public seed (https://node.rings.rs), and the hosted console (https://rings.rs/#node).
+- Versions: pre-1.0 the wire protocol is unversioned, and a release that changes it is a network-wide upgrade (see CHANGELOG.md). 1.0 freezes the protocol once connectivity and churn handling are stable; DRanking is 2.0.
+- Next: churn handling (#773-#779), onion loops (#834), then epoch-randomized ring positions (#780); see ROADMAP.md.
+- To evaluate Rings, read README.md, SECURITY.md, and ROADMAP.md, in that order.
 
 ## Documentation
 
@@ -49,7 +49,7 @@ This file follows https://llmstxt.org/. It is for agents that evaluate Rings, bu
 
 ## Build and test
 
-- Toolchain: `rust-toolchain.toml` pins the stable compiler, and the workspace denies warnings, so `cargo install rings-node` names that release (`cargo +<pinned> install --locked rings-node`); bumping the pin updates that command in README.md, `crates/node/README.md`, `docs/src/install-a-native-node.md`, and `frontend/src/guide.rs`; formatting requires nightly rustfmt (`cargo +nightly fmt`), and stable rustfmt produces a different layout that fails CI. TOML is formatted with taplo; spelling is checked with typos.
+- Toolchain: `rust-toolchain.toml` pins the stable compiler. The workspace denies warnings, so install commands name the pin (`cargo +<pin> install --locked rings-node`); a pin bump updates them in README.md, `crates/node/README.md`, `docs/src/install-a-native-node.md`, and `frontend/src/guide.rs`; formatting requires nightly rustfmt (`cargo +nightly fmt`), and stable rustfmt produces a different layout that fails CI. TOML is formatted with taplo; spelling is checked with typos.
 - Native: `cargo build`; `cargo test --release --all --all-targets`; install the CLI with `cargo install --path crates/node`, then `rings init` and `rings run`.
 - Wasm: `cargo clippy -p rings-node --features browser --no-default-features --target wasm32-unknown-unknown`; the npm package is built by `wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default` (`npm run wasm_pack`); browser tests use wasm-bindgen-test in a headless Chrome.
 - Frontend (from `frontend/`): `cargo check --target wasm32-unknown-unknown`; `cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings`; `cargo test --release --target wasm32-unknown-unknown`; `trunk serve --release true` to run it. Extension: `npm ci --ignore-scripts && npm run package:frontend-extension` from the root.
