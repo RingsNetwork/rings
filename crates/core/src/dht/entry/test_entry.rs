@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 use super::retention::ElementRetention;
 use super::*;
 use crate::algebra::assert_join_semilattice_laws;
@@ -6,24 +8,23 @@ use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::ENTRY_PAYLOAD_MAX_BYTES;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
+use crate::message::Encoder;
 use crate::tests::with_retention;
 use crate::tests::TEST_NETWORK_ID;
 
 const NOW_MS: u128 = 1_700_000_000_000;
 
-fn encoded(value: &str) -> Result<Encoded> {
-    value.to_string().encode()
+/// The data-topic element holding the UTF-8 bytes of `value`.
+fn element(value: &str) -> Result<Bytes> {
+    Ok(Bytes::from(value.to_string()))
 }
 
 fn data_entry(topic: &str, value: &str) -> Result<Entry> {
-    (topic.to_string(), encoded(value)?).try_into()
+    (topic.to_string(), element(value)?).try_into()
 }
 
 fn data_entry_from_values(topic: &str, values: Vec<String>) -> Result<Entry> {
-    let data = values
-        .into_iter()
-        .map(|value| value.encode())
-        .collect::<Result<Vec<_>>>()?;
+    let data = values.into_iter().map(Bytes::from).collect::<Vec<_>>();
     Ok(Entry::new(Entry::gen_did(topic)?, data, EntryKind::Data))
 }
 
@@ -42,7 +43,7 @@ fn decode_entry_data(entry: &Entry) -> Result<Vec<String>> {
     entry
         .data
         .iter()
-        .map(|item| item.decode())
+        .map(|item| String::from_utf8(item.to_vec()).map_err(|_| Error::Decode))
         .collect::<Result<Vec<String>>>()
 }
 
@@ -110,7 +111,7 @@ fn overwrite_delta(topic: &str, value: &str, counter: u32) -> Result<Entry> {
 }
 
 fn entry_dot_for_value(entry: &Entry, value: &str) -> Result<EntryDot> {
-    let encoded_value = encoded(value)?;
+    let encoded_value = element(value)?;
     entry
         .data
         .iter()
@@ -120,7 +121,7 @@ fn entry_dot_for_value(entry: &Entry, value: &str) -> Result<EntryDot> {
 }
 
 fn relay_delta(did: Did, value: &str, counter: u32) -> Result<Entry> {
-    Entry::new(did, vec![encoded(value)?], EntryKind::RelayMessage).stamp_delta(version(counter))
+    Entry::new(did, vec![element(value)?], EntryKind::RelayMessage).stamp_delta(version(counter))
 }
 
 #[test]
@@ -146,10 +147,10 @@ fn test_data_topic_buffer_satisfies_join_semilattice_laws() -> Result<()> {
 #[test]
 fn test_relay_message_set_satisfies_join_semilattice_laws() -> Result<()> {
     let did = Did::from(10u32);
-    let a = Entry::new(did, vec![encoded("a")?], EntryKind::RelayMessage)
+    let a = Entry::new(did, vec![element("a")?], EntryKind::RelayMessage)
         .stamp_delta(version(1))?
         .topic_buffer()?;
-    let b = Entry::new(did, vec![encoded("b")?], EntryKind::RelayMessage)
+    let b = Entry::new(did, vec![element("b")?], EntryKind::RelayMessage)
         .stamp_delta(version(2))?
         .topic_buffer()?;
     let ab = Entry::new(did, vec![], EntryKind::RelayMessage)
@@ -261,8 +262,8 @@ fn test_storage_normalization_realigns_legacy_mismatched_dots() -> Result<()> {
 #[test]
 fn test_crdt_constructors_normalize_carrier_invariants() -> Result<()> {
     let register = version(10);
-    let stale = encoded("stale")?;
-    let live = encoded("live")?;
+    let stale = element("stale")?;
+    let live = element("live")?;
     let mut values = BTreeMap::new();
     values.insert(stale.clone(), EntryDot::for_index(version(1), 0)?);
     let live_dot = EntryDot::for_index(version(11), 0)?;
@@ -286,9 +287,9 @@ fn test_crdt_constructors_normalize_carrier_invariants() -> Result<()> {
 fn test_overwrite_register_tiebreaker_converges_for_same_timestamp_actor() -> Result<()> {
     let did = Entry::gen_did("topic")?;
     let issuer = actor();
-    let lower = Entry::new(did, vec![encoded("lower")?], EntryKind::Data)
+    let lower = Entry::new(did, vec![element("lower")?], EntryKind::Data)
         .stamp_overwrite(EntryVersion::new(1, issuer, Did::from(1u32)))?;
-    let higher = Entry::new(did, vec![encoded("higher")?], EntryKind::Data)
+    let higher = Entry::new(did, vec![element("higher")?], EntryKind::Data)
         .stamp_overwrite(EntryVersion::new(1, issuer, Did::from(2u32)))?;
     let base = Entry::new(did, vec![], EntryKind::Data);
 
@@ -624,14 +625,14 @@ fn test_removal_leaves_the_retention_bound_unchanged() -> Result<()> {
     Ok(())
 }
 
-/// Admission law: every payload is at most `ENTRY_PAYLOAD_MAX_BYTES` encoded bytes. The bound is
+/// Admission law: every payload is at most `ENTRY_PAYLOAD_MAX_BYTES` bytes. The bound is
 /// per element, so the carrier stays a lattice and its size is bounded by the count cap.
 #[test]
 fn test_admission_bounds_every_payload_size() -> Result<()> {
     let did = Entry::gen_did("topic")?;
     let at_bound = Entry::new(
         did,
-        vec![Encoded::from("x".repeat(ENTRY_PAYLOAD_MAX_BYTES))],
+        vec![Bytes::from("x".repeat(ENTRY_PAYLOAD_MAX_BYTES))],
         EntryKind::Data,
     );
     with_retention(at_bound, NOW_MS + 1_000).validate_admissible_at(NOW_MS, TEST_NETWORK_ID)?;
@@ -639,8 +640,8 @@ fn test_admission_bounds_every_payload_size() -> Result<()> {
     let oversize = Entry::new(
         did,
         vec![
-            Encoded::from("small"),
-            Encoded::from("x".repeat(ENTRY_PAYLOAD_MAX_BYTES + 1)),
+            Bytes::from("small"),
+            Bytes::from("x".repeat(ENTRY_PAYLOAD_MAX_BYTES + 1)),
         ],
         EntryKind::Data,
     );
@@ -708,7 +709,7 @@ fn test_admission_bounds_every_version_logical_time() -> Result<()> {
 
     let mut ahead_tombstone = base.clone();
     ahead_tombstone.crdt.tombstones = vec![EntryTombstone::of(
-        &encoded("value")?,
+        &element("value")?,
         EntryDot::for_index(version_at(clock_bound + 1), 0)?,
     )];
     assert!(matches!(
@@ -1150,14 +1151,14 @@ fn test_digest_work_is_bounded_on_a_full_carrier() -> Result<()> {
         .map(|index| {
             let prefix = format!("{index:04}");
             let filler = "x".repeat(ENTRY_PAYLOAD_MAX_BYTES - prefix.len());
-            Encoded::from(format!("{prefix}{filler}"))
+            Bytes::from(format!("{prefix}{filler}"))
         })
         .collect::<Vec<_>>();
     let mut full = Entry::new(Entry::gen_did("topic")?, values, EntryKind::Data)
         .stamp_delta(version_at(NOW_MS))?;
     full.expires_at_ms = Some(NOW_MS + 2 * horizon);
     full.crdt.tombstones = vec![EntryTombstone::of(
-        &encoded("removed")?,
+        &element("removed")?,
         EntryDot::for_index(version_at(NOW_MS), 0)?,
     )];
     let full = full.try_into_storage_entry()?;
@@ -1185,13 +1186,13 @@ fn test_projection_normalizes_an_undotted_entry() -> Result<()> {
     let mut undotted = with_retention(
         Entry::new(
             Entry::gen_did("topic")?,
-            vec![encoded("a")?, encoded("b")?],
+            vec![element("a")?, element("b")?],
             EntryKind::Data,
         ),
         NOW_MS + u128::from(DEFAULT_TTL_MS),
     );
     undotted.crdt.tombstones = vec![EntryTombstone::of(
-        &encoded("removed")?,
+        &element("removed")?,
         EntryDot::for_index(version_at(NOW_MS), 0)?,
     )];
     let projected = undotted.retired_at(NOW_MS);

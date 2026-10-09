@@ -87,7 +87,7 @@ pub const MIN_CHUNK_DATA: usize = 1024;
 pub const ENTRY_DATA_MAX_LEN: usize = 1024;
 /// Maximum number of held messages kept in a relay inbox.
 pub const RELAY_INBOX_MAX_LEN: usize = 64;
-/// Maximum encoded bytes of one payload element in a DHT storage entry.
+/// Maximum bytes of one element in a DHT storage entry.
 ///
 /// The bound is per element so that filtering by it is a lattice morphism; with
 /// [`ENTRY_DATA_MAX_LEN`] it bounds every carrier at `ENTRY_DATA_MAX_LEN * ENTRY_PAYLOAD_MAX_BYTES`.

@@ -42,6 +42,7 @@
 //! `d` as its head, it routes `d` to `d` and refuses the hold, and the message is lost as it was
 //! before the inbox existed. The window closes when the owner retires `d`.
 
+use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -54,10 +55,7 @@ use crate::delegation::DelegateeKey;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::Decoder;
 use crate::message::DomainTag;
-use crate::message::Encoded;
-use crate::message::Encoder;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
@@ -103,22 +101,19 @@ impl MessageVerificationExt for HeldMessage {
     }
 }
 
-impl Encoder for HeldMessage {
-    fn encode(&self) -> Result<Encoded> {
-        rings_codec::serialize(self)
-            .map_err(Error::CodecSerialize)?
-            .encode()
-    }
-}
-
-impl Decoder for HeldMessage {
-    fn from_encoded(encoded: &Encoded) -> Result<Self> {
-        let wire: Vec<u8> = encoded.decode()?;
-        rings_codec::deserialize(&wire).map_err(Error::CodecDeserialize)
-    }
-}
-
 impl HeldMessage {
+    /// This held message as an inbox element: its wire encoding.
+    pub(crate) fn to_element(&self) -> Result<Bytes> {
+        rings_codec::serialize(self)
+            .map(Bytes::from)
+            .map_err(Error::CodecSerialize)
+    }
+
+    /// The held message an inbox element encodes.
+    pub(crate) fn from_element(element: &[u8]) -> Result<Self> {
+        rings_codec::deserialize(element).map_err(Error::CodecDeserialize)
+    }
+
     /// Hold `payload` under `holder`'s authority at the instant `held_at_ms`.
     pub(crate) fn hold(
         payload: MessagePayload,
@@ -185,12 +180,12 @@ impl HeldMessage {
 
 /// Decode one inbox element and check its witness.
 fn verified_element(
-    element: &Encoded,
+    element: &Bytes,
     destination: Did,
     now_ms: u128,
     network_id: u32,
 ) -> Result<HeldMessage> {
-    let held = HeldMessage::from_encoded(element)?;
+    let held = HeldMessage::from_element(element)?;
     held.validate_witness(destination, now_ms, network_id)?;
     Ok(held)
 }
@@ -203,7 +198,7 @@ impl Entry {
     pub(crate) fn inbox_delta(held: &HeldMessage) -> Result<Self> {
         Ok(Self::new(
             inbox_key(held.payload.transaction.destination),
-            vec![held.encode()?],
+            vec![held.to_element()?],
             EntryKind::RelayMessage,
         ))
     }

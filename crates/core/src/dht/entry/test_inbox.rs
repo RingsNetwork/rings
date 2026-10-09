@@ -19,7 +19,6 @@ use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::Encoder;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
@@ -310,7 +309,7 @@ fn test_witness_refuses_a_delta_larger_than_the_inbox_before_verifying() -> Resu
     for _ in 0..RELAY_INBOX_MAX_LEN {
         delta
             .data
-            .push(held_by(&holder, destination, TEST_NETWORK_ID)?.encode()?);
+            .push(held_by(&holder, destination, TEST_NETWORK_ID)?.to_element()?);
     }
     assert_eq!(delta.data.len(), RELAY_INBOX_MAX_LEN + 1);
     assert!(matches!(
@@ -465,7 +464,7 @@ fn test_partition_pairs_each_witnessed_element_with_its_dot_and_retires_the_rest
     assert!(retired.join(stale)?.data.is_empty());
     let third = held_by(&holder, destination, TEST_NETWORK_ID)?;
     let after = retired.extend(now_ms + 4, Entry::inbox_delta(&third)?, actor)?;
-    assert_eq!(after.data, vec![third.encode()?]);
+    assert_eq!(after.data, vec![third.to_element()?]);
     Ok(())
 }
 
@@ -484,7 +483,7 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
         let mut newest = None;
         for _ in 0..RELAY_INBOX_MAX_LEN + 1 {
             let held = held_by(&holder, destination, TEST_NETWORK_ID)?;
-            newest = Some(held.encode()?);
+            newest = Some(held.to_element()?);
             carrier = carrier.extend(get_epoch_ms(), Entry::inbox_delta(&held)?, actor)?;
         }
         assert_eq!(carrier.data.len(), RELAY_INBOX_MAX_LEN);

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 
 use super::super::chord::PeerRing;
 use super::super::chord::PeerRingAction;
@@ -40,7 +41,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
-use crate::message::Encoded;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::tests::expired;
@@ -55,7 +55,11 @@ fn data_entry(did: Did) -> Entry {
 }
 
 fn data_entry_with_data(did: Did, data: &str) -> Entry {
-    live_entry(did, vec![data.into()], EntryKind::Data)
+    live_entry(
+        did,
+        vec![Bytes::copy_from_slice(data.as_bytes())],
+        EntryKind::Data,
+    )
 }
 
 fn data_entry_with_payload_len(did: Did, len: usize) -> Entry {
@@ -976,7 +980,7 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
         .await?
         .ok_or_else(|| Error::InvalidMessage("hold was not stored".to_string()))?;
     assert_eq!(topic.kind, EntryKind::Data);
-    assert_eq!(topic.data, vec![Encoded::from("parked")]);
+    assert_eq!(topic.data, vec![Bytes::from("parked")]);
     assert_eq!(inbox.kind, EntryKind::RelayMessage);
     assert_eq!(inbox.data.len(), 1);
     assert_eq!(node.storage.count().await?, 2);
@@ -1089,7 +1093,7 @@ async fn test_removal_against_nothing_held_stores_nothing() -> Result<()> {
     let topic = Did::from(100u32);
     let removal = EntryOperation::Tombstone(Entry::new(
         topic,
-        vec![Encoded::from("gone")],
+        vec![Bytes::from("gone")],
         EntryKind::Data,
     ))
     .stamped(now_ms, node.did)?;
@@ -1238,14 +1242,14 @@ fn carrier_with_a_remove(did: Did, now_ms: u128) -> Result<Entry> {
     let mut entry = live_entry(
         did,
         (0..DIGEST_BOUND_ELEMENTS)
-            .map(|index| Encoded::from(format!("element-{index}")))
+            .map(|index| Bytes::from(format!("element-{index}")))
             .collect(),
         EntryKind::Data,
     );
     entry.crdt.dots = (0..DIGEST_BOUND_ELEMENTS)
         .map(dot)
         .collect::<Result<Vec<_>>>()?;
-    entry.crdt.tombstones = vec![EntryTombstone::of(&Encoded::from("removed"), dot(0)?)];
+    entry.crdt.tombstones = vec![EntryTombstone::of(&Bytes::from("removed"), dot(0)?)];
     entry.try_into_storage_entry()
 }
 
@@ -1283,7 +1287,7 @@ async fn test_storage_join_and_ack_digest_each_element_at_most_once() -> Result<
 /// `expires_at_ms`.
 fn drained_carrier(did: Did, now_ms: u128, expires_at_ms: u128) -> Entry {
     let mut entry = Entry::new(did, vec![], EntryKind::Data);
-    entry.crdt.tombstones = vec![EntryTombstone::of(&Encoded::from("removed"), EntryDot {
+    entry.crdt.tombstones = vec![EntryTombstone::of(&Bytes::from("removed"), EntryDot {
         version: EntryVersion::new(now_ms - 1_000, Did::from(1u32), Did::from(2u32)),
         index: 0,
     })];
@@ -1336,7 +1340,7 @@ async fn test_read_writes_back_a_projection_that_retired_elements() -> Result<()
     let now_ms = get_epoch_ms();
     let key = Did::from(100u32);
     let mut stored = drained_carrier(key, now_ms, now_ms - 1);
-    stored.data = vec![Encoded::from("expired")];
+    stored.data = vec![Bytes::from("expired")];
     stored.crdt.dots = vec![EntryDot {
         version: EntryVersion::new(now_ms - 1_000, Did::from(3u32), Did::from(4u32)),
         index: 0,
@@ -1409,7 +1413,7 @@ async fn test_lookup_moves_past_an_expired_placement_to_the_next() -> Result<()>
             "the live placement answers".to_string(),
         ));
     };
-    assert_eq!(evidence.entry.data, vec![Encoded::from("descriptor")]);
+    assert_eq!(evidence.entry.data, vec![Bytes::from("descriptor")]);
     assert_eq!(evidence.misses, vec![PlacementMiss::new(expired, node.did)]);
     Ok(())
 }

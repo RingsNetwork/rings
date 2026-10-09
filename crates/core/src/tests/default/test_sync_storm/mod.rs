@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
@@ -27,7 +28,6 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::fair_admission::retained_wire_bytes;
 use crate::message::test_probe_request;
-use crate::message::Encoder;
 use crate::message::Message;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::simulation::model::SimAction;
@@ -638,9 +638,10 @@ fn entry_owned_by(owner: &Node, label: &str) -> PlacedEntry {
             .find_storage_owner(key)
             .expect("test owner lookup must succeed");
         if matches!(action, PeerRingAction::Some(_)) {
-            let data = vec![u8::try_from(nonce % 251).expect("byte must fit"); ENTRY_PAYLOAD_BYTES]
-                .encode()
-                .expect("test payload must encode");
+            let data = Bytes::from(vec![
+                u8::try_from(nonce % 251).expect("byte must fit");
+                ENTRY_PAYLOAD_BYTES
+            ]);
             return PlacedEntry::new(key, live_entry(key, vec![data], EntryKind::Data));
         }
     }

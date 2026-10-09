@@ -98,10 +98,12 @@
 //!
 //! Size: the payload predicate is element-intrinsic, so filtering by it commutes with union
 //! and the carrier stays a lattice; together with the count cap `kind.max_data_len()` it bounds
-//! a carrier at `max_data_len × ENTRY_PAYLOAD_MAX_BYTES` encoded bytes. A byte budget
+//! a carrier at `max_data_len × ENTRY_PAYLOAD_MAX_BYTES` element bytes. A byte budget
 //! over the whole carrier is deliberately not used: "the newest payloads that fit" depends on
 //! the sizes of payloads a replica may already have dropped, so it is not a lattice morphism
 //! and replicas would diverge.
+
+use bytes::Bytes;
 
 use super::Entry;
 use super::EntryCrdt;
@@ -117,7 +119,6 @@ use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::Encoded;
 
 impl EntryKind {
     /// Retention stamped at the operation boundary when the origin left it absent.
@@ -221,9 +222,9 @@ impl ElementRetention {
     }
 }
 
-/// Whether one encoded payload is within the per-payload size bound.
-fn payload_within_bound(value: &Encoded) -> bool {
-    value.value().len() <= ENTRY_PAYLOAD_MAX_BYTES
+/// Whether one element is within the per-element size bound.
+fn payload_within_bound(value: &Bytes) -> bool {
+    value.len() <= ENTRY_PAYLOAD_MAX_BYTES
 }
 
 impl Entry {

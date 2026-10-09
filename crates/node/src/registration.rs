@@ -19,6 +19,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::lock::Mutex as AsyncMutex;
 use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
 use rings_core::delegation::DelegateeKey;
@@ -26,12 +27,11 @@ use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::lifecycle::StopToken;
-use rings_core::message::Encoded;
-use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
 
+use crate::descriptor::RegistryElement;
 use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeDescriptor;
@@ -207,7 +207,7 @@ impl<'a> RegistrationContext<'a> {
 pub(crate) struct DhtRegistrationPublisher {
     topic: String,
     publish_gate: Arc<AsyncMutex<()>>,
-    published_values: Arc<Mutex<BTreeSet<Encoded>>>,
+    published_values: Arc<Mutex<BTreeSet<Bytes>>>,
 }
 
 impl DhtRegistrationPublisher {
@@ -230,8 +230,8 @@ impl DhtRegistrationPublisher {
     pub(crate) async fn publish_replacing(
         &self,
         context: &RegistrationContext<'_>,
-        values: impl IntoIterator<Item = Encoded>,
-        prunes_observed_value: impl Fn(&Encoded) -> bool,
+        values: impl IntoIterator<Item = Bytes>,
+        prunes_observed_value: impl Fn(&Bytes) -> bool,
     ) -> Result<()> {
         let current_values = values.into_iter().collect::<BTreeSet<_>>();
         let _publish_turn = self.publish_gate.lock().await;
@@ -275,7 +275,7 @@ impl DhtRegistrationPublisher {
     async fn observed_registry_values(
         &self,
         context: &RegistrationContext<'_>,
-    ) -> Result<Vec<Encoded>> {
+    ) -> Result<Vec<Bytes>> {
         let entry_key = entry::Entry::gen_did(&self.topic)?;
         Ok(context
             .fetch_storage_entry(entry_key)
@@ -286,11 +286,11 @@ impl DhtRegistrationPublisher {
 }
 
 fn begin_registration_publish(
-    published_values: &mut BTreeSet<Encoded>,
-    current_values: &BTreeSet<Encoded>,
-    observed_values: Vec<Encoded>,
-    replaces_observed_value: impl Fn(&Encoded) -> bool,
-) -> Vec<Encoded> {
+    published_values: &mut BTreeSet<Bytes>,
+    current_values: &BTreeSet<Bytes>,
+    observed_values: Vec<Bytes>,
+    replaces_observed_value: impl Fn(&Bytes) -> bool,
+) -> Vec<Bytes> {
     let mut stale_values = published_values
         .iter()
         .filter(|published| !current_values.contains(*published))
@@ -310,8 +310,8 @@ fn begin_registration_publish(
 }
 
 fn finish_registration_publish(
-    published_values: &mut BTreeSet<Encoded>,
-    current_values: BTreeSet<Encoded>,
+    published_values: &mut BTreeSet<Bytes>,
+    current_values: BTreeSet<Bytes>,
 ) {
     *published_values = current_values;
 }
@@ -397,20 +397,18 @@ impl OnlineNodeRegistration {
     ) -> Result<OnlineNodeDescriptor> {
         let now_ms = get_epoch_ms();
         let descriptor = self.descriptor_at(context, now_ms)?;
-        let encoded = descriptor.encode().map_err(Error::CoreError)?;
+        let element = descriptor.to_element().map_err(Error::CoreError)?;
         // Prune this node's own earlier descriptors, and every descriptor that does not decode,
         // does not verify, or has expired.
-        let prunes_observed_value = |observed: &Encoded| {
-            observed
-                .decode::<OnlineNodeDescriptor>()
-                .map_or(true, |descriptor| {
-                    descriptor.did == context.did()
-                        || !descriptor.verify_signature(context.network_id())
-                        || descriptor.is_expired_at(now_ms)
-                })
+        let prunes_observed_value = |observed: &Bytes| {
+            OnlineNodeDescriptor::from_element(observed).map_or(true, |descriptor| {
+                descriptor.did == context.did()
+                    || !descriptor.verify_signature(context.network_id())
+                    || descriptor.is_expired_at(now_ms)
+            })
         };
         self.publisher
-            .publish_replacing(context, std::iter::once(encoded), prunes_observed_value)
+            .publish_replacing(context, std::iter::once(element), prunes_observed_value)
             .await?;
         Ok(descriptor)
     }
@@ -422,7 +420,7 @@ impl OnlineNodeRegistration {
         entry
             .data
             .iter()
-            .filter_map(|value| value.decode::<OnlineNodeDescriptor>().ok())
+            .filter_map(|value| OnlineNodeDescriptor::from_element(value).ok())
             .collect()
     }
 }
@@ -447,27 +445,27 @@ impl RegistrationTask for OnlineNodeRegistration {
 mod tests {
     use std::collections::BTreeSet;
 
-    use rings_core::message::Encoded;
-
     use super::*;
 
-    fn encoded(value: &str) -> Encoded {
-        value.into()
+    /// The registry element holding the bytes of `value`.
+    fn element(value: &'static str) -> Bytes {
+        Bytes::from_static(value.as_bytes())
     }
 
-    fn encoded_subset(mask: u8) -> BTreeSet<Encoded> {
+    /// The subset of the elements `a`, `b`, `c` that `mask` selects bit by bit.
+    fn element_subset(mask: u8) -> BTreeSet<Bytes> {
         ["a", "b", "c"]
             .into_iter()
             .enumerate()
             .filter(|(bit, _value)| mask & (1 << bit) != 0)
-            .map(|(_bit, value)| encoded(value))
+            .map(|(_bit, value)| element(value))
             .collect()
     }
 
     #[test]
     fn test_registration_publish_remembers_attempted_values_before_effects() {
-        let old = encoded("old");
-        let attempted = encoded("attempted");
+        let old = element("old");
+        let attempted = element("attempted");
         let current = BTreeSet::from([attempted.clone()]);
         let mut known = BTreeSet::from([old.clone()]);
 
@@ -479,9 +477,9 @@ mod tests {
 
     #[test]
     fn test_registration_publish_retry_tombstones_values_from_cancelled_attempts() {
-        let old = encoded("old");
-        let cancelled = encoded("cancelled");
-        let replacement = encoded("replacement");
+        let old = element("old");
+        let cancelled = element("cancelled");
+        let replacement = element("replacement");
         let mut known = BTreeSet::from([old.clone()]);
 
         let cancelled_current = BTreeSet::from([cancelled.clone()]);
@@ -503,9 +501,9 @@ mod tests {
         for old_mask in 0..8 {
             for current_mask in 0..8 {
                 for replacement_mask in 0..8 {
-                    let old = encoded_subset(old_mask);
-                    let current = encoded_subset(current_mask);
-                    let replacement = encoded_subset(replacement_mask);
+                    let old = element_subset(old_mask);
+                    let current = element_subset(current_mask);
+                    let replacement = element_subset(replacement_mask);
                     let mut known = old.clone();
 
                     let _ = begin_registration_publish(&mut known, &current, vec![], |_| false);
@@ -531,9 +529,9 @@ mod tests {
 
     #[test]
     fn test_registration_publish_tombstones_matching_observed_values() {
-        let current = BTreeSet::from([encoded("self-new")]);
-        let observed_self_old = encoded("self-old");
-        let observed_other = encoded("other");
+        let current = BTreeSet::from([element("self-new")]);
+        let observed_self_old = element("self-old");
+        let observed_other = element("other");
         let mut known = BTreeSet::new();
 
         let stale = begin_registration_publish(
@@ -549,10 +547,10 @@ mod tests {
 
     #[test]
     fn test_registration_publish_tombstones_unpreserved_observed_values() {
-        let current = BTreeSet::from([encoded("self-new")]);
-        let observed_self_old = encoded("self-old");
-        let observed_live = encoded("other-live");
-        let observed_invalid = encoded("invalid");
+        let current = BTreeSet::from([element("self-new")]);
+        let observed_self_old = element("self-old");
+        let observed_live = element("other-live");
+        let observed_invalid = element("invalid");
         let mut known = BTreeSet::new();
 
         let stale = begin_registration_publish(

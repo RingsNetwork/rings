@@ -191,6 +191,20 @@
     drained a message holds a tombstone, so it is retired with the messages it still held for
     its offline recipient: those undelivered messages are lost at the cutover.
 
+- Store and send data-topic and relay-inbox elements as bytes, not base58-check text (#926).
+  `Entry::data` is `Vec<Bytes>`; an element is the application's own bytes, and its
+  `ElementDigest` is the Keccak-256 of those bytes. A held relay message is its wire encoding
+  (`HeldMessage::to_element`), and an online-node or onion-exit descriptor its codec encoding
+  (the node-internal `RegistryElement`). The `Encoder`/`Decoder` impls of `OnlineNodeDescriptor`
+  and `OnionExitDescriptor` are removed. `storage_append_data` and `storage_tombstone_data`
+  (core `ChordStorageInterface` and node `Processor`) take `Bytes`, and the entry constructor
+  `(String, Encoded)` becomes `(String, Bytes)`. `ENTRY_PAYLOAD_MAX_BYTES` now bounds element
+  bytes. JSON-RPC `publishMessageToTopic`, `fetchTopicMessages` and `lookupService` still
+  exchange strings, now as the elements' UTF-8. The inspect `StorageValue.data` lists each
+  element as base64 instead of its base58-check text. An element written before this change
+  decodes as the bytes of its base58 text; it is not a valid registry value, and it expires by
+  the element horizon. This is part of the storage-entry wire cutover above.
+
 - Derive the chunk envelope reserve from the widest frame (#925). `MAX_CHUNK_ENVELOPE_OVERHEAD`
   drops from a 4096-byte guess to 911 bytes, and `TRANSPORT_CUSTOM_OVERHEAD` from 64 to 4: each
   is the supremum of what the chunk framer emits, with every field it leaves free at its widest

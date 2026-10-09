@@ -2,7 +2,7 @@
 //!
 //! State variables:
 //! - `register` is an optional LWW reset floor for overwrite.
-//! - `values` is an LWW element set keyed by encoded payload: each payload keeps its greatest
+//! - `values` is an LWW element set keyed by element bytes: each payload keeps its greatest
 //!   add dot.
 //! - `removes` is the remove side, keyed by payload digest: each digest keeps its greatest
 //!   remove dot, and a remove `(e, r)` covers every add `(v, d)` with `digest(v) = e ∧ d ≤ r`.
@@ -40,6 +40,7 @@
 
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -48,7 +49,6 @@ use crate::dht::Did;
 use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::Encoded;
 
 /// Hybrid logical version for LWW entry registers and element dots.
 ///
@@ -113,7 +113,7 @@ impl EntryDot {
     }
 }
 
-/// Content address of one element payload: the Keccak-256 digest of its encoded form.
+/// Content address of one element: the Keccak-256 digest of its bytes.
 ///
 /// A remove names the payload it removes by this digest rather than by its bytes, so a
 /// tombstone costs a constant number of bytes whatever the payload size.
@@ -145,11 +145,11 @@ pub(crate) fn digests_computed() -> usize {
 }
 
 impl ElementDigest {
-    /// The digest of `value`.
-    pub fn of(value: &Encoded) -> Self {
+    /// The digest of the element `value`: the Keccak-256 of its bytes.
+    pub fn of(value: &Bytes) -> Self {
         #[cfg(test)]
         DIGESTS_COMPUTED.with(|computed| computed.set(computed.get() + 1));
-        Self(keccak256(value.value().as_bytes()))
+        Self(keccak256(value.as_ref()))
     }
 }
 
@@ -167,7 +167,7 @@ pub struct EntryTombstone {
 
 impl EntryTombstone {
     /// Remove witness covering the adds of `value` at or below `dot`.
-    pub fn of(value: &Encoded, dot: EntryDot) -> Self {
+    pub fn of(value: &Bytes, dot: EntryDot) -> Self {
         Self {
             element: ElementDigest::of(value),
             dot,
@@ -206,7 +206,7 @@ impl EntryCrdt {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DataTopicBuffer {
     pub(super) register: Option<EntryVersion>,
-    pub(super) values: BTreeMap<Encoded, EntryDot>,
+    pub(super) values: BTreeMap<Bytes, EntryDot>,
     pub(super) removes: BTreeMap<ElementDigest, EntryDot>,
 }
 
@@ -225,7 +225,7 @@ impl DataTopicBuffer {
     /// covered by a kept remove.
     pub(super) fn new(
         register: Option<EntryVersion>,
-        mut values: BTreeMap<Encoded, EntryDot>,
+        mut values: BTreeMap<Bytes, EntryDot>,
         mut removes: BTreeMap<ElementDigest, EntryDot>,
     ) -> Self {
         if let Some(floor) = register {
@@ -243,7 +243,7 @@ impl DataTopicBuffer {
     /// Whether a remove in `removes` covers the add `(value, dot)`.
     pub(super) fn covered_by(
         removes: &BTreeMap<ElementDigest, EntryDot>,
-        value: &Encoded,
+        value: &Bytes,
         dot: EntryDot,
     ) -> bool {
         !removes.is_empty()
@@ -253,7 +253,7 @@ impl DataTopicBuffer {
     }
 
     /// Record a covering remove for `value` at its held dot, if the carrier holds `value`.
-    pub(super) fn remove(&mut self, value: &Encoded) {
+    pub(super) fn remove(&mut self, value: &Bytes) {
         if let Some(dot) = self.values.remove(value) {
             insert_max(&mut self.removes, ElementDigest::of(value), dot);
         }

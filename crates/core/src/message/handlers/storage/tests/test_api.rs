@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 
+use bytes::Bytes;
+
 use super::super::ChordStorageInterface;
 use super::super::ChordStorageInterfaceCacheChecker;
 use super::test_support::assert_cached_data_values;
@@ -12,7 +14,6 @@ use crate::dht::Did;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Result;
 use crate::message::types::Message;
-use crate::message::Encoder;
 use crate::message::MessageVerificationExt;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
@@ -132,14 +133,14 @@ async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> 
 
     node1
         .swarm
-        .storage_append_data(&topic, "111".to_string().encode()?)
+        .storage_append_data(&topic, Bytes::from("111"))
         .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
     node1
         .swarm
-        .storage_append_data(&topic, "222".to_string().encode()?)
+        .storage_append_data(&topic, Bytes::from("222"))
         .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
@@ -157,7 +158,7 @@ async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> 
 
     node1
         .swarm
-        .storage_append_data(&topic, "333".to_string().encode()?)
+        .storage_append_data(&topic, Bytes::from("333"))
         .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
@@ -196,7 +197,7 @@ async fn test_storage_append_data_moves_existing_entry_payload_to_end_once() -> 
     for value in ["111", "222", "333", "222"] {
         node1
             .swarm
-            .storage_append_data(&topic, value.to_string().encode()?)
+            .storage_append_data(&topic, Bytes::from(value.to_string()))
             .await?;
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
@@ -241,7 +242,7 @@ async fn test_storage_tombstone_data_removes_observed_payload() -> Result<()> {
     for value in ["111", "222"] {
         node1
             .swarm
-            .storage_append_data(&topic, value.to_string().encode()?)
+            .storage_append_data(&topic, Bytes::from(value.to_string()))
             .await?;
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
@@ -249,7 +250,7 @@ async fn test_storage_tombstone_data_removes_observed_payload() -> Result<()> {
 
     node1
         .swarm
-        .storage_tombstone_data(&topic, "111".to_string().encode()?)
+        .storage_tombstone_data(&topic, Bytes::from("111"))
         .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;

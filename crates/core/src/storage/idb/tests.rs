@@ -567,7 +567,7 @@ struct LegacyEntryCrdt {
 struct LegacyEntry {
     /// The ring key.
     did: Did,
-    /// The payloads.
+    /// The payloads, as base58-check text (before #926).
     data: Vec<Encoded>,
     /// The kind.
     kind: EntryKind,

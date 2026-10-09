@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use super::super::next_hop_for_sync_entries;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload_for_tx;
@@ -24,7 +26,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
-use crate::message::Encoder;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
@@ -52,7 +53,7 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
         MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
     let entry = live_entry(
         Did::from(10u32),
-        vec!["handler acked".to_string().encode()?],
+        vec![Bytes::from("handler acked")],
         EntryKind::Data,
     );
     let placement_key = entry.did;
@@ -125,7 +126,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predeces
     *receiver.dht().lock_predecessor()? = Some(predecessor);
     let topic = live_entry(
         Did::from(10u32),
-        vec!["acked".to_string().encode()?],
+        vec![Bytes::from("acked")],
         EntryKind::Data,
     );
     let inbox = inbox_held_by_a_stranger(receiver.did())?;
@@ -176,7 +177,7 @@ async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<
     let receiver = prepare_node(SecretKey::random()).await;
     let entry = live_entry(
         Did::from(10u32),
-        vec!["acked".to_string().encode()?],
+        vec![Bytes::from("acked")],
         EntryKind::Data,
     );
     let placement_key = entry.did;
@@ -233,7 +234,7 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
 
     let entry = live_entry(
         Did::from(10u32),
-        vec!["wrong owner".to_string().encode()?],
+        vec![Bytes::from("wrong owner")],
         EntryKind::Data,
     );
     let stored_entry = entry.clone().try_into_storage_entry()?;

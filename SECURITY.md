@@ -107,9 +107,8 @@ and expire, but a party with many identities can try to hold several positions o
   size; versions too far ahead of the receiver's clock are rejected. Each data-topic element
   expires at its own horizon, and a removal is collected only once every write it covers has
   expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
-  while the carrier is retained. A relay inbox is
-  verified by its owner, readable and removable only by its recipient, and capped at 64
-  messages. Values are stored in the clear.
+  while the carrier is retained. A relay inbox is verified by its owner, readable and
+  removable only by its recipient, and capped at 64 messages. Values are stored in the clear.
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.
 - **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures

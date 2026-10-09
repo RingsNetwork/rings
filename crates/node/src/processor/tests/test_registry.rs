@@ -454,7 +454,7 @@ async fn test_online_node_registry_lists_multiple_nodes() -> Result<()> {
     processor
         .storage_append_data(
             ONLINE_NODES_TOPIC,
-            other_descriptor.encode().map_err(Error::CoreError)?,
+            other_descriptor.to_element().map_err(Error::CoreError)?,
         )
         .await?;
     let published = processor.publish_online_node_descriptor().await?;

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
+use bytes::Bytes;
 
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
@@ -28,7 +29,6 @@ use crate::message::types::Message;
 use crate::message::types::SearchEntry;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
-use crate::message::Encoded;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
@@ -54,12 +54,12 @@ pub trait ChordStorageInterface {
     /// Store an entry on DHT storage, replacing its payloads (an `Overwrite`). Each stored
     /// payload expires as the trait documentation states unless it is written again.
     async fn storage_store(&self, entry: Entry) -> Result<()>;
-    /// Append data to a Data kind entry. The element expires as the trait documentation states
-    /// unless it is appended again.
-    async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()>;
-    /// Tombstone observed data in a Data kind entry: the removal covers every dot of `data` the
-    /// storage owner holds or has held under a later one.
-    async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()>;
+    /// Append the element `data`, as its bytes, to a Data kind entry. The element expires as
+    /// the trait documentation states unless it is appended again.
+    async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()>;
+    /// Tombstone the observed element `data` in a Data kind entry: the removal covers every dot
+    /// of `data` the storage owner holds or has held under a later one.
+    async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()>;
 }
 
 /// ChordStorageInterfaceCacheChecker defines the interface for checking the local cache of the DHT.
@@ -393,12 +393,12 @@ impl ChordStorageInterface for Swarm {
         operate_entry(self.transport.clone(), EntryOperation::Overwrite(entry)).await
     }
 
-    async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
+    async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
         operate_entry(self.transport.clone(), EntryOperation::Extend(entry)).await
     }
 
-    async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
+    async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
         operate_entry(self.transport.clone(), EntryOperation::Tombstone(entry)).await
     }

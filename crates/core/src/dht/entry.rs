@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
+use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -13,8 +14,6 @@ use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::Encoded;
-use crate::message::Encoder;
 
 mod crdt;
 pub(crate) mod inbox;
@@ -35,7 +34,7 @@ pub use crdt::EntryVersion;
 /// DHT storage entry categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryKind {
-    /// Encoded data stored in DHT
+    /// Application elements stored in the DHT, each as its bytes.
     Data,
     /// A relay inbox: messages held for an offline peer (see the `inbox` module).
     RelayMessage,
@@ -103,7 +102,7 @@ enum EntryWitness {
 struct OperationDigest<'a> {
     kind: EntryKind,
     did: Did,
-    data: &'a [Encoded],
+    data: &'a [Bytes],
 }
 
 /// Operations supported by a DHT storage entry.
@@ -205,8 +204,9 @@ pub struct Entry {
     /// The ring key of this entry. It has the same representation as a node DID, but a
     /// different domain meaning.
     pub did: Did,
-    /// The data entity of `Entry`, encoded by [Encoder].
-    pub data: Vec<Encoded>,
+    /// The elements of this carrier, each as its bytes: the application's own encoding of the
+    /// value, carried and digested as is, never re-encoded as text.
+    pub data: Vec<Bytes>,
     /// The type indicates how the data is encoded and how the Did is generated.
     pub kind: EntryKind,
     /// CRDT metadata that makes replicated merge a join-semilattice operation.
@@ -348,7 +348,7 @@ impl EntryLookupEvidence {
 
 impl Entry {
     /// Construct an entry with empty CRDT metadata.
-    pub fn new(did: Did, data: Vec<Encoded>, kind: EntryKind) -> Self {
+    pub fn new(did: Did, data: Vec<Bytes>, kind: EntryKind) -> Self {
         Self {
             did,
             data,
@@ -431,18 +431,23 @@ impl EntryOperation {
     }
 }
 
-impl TryFrom<(String, Encoded)> for Entry {
+impl TryFrom<(String, Bytes)> for Entry {
     type Error = Error;
-    fn try_from((topic, e): (String, Encoded)) -> Result<Self> {
-        Ok(Self::new(Self::gen_did(&topic)?, vec![e], EntryKind::Data))
+    /// The data-topic delta holding the one element `element` of `topic`.
+    fn try_from((topic, element): (String, Bytes)) -> Result<Self> {
+        Ok(Self::new(
+            Self::gen_did(&topic)?,
+            vec![element],
+            EntryKind::Data,
+        ))
     }
 }
 
 impl TryFrom<(String, String)> for Entry {
     type Error = Error;
-    fn try_from((topic, s): (String, String)) -> Result<Self> {
-        let encoded_message = s.encode()?;
-        (topic, encoded_message).try_into()
+    /// The data-topic delta holding the text `text` of `topic` as its UTF-8 bytes.
+    fn try_from((topic, text): (String, String)) -> Result<Self> {
+        (topic, Bytes::from(text)).try_into()
     }
 }
 

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 #[cfg(any(
     all(feature = "dummy", not(target_family = "wasm")),
     all(feature = "wasm", target_family = "wasm")
@@ -25,8 +26,6 @@ use crate::dht::topology;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Result;
-use crate::message::Encoded;
-use crate::message::Encoder;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use crate::message::Message;
 use crate::message::MessageCategory;
@@ -70,7 +69,7 @@ const FIXTURE_RETENTION_MS: u128 = 60 * 60 * 1_000;
 
 /// An entry with a retention bound one hour ahead, inside the admission maximum, so a fixture
 /// that is written to storage or carried in a sync message passes storage admission.
-pub(crate) fn live_entry(did: Did, data: Vec<Encoded>, kind: EntryKind) -> Entry {
+pub(crate) fn live_entry(did: Did, data: Vec<Bytes>, kind: EntryKind) -> Entry {
     live(Entry::new(did, data, kind))
 }
 
@@ -201,7 +200,7 @@ pub(crate) fn tail_storage_key(local: Did, lower: Did) -> Did {
 pub fn multi_frame_storage_sync_entries() -> Result<Vec<PlacedEntry>> {
     let topic = "shared multi-frame storage contention";
     let entry_did = Entry::gen_did(topic)?;
-    let payload = vec![0xcd; 1024 * 1024].encode()?;
+    let payload = Bytes::from(vec![0xcd; 1024 * 1024]);
     let entry = live_entry(entry_did, vec![payload], EntryKind::Data);
     Ok(vec![PlacedEntry::new(entry_did, entry)])
 }

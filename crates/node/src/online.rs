@@ -7,20 +7,16 @@ use rings_core::ecc::PublicKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
 use rings_core::error::Result;
-use rings_core::message::Decoder;
 use rings_core::message::DhtProtocolMode;
 use rings_core::message::DomainTag;
-use rings_core::message::Encoded;
-use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::descriptor::decode_descriptor;
-use crate::descriptor::encode_descriptor;
 use crate::descriptor::latest_valid_by_did;
 use crate::descriptor::sign_descriptor_body;
+use crate::descriptor::RegistryElement;
 use crate::descriptor::SignedDescriptor;
 use crate::descriptor::SignedDescriptorBody;
 
@@ -324,17 +320,7 @@ impl SignedDescriptor for OnlineNodeDescriptor {
     }
 }
 
-impl Encoder for OnlineNodeDescriptor {
-    fn encode(&self) -> Result<Encoded> {
-        encode_descriptor(self)
-    }
-}
-
-impl Decoder for OnlineNodeDescriptor {
-    fn from_encoded(encoded: &Encoded) -> Result<Self> {
-        decode_descriptor(encoded)
-    }
-}
+impl RegistryElement for OnlineNodeDescriptor {}
 
 #[cfg(test)]
 mod tests {
@@ -384,8 +370,8 @@ mod tests {
     #[test]
     fn test_descriptor_round_trips_through_dht_encoding() -> Result<()> {
         let descriptor = descriptor_at(20, 30)?;
-        let encoded = descriptor.encode()?;
-        let decoded = OnlineNodeDescriptor::from_encoded(&encoded)?;
+        let element = descriptor.to_element()?;
+        let decoded = OnlineNodeDescriptor::from_element(&element)?;
 
         assert_eq!(decoded, descriptor);
         assert!(decoded.verify_signature(TEST_NETWORK_ID));

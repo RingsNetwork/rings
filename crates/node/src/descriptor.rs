@@ -9,14 +9,13 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
 use rings_core::error::Result;
 use rings_core::message::DomainTag;
-use rings_core::message::Encoded;
-use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
 use rings_core::message::SigningDomain;
@@ -149,13 +148,20 @@ where
     latest.into_values().collect()
 }
 
-pub(crate) fn encode_descriptor<T: Serialize>(descriptor: &T) -> Result<Encoded> {
-    rings_codec::serialize(descriptor)
-        .map_err(Error::CodecSerialize)?
-        .encode()
-}
+/// A descriptor as one element of its DHT registry: the element is the descriptor's codec
+/// encoding, carried as is.
+///
+/// Law (round trip): `from_element(to_element(d)) = Ok(d)`.
+pub(crate) trait RegistryElement: Serialize + DeserializeOwned {
+    /// This descriptor as a registry element.
+    fn to_element(&self) -> Result<Bytes> {
+        rings_codec::serialize(self)
+            .map(Bytes::from)
+            .map_err(Error::CodecSerialize)
+    }
 
-pub(crate) fn decode_descriptor<T: DeserializeOwned>(encoded: &Encoded) -> Result<T> {
-    let data: Vec<u8> = encoded.decode()?;
-    rings_codec::deserialize(&data).map_err(Error::CodecDeserialize)
+    /// The descriptor the registry element `element` encodes.
+    fn from_element(element: &[u8]) -> Result<Self> {
+        rings_codec::deserialize(element).map_err(Error::CodecDeserialize)
+    }
 }

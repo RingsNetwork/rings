@@ -89,6 +89,8 @@
 
 use std::collections::BTreeSet;
 
+use bytes::Bytes;
+
 use super::retention::ElementRetention;
 use super::Entry;
 use super::EntryDot;
@@ -101,8 +103,6 @@ use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::Encoded;
-use crate::message::Encoder;
 use crate::tests::splitmix64;
 
 /// The model's topic.
@@ -220,7 +220,7 @@ enum Action {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Add {
     /// The payload.
-    value: Encoded,
+    value: Bytes,
     /// The dot its writer issued.
     dot: EntryDot,
     /// The retention bound the write asked for.
@@ -235,7 +235,7 @@ struct Replica {
     /// Every add delivered here while visible at its sender.
     received: BTreeSet<Add>,
     /// Every remove observed here, as the payload and the dot the remove covers up to.
-    killed: BTreeSet<(Encoded, EntryDot)>,
+    killed: BTreeSet<(Bytes, EntryDot)>,
     /// The greatest overwrite register observed here.
     floor: Option<EntryVersion>,
 }
@@ -247,7 +247,7 @@ struct World {
     /// The topic's entry DID.
     topic: Did,
     /// The payloads, encoded.
-    values: Vec<(&'static str, Encoded)>,
+    values: Vec<(&'static str, Bytes)>,
     /// Real time.
     real_ms: u128,
     /// Each replica's clock offset from real time.
@@ -272,7 +272,7 @@ impl World {
             topic: Entry::gen_did(MODEL_TOPIC)?,
             values: MODEL_VALUES
                 .into_iter()
-                .map(|value| Ok((value, value.to_string().encode()?)))
+                .map(|value| Ok((value, Bytes::from(value.to_string()))))
                 .collect::<Result<Vec<_>>>()?,
             real_ms: MODEL_EPOCH_MS,
             skews_ms: [0; REPLICAS],
@@ -305,7 +305,7 @@ impl World {
     }
 
     /// The encoded payload named `value`.
-    fn encoded(&self, value: &str) -> Result<Encoded> {
+    fn encoded(&self, value: &str) -> Result<Bytes> {
         self.values
             .iter()
             .find_map(|(name, encoded)| (*name == value).then(|| encoded.clone()))
@@ -353,7 +353,7 @@ impl World {
     }
 
     /// The dot `entry` holds for `value`, if it holds `value`.
-    fn held_dot(entry: &Entry, value: &Encoded) -> Option<EntryDot> {
+    fn held_dot(entry: &Entry, value: &Bytes) -> Option<EntryDot> {
         entry
             .data
             .iter()
@@ -547,7 +547,7 @@ impl World {
     }
 
     /// Whether `replica` has observed a remove or a register shadowing `(value, dot)`.
-    fn covered(replica: &Replica, value: &Encoded, dot: EntryDot) -> bool {
+    fn covered(replica: &Replica, value: &Bytes, dot: EntryDot) -> bool {
         replica
             .killed
             .iter()

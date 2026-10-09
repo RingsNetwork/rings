@@ -924,9 +924,8 @@ impl Provider {
                 let dids = entry
                     .data
                     .iter()
-                    .map(|v| v.decode())
-                    .filter_map(|v| v.ok())
-                    .map(|x: String| JsValue::from_str(x.as_str()))
+                    .filter_map(|element| String::from_utf8(element.to_vec()).ok())
+                    .map(|did| JsValue::from_str(did.as_str()))
                     .collect::<js_sys::Array>();
                 Ok(JsValue::from(dids))
             } else {

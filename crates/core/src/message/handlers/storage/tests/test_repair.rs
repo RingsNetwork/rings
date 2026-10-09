@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use super::super::ChordStorageInterface;
 use super::super::ChordStorageInterfaceCacheChecker;
 #[cfg(feature = "dummy")]
@@ -26,8 +28,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
-use crate::message::Encoded;
-use crate::message::Encoder;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
@@ -330,7 +330,7 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
     );
     let entry = live_entry(
         key.address().into(),
-        vec!["local".to_string().encode()?],
+        vec![Bytes::from("local")],
         EntryKind::Data,
     );
     let first_key = entry
@@ -357,7 +357,7 @@ async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let entry = live_entry(
         Did::from(10u32),
-        vec!["repair".to_string().encode()?],
+        vec![Bytes::from("repair")],
         EntryKind::Data,
     );
     let stored_entry = entry.clone().try_into_storage_entry()?;
@@ -422,7 +422,7 @@ async fn test_found_empty_reply_repairs_misses_from_a_held_carrier_past_its_boun
     let now_ms = get_epoch_ms();
     let resource = Did::from(10u32);
     let mut carrier = Entry::new(resource, vec![], EntryKind::Data);
-    carrier.crdt.tombstones = vec![EntryTombstone::of(&Encoded::from("removed"), EntryDot {
+    carrier.crdt.tombstones = vec![EntryTombstone::of(&Bytes::from("removed"), EntryDot {
         version: EntryVersion::new(now_ms - 1_000, Did::from(1u32), Did::from(2u32)),
         index: 0,
     })];
@@ -470,16 +470,8 @@ async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource = Did::from(10u32);
-    let first = live_entry(
-        resource,
-        vec!["first".to_string().encode()?],
-        EntryKind::Data,
-    );
-    let second = live_entry(
-        resource,
-        vec!["second".to_string().encode()?],
-        EntryKind::Data,
-    );
+    let first = live_entry(resource, vec![Bytes::from("first")], EntryKind::Data);
+    let second = live_entry(resource, vec![Bytes::from("second")], EntryKind::Data);
     let context_key = SecretKey::random();
     let context_session = DelegateeKey::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
@@ -518,7 +510,7 @@ async fn test_found_entry_rejects_redundancy_outside_local_protocol_mode() -> Re
     let resource = Did::from(10u32);
     let entry = live_entry(
         resource,
-        vec!["wrong redundancy".to_string().encode()?],
+        vec![Bytes::from("wrong redundancy")],
         EntryKind::Data,
     );
     let context_key = SecretKey::random();
@@ -561,11 +553,7 @@ async fn test_found_entry_rejects_response_without_active_lookup() -> Result<()>
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource = Did::from(10u32);
-    let entry = live_entry(
-        resource,
-        vec!["unsolicited".to_string().encode()?],
-        EntryKind::Data,
-    );
+    let entry = live_entry(resource, vec![Bytes::from("unsolicited")], EntryKind::Data);
     let context_key = SecretKey::random();
     let context_session = DelegateeKey::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
@@ -604,7 +592,7 @@ async fn test_found_entry_rejects_resource_mismatch_without_cache_write() -> Res
     let resource = Did::from(10u32);
     let entry = live_entry(
         Did::from(11u32),
-        vec!["wrong resource".to_string().encode()?],
+        vec![Bytes::from("wrong resource")],
         EntryKind::Data,
     );
     let context_key = SecretKey::random();
@@ -687,7 +675,7 @@ async fn test_storage_fetch_answered_marks_a_round_answered_by_an_entry() -> Res
     let redundancy = node.swarm.storage_redundancy();
     let entry = live_entry(
         Did::from(10u32),
-        vec!["answer".to_string().encode()?],
+        vec![Bytes::from("answer")],
         EntryKind::Data,
     );
     let reply = |data: Vec<Entry>| FoundEntry {
@@ -728,7 +716,7 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let entry = live_entry(
         Did::from(10u32),
-        vec!["fresh".to_string().encode()?],
+        vec![Bytes::from("fresh")],
         EntryKind::Data,
     );
     let placement_key = entry

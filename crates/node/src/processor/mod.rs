@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::future::join_all;
 use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
@@ -50,6 +51,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use uuid;
 
+#[cfg(all(test, feature = "node"))]
+use crate::descriptor::RegistryElement;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
@@ -283,7 +286,7 @@ impl Processor {
     fn online_node_registry_entry(descriptors: Vec<OnlineNodeDescriptor>) -> Result<entry::Entry> {
         let data = descriptors
             .into_iter()
-            .map(|descriptor| descriptor.encode().map_err(Error::CoreError))
+            .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(entry::Entry::new(
@@ -297,7 +300,7 @@ impl Processor {
     fn onion_exit_registry_entry(descriptors: Vec<OnionExitDescriptor>) -> Result<entry::Entry> {
         let data = descriptors
             .into_iter()
-            .map(|descriptor| descriptor.encode().map_err(Error::CoreError))
+            .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(entry::Entry::new(
@@ -919,7 +922,7 @@ impl Processor {
     ///
     /// The appended element expires by the element lifetime rule of [`ChordStorageInterface`],
     /// even while other writes keep the topic alive, unless it is appended again.
-    pub async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
+    pub async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         self.swarm
             .storage_append_data(topic, data)
             .await
@@ -930,7 +933,7 @@ impl Processor {
     ///
     /// The removal covers every dot of `data` the storage owner holds, including earlier dots
     /// forgotten under a later one, and is collected once every add it covers has expired.
-    pub async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
+    pub async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()> {
         self.swarm
             .storage_tombstone_data(topic, data)
             .await
@@ -991,12 +994,7 @@ impl Processor {
     /// The registration is one appended element, so it expires by the element lifetime rule of
     /// [`ChordStorageInterface`] unless it is registered again.
     pub async fn register_service(&self, name: &str) -> Result<()> {
-        let encoded_did = self
-            .did()
-            .to_string()
-            .encode()
-            .map_err(Error::ServiceRegisterError)?;
-        self.storage_append_data(name, encoded_did)
+        self.storage_append_data(name, Bytes::from(self.did().to_string()))
             .await
             .map_err(|error| match error {
                 Error::EntryError(error) => Error::ServiceRegisterError(error),

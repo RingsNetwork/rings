@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 use super::pressure::exercise_bounded_control_burst;
 use super::pressure::exercise_per_entry_yield;
 use super::pressure::start_controlled_deliveries;
@@ -455,9 +457,7 @@ fn entry_routed_remotely_by(node: &Node, label: &str) -> PlacedEntry {
                 .expect("repair route must resolve"),
             PeerRingAction::RemoteAction(_, _)
         ) {
-            let data = vec![0x6d; ENTRY_PAYLOAD_BYTES]
-                .encode()
-                .expect("repair fixture payload must encode");
+            let data = Bytes::from(vec![0x6d; ENTRY_PAYLOAD_BYTES]);
             return PlacedEntry::new(key, live_entry(key, vec![data], EntryKind::Data));
         }
     }
