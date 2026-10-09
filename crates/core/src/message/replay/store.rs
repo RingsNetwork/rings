@@ -336,11 +336,6 @@ fn restore_record(
     }
 }
 
-/// Whether `storage_key` is the key of the shared-stream snapshot used before #898.
-fn is_shared_snapshot_key(storage_key: &str) -> bool {
-    storage_key == SHARED_STREAM_SNAPSHOT_KEY
-}
-
 /// What one scanned record contributes to the restored store.
 enum Contribution {
     /// The shared-stream snapshot of the key used before #898.
@@ -356,31 +351,36 @@ enum Contribution {
     },
 }
 
-/// Classify one scanned record (pure): the shared snapshot (named `shared_snapshot`, never
-/// decoded), a restored stream, or an unrestorable record under its name.
+/// Classify one scanned record (pure): the shared snapshot (the record filed under
+/// `shared_snapshot`, its name, which is never decoded), a restored stream, or an unrestorable
+/// record under its name.
+///
+/// By the scan law a `Filed` record of key `k` is filed under `name(k)`, so one test on the name
+/// a record is filed under recognises the snapshot whether or not it decoded.
 fn classify(
     record: ScannedRecord<ReplayRecord>,
     shared_snapshot: &str,
     name: &impl Fn(&str) -> String,
 ) -> Contribution {
+    let filed_under = match &record {
+        ScannedRecord::Filed { key, .. } => name(key),
+        ScannedRecord::Undecodable(undecodable) => undecodable.name.clone(),
+    };
+    if filed_under == shared_snapshot {
+        return Contribution::SharedSnapshot;
+    }
     match record {
-        ScannedRecord::Undecodable(undecodable) if undecodable.name == shared_snapshot => {
-            Contribution::SharedSnapshot
-        }
         ScannedRecord::Undecodable(UndecodableRecord { name, key }) => Contribution::Unrestorable {
             name,
             failure: RestoreFailure::Undecodable { filed_as: key },
         },
-        ScannedRecord::Filed { key, .. } if is_shared_snapshot_key(&key) => {
-            Contribution::SharedSnapshot
-        }
         ScannedRecord::Filed {
             key,
             value: ReplayRecord(bytes),
         } => match restore_record(&key, &bytes) {
             Ok(stream) => Contribution::Stream(stream),
             Err(failure) => Contribution::Unrestorable {
-                name: name(&key),
+                name: filed_under,
                 failure,
             },
         },

@@ -185,7 +185,7 @@ unrestorable records (#910): torn, corrupt, unreadable (any read error but the a
 such as a permission error, an I/O error, a dangling link, or a directory in the record's place),
 holding another key's record (copied, moved or renamed there from outside the store, or a bit flip
 in its key text), misplaced, or holding an invalid window. Its name is the storage's record name:
-the native file name, or the browser row key. A directory or other non-file entry in a record's
+the native file name, or the browser row key. A directory or a symbolic link to one in a record's
 place charges nothing against the store's budget.
 
 ```text

@@ -15,7 +15,7 @@ workspace = true
 
 [features]
 # `tokio` provides native task scheduling (`Spawner`, `spawn_detached`,
-# `run_detached`); `browser` selects the single-threaded JavaScript event loop on a
+# `run_detached`, `run_blocking`); `browser` selects the single-threaded JavaScript event loop on a
 # wasm target. Without either, only timers and bounds exist, so a backend-free
 # consumer carries no executor. The workspace dependency disables the default.
 default = ["tokio"]
