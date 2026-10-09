@@ -5,7 +5,7 @@ use serde::Serialize;
 use super::StorageSyncDestination;
 use super::StorageSyncPurpose;
 use super::StorageSyncTarget;
-use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
+use crate::consts::MAX_PAYLOAD_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
@@ -28,8 +28,9 @@ use crate::utils::get_epoch_ms;
 /// reserves the payload/chunk envelope bytes below.
 pub(crate) const SYNC_BATCH_MAX_BYTES: usize = MAX_DATA_CHANNEL_MESSAGE_SIZE / 4;
 
+/// The envelope a batch is sent whole in: the payload envelope and the transport wrapper.
 const SYNC_BATCH_ENVELOPE_HEADROOM_BYTES: usize =
-    MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD;
+    MAX_PAYLOAD_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD;
 
 fn serialized_wire_size<T: Serialize>(value: &T) -> Result<usize> {
     let bytes = rings_codec::serialized_size(value).map_err(Error::CodecSerialize)?;

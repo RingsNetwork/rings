@@ -139,3 +139,26 @@ impl Delegation {
         self.delegator.account_verifier().did()
     }
 }
+
+#[cfg(test)]
+impl Delegation {
+    /// The delegation of the widest wire encoding: the widest account (a BLS12-381 key, which
+    /// also signs the longest signature) and every varint field at its maximum.
+    ///
+    /// It authorizes nothing; it witnesses the envelope bounds of `consts`, which take its
+    /// encoded size in both delegation slots.
+    pub(crate) fn widest_for_test() -> Self {
+        Self {
+            delegatee_did: Did::from(u32::MAX),
+            delegator: Account::Bls12381(PublicKey([u8::MAX; 48])),
+            ttl_ms: u64::MAX,
+            ts_ms: u128::MAX,
+            delegator_signature: signers::bls::Signature([u8::MAX; 96]).0.to_vec(),
+        }
+    }
+
+    /// A delegatee key that signs under [`Self::widest_for_test`].
+    pub(crate) fn widest_key_for_test() -> super::DelegateeKey {
+        super::DelegateeKey::from_parts(Self::widest_for_test(), crate::ecc::SecretKey::random())
+    }
+}

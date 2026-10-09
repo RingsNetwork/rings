@@ -9,7 +9,7 @@ use super::super::chord::RemoteAction;
 use super::sync::sync_entries_batch_wire_cost;
 use super::sync::sync_entries_batches;
 use super::sync::SYNC_BATCH_MAX_BYTES;
-use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
+use crate::consts::MAX_PAYLOAD_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::digests_computed;
@@ -795,7 +795,7 @@ fn test_sync_entries_batch_wire_cost_matches_serialized_message_cost() -> Result
     let message_bytes =
         usize::try_from(serialized_bytes).map_err(|_| Error::MessageSizeOverflow)?;
     let expected = message_bytes
-        .checked_add(MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD)
+        .checked_add(MAX_PAYLOAD_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD)
         .ok_or(Error::MessageSizeOverflow)?;
 
     assert_eq!(sync_entries_batch_wire_cost(&entries)?, expected);

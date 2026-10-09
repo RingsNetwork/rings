@@ -12,6 +12,7 @@ use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::sync::watch;
 use tokio::time::Duration;
 
+use crate::chunk::WireReserves;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -1009,9 +1010,10 @@ async fn test_negotiated_size_too_small_errors_without_partial_send() {
         .await
         .unwrap();
 
-    // Below `chunk_overhead + MIN_CHUNK_DATA`: no usable chunk size exists, so framing must reject
-    // *before* any chunk is sent (the `None` is returned ahead of the send loop).
-    dummy_controlled::set_max_message_size(5000);
+    // One byte below `chunk reserve + MIN_CHUNK_DATA`: no usable chunk size exists, so framing
+    // must reject *before* any chunk is sent (the `None` is returned ahead of the send loop).
+    let reserves = WireReserves::PRODUCTION;
+    dummy_controlled::set_max_message_size(reserves.chunk + reserves.min_chunk_data - 1);
 
     let big: Vec<u8> = vec![0xab; 10_000];
     // Count data-channel sends from here, to prove the failed send enqueues nothing.

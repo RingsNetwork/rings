@@ -191,6 +191,15 @@
     drained a message holds a tombstone, so it is retired with the messages it still held for
     its offline recipient: those undelivered messages are lost at the cutover.
 
+- Derive the chunk envelope reserve from the widest frame (#925). `MAX_CHUNK_ENVELOPE_OVERHEAD`
+  drops from a 4096-byte guess to 911 bytes, and `TRANSPORT_CUSTOM_OVERHEAD` from 64 to 4: each
+  is the supremum of what the chunk framer emits, with every field it leaves free at its widest
+  (both delegation slots inline with the widest account and signature, every varint at its
+  maximum), witnessed with equality through the framer itself. The new
+  `MAX_PAYLOAD_ENVELOPE_OVERHEAD` (941) bounds a whole payload's envelope, `reply_via` and the
+  relay aim included, and is the storage hand-off batch's headroom. At a negotiated 8 KiB limit,
+  a chunk now carries about 7.3 KB of data instead of 4032 bytes. The wire format is unchanged.
+
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`
   (core), both defaulting to `false`. For its traffic from the authenticated neighbour that

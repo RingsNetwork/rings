@@ -678,6 +678,66 @@ mod tests {
         assert!(closed.load(std::sync::atomic::Ordering::Acquire));
     }
 
+    /// Witness of the chunk reserves of `consts`, with equality: the widest frame
+    /// [`frame_chunk`] can emit, with every field it leaves free at its widest (the signer's
+    /// delegation in both slots, [`Delegation::widest_for_test`]; the sequence, timestamps and
+    /// lifetimes at their types' maxima; the chunk header at the most chunks one message is cut
+    /// into; `MAX_DATA_CHANNEL_MESSAGE_SIZE` data bytes), encodes to exactly its chunk data plus
+    /// [`MAX_CHUNK_ENVELOPE_OVERHEAD`], and the transport wrapper adds exactly
+    /// [`TRANSPORT_CUSTOM_OVERHEAD`]. The fields `frame_chunk` fixes (no `reply_via`, the
+    /// relay aim toward the receiver, an exhausted hop budget) are taken as it fixes them.
+    ///
+    /// [`Delegation::widest_for_test`]: crate::delegation::Delegation::widest_for_test
+    /// [`MAX_CHUNK_ENVELOPE_OVERHEAD`]: crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD
+    /// [`TRANSPORT_CUSTOM_OVERHEAD`]: crate::consts::TRANSPORT_CUSTOM_OVERHEAD
+    #[test]
+    fn test_chunk_envelope_reserves_are_the_widest_framed_chunk() -> Result<()> {
+        use rings_transport::core::transport::TransportMessage;
+        use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+
+        use crate::chunk::ChunkMeta;
+        use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
+        use crate::consts::MIN_CHUNK_DATA;
+        use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
+        use crate::consts::TRANSPORT_MAX_SIZE;
+        use crate::delegation::Delegation;
+
+        let key = Delegation::widest_key_for_test();
+        let most_chunks = TRANSPORT_MAX_SIZE.div_ceil(MIN_CHUNK_DATA);
+        let chunk = Chunk {
+            chunk: [most_chunks, most_chunks],
+            data: bytes::Bytes::from(vec![u8::MAX; MAX_DATA_CHANNEL_MESSAGE_SIZE]),
+            meta: ChunkMeta {
+                id: uuid::Uuid::from_u128(u128::MAX),
+                ts_ms: u128::MAX,
+                ttl_ms: u64::MAX,
+            },
+        };
+        let mut payload = frame_chunk(
+            MessageSigner::new(&key, u32::MAX),
+            Did::from(u32::MAX),
+            chunk,
+            u64::MAX,
+        )?;
+        for verification in [
+            &mut payload.transaction.verification,
+            &mut payload.verification,
+        ] {
+            verification.ttl_ms = u64::MAX;
+            verification.ts_ms = u128::MAX;
+        }
+
+        let frame = payload.to_wire()?;
+        let wire = rings_codec::serialize(&TransportMessage::Custom(frame.clone()))
+            .map_err(Error::CodecSerialize)?;
+        assert_eq!(
+            frame.len(),
+            MAX_DATA_CHANNEL_MESSAGE_SIZE + MAX_CHUNK_ENVELOPE_OVERHEAD
+        );
+        assert_eq!(wire.len(), frame.len() + TRANSPORT_CUSTOM_OVERHEAD);
+        Ok(())
+    }
+
     #[test]
     fn test_initial_cancel_reports_generation_revocation_explicitly() {
         let attempt = PendingConnectionAttempt {
