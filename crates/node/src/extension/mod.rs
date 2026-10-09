@@ -2,6 +2,7 @@
 
 pub mod ext;
 pub mod protocols;
+#[cfg(rings_native)]
 pub mod transport;
 use std::result::Result;
 use std::sync::Arc;

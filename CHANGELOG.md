@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Remove the WebTransport-backed browser relay (#805). The browser `RelayHandle` with
+  `register_wt_service` and `register_wt_udp_service`, its interpreter, and its session engine are
+  gone, and the relay protocol and `extension::transport` now build for native targets only, where
+  their one interpreter runs. Native TCP/UDP relay, WebRTC transport, and browser onion HTTPS are
+  unchanged. Wasm builds no longer set `--cfg=web_sys_unstable_apis`, and `rings-node` drops the
+  WebTransport and stream `web-sys` features.
+
 - Rewrite SECURITY.md, README.md, ROADMAP.md, and llms.txt to be short and current: SECURITY.md
   adds private vulnerability reporting and states the Sybil boundary once (#780); README.md leads
   with what Rings offers, how to try it, and the pre-1.0 status; ROADMAP.md states the 1.0 and 2.0
