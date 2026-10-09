@@ -37,9 +37,10 @@
 //!
 //! **Law (bounded slots).** A record in `U` may belong to either table (its name need not say),
 //! so it counts against both tables' stream bounds: a table admits a new stream only while its
-//! streams and `|U|` together stay below [`TRANSACTION_REPLAY_STREAM_CAPACITY`], so no new
-//! stream takes the store past [`TRANSACTION_REPLAY_STORE_MAX_RECORDS`] records, however many
-//! are unavailable.
+//! streams and `|U|` together stay below [`TRANSACTION_REPLAY_STREAM_CAPACITY`], so no new stream
+//! takes the store past [`TRANSACTION_REPLAY_STORE_MAX_RECORDS`] records, however many are
+//! unavailable. [`restore`] does not re-check the table bounds: admission maintains them, so only a
+//! state outside the program could exceed one.
 //!
 //! The laws cover every record the storage holds, provided the storage drops none itself: an
 //! absent record, a stream's record moved or renamed away included, is indistinguishable from a
@@ -224,25 +225,25 @@ pub(super) fn receiver_record(
 pub(super) enum RestoreFailure {
     /// The storage reports the record undecodable for its name: a torn, corrupt or unreadable
     /// record, or one holding another key's record.
-    Undecodable {
-        /// The key it is filed as, when its intact prefix names it.
-        filed_as: Option<String>,
-    },
-    /// The record stored under `key` decodes as no stream.
-    NotAStream {
+    Undecodable,
+    /// The record stored under `key` decodes whole but is not a valid record of that key.
+    Defective {
         /// Its storage key.
         key: String,
+        /// What is wrong with it.
+        defect: Defect,
     },
-    /// The record stored under `key` holds a receiver window that violates its invariant.
-    InvalidWindow {
-        /// Its storage key.
-        key: String,
-    },
-    /// The record stored under `key` decodes as a stream whose record key is another.
-    Misplaced {
-        /// Its storage key.
-        key: String,
-    },
+}
+
+/// What is wrong with a record that decodes whole but does not restore its stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Defect {
+    /// Its bytes decode as no stream.
+    NotAStream,
+    /// It holds a receiver window that violates its invariant.
+    InvalidWindow,
+    /// It decodes as a stream whose record key is another.
+    Misplaced,
 }
 
 /// The replay store as one load restores it: the tables and the records that fail closed.
@@ -302,27 +303,16 @@ enum RestoredStream {
     Receiver(StreamKey, Box<SequenceState>),
 }
 
-/// Restore one decoded record stored under `storage_key` (pure): its stream, or why it does not
-/// restore.
-fn restore_record(
-    storage_key: &str,
-    bytes: &[u8],
-) -> std::result::Result<RestoredStream, RestoreFailure> {
+/// Restore one decoded record stored under `storage_key` (pure): its stream, or what is wrong
+/// with it.
+fn restore_record(storage_key: &str, bytes: &[u8]) -> std::result::Result<RestoredStream, Defect> {
     let stream = match rings_codec::deserialize::<StoredStream>(bytes) {
         Ok(StoredStream::Sender { key, last }) => RestoredStream::Sender(key, last),
         Ok(StoredStream::Receiver { key, state }) if state.is_valid() => {
             RestoredStream::Receiver(key, state)
         }
-        Ok(StoredStream::Receiver { .. }) => {
-            return Err(RestoreFailure::InvalidWindow {
-                key: storage_key.to_owned(),
-            });
-        }
-        Err(_) => {
-            return Err(RestoreFailure::NotAStream {
-                key: storage_key.to_owned(),
-            });
-        }
+        Ok(StoredStream::Receiver { .. }) => return Err(Defect::InvalidWindow),
+        Err(_) => return Err(Defect::NotAStream),
     };
     let (table, key) = match &stream {
         RestoredStream::Sender(key, _) => (ReplayTable::Sender, key),
@@ -330,9 +320,7 @@ fn restore_record(
     };
     match record_key(table, key).is_ok_and(|own| own == storage_key) {
         true => Ok(stream),
-        false => Err(RestoreFailure::Misplaced {
-            key: storage_key.to_owned(),
-        }),
+        false => Err(Defect::Misplaced),
     }
 }
 
@@ -355,35 +343,38 @@ enum Contribution {
 /// `shared_snapshot`, its name, which is never decoded), a restored stream, or an unrestorable
 /// record under its name.
 ///
-/// By the scan law a `Filed` record of key `k` is filed under `name(k)`, so one test on the name
-/// a record is filed under recognises the snapshot whether or not it decoded.
+/// By the scan law a `Filed` record of key `k` is filed under `name(k)`, so the snapshot is the
+/// record filed under its name whether or not it decoded; `name(k)` is computed only for a
+/// decoded record.
 fn classify(
     record: ScannedRecord<ReplayRecord>,
     shared_snapshot: &str,
     name: &impl Fn(&str) -> String,
 ) -> Contribution {
-    let filed_under = match &record {
-        ScannedRecord::Filed { key, .. } => name(key),
-        ScannedRecord::Undecodable(undecodable) => undecodable.name.clone(),
-    };
-    if filed_under == shared_snapshot {
-        return Contribution::SharedSnapshot;
-    }
     match record {
-        ScannedRecord::Undecodable(UndecodableRecord { name, key }) => Contribution::Unrestorable {
-            name,
-            failure: RestoreFailure::Undecodable { filed_as: key },
+        ScannedRecord::Undecodable(UndecodableRecord { name }) => match name == shared_snapshot {
+            true => Contribution::SharedSnapshot,
+            false => Contribution::Unrestorable {
+                name,
+                failure: RestoreFailure::Undecodable,
+            },
         },
         ScannedRecord::Filed {
             key,
             value: ReplayRecord(bytes),
-        } => match restore_record(&key, &bytes) {
-            Ok(stream) => Contribution::Stream(stream),
-            Err(failure) => Contribution::Unrestorable {
-                name: filed_under,
-                failure,
-            },
-        },
+        } => {
+            let filed_under = name(&key);
+            if filed_under == shared_snapshot {
+                return Contribution::SharedSnapshot;
+            }
+            match restore_record(&key, &bytes) {
+                Ok(stream) => Contribution::Stream(stream),
+                Err(defect) => Contribution::Unrestorable {
+                    name: filed_under,
+                    failure: RestoreFailure::Defective { key, defect },
+                },
+            }
+        }
     }
 }
 
@@ -438,6 +429,7 @@ mod tests {
     use super::record_key_max_bytes;
     use super::restore;
     use super::sender_record;
+    use super::Defect;
     use super::ReplayRecord;
     use super::ReplayStore;
     use super::ReplayTable;
@@ -531,7 +523,7 @@ mod tests {
 
     /// One record scanned as undecodable, filed under `name`.
     fn undecodable(name: String) -> ScannedRecord<ReplayRecord> {
-        ScannedRecord::Undecodable(UndecodableRecord { name, key: None })
+        ScannedRecord::Undecodable(UndecodableRecord { name })
     }
 
     /// The record naming of a storage that files records by their key.
@@ -592,17 +584,21 @@ mod tests {
 
         let restored = restore(records, by_digest);
         let expected = [
-            (by_digest(&misplaced), RestoreFailure::Misplaced {
+            (by_digest(&misplaced), RestoreFailure::Defective {
                 key: misplaced.clone(),
+                defect: Defect::Misplaced,
             }),
-            (by_digest(&receiver_slot), RestoreFailure::Misplaced {
+            (by_digest(&receiver_slot), RestoreFailure::Defective {
                 key: receiver_slot.clone(),
+                defect: Defect::Misplaced,
             }),
-            (by_digest(&garbage), RestoreFailure::NotAStream {
+            (by_digest(&garbage), RestoreFailure::Defective {
                 key: garbage.clone(),
+                defect: Defect::NotAStream,
             }),
-            (by_digest(&invalid_slot), RestoreFailure::InvalidWindow {
+            (by_digest(&invalid_slot), RestoreFailure::Defective {
                 key: invalid_slot.clone(),
+                defect: Defect::InvalidWindow,
             }),
         ];
         assert_eq!(
@@ -634,7 +630,7 @@ mod tests {
         assert!(restored.holds_shared_snapshot);
         assert_eq!(
             restored.store.unrestorable.get(&by_digest(&torn_slot)),
-            Some(&RestoreFailure::Undecodable { filed_as: None })
+            Some(&RestoreFailure::Undecodable)
         );
         assert_eq!(
             restored
@@ -658,6 +654,107 @@ mod tests {
         Ok(())
     }
 
+    /// The state one stream's record is in, for the exhaustive pointwise check.
+    #[derive(Clone, Copy, Debug)]
+    enum RecordState {
+        /// A valid record of the stream, under its own key.
+        Intact,
+        /// Bytes that decode as no stream.
+        NotAStream,
+        /// A receiver window that violates its invariant.
+        InvalidWindow,
+        /// Another stream's record under this stream's key.
+        Misplaced,
+        /// A record the storage cannot decode.
+        Undecodable,
+    }
+
+    /// Every state a record can be in.
+    const RECORD_STATES: [RecordState; 5] = [
+        RecordState::Intact,
+        RecordState::NotAStream,
+        RecordState::InvalidWindow,
+        RecordState::Misplaced,
+        RecordState::Undecodable,
+    ];
+
+    /// The scanned record of receiver stream `key` in `state`, and the entry of `U` it must
+    /// produce (none for an intact record).
+    fn record_in(
+        key: &StreamKey,
+        state: RecordState,
+    ) -> Result<(ScannedRecord<ReplayRecord>, Option<RestoreFailure>)> {
+        let own = record_key(ReplayTable::Receiver, key)?;
+        let defective = |defect| RestoreFailure::Defective {
+            key: own.clone(),
+            defect,
+        };
+        Ok(match state {
+            RecordState::Intact => (filed(receiver_record(key, &full_window())?), None),
+            RecordState::NotAStream => (
+                filed((own.clone(), ReplayRecord(vec![0xff; 3]))),
+                Some(defective(Defect::NotAStream)),
+            ),
+            RecordState::InvalidWindow => {
+                let mut invalid = full_window();
+                invalid.accepted = [None; TRANSACTION_REPLAY_WINDOW];
+                let (_, record) = receiver_record(key, &invalid)?;
+                (
+                    filed((own.clone(), record)),
+                    Some(defective(Defect::InvalidWindow)),
+                )
+            }
+            RecordState::Misplaced => {
+                let (_, record) = receiver_record(&maximal_key(u32::MAX), &full_window())?;
+                (
+                    filed((own.clone(), record)),
+                    Some(defective(Defect::Misplaced)),
+                )
+            }
+            RecordState::Undecodable => (
+                undecodable(by_digest(&own)),
+                Some(RestoreFailure::Undecodable),
+            ),
+        })
+    }
+
+    /// The fail-closed-per-stream law, checked exhaustively over three streams and every state
+    /// of each (125 stores): the tables are exactly those of the intact records alone, and `U`
+    /// holds exactly the bad records, each under its own name with its own failure.
+    #[test]
+    fn test_restore_is_pointwise_over_every_store_of_three_streams() -> Result<()> {
+        let keys = [maximal_key(1), maximal_key(2), maximal_key(3)];
+        for first in RECORD_STATES {
+            for second in RECORD_STATES {
+                for third in RECORD_STATES {
+                    let states = [first, second, third];
+                    let mut records = Vec::new();
+                    let mut intact = Vec::new();
+                    let mut expected = std::collections::BTreeMap::new();
+                    for (key, state) in keys.iter().zip(states) {
+                        let (record, failure) = record_in(key, state)?;
+                        match failure {
+                            None => intact.push(record.clone()),
+                            Some(failure) => {
+                                let name = by_digest(&record_key(ReplayTable::Receiver, key)?);
+                                expected.insert(name, failure);
+                            }
+                        }
+                        records.push(record);
+                    }
+                    let restored = restore(records, by_digest);
+                    assert_eq!(
+                        restored.store.tables,
+                        restore(intact, by_digest).store.tables,
+                        "{states:?}"
+                    );
+                    assert_eq!(restored.store.unrestorable, expected, "{states:?}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Bounded slots: each unrestorable record holds a slot of both tables, so a table admits a
     /// new stream only while its streams and `|U|` stay below the table bound.
     #[test]
@@ -673,9 +770,7 @@ mod tests {
 
         store
             .unrestorable
-            .insert("torn".to_owned(), RestoreFailure::Undecodable {
-                filed_as: None,
-            });
+            .insert("torn".to_owned(), RestoreFailure::Undecodable);
         assert!(!store.admits_new_stream(ReplayTable::Sender));
         assert!(store.admits_new_stream(ReplayTable::Receiver));
         Ok(())

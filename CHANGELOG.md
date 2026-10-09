@@ -22,23 +22,19 @@
 - Open the native transaction replay store as an authoritative `FileStorage` (#909). On unix its
   `put` flushes the temporary file before the rename and the directory after it (removals, and the
   store's directory and its ancestors at open, are flushed too), so a crash leaves each record whole
-  at its previous or its new value. A record file that cannot be read or does not decode whole is
-  reported (`Error::StorageRecordUndecodable`), naming its file and, when its intact key prefix
-  names the file, its key; a whole record of another key under a file's name is undecodable for that
-  name; a scan reports each record as `ScannedRecord::Filed` or `Undecodable`. Neither is ever
-  deleted, so replay fails closed on it instead of reopening its stream. A directory or a symbolic
-  link to one in a record's place is indexed but charges nothing against the budget. Disposable
-  stores change too: a record entry that is present but unreadable (a dangling link) makes `get` and
-  `get_all` fail instead of reading as absent, and a record holding another key's record is retired
-  by the read that finds it instead of being returned by `get_all`. An authoritative store evicts
-  nothing: a write beyond its budget, or an open under a lowered one, fails with
-  `Error::StorageBudgetExhausted`, and a write into a root that vanished while open fails with
-  `Error::StorageRootMissing`. The flush bounds replay transitions to about 50 per second on an
-  Apple M1 Max SSD (`F_FULLFSYNC`), against about 4,500 unflushed; group commit is tracked in #916.
-  `FileStorage::new_with_cap_and_path` keeps the disposable behaviour (no flush, oldest records
-  evicted, undecodable records retired) for the DHT, measurement, evidence and onion entry-guard
-  stores (the entry-guard store's policy is #911); `FileStorage::new_with_cap_path_and_authority`
-  opens a store of either `RecordAuthority`.
+  at its previous or its new value; the write and removal plans are data the store interprets, and a
+  model checks every crash point of them. A record file that cannot be read or is not the whole
+  record of its own key is reported (`Error::StorageRecordUndecodable`, naming its file; a scan
+  reports each record as `ScannedRecord::Filed` or `Undecodable`) and never deleted, so replay fails
+  closed on it instead of reopening its stream. A disposable store now also retires a record holding
+  another key's record on the read that finds it, instead of returning it from `get_all`. An
+  authoritative store evicts nothing: a write beyond its budget, or an open under a lowered one,
+  fails with `Error::StorageBudgetExhausted`. The flush bounds replay transitions to about 50 per
+  second on an Apple M1 Max SSD (`F_FULLFSYNC`), against about 4,500 unflushed; group commit is
+  tracked in #916. `FileStorage::new_with_cap_and_path` keeps the disposable behaviour (no flush,
+  oldest records evicted, undecodable records retired) for the DHT, measurement, evidence and onion
+  entry-guard stores (the entry-guard store's policy is #911);
+  `FileStorage::new_with_cap_path_and_authority` opens a store of either `RecordAuthority`.
 
 - `rings_runtime::run_blocking` (#919): fallible scheduling on the native blocking pool, with the
   ownership law of `run_detached` (the work starts at the call and outlives a dropped waiter);
@@ -100,8 +96,6 @@
   on the trait. `MemStorage`, `FileStorage` and `IdbStorage` implement it; a custom replay storage
   passed to `SwarmBuilder::replay_storage` or `ProcessorBuilder::replay_storage` must implement it
   too.
-- `Arc<S>` implements `KvStorageInterface<V>` and `KvStorageScan<V>` whenever `S` does (#910),
-  so a downstream `impl KvStorageInterface<_> for Arc<_>` now conflicts.
 - Every `FileStorage` operation, disposable stores' included, runs its file I/O on the runtime's
   blocking pool (#909, #919) and fails with `Error::StorageWorkUnscheduled` outside a Tokio
   runtime.

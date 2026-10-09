@@ -493,10 +493,10 @@ where V: DeserializeOwned {
         .and_then(|row| Ok((row.key, js_value::deserialize(row.data)?)))
         .map_or_else(
             |_| {
-                let key = primary_key.as_string();
                 ScannedRecord::Undecodable(UndecodableRecord {
-                    name: key.clone().unwrap_or_else(|| format!("{primary_key:?}")),
-                    key,
+                    name: primary_key
+                        .as_string()
+                        .unwrap_or_else(|| format!("{primary_key:?}")),
                 })
             },
             |(key, value)| ScannedRecord::Filed { key, value },

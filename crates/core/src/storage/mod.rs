@@ -17,10 +17,7 @@ pub mod idb;
 pub mod memory;
 mod write_ordered;
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
-use rings_runtime::MaybeSendSync;
 
 use crate::error::Result;
 pub use crate::storage::memory::MemStorage;
@@ -36,9 +33,6 @@ pub struct UndecodableRecord {
     /// filed as, which is the key itself or the backend's image of it (`FileStorage`: the file
     /// name).
     pub name: String,
-    /// The key the record is filed as, when the intact part of the record names a key whose
-    /// name is this record's name; `None` otherwise.
-    pub key: Option<String>,
 }
 
 /// One record of a [`KvStorageScan::scan`].
@@ -57,12 +51,9 @@ pub enum ScannedRecord<V> {
 }
 
 impl std::fmt::Display for UndecodableRecord {
-    /// The record's name, and the key it is filed as or that no key can be recovered.
+    /// The record's name.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.key.as_deref() {
-            Some(key) => write!(f, "record {} (key {key})", self.name),
-            None => write!(f, "record {} (key unrecoverable)", self.name),
-        }
+        write!(f, "record {}", self.name)
     }
 }
 
@@ -103,8 +94,7 @@ pub trait KvStorageInterface<V> {
 ///
 /// ```text
 /// Filed { k, v }   ⟺  a whole record (k, v) filed under record_name(k)
-/// Undecodable(u)   ⟺  anything else filed under u.name;
-///                      u.key = Some(k) ⟹ record_name(k) = u.name
+/// Undecodable(u)   ⟺  anything else filed under u.name
 /// ```
 ///
 /// An owner restores exactly the `Filed` records and fails closed on the names of the rest, so
@@ -121,61 +111,5 @@ pub trait KvStorageScan<V>: KvStorageInterface<V> {
     fn record_name(&self, key: &str) -> String;
 }
 
-/// A shared storage is the storage it shares: every operation delegates to it, so a wrapper
-/// never restates (or mistakes) the naming its scan must agree with.
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl<V, S> KvStorageInterface<V> for Arc<S>
-where
-    V: MaybeSendSync,
-    S: KvStorageInterface<V> + MaybeSendSync + ?Sized,
-{
-    /// `get` of the shared storage.
-    async fn get(&self, key: &str) -> Result<Option<V>> {
-        self.as_ref().get(key).await
-    }
-
-    /// `put` of the shared storage.
-    async fn put(&self, key: &str, value: &V) -> Result<()> {
-        self.as_ref().put(key, value).await
-    }
-
-    /// `get_all` of the shared storage.
-    async fn get_all(&self) -> Result<Vec<(String, V)>> {
-        self.as_ref().get_all().await
-    }
-
-    /// `remove` of the shared storage.
-    async fn remove(&self, key: &str) -> Result<()> {
-        self.as_ref().remove(key).await
-    }
-
-    /// `clear` of the shared storage.
-    async fn clear(&self) -> Result<()> {
-        self.as_ref().clear().await
-    }
-
-    /// `count` of the shared storage.
-    async fn count(&self) -> Result<u32> {
-        self.as_ref().count().await
-    }
-}
-
-/// A shared scannable storage scans and names exactly as the storage it shares.
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl<V, S> KvStorageScan<V> for Arc<S>
-where
-    V: MaybeSendSync,
-    S: KvStorageScan<V> + MaybeSendSync + ?Sized,
-{
-    /// `scan` of the shared storage.
-    async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
-        self.as_ref().scan().await
-    }
-
-    /// `record_name` of the shared storage.
-    fn record_name(&self, key: &str) -> String {
-        self.as_ref().record_name(key)
-    }
-}
+#[cfg(test)]
+mod test_shared;

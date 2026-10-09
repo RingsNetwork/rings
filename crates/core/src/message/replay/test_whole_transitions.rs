@@ -161,3 +161,50 @@ async fn test_a_cancelled_reservation_completes_before_the_next_one() -> Result<
     );
     Ok(())
 }
+
+/// A reservation cancelled while it waits for the lock is not shed: its transition was handed
+/// to the runtime at the call, so it still runs to its end after the holder, reaches its write
+/// and consumes its sequence; the next reservation continues after both.
+#[tokio::test]
+async fn test_a_reservation_cancelled_while_waiting_for_the_lock_still_commits() -> Result<()> {
+    let storage = Arc::new(GatedStorage::new(Gate::default()));
+    let replay = TransactionReplay::new_shared(Box::new(Arc::clone(&storage)));
+    let reserve = |replay: &Arc<TransactionReplay>| {
+        let replay = Arc::clone(replay);
+        tokio::spawn(async move { replay.reserve(stream(), NonZeroU64::MIN).await })
+    };
+
+    let holder = reserve(&replay);
+    storage.hooks.entered.notified().await;
+    let waiting = reserve(&replay);
+    // The test runs on one current-thread executor, which polls the woken tasks in order: one
+    // yield lets the waiter hand its transition to the runtime, where it queues on the lock.
+    tokio::task::yield_now().await;
+    cancel(waiting).await;
+    storage.hooks.release.notify_one();
+    assert_eq!(
+        holder
+            .await
+            .map_err(|_| Error::TransactionReplayStateInvalid)??,
+        0..=0
+    );
+
+    // The cancelled transition still reaches its write (a hang guard bounds the wait).
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        storage.hooks.entered.notified(),
+    )
+    .await
+    .map_err(|_| Error::TransactionReplayStateInvalid)?;
+    storage.hooks.release.notify_one();
+
+    let next = reserve(&replay);
+    storage.hooks.entered.notified().await;
+    storage.hooks.release.notify_one();
+    assert_eq!(
+        next.await
+            .map_err(|_| Error::TransactionReplayStateInvalid)??,
+        2..=2
+    );
+    Ok(())
+}

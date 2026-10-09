@@ -769,16 +769,9 @@ impl TransactionReplay {
 mod tests {
     use std::collections::BTreeMap;
 
-    #[cfg(not(target_family = "wasm"))]
-    use super::store::record_key;
-    #[cfg(not(target_family = "wasm"))]
-    use super::store::ReplayTable;
-    #[cfg(not(target_family = "wasm"))]
-    use super::test_storage::Hooked;
-    #[cfg(not(target_family = "wasm"))]
-    use super::test_storage::StorageHooks;
     use super::*;
     use crate::ecc::SecretKey;
+    #[cfg(not(target_family = "wasm"))]
     use crate::storage::KvStorageInterface;
 
     fn digest(value: u8) -> TransactionDigest {
@@ -1066,38 +1059,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(target_family = "wasm"))]
-    #[tokio::test]
-    async fn load_failure_fails_closed_and_is_counted() {
-        let runtime = TransactionReplay::new_shared(Box::new(Hooked::new(Unavailable)));
-        let key = stream(SecretKey::random().address().into());
-
-        assert!(matches!(
-            runtime.admit(key, 0, digest(1)).await,
-            Err(Error::TransactionReplayPersistence {
-                operation: "load",
-                ..
-            })
-        ));
-        assert_eq!(runtime.counters().persistence_failure, 1);
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    #[tokio::test]
-    async fn store_failure_fails_closed_before_admission_and_is_counted() {
-        let runtime = TransactionReplay::new_shared(Box::new(Hooked::new(WritesRefused)));
-        let key = stream(SecretKey::random().address().into());
-
-        assert!(matches!(
-            runtime.admit(key, 0, digest(1)).await,
-            Err(Error::TransactionReplayPersistence {
-                operation: "store",
-                ..
-            })
-        ));
-        assert_eq!(runtime.counters().persistence_failure, 1);
-    }
-
     /// The four classes of a class-keyed stream, in lane order.
     const CLASSES: [MessageCategory; MessageCategory::COUNT] = [
         MessageCategory::DhtControl,
@@ -1188,223 +1149,16 @@ mod tests {
             Err(Error::TransactionReplay { .. })
         ));
     }
-
-    /// Fail closed per stream in the browser store: a row under stream 1's receiver record key
-    /// that does not decode as a record refuses that stream alone, is kept, and removing it
-    /// before a reopen restores the stream while the others keep their windows.
-    #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    async fn test_browser_store_fails_closed_only_on_the_stream_of_an_undecodable_row() {
-        /// The IndexedDB database this test owns.
-        const STORAGE_NAME: &str = "rings-core/replay-store-undecodable-row";
-        let open = || crate::storage::idb::IdbStorage::new_with_cap_and_name(4, STORAGE_NAME);
-        let storage = open().await.expect("IndexedDB opens");
-        <crate::storage::idb::IdbStorage as KvStorageInterface<ReplayRecord>>::clear(&storage)
-            .await
-            .expect("IndexedDB clears");
-        let corrupt = StreamKey::new(7, Did::from(1_u32), Did::from(99_u32), MessageCategory::E2e);
-        let intact = StreamKey::new(7, Did::from(2_u32), Did::from(99_u32), MessageCategory::E2e);
-        let corrupt_key = super::store::record_key(super::store::ReplayTable::Receiver, &corrupt)
-            .expect("record key encodes");
-        storage
-            .put(corrupt_key.as_str(), &42_u32)
-            .await
-            .expect("foreign row stores");
-        let replay = TransactionReplay::new_shared(Box::new(storage));
-
-        assert!(matches!(
-            replay.admit(corrupt, 0, digest(1)).await,
-            Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
-                if *record == corrupt_key
-        ));
-        assert_eq!(
-            replay
-                .admit(intact, 0, digest(1))
-                .await
-                .expect("the intact stream admits"),
-            SequenceVerdict::First
-        );
-        assert_eq!(replay.counters().unrestorable_record, 1);
-        drop(replay);
-
-        let reopened = open().await.expect("IndexedDB reopens");
-        <crate::storage::idb::IdbStorage as KvStorageInterface<ReplayRecord>>::remove(
-            &reopened,
-            corrupt_key.as_str(),
-        )
-        .await
-        .expect("the operator removes the row");
-        let restarted = TransactionReplay::new_shared(Box::new(reopened));
-        assert_eq!(
-            restarted
-                .admit(corrupt, 0, digest(1))
-                .await
-                .expect("the cleared stream admits"),
-            SequenceVerdict::First
-        );
-        assert!(matches!(
-            restarted.admit(intact, 0, digest(1)).await,
-            Err(Error::TransactionReplay { .. })
-        ));
-    }
-
-    /// Hooks of a store that cannot be read or written, modelling a store that cannot load.
-    /// Removal (and `clear`, `count`) still succeeds: the shared-snapshot retirement must not
-    /// be what fails.
-    #[cfg(not(target_family = "wasm"))]
-    struct Unavailable;
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl StorageHooks for Unavailable {
-        /// Runs before a `get`.
-        async fn before_get(&self, _key: &str) -> Result<()> {
-            Err(Error::InvalidTransport)
-        }
-
-        /// Runs before a `put`.
-        async fn before_put(&self, _key: &str) -> Result<()> {
-            Err(Error::InvalidTransport)
-        }
-
-        /// Runs before a whole-store read.
-        async fn before_scan(&self) -> Result<()> {
-            Err(Error::InvalidTransport)
-        }
-    }
-
-    /// Hooks of a store that loads but refuses every write.
-    #[cfg(not(target_family = "wasm"))]
-    struct WritesRefused;
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl StorageHooks for WritesRefused {
-        /// Runs before a `put`.
-        async fn before_put(&self, _key: &str) -> Result<()> {
-            Err(Error::InvalidTransport)
-        }
-    }
-
-    /// Hooks of a store that still holds a shared-stream snapshot under the key used before
-    /// #898. The snapshot's bytes decode as no stream, so a passing test proves the cutover
-    /// never decodes it, and reading the key alone is an error.
-    #[cfg(not(target_family = "wasm"))]
-    struct Cutover {
-        /// Whether removing a record fails.
-        fail_remove: bool,
-        /// Removals attempted.
-        removals: std::sync::atomic::AtomicUsize,
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    #[async_trait::async_trait]
-    impl StorageHooks for Cutover {
-        /// Runs before a `get`.
-        async fn before_get(&self, key: &str) -> Result<()> {
-            match key == SHARED_STREAM_SNAPSHOT_KEY {
-                true => Err(Error::InvalidTransport),
-                false => Ok(()),
-            }
-        }
-
-        /// Runs before a `remove`.
-        async fn before_remove(&self, _key: &str) -> Result<()> {
-            self.removals.fetch_add(1, Ordering::SeqCst);
-            match self.fail_remove {
-                true => Err(Error::InvalidTransport),
-                false => Ok(()),
-            }
-        }
-    }
-
-    /// A store holding a snapshot under the shared-stream key, whose removals fail iff
-    /// `fail_remove`.
-    #[cfg(not(target_family = "wasm"))]
-    async fn holding_a_shared_stream_snapshot(
-        fail_remove: bool,
-    ) -> Result<std::sync::Arc<Hooked<Cutover>>> {
-        let storage = Hooked::new(Cutover {
-            fail_remove,
-            removals: std::sync::atomic::AtomicUsize::new(0),
-        });
-        storage
-            .inner
-            .put(SHARED_STREAM_SNAPSHOT_KEY, &ReplayRecord(vec![0xff; 3]))
-            .await?;
-        Ok(std::sync::Arc::new(storage))
-    }
-
-    /// Cutover of #898: the first load deletes the shared-stream snapshot without decoding it,
-    /// and admission proceeds on fresh per-class streams. A restart after it never deletes
-    /// again: the former snapshot is gone.
-    #[cfg(not(target_family = "wasm"))]
-    #[tokio::test]
-    async fn test_first_load_deletes_the_shared_stream_snapshot_unread() -> Result<()> {
-        let storage = holding_a_shared_stream_snapshot(false).await?;
-        let runtime = TransactionReplay::new_shared(Box::new(storage.clone()));
-        let key = stream(SecretKey::random().address().into());
-
-        assert_eq!(
-            runtime.admit(key, 0, digest(1)).await?,
-            SequenceVerdict::First
-        );
-        assert!(storage
-            .inner
-            .get(SHARED_STREAM_SNAPSHOT_KEY)
-            .await?
-            .is_none());
-        assert!(storage
-            .inner
-            .get(record_key(ReplayTable::Receiver, &key)?.as_str())
-            .await?
-            .is_some());
-        assert_eq!(runtime.counters().persistence_failure, 0);
-
-        let restarted = TransactionReplay::new_shared(Box::new(storage.clone()));
-        assert_eq!(
-            restarted.admit(key, 1, digest(2)).await?,
-            SequenceVerdict::Advance
-        );
-        assert_eq!(storage.hooks.removals.load(Ordering::SeqCst), 1);
-        Ok(())
-    }
-
-    /// A failed deletion of the shared-stream snapshot is counted and admission continues: the
-    /// former key is never decoded, so it is left inert until a later load deletes it.
-    #[cfg(not(target_family = "wasm"))]
-    #[tokio::test]
-    async fn test_failed_shared_stream_deletion_is_counted_and_admission_continues() -> Result<()> {
-        let storage = holding_a_shared_stream_snapshot(true).await?;
-        let runtime = TransactionReplay::new_shared(Box::new(storage.clone()));
-        let key = stream(SecretKey::random().address().into());
-
-        assert_eq!(
-            runtime.admit(key, 0, digest(1)).await?,
-            SequenceVerdict::First
-        );
-        assert_eq!(runtime.counters().persistence_failure, 1);
-        assert!(storage
-            .inner
-            .get(SHARED_STREAM_SNAPSHOT_KEY)
-            .await?
-            .is_some());
-
-        let restarted = TransactionReplay::new_shared(Box::new(storage.clone()));
-        assert_eq!(
-            restarted.admit(key, 1, digest(2)).await?,
-            SequenceVerdict::Advance
-        );
-        assert_eq!(restarted.counters().persistence_failure, 1);
-        assert_eq!(storage.hooks.removals.load(Ordering::SeqCst), 2);
-        Ok(())
-    }
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod quota_admission_tests;
+#[cfg(all(test, feature = "wasm", target_family = "wasm"))]
+mod test_browser_store;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_durable_throughput;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_load_failures;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_storage;
 #[cfg(all(test, not(target_family = "wasm")))]

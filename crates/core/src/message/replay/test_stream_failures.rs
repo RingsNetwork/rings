@@ -3,7 +3,6 @@
 //! restarting, restores the stream.
 
 use std::num::NonZeroU64;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -163,30 +162,19 @@ async fn test_a_corrupt_sender_record_refuses_reservation_on_its_stream() -> Res
     Ok(())
 }
 
-/// A directory occupying a native record's name cannot be read as a record: it fails its
-/// stream closed without failing the load, so every other stream works and the refusal repeats
-/// from the cached load, never counted as a failed read of the store.
+/// A record file the store cannot read (a looping link, which no user can read) fails its stream
+/// closed without failing the load, so every other stream works and the refusal repeats from
+/// the cached load, never counted as a failed read of the store.
+#[cfg(unix)]
 #[tokio::test]
 async fn test_an_unreadable_native_record_fails_only_its_stream() -> Result<()> {
     let root = TempRoot::new("replay-unreadable");
-    let storage = FileStorage::new_with_cap_path_and_authority(
-        1 << 20,
-        &root,
-        RecordAuthority::Authoritative,
-    )
-    .await?;
+    let storage = open_authoritative(&root).await?;
     let occupied = record_key(ReplayTable::Receiver, &stream(1))?;
     let name = <FileStorage as KvStorageScan<ReplayRecord>>::record_name(&storage, &occupied);
-    std::fs::create_dir(root.join(&name)).map_err(Error::ServiceIOError)?;
+    std::os::unix::fs::symlink(&name, root.join(&name)).map_err(Error::ServiceIOError)?;
     drop(storage);
-    let replay = TransactionReplay::new_shared(Box::new(
-        FileStorage::new_with_cap_path_and_authority(
-            1 << 20,
-            &root,
-            RecordAuthority::Authoritative,
-        )
-        .await?,
-    ));
+    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
 
     for sequence in 0..4_u8 {
         assert!(matches!(
@@ -202,21 +190,7 @@ async fn test_an_unreadable_native_record_fails_only_its_stream() -> Result<()> 
     assert_eq!(counters.unrestorable_record, 1);
     assert_eq!(counters.unavailable_stream, 4);
     assert_eq!(counters.persistence_failure, 0);
-    drop(replay);
     Ok(())
-}
-
-/// The native files of stream 2's and stream 1's receiver records in `root`.
-fn receiver_files(root: &TempRoot, storage: &FileStorage) -> Result<(PathBuf, PathBuf)> {
-    let name = |stream_key: &StreamKey| -> Result<PathBuf> {
-        let key = record_key(ReplayTable::Receiver, stream_key)?;
-        Ok(
-            root.join(<FileStorage as KvStorageScan<ReplayRecord>>::record_name(
-                storage, &key,
-            )),
-        )
-    };
-    Ok((name(&stream(2))?, name(&stream(1))?))
 }
 
 /// Open the authoritative replay store rooted at `root`.
@@ -230,178 +204,6 @@ fn file_name(path: &std::path::Path) -> Option<String> {
     path.file_name()
         .and_then(|name| name.to_str())
         .map(str::to_owned)
-}
-
-/// A copy of stream 2's receiver record under stream 1's file name is undecodable for that name
-/// (it holds another key): stream 1 alone fails closed, named by its file, and stream 2 keeps its
-/// own, newer window, so the stale copy cannot roll it back.
-#[tokio::test]
-async fn test_a_copied_record_fails_only_the_stream_its_name_denotes() -> Result<()> {
-    let root = TempRoot::new("replay-copied");
-    let (own, copy) = receiver_files(&root, &open_authoritative(&root).await?)?;
-    TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
-        .admit(stream(2), 0, digest(1))
-        .await?;
-    let stale = std::fs::read(&own).map_err(Error::ServiceIOError)?;
-    TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
-        .admit(stream(2), 1, digest(2))
-        .await?;
-    std::fs::write(&copy, stale).map_err(Error::ServiceIOError)?;
-
-    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
-    assert!(matches!(
-        replay.admit(stream(1), 0, digest(1)).await,
-        Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
-            if Some(record) == file_name(&copy).as_ref()
-    ));
-    assert!(matches!(
-        replay.admit(stream(2), 1, digest(2)).await,
-        Err(Error::TransactionReplay { .. })
-    ));
-    assert_eq!(
-        replay.admit(stream(3), 0, digest(1)).await?,
-        SequenceVerdict::First
-    );
-    assert_eq!(replay.counters().unrestorable_record, 1);
-    Ok(())
-}
-
-/// A whole record under stream 1's file name whose key text names stream 3 while its body is
-/// stream 2's window (a bit flip in the key text) is undecodable for stream 1's name: stream 1
-/// alone fails closed, and streams 2 and 3 run.
-#[tokio::test]
-async fn test_a_record_with_a_flipped_key_fails_only_its_own_stream() -> Result<()> {
-    let root = TempRoot::new("replay-flipped");
-    let (own, filed_as) = receiver_files(&root, &open_authoritative(&root).await?)?;
-    TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
-        .admit(stream(2), 0, digest(1))
-        .await?;
-    let bytes = std::fs::read(&own).map_err(Error::ServiceIOError)?;
-    let (_, record) = rings_codec::deserialize::<(String, ReplayRecord)>(&bytes)
-        .map_err(Error::CodecDeserialize)?;
-    let flipped = record_key(ReplayTable::Receiver, &stream(3))?;
-    let damaged = rings_codec::serialize(&(flipped, record)).map_err(Error::CodecSerialize)?;
-    std::fs::write(&filed_as, damaged).map_err(Error::ServiceIOError)?;
-
-    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
-    assert!(matches!(
-        replay.admit(stream(1), 0, digest(1)).await,
-        Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
-            if Some(record) == file_name(&filed_as).as_ref()
-    ));
-    assert!(matches!(
-        replay.admit(stream(2), 0, digest(1)).await,
-        Err(Error::TransactionReplay { .. })
-    ));
-    assert_eq!(
-        replay.admit(stream(3), 0, digest(1)).await?,
-        SequenceVerdict::First
-    );
-    Ok(())
-}
-
-/// A store where stream 2's receiver record, holding sequence 0, was moved over stream 1's
-/// file; returns stream 2's own (now absent) file and the file it was moved into.
-async fn store_with_a_moved_record(root: &TempRoot) -> Result<(PathBuf, PathBuf)> {
-    let (own, moved) = receiver_files(root, &open_authoritative(root).await?)?;
-    TransactionReplay::new_shared(Box::new(open_authoritative(root).await?))
-        .admit(stream(2), 0, digest(1))
-        .await?;
-    std::fs::rename(&own, &moved).map_err(Error::ServiceIOError)?;
-    Ok((own, moved))
-}
-
-/// A record moved over another stream's file is undecodable for that file's name: the stream
-/// it is filed as fails closed, named by the file, and the moved stream has no record of its
-/// own, the absent-record case of #915 (it starts from `First`). Renaming the file back
-/// restores the moved stream exactly.
-#[tokio::test]
-async fn test_a_moved_record_fails_the_stream_it_is_filed_as() -> Result<()> {
-    let root = TempRoot::new("replay-moved");
-    let (own, moved) = store_with_a_moved_record(&root).await?;
-
-    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
-    assert!(matches!(
-        replay.admit(stream(1), 0, digest(1)).await,
-        Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
-            if Some(record) == file_name(&moved).as_ref()
-    ));
-    assert_eq!(replay.counters().unrestorable_record, 1);
-    drop(replay);
-
-    std::fs::rename(&moved, &own).map_err(Error::ServiceIOError)?;
-    let restarted = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
-    assert!(matches!(
-        restarted.admit(stream(2), 0, digest(1)).await,
-        Err(Error::TransactionReplay { .. })
-    ));
-    assert_eq!(
-        restarted.admit(stream(1), 0, digest(1)).await?,
-        SequenceVerdict::First
-    );
-    Ok(())
-}
-
-/// A file name damaged by one bit that stays a record name (lower-case hex) denotes no stream's
-/// record: the record under it is undecodable for that name and fails only the stream that name
-/// denotes (none of the live ones), so no transition is refused; stream 2, whose name was
-/// damaged, has no record of its own and starts from `First` (the absent-record case of #915),
-/// and renaming the file back restores its window.
-#[tokio::test]
-async fn test_a_record_under_a_one_bit_damaged_name_fails_only_that_name() -> Result<()> {
-    let root = TempRoot::new("replay-name-flip");
-    let (stream_2_file, stream_1_file) = receiver_files(&root, &open_authoritative(&root).await?)?;
-    TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
-        .admit(stream(2), 0, digest(1))
-        .await?;
-    TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
-        .admit(stream(1), 0, digest(1))
-        .await?;
-    let name = file_name(&stream_2_file).unwrap_or_default();
-    // Flip the lowest bit of the first character whose flip stays lower-case hex.
-    let flipped = name
-        .char_indices()
-        .find_map(|(index, character)| {
-            let flip = char::from(u8::try_from(character).ok()? ^ 1);
-            matches!(flip, '0'..='9' | 'a'..='f').then(|| {
-                let mut damaged = name.clone();
-                damaged.replace_range(index..=index, flip.encode_utf8(&mut [0; 4]));
-                damaged
-            })
-        })
-        .unwrap_or_default();
-    let damaged = root.join(&flipped);
-    std::fs::rename(&stream_2_file, &damaged).map_err(Error::ServiceIOError)?;
-
-    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
-    assert!(matches!(
-        replay.admit(stream(1), 0, digest(1)).await,
-        Err(Error::TransactionReplay { .. })
-    ));
-    assert_eq!(
-        replay.admit(stream(2), 0, digest(1)).await?,
-        SequenceVerdict::First
-    );
-    assert_eq!(
-        replay.admit(stream(3), 0, digest(1)).await?,
-        SequenceVerdict::First
-    );
-    let counters = replay.counters();
-    assert_eq!(counters.unrestorable_record, 1);
-    assert_eq!(counters.unavailable_stream, 0);
-    assert!(damaged.exists() && stream_1_file.exists());
-    drop(replay);
-
-    // Stream 2's window from the damaged run is now in its own file; the renamed one is older.
-    std::fs::remove_file(&stream_2_file).map_err(Error::ServiceIOError)?;
-    std::fs::rename(&damaged, &stream_2_file).map_err(Error::ServiceIOError)?;
-    let restarted = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
-    assert!(matches!(
-        restarted.admit(stream(2), 0, digest(1)).await,
-        Err(Error::TransactionReplay { .. })
-    ));
-    assert_eq!(restarted.counters().unrestorable_record, 0);
-    Ok(())
 }
 
 /// Law (restore once): the store is read by the first operation only; refused and admitted

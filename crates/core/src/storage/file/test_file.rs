@@ -257,7 +257,7 @@ fn plant_record(root: &std::path::Path, key: &str, bytes: &[u8]) -> String {
 }
 
 /// Decode law of an authoritative store: a torn record (its tail lost) is reported by `get`
-/// and `get_all` with its file and its intact key, and never deleted.
+/// and `get_all` by its file, and never deleted.
 #[tokio::test]
 async fn test_authoritative_store_reports_a_torn_record_and_keeps_it() {
     let root = temp_root("torn");
@@ -268,10 +268,7 @@ async fn test_authoritative_store_reports_a_torn_record_and_keeps_it() {
         FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
             .await
             .expect("open");
-    let expected = UndecodableRecord {
-        name: name.clone(),
-        key: Some("stream".to_owned()),
-    };
+    let expected = UndecodableRecord { name: name.clone() };
 
     assert!(matches!(
         <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
@@ -291,16 +288,13 @@ async fn test_authoritative_store_reports_a_torn_record_and_keeps_it() {
 }
 
 /// Decode law of an authoritative store: a record truncated to nothing, which a crash between
-/// an unflushed write and its rename leaves behind, is reported by its file alone (its key is
-/// lost with its bytes) and never deleted, even across a reopen.
+/// an unflushed write and its rename leaves behind on a disposable store, is reported by an
+/// authoritative store by its file and never deleted, even across a reopen.
 #[tokio::test]
 async fn test_authoritative_store_reports_an_empty_record_by_its_file() {
     let root = temp_root("empty");
     let name = plant_record(&root, "stream", &[]);
-    let expected = UndecodableRecord {
-        name: name.clone(),
-        key: None,
-    };
+    let expected = UndecodableRecord { name: name.clone() };
     for _ in 0..2 {
         let storage = FileStorage::new_with_cap_path_and_authority(
             4096,
@@ -315,28 +309,6 @@ async fn test_authoritative_store_reports_an_empty_record_by_its_file() {
         ));
         assert!(root.join(&name).exists());
     }
-}
-
-/// A record that does not decode whole, whose key prefix decodes but hashes to another file, is
-/// undecodable with no key: the prefix is not the key it is filed as.
-#[tokio::test]
-async fn test_a_foreign_key_prefix_is_not_reported_as_the_key() {
-    let root = temp_root("foreign-prefix");
-    let other = rings_codec::serialize(&"other").expect("key serializes");
-    let name = plant_record(&root, "stream", &other);
-    let storage =
-        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
-            .await
-            .expect("open");
-
-    assert!(matches!(
-        <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
-        Err(Error::StorageRecordUndecodable(UndecodableRecord {
-            name: ref reported,
-            key: None,
-        }))
-            if *reported == name
-    ));
 }
 
 /// Durability law, observed through its effect: an authoritative store's writes, rewrites and
@@ -395,10 +367,7 @@ async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
         .expect("scan");
     scanned.sort_by_key(|record| matches!(record, ScannedRecord::Filed { .. }));
     assert_eq!(scanned, [
-        ScannedRecord::Undecodable(UndecodableRecord {
-            name: name.clone(),
-            key: Some("torn".to_owned()),
-        }),
+        ScannedRecord::Undecodable(UndecodableRecord { name: name.clone() }),
         ScannedRecord::Filed {
             key: "whole".to_owned(),
             value: "v".to_owned(),
@@ -409,41 +378,6 @@ async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
         <FileStorage as KvStorageScan<String>>::record_name(&storage, "torn"),
         name
     );
-}
-
-/// Scan and index laws under a directory in a record's place: it is reported by its file name,
-/// charges nothing against the budget, and the scan as a whole succeeds with the readable
-/// records.
-#[tokio::test]
-async fn test_scan_reports_a_directory_in_a_record_place() {
-    let root = temp_root("directory");
-    let directory = file_name_for("directory");
-    std::fs::create_dir_all(root.join(&directory)).expect("occupy a record name");
-    // A budget of exactly one record: the directory must charge nothing, whatever size the file
-    // system reports for it (4096 on ext4).
-    let storage = FileStorage::new_with_cap_path_and_authority(
-        record_len("whole", "v"),
-        &root,
-        RecordAuthority::Authoritative,
-    )
-    .await
-    .expect("open");
-    storage.put("whole", &"v".to_string()).await.expect("put");
-
-    let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
-        .await
-        .expect("a bad entry does not fail the scan");
-    scanned.sort_by_key(|record| matches!(record, ScannedRecord::Filed { .. }));
-    assert_eq!(scanned, [
-        ScannedRecord::Undecodable(UndecodableRecord {
-            name: directory,
-            key: None,
-        }),
-        ScannedRecord::Filed {
-            key: "whole".to_owned(),
-            value: "v".to_owned(),
-        },
-    ]);
 }
 
 /// A symbolic link named `name` in `root` that points at itself: its metadata and its contents
@@ -473,10 +407,7 @@ async fn test_scan_reports_a_record_it_cannot_read() {
         .expect("a bad entry does not fail the scan");
     scanned.sort_by_key(|record| matches!(record, ScannedRecord::Filed { .. }));
     assert_eq!(scanned, [
-        ScannedRecord::Undecodable(UndecodableRecord {
-            name: looping,
-            key: None,
-        }),
+        ScannedRecord::Undecodable(UndecodableRecord { name: looping }),
         ScannedRecord::Filed {
             key: "whole".to_owned(),
             value: "v".to_owned(),
@@ -504,67 +435,8 @@ async fn test_authoritative_open_indexes_an_entry_whose_metadata_fails() {
         <FileStorage as KvStorageScan<String>>::scan(&storage)
             .await
             .expect("scan"),
-        [ScannedRecord::Undecodable(UndecodableRecord {
-            name,
-            key: None,
-        })]
+        [ScannedRecord::Undecodable(UndecodableRecord { name })]
     );
-}
-
-/// Index law under a dangling link: an entry whose target is missing is present, so a scan
-/// reports it as unreadable instead of hiding it as absent.
-#[cfg(unix)]
-#[tokio::test]
-async fn test_scan_reports_a_dangling_link_instead_of_hiding_it() {
-    let root = temp_root("dangling");
-    let name = file_name_for("stream");
-    std::fs::create_dir_all(root.as_ref()).expect("root");
-    std::os::unix::fs::symlink(root.join("missing-target"), root.join(&name))
-        .expect("plant a dangling link");
-    let storage =
-        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
-            .await
-            .expect("open");
-
-    assert_eq!(
-        <FileStorage as KvStorageScan<String>>::scan(&storage)
-            .await
-            .expect("scan"),
-        [ScannedRecord::Undecodable(UndecodableRecord {
-            name,
-            key: None,
-        })]
-    );
-}
-
-/// Root law: an authoritative store whose root vanished while open refuses the next write
-/// instead of recreating an empty store; a disposable store recreates it.
-#[tokio::test]
-async fn test_authoritative_store_refuses_a_write_into_a_vanished_root() {
-    let root = temp_root("vanished");
-    let authoritative =
-        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
-            .await
-            .expect("open");
-    authoritative
-        .put("a", &"v".to_string())
-        .await
-        .expect("put a");
-    std::fs::remove_dir_all(root.as_ref()).expect("remove the root");
-
-    assert!(matches!(
-        authoritative.put("b", &"v".to_string()).await,
-        Err(Error::StorageRootMissing(ref missing)) if missing.as_path() == root.as_ref()
-    ));
-    assert!(!root.exists());
-    drop(authoritative);
-
-    let disposable = FileStorage::new_with_cap_and_path(4096, &root)
-        .await
-        .expect("open");
-    std::fs::remove_dir_all(root.as_ref()).expect("remove the root");
-    disposable.put("b", &"v".to_string()).await.expect("put b");
-    assert_eq!(stored_keys(&disposable).await, ["b"]);
 }
 
 /// Budget law of an authoritative store: a write that does not fit fails and evicts nothing,
@@ -631,14 +503,12 @@ async fn test_a_record_of_another_key_is_undecodable_for_its_name() {
             .expect("scan"),
         [ScannedRecord::Undecodable(UndecodableRecord {
             name: name.clone(),
-            key: None,
         })]
     );
     assert!(matches!(
         <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
         Err(Error::StorageRecordUndecodable(UndecodableRecord {
             name: ref reported,
-            key: None,
         })) if *reported == name
     ));
     assert_eq!(
@@ -672,58 +542,4 @@ async fn test_a_record_of_another_key_is_undecodable_for_its_name() {
         []
     );
     assert!(!root.join(&name).exists());
-}
-
-/// Root law: an authoritative root that is no longer a directory is reported missing, and the
-/// write changes nothing.
-#[tokio::test]
-async fn test_authoritative_root_replaced_by_a_file_is_missing() {
-    let root = temp_root("root-file");
-    let storage =
-        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
-            .await
-            .expect("open");
-    std::fs::remove_dir_all(root.as_ref()).expect("remove the root");
-    std::fs::write(root.as_ref(), b"not a directory").expect("occupy the root");
-
-    assert!(matches!(
-        storage.put("a", &"v".to_string()).await,
-        Err(Error::StorageRootMissing(_))
-    ));
-    std::fs::remove_file(root.as_ref()).expect("release the root");
-}
-
-/// Root law, the race after the check: a temporary write that fails because the root vanished
-/// (`NotFound`) or stopped being a directory (`NotADirectory`) is reported as the root missing
-/// by an authoritative store, and as itself by a disposable one. A unit test of the
-/// classification `store_record` routes the temporary write's error through; each store owns its
-/// own root, as the index law requires.
-#[tokio::test]
-async fn test_a_write_that_loses_its_root_reports_the_root_missing() {
-    let authoritative_root = temp_root("write-failure-authoritative");
-    let disposable_root = temp_root("write-failure-disposable");
-    let authoritative = FileStorage::new_with_cap_path_and_authority(
-        4096,
-        &authoritative_root,
-        RecordAuthority::Authoritative,
-    )
-    .await
-    .expect("open");
-    let disposable = FileStorage::new_with_cap_and_path(4096, &disposable_root)
-        .await
-        .expect("open");
-    for kind in [
-        std::io::ErrorKind::NotFound,
-        std::io::ErrorKind::NotADirectory,
-    ] {
-        let failed = || Error::ServiceIOError(std::io::Error::from(kind));
-        assert!(matches!(
-            authoritative.store.write_failure(failed()),
-            Error::StorageRootMissing(_)
-        ));
-        assert!(matches!(
-            disposable.store.write_failure(failed()),
-            Error::ServiceIOError(_)
-        ));
-    }
 }

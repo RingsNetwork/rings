@@ -718,11 +718,6 @@ pub enum Error {
         capacity: u64,
     },
 
-    /// An authoritative storage's root directory vanished while it was open; the write is
-    /// refused instead of recreating an empty store.
-    #[error("Authoritative storage root {0:?} is missing")]
-    StorageRootMissing(std::path::PathBuf),
-
     /// A storage could not run its blocking file work: no runtime was current, or the work
     /// ended without publishing its result.
     #[error("Storage file work did not run: {0}")]

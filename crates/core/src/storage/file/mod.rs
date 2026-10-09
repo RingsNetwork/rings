@@ -22,50 +22,37 @@
 //! open (stale `.tmp` files from an interrupted write are removed then), every write and every
 //! retirement updates it under the same lock only after the file system operation succeeded
 //! (so a file the file system refused to remove stays indexed and stays counted against the
-//! budget), and the directory is owned exclusively by this instance while it is open. Every
-//! regular file, directory or symbolic link with a record's name is indexed; it is charged the
-//! length of the regular file it resolves to, and nothing if it resolves to anything else, since
-//! such an entry holds no record's bytes. A FIFO or a device in a record's place is outside these
-//! laws: reading one may block or not end. An entry whose metadata
-//! cannot be read fails a disposable open; an authoritative open indexes it at zero bytes so
-//! that a scan reports it rather than hiding it, and an entry whose target is missing (a
-//! dangling symbolic link) is present, so a scan reports it as unreadable. A directory listing
-//! that fails part-way skips the unlisted entries of a disposable store, and fails an
-//! authoritative open as a whole, since an entry it cannot list it cannot name.
+//! budget), and the directory is owned exclusively by this instance while it is open. A record
+//! file whose metadata cannot be read fails a disposable open; an authoritative open indexes it
+//! at zero bytes so that a scan reports it rather than hiding it. A directory listing that fails
+//! part-way skips the unlisted entries of a disposable store, and fails an authoritative open as
+//! a whole, since an entry it cannot list it cannot name.
 //!
-//! Durability law: an authoritative `put` flushes the temporary file to stable storage before
-//! renaming it over the record, and flushes the directory after the rename; an authoritative
-//! removal flushes the directory after it, and an authoritative open flushes the root and its
-//! ancestors, deepest first, up to the first one the process may not open. Exact bound: every
-//! directory entry below that ancestor survives a crash. The chain the open itself created is
-//! therefore durable iff the parent of its topmost created directory is readable, which fails
-//! only for a write-and-search-only (`-wx`) parent; entries at or above the first unreadable
-//! ancestor are not flushed by this open.
-//! On unix a crash therefore leaves each record either whole at its previous value or whole at
-//! its new one, never torn, and a completed write or removal is not rolled back. The flushes
-//! are `File::sync_all`, which the standard library maps to `fcntl(F_FULLFSYNC)` on Apple
-//! targets (flushing the drive cache as well) and to `fsync` elsewhere; the law rests on that
-//! mapping. On other targets a directory cannot be flushed, so the durability of a rename or a
-//! removal is the file system's own. A disposable store skips every flush: a crash may lose its
-//! latest writes or tear a record, which its decode law then discards.
+//! Durability law: every write and removal runs a fixed plan of file-system steps, data
+//! interpreted by the store (`PutStep`, `RemoveStep`). An authoritative `put` writes the
+//! temporary file, flushes it, renames it over the record, and flushes the directory; an
+//! authoritative removal removes the record and flushes the directory; an authoritative open
+//! flushes the root and its ancestors, so the store's own directory entry survives. On unix a
+//! crash therefore leaves each record either whole at its previous value or whole at its new
+//! one, never torn, and a completed write or removal is not rolled back (checked over every
+//! crash point by the model in `test_durability`). The flushes are `File::sync_all`, which the
+//! standard library maps to `fcntl(F_FULLFSYNC)` on Apple targets (flushing the drive cache as
+//! well) and to `fsync` elsewhere; the law rests on that mapping. On other targets a directory
+//! cannot be flushed, so the durability of a rename or a removal is the file system's own. A
+//! disposable store's plans skip every flush: a crash may lose its latest writes or tear a
+//! record, which its decode law then discards.
 //!
 //! Decode law: a record is the file's only if it decodes whole as `(key, V)` and its key hashes
 //! to the file name; the store writes nothing else. Any other record is undecodable for the name
-//! it is found under: it does not decode whole (written by an earlier build, torn, or corrupt),
-//! or it holds another key (which only something outside the store can produce). A disposable
-//! store retires such a record on the read that discovers it and reports it absent, so it
-//! neither serves stale data nor occupies the budget; the retirement removes exactly the bytes
-//! the read observed, so a record rewritten between the read and the retirement is the writer's,
-//! and stays. An authoritative store never deletes it: the read that discovers it fails with
-//! `Error::StorageRecordUndecodable`, naming the file and, when the record's key prefix is intact
-//! and names the file, its key, and the record stays until its owner or an operator removes it.
-//! A [`scan`](crate::storage::KvStorageScan::scan) deletes nothing under either authority, and
-//! reports every record as filed or undecodable by its file name, a record it cannot read (any
-//! error but the absence of the entry) included.
-//!
-//! Root law: a disposable store recreates its root directory if it vanished while open; an
-//! authoritative store fails the write with `Error::StorageRootMissing`, since a vanished root
-//! took every record with it.
+//! it is found under. A disposable store retires such a record on the read that discovers it
+//! and reports it absent, so it neither serves stale data nor occupies the budget; the
+//! retirement removes exactly the bytes the read observed, so a record rewritten between the
+//! read and the retirement is the writer's, and stays. An authoritative store never deletes it:
+//! the read that discovers it fails with `Error::StorageRecordUndecodable`, naming the file, and
+//! the record stays until its owner or an operator removes it. A
+//! [`scan`](crate::storage::KvStorageScan::scan) deletes nothing under either authority, and
+//! reports every record file as filed or undecodable by its name, a file it cannot read (any
+//! error but its absence) included.
 //!
 //! Execution law: all file system work of an operation, flushes included, runs on the blocking
 //! thread pool of the tokio runtime, so a slow flush never stalls an asynchronous worker.
@@ -108,7 +95,7 @@ pub enum RecordAuthority {
 }
 
 impl RecordAuthority {
-    /// Whether writes and removals are flushed to stable storage before they return.
+    /// Whether the open flushes the store's directory entry (the durability law).
     const fn flushes(self) -> bool {
         matches!(self, Self::Authoritative)
     }
@@ -118,21 +105,60 @@ impl RecordAuthority {
         matches!(self, Self::Disposable)
     }
 
-    /// Whether the budget retires the oldest records to make room (the budget law).
+    /// Whether the budget retires the oldest records to make room (the budget law), and a write
+    /// recreates the root directory should it be missing.
     const fn evicts(self) -> bool {
         matches!(self, Self::Disposable)
     }
 
-    /// Whether every entry named as a record must be indexed, so that an entry that cannot be
-    /// listed fails the open and one whose metadata fails is indexed anyway (the index law).
+    /// Whether every listed record file must be indexed, so that a listing that fails fails the
+    /// open and a file whose metadata fails is indexed anyway (the index law).
     const fn indexes_every_entry(self) -> bool {
         matches!(self, Self::Authoritative)
     }
 
-    /// Whether a write recreates a root directory that vanished while open (the root law).
-    const fn recreates_root(self) -> bool {
-        matches!(self, Self::Disposable)
+    /// The plan of a `put` (pure; the durability law).
+    const fn put_plan(self) -> &'static [PutStep] {
+        match self {
+            Self::Authoritative => &[
+                PutStep::WriteTemporary,
+                PutStep::SyncTemporary,
+                PutStep::Rename,
+                PutStep::SyncDirectory,
+            ],
+            Self::Disposable => &[PutStep::WriteTemporary, PutStep::Rename],
+        }
     }
+
+    /// The plan of a removal (pure; the durability law).
+    const fn remove_plan(self) -> &'static [RemoveStep] {
+        match self {
+            Self::Authoritative => &[RemoveStep::Remove, RemoveStep::SyncDirectory],
+            Self::Disposable => &[RemoveStep::Remove],
+        }
+    }
+}
+
+/// One file-system step of a `put`, as data the store interprets (the durability law).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PutStep {
+    /// Write the record to its temporary file.
+    WriteTemporary,
+    /// Flush the temporary file's contents to stable storage.
+    SyncTemporary,
+    /// Rename the temporary file over the record, making room first (the budget law).
+    Rename,
+    /// Flush the directory's entries (the rename, and any eviction) to stable storage.
+    SyncDirectory,
+}
+
+/// One file-system step of a removal, as data the store interprets (the durability law).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoveStep {
+    /// Remove the records and forget them.
+    Remove,
+    /// Flush the directory's entries (the removals) to stable storage.
+    SyncDirectory,
 }
 
 /// The on-disk state known to this instance: file lengths by file name, in write order.
@@ -331,7 +357,7 @@ impl FileStore {
             let (modified, len) = match std::fs::metadata(&path) {
                 Ok(metadata) => (
                     metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                    charged_len(&metadata),
+                    metadata.len(),
                 ),
                 // Indexed so that a scan reports it (the index law).
                 Err(_) if self.authority.indexes_every_entry() => (SystemTime::UNIX_EPOCH, 0),
@@ -415,69 +441,58 @@ impl FileStore {
         }
     }
 
-    /// Store `data`, the encoded record of `key`, as the file `name` (the durability law).
+    /// Store `data`, the encoded record of `key`, as the file `name` by running the store's
+    /// [`RecordAuthority::put_plan`] (the durability law).
     ///
-    /// Post: as [`Self::commit_record`]; an error from the final directory flush leaves the
-    /// new record in place and indexed, its survival of a crash unknown, and the caller treats
-    /// the write as failed.
+    /// Post: as [`Self::commit_record`]; a failed step removes the temporary file, and an error
+    /// from the final directory flush leaves the new record in place and indexed, its survival
+    /// of a crash unknown, and the caller treats the write as failed.
     fn store_record(&self, name: String, data: &[u8]) -> Result<()> {
         let required = u64::try_from(data.len()).map_err(|_| Error::StorageCountOverflow)?;
         let path = self.root.join(&name);
         let tmp_path = path.with_extension("tmp");
         let mut index = self.write_index()?;
-        // The temporary file lives outside the index, so a failed write changes nothing.
-        self.ensure_root()?;
-        let written = write_file(&tmp_path, data, self.authority.flushes())
-            .map_err(|e| self.write_failure(e));
-        if written.is_err() {
-            remove_file_if_present(&tmp_path)?;
+        // The root is the store's own (the index law); only a disposable store recreates it.
+        if self.authority.evicts() {
+            std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError)?;
         }
-        written?;
-        let committed = self.commit_record(&mut index, name, &path, &tmp_path, required);
-        if committed.is_err() {
-            remove_file_if_present(&tmp_path)?;
+        let mut temporary = None;
+        for step in self.authority.put_plan() {
+            let done = match step {
+                PutStep::WriteTemporary => {
+                    write_temporary(&tmp_path, data).map(|file| temporary = Some(file))
+                }
+                PutStep::SyncTemporary => temporary.as_ref().map_or(Ok(()), |file| {
+                    file.sync_all().map_err(Error::ServiceIOError)
+                }),
+                PutStep::Rename => {
+                    self.commit_record(&mut index, name.clone(), &path, &tmp_path, required)
+                }
+                PutStep::SyncDirectory => sync_directory(&self.root),
+            };
+            if let Err(error) = done {
+                // The temporary file lives outside the index, so removing it changes nothing.
+                remove_file_if_present(&tmp_path)?;
+                return Err(error);
+            }
         }
-        committed?;
-        self.flush_directory()
+        Ok(())
     }
 
-    /// Make sure the root directory exists before a write (the root law). A disposable store
-    /// recreates a vanished root; an authoritative store never creates it here, and fails with
-    /// `Error::StorageRootMissing` iff the root is absent or not a directory (any other metadata
-    /// error is reported as itself), since a vanished root took every record with it.
-    fn ensure_root(&self) -> Result<()> {
-        if self.authority.recreates_root() {
-            return std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError);
-        }
-        match std::fs::metadata(&self.root) {
-            Ok(metadata) if metadata.is_dir() => Ok(()),
-            Ok(_) => Err(Error::StorageRootMissing(self.root.clone())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Err(Error::StorageRootMissing(self.root.clone()))
+    /// Remove the records `names` and forget them by running the store's
+    /// [`RecordAuthority::remove_plan`] (the durability law).
+    fn remove_records(&self, index: &mut FileIndex, names: &[String]) -> Result<()> {
+        for step in self.authority.remove_plan() {
+            match step {
+                RemoveStep::Remove => {
+                    for name in names {
+                        self.retire_indexed(index, name)?;
+                    }
+                }
+                RemoveStep::SyncDirectory => sync_directory(&self.root)?,
             }
-            Err(error) => Err(Error::ServiceIOError(error)),
         }
-    }
-
-    /// Classify a failed write of the temporary file under the root law: an authoritative
-    /// store whose root vanished, or stopped being a directory, after [`Self::ensure_root`]
-    /// checked it reports the root missing, not a bare I/O error. A root that vanishes later
-    /// (between the rename and the flush, or during a removal) fails the operation with its
-    /// plain I/O error: the root law classifies the write's own check only, and every such
-    /// failure is closed.
-    fn write_failure(&self, error: Error) -> Error {
-        match error {
-            Error::ServiceIOError(io)
-                if !self.authority.recreates_root()
-                    && matches!(
-                        io.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                    ) =>
-            {
-                Error::StorageRootMissing(self.root.clone())
-            }
-            other => other,
-        }
+        Ok(())
     }
 
     /// Acquire the index for reading.
@@ -490,52 +505,42 @@ impl FileStore {
         self.index.write().map_err(|_| Error::LockPoisoned)
     }
 
-    /// The bytes of the record file `name`, read under the read guard; `None` iff the entry is
-    /// absent (a present entry that cannot be read, a dangling link included, is an error).
+    /// The bytes of the record file `name`, read under the read guard; `None` if it is absent.
     fn read_record(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let _guard = self.read_index()?;
-        read_entry(&self.root.join(name))
-            .transpose()
-            .map_err(Error::ServiceIOError)
+        read_file_if_present(&self.root.join(name)).map_err(Error::ServiceIOError)
     }
 
     /// Read every indexed record file under the read guard, each to its bytes or to the error
-    /// that kept them; an entry removed since it was indexed is skipped, while an entry that is
-    /// present but unreadable (a dangling or looping symbolic link included) is kept with its
-    /// error. Only the index lock can fail the read as a whole.
+    /// that kept them; a file removed since it was indexed is skipped. Only the index lock can
+    /// fail the read as a whole.
     fn read_records(&self) -> Result<Vec<ReadRecord>> {
         let index = self.read_index()?;
         Ok(index
             .files
             .iter()
-            .filter_map(|(name, _)| Some((name.to_owned(), read_entry(&self.root.join(name))?)))
+            .filter_map(|(name, _)| {
+                let read = read_file_if_present(&self.root.join(name)).transpose()?;
+                Some((name.to_owned(), read))
+            })
             .collect())
     }
 
-    /// Remove the record stored as `name` and forget it; an authoritative store flushes the
-    /// removal (the durability law).
+    /// Remove the record stored as `name` and forget it (the remove plan).
     fn retire(&self, name: &str) -> Result<()> {
         let mut index = self.write_index()?;
-        self.retire_indexed(&mut index, name)?;
-        self.flush_directory()
+        self.remove_records(&mut index, &[name.to_owned()])
     }
 
-    /// Remove every record; an authoritative store flushes the removals.
+    /// Remove every record (the remove plan).
     fn clear(&self) -> Result<()> {
         let mut index = self.write_index()?;
-        while let Some(name) = index.oldest() {
-            self.retire_indexed(&mut index, &name)?;
-        }
-        self.flush_directory()
-    }
-
-    /// Flush the directory's entries (renames and removals) to stable storage iff the store is
-    /// authoritative.
-    fn flush_directory(&self) -> Result<()> {
-        match self.authority.flushes() {
-            true => sync_directory(&self.root),
-            false => Ok(()),
-        }
+        let names = index
+            .files
+            .iter()
+            .map(|(name, _)| name.to_owned())
+            .collect::<Vec<_>>();
+        self.remove_records(&mut index, &names)
     }
 
     /// Retire the record stored as `name` iff its file still holds `observed`, the bytes a read
@@ -552,27 +557,12 @@ impl FileStore {
 }
 
 /// Scan `data`, the bytes of the file `name` (pure): the whole record filed there under its own
-/// key, or an undecodable record.
-///
-/// A record is the file's only if it decodes whole and its key hashes to `name`; anything else
-/// (a torn or corrupt record, or a whole record of another key, which only something outside
-/// the store can put there) is undecodable for `name`, with the key its intact leading prefix
-/// names when that key hashes to `name` (a torn record loses its tail first).
+/// key, or an undecodable record for `name` (anything else: torn, corrupt, or another key's).
 fn scan_bytes<V>(name: String, data: &[u8]) -> ScannedRecord<V>
 where V: DeserializeOwned {
-    let filed = |key: &str| file_name_for(key) == name;
     match rings_codec::deserialize::<(String, V)>(data) {
-        Ok((key, value)) if filed(&key) => ScannedRecord::Filed { key, value },
-        decoded => {
-            let key = match decoded {
-                Ok(_) => None,
-                Err(_) => rings_codec::deserialize_prefix::<String>(data)
-                    .ok()
-                    .map(|(key, _)| key)
-                    .filter(|key| filed(key)),
-            };
-            ScannedRecord::Undecodable(UndecodableRecord { name, key })
-        }
+        Ok((key, value)) if file_name_for(&key) == name => ScannedRecord::Filed { key, value },
+        _ => ScannedRecord::Undecodable(UndecodableRecord { name }),
     }
 }
 
@@ -582,20 +572,15 @@ fn scan_record<V>((name, read): ReadRecord) -> ScannedRecord<V>
 where V: DeserializeOwned {
     match read {
         Ok(data) => scan_bytes(name, &data),
-        Err(_) => ScannedRecord::Undecodable(UndecodableRecord { name, key: None }),
+        Err(_) => ScannedRecord::Undecodable(UndecodableRecord { name }),
     }
 }
 
 /// Create the directory `root` and its missing ancestors; iff `flush`, flush `root` and its
-/// ancestors, deepest first, up to the first ancestor the process may not open, so that every
-/// directory entry below that ancestor survives a crash, whoever created it (another store may
-/// have created a shared parent without flushing it); this is the exact bound of the durability
-/// law.
-///
-/// The walk stops at an ancestor that fails with `PermissionDenied`, such as `/` under a sandbox
-/// or an execute-only home: its entries, and every entry above it, are left to whoever made
-/// them. Any other failure fails the open. No fixture makes an ancestor unopenable for every
-/// user (root included), so the stop is covered by review only.
+/// ancestors, deepest first, so that the store's directory entries survive a crash, whoever
+/// created them (another store may have created a shared parent without flushing it). The walk
+/// stops at the first ancestor the process may not open (`PermissionDenied`), one it did not
+/// create; any other failure fails the open.
 fn create_directory(root: &Path, flush: bool) -> Result<()> {
     std::fs::create_dir_all(root).map_err(Error::ServiceIOError)?;
     if !flush {
@@ -616,17 +601,13 @@ fn create_directory(root: &Path, flush: bool) -> Result<()> {
     Ok(())
 }
 
-/// Write `data` to the fresh file `path`, flushing it to stable storage iff `flush`.
-///
-/// `File::sync_all` is `fcntl(F_FULLFSYNC)` on Apple targets and `fsync` on other unix targets
-/// (a precondition of the durability law).
-fn write_file(path: &Path, data: &[u8], flush: bool) -> Result<()> {
+/// Write `data` to the fresh file `path` and return it open, for [`PutStep::SyncTemporary`] to
+/// flush; `File::sync_all` is `fcntl(F_FULLFSYNC)` on Apple targets and `fsync` on other unix
+/// targets (a precondition of the durability law).
+fn write_temporary(path: &Path, data: &[u8]) -> Result<std::fs::File> {
     let mut file = std::fs::File::create(path).map_err(Error::ServiceIOError)?;
     file.write_all(data).map_err(Error::ServiceIOError)?;
-    match flush {
-        true => file.sync_all().map_err(Error::ServiceIOError),
-        false => Ok(()),
-    }
+    Ok(file)
 }
 
 /// Flush the entries of directory `root` (the renames and removals made in it) to stable
@@ -659,38 +640,12 @@ fn file_name_for(key: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// The bytes an indexed entry charges against the budget: the length of the regular file it
-/// resolves to, and nothing for any other entry (a directory or a device in a record's place),
-/// whose size (a directory's is 4096 on ext4) is no record's.
-fn charged_len(metadata: &std::fs::Metadata) -> u64 {
-    match metadata.is_file() {
-        true => metadata.len(),
-        false => 0,
-    }
-}
-
 /// Read the file `path`, treating an absent file as `None`.
 fn read_file_if_present(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(data) => Ok(Some(data)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
-    }
-}
-
-/// Read the directory entry `path` as a record: `None` iff the entry itself is absent, so an
-/// entry that is present but whose target is missing (a dangling symbolic link) is an error, not
-/// an absence.
-fn read_entry(path: &Path) -> Option<std::io::Result<Vec<u8>>> {
-    match read_file_if_present(path) {
-        Ok(Some(data)) => Some(Ok(data)),
-        Ok(None) => std::fs::symlink_metadata(path).ok().map(|_| {
-            // Not `NotFound`: callers read that kind as the entry's absence.
-            Err(std::io::Error::other(
-                "the entry is present but its target is missing",
-            ))
-        }),
-        Err(error) => Some(Err(error)),
     }
 }
 
@@ -772,10 +727,9 @@ where V: Serialize + DeserializeOwned + Send + Sync
 impl<V> KvStorageScan<V> for FileStorage
 where V: Serialize + DeserializeOwned + Send + Sync
 {
-    /// Every record file, as filed or undecodable, by its file name; a file that cannot
-    /// be read is reported too, so one bad regular file, directory or link never fails the whole
-    /// scan (a FIFO or device in a record's place is outside the index law). Unlike `get_all`, a
-    /// scan never retires, whatever the store's authority.
+    /// Every record file, as filed or undecodable, by its file name; a file that cannot be read
+    /// is reported too, so one bad file never fails the whole scan. Unlike `get_all`, a scan
+    /// never retires, whatever the store's authority.
     async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
         Ok(self
             .on_store(FileStore::read_records)
@@ -796,10 +750,7 @@ where V: Serialize + DeserializeOwned + Send + Sync
 /// `file_name_for`), or `None` for any other entry.
 fn entry_file_name(path: &Path) -> Option<&str> {
     let file_name = path.file_name().and_then(|name| name.to_str())?;
-    // The image of `file_name_for`: lower-case hex only, so an entry is a record iff it could
-    // be the file of some key. The trade: a record renamed to upper case is not a record at
-    // all (not indexed, scanned, counted or cleared), so its stream is absent rather than failed
-    // closed; a damaged file name is the absent-record case of #915.
+    // The image of `file_name_for`: lower-case hex only.
     let lower_hex = |byte: &u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte);
     (file_name.len() == 40 && file_name.as_bytes().iter().all(lower_hex)).then_some(file_name)
 }
@@ -814,6 +765,8 @@ impl std::fmt::Debug for FileStorage {
     }
 }
 
+#[cfg(test)]
+mod test_durability;
 #[cfg(test)]
 mod test_file;
 #[cfg(test)]
