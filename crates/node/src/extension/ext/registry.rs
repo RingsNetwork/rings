@@ -91,6 +91,8 @@ impl Core {
 
     /// Re-enter the router with a *self*-addressed message (`from = this node`): a locally
     /// injected command, or an engine task feeding a lifecycle event back to its protocol.
+    /// Only the native relay engine has such tasks.
+    #[cfg(rings_native)]
     pub async fn inject(&self, namespace: &str, payload: Bytes) -> Result<()> {
         self.dispatch(self.did(), Envelope::new(namespace, payload))
             .await
@@ -179,6 +181,7 @@ impl Scope {
     /// turn and budget.
     /// A third-party shell therefore gets only that bounded return path, never this re-entrant
     /// sink, so it cannot recurse `inject` to escape the budget.
+    #[cfg(rings_native)]
     pub(crate) async fn inject(&self, payload: Bytes) -> Result<()> {
         self.core.inject(self.namespace.as_str(), payload).await
     }
