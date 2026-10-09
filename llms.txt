@@ -2,23 +2,30 @@
 
 > Rings is a browser-native, structured peer-to-peer network. Browser tabs and native daemons join one Chord DHT overlay, address each other by DID, and exchange messages over direct WebRTC datachannels; application protocols are namespace-scoped pure state machines run by an interpreter shell. Rust workspace, AGPL-3.0-only (commercial licensing available), https://github.com/RingsNetwork/rings.
 
-This file follows https://llmstxt.org/. It is for coding agents that build on Rings or change it: which document is authoritative for what, how the crates are layered, how each target is built and tested, and which conventions a change must keep. Where this file and the code disagree, the code wins; correct this file in the same change.
+This file follows https://llmstxt.org/. It is for agents that evaluate Rings, build on it, or change it: which document is authoritative for what, how the crates are layered, how each target is built and tested, and which conventions a change must keep. Where this file and the code disagree, the code wins; correct this file in the same change.
 
 ## What Rings is
 
 - Overlay (communication layer): a Chord DHT (successor list, finger table, stabilization) keyed by DID. `network_id` isolates independent overlays. Its contract is routing and, after the E2E handshake, confidentiality to a DID; every hop sees the origin DID by signature and the destination DID by routing, so it has no unlinkability goal. It minimizes leakage; it does not provide privacy.
 - Privacy layer: onion circuits in `crates/node/src/onion`, layered ElGamal-AEAD frames over direct edges with fixed-batch cover cells, pacing, fixed cell size classes, and route selection from the onion-relay and onion-exit registries. Each relay learns only its predecessor and successor; the client is hidden from the exit but not from its first hop, and membership and timing are not hidden. The two contracts are drawn in SECURITY.md under Layer Contracts.
 - Transport: WebRTC datachannels, native and browser (web_sys), with STUN/ICE/SDP for NAT traversal. No server sits in the data path; seed nodes only help a peer find its first connection.
-- Identity: a DID derived from a public key. Signature schemes: secp256k1 (EIP-191, bip137), secp256r1 (P-256), ed25519, BLS. DID authentication proves control of a key and nothing more: it is not Sybil or eclipse resistance (see SECURITY.md before making any security claim).
+- Identity: a DID derived from a public key. Signature schemes: secp256k1 (EIP-191, bip137), secp256r1 (P-256), ed25519, BLS; the browser console signs with WebCrypto P-256, MetaMask, or Phantom. DID authentication proves control of a key; making identities scarce is a separate property, planned as epoch-randomized ring positions (#780). SECURITY.md is authoritative for every security claim.
 - Protocol runtime: `Protocol::step` is pure (state, event -> state, effects); an `Interpret` shell performs the effects through a namespace-scoped capability. Built-in protocols: relay (TCP/UDP tunnels over the overlay) and echo. Applications register their own by namespace: `provider.register_protocol(..)` in Rust, `provider.on(namespace, initialState, handler)` in JavaScript.
 - Targets: the native daemon (`rings` CLI with a JSON-RPC API over HTTP), the browser/Wasm node (npm `@ringsnetwork/rings-node`; the rings.rs frontend and its Chrome extension), and a C FFI (`crates/node/include/rings.h`).
+
+## Status
+
+- Shipped: the overlay, native and browser nodes, the onion privacy layer (TCP/HTTPS exits, TUN gateway, onion WebView), replay protection and per-origin rate limits, a public seed (https://node.rings.rs), and the hosted console (https://rings.rs/#node).
+- Versions: pre-1.0 the wire protocol is unversioned, and a release that changes it is a network-wide upgrade (see CHANGELOG.md). 1.0 freezes the protocol once connectivity and churn handling are stable; DRanking is 2.0.
+- Next: churn handling (#773-#779), onion loops (#834), then epoch-randomized ring positions (#780); see ROADMAP.md.
+- To evaluate Rings, read README.md, SECURITY.md, and ROADMAP.md, in that order.
 
 ## Documentation
 
 - [Documentation book](https://rings.rs/docs/): the reference; source in `docs/src`, built with mdBook and published from master.
 - [Guide](https://rings.rs/#guide): the abridged version: one card per runtime and the first commands; the book is authoritative.
 - [README](https://github.com/RingsNetwork/rings/blob/master/README.md): overview, architecture table, examples, whitepaper citation.
-- [SECURITY.md](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md): threat model, assumptions, deployment models, non-goals, the communication-layer and privacy-layer contracts, and the work required before stronger claims.
+- [SECURITY.md](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md): threat model, assumptions, deployment models, non-goals, the communication-layer and privacy-layer contracts, feature boundaries, and how to report a vulnerability.
 - [ROADMAP.md](https://github.com/RingsNetwork/rings/blob/master/ROADMAP.md): shipped foundations and the network-layer and privacy-layer tracks.
 - [CHANGELOG.md](https://github.com/RingsNetwork/rings/blob/master/CHANGELOG.md): per-version changes, generated by git-cliff.
 - [Whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf): the protocol paper; LaTeX source beside it.
@@ -42,7 +49,7 @@ This file follows https://llmstxt.org/. It is for coding agents that build on Ri
 
 ## Build and test
 
-- Toolchain: `rust-toolchain.toml` pins the stable compiler; formatting requires nightly rustfmt (`cargo +nightly fmt`), and stable rustfmt produces a different layout that fails CI. TOML is formatted with taplo; spelling is checked with typos.
+- Toolchain: `rust-toolchain.toml` pins the stable compiler. The workspace denies warnings, so install commands name the pin (`cargo +<pin> install --locked rings-node`); a pin bump updates them in README.md, `crates/node/README.md`, `docs/src/install-a-native-node.md`, and `frontend/src/guide.rs`; formatting requires nightly rustfmt (`cargo +nightly fmt`), and stable rustfmt produces a different layout that fails CI. TOML is formatted with taplo; spelling is checked with typos.
 - Native: `cargo build`; `cargo test --release --all --all-targets`; install the CLI with `cargo install --path crates/node`, then `rings init` and `rings run`.
 - Wasm: `cargo clippy -p rings-node --features browser --no-default-features --target wasm32-unknown-unknown`; the npm package is built by `wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default` (`npm run wasm_pack`); browser tests use wasm-bindgen-test in a headless Chrome.
 - Frontend (from `frontend/`): `cargo check --target wasm32-unknown-unknown`; `cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings`; `cargo test --release --target wasm32-unknown-unknown`; `trunk serve --release true` to run it. Extension: `npm ci --ignore-scripts && npm run package:frontend-extension` from the root.

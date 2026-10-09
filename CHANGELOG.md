@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Rewrite SECURITY.md, README.md, ROADMAP.md, and llms.txt to be short and current: SECURITY.md
+  adds private vulnerability reporting and states the Sybil boundary once (#780); README.md leads
+  with what Rings offers, how to try it, and the pre-1.0 status; ROADMAP.md states the 1.0 and 2.0
+  milestones; llms.txt gains a Status section. Install commands name the pinned toolchain with
+  `--locked`, because the workspace denies warnings.
+
 - Fail a bad transaction replay record closed on its own stream only, and restore the replay store
   once (#910). A record that does not restore (torn, corrupt, unreadable, misplaced, or holding an
   invalid window) used to leave the whole replay store unloaded: every later reservation and

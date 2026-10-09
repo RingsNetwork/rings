@@ -504,7 +504,7 @@ mod tests {
             pair * TRANSACTION_REPLAY_STREAM_CAPACITY,
             TRANSACTION_REPLAY_STORE_MAX_BYTES
         );
-        // The figures SECURITY.md and the replay documentation state.
+        // The figures the replay documentation states.
         assert_eq!(TRANSACTION_REPLAY_RECORD_MAX_BYTES, 1_161);
         assert_eq!(TRANSACTION_REPLAY_STORE_MAX_BYTES, 28_295_168);
         Ok(())

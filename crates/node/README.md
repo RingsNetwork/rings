@@ -24,10 +24,11 @@ You can install rings-node either from Cargo or from source.
 
 ### from cargo
 
-To install rings-node from Cargo, run the following command:
+To install rings-node from Cargo, build with the Rust release pinned in the repository's
+`rust-toolchain.toml` (the workspace denies warnings, so a newer compiler can fail the build):
 
 ```sh
-cargo install rings-node
+cargo +1.97.0 install --locked rings-node
 ```
 
 ### from source
