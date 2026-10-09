@@ -569,12 +569,8 @@ impl Entry {
 
     /// This entry's normalized carrier state (see [`DataTopicBuffer::new`]).
     fn topic_buffer(&self) -> Result<DataTopicBuffer> {
-        let DataTopicBuffer {
-            register,
-            values,
-            removes,
-        } = self.raw_buffer()?;
-        Ok(DataTopicBuffer::new(register, values, removes))
+        let raw = self.raw_buffer()?;
+        Ok(DataTopicBuffer::new(raw.register, raw.values, raw.removes))
     }
 
     /// Materialize a normalized buffer as an entry: elements in dot order under the count cap,
@@ -582,12 +578,12 @@ impl Entry {
     ///
     /// Pre: `buffer` is normalized, so no element is below the register or covered by a remove,
     /// and no digest is computed here.
-    fn materialize_elements(
-        did: Did,
-        kind: EntryKind,
+    fn materialize_topic_buffer(
+        &self,
         buffer: DataTopicBuffer,
         expires_at_ms: Option<u128>,
     ) -> Self {
+        let kind = self.kind;
         let DataTopicBuffer {
             register,
             values,
@@ -616,7 +612,7 @@ impl Entry {
             .map_or(0, |cap| tombstones.len().saturating_sub(cap));
 
         Self {
-            did,
+            did: self.did,
             data,
             kind,
             crdt: EntryCrdt {
@@ -626,14 +622,6 @@ impl Entry {
             },
             expires_at_ms,
         }
-    }
-
-    fn materialize_topic_buffer(
-        &self,
-        buffer: DataTopicBuffer,
-        expires_at_ms: Option<u128>,
-    ) -> Self {
-        Self::materialize_elements(self.did, self.kind, buffer, expires_at_ms)
     }
 
     /// Merge two entries from the same replicated carrier.

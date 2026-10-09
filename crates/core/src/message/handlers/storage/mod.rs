@@ -447,7 +447,11 @@ impl HandleMsg<FoundEntry> for MessageHandler {
             repair_observed_storage_misses(self.transport.clone(), data.clone(), msg.redundancy)
                 .await?;
         } else if !msg.misses.is_empty() {
-            if let Some(entry) = self.dht.local_cache_held(msg.resource).await? {
+            if let Some(entry) = self
+                .dht
+                .local_cache_held(msg.resource, crate::utils::get_epoch_ms())
+                .await?
+            {
                 repair_observed_storage_misses(self.transport.clone(), entry, msg.redundancy)
                     .await?;
             }

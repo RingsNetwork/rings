@@ -150,8 +150,7 @@ impl StorageInspect {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(key, entry)| (key, entry.retired_at(now_ms)))
-                .filter(|(_, entry)| entry.is_live_at(now_ms))
+                .filter_map(|(key, entry)| Some((key, entry.live_at(now_ms)?)))
                 .collect(),
         }
     }

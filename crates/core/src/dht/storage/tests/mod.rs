@@ -1260,7 +1260,7 @@ async fn digests_of<T>(operation: impl std::future::Future<Output = Result<T>>) 
     Ok(digests_computed())
 }
 
-/// Review B2-M2, a bound on the digest work of the production storage paths under the storage
+/// A bound on the digest work of the production storage paths under the storage
 /// transition: a sync join hashes each element once, into an empty slot and into a held one
 /// alike, and the ack comparison of a hand-off hashes none.
 #[tokio::test(flavor = "current_thread")]
@@ -1295,7 +1295,7 @@ fn drained_carrier(did: Did, now_ms: u128, expires_at_ms: u128) -> Entry {
     entry
 }
 
-/// Review A2-M1: a carrier past its retention bound, held live only by an unstable remove,
+/// A carrier past its retention bound, held live only by an unstable remove,
 /// answers a lookup as a miss, and is kept; a drained carrier inside its bound still answers as
 /// found, so its removes reach the reader's cache.
 #[tokio::test]
@@ -1332,7 +1332,7 @@ async fn test_carrier_past_its_bound_answers_lookups_as_absent() -> Result<()> {
     Ok(())
 }
 
-/// Review A2-M2: a read that retires part of a stored carrier writes the projection back, so
+/// A read that retires part of a stored carrier writes the projection back, so
 /// retired payload bytes stop occupying storage while the carrier's remove side holds it live.
 #[tokio::test]
 async fn test_read_writes_back_a_projection_that_retired_elements() -> Result<()> {
@@ -1356,7 +1356,7 @@ async fn test_read_writes_back_a_projection_that_retired_elements() -> Result<()
     Ok(())
 }
 
-/// Review A3-H1: a cached carrier past its retention bound, held live only by a remove, is
+/// A cached carrier past its retention bound, held live only by a remove, is
 /// served by the fetch cache as absent, as a replica serves it, while a drained carrier inside
 /// its bound is still served, so its removes reach the reader.
 #[tokio::test]
@@ -1372,7 +1372,10 @@ async fn test_cache_serves_a_carrier_past_its_bound_as_absent() -> Result<()> {
 
     assert_eq!(node.local_cache_get(expired_key).await?, None);
     // Read-repair of a missed placement still reads the held carrier, whose removes it spreads.
-    assert!(node.local_cache_held(expired_key).await?.is_some());
+    assert!(node
+        .local_cache_held(expired_key, get_epoch_ms())
+        .await?
+        .is_some());
     let live = node
         .local_cache_get(live_key)
         .await?
@@ -1382,7 +1385,7 @@ async fn test_cache_serves_a_carrier_past_its_bound_as_absent() -> Result<()> {
     Ok(())
 }
 
-/// Review A2-M1 at redundancy 2: when the first placement holds a carrier past its bound, the
+/// When the first placement holds a carrier past its bound, the
 /// lookup does not stop there but asks the next placement, which answers with its data, and the
 /// first placement is reported missed for read-repair.
 #[tokio::test]

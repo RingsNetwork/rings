@@ -1,5 +1,3 @@
-use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
-use rings_core::dht::entry::EntryKind;
 use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::message::OriginQuotaConfig;
@@ -8,7 +6,6 @@ use rings_core::message::OriginQuotaLaneConfig;
 use super::common::*;
 use super::*;
 use crate::processor::config::parse_webrtc_udp_port_range;
-use crate::processor::dht_lookup_poll_budget;
 use crate::registration::registry_refresh_bound;
 
 #[test]
@@ -92,25 +89,16 @@ fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enable
     ));
 }
 
-/// The registry refresh bound, derived here from its named terms rather than read back from
-/// [`registry_refresh_bound`]: `L − σ − P`, where `L` is the data default lifetime a registry
-/// write requests, `σ = TS_OFFSET_TOLERANCE_MS` the clock-skew tolerance, and `P` the fetch-poll
-/// budget a heartbeat may spend fetching the registry before it appends.
-fn expected_registry_refresh_bound() -> Duration {
-    let lifetime = Duration::from_millis(EntryKind::Data.default_lifetime_ms());
-    let skew = Duration::from_millis(u64::try_from(TS_OFFSET_TOLERANCE_MS).unwrap());
-    lifetime - skew - dht_lookup_poll_budget()
-}
-
 /// Both registries accept a heartbeat interval just below `L − σ − P` and refuse one at it, at
-/// which a sole registrant's descriptor could lapse between heartbeats. Probing both sides of
-/// the independently derived bound makes dropping or adding any of the three terms fail.
+/// which a sole registrant's descriptor could lapse between heartbeats. The bound is pinned to
+/// the 595 s the configuration documentation states, so dropping or adding any of the three
+/// terms fails.
 #[test]
 fn test_registry_heartbeat_must_refresh_before_a_descriptor_expires() -> Result<()> {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let bound = expected_registry_refresh_bound();
-    assert_eq!(registry_refresh_bound(), bound);
+    let bound = registry_refresh_bound();
+    assert_eq!(bound, Duration::from_secs(595));
     let below = bound - Duration::from_millis(1);
 
     let presence = |interval: Duration| {

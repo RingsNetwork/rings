@@ -240,10 +240,47 @@ struct Replica {
     floor: Option<EntryVersion>,
 }
 
+/// What holds a carrier live past its retention bound: under the production law, every unstable
+/// remove and the unstable register; a mutant drops one of the two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Holders {
+    /// The production liveness, [`Entry::is_live_under`].
+    Production,
+    /// Mutant: an unstable remove does not hold its carrier.
+    RegisterOnly,
+    /// Mutant: the unstable register does not hold its carrier.
+    RemovesOnly,
+}
+
+impl Holders {
+    /// Whether `carrier` is live at `now_ms` under `law` and these holders.
+    fn live(self, carrier: &Entry, law: ElementRetention, now_ms: u128) -> bool {
+        let (removes_hold, register_holds) = match self {
+            Self::Production => return carrier.is_live_under(Some(law), now_ms),
+            Self::RegisterOnly => (false, true),
+            Self::RemovesOnly => (true, false),
+        };
+        let removes = carrier
+            .crdt
+            .tombstones
+            .iter()
+            .map(|tombstone| tombstone.dot.version)
+            .filter(|_| removes_hold);
+        let held_until = removes
+            .chain(carrier.crdt.register.filter(|_| register_holds))
+            .map(|version| law.stable_at(&version))
+            .max();
+        carrier.expires_at_ms.is_some()
+            && (carrier.bound_live_at(now_ms) || held_until.is_some_and(|until| now_ms < until))
+    }
+}
+
 /// The model state.
 struct World {
     /// The retention law under test.
     law: ElementRetention,
+    /// What holds a carrier live past its bound under the law under test.
+    holders: Holders,
     /// The topic's entry DID.
     topic: Did,
     /// The payloads, encoded.
@@ -266,9 +303,10 @@ struct World {
 
 impl World {
     /// The initial state under `law`: empty carriers at [`MODEL_EPOCH_MS`].
-    fn new(law: ElementRetention) -> Result<Self> {
+    fn new(law: ElementRetention, holders: Holders) -> Result<Self> {
         Ok(Self {
             law,
+            holders,
             topic: Entry::gen_did(MODEL_TOPIC)?,
             values: MODEL_VALUES
                 .into_iter()
@@ -320,8 +358,8 @@ impl World {
     /// Project `carrier` at `now_ms` under the law, `None` when the result is not live.
     fn project(&self, carrier: Entry, now_ms: u128) -> Option<Entry> {
         let carrier = carrier.retired_under(Some(self.law), now_ms);
-        carrier
-            .is_live_under(Some(self.law), now_ms)
+        self.holders
+            .live(&carrier, self.law, now_ms)
             .then_some(carrier)
     }
 
@@ -709,10 +747,10 @@ fn draw(prng: &mut Prng, ticks: &[u128; 6]) -> Action {
 
 /// Run one seeded walk under `law`, checking every safety law after every step and
 /// convergence at the end.
-fn walk(law: ElementRetention, seed: u64) -> Result<()> {
+fn walk(law: ElementRetention, holders: Holders, seed: u64) -> Result<()> {
     let ticks = ticks_ms()?;
     let mut prng = Prng(seed);
-    let mut world = World::new(law)?;
+    let mut world = World::new(law, holders)?;
     let mut trace = Vec::with_capacity(STEPS);
     for _ in 0..STEPS {
         let action = draw(&mut prng, &ticks);
@@ -733,15 +771,18 @@ fn walk(law: ElementRetention, seed: u64) -> Result<()> {
 /// Witness that the broken law `law` violates the law named `violated` on some seed, and that
 /// the production law passes that seed: the draws do not depend on the law, so the production
 /// walk replays the very trace that witnessed the violation.
-fn assert_mutant_fails(law: ElementRetention, violated: &str) -> Result<()> {
+fn assert_mutant_fails(law: ElementRetention, holders: Holders, violated: &str) -> Result<()> {
     let needle = format!("law violated: {violated}");
     let witness = (0..SEEDS).find(|seed| {
-        walk(law, *seed).is_err_and(|error| error.to_string().contains(needle.as_str()))
+        walk(law, holders, *seed).is_err_and(|error| error.to_string().contains(needle.as_str()))
     });
     let Some(seed) = witness else {
-        return ensure(false, format!("no seed witnesses {violated} under {law:?}"));
+        return ensure(
+            false,
+            format!("no seed witnesses {violated} under {law:?}, {holders:?}"),
+        );
     };
-    walk(production_law()?, seed)
+    walk(production_law()?, Holders::Production, seed)
 }
 
 /// Every law of the element horizon holds on every fixed-seed interleaving of add, overwrite,
@@ -750,7 +791,7 @@ fn assert_mutant_fails(law: ElementRetention, violated: &str) -> Result<()> {
 #[test]
 fn test_horizon_model_laws_hold_on_seeded_interleavings() -> Result<()> {
     let law = production_law()?;
-    (0..SEEDS).try_for_each(|seed| walk(law, seed))
+    (0..SEEDS).try_for_each(|seed| walk(law, Holders::Production, seed))
 }
 
 /// Mutant: retiring adds at `H / 2` loses live adds.
@@ -761,17 +802,13 @@ fn test_horizon_model_catches_early_add_retirement() -> Result<()> {
         add_horizon_ms: law.add_horizon_ms / 2,
         ..law
     };
-    assert_mutant_fails(mutant, "NoLoss")
+    assert_mutant_fails(mutant, Holders::Production, "NoLoss")
 }
 
 /// Mutant: a remove that does not hold its carrier past the bound lets a removed payload back.
 #[test]
 fn test_horizon_model_catches_removes_not_holding_carrier() -> Result<()> {
-    let mutant = ElementRetention {
-        removes_hold_carrier: false,
-        ..production_law()?
-    };
-    assert_mutant_fails(mutant, "NoResurrection")
+    assert_mutant_fails(production_law()?, Holders::RegisterOnly, "NoResurrection")
 }
 
 /// Mutant: collecting removes at `H`, without `σ`, lets a stepped-back clock take a stale add.
@@ -782,16 +819,12 @@ fn test_horizon_model_catches_removes_collected_without_skew() -> Result<()> {
         remove_horizon_ms: law.add_horizon_ms,
         ..law
     };
-    assert_mutant_fails(mutant, "NoResurrection")
+    assert_mutant_fails(mutant, Holders::Production, "NoResurrection")
 }
 
 /// Mutant: a register that does not hold its carrier lets an overwrite collapse an unstable
-/// remove into a carrier that expires at its own bound (review A-H1).
+/// remove into a carrier that expires at its own bound.
 #[test]
 fn test_horizon_model_catches_register_not_holding_carrier() -> Result<()> {
-    let mutant = ElementRetention {
-        register_holds_carrier: false,
-        ..production_law()?
-    };
-    assert_mutant_fails(mutant, "NoResurrection")
+    assert_mutant_fails(production_law()?, Holders::RemovesOnly, "NoResurrection")
 }

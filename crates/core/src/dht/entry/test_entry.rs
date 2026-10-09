@@ -1,6 +1,5 @@
 use bytes::Bytes;
 
-use super::retention::ElementRetention;
 use super::*;
 use crate::algebra::assert_join_semilattice_laws;
 use crate::algebra::assert_strong_eventual_consistency;
@@ -1015,25 +1014,12 @@ fn test_carrier_with_unstable_remove_outlives_its_bound() -> Result<()> {
     Ok(())
 }
 
-/// The production data retention law.
-fn data_law() -> Result<ElementRetention> {
-    ElementRetention::of(EntryKind::Data)
-        .ok_or_else(|| Error::InvalidMessage("a data topic has an element horizon".to_string()))
-}
-
-/// Project `entry` at `now_ms` under `law` as a storage read does: `None` when not live.
-fn read_under(entry: Entry, law: ElementRetention, now_ms: u128) -> Option<Entry> {
-    let entry = entry.retired_under(Some(law), now_ms);
-    entry.is_live_under(Some(law), now_ms).then_some(entry)
-}
-
-/// Review A-H1, the directed trace: an overwrite drops the unstable remove below its register,
+/// The directed overwrite trace: an overwrite drops the unstable remove below its register,
 /// and the register then holds the carrier until it is stable, so a later sync from a replica
-/// that other writes kept alive cannot serve the removed payload back. Under a law in which the
-/// register does not hold the carrier, the carrier expires at its bound and the payload returns.
+/// that other writes kept alive cannot serve the removed payload back. The model's
+/// `test_horizon_model_catches_register_not_holding_carrier` refutes the law without it.
 #[test]
 fn test_overwrite_register_holds_carrier_until_stable() -> Result<()> {
-    let law = data_law()?;
     let minute: u128 = 60_000;
     let default_bound = u128::from(DEFAULT_TTL_MS);
     let a = with_retention(delta_at("a", 0)?, NOW_MS + default_bound);
@@ -1053,52 +1039,36 @@ fn test_overwrite_register_holds_carrier_until_stable() -> Result<()> {
     ))?;
 
     let after_bound = overwrite_at + default_bound + minute;
-    let stored = read_under(owner_x.clone(), law, after_bound)
-        .ok_or_else(|| Error::InvalidMessage("the register holds the carrier".to_string()))?;
+    let stored = owner_x.retired_at(after_bound);
+    assert!(
+        stored.is_live_at(after_bound),
+        "the register holds the carrier"
+    );
     assert!(stored.data.is_empty());
-    let synced = stored.join(replica_y.clone())?.retired_at(after_bound);
-    assert_entry_data_set(&synced, &["b"])?;
-
-    let mutant = ElementRetention {
-        register_holds_carrier: false,
-        ..law
-    };
-    assert_eq!(read_under(owner_x, mutant, after_bound), None);
-    // X's slot is empty, so the sync from Y stores Y's read as it is: `a`, which X removed and
-    // overwrote, is served by X again.
-    let resurrected = read_under(replica_y, mutant, after_bound)
-        .ok_or_else(|| Error::InvalidMessage("Y's carrier is live".to_string()))?;
-    assert_entry_data_set(&resurrected, &["a", "b"])
+    let synced = stored.join(replica_y)?.retired_at(after_bound);
+    assert_entry_data_set(&synced, &["b"])
 }
 
-/// Directed witness of `σ`: a remove collected at `τ + H` lets a stale add in on a clock that
-/// then steps back by less than `σ`; collected at `τ + H + σ`, it is still held there.
+/// Directed witness of `σ`: a remove collected at `τ + H + σ` is still held on a clock that
+/// steps back by less than `σ`, so a stale add joined there stays removed. The model's
+/// `test_horizon_model_catches_removes_collected_without_skew` refutes the law without `σ`.
 #[test]
 fn test_remove_skew_margin_survives_clock_step_back() -> Result<()> {
-    let law = data_law()?;
     let horizon = data_horizon_ms();
     let far = NOW_MS + 3 * horizon;
     let stale = with_retention(delta_at("a", 0)?, far);
     let removed = stale.tombstone(data_entry("topic", "a")?)?;
     let collected_at = NOW_MS + horizon;
     let stepped_back = collected_at - TS_OFFSET_TOLERANCE_MS / 2;
-    let mutant = ElementRetention {
-        remove_horizon_ms: law.add_horizon_ms,
-        ..law
-    };
-
-    for (retention, resurrects) in [(law, false), (mutant, true)] {
-        // Collected on the later clock, then joined with the stale add on the stepped-back one.
-        let held = removed.clone().retired_under(Some(retention), collected_at);
-        let rejoined = held
-            .join(stale.clone())?
-            .retired_under(Some(retention), stepped_back);
-        assert_eq!(!rejoined.data.is_empty(), resurrects);
-    }
+    let rejoined = removed
+        .retired_at(collected_at)
+        .join(stale)?
+        .retired_at(stepped_back);
+    assert!(rejoined.data.is_empty());
     Ok(())
 }
 
-/// Review A-M1: once the retention bound elapses, a carrier held live by a remove serves no
+/// Once the retention bound elapses, a carrier held live by a remove serves no
 /// element, only its remove side.
 #[test]
 fn test_expired_bound_serves_only_the_remove_side() -> Result<()> {
@@ -1115,7 +1085,7 @@ fn test_expired_bound_serves_only_the_remove_side() -> Result<()> {
     Ok(())
 }
 
-/// Review B-M3: a hand-off copy whose element crossed its horizon between the copy and the ack
+/// A hand-off copy whose element crossed its horizon between the copy and the ack
 /// still confirms the local value, which the unprojected comparison would refuse; a write after
 /// the copy does not.
 #[test]
@@ -1141,7 +1111,7 @@ fn test_ack_confirms_across_a_horizon_crossing_but_not_a_newer_write() -> Result
     Ok(())
 }
 
-/// A bound on the digest work over a full carrier of maximal payloads (review B-M2): a read
+/// A bound on the digest work over a full carrier of maximal payloads: a read
 /// computes no digest whether or not anything crosses a threshold, and a join computes one
 /// digest per element.
 #[test]
@@ -1175,33 +1145,5 @@ fn test_digest_work_is_bounded_on_a_full_carrier() -> Result<()> {
     assert_eq!((retired.data.len(), hashed), (0, 0));
     let (joined, hashed) = digests(&|| full.join(full.clone()))?;
     assert_eq!((joined == full, hashed), (true, ENTRY_DATA_MAX_LEN));
-    Ok(())
-}
-
-/// Review A2-L5: the projection of an entry whose elements carry no dots (a value stored by an
-/// earlier build) normalizes it first instead of truncating, so its elements are judged by the
-/// synthesized epoch dot and retired, and its remove side and bound are kept.
-#[test]
-fn test_projection_normalizes_an_undotted_entry() -> Result<()> {
-    let mut undotted = with_retention(
-        Entry::new(
-            Entry::gen_did("topic")?,
-            vec![element("a")?, element("b")?],
-            EntryKind::Data,
-        ),
-        NOW_MS + u128::from(DEFAULT_TTL_MS),
-    );
-    undotted.crdt.tombstones = vec![EntryTombstone::of(
-        &element("removed")?,
-        EntryDot::for_index(version_at(NOW_MS), 0)?,
-    )];
-    let projected = undotted.retired_at(NOW_MS);
-    assert!(projected.data.is_empty());
-    assert!(projected.crdt.dots.is_empty());
-    assert_eq!(projected.crdt.tombstones.len(), 1);
-    assert_eq!(
-        projected.expires_at_ms,
-        Some(NOW_MS + u128::from(DEFAULT_TTL_MS))
-    );
     Ok(())
 }

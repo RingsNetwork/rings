@@ -116,8 +116,7 @@ async fn live_entry(
 
 /// The counts a projection can change: elements, element dots, removes, and whether a register
 /// is held. On a stored value, which is normalized, [`Entry::retired_at`] only drops, so a
-/// projection with the same shape is the same value; a misaligned value (elements and dots of
-/// different lengths) differs in shape from its normalization, so it is written back once.
+/// projection with the same shape is the same value.
 fn projection_shape(entry: &Entry) -> (usize, usize, usize, bool) {
     (
         entry.data.len(),
@@ -144,11 +143,10 @@ async fn retire_unless_live(
     projection: Projection,
 ) -> Result<Option<Entry>> {
     let stored_shape = projection_shape(&entry);
-    let entry = entry.retired_at(now_ms);
-    if !entry.is_live_at(now_ms) {
+    let Some(entry) = entry.live_at(now_ms) else {
         store.remove(key).await?;
         return Ok(None);
-    }
+    };
     if projection == Projection::WrittenBack && projection_shape(&entry) != stored_shape {
         store.put(key, &entry).await?;
     }
@@ -473,13 +471,12 @@ impl PeerRing {
     /// removes and register that hold it live are what the repair spreads.
     ///
     /// `held` ⊇ `served`: `local_cache_get = filter(answers_lookups_at) ∘ local_cache_held`.
-    pub(crate) async fn local_cache_held(&self, entry_key: Did) -> Result<Option<Entry>> {
-        self.cached_at(entry_key, get_epoch_ms()).await
-    }
-
-    /// The live cached carrier at `entry_key`, projected at `now_ms`; the fetch cache has no
-    /// transition, so the projection is returned only.
-    async fn cached_at(&self, entry_key: Did, now_ms: u128) -> Result<Option<Entry>> {
+    /// The fetch cache has no transition, so the projection is returned only.
+    pub(crate) async fn local_cache_held(
+        &self,
+        entry_key: Did,
+        now_ms: u128,
+    ) -> Result<Option<Entry>> {
         live_entry(
             &self.cache,
             &entry_key.to_string(),
@@ -516,7 +513,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// element must not answer a fetch as a found, empty topic while the owners hold live data.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
         let now_ms = get_epoch_ms();
-        let held = self.cached_at(entry_key, now_ms).await?;
+        let held = self.local_cache_held(entry_key, now_ms).await?;
         Ok(held.filter(|entry| entry.answers_lookups_at(now_ms)))
     }
 }

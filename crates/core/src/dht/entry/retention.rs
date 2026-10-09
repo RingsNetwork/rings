@@ -155,20 +155,13 @@ impl EntryKind {
 /// the register) retires, and what holds an expired carrier live.
 ///
 /// The production law is [`ElementRetention::of`]. The horizons are crate-visible so a model can
-/// check a deliberately broken law and witness that it fails; the two holders, fixed in
-/// production, exist only in test builds for the same purpose.
+/// check a deliberately broken law and witness that it fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ElementRetention {
     /// `H`: an add retires at `τ(d) + H`.
     pub(crate) add_horizon_ms: u128,
     /// `H + σ`: a remove, and the register, retire at `τ + H + σ`.
     pub(crate) remove_horizon_ms: u128,
-    /// Whether an unstable remove keeps a carrier live past its retention bound.
-    #[cfg(test)]
-    pub(crate) removes_hold_carrier: bool,
-    /// Whether an unstable register keeps a carrier live past its retention bound.
-    #[cfg(test)]
-    pub(crate) register_holds_carrier: bool,
 }
 
 impl ElementRetention {
@@ -178,25 +171,7 @@ impl ElementRetention {
         Some(Self {
             add_horizon_ms: horizon_ms,
             remove_horizon_ms: horizon_ms.saturating_add(TS_OFFSET_TOLERANCE_MS),
-            #[cfg(test)]
-            removes_hold_carrier: true,
-            #[cfg(test)]
-            register_holds_carrier: true,
         })
-    }
-
-    /// Whether an unstable remove, and whether an unstable register, keeps a carrier live past
-    /// its retention bound: both, under the production law.
-    #[cfg(not(test))]
-    const fn holders(self) -> (bool, bool) {
-        (true, true)
-    }
-
-    /// Whether an unstable remove, and whether an unstable register, keeps a carrier live past
-    /// its retention bound, as the law under test sets them.
-    #[cfg(test)]
-    const fn holders(self) -> (bool, bool) {
-        (self.removes_hold_carrier, self.register_holds_carrier)
     }
 
     /// Whether the add `dot` is past the horizon at `now_ms`: `t ≥ τ(d) + H`.
@@ -210,7 +185,7 @@ impl ElementRetention {
 
     /// The instant a remove or register at `version` becomes stable, i.e. every add it covers
     /// or floors is retired on every clock within the skew tolerance: `τ + H + σ`.
-    fn stable_at(self, version: &EntryVersion) -> u128 {
+    pub(super) fn stable_at(self, version: &EntryVersion) -> u128 {
         version
             .logical_time_ms
             .saturating_add(self.remove_horizon_ms)
@@ -246,19 +221,23 @@ impl Entry {
     /// documentation): `retire_t`, then, once the retention bound has elapsed, the carrier's
     /// elements dropped so that only its remove side outlives the bound.
     ///
-    /// Every stored value, join result, and operation result is normalized for storage
-    /// ([`Self::try_into_storage_entry`]), and the projection is then a pure filter. An entry
-    /// whose elements and dots are misaligned (a value stored by an earlier build) is
-    /// normalized first, and if even that fails its elements, which carry no provable dot, are
-    /// dropped.
-    /// Post: identity for a kind without a horizon. For a kind with one: normalized when `self`
-    /// is normalized or misaligned (a misaligned entry is normalized first); an aligned entry
-    /// that is not normalized is filtered as it stands and is not normalized by the projection,
-    /// a shape no storage path produces. Identity, without copying or hashing, for a normalized
-    /// entry in which nothing has crossed a threshold. The retention bound is unchanged.
+    /// Pre: `self` is normalized ([`Self::try_into_storage_entry`]), as every stored value, join
+    /// result and operation result is; the projection is then a pure filter.
+    /// Post: identity for a kind without a horizon; for a kind with one, normalized, and
+    /// identity, without copying or hashing, when nothing has crossed a threshold. The retention
+    /// bound is unchanged.
     pub fn retired_at(self, now_ms: u128) -> Self {
         let retention = ElementRetention::of(self.kind);
         self.retired_under(retention, now_ms)
+    }
+
+    /// What a read serves at `now_ms`: the projection [`Self::retired_at`] when it is live
+    /// ([`Self::is_live_at`]), else `None`.
+    ///
+    /// Pre: `self` is normalized.
+    pub fn live_at(self, now_ms: u128) -> Option<Self> {
+        let projected = self.retired_at(now_ms);
+        projected.is_live_at(now_ms).then_some(projected)
     }
 
     /// [`Self::retired_at`] under the retention law `retention`.
@@ -267,22 +246,10 @@ impl Entry {
             return self;
         };
         let bound_elapsed = !self.bound_live_at(now_ms);
-        let entry = self.aligned().horizon_retired_under(retention, now_ms);
+        let entry = self.horizon_retired_under(retention, now_ms);
         match bound_elapsed && !entry.data.is_empty() {
             true => entry.without_elements(),
             false => entry,
-        }
-    }
-
-    /// This entry with one dot per element: itself when aligned, else its normalization, else
-    /// (when normalization fails) itself without elements.
-    fn aligned(self) -> Self {
-        if self.data.len() == self.crdt.dots.len() {
-            return self;
-        }
-        match self.clone().try_into_storage_entry() {
-            Ok(normalized) => normalized,
-            Err(_) => self.without_elements(),
         }
     }
 
@@ -352,7 +319,7 @@ impl Entry {
     }
 
     /// Whether the retention bound itself has not elapsed at `now_ms`.
-    fn bound_live_at(&self, now_ms: u128) -> bool {
+    pub(super) fn bound_live_at(&self, now_ms: u128) -> bool {
         self.expires_at_ms
             .is_some_and(|expires_at_ms| now_ms < expires_at_ms)
     }
@@ -377,23 +344,17 @@ impl Entry {
     }
 
     /// The instant every remove and the register this entry holds are stable,
-    /// `max({τ(k)} ∪ {τ(register)}) + H + σ`, or `None` when it holds neither (or when
-    /// `retention` lets nothing hold the carrier).
+    /// `max({τ(k)} ∪ {τ(register)}) + H + σ`, or `None` when it holds neither.
     ///
     /// The register counts because an overwrite drops every remove below it: were it not to
     /// hold the carrier, an overwrite would collapse an unstable remove into a carrier that
     /// expires at its own bound, and a stale replica could serve the removed payload back.
     fn removes_stable_under(&self, retention: ElementRetention) -> Option<u128> {
-        let (removes_hold, register_holds) = retention.holders();
-        let removes = self
-            .crdt
+        self.crdt
             .tombstones
             .iter()
             .map(|tombstone| tombstone.dot.version)
-            .filter(|_| removes_hold);
-        let register = self.crdt.register.filter(|_| register_holds);
-        removes
-            .chain(register)
+            .chain(self.crdt.register)
             .map(|version| retention.stable_at(&version))
             .max()
     }

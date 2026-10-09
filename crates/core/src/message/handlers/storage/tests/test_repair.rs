@@ -411,7 +411,7 @@ async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
     Ok(())
 }
 
-/// Review R4-L4, the handler split: a found-empty reply that reports misses repairs them from
+/// The handler split: a found-empty reply that reports misses repairs them from
 /// the carrier the cache holds (`PeerRing::local_cache_held`), even one past its retention
 /// bound that the cache serves as absent, since its removes are what the repair spreads. A
 /// repair that read the served view (`local_cache_get`) would find nothing and write nothing.
@@ -665,7 +665,7 @@ async fn test_storage_fetch_starts_fresh_observation_round() -> Result<()> {
     Ok(())
 }
 
-/// Review R4-L5: a fetch round's reply marker is set by a reply that caches an entry, not by a
+/// A fetch round's reply marker is set by a reply that caches an entry, not by a
 /// found-empty one, and a new round clears it; a reader polls the marker instead of comparing
 /// cached values, which change with no reply as elements cross their horizon.
 #[tokio::test]
