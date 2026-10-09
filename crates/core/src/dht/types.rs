@@ -100,8 +100,10 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 /// ChordStorageCache defines the basic API for getting and setting DHT cache storage.
 ///
 /// The cache is bounded and shares the storage admission law: a fetched entry
-/// is cached only if it could have been accepted into storage, and it is
-/// retired once its retention bound elapses.
+/// is cached only if it could have been accepted into storage. It shares the
+/// retention law too: a cached carrier is retired once its retention bound has
+/// elapsed and it holds no uncollected remove or register, and a carrier past
+/// its bound is served as absent while those still hold it.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageCache<Action>: Chord<Action> {
@@ -110,7 +112,4 @@ pub trait ChordStorageCache<Action>: Chord<Action> {
     /// Get a live cached entry as a lookup serves it: a carrier past its retention bound is
     /// absent.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>>;
-    /// Get every live cached carrier, one past its bound that serves no element included, for
-    /// read-repair of a missed placement.
-    async fn local_cache_held(&self, entry_key: Did) -> Result<Option<Entry>>;
 }

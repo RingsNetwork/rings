@@ -117,6 +117,7 @@ async fn handle_storage_fetch_act(
                 .dht
                 .local_cache_put(evidence.entry.clone())
                 .await?;
+            transport.answer_storage_lookup(resource, redundancy)?;
             let misses = evidence.misses;
             let repair = transport
                 .dht
@@ -441,6 +442,8 @@ impl HandleMsg<FoundEntry> for MessageHandler {
         )?;
         if let Some(data) = found_entry {
             self.dht.local_cache_put(data.clone()).await?;
+            self.transport
+                .answer_storage_lookup(msg.resource, msg.redundancy)?;
             repair_observed_storage_misses(self.transport.clone(), data.clone(), msg.redundancy)
                 .await?;
         } else if !msg.misses.is_empty() {

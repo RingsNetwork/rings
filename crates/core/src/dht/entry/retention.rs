@@ -250,9 +250,11 @@ impl Entry {
     /// whose elements and dots are misaligned (a value stored by an earlier build) is
     /// normalized first, and if even that fails its elements, which carry no provable dot, are
     /// dropped.
-    /// Post: normalized; identity for a kind without a horizon, and identity, without copying or
-    /// hashing, for a normalized entry in which nothing has crossed a threshold. The retention
-    /// bound is unchanged.
+    /// Post: identity for a kind without a horizon. For a kind with one: normalized when `self`
+    /// is normalized or misaligned (a misaligned entry is normalized first); an aligned entry
+    /// that is not normalized is filtered as it stands and is not normalized by the projection,
+    /// a shape no storage path produces. Identity, without copying or hashing, for a normalized
+    /// entry in which nothing has crossed a threshold. The retention bound is unchanged.
     pub fn retired_at(self, now_ms: u128) -> Self {
         let retention = ElementRetention::of(self.kind);
         self.retired_under(retention, now_ms)
@@ -344,7 +346,7 @@ impl Entry {
     /// elapsed. A carrier held live past its bound by an unstable remove or register serves no
     /// element, and answering it as found would shadow a replica that still holds data; it
     /// answers as absent, and its remove side still spreads by join on hand-off and repair.
-    pub fn answers_lookups_at(&self, now_ms: u128) -> bool {
+    pub(crate) fn answers_lookups_at(&self, now_ms: u128) -> bool {
         self.bound_live_at(now_ms)
     }
 

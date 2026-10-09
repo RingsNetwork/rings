@@ -77,7 +77,8 @@
 //! sender's slot, so the sender's history restarts with it. Reader
 //! caches of both kinds are modelled: one joins every reply it observes (the read-join of #864,
 //! on `develop`), one replaces its value with the last reply (master's `local_cache_put`), and
-//! both are delivered back to owners, as read-repair does from `local_cache_get`.
+//! both are delivered back to owners, as read-repair of a missed placement does from the held
+//! cache read (`PeerRing::local_cache_held`), which keeps a carrier past its bound.
 //!
 //! Not modelled, each stated where it matters: storage byte-budget eviction (it drops a carrier
 //! whatever it holds; SECURITY.md), forged deltas (admission bounds them to `τ ≤ now + σ`, the

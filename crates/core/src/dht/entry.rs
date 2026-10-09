@@ -288,7 +288,7 @@ impl SyncedEntryAck {
     /// earlier clock, and projecting it again at `now_ms` yields what `local` is when nothing
     /// was written meanwhile. It computes no digest.
     pub fn confirms_local_value(&self, local: &Entry, now_ms: u128) -> bool {
-        self.entry.clone().retired_at(now_ms) == *local
+        self.entry.clone().retired_at(now_ms).eq(local)
     }
 }
 

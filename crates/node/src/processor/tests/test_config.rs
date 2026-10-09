@@ -1,3 +1,5 @@
+use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
+use rings_core::dht::entry::EntryKind;
 use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::message::OriginQuotaConfig;
@@ -6,6 +8,7 @@ use rings_core::message::OriginQuotaLaneConfig;
 use super::common::*;
 use super::*;
 use crate::processor::config::parse_webrtc_udp_port_range;
+use crate::processor::dht_lookup_poll_budget;
 use crate::registration::registry_refresh_bound;
 
 #[test]
@@ -89,44 +92,66 @@ fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enable
     ));
 }
 
-/// Both registries refuse a heartbeat interval at or above the descriptor lifetime less the
-/// clock skew, at which a sole registrant's descriptor would lapse between heartbeats.
+/// The registry refresh bound, derived here from its named terms rather than read back from
+/// [`registry_refresh_bound`]: `L − σ − P`, where `L` is the data default lifetime a registry
+/// write requests, `σ = TS_OFFSET_TOLERANCE_MS` the clock-skew tolerance, and `P` the fetch-poll
+/// budget a heartbeat may spend fetching the registry before it appends.
+fn expected_registry_refresh_bound() -> Duration {
+    let lifetime = Duration::from_millis(EntryKind::Data.default_lifetime_ms());
+    let skew = Duration::from_millis(u64::try_from(TS_OFFSET_TOLERANCE_MS).unwrap());
+    lifetime - skew - dht_lookup_poll_budget()
+}
+
+/// Both registries accept a heartbeat interval just below `L − σ − P` and refuse one at it, at
+/// which a sole registrant's descriptor could lapse between heartbeats. Probing both sides of
+/// the independently derived bound makes dropping or adding any of the three terms fail.
 #[test]
 fn test_registry_heartbeat_must_refresh_before_a_descriptor_expires() -> Result<()> {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let bound = registry_refresh_bound();
-    let mut presence = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key.clone(),
-        3,
-    );
-    presence.online_node_heartbeat_interval = bound;
-    presence.online_node_ttl = bound * 2;
+    let bound = expected_registry_refresh_bound();
+    assert_eq!(registry_refresh_bound(), bound);
+    let below = bound - Duration::from_millis(1);
+
+    let presence = |interval: Duration| {
+        let mut config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            delegatee_key.clone(),
+            3,
+        );
+        config.online_node_heartbeat_interval = interval;
+        config.online_node_ttl = bound * 2;
+        ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build)
+    };
+    assert!(presence(below).is_ok());
     assert!(matches!(
-        ProcessorBuilder::from_config(&presence).and_then(ProcessorBuilder::build),
+        presence(bound),
         Err(Error::InvalidConfig(message))
             if message.contains("online_node_heartbeat_interval")
-                && message.contains("registry descriptor's lifetime")
+                && message.contains("lifetime of a registry write")
     ));
 
-    let mut exit = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_string(),
-        delegatee_key,
-        3,
-    )
-    .advertise_onion_exit(true)
-    .onion_exit_policy(onion_policy(&["example.com:443"], &[])?);
-    exit.advertise_presence = false;
-    exit.onion_exit_heartbeat_interval = bound;
-    exit.onion_exit_ttl = bound * 2;
+    let exit = |interval: Duration| -> Result<_> {
+        let mut config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            delegatee_key.clone(),
+            3,
+        )
+        .advertise_onion_exit(true)
+        .onion_exit_policy(onion_policy(&["example.com:443"], &[])?);
+        config.advertise_presence = false;
+        config.onion_exit_heartbeat_interval = interval;
+        config.onion_exit_ttl = bound * 2;
+        Ok(ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build))
+    };
+    assert!(exit(below)?.is_ok());
     assert!(matches!(
-        ProcessorBuilder::from_config(&exit).and_then(ProcessorBuilder::build),
+        exit(bound)?,
         Err(Error::InvalidConfig(message))
             if message.contains("onion_exit_heartbeat_interval")
-                && message.contains("registry descriptor's lifetime")
+                && message.contains("lifetime of a registry write")
     ));
     Ok(())
 }

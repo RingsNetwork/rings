@@ -32,6 +32,8 @@ pub(super) struct StorageLookupObservationKey {
 pub(super) struct StorageLookupObservation {
     observed_at_ms: i64,
     misses: BTreeSet<PlacementMiss>,
+    /// Whether an entry has been cached for this round: the round's reply marker.
+    answered: bool,
 }
 
 fn storage_lookup_observation_now_ms() -> i64 {
@@ -110,12 +112,50 @@ impl SwarmTransport {
         observations.insert(key, StorageLookupObservation {
             observed_at_ms: now,
             misses: BTreeSet::new(),
+            answered: false,
         });
         self.observer().lookup_started(
             LookupKind::Storage,
             LookupCorrelation::StorageResource(resource),
         );
         Ok(())
+    }
+
+    /// Mark the active lookup round of `(resource, redundancy)` answered: an entry it found has
+    /// just been cached.
+    ///
+    /// Post: [`Self::storage_lookup_answered`] is `true` until a new round for the same key
+    /// starts or the bucket is evicted; a missing bucket is left missing.
+    pub(crate) fn answer_storage_lookup(&self, resource: Did, redundancy: u16) -> Result<()> {
+        let key = self.storage_lookup_observation_key(resource, redundancy)?;
+        let mut observations = self
+            .storage_lookup_observations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        if let Some(observation) = observations.get_mut(&key) {
+            observation.answered = true;
+        }
+        Ok(())
+    }
+
+    /// Whether the latest lookup round of `(resource, redundancy)` has cached an entry since it
+    /// started.
+    ///
+    /// Post: `false` when no fresh round is retained, so a reader falls back to the cache.
+    pub(crate) fn storage_lookup_answered(&self, resource: Did, redundancy: u16) -> Result<bool> {
+        let key = self.storage_lookup_observation_key(resource, redundancy)?;
+        let mut observations = self
+            .storage_lookup_observations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        evict_storage_lookup_observations(
+            &mut observations,
+            storage_lookup_observation_now_ms(),
+            STORAGE_LOOKUP_OBSERVATION_CAPACITY,
+        );
+        Ok(observations
+            .get(&key)
+            .is_some_and(|observation| observation.answered))
     }
 
     /// Validate that a storage lookup response belongs to a local lookup round.

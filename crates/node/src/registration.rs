@@ -103,8 +103,8 @@ pub(crate) fn validate_registry_heartbeat(
     let bound = registry_refresh_bound();
     if heartbeat_interval >= bound {
         return Err(Error::InvalidConfig(format!(
-            "{setting} ({heartbeat_interval:?}) must be less than {bound:?}, \
-             a registry descriptor's lifetime less the clock-skew tolerance and the fetch-poll budget"
+            "{setting} ({heartbeat_interval:?}) must be less than {bound:?}, the lifetime of \
+             a registry write less the clock-skew tolerance and the fetch-poll budget"
         )));
     }
     Ok(())

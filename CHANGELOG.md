@@ -169,22 +169,27 @@
   - A carrier past its retention bound answers lookups as absent, from a replica and from a
     reader's fetch cache alike, so the lookup asks the next placement and read-repair joins
     the missed one; a read that retires part of a stored carrier writes the projection back.
-  - Registry heartbeat intervals must be below the descriptor lifetime less the clock-skew
-    tolerance and the fetch-poll budget (595 s by default), for the online-node and onion-exit
-    registries alike; a node whose configuration exceeds it refuses to start.
-  - IndexedDB stores are opened with a `RecordAuthority` (`rings_core::storage`): a disposable
-    store retires a record it cannot decode, an authoritative one reports it and keeps it.
-    `IdbStorage::new_with_cap_and_name` now opens a disposable store, and the new
-    `IdbStorage::new_with_cap_name_and_authority` takes the authority; the browser replay store
-    is authoritative and every other browser store disposable. Native file storage is
-    unchanged here: it retires an undecodable record in every store.
+    Since a cached value is projected at each read, it can change with no reply, so the new
+    `Swarm::storage_fetch_answered` reports whether the latest fetch of a key has cached an
+    entry, and the node's onion-exit refresh waits on it instead of on a changed value.
+  - Registry heartbeat intervals must be below the lifetime of a registry write (10 minutes)
+    less the clock-skew tolerance and the fetch-poll budget, which is 595 s, for the online-node
+    and onion-exit registries alike; a node whose configuration exceeds it refuses to start.
+  - `RecordAuthority` moves from `rings_core::storage::file` to `rings_core::storage`, one type
+    for every backend, whose shared law is the decode law: a disposable store retires a record
+    it cannot decode on the read that finds it, an authoritative one reports it and keeps it.
+    IndexedDB stores are now opened with one as well: `IdbStorage::new_with_cap_and_name` opens
+    a disposable store, and the new `IdbStorage::new_with_cap_name_and_authority` takes the
+    authority; the browser replay store is authoritative and every other browser store
+    disposable, as on native (#909). An IndexedDB `scan` reports an undecodable row as
+    `ScannedRecord::Undecodable` under either authority and deletes nothing.
   - Cutover: the wire format of storage entries and operations changes, so every node of a
     network must upgrade together; the version is bumped at release. Stored carriers of the old
     format that hold a tombstone no longer decode, and both native file storage and the browser
-    entry store retire them on first read or scan. Data topics are repopulated by their owners'
-    next writes and the registries' next heartbeats. A relay inbox that has ever drained a
-    message holds a tombstone, so it is retired with the messages it still held for its
-    offline recipient: those undelivered messages are lost at the cutover.
+    entry store retire them on the first read that finds them. Data topics are repopulated by
+    their owners' next writes and the registries' next heartbeats. A relay inbox that has ever
+    drained a message holds a tombstone, so it is retired with the messages it still held for
+    its offline recipient: those undelivered messages are lost at the cutover.
 
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`

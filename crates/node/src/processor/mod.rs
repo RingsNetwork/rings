@@ -115,7 +115,11 @@ pub(crate) use config::parse_webrtc_udp_port_range;
 pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
 
+/// The pause between two reads of the fetch cache while a DHT fetch waits for its reply.
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// The number of fetch-cache reads a DHT fetch makes before it gives up on a reply; with
+/// [`DHT_LOOKUP_CACHE_POLL_INTERVAL`] it fixes [`dht_lookup_poll_budget`], the `P` term of the
+/// registry refresh bound.
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: u32 = 40;
 
 /// The longest a DHT fetch polls the cache for its reply: its attempts times their interval.
@@ -355,7 +359,7 @@ impl Processor {
         }
 
         let Some(refreshed_entry) = self
-            .fetch_storage_entry_after_cache_refresh(entry_key, &entry)
+            .fetch_storage_entry_after_cache_refresh(entry_key)
             .await?
         else {
             return Ok(exits);
@@ -420,20 +424,28 @@ impl Processor {
             })
     }
 
+    /// Fetch `entry_key` again and read the cache once the fetch is answered.
+    ///
+    /// A reply is recognised by the fetch's reply marker ([`Swarm::storage_fetch_answered`]),
+    /// not by the cached value changing: a cached value is projected at the clock of each read,
+    /// so it changes with no reply when an element crosses its horizon.
+    ///
+    /// Post: the cache read after the reply, or, if none arrives within the fetch-poll budget,
+    /// the cache read at its end.
     async fn fetch_storage_entry_after_cache_refresh(
         &self,
         entry_key: Did,
-        previous_entry: &entry::Entry,
     ) -> Result<Option<entry::Entry>> {
         self.storage_fetch(entry_key).await?;
         for _ in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
-            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
-            let Some(entry) = self.storage_check_cache(entry_key).await else {
-                continue;
-            };
-            if &entry != previous_entry {
-                return Ok(Some(entry));
+            if self
+                .swarm
+                .storage_fetch_answered(entry_key)
+                .map_err(Error::EntryError)?
+            {
+                break;
             }
+            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
         }
         Ok(self.storage_check_cache(entry_key).await)
     }

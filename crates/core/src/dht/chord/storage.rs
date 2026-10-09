@@ -464,6 +464,19 @@ impl PeerRing {
 }
 
 impl PeerRing {
+    /// Read the cached carrier at `entry_key` as the cache holds it, for read-repair of a missed
+    /// placement.
+    ///
+    /// Post: the live carrier projected at the current clock, a carrier past its retention
+    /// bound included: such a carrier serves no element and is absent from
+    /// [`ChordStorageCache::local_cache_get`] (see [`Entry::answers_lookups_at`]), but the
+    /// removes and register that hold it live are what the repair spreads.
+    ///
+    /// `held` ⊇ `served`: `local_cache_get = filter(answers_lookups_at) ∘ local_cache_held`.
+    pub(crate) async fn local_cache_held(&self, entry_key: Did) -> Result<Option<Entry>> {
+        self.cached_at(entry_key, get_epoch_ms()).await
+    }
+
     /// The live cached carrier at `entry_key`, projected at `now_ms`; the fetch cache has no
     /// transition, so the projection is returned only.
     async fn cached_at(&self, entry_key: Did, now_ms: u128) -> Result<Option<Entry>> {
@@ -499,18 +512,11 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// Read a cached entry, as a lookup serves it.
     ///
     /// Post: a cached carrier past its retention bound, held live only by an unstable remove or
-    /// register, is served as absent, as a replica serves it (see
-    /// [`Entry::answers_lookups_at`]): a cache entry that serves no element must not answer a
-    /// fetch as a found, empty topic while the owners hold live data.
+    /// register, is served as absent, as a replica serves it: a cache entry that serves no
+    /// element must not answer a fetch as a found, empty topic while the owners hold live data.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
         let now_ms = get_epoch_ms();
         let held = self.cached_at(entry_key, now_ms).await?;
         Ok(held.filter(|entry| entry.answers_lookups_at(now_ms)))
-    }
-
-    /// Read every live cached carrier, one past its bound that serves no element included: its
-    /// removes are what read-repair of a missed placement spreads.
-    async fn local_cache_held(&self, entry_key: Did) -> Result<Option<Entry>> {
-        self.cached_at(entry_key, get_epoch_ms()).await
     }
 }

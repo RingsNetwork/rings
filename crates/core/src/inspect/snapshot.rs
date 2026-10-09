@@ -137,7 +137,9 @@ impl StorageInspect {
     /// Build a storage inspection snapshot from an entry storage handle.
     ///
     /// Post: every item is live and projected by [`Entry::retired_at`] at the current clock, as
-    /// every storage read serves it. The snapshot retires no expired value and writes back no
+    /// a storage read holds it: a carrier past its retention bound that an uncollected remove
+    /// or register keeps live is listed, with no element, although lookups serve it as absent.
+    /// The snapshot retires no expired value and writes back no
     /// projection, leaving both to the next storage read; the store's own scan may still retire
     /// a record it cannot decode, under a disposable store's decode law.
     pub async fn inspect_kv_storage(storage: &EntryStorage) -> Self {

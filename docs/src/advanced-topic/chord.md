@@ -76,8 +76,9 @@ merged value does not depend on the order replies arrive in.
   refresh their descriptors every heartbeat (30 s by default). Once the topic's bound has
   elapsed, it serves no element; it is kept only while it holds a tombstone or overwrite that
   is not yet collected, and it answers lookups as absent, from a replica and from a reader's
-  fetch cache alike, so a reader asks the next replica and read-repair joins the missed one,
-  which is how its tombstones still spread.
+  fetch cache alike, so a reader asks the next replica. Its tombstones still spread by
+  hand-off, by republish, and by read-repair from the reader's cache, which repairs a missed
+  replica from the carrier it holds even past its bound.
 - **A removal wins over every earlier write of its value.** A tombstone names the value and the
   newest dot of it the storage owner holds, and covers every dot of that value up to that one,
   including dots already forgotten under a later write. "Earlier" is the dot order, not real

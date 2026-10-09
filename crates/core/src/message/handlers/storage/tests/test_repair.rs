@@ -12,8 +12,11 @@ use super::test_support::split_redundant_entry;
 use super::test_support::NoopCallback;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryDot;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
+use crate::dht::entry::EntryTombstone;
+use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
@@ -23,6 +26,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
+use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
@@ -41,6 +45,7 @@ use crate::tests::default::Node;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::TEST_NETWORK_ID;
+use crate::utils::get_epoch_ms;
 
 #[tokio::test]
 async fn test_storage_repair_request_after_claim_remains_pending() -> Result<()> {
@@ -406,6 +411,60 @@ async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
     Ok(())
 }
 
+/// Review R4-L4, the handler split: a found-empty reply that reports misses repairs them from
+/// the carrier the cache holds (`PeerRing::local_cache_held`), even one past its retention
+/// bound that the cache serves as absent, since its removes are what the repair spreads. A
+/// repair that read the served view (`local_cache_get`) would find nothing and write nothing.
+#[tokio::test]
+async fn test_found_empty_reply_repairs_misses_from_a_held_carrier_past_its_bound() -> Result<()> {
+    let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let now_ms = get_epoch_ms();
+    let resource = Did::from(10u32);
+    let mut carrier = Entry::new(resource, vec![], EntryKind::Data);
+    carrier.crdt.tombstones = vec![EntryTombstone::of(&Encoded::from("removed"), EntryDot {
+        version: EntryVersion::new(now_ms - 1_000, Did::from(1u32), Did::from(2u32)),
+        index: 0,
+    })];
+    carrier.expires_at_ms = Some(now_ms - 1);
+    node.dht()
+        .cache
+        .put(&resource.to_string(), &carrier)
+        .await?;
+    let placement_key = resource
+        .rotate_affine(2)?
+        .into_iter()
+        .nth(1)
+        .ok_or_else(|| Error::InvalidMessage("expected repair placement".to_string()))?;
+    let found_empty = FoundEntry {
+        data: vec![],
+        misses: vec![PlacementMiss::new(placement_key, node.did())],
+        resource,
+        redundancy: 2,
+    };
+    let context_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(found_empty.clone()),
+        MessageSigner::new(&context_session, TEST_NETWORK_ID),
+        node.did(),
+        node.did(),
+    )?;
+    node.swarm.transport.start_storage_lookup(resource, 2)?;
+
+    assert_eq!(node.swarm.storage_check_cache(resource).await, None);
+    handler.handle(&context, &found_empty).await?;
+
+    let repaired = node
+        .dht()
+        .storage
+        .get(&placement_key.to_string())
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("the missed placement is repaired".to_string()))?;
+    assert!(repaired.data.is_empty());
+    assert_eq!(repaired.crdt.tombstones, carrier.crdt.tombstones);
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
@@ -615,6 +674,51 @@ async fn test_storage_fetch_starts_fresh_observation_round() -> Result<()> {
 
     assert!(misses.is_empty());
     assert_eq!(node.swarm.transport.storage_lookup_observation_count()?, 1);
+    Ok(())
+}
+
+/// Review R4-L5: a fetch round's reply marker is set by a reply that caches an entry, not by a
+/// found-empty one, and a new round clears it; a reader polls the marker instead of comparing
+/// cached values, which change with no reply as elements cross their horizon.
+#[tokio::test]
+async fn test_storage_fetch_answered_marks_a_round_answered_by_an_entry() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let redundancy = node.swarm.storage_redundancy();
+    let entry = live_entry(
+        Did::from(10u32),
+        vec!["answer".to_string().encode()?],
+        EntryKind::Data,
+    );
+    let reply = |data: Vec<Entry>| FoundEntry {
+        data,
+        misses: vec![],
+        resource: entry.did,
+        redundancy,
+    };
+    let context_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(reply(vec![])),
+        MessageSigner::new(&context_session, TEST_NETWORK_ID),
+        node.did(),
+        node.did(),
+    )?;
+
+    node.swarm
+        .transport
+        .start_storage_lookup(entry.did, redundancy)?;
+    assert!(!node.swarm.storage_fetch_answered(entry.did)?);
+    handler.handle(&context, &reply(vec![])).await?;
+    assert!(!node.swarm.storage_fetch_answered(entry.did)?);
+    handler
+        .handle(&context, &reply(vec![entry.clone()]))
+        .await?;
+    assert!(node.swarm.storage_fetch_answered(entry.did)?);
+
+    node.swarm
+        .transport
+        .start_storage_lookup(entry.did, redundancy)?;
+    assert!(!node.swarm.storage_fetch_answered(entry.did)?);
     Ok(())
 }
 

@@ -213,9 +213,9 @@ pub struct DataTopicBuffer {
 /// Insert `dot` at `key`, keeping the greater dot when `key` is already present: the join of
 /// one singleton into a pointwise-`max` map.
 pub(super) fn insert_max<K: Ord>(map: &mut BTreeMap<K, EntryDot>, key: K, dot: EntryDot) {
-    map.entry(key)
-        .and_modify(|current| *current = (*current).max(dot))
-        .or_insert(dot);
+    if map.get(&key).is_none_or(|current| current.lt(&dot)) {
+        map.insert(key, dot);
+    }
 }
 
 impl DataTopicBuffer {
@@ -249,7 +249,7 @@ impl DataTopicBuffer {
         !removes.is_empty()
             && removes
                 .get(&ElementDigest::of(value))
-                .is_some_and(|remove| dot <= *remove)
+                .is_some_and(|remove| dot.le(remove))
     }
 
     /// Record a covering remove for `value` at its held dot, if the carrier holds `value`.
