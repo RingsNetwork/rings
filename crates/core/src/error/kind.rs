@@ -114,7 +114,19 @@ pub enum Error {
         capacity: usize,
     },
 
-    /// The replay store holds a record that violates its structural bounds.
+    /// A replay stream whose stored record does not restore refuses every transition until an
+    /// operator clears that record.
+    #[error(
+        "Transaction replay stream {key:?} is unavailable: its record {record} does not restore"
+    )]
+    TransactionReplayStreamUnavailable {
+        /// The stream that fails closed.
+        key: crate::message::StreamKey,
+        /// Storage record name of the stream's unrestorable record, the one to clear.
+        record: String,
+    },
+
+    /// Replay state violates an invariant of the replay runtime.
     #[error("Transaction replay state is invalid")]
     TransactionReplayStateInvalid,
 
@@ -693,6 +705,32 @@ pub enum Error {
         /// Total byte budget of the storage.
         capacity: u64,
     },
+
+    /// An authoritative storage is full: it evicts nothing, so a write that does not fit, or an
+    /// open over a lowered budget, fails and changes nothing.
+    #[error("Authoritative storage holds {used} of {capacity} bytes; {required} more do not fit")]
+    StorageBudgetExhausted {
+        /// Bytes the stored records occupy.
+        used: u64,
+        /// Bytes the write needs (zero at open).
+        required: u64,
+        /// Total byte budget of the storage.
+        capacity: u64,
+    },
+
+    /// A storage could not run its blocking file work: no runtime was current, or the work
+    /// ended without publishing its result.
+    #[error("Storage file work did not run: {0}")]
+    StorageWorkUnscheduled(rings_runtime::DetachedError),
+
+    /// A replay transition could not run detached from its caller: no runtime was current, or
+    /// the transition ended without publishing its result.
+    #[error("Transaction replay transition did not run: {0}")]
+    TransactionReplayUnscheduled(rings_runtime::DetachedError),
+
+    /// A storage holds a record it cannot read or decode; the record is kept, never deleted.
+    #[error("Storage cannot decode {0}")]
+    StorageRecordUndecodable(crate::storage::UndecodableRecord),
 
     /// Message invalid: {0}
     #[error("Message invalid: {0}")]

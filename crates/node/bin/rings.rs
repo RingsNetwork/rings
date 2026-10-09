@@ -46,6 +46,7 @@ use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::file::FileStorage;
+use rings_node::prelude::rings_core::storage::file::RecordAuthority;
 use rings_node::prelude::DelegationBuilder;
 use rings_node::prelude::StopSource;
 use rings_node::processor::ProcessorBuilder;
@@ -66,8 +67,8 @@ const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
 /// Byte budget of the native replay store: every record of a full store
 /// (`rings_core::message::TRANSACTION_REPLAY_STORE_MAX_BYTES`, about 27 MiB), with room left
 /// for the former shared-stream snapshot until the first load after the #898 upgrade deletes
-/// it. The file store evicts its oldest records beyond its budget, and an evicted replay record
-/// would reopen replay for its stream, so the budget must never be reached.
+/// it. The store is authoritative and evicts nothing: a write beyond the budget fails, which
+/// fails that transition closed, so the budget must never be reached.
 const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 40 * 1024 * 1024;
 
 fn onion_entry_guard_storage_path(data_storage_path: &str) -> String {
@@ -879,10 +880,13 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         )
         .await?,
     );
+    // The replay store is the only copy of its streams' state: its writes are flushed and an
+    // undecodable record is reported and kept, so replay fails closed on it (#909).
     let per_transaction_replay_storage = Box::new(
-        FileStorage::new_with_cap_and_path(
+        FileStorage::new_with_cap_path_and_authority(
             TRANSACTION_REPLAY_STORAGE_CAPACITY,
             transaction_replay_storage_path(&data_storage.path),
+            RecordAuthority::Authoritative,
         )
         .await?,
     );
