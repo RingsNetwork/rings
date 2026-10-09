@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Rewrite SECURITY.md as a threat model: add the private vulnerability-reporting channel, state
+  the Sybil boundary once with its planned defence (#780) instead of in every section, and list the
+  open known limitations. Implementation invariants it used to repeat stay in the mdBook chapters
+  (replay, delegation references, service receipts, measurement storage), the CHANGELOG, and the
+  owning crates' documentation.
+
 - Fail a bad transaction replay record closed on its own stream only, and restore the replay store
   once (#910). A record that does not restore (torn, corrupt, unreadable, misplaced, or holding an
   invalid window) used to leave the whole replay store unloaded: every later reservation and
