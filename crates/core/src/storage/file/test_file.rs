@@ -3,7 +3,6 @@ use serde::Serialize;
 
 use super::test_root::TempRoot;
 use super::*;
-use crate::storage::RecordIdentity;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TestStorageStruct {
@@ -271,7 +270,7 @@ async fn test_authoritative_store_reports_a_torn_record_and_keeps_it() {
             .expect("open");
     let expected = UndecodableRecord {
         name: name.clone(),
-        identity: RecordIdentity::FiledAs("stream".to_owned()),
+        key: Some("stream".to_owned()),
     };
 
     assert!(matches!(
@@ -300,7 +299,7 @@ async fn test_authoritative_store_reports_an_empty_record_by_its_file() {
     let name = plant_record(&root, "stream", &[]);
     let expected = UndecodableRecord {
         name: name.clone(),
-        identity: RecordIdentity::Unreadable,
+        key: None,
     };
     for _ in 0..2 {
         let storage = FileStorage::new_with_cap_path_and_authority(
@@ -318,10 +317,10 @@ async fn test_authoritative_store_reports_an_empty_record_by_its_file() {
     }
 }
 
-/// A torn misfiled record keeps its evidence: a key prefix that decodes but hashes to another
-/// file is not the record's own key, and is reported as the key it carries.
+/// Damage is never taken for a move: a record that does not decode whole, whose key prefix
+/// decodes but hashes to another file, is undecodable with no key, not misfiled.
 #[tokio::test]
-async fn test_a_torn_misfiled_record_reports_the_key_it_carries() {
+async fn test_a_foreign_key_prefix_is_not_a_misfiled_record() {
     let root = temp_root("misfiled");
     let other = rings_codec::serialize(&"other").expect("key serializes");
     let name = plant_record(&root, "stream", &other);
@@ -334,9 +333,9 @@ async fn test_a_torn_misfiled_record_reports_the_key_it_carries() {
         <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
         Err(Error::StorageRecordUndecodable(UndecodableRecord {
             name: ref reported,
-            identity: RecordIdentity::Carries(ref carried),
+            key: None,
         }))
-            if *reported == name && carried == "other"
+            if *reported == name
     ));
 }
 
@@ -394,13 +393,16 @@ async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
     let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
         .await
         .expect("scan");
-    scanned.sort_by_key(|record| record.is_ok());
+    scanned.sort_by_key(|record| matches!(record, ScannedRecord::Filed { .. }));
     assert_eq!(scanned, [
-        Err(UndecodableRecord {
+        ScannedRecord::Undecodable(UndecodableRecord {
             name: name.clone(),
-            identity: RecordIdentity::FiledAs("torn".to_owned()),
+            key: Some("torn".to_owned()),
         }),
-        Ok(("whole".to_owned(), "v".to_owned())),
+        ScannedRecord::Filed {
+            key: "whole".to_owned(),
+            value: "v".to_owned(),
+        },
     ]);
     assert!(root.join(&name).exists());
     assert_eq!(
@@ -409,29 +411,38 @@ async fn test_scan_reports_undecodable_records_and_deletes_nothing() {
     );
 }
 
-/// Scan law under an unreadable entry: a directory occupying a record's name is reported by its
-/// file name, and the scan as a whole succeeds with the readable records.
+/// Scan and index laws under a directory in a record's place: it is reported by its file name,
+/// charges nothing against the budget, and the scan as a whole succeeds with the readable
+/// records.
 #[tokio::test]
 async fn test_scan_reports_a_directory_in_a_record_place() {
     let root = temp_root("directory");
     let directory = file_name_for("directory");
     std::fs::create_dir_all(root.join(&directory)).expect("occupy a record name");
-    let storage =
-        FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::Authoritative)
-            .await
-            .expect("open");
+    // A budget of exactly one record: the directory must charge nothing, whatever size the file
+    // system reports for it (4096 on ext4).
+    let storage = FileStorage::new_with_cap_path_and_authority(
+        record_len("whole", "v"),
+        &root,
+        RecordAuthority::Authoritative,
+    )
+    .await
+    .expect("open");
     storage.put("whole", &"v".to_string()).await.expect("put");
 
     let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
         .await
         .expect("a bad entry does not fail the scan");
-    scanned.sort_by_key(|record| record.is_ok());
+    scanned.sort_by_key(|record| matches!(record, ScannedRecord::Filed { .. }));
     assert_eq!(scanned, [
-        Err(UndecodableRecord {
+        ScannedRecord::Undecodable(UndecodableRecord {
             name: directory,
-            identity: RecordIdentity::Unreadable,
+            key: None,
         }),
-        Ok(("whole".to_owned(), "v".to_owned())),
+        ScannedRecord::Filed {
+            key: "whole".to_owned(),
+            value: "v".to_owned(),
+        },
     ]);
 }
 
@@ -460,13 +471,16 @@ async fn test_scan_reports_a_record_it_cannot_read() {
     let mut scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
         .await
         .expect("a bad entry does not fail the scan");
-    scanned.sort_by_key(|record| record.is_ok());
+    scanned.sort_by_key(|record| matches!(record, ScannedRecord::Filed { .. }));
     assert_eq!(scanned, [
-        Err(UndecodableRecord {
+        ScannedRecord::Undecodable(UndecodableRecord {
             name: looping,
-            identity: RecordIdentity::Unreadable,
+            key: None,
         }),
-        Ok(("whole".to_owned(), "v".to_owned())),
+        ScannedRecord::Filed {
+            key: "whole".to_owned(),
+            value: "v".to_owned(),
+        },
     ]);
 }
 
@@ -490,9 +504,9 @@ async fn test_authoritative_open_indexes_an_entry_whose_metadata_fails() {
         <FileStorage as KvStorageScan<String>>::scan(&storage)
             .await
             .expect("scan"),
-        [Err(UndecodableRecord {
+        [ScannedRecord::Undecodable(UndecodableRecord {
             name,
-            identity: RecordIdentity::Unreadable,
+            key: None,
         })]
     );
 }
@@ -516,9 +530,9 @@ async fn test_scan_reports_a_dangling_link_instead_of_hiding_it() {
         <FileStorage as KvStorageScan<String>>::scan(&storage)
             .await
             .expect("scan"),
-        [Err(UndecodableRecord {
+        [ScannedRecord::Undecodable(UndecodableRecord {
             name,
-            identity: RecordIdentity::Unreadable,
+            key: None,
         })]
     );
 }
@@ -597,9 +611,10 @@ async fn test_authoritative_store_evicts_nothing() {
 }
 
 /// Decode law under a misfiled record: a whole, decodable record copied over another key's
-/// file carries a key that does not hash to its file name, so it is neither record: a scan
-/// reports it by its file alone, an authoritative `get` of either key does not return it, and a
-/// disposable `get` retires it.
+/// file holds a key that does not hash to its file name, so it is neither key's record: a scan
+/// reports it as misfiled, with the key and value it holds, an authoritative `get` of the key it
+/// is filed as fails naming it, a `get` of the key it holds does not see it, and a disposable
+/// `get` retires it.
 #[tokio::test]
 async fn test_a_misfiled_whole_record_belongs_to_neither_key() {
     let root = temp_root("misfiled-whole");
@@ -614,17 +629,18 @@ async fn test_a_misfiled_whole_record_belongs_to_neither_key() {
         <FileStorage as KvStorageScan<String>>::scan(&storage)
             .await
             .expect("scan"),
-        [Err(UndecodableRecord {
+        [ScannedRecord::Misfiled {
             name: name.clone(),
-            identity: RecordIdentity::Carries("other".to_owned()),
-        })]
+            key: "other".to_owned(),
+            value: "v".to_owned(),
+        }]
     );
     assert!(matches!(
         <FileStorage as KvStorageInterface<String>>::get(&storage, "stream").await,
-        Err(Error::StorageRecordUndecodable(UndecodableRecord {
-            name: ref reported,
-            identity: RecordIdentity::Carries(ref carried),
-        })) if *reported == name && carried == "other"
+        Err(Error::StorageRecordMisfiled {
+            ref record,
+            ref key,
+        }) if *record == name && key == "other"
     ));
     assert_eq!(
         <FileStorage as KvStorageInterface<String>>::get(&storage, "other")

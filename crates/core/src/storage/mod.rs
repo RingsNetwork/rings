@@ -36,39 +36,42 @@ pub struct UndecodableRecord {
     /// filed as, which is the key itself or the backend's image of it (`FileStorage`: the file
     /// name).
     pub name: String,
-    /// What the record reveals of the key it belongs to.
-    pub identity: RecordIdentity,
+    /// The key the record is filed as, when the intact part of the record names it (and that
+    /// key's name is this record's name); `None` when no such key can be recovered.
+    pub key: Option<String>,
 }
 
-/// What an unreadable or undecodable record reveals of the key it belongs to; the cases are
-/// exclusive, so a record is filed as its own key or carries another, never both.
+/// One record of a [`KvStorageScan::scan`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RecordIdentity {
-    /// No key could be read from the record.
-    Unreadable,
-    /// The record names the key it is filed as (its key is intact and names this record's
-    /// name): a torn or corrupt record of that key.
-    FiledAs(String),
-    /// The record names another key than the one it is filed as, whole or torn: a misfiled
-    /// record, copied or moved over another's file, which its owner may have to fail closed
-    /// under that key as well.
-    Carries(String),
+pub enum ScannedRecord<V> {
+    /// A whole record of `key`, filed under that key's own name.
+    Filed {
+        /// The record's key.
+        key: String,
+        /// The record's value.
+        value: V,
+    },
+    /// A whole record of `key` filed under another key's name `name` (a record copied or moved
+    /// over another's file): it is the record of neither key, and is reported with its value so
+    /// that its owner can judge it.
+    Misfiled {
+        /// The name it is filed under.
+        name: String,
+        /// The key the record holds.
+        key: String,
+        /// The value the record holds.
+        value: V,
+    },
+    /// A record the storage cannot read or decode.
+    Undecodable(UndecodableRecord),
 }
-
-/// One record of a [`KvStorageScan::scan`]: its key and value, or the record the storage
-/// holds but cannot decode.
-pub type ScannedRecord<V> = std::result::Result<(String, V), UndecodableRecord>;
 
 impl std::fmt::Display for UndecodableRecord {
-    /// The record's name, and the key it is filed as, the key it carries when misfiled, or
-    /// that its key is unreadable.
+    /// The record's name, and the key it is filed as or that no key can be recovered.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.identity {
-            RecordIdentity::Unreadable => write!(f, "record {} (key unreadable)", self.name),
-            RecordIdentity::FiledAs(key) => write!(f, "record {} (key {key})", self.name),
-            RecordIdentity::Carries(key) => {
-                write!(f, "record {} (misfiled: holds key {key})", self.name)
-            }
+        match self.key.as_deref() {
+            Some(key) => write!(f, "record {} (key {key})", self.name),
+            None => write!(f, "record {} (key unrecoverable)", self.name),
         }
     }
 }
@@ -105,32 +108,30 @@ pub trait KvStorageInterface<V> {
 /// or decode instead of failing or deleting, together with the naming that ties a reported
 /// record back to its key.
 ///
-/// **Law (agreement).** A scan and the naming agree in three clauses: a decoded pair is the
-/// record filed under its own key's name; a record that cannot be read, decoded or tied to its
-/// key is reported under the name it is filed under; and a reported record that names another
-/// key than the one it is filed as says so:
+/// **Law (agreement).** A scan and the naming agree: every record is reported under the name it
+/// is filed under, and as exactly one of three cases, decided by whether it decodes whole and
+/// whether its key's name is the name it is filed under:
 ///
 /// ```text
-/// scan ∋ Ok((k, v))                             ⟹  v is the record filed under record_name(k)
-/// scan ∋ Err(u) ∧ u is filed as key k           ⟹  u.name = record_name(k)
-/// scan ∋ Err(u) ∧ u names key k, record_name(k) ≠ u.name  ⟹  u.identity = Carries(k)
+/// Filed { k, v }           ⟺  a whole record (k, v) filed under record_name(k)
+/// Misfiled { n, k, v }     ⟺  a whole record (k, v) filed under n ≠ record_name(k)
+/// Undecodable(u)           ⟺  a record that does not decode whole, filed under u.name;
+///                              u.key = Some(k) ⟹ record_name(k) = u.name
 /// ```
 ///
-/// An owner restores exactly the pairs a scan decoded, fails closed on exactly the names it
-/// reported, and fails closed on the keys reported as carried whose own record did not restore,
-/// so both methods are required: a default for either could break the agreement for a backend
-/// that overrides the other. A backend keyed by the key itself (memory, IndexedDB) satisfies
-/// the first and third clauses by construction; `FileStorage`, which files by digest, reports a
-/// record filed under another key's name as `Carries`.
+/// An owner restores exactly the `Filed` records and decides on the others by name, so both
+/// methods are required: a default for either could break the agreement for a backend that
+/// overrides the other. A backend keyed by the key itself (memory, IndexedDB) never reports
+/// `Misfiled`, since a record cannot sit under another key's name there; `FileStorage`, which
+/// files by digest, reports it.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait KvStorageScan<V>: KvStorageInterface<V> {
-    /// Return every record of this storage, each decoded or reported as an
-    /// [`UndecodableRecord`]; a scan deletes nothing.
+    /// Return every record of this storage as a [`ScannedRecord`]; a scan deletes nothing.
     async fn scan(&self) -> Result<Vec<ScannedRecord<V>>>;
 
     /// The name under which this storage files the record of `key`, and under which
-    /// [`Self::scan`] reports that record when it cannot read or decode it.
+    /// [`Self::scan`] reports whatever it finds filed there.
     fn record_name(&self, key: &str) -> String;
 }
 

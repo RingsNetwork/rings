@@ -137,7 +137,12 @@ where V: Clone + Send + Sync
 {
     /// Every stored value, each decoded by construction.
     async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
-        Ok(self.get_all().await?.into_iter().map(Ok).collect())
+        Ok(self
+            .get_all()
+            .await?
+            .into_iter()
+            .map(|(key, value)| ScannedRecord::Filed { key, value })
+            .collect())
     }
 
     /// The key itself: a memory store files each value under its key.

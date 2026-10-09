@@ -128,9 +128,9 @@ records](#bad-records)). The native daemon opens the replay store as an authorit
 (#909). On unix each write is flushed to stable storage before its rename and the directory after
 it (`F_FULLFSYNC` on macOS), so a crash leaves every record whole at its previous or its new value;
 on other targets a rename's durability is the file system's own. A record file that cannot be read,
-whose framing does not decode, or that is misfiled (a whole record copied or moved over another
-key's file) is reported and never deleted. The file I/O runs on the tokio
-blocking pool, so a flush never stalls an asynchronous worker.
+that does not decode whole, or that is misfiled (a whole record of another key, copied or moved
+over this file) is reported and never deleted. The file I/O runs on the tokio blocking pool, so a
+flush never stalls an asynchronous worker.
 
 One lock serializes all replay transitions and is held across each record write, so the store's
 write latency bounds the node-wide transition rate. Each transition runs detached from its caller
@@ -184,11 +184,10 @@ reads the store again. A record restores its stream iff it decodes, holds a vali
 under the record key of the stream it carries. Any other record is kept and joins the set `U` of
 unrestorable records (#910): torn, corrupt, unreadable (any read error but the absence of the
 entry, such as a permission error, an I/O error, a dangling link, or a directory in the record's
-place), misfiled (a whole or torn record copied or moved over another stream's file), misplaced,
-or holding an invalid window. Its name is the storage's record name: the native file name, or the
-browser row key. A misfiled record also fails closed the stream whose key it carries, unless that
-stream's own record restored it: that stream's entry holds no record of its own, and names the
-misfiled record as the one to clear.
+place), a whole record of another key that is not a consistent stream record of it (a bit flip in
+its key text, or a foreign file), misplaced, or holding an invalid window. Its name is the
+storage's record name: the native file name, or the browser row key. A directory or other
+non-file entry in a record's place charges nothing against the store's budget.
 
 ```text
 unavailable(table, key)  ⟺  record_name(record_key(table, key)) ∈ U
@@ -242,15 +241,25 @@ This resets that stream's replay window alone, and no other stream's state chang
 
   The messages carried by the rejected sequences are lost.
 
-A misfiled record is the one case where a record holds two streams' fate. When stream B's record
-was moved over stream A's file, both refusals name that file (A's name), and the operator chooses
-one repair:
-- **Rename it back** to B's own record name (the one B's log line reports as `record`). B's window
-  is restored exactly; A's own record was destroyed by the move, so A starts from `First` (the
-  absent-record case of #915).
-- **Delete it.** Both A's and B's windows reset.
+## Misfiled records
 
-A copied record (B's own file still present) fails only A closed, and is cleared like any other.
+A misfiled record is a whole, consistent stream record of one stream filed under another
+stream's name: only copying or moving a file produces one, since damage would have to leave the
+record whole and change its key and its body consistently. It means a stream's record may have
+been lost and another's overwritten, so the load does not guess: replay is closed for every
+stream, and every transition fails with `TransactionReplayStoreMisfiled { records }`, which names
+every misfiled file. The load logs each (`replay record is misfiled`, with the key it holds) and
+counts them in `misfiled_record`; the refusal is cached, so the store is not read again.
+
+To resolve it, stop the node and, for every named file:
+- **rename it back** to the record name of the key it holds, when that key's own record is
+  absent (a move): that stream's window is restored exactly, and the stream whose file it
+  overwrote starts from `First` (its record was destroyed by the move, the absent-record case of
+  #915); or
+- **delete it** (a stale copy, or when its state is not wanted): the windows of the streams
+  involved reset, with the consequences listed above.
+
+Then start the node.
 
 ## Hard cutover
 

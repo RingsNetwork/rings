@@ -232,17 +232,13 @@ fn file_name(path: &std::path::Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Fail closed per stream under a copied native record: a stale copy of stream 2's receiver
-/// record under stream 1's file name restores neither stream from the copy. Stream 1 is refused,
-/// named by its file, and stream 2 keeps its own, newer window: a scan yields records in file
-/// name order, and the copy's name sorts after stream 2's own, so a restore that took the copy
-/// would keep it last.
+/// The misfiled law under a copied native record: a stale copy of stream 2's receiver record
+/// under stream 1's file name closes replay for every stream, naming the copy, and the misfiled
+/// gauge counts it.
 #[tokio::test]
-async fn test_a_stale_copy_over_another_stream_restores_neither() -> Result<()> {
+async fn test_a_copied_record_closes_replay_until_it_is_resolved() -> Result<()> {
     let root = TempRoot::new("replay-copied");
     let (own, copy) = receiver_files(&root, &open_authoritative(&root).await?)?;
-    // The precondition that makes the stream-2 half discriminate.
-    assert!(file_name(&copy) > file_name(&own));
     TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
         .admit(stream(2), 0, digest(1))
         .await?;
@@ -253,16 +249,49 @@ async fn test_a_stale_copy_over_another_stream_restores_neither() -> Result<()> 
     std::fs::write(&copy, stale).map_err(Error::ServiceIOError)?;
 
     let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
+    let named = file_name(&copy).into_iter().collect::<Vec<_>>();
+    for key in [stream(1), stream(2), stream(3)] {
+        assert!(matches!(
+            replay.admit(key, 2, digest(3)).await,
+            Err(Error::TransactionReplayStoreMisfiled { ref records }) if *records == named
+        ));
+    }
+    assert_eq!(replay.counters().misfiled_record, 1);
+    Ok(())
+}
+
+/// Damage is never taken for a move: a whole record under stream 1's file name whose key text
+/// names stream 3 while its body is stream 2's window (a bit flip in the key text) is not a
+/// consistent stream record, so it fails only stream 1, and streams 2 and 3 run.
+#[tokio::test]
+async fn test_a_record_with_a_flipped_key_fails_only_its_own_stream() -> Result<()> {
+    let root = TempRoot::new("replay-flipped");
+    let (own, filed_as) = receiver_files(&root, &open_authoritative(&root).await?)?;
+    TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?))
+        .admit(stream(2), 0, digest(1))
+        .await?;
+    let bytes = std::fs::read(&own).map_err(Error::ServiceIOError)?;
+    let (_, record) = rings_codec::deserialize::<(String, ReplayRecord)>(&bytes)
+        .map_err(Error::CodecDeserialize)?;
+    let flipped = record_key(ReplayTable::Receiver, &stream(3))?;
+    let damaged = rings_codec::serialize(&(flipped, record)).map_err(Error::CodecSerialize)?;
+    std::fs::write(&filed_as, damaged).map_err(Error::ServiceIOError)?;
+
+    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
     assert!(matches!(
         replay.admit(stream(1), 0, digest(1)).await,
         Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
-            if Some(record) == file_name(&copy).as_ref()
+            if Some(record) == file_name(&filed_as).as_ref()
     ));
     assert!(matches!(
-        replay.admit(stream(2), 1, digest(2)).await,
+        replay.admit(stream(2), 0, digest(1)).await,
         Err(Error::TransactionReplay { .. })
     ));
-    assert_eq!(replay.counters().unrestorable_record, 1);
+    assert_eq!(
+        replay.admit(stream(3), 0, digest(1)).await?,
+        SequenceVerdict::First
+    );
+    assert_eq!(replay.counters().misfiled_record, 0);
     Ok(())
 }
 
@@ -277,29 +306,32 @@ async fn store_with_a_moved_record(root: &TempRoot) -> Result<(PathBuf, PathBuf)
     Ok((own, moved))
 }
 
-/// Fail closed per stream under a moved native record: stream 2's receiver record renamed over
-/// stream 1's file leaves stream 2 without its own record, so both streams are refused, and both
-/// refusals name the misfiled file, the one record to clear.
+/// The misfiled law under a moved native record: stream 2's receiver record renamed over
+/// stream 1's file closes replay for every stream, naming the moved file.
 #[tokio::test]
-async fn test_a_record_moved_over_another_stream_fails_both_closed() -> Result<()> {
+async fn test_a_moved_record_closes_replay_until_it_is_resolved() -> Result<()> {
     let root = TempRoot::new("replay-moved");
     let (_, moved) = store_with_a_moved_record(&root).await?;
 
     let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
+    let named = file_name(&moved).into_iter().collect::<Vec<_>>();
     for key in [stream(1), stream(2)] {
         assert!(matches!(
             replay.admit(key, 0, digest(1)).await,
-            Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
-                if Some(record) == file_name(&moved).as_ref()
+            Err(Error::TransactionReplayStoreMisfiled { ref records }) if *records == named
         ));
     }
-    assert_eq!(replay.counters().unrestorable_record, 2);
+    assert!(matches!(
+        replay.reserve(stream(3), NonZeroU64::MIN).await,
+        Err(Error::TransactionReplayStoreMisfiled { .. })
+    ));
     Ok(())
 }
 
-/// Recovery of a moved record, both repairs the refusal's record allows: renaming the misfiled
-/// file back restores stream 2's window exactly (stream 1's own record was destroyed by the
-/// move, so it starts from `First`); deleting it resets both streams' windows.
+/// Recovery of a moved record, both repairs of a named misfiled file, each followed by a
+/// restart: renaming it back to its own key's name restores stream 2's window exactly (stream
+/// 1's own record was destroyed by the move, so it starts from `First`); deleting it resets both
+/// streams' windows.
 #[tokio::test]
 async fn test_a_moved_record_is_cleared_by_renaming_it_back_or_deleting_it() -> Result<()> {
     let renamed = TempRoot::new("replay-moved-back");

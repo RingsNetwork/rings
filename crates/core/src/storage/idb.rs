@@ -59,7 +59,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
 use crate::storage::KvStorageScan;
-use crate::storage::RecordIdentity;
 use crate::storage::ScannedRecord;
 use crate::storage::UndecodableRecord;
 use crate::utils::js_value;
@@ -492,13 +491,16 @@ fn scan_row<V>(primary_key: JsValue, row: JsValue) -> ScannedRecord<V>
 where V: DeserializeOwned {
     js_value::deserialize::<StoredRow>(row)
         .and_then(|row| Ok((row.key, js_value::deserialize(row.data)?)))
-        .map_err(|_| {
-            let key = primary_key.as_string();
-            UndecodableRecord {
-                name: key.clone().unwrap_or_else(|| format!("{primary_key:?}")),
-                identity: key.map_or(RecordIdentity::Unreadable, RecordIdentity::FiledAs),
-            }
-        })
+        .map_or_else(
+            |_| {
+                let key = primary_key.as_string();
+                ScannedRecord::Undecodable(UndecodableRecord {
+                    name: key.clone().unwrap_or_else(|| format!("{primary_key:?}")),
+                    key,
+                })
+            },
+            |(key, value)| ScannedRecord::Filed { key, value },
+        )
 }
 
 impl std::fmt::Debug for IdbStorage {
