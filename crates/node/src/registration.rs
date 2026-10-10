@@ -31,6 +31,7 @@ use rings_core::message::MessageSigner;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
 
+use crate::descriptor::prunes_registry_element;
 use crate::descriptor::RegistryElement;
 use crate::error::Error;
 use crate::error::Result;
@@ -400,14 +401,13 @@ impl OnlineNodeRegistration {
         let now_ms = get_epoch_ms();
         let descriptor = self.descriptor_at(context, now_ms)?;
         let element = descriptor.to_element().map_err(Error::CoreError)?;
-        // Prune this node's own earlier descriptors, and every descriptor that does not decode,
-        // does not verify, or has expired.
         let prunes_observed_value = |observed: &Bytes| {
-            OnlineNodeDescriptor::from_element(observed).map_or(true, |descriptor| {
-                descriptor.did == context.did()
-                    || !descriptor.verify_signature(context.network_id())
-                    || descriptor.is_expired_at(now_ms)
-            })
+            prunes_registry_element::<OnlineNodeDescriptor>(
+                observed,
+                context.did(),
+                now_ms,
+                context.network_id(),
+            )
         };
         self.publisher
             .publish_replacing(context, std::iter::once(element), prunes_observed_value)

@@ -62,9 +62,17 @@ pub struct MailboxStorageInspect {
 
 impl MailboxStorageInspect {
     /// Build privacy-safe aggregate mailbox state from the ring's live storage view.
+    ///
+    /// Post: read only, as every snapshot is: values are projected and filtered as a storage
+    /// read would, but no projection is written back and no expired value is retired.
     pub async fn inspect(dht: &PeerRing) -> crate::error::Result<Self> {
+        let now_ms = get_epoch_ms();
         let mut snapshot = Self::default();
-        for (_, entry) in dht.live_storage_entries(get_epoch_ms()).await? {
+        let stored = dht.storage.get_all().await?;
+        for entry in stored
+            .into_iter()
+            .filter_map(|(_, entry)| entry.live_at(now_ms))
+        {
             if entry.kind == crate::dht::entry::EntryKind::RelayMessage {
                 snapshot.registered = snapshot.registered.saturating_add(1);
                 snapshot.held_messages = snapshot

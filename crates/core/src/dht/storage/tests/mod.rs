@@ -1195,7 +1195,8 @@ async fn test_join_storage_entry_keeps_the_later_retention_bound() -> Result<()>
     Ok(())
 }
 
-/// The fetched-entry cache shares the admission law and retires expired values on read.
+/// The fetched-entry cache shares the admission law, and a read reports an expired value absent
+/// without removing it, since a removal could undo a concurrent put; a later put replaces it.
 #[tokio::test]
 async fn test_local_cache_shares_admission_and_retention() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
@@ -1220,6 +1221,10 @@ async fn test_local_cache_shares_admission_and_retention() -> Result<()> {
         .put(&resource.to_string(), &expired(data_entry(resource)))
         .await?;
     assert_eq!(node.local_cache_get(resource).await?, None);
-    assert_eq!(node.cache.count().await?, 0);
+    assert_eq!(node.cache.count().await?, 1);
+    let fresh = data_entry(resource);
+    node.local_cache_put(fresh).await?;
+    assert!(node.local_cache_get(resource).await?.is_some());
+    assert_eq!(node.cache.count().await?, 1);
     Ok(())
 }

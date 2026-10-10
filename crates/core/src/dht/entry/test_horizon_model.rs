@@ -9,7 +9,9 @@
 //! result. The retention law is a parameter, its horizons and what holds a carrier past its
 //! bound: the production law ([`ElementRetention::of`], [`Entry::is_live_under`]), or a
 //! deliberately broken one, for which a test witnesses that the named law fails; every law,
-//! Bounded included, has such a mutant. The model owns
+//! Bounded included, has such a mutant. Whether the funnels apply the projection at all is a
+//! parameter too (`HorizonFilter`): skipping it under the production law fails Bounded, so
+//! Bounded judges the projection's implementation and not only the law's constants. The model owns
 //! only the world: which replica acts, when a carrier is delivered, and how far real time
 //! advances. Every walk is a fixed-seed random interleaving, so a failure replays exactly.
 //!
@@ -277,12 +279,25 @@ impl Holders {
     }
 }
 
+/// Whether the storage funnels apply the horizon projection `Entry::retired_under` to what they
+/// store and read: production applies it; a mutant skips it, so the `Bounded` clauses are shown
+/// to judge the projection's implementation, not only the law's constants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HorizonFilter {
+    /// The production funnels: every store and read is projected.
+    Applied,
+    /// Mutant: a store or read keeps what crossed its horizon.
+    Skipped,
+}
+
 /// The model state.
 struct World {
     /// The retention law under test.
     law: ElementRetention,
     /// What holds a carrier live past its bound under the law under test.
     holders: Holders,
+    /// Whether the funnels project to the horizon.
+    filter: HorizonFilter,
     /// The topic's entry DID.
     topic: Did,
     /// The payloads, encoded.
@@ -305,10 +320,11 @@ struct World {
 
 impl World {
     /// The initial state under `law`: empty carriers at [`MODEL_EPOCH_MS`].
-    fn new(law: ElementRetention, holders: Holders) -> Result<Self> {
+    fn new(law: ElementRetention, holders: Holders, filter: HorizonFilter) -> Result<Self> {
         Ok(Self {
             law,
             holders,
+            filter,
             topic: Entry::gen_did(MODEL_TOPIC)?,
             values: MODEL_VALUES
                 .into_iter()
@@ -359,7 +375,10 @@ impl World {
 
     /// Project `carrier` at `now_ms` under the law, `None` when the result is not live.
     fn project(&self, carrier: Entry, now_ms: u128) -> Option<Entry> {
-        let carrier = carrier.retired_under(Some(self.law), now_ms);
+        let carrier = match self.filter {
+            HorizonFilter::Applied => carrier.retired_under(Some(self.law), now_ms),
+            HorizonFilter::Skipped => carrier,
+        };
         self.holders
             .live(&carrier, self.law, now_ms)
             .then_some(carrier)
@@ -598,8 +617,9 @@ impl World {
     /// Check `NoLoss`, `NoResurrection`, and `Bounded` at every replica.
     fn check_safety(&self) -> Result<()> {
         // Judged against the production law, so a law under test that holds too long fails.
-        let horizon = production_law()?.add_horizon_ms;
-        let window_ms = production_law()?.remove_horizon_ms;
+        let production = production_law()?;
+        let horizon = production.add_horizon_ms;
+        let window_ms = production.remove_horizon_ms;
         for (index, replica) in self.replicas.iter().enumerate() {
             let now_ms = self.clock(index);
             let read = self.read(index).unwrap_or_else(|| self.empty());
@@ -610,9 +630,8 @@ impl World {
                 .zip(read.crdt.dots.iter().copied())
                 .collect::<Vec<_>>();
             let peak_ms = self.peak(index);
-            let production_horizon = production_law()?.add_horizon_ms;
             for add in replica.received.iter() {
-                let live = peak_ms < add.dot.version.logical_time_ms + production_horizon
+                let live = peak_ms < add.dot.version.logical_time_ms + horizon
                     && peak_ms < add.expires_at_ms;
                 if live && !Self::covered(replica, &add.value, add.dot) {
                     let kept = visible
@@ -749,10 +768,10 @@ fn draw(prng: &mut Prng, ticks: &[u128; 6]) -> Action {
 
 /// Run one seeded walk under `law`, checking every safety law after every step and
 /// convergence at the end.
-fn walk(law: ElementRetention, holders: Holders, seed: u64) -> Result<()> {
+fn walk(law: ElementRetention, holders: Holders, filter: HorizonFilter, seed: u64) -> Result<()> {
     let ticks = ticks_ms()?;
     let mut prng = Prng(seed);
-    let mut world = World::new(law, holders)?;
+    let mut world = World::new(law, holders, filter)?;
     let mut trace = Vec::with_capacity(STEPS);
     for _ in 0..STEPS {
         let action = draw(&mut prng, &ticks);
@@ -773,18 +792,29 @@ fn walk(law: ElementRetention, holders: Holders, seed: u64) -> Result<()> {
 /// Witness that the broken law `law` violates the law named `violated` on some seed, and that
 /// the production law passes that seed: the draws do not depend on the law, so the production
 /// walk replays the very trace that witnessed the violation.
-fn assert_mutant_fails(law: ElementRetention, holders: Holders, violated: &str) -> Result<()> {
+fn assert_mutant_fails(
+    law: ElementRetention,
+    holders: Holders,
+    filter: HorizonFilter,
+    violated: &str,
+) -> Result<()> {
     let needle = format!("law violated: {violated}");
     let witness = (0..SEEDS).find(|seed| {
-        walk(law, holders, *seed).is_err_and(|error| error.to_string().contains(needle.as_str()))
+        walk(law, holders, filter, *seed)
+            .is_err_and(|error| error.to_string().contains(needle.as_str()))
     });
     let Some(seed) = witness else {
         return ensure(
             false,
-            format!("no seed witnesses {violated} under {law:?}, {holders:?}"),
+            format!("no seed witnesses {violated} under {law:?}, {holders:?}, {filter:?}"),
         );
     };
-    walk(production_law()?, Holders::Production, seed)
+    walk(
+        production_law()?,
+        Holders::Production,
+        HorizonFilter::Applied,
+        seed,
+    )
 }
 
 /// Every law of the element horizon holds on every fixed-seed interleaving of add, overwrite,
@@ -793,7 +823,7 @@ fn assert_mutant_fails(law: ElementRetention, holders: Holders, violated: &str) 
 #[test]
 fn test_horizon_model_laws_hold_on_seeded_interleavings() -> Result<()> {
     let law = production_law()?;
-    (0..SEEDS).try_for_each(|seed| walk(law, Holders::Production, seed))
+    (0..SEEDS).try_for_each(|seed| walk(law, Holders::Production, HorizonFilter::Applied, seed))
 }
 
 /// Mutant: retiring adds at `H / 2` loses live adds.
@@ -804,7 +834,12 @@ fn test_horizon_model_catches_early_add_retirement() -> Result<()> {
         add_horizon_ms: law.add_horizon_ms / 2,
         ..law
     };
-    assert_mutant_fails(mutant, Holders::Production, "NoLoss")
+    assert_mutant_fails(
+        mutant,
+        Holders::Production,
+        HorizonFilter::Applied,
+        "NoLoss",
+    )
 }
 
 /// Mutant: retiring adds at `2H` holds them past the horizon.
@@ -815,7 +850,12 @@ fn test_horizon_model_catches_late_add_retirement() -> Result<()> {
         add_horizon_ms: law.add_horizon_ms * 2,
         ..law
     };
-    assert_mutant_fails(mutant, Holders::Production, "Bounded")
+    assert_mutant_fails(
+        mutant,
+        Holders::Production,
+        HorizonFilter::Applied,
+        "Bounded",
+    )
 }
 
 /// Mutant: collecting removes at `2(H + σ)` holds tombstones past their window.
@@ -826,13 +866,23 @@ fn test_horizon_model_catches_late_remove_collection() -> Result<()> {
         remove_horizon_ms: law.remove_horizon_ms * 2,
         ..law
     };
-    assert_mutant_fails(mutant, Holders::Production, "Bounded")
+    assert_mutant_fails(
+        mutant,
+        Holders::Production,
+        HorizonFilter::Applied,
+        "Bounded",
+    )
 }
 
 /// Mutant: a remove that does not hold its carrier past the bound lets a removed payload back.
 #[test]
 fn test_horizon_model_catches_removes_not_holding_carrier() -> Result<()> {
-    assert_mutant_fails(production_law()?, Holders::RegisterOnly, "NoResurrection")
+    assert_mutant_fails(
+        production_law()?,
+        Holders::RegisterOnly,
+        HorizonFilter::Applied,
+        "NoResurrection",
+    )
 }
 
 /// Mutant: collecting removes at `H`, without `σ`, lets a stepped-back clock take a stale add.
@@ -843,12 +893,34 @@ fn test_horizon_model_catches_removes_collected_without_skew() -> Result<()> {
         remove_horizon_ms: law.add_horizon_ms,
         ..law
     };
-    assert_mutant_fails(mutant, Holders::Production, "NoResurrection")
+    assert_mutant_fails(
+        mutant,
+        Holders::Production,
+        HorizonFilter::Applied,
+        "NoResurrection",
+    )
 }
 
 /// Mutant: a register that does not hold its carrier lets an overwrite collapse an unstable
 /// remove into a carrier that expires at its own bound.
 #[test]
 fn test_horizon_model_catches_register_not_holding_carrier() -> Result<()> {
-    assert_mutant_fails(production_law()?, Holders::RemovesOnly, "NoResurrection")
+    assert_mutant_fails(
+        production_law()?,
+        Holders::RemovesOnly,
+        HorizonFilter::Applied,
+        "NoResurrection",
+    )
+}
+
+/// Mutant: funnels that skip the horizon projection store and serve what crossed it. The law's
+/// constants are production's, so only the projection's absence can fail `Bounded` here.
+#[test]
+fn test_horizon_model_catches_unprojected_storage() -> Result<()> {
+    assert_mutant_fails(
+        production_law()?,
+        Holders::Production,
+        HorizonFilter::Skipped,
+        "Bounded",
+    )
 }

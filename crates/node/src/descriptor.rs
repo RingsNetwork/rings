@@ -148,6 +148,26 @@ where
     latest.into_values().collect()
 }
 
+/// Whether a registrant `own` that publishes at `now_ms` prunes the observed registry element
+/// `element`: its own earlier descriptors, which its publication replaces, and every element
+/// that does not decode as `D`, does not verify under `network_id`, or has expired.
+///
+/// Law: an element is kept iff it is a live descriptor of another registrant, so no publisher
+/// carries junk forward to the element horizon.
+pub(crate) fn prunes_registry_element<D>(
+    element: &[u8],
+    own: Did,
+    now_ms: u128,
+    network_id: u32,
+) -> bool
+where
+    D: SignedDescriptor + RegistryElement,
+{
+    D::from_element(element).map_or(true, |descriptor| {
+        descriptor.descriptor_did() == own || !descriptor.descriptor_is_live_at(now_ms, network_id)
+    })
+}
+
 /// A descriptor as one element of its DHT registry: the element is the descriptor's codec
 /// encoding, carried as is.
 ///

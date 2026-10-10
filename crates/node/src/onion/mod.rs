@@ -26,6 +26,7 @@ use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::descriptor::prunes_registry_element;
 use crate::descriptor::sign_descriptor_body;
 use crate::descriptor::RegistryElement;
 use crate::descriptor::SignedDescriptor;
@@ -739,11 +740,12 @@ impl OnionExitRegistration {
             .collect::<Result<Vec<_>>>()?;
         self.publisher
             .publish_replacing(context, elements, |observed| {
-                OnionExitDescriptor::from_element(observed).is_ok_and(|descriptor| {
-                    descriptor.did == context.did()
-                        || (descriptor.verify_signature(context.network_id())
-                            && descriptor.is_expired_at(now_ms))
-                })
+                prunes_registry_element::<OnionExitDescriptor>(
+                    observed,
+                    context.did(),
+                    now_ms,
+                    context.network_id(),
+                )
             })
             .await?;
         Ok(descriptors)

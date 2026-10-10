@@ -352,19 +352,7 @@ impl Processor {
             return Ok(vec![]);
         };
 
-        let service = service.trim();
-        let exits = self.select_onion_exits_from_entry(&entry, service, include_expired);
-        if include_expired
-            || !exits.is_empty()
-            || !self.entry_has_expired_onion_exit_service(&entry, service)
-        {
-            return Ok(exits);
-        }
-
-        let Some(refreshed_entry) = self.fetch_storage_entry(entry_key).await? else {
-            return Ok(exits);
-        };
-        Ok(self.select_onion_exits_from_entry(&refreshed_entry, service, include_expired))
+        Ok(self.select_onion_exits_from_entry(&entry, service.trim(), include_expired))
     }
 
     pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
@@ -422,17 +410,6 @@ impl Processor {
         .into_iter()
         .filter(|descriptor| service.is_empty() || descriptor.offers_service(service))
         .collect()
-    }
-
-    fn entry_has_expired_onion_exit_service(&self, entry: &entry::Entry, service: &str) -> bool {
-        let now_ms = get_epoch_ms();
-        Self::onion_exit_descriptors_from_entry(entry)
-            .into_iter()
-            .any(|descriptor| {
-                (service.is_empty() || descriptor.offers_service(service))
-                    && descriptor.verify_signature(self.swarm.network_id())
-                    && descriptor.is_expired_at(now_ms)
-            })
     }
 
     /// Build an onion proxy route for a client target through a target-agnostic proxy config.

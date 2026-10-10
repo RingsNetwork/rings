@@ -184,7 +184,8 @@
       read. One without still decodes, its elements read as the bytes of their old base58
       text. A data topic serves those as values until the element horizon, `lookupService` and
       `fetchTopicMessages` included. A relay inbox's held messages fail its witness and are
-      dropped undelivered, so every message held at the upgrade is lost.
+      retired undelivered, by its holder's next hand-off or by its recipient's drain, so every
+      message held at the upgrade is lost.
     - Browser: every non-empty old carrier is refused and retired on first read.
     - A storage hand-off now skips an entry the receiver cannot admit, without acknowledging
       it, instead of rejecting its batch; only a placement outside the entry's replica set
@@ -280,8 +281,12 @@
   `(String, Encoded)` becomes `(String, Bytes)`. `ENTRY_PAYLOAD_MAX_BYTES` now bounds element
   bytes. JSON-RPC `publishMessageToTopic`, `fetchTopicMessages` and `lookupService` still
   exchange strings, now as the elements' UTF-8. The inspect `StorageValue.data` lists each
-  element as base64 instead of its base58-check text. What an element written before this
-  change becomes on each backend is stated in the storage-entry wire cutover above.
+  element as base64 instead of its base58-check text. The browser
+  `Provider.storage_check_cache` returns the whole serialized `Entry`, so its `data` elements
+  are now byte arrays instead of base58 strings, and each of its removes (`crdt.tombstones`),
+  formerly a bare dot, is an `EntryTombstone` of the removed element's `ElementDigest` and its
+  dot. What an element written before this change becomes on each backend is stated in the
+  storage-entry wire cutover above.
 
 - Derive the chunk envelope reserve from the widest frame (#925). `MAX_CHUNK_ENVELOPE_OVERHEAD`
   drops from a 4096-byte guess to 911 bytes, and `TRANSPORT_CUSTOM_OVERHEAD` from 64 to 4: each

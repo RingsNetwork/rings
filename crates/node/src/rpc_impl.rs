@@ -273,10 +273,7 @@ impl HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse> for Proces
         let entry_key = Entry::gen_did(&req.topic)
             .map_err(|_| Error::invalid_params("Failed to get id of topic"))?;
 
-        self.storage_fetch(entry_key).await?;
-        let result = self.storage_check_cache(entry_key).await;
-
-        let Some(entry) = result else {
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(FetchTopicMessagesResponse { data: vec![] });
         };
 
@@ -307,10 +304,7 @@ impl HandleRpc<LookupServiceRequest, LookupServiceResponse> for Processor {
         let entry_key = Entry::gen_did(&req.name)
             .map_err(|_| Error::invalid_params("Failed to get id of topic"))?;
 
-        self.storage_fetch(entry_key).await?;
-        let result = self.storage_check_cache(entry_key).await;
-
-        let Some(entry) = result else {
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(LookupServiceResponse { dids: vec![] });
         };
 

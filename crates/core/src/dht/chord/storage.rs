@@ -87,9 +87,12 @@ enum Projection {
     /// replicated storage, whose reads run under the storage transition, and the reader writes
     /// nothing of its own.
     WrittenBack,
-    /// Return it only: the reader writes the slot itself under the transition (a join or an
-    /// operation), whose write subsumes the write-back, or the store is the fetch cache, which
-    /// has no transition, so a write-back could overwrite a concurrent put.
+    /// Return it only, writing nothing, not even the retirement of a value no longer live: the
+    /// reader writes the slot itself under the transition (a join or an operation), whose write
+    /// subsumes the write-back and the retirement, or the store is the fetch cache, which has
+    /// no transition, so a write or a removal could undo a concurrent put. A dead cached value
+    /// stays until a put replaces it or the cache's count bound evicts it, and is reported
+    /// absent meanwhile.
     ReturnedOnly,
 }
 
@@ -99,9 +102,10 @@ enum Projection {
 /// [`Projection::WrittenBack`], since a retirement is a write.
 /// Post: `Ok(Some(entry))` implies `entry.is_live_at(now_ms)` and `entry` is projected by
 /// [`Entry::retired_at`]`(now_ms)`. A stored value whose retention bound has elapsed (or that
-/// predates retention bounds) and holds no unstable remove or register is removed and reported
-/// absent, so expiry, like the element horizon, is enforced lazily on every read path (storage,
-/// sync hand-off, lookups, the fetch cache) instead of by a sweeper.
+/// predates retention bounds) and holds no unstable remove or register is reported absent on
+/// every read path (storage, sync hand-off, lookups, the fetch cache), and removed by a
+/// [`Projection::WrittenBack`] read, so expiry, like the element horizon, is enforced lazily
+/// instead of by a sweeper.
 async fn live_entry(
     store: &EntryStorage,
     key: &str,
@@ -127,7 +131,7 @@ fn projection_shape(entry: &Entry) -> (usize, usize, usize, bool) {
 }
 
 /// Keep `entry`, read from `store` at `key` and projected to its element horizon, iff it is live
-/// at `now_ms`; remove it otherwise.
+/// at `now_ms`; otherwise report it absent, and remove it under [`Projection::WrittenBack`].
 ///
 /// A live projection that retired something is written back under
 /// [`Projection::WrittenBack`], so a carrier held live past its bound by a remove or register
@@ -144,7 +148,9 @@ async fn retire_unless_live(
 ) -> Result<Option<Entry>> {
     let stored_shape = projection_shape(&entry);
     let Some(entry) = entry.live_at(now_ms) else {
-        store.remove(key).await?;
+        if projection == Projection::WrittenBack {
+            store.remove(key).await?;
+        }
         return Ok(None);
     };
     if projection == Projection::WrittenBack && projection_shape(&entry) != stored_shape {
@@ -165,14 +171,21 @@ impl PeerRing {
     /// Read the live replicated entry of `kind` stored at `placement` on this node, projected at
     /// `now_ms` as every storage read is: the read outside core, whose stores are crate-private
     /// so that no reader bypasses the projection.
+    ///
+    /// Post: read only. Unlike a read under the storage transition, it neither writes the
+    /// projection back nor retires a value that is no longer live; it reports that as absent.
     pub async fn stored_entry_at(
         &self,
         kind: EntryKind,
         placement: Did,
         now_ms: u128,
     ) -> Result<Option<Entry>> {
-        self.live_storage_entry(StorageKey::new(kind, placement), now_ms)
-            .await
+        let key = StorageKey::new(kind, placement).to_string();
+        Ok(self
+            .storage
+            .get(&key)
+            .await?
+            .and_then(|entry| entry.live_at(now_ms)))
     }
 
     /// Read the live replicated entry stored at `key`.
@@ -239,6 +252,36 @@ impl PeerRing {
             self.storage.remove(&key.to_string()).await?;
         }
         Ok(())
+    }
+
+    /// Remove the elements `removal` names from the relay carrier stored at `key`, as this node
+    /// holds it at `now_ms`, and return the carrier that remains.
+    ///
+    /// Pre: `removal` is a removal delta of that carrier ([`Entry::removal_of`]). It is applied
+    /// locally, outside the inbox write law, which admits a remote removal only from the
+    /// recipient: the caller removes what fails the witness, which no write law could have
+    /// admitted. Post: dots are unique to elements, so a join landing since `removal` was
+    /// computed loses nothing it did not name; a carrier left without retention is removed.
+    pub(crate) async fn remove_inbox_elements(
+        &self,
+        key: StorageKey,
+        removal: Entry,
+        now_ms: u128,
+    ) -> Result<Option<Entry>> {
+        let key = key.to_string();
+        let _transition = self.storage_transition.lock().await;
+        let Some(local) = live_entry(&self.storage, &key, now_ms, Projection::WrittenBack).await?
+        else {
+            return Ok(None);
+        };
+        let stored = local.tombstone(removal)?.retired_at(now_ms);
+        if stored.is_live_at(now_ms) {
+            self.storage.put(&key, &stored).await?;
+            Ok(Some(stored))
+        } else {
+            self.storage.remove(&key).await?;
+            Ok(None)
+        }
     }
 
     /// Join a peer-supplied replicated value into local storage at time `now_ms`.

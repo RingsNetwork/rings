@@ -174,3 +174,46 @@ async fn test_read_repair_rejects_non_affine_observed_miss() -> Result<()> {
     );
     Ok(())
 }
+
+/// Hand-off law for relay carriers: an element that fails the witness (a carrier written before
+/// the storage cutover) is retired by the sender rather than offered, so the receiver can admit
+/// and ack the rest instead of skipping the whole carrier on every pass.
+#[tokio::test]
+async fn test_handoff_retires_an_unwitnessed_inbox_element_and_offers_the_rest() -> Result<()> {
+    let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    // Standing alone, the node routes every position to itself and is the hold authority.
+    let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()));
+    let new_successor = node.did + Did::from(1u32);
+    let destination = node.did + Did::from(100u32);
+    let position = inbox_key(destination);
+    let key = StorageKey::inbox_of(destination);
+    let now_ms = get_epoch_ms();
+    let hold =
+        EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
+    node.operate_storage_entry(now_ms, position, hold, node.did)
+        .await?;
+    // The write law refuses an element that fails the witness, so the junk is stored directly,
+    // as a carrier from before the cutover was.
+    let junk = Entry::new(position, vec![Bytes::from("junk")], EntryKind::RelayMessage);
+    let junk = EntryOperation::Extend(junk).stamped(now_ms, node.did)?;
+    let stored = node
+        .live_storage_entry(key, now_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("hold was not stored".to_string()))?
+        .operate(now_ms, junk, node.did)?;
+    assert_eq!(stored.data.len(), 2);
+    node.storage.put(&key.to_string(), &stored).await?;
+
+    let batches = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
+
+    let remaining = node
+        .live_storage_entry(key, now_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("the witnessed hold was retired".to_string()))?;
+    assert_eq!(remaining.data.len(), 1);
+    remaining.witnessed_inbox_elements(now_ms, node.network_id())?;
+    assert_eq!(batches, vec![(new_successor, vec![PlacedEntry::new(
+        position, remaining
+    )])]);
+    Ok(())
+}

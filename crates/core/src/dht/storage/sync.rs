@@ -117,12 +117,16 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// `Entry`s that are no longer between current node and `new_successor`,
     /// and copy them to the new successor.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
-        let all_items = self.live_storage_entries(get_epoch_ms()).await?;
+        let now_ms = get_epoch_ms();
+        let all_items = self.live_storage_entries(now_ms).await?;
         // Relay inboxes are placed by the ring geometry in every storage mode
         // (see the `inbox` module); data topics follow the configured mode.
         let (relay, data): (Vec<_>, Vec<_>) = all_items
             .into_iter()
             .partition(|(_, entry)| entry.kind.is_relay_inbox());
+        let relay = self
+            .retire_unwitnessed_inbox_elements(relay, now_ms)
+            .await?;
         let mut actions = vec![self.hand_off_beyond_successor(new_successor, relay)?];
         actions.push(if self.storage_virtual_nodes_enabled()? {
             self.copy_entries_to_observed_virtual_storage_owners(data)?
@@ -157,6 +161,40 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
 }
 
 impl PeerRing {
+    /// Remove from each relay carrier in `inboxes` the elements that fail the witness at
+    /// `now_ms`, and return the carriers that remain, to be offered.
+    ///
+    /// Law: the witness of a stored element never turns from pass to fail. Each element passed
+    /// it when its delta was admitted here, and it is judged as of the element's hold instant,
+    /// which was then within σ of this clock. So an element failing it is one no receiver
+    /// admits (a carrier written before the storage cutover): offered, it would be skipped
+    /// without an ack on every pass until its retention bound. Removing it here, as the
+    /// recipient's drain does, is what lets the rest of the carrier be acked and handed off.
+    async fn retire_unwitnessed_inbox_elements(
+        &self,
+        inboxes: Vec<(StorageKey, Entry)>,
+        now_ms: u128,
+    ) -> Result<Vec<(StorageKey, Entry)>> {
+        let mut offered = Vec::with_capacity(inboxes.len());
+        for (key, inbox) in inboxes {
+            let rejected = inbox.partition_inbox(now_ms, self.network_id()).rejected;
+            if rejected.crdt.dots.is_empty() {
+                offered.push((key, inbox));
+                continue;
+            }
+            tracing::warn!(
+                local = %self.did,
+                inbox = %key,
+                rejected = rejected.crdt.dots.len(),
+                "relay inbox elements failed the witness and are retired unoffered"
+            );
+            if let Some(remaining) = self.remove_inbox_elements(key, rejected, now_ms).await? {
+                offered.push((key, remaining));
+            }
+        }
+        Ok(offered)
+    }
+
     /// Offer every item placed beyond `(self, new_successor]` to `new_successor` as an
     /// ownership hand-off.
     ///
