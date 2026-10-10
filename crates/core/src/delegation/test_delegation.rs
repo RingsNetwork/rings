@@ -1,6 +1,8 @@
 use std::str::FromStr;
 
+use super::Account;
 use super::DelegateeKey;
+use super::Delegation;
 use super::DelegationBuilder;
 use crate::dht::Did;
 use crate::ecc::keys::SigningSecretKey;
@@ -180,4 +182,43 @@ fn test_delegation_digest_golden_vector() {
         hex::encode(digest.into_bytes()),
         "c76a74b6e1c1f58a80eef20406d66157c64aad28"
     );
+}
+
+/// The widest account of the variant after `account`'s in a fixed chain through every variant
+/// (the first variant's for `None`), or `None` after the last. The match is exhaustive and each
+/// arm constructs the next variant, so an account added later fails to compile here until it is
+/// linked into the chain.
+fn next_widest_account(account: Option<&Account>) -> Option<Account> {
+    let did = Did::from(u32::MAX);
+    match account {
+        None => Some(Account::Secp256k1(did)),
+        Some(Account::Secp256k1(_)) => Some(Account::EIP191(did)),
+        Some(Account::EIP191(_)) => Some(Account::BIP137(did)),
+        Some(Account::BIP137(_)) => Some(Account::Secp256r1(PublicKey([u8::MAX; 33]))),
+        Some(Account::Secp256r1(_)) => Some(Account::Ed25519(PublicKey([u8::MAX; 33]))),
+        Some(Account::Ed25519(_)) => Some(Account::Bls12381(PublicKey([u8::MAX; 48]))),
+        Some(Account::Bls12381(_)) => None,
+    }
+}
+
+/// Witness of [`Delegation::widest_for_test`]: every account at its widest, signing its
+/// algorithm's signature length, encodes no wider than it, so an account or algorithm added
+/// later with a wider key or signature fails here instead of leaving the envelope reserves
+/// silently too small.
+#[test]
+fn test_the_widest_delegation_bounds_every_account() {
+    let widest = Delegation::widest_for_test();
+    let encoded_len = |delegation: &Delegation| rings_codec::serialize(delegation).unwrap().len();
+    let accounts = std::iter::successors(next_widest_account(None), |account| {
+        next_widest_account(Some(account))
+    });
+    for account in accounts {
+        let signature_len = account.account_verifier().algorithm().signature_len();
+        let delegation = Delegation {
+            delegator: account,
+            delegator_signature: vec![u8::MAX; signature_len],
+            ..widest.clone()
+        };
+        assert!(encoded_len(&delegation) <= encoded_len(&widest));
+    }
 }

@@ -3228,7 +3228,6 @@ dependencies = [
  "ark-ff",
  "ark-serialize",
  "ark-std",
- "arrayref",
  "async-lock",
  "async-recursion",
  "async-stream",

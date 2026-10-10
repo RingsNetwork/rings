@@ -4,6 +4,8 @@ use serde::Serialize;
 use super::Account;
 use crate::dht::Did;
 use crate::ecc::keys::AccountVerifier;
+#[cfg(test)]
+use crate::ecc::keys::SignatureAlgorithm;
 use crate::ecc::keys::VerificationPublicKey;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
@@ -146,14 +148,15 @@ impl Delegation {
     /// also signs the longest signature) and every varint field at its maximum.
     ///
     /// It authorizes nothing; it witnesses the envelope bounds of `consts`, which take its
-    /// encoded size in both delegation slots.
+    /// encoded size in both delegation slots. That it is the widest is itself witnessed by
+    /// `test_the_widest_delegation_bounds_every_account`.
     pub(crate) fn widest_for_test() -> Self {
         Self {
             delegatee_did: Did::from(u32::MAX),
             delegator: Account::Bls12381(PublicKey([u8::MAX; 48])),
             ttl_ms: u64::MAX,
             ts_ms: u128::MAX,
-            delegator_signature: signers::bls::Signature([u8::MAX; 96]).0.to_vec(),
+            delegator_signature: vec![u8::MAX; SignatureAlgorithm::Bls12381.signature_len()],
         }
     }
 

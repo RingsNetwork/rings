@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Refuse a delegation signature that is not its algorithm's exact length (#933). BIP-137
+  recovery sliced the first 65 bytes of a peer-supplied signature and panicked on a shorter one;
+  it now converts exactly, and every `AccountVerifier` checks the length first
+  (`SignatureAlgorithm::signature_len`, new error `InvalidSignatureLength`), so a verified
+  delegation's signature is at most 96 bytes.
+
 - Remove the WebTransport-backed browser relay (#805). The browser `RelayHandle` with
   `register_wt_service` and `register_wt_udp_service`, its interpreter, and its session engine are
   gone, and the relay protocol and `extension::transport` now build for native targets only, where
