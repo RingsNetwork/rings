@@ -6,8 +6,10 @@
 //! `Entry::is_live_under`, and the hand-off acknowledgement `SyncedEntryAck::confirms_local_value`,
 //! composed the way the storage funnels compose them: a read projects the stored value at the
 //! reader's clock and retires a carrier that is no longer live, a write stores the projected
-//! result. The retention law is a parameter: the production law [`ElementRetention::of`], or a
-//! deliberately broken one, for which a test witnesses that the named law fails. The model owns
+//! result. The retention law is a parameter, its horizons and what holds a carrier past its
+//! bound: the production law ([`ElementRetention::of`], [`Entry::is_live_under`]), or a
+//! deliberately broken one, for which a test witnesses that the named law fails; every law,
+//! Bounded included, has such a mutant. The model owns
 //! only the world: which replica acts, when a carrier is delivered, and how far real time
 //! advances. Every walk is a fixed-seed random interleaving, so a failure replays exactly.
 //!
@@ -75,8 +77,8 @@
 //! A hand-off is two steps, the copy and a later acknowledgement, so writes, ticks and drifts
 //! interleave between them and the ack gate is exercised; a confirmed hand-off gives up the
 //! sender's slot, so the sender's history restarts with it. Reader
-//! caches of both kinds are modelled: one joins every reply it observes (the read-join of #864,
-//! on `develop`), one replaces its value with the last reply (master's `local_cache_put`), and
+//! caches of both kinds are modelled: one joins every reply it observes (the read-join #864
+//! adds), one replaces its value with the last reply (`local_cache_put`), and
 //! both are delivered back to owners, as read-repair of a missed placement does from the held
 //! cache read (`PeerRing::local_cache_held`), which keeps a carrier past its bound.
 //!
@@ -595,7 +597,8 @@ impl World {
 
     /// Check `NoLoss`, `NoResurrection`, and `Bounded` at every replica.
     fn check_safety(&self) -> Result<()> {
-        let horizon = self.law.add_horizon_ms;
+        // Judged against the production law, so a law under test that holds too long fails.
+        let horizon = production_law()?.add_horizon_ms;
         let window_ms = production_law()?.remove_horizon_ms;
         for (index, replica) in self.replicas.iter().enumerate() {
             let now_ms = self.clock(index);
@@ -671,8 +674,7 @@ impl World {
         let lhs = x.join(y.clone())?.horizon_retired_under(self.law, now_ms);
         let rhs = x
             .horizon_retired_under(self.law, now_ms)
-            .join(y.horizon_retired_under(self.law, now_ms))?
-            .try_into_storage_entry()?;
+            .join(y.horizon_retired_under(self.law, now_ms))?;
         ensure(lhs == rhs, "Homomorphism".to_string())
     }
 
@@ -803,6 +805,28 @@ fn test_horizon_model_catches_early_add_retirement() -> Result<()> {
         ..law
     };
     assert_mutant_fails(mutant, Holders::Production, "NoLoss")
+}
+
+/// Mutant: retiring adds at `2H` holds them past the horizon.
+#[test]
+fn test_horizon_model_catches_late_add_retirement() -> Result<()> {
+    let law = production_law()?;
+    let mutant = ElementRetention {
+        add_horizon_ms: law.add_horizon_ms * 2,
+        ..law
+    };
+    assert_mutant_fails(mutant, Holders::Production, "Bounded")
+}
+
+/// Mutant: collecting removes at `2(H + σ)` holds tombstones past their window.
+#[test]
+fn test_horizon_model_catches_late_remove_collection() -> Result<()> {
+    let law = production_law()?;
+    let mutant = ElementRetention {
+        remove_horizon_ms: law.remove_horizon_ms * 2,
+        ..law
+    };
+    assert_mutant_fails(mutant, Holders::Production, "Bounded")
 }
 
 /// Mutant: a remove that does not hold its carrier past the bound lets a removed payload back.

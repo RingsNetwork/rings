@@ -84,9 +84,9 @@ pub struct PeerRing {
     /// Current predecessor learned through Chord notifications.
     predecessor: Arc<Mutex<Option<Did>>>,
     /// Persistent replicated-entry storage.
-    pub storage: EntryStorage,
+    pub(crate) storage: EntryStorage,
     /// Local fetched-entry cache, bounded at [`LOCAL_CACHE_CAPACITY`] entries.
-    pub cache: EntryStorage,
+    pub(crate) cache: EntryStorage,
     /// Virtual ownership layout used by storage placement.
     storage_virtual_node_config: VirtualNodeConfig,
     /// Total order of topology transitions and of the views taken between them

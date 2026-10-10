@@ -361,10 +361,7 @@ impl Processor {
             return Ok(exits);
         }
 
-        let Some(refreshed_entry) = self
-            .fetch_storage_entry_after_cache_refresh(entry_key)
-            .await?
-        else {
+        let Some(refreshed_entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(exits);
         };
         Ok(self.select_onion_exits_from_entry(&refreshed_entry, service, include_expired))
@@ -375,6 +372,16 @@ impl Processor {
         self.fetch_storage_entry_with_stop(entry_key, &stop).await
     }
 
+    /// Fetch `entry_key` and read the cache once the fetch is answered, stopping early on
+    /// `stop`.
+    ///
+    /// A reply is recognised by the fetch's reply marker ([`Swarm::storage_fetch_answered`]),
+    /// not by the cache holding a value: the cache may hold a value from before this fetch,
+    /// and a cached value is projected at the clock of each read, so it changes with no reply
+    /// when an element crosses its horizon.
+    ///
+    /// Post: the cache read after the reply, or, if none arrives within the fetch-poll budget,
+    /// the cache read at its end.
     pub(crate) async fn fetch_storage_entry_with_stop(
         &self,
         entry_key: Did,
@@ -388,15 +395,16 @@ impl Processor {
             if stop.should_stop() {
                 return Err(Error::RegistrationStopped);
             }
-            if let Some(entry) = self.storage_check_cache(entry_key).await {
-                return Ok(Some(entry));
-            }
-            if attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            let answered = self
+                .swarm
+                .storage_fetch_answered(entry_key)
+                .map_err(Error::EntryError)?;
+            if answered || attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
                 break;
             }
             sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
         }
-        Ok(None)
+        Ok(self.storage_check_cache(entry_key).await)
     }
 
     fn select_onion_exits_from_entry(
@@ -425,32 +433,6 @@ impl Processor {
                     && descriptor.verify_signature(self.swarm.network_id())
                     && descriptor.is_expired_at(now_ms)
             })
-    }
-
-    /// Fetch `entry_key` again and read the cache once the fetch is answered.
-    ///
-    /// A reply is recognised by the fetch's reply marker ([`Swarm::storage_fetch_answered`]),
-    /// not by the cached value changing: a cached value is projected at the clock of each read,
-    /// so it changes with no reply when an element crosses its horizon.
-    ///
-    /// Post: the cache read after the reply, or, if none arrives within the fetch-poll budget,
-    /// the cache read at its end.
-    async fn fetch_storage_entry_after_cache_refresh(
-        &self,
-        entry_key: Did,
-    ) -> Result<Option<entry::Entry>> {
-        self.storage_fetch(entry_key).await?;
-        for _ in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
-            if self
-                .swarm
-                .storage_fetch_answered(entry_key)
-                .map_err(Error::EntryError)?
-            {
-                break;
-            }
-            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
-        }
-        Ok(self.storage_check_cache(entry_key).await)
     }
 
     /// Build an onion proxy route for a client target through a target-agnostic proxy config.

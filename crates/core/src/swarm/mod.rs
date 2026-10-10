@@ -108,8 +108,10 @@ impl Swarm {
         self.transport.storage_redundancy()
     }
 
-    /// Whether the latest `storage_fetch` of `entry_key` has been answered: an entry it found
-    /// has been cached since that fetch started, locally or from a reply.
+    /// Whether the latest `storage_fetch` of `entry_key` has been answered: a found entry of the
+    /// key has been cached since that fetch started, locally or from a reply. The marker carries
+    /// no round identity, so a late reply to an earlier fetch of the key also answers it; the
+    /// entry it caches is still a reply received after this fetch started.
     ///
     /// This is the fetch's reply marker. A reader cannot tell a reply by comparing cached values,
     /// since a cached value is projected at the clock of each read and changes, with no reply,

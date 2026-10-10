@@ -269,6 +269,50 @@ async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() 
     Ok(())
 }
 
+/// An entry the receiver cannot admit (here one already past its retention bound on this clock,
+/// as an entry live on the sender's clock can be up to the skew tolerance later) is skipped
+/// without an ack and holds back no other entry of its batch: the admissible one is persisted
+/// and acknowledged, the inadmissible one is neither, so its owner keeps it.
+#[tokio::test]
+async fn test_storage_sync_batch_skips_an_inadmissible_entry_without_failing_the_batch(
+) -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let now = get_epoch_ms();
+    let admissible = live_entry(Did::from(41u32), vec![Bytes::from("kept")], EntryKind::Data);
+    let mut expired = live_entry(Did::from(42u32), vec![Bytes::from("gone")], EntryKind::Data);
+    expired.expires_at_ms = Some(now - 1);
+    let (admissible_key, expired_key) = (admissible.did, expired.did);
+    let admissible_stored = admissible.clone().try_into_storage_entry()?;
+    let msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
+        destination: StorageSyncDestination::PhysicalOwner(node.did()),
+        data: vec![
+            PlacedEntry::new(expired_key, expired),
+            PlacedEntry::new(admissible_key, admissible),
+        ],
+    };
+    let mut batch = StorageSyncBatch::new(&msg, Did::from(1u32), now);
+    let acks = loop {
+        if let StorageSyncBatchStep::Complete(acks) = batch.step(&node.swarm.transport).await? {
+            break acks;
+        }
+    };
+
+    assert_eq!(acks, vec![SyncedEntryAck::new(
+        admissible_key,
+        admissible_stored.clone()
+    )]);
+    assert_eq!(
+        node.dht().storage.get(&admissible_key.to_string()).await?,
+        Some(admissible_stored)
+    );
+    assert_eq!(
+        node.dht().storage.get(&expired_key.to_string()).await?,
+        None
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_sync_entries_handler_accepts_placement_destination_on_local_branch() -> Result<()> {
     let mut keys = gen_ordered_keys::<2>().into_iter();

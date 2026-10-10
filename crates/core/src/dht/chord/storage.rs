@@ -162,6 +162,19 @@ async fn retire_unless_live(
 /// message could be lost. The transition is held across the store's own awaits and nothing
 /// else, so it never nests and never waits on the network.
 impl PeerRing {
+    /// Read the live replicated entry of `kind` stored at `placement` on this node, projected at
+    /// `now_ms` as every storage read is: the read outside core, whose stores are crate-private
+    /// so that no reader bypasses the projection.
+    pub async fn stored_entry_at(
+        &self,
+        kind: EntryKind,
+        placement: Did,
+        now_ms: u128,
+    ) -> Result<Option<Entry>> {
+        self.live_storage_entry(StorageKey::new(kind, placement), now_ms)
+            .await
+    }
+
     /// Read the live replicated entry stored at `key`.
     pub(crate) async fn live_storage_entry(
         &self,

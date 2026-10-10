@@ -62,7 +62,7 @@
 //! it was joined with requested (a plain append requests `default_lifetime_ms`, 10 minutes).
 //! Writing it again issues a fresh dot and a fresh bound: a sole writer must rewrite a value
 //! within the default lifetime, and every writer within `H`, even while other writes keep the
-//! carrier alive. A registry refreshes its descriptors every heartbeat.
+//! carrier alive.
 //!
 //! Laws, for `t` any node's clock and `x, y` carriers of one data topic:
 //! - Homomorphism: `retire_t(x ⊔ y) = retire_t(x) ⊔ retire_t(y)`. Every filter is a threshold

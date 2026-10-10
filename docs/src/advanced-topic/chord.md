@@ -63,8 +63,10 @@ report goes straight to the origin, so `reply_via` reflects at most one bounded 
 ## Data-topic storage
 
 A data topic is a replicated set of elements (a state-based CRDT): each element carries the
-*dot* of the write that issued it, and replicas, hand-offs and fetch caches merge by join, so the
-merged value does not depend on the order replies arrive in.
+*dot* of the write that issued it, and replicas and hand-offs merge by join, so a replica's value
+does not depend on the order writes and hand-offs arrive in. A reader's fetch cache does not
+merge: it keeps the last reply it received, so a late reply from a stale replica can replace a
+fresher one until the next fetch (a cache that joins its replies is #864).
 
 - **Every element expires individually.** An element expires at the earlier of two instants:
   100 minutes after its dot was issued (the element horizon `H`, the longest retention one write

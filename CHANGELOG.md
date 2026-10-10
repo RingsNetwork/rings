@@ -170,6 +170,8 @@
     and a read that retires part of a stored carrier writes the projection back. The new
     `Swarm::storage_fetch_answered` reports whether a fetch was answered, which a projected
     cache value cannot show.
+  - `PeerRing::storage` and `PeerRing::cache` are crate-private, so every read outside core goes
+    through the projection (`Swarm` lookups, `inspect`).
   - Registry heartbeat intervals must be below 595 s (a registry write's lifetime less the skew
     tolerance and the fetch-poll budget); a node configured above it refuses to start.
   - `RecordAuthority` moves from `rings_core::storage::file` to `rings_core::storage`, one type
@@ -177,10 +179,17 @@
     `IdbStorage::new_with_cap_and_name` is disposable and the new
     `IdbStorage::new_with_cap_name_and_authority` takes the authority; the browser replay store
     is authoritative, as on native (#909). An IndexedDB `scan` deletes nothing.
-  - Cutover: the storage wire format changes, so a network upgrades together. Old stored
-    carriers holding a tombstone no longer decode and are retired on first read; data topics
-    and registries are repopulated by their next writes, and messages held in a relay inbox
-    that ever drained one are lost.
+  - Cutover: the storage wire format changes, so a network upgrades together.
+    - Native: an old carrier holding a tombstone no longer decodes and is retired on first
+      read. One without still decodes, its elements read as the bytes of their old base58
+      text. A data topic serves those as values until the element horizon, `lookupService` and
+      `fetchTopicMessages` included. A relay inbox's held messages fail its witness and are
+      dropped undelivered, so every message held at the upgrade is lost.
+    - Browser: every non-empty old carrier is refused and retired on first read.
+    - A storage hand-off now skips an entry the receiver cannot admit, without acknowledging
+      it, instead of rejecting its batch; only a placement outside the entry's replica set
+      rejects the batch. So an old carrier holds back no other entry.
+    - Data topics and registries are repopulated by their next writes.
 
 - Make receive-side admission lossless with per-lane credit flow control in the transport (#924).
 
@@ -271,9 +280,8 @@
   `(String, Encoded)` becomes `(String, Bytes)`. `ENTRY_PAYLOAD_MAX_BYTES` now bounds element
   bytes. JSON-RPC `publishMessageToTopic`, `fetchTopicMessages` and `lookupService` still
   exchange strings, now as the elements' UTF-8. The inspect `StorageValue.data` lists each
-  element as base64 instead of its base58-check text. An element written before this change
-  decodes as the bytes of its base58 text; it is not a valid registry value, and it expires by
-  the element horizon. This is part of the storage-entry wire cutover above.
+  element as base64 instead of its base58-check text. What an element written before this
+  change becomes on each backend is stated in the storage-entry wire cutover above.
 
 - Derive the chunk envelope reserve from the widest frame (#925). `MAX_CHUNK_ENVELOPE_OVERHEAD`
   drops from a 4096-byte guess to 911 bytes, and `TRANSPORT_CUSTOM_OVERHEAD` from 64 to 4: each

@@ -85,7 +85,9 @@ pub(crate) const fn default_advertise_presence() -> bool {
 /// owner whose clock runs up to `σ = TS_OFFSET_TOLERANCE_MS` ahead retires it at `L − σ` of the
 /// publisher's time. Each heartbeat first fetches the registry, polling for up to the fetch-poll
 /// budget `P`, before it appends, so the interval is below `L − σ − P`; the append's own
-/// network latency must fit in what the interval leaves of it.
+/// network latency must fit in what the interval leaves of it. The bound holds between
+/// successful heartbeats: one that fails leaves a gap of two intervals, which a sole
+/// registrant's descriptor outlives only if `2I < L − σ − P`.
 pub(crate) fn registry_refresh_bound() -> Duration {
     let lifetime = Duration::from_millis(entry::EntryKind::Data.default_lifetime_ms());
     let skew = Duration::from_millis(u64::try_from(TS_OFFSET_TOLERANCE_MS).unwrap_or(u64::MAX));

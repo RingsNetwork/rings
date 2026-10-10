@@ -120,9 +120,7 @@ impl EntryDot {
 ///
 /// Law: `ElementDigest::of(u) = ElementDigest::of(v) ⟺ u = v`, up to Keccak-256 collision
 /// resistance.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ElementDigest(pub [u8; 32]);
 
 #[cfg(test)]
@@ -155,9 +153,7 @@ impl ElementDigest {
 
 /// Remove witness for one payload: it covers every add of the payload whose digest is `element`
 /// at or below `dot` (see the module documentation).
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EntryTombstone {
     /// Digest of the removed payload.
     pub element: ElementDigest,

@@ -1,3 +1,5 @@
+#[cfg(feature = "dummy")]
+use rings_core::dht::entry::EntryKind;
 use rings_core::message::MessageSigner;
 
 #[cfg(feature = "dummy")]
@@ -449,8 +451,7 @@ pub(super) async fn wait_for_online_node_dids_in_storage(
                 let observed = match processor
                     .swarm
                     .dht()
-                    .storage
-                    .get(&placement_key.to_string())
+                    .stored_entry_at(EntryKind::Data, *placement_key, get_epoch_ms())
                     .await
                     .map_err(Error::Storage)?
                 {

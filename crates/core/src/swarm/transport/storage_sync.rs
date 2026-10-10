@@ -230,20 +230,30 @@ impl<'data> StorageSyncBatch<'data> {
         };
         self.validate_index += 1;
 
-        // Preservation: every input is validated before the first storage
-        // effect, so a later invalid input leaves the entire batch unwritten.
-        // The admission law is re-checked by `join_storage_entry` at persist
-        // time; it is evaluated here so that a failing entry rejects the batch
-        // before any earlier entry has been written.
+        // Preservation: every input is validated before the first storage effect, so a
+        // placement outside its entry's replica set, a protocol violation, leaves the entire
+        // batch unwritten. An entry this receiver cannot admit now (the admission law,
+        // re-checked by `join_storage_entry` at persist time) is skipped without an ack, as a
+        // relocation the law does not yet permit is: its owner keeps it and may offer it
+        // again, and it holds back no other entry of the batch. Such an entry may be honest:
+        // live on the sender's clock and not on this one, up to the skew tolerance apart, or
+        // stored before the storage cutover in a shape the witness law refuses.
         if should_persist_synced_entry(transport, self.destination, placed)?
             && self.relay_relocation_permits(transport, placed)?
         {
             placed.validate_placement(transport.storage_redundancy())?;
-            placed
+            let admitted = placed
                 .entry
-                .validate_admissible_at(self.now_ms, transport.network_id)?;
-            let entry = placed.entry.clone().try_into_storage_entry()?;
-            self.accepted.push(SyncedEntryAck::new(placed.key, entry));
+                .validate_admissible_at(self.now_ms, transport.network_id)
+                .and_then(|()| placed.entry.clone().try_into_storage_entry());
+            match admitted {
+                Ok(entry) => self.accepted.push(SyncedEntryAck::new(placed.key, entry)),
+                Err(error) => tracing::debug!(
+                    key = %placed.key,
+                    %error,
+                    "skipping a synced entry this node cannot admit; its owner keeps it"
+                ),
+            }
         }
 
         Ok(Some(StorageSyncBatchStep::Pending))
