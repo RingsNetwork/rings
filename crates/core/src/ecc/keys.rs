@@ -146,6 +146,15 @@ impl std::fmt::Debug for SigningSecretKey {
     }
 }
 
+/// The length of a recoverable signature `r ‖ s ‖ v` (secp256k1, EIP-191, BIP-137).
+pub(crate) const RECOVERABLE_SIGNATURE_LEN: usize = 65;
+
+const _: () = {
+    assert!(SignatureAlgorithm::Secp256k1.signature_len() == RECOVERABLE_SIGNATURE_LEN);
+    assert!(SignatureAlgorithm::Eip191.signature_len() == RECOVERABLE_SIGNATURE_LEN);
+    assert!(SignatureAlgorithm::Bip137.signature_len() == RECOVERABLE_SIGNATURE_LEN);
+};
+
 impl SignatureAlgorithm {
     /// Stable lower-case algorithm name.
     pub fn as_str(self) -> &'static str {
@@ -159,7 +168,7 @@ impl SignatureAlgorithm {
         }
     }
 
-    /// The length of this algorithm's signatures, in bytes.
+    /// The length of this algorithm's signatures, in bytes: 65 for every recoverable one.
     ///
     /// Law: an [`AccountVerifier`] accepts a signature of exactly this length and no other, so
     /// every delegation that verified (built or admitted) carries a signature of its
@@ -183,12 +192,13 @@ impl SignatureAlgorithm {
         Err(self.signature_length_error(sig.len()))
     }
 
-    /// `sig` as the array of this algorithm's signatures, refused with
+    /// `sig` as a recoverable signature `r ‖ s ‖ v` of this algorithm, refused with
     /// [`Error::InvalidSignatureLength`] at any other length: the gate and the conversion in one
-    /// step, for a signer that needs the array.
-    ///
-    /// Pre: `N == self.signature_len()`.
-    pub(crate) fn signature_array<const N: usize>(self, sig: &[u8]) -> Result<[u8; N]> {
+    /// step, for the recovering signers.
+    pub(crate) fn recoverable_signature(
+        self,
+        sig: &[u8],
+    ) -> Result<[u8; RECOVERABLE_SIGNATURE_LEN]> {
         sig.try_into()
             .map_err(|_| self.signature_length_error(sig.len()))
     }
@@ -734,5 +744,40 @@ mod tests {
             secret.public_key().unwrap(),
             VerificationPublicKey::Secp256r1(expected)
         );
+    }
+
+    /// Every recovering signer refuses a signature that is not `r ‖ s ‖ v`, empty, short or
+    /// long, with [`Error::InvalidSignatureLength`] naming its own algorithm (#933, #913 R8):
+    /// recovery is called directly as well as behind the account verifiers' gate.
+    #[test]
+    fn test_every_recovering_signer_refuses_a_signature_of_the_wrong_length() {
+        type Recover = fn(&[u8], Vec<u8>) -> Result<PublicKey<33>>;
+        let recovers: [(SignatureAlgorithm, Recover); 3] = [
+            (SignatureAlgorithm::Secp256k1, |msg, sig| {
+                signers::secp256k1::recover(msg, sig)
+            }),
+            (SignatureAlgorithm::Eip191, |msg, sig| {
+                signers::eip191::recover(msg, sig)
+            }),
+            (SignatureAlgorithm::Bip137, |msg, sig| {
+                signers::bip137::recover(msg, sig)
+            }),
+        ];
+        for (algorithm, recover) in recovers {
+            for len in [
+                0,
+                RECOVERABLE_SIGNATURE_LEN - 1,
+                RECOVERABLE_SIGNATURE_LEN + 1,
+            ] {
+                assert!(
+                    matches!(
+                        recover(b"message", vec![27; len]),
+                        Err(Error::InvalidSignatureLength { algorithm: named, actual, .. })
+                            if named == algorithm.as_str() && actual == len
+                    ),
+                    "{algorithm:?} recovers from {len} bytes"
+                );
+            }
+        }
     }
 }

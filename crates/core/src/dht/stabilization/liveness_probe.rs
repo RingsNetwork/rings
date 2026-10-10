@@ -1,9 +1,8 @@
 //! Liveness probing of admitted peers: a probe is due for a peer that is idle or withholds
-//! credit, counts as sent once it is queued on the peer's control lane, and probes are sent
-//! concurrently, so a peer that withholds credit is judged without delaying any other.
+//! credit, counts as sent once it is queued on the peer's control lane, and is sent through the
+//! protocol egress, which never waits on the peer, so a peer that withholds credit is judged
+//! without delaying any other.
 
-use futures::stream;
-use futures::TryStreamExt;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use super::Stabilizer;
@@ -33,9 +32,10 @@ impl Stabilizer {
     /// Send liveness probes for admitted peers that are due one and do not already have one
     /// pending.
     ///
-    /// Law (independence): the probes are sent concurrently, and each send returns once its
-    /// probe is queued, so a peer that withholds credit delays no other peer's probe and cannot
-    /// make the step overrun its deadline.
+    /// Law (independence): each probe is sent through the protocol egress, which takes its
+    /// capacity and readiness now and returns once the probe is queued, so no probe waits on its
+    /// peer; and one peer's failure is that peer's alone. A peer that withholds credit therefore
+    /// delays and aborts no other peer's probe and cannot make the step overrun its deadline.
     pub(super) async fn probe_peer_liveness(&self) -> Result<()> {
         let now_ms = get_epoch_ms_i64();
         // Probe epochs use wall-clock seconds; topology deadlines use the
@@ -43,15 +43,32 @@ impl Stabilizer {
         let unix_seconds = u64::try_from(now_ms).unwrap_or(0) / 1_000;
         let epoch = ProvisionalEpoch::from_unix_seconds(unix_seconds);
         let candidates = self.transport.liveness_probe_candidates(now_ms)?;
-        stream::iter(candidates.into_iter().map(Ok))
-            .try_for_each_concurrent(None, |attempt| async move {
-                let probe = self.prepare_liveness_probe(attempt, epoch).await?;
-                match self.register_liveness_probe(probe)? {
-                    Some(probe) => self.send_registered_liveness_probe(probe, now_ms).await,
-                    None => Ok(()),
-                }
-            })
-            .await
+        for attempt in candidates {
+            if let Err(error) = self.probe_peer(attempt, epoch, now_ms).await {
+                tracing::warn!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    peer = %attempt.peer(),
+                    error = ?error,
+                    "STABILIZATION peer liveness probe failed"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Prepare, register and send one peer's probe.
+    async fn probe_peer(
+        &self,
+        attempt: PendingConnectionAttempt,
+        epoch: ProvisionalEpoch,
+        now_ms: i64,
+    ) -> Result<()> {
+        let probe = self.prepare_liveness_probe(attempt, epoch).await?;
+        match self.register_liveness_probe(probe)? {
+            Some(probe) => self.send_registered_liveness_probe(probe, now_ms).await,
+            None => Ok(()),
+        }
     }
 
     /// Build and sign one liveness probe before it is registered as pending.
@@ -117,12 +134,11 @@ impl Stabilizer {
         );
         // `Ok` once the probe is queued on the peer's control lane: from then on a probe the
         // peer will not let this end send (it withholds the lane's credit) counts as unanswered.
-        // An `Err` is this end's own failure before the queue, and charges the peer nothing.
-        match self
-            .transport
-            .send_payload_enqueued(payload.relay.next_hop, payload)
-            .await
-        {
+        // An `Err` is a failure before the queue: the capacity or readiness the probe lacked.
+        // While this end waits for the peer's credit, that is the peer's own backpressure (its
+        // stalled transfers hold the capacity), so the probe is charged as sent; otherwise it
+        // is this end's failure and charges the peer nothing.
+        match self.transport.protocol_egress().send_payload(payload).await {
             Ok(()) => {
                 let matching_probe_recorded = self
                     .transport
@@ -134,6 +150,18 @@ impl Stabilizer {
                     tx_id = %tx_id,
                     matching_probe_recorded,
                     "STABILIZATION peer liveness probe send complete"
+                );
+            }
+            Err(error) if self.transport.credit_stalled(peer) => {
+                self.transport
+                    .record_peer_liveness_probe_sent(attempt, now_ms, tx_id, request)?;
+                tracing::warn!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    state = ?peer_state,
+                    error = ?error,
+                    "STABILIZATION peer liveness probe not queued behind the peer's withheld credit; charged as unanswered"
                 );
             }
             Err(error) => {

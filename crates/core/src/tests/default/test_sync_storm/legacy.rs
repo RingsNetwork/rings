@@ -7,6 +7,7 @@ use super::pressure::new_deliveries_with_controls;
 use super::pressure::start_lane_handover;
 use super::pressure::wait_for_control_barrier_verdict;
 use super::*;
+use crate::swarm::transport::StorageSyncSend;
 
 /// The legacy storm, every protection layer disabled, against per-lane credit dispatch.
 ///
@@ -114,7 +115,7 @@ async fn queue_legacy_storm(
         nodes[observer]
             .swarm
             .transport
-            .send_storage_sync(msg)
+            .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
             .await
             .expect("legacy sync must enter the real scheduler"),
         StorageSyncOutcome::Sent(_)
@@ -182,49 +183,8 @@ async fn probe_healthy_peer_behind_barrier(
         "the liveness clock must originate at the real stabilizer probe"
     );
     let probe = observe_stabilizer_probe(runtime, driver).await;
-    let deadline = probe
-        .deadline_virtual_ms
-        .expect("the exact stabilizer probe must carry its production deadline");
-    let backlog = in_flight_reassembly(runtime);
-    runtime
-        .enable_reassembly_service()
-        .expect("legacy reassembly service must enable");
-    let mut backlog_deliveries = start_lane_handover(runtime, backlog.clone()).await;
-    settle_one_poll().await;
-    for delivery in &backlog {
-        driver.observe_dispatch(delivery);
-    }
-    let mut probe_delivery = runtime.deliver(&probe).boxed_local();
-    assert!(!wait_for_control_barrier_verdict(runtime, probe_delivery.as_mut(), true).await);
-    driver.observe_dispatch(&probe);
-    driver.observe_barrier(&probe, true);
-    await_one_handover(runtime, probe_delivery.as_mut(), &backlog, deadline).await;
-    driver.observe_delivery(runtime, &probe);
-    drop(probe_delivery);
-    drain_started_reassembly(runtime, &mut backlog_deliveries).await;
-    for delivery in &backlog {
-        driver.observe_delivery(runtime, delivery);
-    }
-    runtime
-        .disable_reassembly_service()
-        .expect("legacy reassembly service must disable");
-    // The peer answered the probe under its transaction; delivering that answer is the liveness
-    // evidence the barrier would have withheld past the deadline before #924.
-    let answer = runtime
-        .pending_deliveries()
-        .expect("probe answer must classify")
-        .into_iter()
-        .find(|delivery| {
-            delivery.class == ScheduledDeliveryClass::Control
-                && delivery.transaction_id == probe.transaction_id
-        })
-        .expect("the peer must answer the probe once the barrier released it");
-    assert!(runtime
-        .deliver(&answer)
-        .await
-        .expect("probe answer delivery must remain stable"));
-    driver.observe_delivery(runtime, &answer);
-    drain_bootstrap(runtime, nodes).await;
+    deliver_probe_behind_barrier(runtime, driver, &probe).await;
+    deliver_probe_answer(runtime, nodes, driver, &probe).await;
     // The probe was answered: no unanswered probe remains to expire into a false disconnect,
     // the observer still holds the peer, and no repair entry is emitted.
     assert_eq!(
@@ -256,6 +216,66 @@ async fn probe_healthy_peer_behind_barrier(
     );
     persist_inflight_trace_artifact("legacy-probe-answered", runtime, &driver.state)
         .expect("legacy probe trace artifact must be writable");
+}
+
+/// Deliver `probe` while the peer's reassembly backlog holds the barrier: it is blocked, and
+/// delivered within one hand-over of the backlog, which then drains.
+async fn deliver_probe_behind_barrier(
+    runtime: &SimulationRuntimeGuard,
+    driver: &mut TraceDriver,
+    probe: &ScheduledDelivery,
+) {
+    let deadline = probe
+        .deadline_virtual_ms
+        .expect("the exact stabilizer probe must carry its production deadline");
+    let backlog = in_flight_reassembly(runtime);
+    runtime
+        .enable_reassembly_service()
+        .expect("legacy reassembly service must enable");
+    let mut backlog_deliveries = start_lane_handover(runtime, backlog.clone()).await;
+    settle_one_poll().await;
+    for delivery in &backlog {
+        driver.observe_dispatch(delivery);
+    }
+    let mut probe_delivery = runtime.deliver(probe).boxed_local();
+    assert!(!wait_for_control_barrier_verdict(runtime, probe_delivery.as_mut(), true).await);
+    driver.observe_dispatch(probe);
+    driver.observe_barrier(probe, true);
+    await_one_handover(runtime, probe_delivery.as_mut(), &backlog, deadline).await;
+    driver.observe_delivery(runtime, probe);
+    drop(probe_delivery);
+    drain_started_reassembly(runtime, &mut backlog_deliveries).await;
+    for delivery in &backlog {
+        driver.observe_delivery(runtime, delivery);
+    }
+    runtime
+        .disable_reassembly_service()
+        .expect("legacy reassembly service must disable");
+}
+
+/// Deliver the peer's answer to `probe`, under the probe's transaction: the liveness evidence
+/// the barrier would have withheld past the deadline before #924.
+async fn deliver_probe_answer(
+    runtime: &SimulationRuntimeGuard,
+    nodes: &[Node],
+    driver: &mut TraceDriver,
+    probe: &ScheduledDelivery,
+) {
+    let answer = runtime
+        .pending_deliveries()
+        .expect("probe answer must classify")
+        .into_iter()
+        .find(|delivery| {
+            delivery.class == ScheduledDeliveryClass::Control
+                && delivery.transaction_id == probe.transaction_id
+        })
+        .expect("the peer must answer the probe once the barrier released it");
+    assert!(runtime
+        .deliver(&answer)
+        .await
+        .expect("probe answer delivery must remain stable"));
+    driver.observe_delivery(runtime, &answer);
+    drain_bootstrap(runtime, nodes).await;
 }
 
 async fn observe_stabilizer_probe(

@@ -74,6 +74,11 @@ impl ConnectionAttempt {
     }
 }
 
+/// The node's storage answer clock as a fetcher read it before its fetch
+/// ([`Swarm::storage_fetch_mark`]). Marks are ordered by when they were read.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StorageFetchMark(u64);
+
 /// The transport and dht management.
 pub struct Swarm {
     /// Reference of DHT.
@@ -108,20 +113,32 @@ impl Swarm {
         self.transport.storage_redundancy()
     }
 
-    /// The answers `storage_fetch` of `entry_key` has received: the found entries of the key
-    /// cached, locally or from a reply, that the cache then serves, counted across fetches. A fetcher notes the count
-    /// before its fetch and knows it was answered once the count grows; a fetch of the key that
-    /// starts meanwhile does not reset it. A late reply to an earlier fetch also counts, and the
-    /// entry it caches is still a reply received after the count was noted.
+    /// The mark a fetcher reads before `storage_fetch`, to learn from
+    /// [`Self::storage_fetch_answered_since`] when its fetch was answered.
+    pub fn storage_fetch_mark(&self) -> StorageFetchMark {
+        StorageFetchMark(self.transport.storage_lookup_mark())
+    }
+
+    /// Whether `storage_fetch` of `entry_key` cached a found entry the cache then serves,
+    /// locally or from a reply, after `mark` was read. A fetch of the key that starts meanwhile does not reset it. A
+    /// late reply to an earlier fetch also counts, and the entry it caches is still a reply
+    /// received after the mark.
     ///
     /// This is the fetch's reply marker. A reader cannot tell a reply by comparing cached values,
     /// since a cached value is projected at the clock of each read and changes, with no reply,
     /// when one of its elements crosses its horizon.
     ///
-    /// Post: monotone while a fetch of `entry_key` is retained; `0` once none is.
-    pub fn storage_fetch_answers(&self, entry_key: Did) -> Result<u64> {
-        self.transport
-            .storage_lookup_answers(entry_key, self.transport.storage_redundancy())
+    /// Post: `false` once no fetch of `entry_key` is retained.
+    pub fn storage_fetch_answered_since(
+        &self,
+        entry_key: Did,
+        mark: StorageFetchMark,
+    ) -> Result<bool> {
+        self.transport.storage_lookup_answered_since(
+            entry_key,
+            self.transport.storage_redundancy(),
+            mark.0,
+        )
     }
 
     /// Get the storage virtual-node positions for this swarm's DHT protocol mode.

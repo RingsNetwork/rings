@@ -37,6 +37,8 @@ use crate::tests::activity::ActivityObserver;
 mod test_dht_convergence;
 // Uses the `stateright` model checker, which doesn't build for wasm32.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) mod credit_starvation;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub(crate) mod dummy_hooks;
 #[cfg(not(target_family = "wasm"))]
 mod test_dht_stateright;

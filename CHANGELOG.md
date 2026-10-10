@@ -168,9 +168,9 @@
     `ElementDigest` and the greatest dot it covers, at most one per value.
   - A carrier past its bound answers lookups as absent, from a replica and from a fetch cache,
     and a read that retires part of a stored carrier writes the projection back. The new
-    `Swarm::storage_fetch_answers` counts the answers fetches of a key received, across
-    fetches, so a fetcher that noted it before fetching knows when it was answered, which a
-    projected cache value cannot show.
+    `Swarm::storage_fetch_mark` and `Swarm::storage_fetch_answered_since` are the fetch's
+    reply marker: a fetcher reads a mark before fetching and learns when its key was answered
+    after it, which a projected cache value cannot show.
   - `PeerRing::storage` and `PeerRing::cache` are crate-private, so every read outside core goes
     through the projection (`Swarm` lookups, `inspect`).
   - Registry heartbeat intervals must be below 595 s (a registry write's lifetime less the skew
@@ -218,8 +218,9 @@
   - A node defers new credit while its connections hold more than
     `NODE_RECEIVE_SOFT_LIMIT_BYTES` (16 MiB) of received frames, counted in the transport's
     `NodeReceiveLoad`, which `InnerTransportCallback::new` takes; the release that brings it
-    below the limit advertises what was deferred. The bound is soft; a hard node-wide bound
-    needs credit that can be taken back (#934).
+    below the limit advertises what was deferred. The new `ChannelLane::PRIORITY` is never
+    deferred, and core puts DHT control on it, so control traffic never waits for the node's
+    load. The bound is soft; a hard node-wide bound needs credit that can be taken back (#934).
   - The pure algebra (`rings_transport::core::credit`) is model checked: no honest violation,
     bounded occupancy, deadlock freedom with deferred advertisements and failed credit sends,
     completion, and refusal of a flooding sender, each refuted by a broken algebra.
@@ -239,17 +240,24 @@
 
   **Core.**
   - The outbound worker serves only lanes that hold credit, so one lane's backpressure never
-    stalls another. A forwarded or relayed payload is released once it is queued: it takes its
-    outbound capacity without waiting, returns, and frees the inbound lane that carried it, so
-    a next hop's backpressure never reaches upstream links. Its first frame is awaited apart
-    from it for at most 25 s, credit included; one that waits longer is dropped as local
-    backpressure. A payload this node originates still returns once its first frame is
-    admitted.
-  - Liveness judges a peer that withholds credit. A probe counts as sent once it is queued, so
-    a probe the peer's control lane will not take is unanswered and the peer is evicted after
-    the answer window; a peer waited on for credit for the idle interval is probed however
-    recently it sent anything; and probes are sent concurrently, so a starved peer delays no
-    other peer's probe.
+    stalls another.
+  - An inbound lane's progress depends only on local resources (the inbound-locality law of
+    `swarm::transport::egress`). Every send in the protocol context goes through the new
+    `ProtocolEgress`: a handler's forward, report, query or notification, a connection offer it
+    starts, a read repair, a relay hold and a liveness probe take the connection's readiness and
+    their outbound capacity now, are dropped as local backpressure when either is lacking, and
+    return once queued, freeing the inbound event and lane that carried their cause; so a next
+    hop's backpressure never reaches upstream links. The first frame is awaited apart for at
+    most 25 s, credit included; a payload that waits longer is dropped as local backpressure.
+    A send through the Swarm API still returns once its first frame is admitted.
+    `SwarmTransport::send_storage_sync_or_defer` takes its `StorageSyncSend` discipline.
+  - Liveness judges a peer that withholds credit. A probe counts as sent once it is queued, or
+    when it cannot be queued while this end waits for the peer's credit, so a probe the peer's
+    control lane will not take is unanswered and the peer is evicted after the answer window; a
+    peer waited on for credit for the idle interval is probed however recently it sent
+    anything; while this end waits for a peer's credit only the probe's answer answers it, so a
+    peer cannot escape eviction by sending; and no probe waits on its peer, so a starved peer
+    delays no other peer's probe.
   - The session-link holds of every connection keep at most 256 frames together, since their
     frames have given their credit back.
   - A frame the session-link hold keeps gives its transport credit back, so held frames never

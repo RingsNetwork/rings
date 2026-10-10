@@ -25,6 +25,8 @@ pub struct AdmittedInboundMessage<'a> {
 }
 
 impl<'a> AdmittedInboundMessage<'a> {
+    /// The admitted message `payload` from the connection `cid`, holding its frame's place in
+    /// the lane's credit window through `capacity`.
     pub(crate) fn new(cid: &'a str, payload: Bytes, capacity: InboundCreditLease) -> Self {
         Self {
             cid,
@@ -64,6 +66,7 @@ pub struct InboundCreditLease {
 }
 
 impl InboundCreditLease {
+    /// The lease of the place `permit` holds.
     pub(crate) const fn new(permit: CreditPermit) -> Self {
         Self { _permit: permit }
     }

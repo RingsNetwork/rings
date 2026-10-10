@@ -1,6 +1,7 @@
 //! Default method signing using secp256k1 ECDSA.
 
 use crate::ecc::keccak256;
+use crate::ecc::keys::SignatureAlgorithm;
 use crate::ecc::PublicKey;
 use crate::ecc::PublicKeyAddress;
 use crate::ecc::SecretKey;
@@ -23,7 +24,7 @@ pub fn hash(msg: &[u8]) -> [u8; 32] {
 
 /// recover public key from message and signature.
 pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey<33>> {
-    let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
+    let sig_byte = SignatureAlgorithm::Secp256k1.recoverable_signature(sig.as_ref())?;
     crate::ecc::recover(msg, sig_byte)
 }
 

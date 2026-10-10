@@ -52,6 +52,7 @@ mod listener;
 mod onion_proxy;
 pub use listener::ProviderListener;
 pub use onion_proxy::BrowserOnionProxy;
+pub use onion_proxy::BrowserOnionProxyResponse;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]

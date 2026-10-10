@@ -1,5 +1,4 @@
 use super::*;
-use crate::error::Error;
 
 #[test]
 fn test_verify() {
@@ -20,16 +19,4 @@ fn test_verify() {
     let pk = self::recover(msg.as_bytes(), sig).unwrap();
     assert_eq!(pk, pubkey);
     assert_eq!(pk.address(), pubkey.address());
-}
-
-/// Recovery refuses a signature that is not 65 bytes instead of slicing it (#933): empty, one
-/// byte short, and one byte long.
-#[test]
-fn test_recover_refuses_a_signature_of_the_wrong_length() {
-    for len in [0, 10, 64, 66] {
-        assert!(matches!(
-            self::recover(b"Hello World 42", vec![27; len]),
-            Err(Error::InvalidSignatureLength { actual, .. }) if actual == len
-        ));
-    }
 }

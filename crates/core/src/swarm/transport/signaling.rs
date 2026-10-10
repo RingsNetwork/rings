@@ -22,7 +22,25 @@ use crate::swarm::callback::InnerSwarmCallback;
 impl SwarmTransport {
     /// Connect a given Did. If the did is already connected, return Err,
     /// else try prepare offer and establish connection by dht.
+    ///
+    /// The offer is sent under the application discipline: this returns once the offer's first
+    /// frame is admitted.
     pub async fn connect(&self, peer: Did, callback: InnerSwarmCallback) -> Result<()> {
+        self.connect_with(peer, callback, self).await
+    }
+
+    /// [`Self::connect`] with the offer sent through `offer_sender`; the protocol context passes
+    /// its [`ProtocolEgress`](super::egress::ProtocolEgress), so a connection a handler starts never
+    /// waits on the relay that carries its offer.
+    pub(crate) async fn connect_with<S>(
+        &self,
+        peer: Did,
+        callback: InnerSwarmCallback,
+        offer_sender: &S,
+    ) -> Result<()>
+    where
+        S: PayloadSender + rings_runtime::MaybeSendSync + ?Sized,
+    {
         let (attempt, offer_msg) = match self
             .prepare_connection_offer_with_attempt(peer, callback)
             .await
@@ -57,7 +75,7 @@ impl SwarmTransport {
             sdp_bytes = sdp_len,
             "connection offer send start"
         );
-        match self
+        match offer_sender
             .send_message(Message::ConnectNodeSend(offer_msg), peer)
             .await
         {

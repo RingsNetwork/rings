@@ -343,6 +343,7 @@ impl InboundMailbox {
         self.capacity.await_admitted_count_for_test(predicate).await;
     }
 
+    /// Wait until the number of arrivals waiting for the mailbox satisfies `predicate`.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) async fn await_waiting_for_test(&self, predicate: impl Fn(usize) -> bool) {
         self.capacity.await_waiting_for_test(predicate).await;

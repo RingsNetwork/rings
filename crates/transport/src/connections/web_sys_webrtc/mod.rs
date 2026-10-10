@@ -206,7 +206,7 @@ pub struct WebSysWebrtcTransport {
     ice_servers: Vec<IceServer>,
     pool: Pool<WebSysWebrtcConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
-    receive_pool: NodeReceiveLoad,
+    receive_load: NodeReceiveLoad,
 }
 
 impl WebSysWebrtcConnection {
@@ -274,7 +274,7 @@ impl WebSysWebrtcTransport {
         Self {
             ice_servers,
             pool: Pool::new(),
-            receive_pool: NodeReceiveLoad::new(),
+            receive_load: NodeReceiveLoad::new(),
         }
     }
 }
@@ -589,7 +589,7 @@ impl TransportInterface for WebSysWebrtcTransport {
             cid,
             callback,
             webrtc_data_channel_state_notifier.clone(),
-            self.receive_pool.clone(),
+            self.receive_load.clone(),
         ));
 
         let channel_pool = Rc::new(ChannelPool::default());

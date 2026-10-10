@@ -379,7 +379,8 @@ fn refuted(model: LaneModel) -> BTreeSet<&'static str> {
 /// Each law is load-bearing: a broken algebra is refuted by the property that states it. An
 /// over-advertising receiver lets occupancy exceed the window; a sender that ignores its limit
 /// is refused by the receiver, a violation; a batch larger than the window never advertises, so
-/// the honest sender deadlocks.
+/// the honest sender deadlocks; and a pump that drops a credit whose send failed, instead of
+/// resending it, loses the last advertisement, so the honest sender deadlocks too.
 #[test]
 fn test_each_credit_mutant_is_refuted() {
     let window = CreditWindow::new(2, 1);

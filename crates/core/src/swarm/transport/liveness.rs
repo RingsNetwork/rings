@@ -39,14 +39,20 @@ struct PendingProbe {
 #[derive(Clone, Copy)]
 enum PeerLivenessObservation {
     Connected,
-    Inbound,
+    /// An authenticated inbound payload, observed while this end does (`credit_stalled`) or
+    /// does not wait for the peer's credit.
+    Inbound {
+        credit_stalled: bool,
+    },
 }
 
 impl PeerLivenessObservation {
     fn apply(self, liveness: &mut PeerLivenessMap, peer: Did, generation: u64, now_ms: i64) {
         match self {
             Self::Connected => liveness.mark_connected(peer, generation, now_ms),
-            Self::Inbound => liveness.mark_inbound(peer, generation, now_ms),
+            Self::Inbound { credit_stalled } => {
+                liveness.mark_inbound(peer, generation, now_ms, credit_stalled)
+            }
         }
     }
 }
@@ -63,9 +69,18 @@ impl PeerLiveness {
         }
     }
 
-    fn mark_inbound(&mut self, now_ms: i64) {
+    /// Record an authenticated inbound payload at `now_ms`.
+    ///
+    /// Law (progress): a probe is answered by its answer ([`Self::consume_pending_probe`]), or
+    /// by any inbound payload while this end waits for none of the peer's credit. While this end
+    /// waits (`credit_stalled`), the peer's own traffic proves only that it can send, not that it
+    /// takes this end's control traffic, so it leaves an unanswered probe unanswered: a peer that
+    /// withholds credit cannot escape eviction by sending.
+    fn mark_inbound(&mut self, now_ms: i64, credit_stalled: bool) {
         self.last_inbound_ms = now_ms;
-        self.unanswered_probe_since_ms = None;
+        if !credit_stalled {
+            self.unanswered_probe_since_ms = None;
+        }
     }
 
     /// Whether the peer is due a probe at `now_ms`: it has sent nothing for
@@ -114,11 +129,14 @@ impl PeerLiveness {
         }
     }
 
+    /// Consume the pending probe `(tx_id, request)` on its answer, which answers every probe
+    /// sent before it (see [`Self::mark_inbound`]).
     fn consume_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) -> bool {
         if self.pending_probe != Some(PendingProbe { tx_id, request }) {
             return false;
         }
         self.pending_probe = None;
+        self.unanswered_probe_since_ms = None;
         true
     }
 
@@ -162,10 +180,10 @@ impl PeerLivenessMap {
             .insert(peer, PeerLiveness::new(generation, now_ms));
     }
 
-    fn mark_inbound(&mut self, peer: Did, generation: u64, now_ms: i64) {
+    fn mark_inbound(&mut self, peer: Did, generation: u64, now_ms: i64, credit_stalled: bool) {
         match self.peers.get_mut(&peer) {
             Some(liveness) if liveness.generation == generation => {
-                liveness.mark_inbound(now_ms);
+                liveness.mark_inbound(now_ms, credit_stalled);
             }
             _ => self.mark_connected(peer, generation, now_ms),
         }
@@ -373,15 +391,26 @@ impl SwarmTransport {
     }
 
     pub(crate) fn mark_peer_liveness_inbound(&self, attempt: PendingConnectionAttempt) {
-        if let Err(error) =
-            self.observe_peer_liveness(attempt, PeerLivenessObservation::Inbound, || {})
-        {
+        // Read before the liveness lock: the outbound registry is never locked under it.
+        let credit_stalled = self.credit_stalled(attempt.peer);
+        if let Err(error) = self.observe_peer_liveness(
+            attempt,
+            PeerLivenessObservation::Inbound { credit_stalled },
+            || {},
+        ) {
             tracing::warn!(
                 "failed to mark liveness for inbound peer {} generation {}: {error}",
                 attempt.peer,
                 attempt.generation
             );
         }
+    }
+
+    /// Whether this end waits for any of `peer`'s credit.
+    pub(crate) fn credit_stalled(&self, peer: Did) -> bool {
+        self.outbound_schedulers
+            .credit_stalled_since_ms(peer)
+            .is_some()
     }
 
     pub(crate) fn liveness_probe_candidates(
@@ -643,5 +672,29 @@ mod tests {
         liveness.set_pending_probe(replacement_tx_id, replacement);
         liveness.cancel_pending_probe(tx_id, request);
         assert!(liveness.consume_pending_probe(replacement_tx_id, replacement));
+    }
+
+    /// Law (progress), #913 R8 M1: while this end waits for the peer's credit, the peer's own
+    /// traffic leaves an unanswered probe unanswered, so the window still expires, and only the
+    /// probe's answer clears it; without a stall any inbound payload clears it.
+    #[test]
+    fn test_only_the_answer_clears_an_unanswered_probe_while_credit_is_stalled() {
+        let stalled = crate::message::test_probe_request(12);
+        let flowing = crate::message::test_probe_request(13);
+        let (stalled_tx, flowing_tx) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let mut liveness = PeerLiveness::new(1, 10);
+
+        liveness.set_pending_probe(stalled_tx, stalled);
+        assert!(liveness.mark_matching_probe_sent(11, stalled_tx, stalled));
+        liveness.mark_inbound(12, true);
+        assert_eq!(liveness.unanswered_probe_since_ms, Some(11));
+        assert!(liveness.expiry(11 + PEER_LIVENESS_TIMEOUT_MS).is_some());
+        assert!(liveness.consume_pending_probe(stalled_tx, stalled));
+        assert_eq!(liveness.unanswered_probe_since_ms, None);
+
+        liveness.set_pending_probe(flowing_tx, flowing);
+        assert!(liveness.mark_matching_probe_sent(13, flowing_tx, flowing));
+        liveness.mark_inbound(14, false);
+        assert_eq!(liveness.unanswered_probe_since_ms, None);
     }
 }

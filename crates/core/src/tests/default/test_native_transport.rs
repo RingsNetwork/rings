@@ -28,6 +28,7 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::message::TRANSACTION_REPLAY_WINDOW;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::callback::SwarmEvent;
+use crate::swarm::transport::StorageSyncSend;
 use crate::tests::activity::ActivityCallback;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
@@ -66,7 +67,7 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
     assert!(node1
         .swarm
         .transport
-        .send_storage_sync(storage)
+        .send_storage_sync_or_defer(storage, StorageSyncSend::Admitted, "test")
         .await?
         .is_sent());
 

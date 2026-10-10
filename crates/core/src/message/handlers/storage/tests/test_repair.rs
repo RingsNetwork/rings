@@ -665,13 +665,13 @@ async fn test_storage_fetch_starts_fresh_observation_round() -> Result<()> {
     Ok(())
 }
 
-/// A fetch's reply marker counts a reply that caches an entry, not a found-empty one, and a new
-/// round of the key keeps the count, so a fetcher that noted it is not reset by a concurrent
-/// fetch; a reader polls the marker instead of comparing cached values, which change with no
-/// reply as elements cross their horizon.
+/// A fetch's reply marker (#913 R8): a reply that caches an entry answers the key since every
+/// mark read before it, a found-empty one does not, and neither a new round of the key nor the
+/// eviction of its bucket makes an answer read as earlier than a mark. A reader polls the marker
+/// instead of comparing cached values, which change with no reply as elements cross their
+/// horizon.
 #[tokio::test]
-async fn test_storage_fetch_answers_count_replies_that_cache_an_entry_across_rounds() -> Result<()>
-{
+async fn test_storage_fetch_answers_are_stamped_after_every_earlier_mark() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let redundancy = node.swarm.storage_redundancy();
@@ -694,25 +694,47 @@ async fn test_storage_fetch_answers_count_replies_that_cache_an_entry_across_rou
         node.did(),
     )?;
 
+    let answered_since = |mark| node.swarm.storage_fetch_answered_since(entry.did, mark);
+    let first = node.swarm.storage_fetch_mark();
     node.swarm
         .transport
         .start_storage_lookup(entry.did, redundancy)?;
-    assert_eq!(node.swarm.storage_fetch_answers(entry.did)?, 0);
+    assert!(!answered_since(first)?);
     handler.handle(&context, &reply(vec![])).await?;
-    assert_eq!(node.swarm.storage_fetch_answers(entry.did)?, 0);
+    assert!(
+        !answered_since(first)?,
+        "a found-empty reply answers nothing"
+    );
     handler
         .handle(&context, &reply(vec![entry.clone()]))
         .await?;
-    assert_eq!(node.swarm.storage_fetch_answers(entry.did)?, 1);
+    assert!(answered_since(first)?);
 
+    let second = node.swarm.storage_fetch_mark();
+    assert!(
+        !answered_since(second)?,
+        "an answer before a mark is earlier"
+    );
     node.swarm
         .transport
         .start_storage_lookup(entry.did, redundancy)?;
-    assert_eq!(
-        node.swarm.storage_fetch_answers(entry.did)?,
-        1,
-        "a concurrent round does not reset what an earlier fetcher noted"
+    assert!(
+        answered_since(first)?,
+        "a concurrent round does not undo what an earlier fetcher saw"
     );
+
+    // A bucket evicted and started again stamps its next answer above every earlier mark.
+    node.swarm
+        .transport
+        .expire_storage_lookup_observation(entry.did, redundancy)?;
+    node.swarm
+        .transport
+        .start_storage_lookup(entry.did, redundancy)?;
+    assert!(!answered_since(second)?);
+    handler
+        .handle(&context, &reply(vec![entry.clone()]))
+        .await?;
+    assert!(answered_since(second)?);
     Ok(())
 }
 
@@ -751,15 +773,16 @@ async fn test_a_reply_past_its_bound_is_no_answer_and_a_later_live_placement_is(
         node.did(),
     )?;
 
+    let mark = node.swarm.storage_fetch_mark();
     node.swarm
         .transport
         .start_storage_lookup(live.did, redundancy)?;
     handler.handle(&context, &reply(vec![past_bound])).await?;
-    assert_eq!(node.swarm.storage_fetch_answers(live.did)?, 0);
+    assert!(!node.swarm.storage_fetch_answered_since(live.did, mark)?);
     assert_eq!(node.swarm.storage_check_cache(live.did).await, None);
 
     handler.handle(&context, &reply(vec![live.clone()])).await?;
-    assert_eq!(node.swarm.storage_fetch_answers(live.did)?, 1);
+    assert!(node.swarm.storage_fetch_answered_since(live.did, mark)?);
     assert!(node.swarm.storage_check_cache(live.did).await.is_some());
     Ok(())
 }

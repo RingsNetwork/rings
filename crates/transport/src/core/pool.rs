@@ -20,7 +20,8 @@ use crate::error::Result;
 
 /// An ordering domain of one connection: all messages of a lane travel on one ordered channel.
 ///
-/// The transport gives lanes no meaning beyond that; the caller chooses them.
+/// The transport gives lanes no meaning beyond that, save one: [`ChannelLane::PRIORITY`] keeps
+/// its credit flowing while the node is loaded. The caller chooses the lanes.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ChannelLane(u8);
 
@@ -29,6 +30,12 @@ pub struct ChannelLane(u8);
 pub const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
 impl ChannelLane {
+    /// The priority lane: its credit advertisements are never deferred by the node's receive
+    /// load (see [`NodeReceiveLoad`](crate::callback::link_credit::NodeReceiveLoad)), so the
+    /// traffic a caller puts on it keeps flowing while the node holds more than its soft bound.
+    /// Its window still bounds what it holds.
+    pub const PRIORITY: Self = Self(0);
+
     /// Name lane `index`.
     pub const fn new(index: u8) -> Self {
         Self(index)

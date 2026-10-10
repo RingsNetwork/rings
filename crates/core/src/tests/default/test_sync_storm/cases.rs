@@ -5,6 +5,9 @@ use futures::future::Either;
 
 use super::*;
 
+/// With every protection disabled, per-lane credit still breaks the original feedback loop at the
+/// barrier: no control starvation, false disconnect or repair storm follows, while a storage
+/// batch without the per-entry yield still makes no progress.
 #[tokio::test(start_paused = true)]
 async fn test_legacy_all_disabled_breaks_the_feedback_loop_at_the_barrier() {
     let state = legacy_storm_state().await;
@@ -26,6 +29,8 @@ async fn test_legacy_all_disabled_breaks_the_feedback_loop_at_the_barrier() {
         .any(|violation| matches!(violation, SimInvariantViolation::NoStorageProgress)));
 }
 
+/// Each single-layer ablation at N=10 exposes exactly the proposition its layer protects, except
+/// the layers per-lane credit subsumes.
 #[tokio::test(start_paused = true)]
 async fn test_n10_single_ablation_matrix_exposes_each_unsubsumed_proposition() {
     // Each single-layer ablation exposes exactly its proposition, except the barrier control

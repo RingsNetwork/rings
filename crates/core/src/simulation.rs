@@ -331,6 +331,9 @@ impl ProtectionObservations {
         }
     }
 
+    /// Record the completion of a control frame that waited behind a barrier: every completion
+    /// is recorded, and one observed past its deadline violates the barrier control exemption
+    /// once the barrier is known to have blocked it.
     fn record_barrier_control_completion(&mut self, witness: ControlCompletionWitness) {
         self.barrier_control_completion = Some(witness);
         if self.barrier_control_blocked && witness.observed_virtual_ms > witness.deadline_virtual_ms

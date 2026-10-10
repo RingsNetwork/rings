@@ -185,9 +185,13 @@ fn test_delegation_digest_golden_vector() {
 }
 
 /// The widest account of the variant after `account`'s in a fixed chain through every variant
-/// (the first variant's for `None`), or `None` after the last. The match is exhaustive and each
-/// arm constructs the next variant, so an account added later fails to compile here until it is
-/// linked into the chain.
+/// (the first variant's for `None`), or `None` after the last.
+///
+/// The match is exhaustive, so an account variant added later fails to compile here until it is
+/// given an arm. The arm decides whether the witness covers it: the new variant must also be
+/// constructed by its predecessor's arm, since an arm `Some(Account::New(_)) => None` alone
+/// compiles and leaves it out. Rust cannot enumerate an enum's variants, so the chain is the
+/// list, kept beside the match that forces each variant to be considered.
 fn next_widest_account(account: Option<&Account>) -> Option<Account> {
     let did = Did::from(u32::MAX);
     match account {

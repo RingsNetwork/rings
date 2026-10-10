@@ -24,6 +24,16 @@ impl OutboundSchedulers {
         drop(lower_class_permits);
         Ok(lower_class_overload)
     }
+
+    /// Take every control-class reservation this end's capacity toward `peer` admits.
+    fn hold_control_capacity(&self, peer: Did) -> Result<Vec<super::TransferCapacityPermit>> {
+        let handle = self.handle(peer)?;
+        let mut held = Vec::new();
+        while let Ok(permit) = handle.reserve(peer, TransferClass::DhtControl, 1) {
+            held.push(permit);
+        }
+        Ok(held)
+    }
 }
 
 impl crate::swarm::transport::SwarmTransport {
@@ -34,6 +44,12 @@ impl crate::swarm::transport::SwarmTransport {
 
     /// Exercise the live peer scheduler under lower-class saturation and record
     /// whether an actual control reservation is rejected.
+    /// Hold every control-class reservation of this end's capacity toward `peer`, as transfers
+    /// stalled behind the peer's withheld credit would: the reservations return when dropped.
+    pub(crate) fn hold_control_capacity_for_test(&self, peer: Did) -> Result<Vec<impl Sized>> {
+        self.outbound_schedulers.hold_control_capacity(peer)
+    }
+
     pub(crate) fn exercise_class_reservation_pressure_for_simulation(
         &self,
         peer: Did,
