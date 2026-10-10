@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use super::super::finish_storage_action;
 use super::test_support::install_two_node_chord_view;
 use super::test_support::next_generated_key;
@@ -24,7 +26,6 @@ use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
-use crate::message::Encoder;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
@@ -65,11 +66,7 @@ async fn test_sync_entries_handler_stores_entry_at_placement_key() -> Result<()>
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource_id = Did::from(10u32);
-    let entry = live_entry(
-        resource_id,
-        vec!["placed".to_string().encode()?],
-        EntryKind::Data,
-    );
+    let entry = live_entry(resource_id, vec![Bytes::from("placed")], EntryKind::Data);
     let placement_key = entry
         .did
         .rotate_affine(2)?
@@ -112,8 +109,8 @@ async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
     let entry = live_entry(
         Did::from(10u32),
         (0..ENTRY_DATA_MAX_LEN + 3)
-            .map(|i| format!("payload{i}").encode())
-            .collect::<Result<Vec<_>>>()?,
+            .map(|i| Bytes::from(format!("payload{i}")))
+            .collect::<Vec<_>>(),
         EntryKind::Data,
     );
     let placement_key = entry.did;
@@ -142,12 +139,11 @@ async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
         .ok_or_else(|| Error::InvalidMessage("expected stored sync entry".to_string()))?;
 
     assert_eq!(stored.data.len(), ENTRY_DATA_MAX_LEN);
-    let first_payload: String = stored
+    let first_payload = stored
         .data
         .first()
-        .ok_or_else(|| Error::InvalidMessage("expected capped payload".to_string()))?
-        .decode()?;
-    assert_eq!(first_payload, String::from("payload3"));
+        .ok_or_else(|| Error::InvalidMessage("expected capped payload".to_string()))?;
+    assert_eq!(first_payload, &Bytes::from("payload3"));
     Ok(())
 }
 
@@ -157,12 +153,12 @@ async fn test_sync_entries_handler_rejects_non_affine_placement_before_writing()
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let valid_entry = live_entry(
         Did::from(20u32),
-        vec!["valid".to_string().encode()?],
+        vec![Bytes::from("valid")],
         EntryKind::Data,
     );
     let invalid_entry = live_entry(
         Did::from(10u32),
-        vec!["invalid".to_string().encode()?],
+        vec![Bytes::from("invalid")],
         EntryKind::Data,
     );
     let valid_placement = valid_entry.did;
@@ -207,12 +203,12 @@ async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() 
     let node = prepare_node(SecretKey::random()).await;
     let first = live_entry(
         Did::from(31u32),
-        vec!["first".to_string().encode()?],
+        vec![Bytes::from("first")],
         EntryKind::Data,
     );
     let second = live_entry(
         Did::from(32u32),
-        vec!["second".to_string().encode()?],
+        vec![Bytes::from("second")],
         EntryKind::Data,
     );
     let first_key = first.did;
@@ -273,6 +269,50 @@ async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() 
     Ok(())
 }
 
+/// An entry the receiver cannot admit (here one already past its retention bound on this clock,
+/// as an entry live on the sender's clock can be up to the skew tolerance later) is skipped
+/// without an ack and holds back no other entry of its batch: the admissible one is persisted
+/// and acknowledged, the inadmissible one is neither, so its owner keeps it.
+#[tokio::test]
+async fn test_storage_sync_batch_skips_an_inadmissible_entry_without_failing_the_batch(
+) -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let now = get_epoch_ms();
+    let admissible = live_entry(Did::from(41u32), vec![Bytes::from("kept")], EntryKind::Data);
+    let mut expired = live_entry(Did::from(42u32), vec![Bytes::from("gone")], EntryKind::Data);
+    expired.expires_at_ms = Some(now - 1);
+    let (admissible_key, expired_key) = (admissible.did, expired.did);
+    let admissible_stored = admissible.clone().try_into_storage_entry()?;
+    let msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
+        destination: StorageSyncDestination::PhysicalOwner(node.did()),
+        data: vec![
+            PlacedEntry::new(expired_key, expired),
+            PlacedEntry::new(admissible_key, admissible),
+        ],
+    };
+    let mut batch = StorageSyncBatch::new(&msg, Did::from(1u32), now);
+    let acks = loop {
+        if let StorageSyncBatchStep::Complete(acks) = batch.step(&node.swarm.transport).await? {
+            break acks;
+        }
+    };
+
+    assert_eq!(acks, vec![SyncedEntryAck::new(
+        admissible_key,
+        admissible_stored.clone()
+    )]);
+    assert_eq!(
+        node.dht().storage.get(&admissible_key.to_string()).await?,
+        Some(admissible_stored)
+    );
+    assert_eq!(
+        node.dht().storage.get(&expired_key.to_string()).await?,
+        None
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_sync_entries_handler_accepts_placement_destination_on_local_branch() -> Result<()> {
     let mut keys = gen_ordered_keys::<2>().into_iter();
@@ -291,7 +331,7 @@ async fn test_sync_entries_handler_accepts_placement_destination_on_local_branch
     ));
     let entry = live_entry(
         placement_key,
-        vec!["routed repair".to_string().encode()?],
+        vec![Bytes::from("routed repair")],
         EntryKind::Data,
     );
     let stored_entry = entry.clone().try_into_storage_entry()?;
@@ -350,7 +390,7 @@ async fn test_additive_repair_sync_persists_without_cleanup_report() -> Result<(
     ));
     let entry = live_entry(
         placement_key,
-        vec!["repair copy".to_string().encode()?],
+        vec![Bytes::from("repair copy")],
         EntryKind::Data,
     );
     let stored_entry = entry.clone().try_into_storage_entry()?;
@@ -394,7 +434,7 @@ async fn test_sync_entries_handler_rejects_mismatched_placement_destination() ->
     let mismatched_key = sender.did();
     let entry = live_entry(
         Did::from(10u32),
-        vec!["mismatched placement".to_string().encode()?],
+        vec![Bytes::from("mismatched placement")],
         EntryKind::Data,
     );
     let sync_msg = SyncEntriesWithSuccessor {
@@ -444,7 +484,7 @@ async fn test_sync_entries_handler_rejects_physical_destination_for_unowned_plac
     let placement_key = remote_storage_placement_after(&receiver, sender.did())?;
     let entry = live_entry(
         Did::from(10u32),
-        vec!["wrong physical owner".to_string().encode()?],
+        vec![Bytes::from("wrong physical owner")],
         EntryKind::Data,
     );
     let sync_msg = SyncEntriesWithSuccessor {
@@ -498,7 +538,7 @@ async fn test_sync_entries_handler_acks_local_branch_with_successor_witness() ->
 
     let entry = live_entry(
         placement_key,
-        vec!["successor witness owner".to_string().encode()?],
+        vec![Bytes::from("successor witness owner")],
         EntryKind::Data,
     );
     let stored_entry = entry.clone().try_into_storage_entry()?;

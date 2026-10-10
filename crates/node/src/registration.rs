@@ -2,6 +2,16 @@
 //!
 //! A registration task is a built-in periodic node-side publisher. The shared publisher owns
 //! DHT touch/tombstone mechanics for the online-node and onion-exit registries.
+//!
+//! Boundedness: a registry carrier is a data topic, so each descriptor expires individually at
+//! its dot's issue time plus the data element horizon `H = EntryKind::Data.max_lifetime_ms()`
+//! unless it is written again, and the heartbeat is what writes it again. Each heartbeat adds
+//! one descriptor and removes the one it replaces, and a remove retires `H + σ` after the dot
+//! it covers, so a registry holds at most one live descriptor per registrant and service plus
+//! the removes of the last `H + σ`: about `(H + σ) / heartbeat` per registrant, 200 removes of
+//! 125 encoded bytes each at the default 30 s heartbeat. No publisher
+//! compacts; a reset floor stamped by one owner would erase every concurrent descriptor that
+//! owner never received (#867).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -9,24 +19,27 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::lock::Mutex as AsyncMutex;
+use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::lifecycle::StopToken;
-use rings_core::message::Encoded;
-use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
 
+use crate::descriptor::prunes_registry_element;
+use crate::descriptor::RegistryElement;
 use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
+use crate::processor::dht_lookup_poll_budget;
 use crate::processor::Processor;
 
 const DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -66,18 +79,55 @@ pub(crate) const fn default_advertise_presence() -> bool {
     true
 }
 
+/// The heartbeat interval below which a registry descriptor stays stored between heartbeats.
+///
+/// A descriptor write requests the data default lifetime `L` (which bounds the registry of a
+/// sole registrant, and is below the element horizon), stamped on the publisher's clock; an
+/// owner whose clock runs up to `σ = TS_OFFSET_TOLERANCE_MS` ahead retires it at `L − σ` of the
+/// publisher's time. Each heartbeat first fetches the registry, polling for up to the fetch-poll
+/// budget `P`, before it appends, so the interval is below `L − σ − P`; the append's own
+/// network latency must fit in what the interval leaves of it. The bound holds between
+/// successful heartbeats: one that fails leaves a gap of two intervals, which a sole
+/// registrant's descriptor outlives only if `2I < L − σ − P`.
+pub(crate) fn registry_refresh_bound() -> Duration {
+    let lifetime = Duration::from_millis(entry::EntryKind::Data.default_lifetime_ms());
+    let skew = Duration::from_millis(u64::try_from(TS_OFFSET_TOLERANCE_MS).unwrap_or(u64::MAX));
+    lifetime
+        .saturating_sub(skew)
+        .saturating_sub(dht_lookup_poll_budget())
+}
+
+/// Validate a registry heartbeat interval against [`registry_refresh_bound`]; `setting` names
+/// the configuration key in the error.
+pub(crate) fn validate_registry_heartbeat(
+    setting: &str,
+    heartbeat_interval: Duration,
+) -> Result<()> {
+    let bound = registry_refresh_bound();
+    if heartbeat_interval >= bound {
+        return Err(Error::InvalidConfig(format!(
+            "{setting} ({heartbeat_interval:?}) must be less than {bound:?}, the lifetime of \
+             a registry write less the clock-skew tolerance and the fetch-poll budget"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate online-node registration scheduling.
 pub(crate) fn validate_online_node_registration_timing(
     advertise_presence: bool,
     heartbeat_interval: Duration,
     ttl: Duration,
 ) -> Result<()> {
-    if advertise_presence && heartbeat_interval >= ttl {
+    if !advertise_presence {
+        return Ok(());
+    }
+    if heartbeat_interval >= ttl {
         return Err(Error::InvalidConfig(format!(
             "online_node_heartbeat_interval ({heartbeat_interval:?}) must be less than online_node_ttl ({ttl:?}) when advertise_presence is enabled"
         )));
     }
-    Ok(())
+    validate_registry_heartbeat("online_node_heartbeat_interval", heartbeat_interval)
 }
 
 /// Capability passed to registration tasks.
@@ -160,7 +210,7 @@ impl<'a> RegistrationContext<'a> {
 pub(crate) struct DhtRegistrationPublisher {
     topic: String,
     publish_gate: Arc<AsyncMutex<()>>,
-    published_values: Arc<Mutex<BTreeSet<Encoded>>>,
+    published_values: Arc<Mutex<BTreeSet<Bytes>>>,
 }
 
 impl DhtRegistrationPublisher {
@@ -173,7 +223,9 @@ impl DhtRegistrationPublisher {
         }
     }
 
-    /// Publish the current value set, tombstoning older observed values with the same registry key.
+    /// Publish the current value set, tombstoning every observed value `prunes_observed_value`
+    /// selects: older values with the same registry key, and, for a registry that prunes them,
+    /// values that no longer verify or have expired.
     ///
     /// Invariant: registry topics are keyed presence sets, not append-only heartbeat logs.
     /// Preservation: every observed value replaced by the current publish is tombstoned after the
@@ -181,8 +233,8 @@ impl DhtRegistrationPublisher {
     pub(crate) async fn publish_replacing(
         &self,
         context: &RegistrationContext<'_>,
-        values: impl IntoIterator<Item = Encoded>,
-        replaces_observed_value: impl Fn(&Encoded) -> bool,
+        values: impl IntoIterator<Item = Bytes>,
+        prunes_observed_value: impl Fn(&Bytes) -> bool,
     ) -> Result<()> {
         let current_values = values.into_iter().collect::<BTreeSet<_>>();
         let _publish_turn = self.publish_gate.lock().await;
@@ -194,7 +246,7 @@ impl DhtRegistrationPublisher {
                 &mut published_values,
                 &current_values,
                 observed_values,
-                replaces_observed_value,
+                prunes_observed_value,
             )
         };
 
@@ -215,80 +267,6 @@ impl DhtRegistrationPublisher {
                 .lock()
                 .map_err(|_| Error::Lock)?
                 .remove(&stale_value);
-        }
-        {
-            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
-            finish_registration_publish(&mut published_values, current_values);
-        }
-        Ok(())
-    }
-
-    /// Publish values, tombstone stale observed registry values, and compact at the owner.
-    ///
-    /// This never sends a replacement value set computed from an observed client
-    /// snapshot. Compaction is requested with only the removable payloads, so the
-    /// storage owner computes the final live set from its current local entry and
-    /// preserves concurrent live writes.
-    pub(crate) async fn publish_many_replacing_and_compacting(
-        &self,
-        context: &RegistrationContext<'_>,
-        values: impl IntoIterator<Item = Encoded>,
-        replaces_observed_value: impl Fn(&Encoded) -> bool,
-        preserves_observed_value: impl Fn(&Encoded) -> bool,
-    ) -> Result<()> {
-        let current_values = values.into_iter().collect::<BTreeSet<_>>();
-        let _publish_turn = self.publish_gate.lock().await;
-        context.ensure_running()?;
-        let observed_entry = self.observed_registry_entry(context).await?;
-        let observed_values = observed_entry
-            .as_ref()
-            .map(|entry| entry.data.clone())
-            .unwrap_or_default();
-        let should_compact_metadata = observed_entry
-            .as_ref()
-            .is_some_and(registry_entry_has_compactable_metadata);
-        let stale_values = {
-            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
-            begin_registration_publish(
-                &mut published_values,
-                &current_values,
-                observed_values,
-                |observed| {
-                    should_prune_observed_registry_value(
-                        observed,
-                        &replaces_observed_value,
-                        &preserves_observed_value,
-                    )
-                },
-            )
-        };
-        let should_compact = should_compact_metadata || !stale_values.is_empty();
-        let removals = stale_values.clone();
-
-        for value in &current_values {
-            context.ensure_running()?;
-            context
-                .processor
-                .storage_append_data(&self.topic, value.clone())
-                .await?;
-        }
-        for stale_value in stale_values {
-            context.ensure_running()?;
-            context
-                .processor
-                .storage_tombstone_data(&self.topic, stale_value.clone())
-                .await?;
-            self.published_values
-                .lock()
-                .map_err(|_| Error::Lock)?
-                .remove(&stale_value);
-        }
-        if should_compact {
-            context.ensure_running()?;
-            context
-                .processor
-                .storage_compact_data(&self.topic, removals)
-                .await?;
         }
         {
             let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
@@ -300,41 +278,22 @@ impl DhtRegistrationPublisher {
     async fn observed_registry_values(
         &self,
         context: &RegistrationContext<'_>,
-    ) -> Result<Vec<Encoded>> {
-        Ok(self
-            .observed_registry_entry(context)
+    ) -> Result<Vec<Bytes>> {
+        let entry_key = entry::Entry::gen_did(&self.topic)?;
+        Ok(context
+            .fetch_storage_entry(entry_key)
             .await?
             .map(|entry| entry.data)
             .unwrap_or_default())
     }
-
-    async fn observed_registry_entry(
-        &self,
-        context: &RegistrationContext<'_>,
-    ) -> Result<Option<entry::Entry>> {
-        let entry_key = entry::Entry::gen_did(&self.topic)?;
-        context.fetch_storage_entry(entry_key).await
-    }
-}
-
-fn registry_entry_has_compactable_metadata(entry: &entry::Entry) -> bool {
-    !entry.crdt.tombstones.is_empty()
-}
-
-fn should_prune_observed_registry_value(
-    observed: &Encoded,
-    replaces_observed_value: &impl Fn(&Encoded) -> bool,
-    preserves_observed_value: &impl Fn(&Encoded) -> bool,
-) -> bool {
-    replaces_observed_value(observed) || !preserves_observed_value(observed)
 }
 
 fn begin_registration_publish(
-    published_values: &mut BTreeSet<Encoded>,
-    current_values: &BTreeSet<Encoded>,
-    observed_values: Vec<Encoded>,
-    replaces_observed_value: impl Fn(&Encoded) -> bool,
-) -> Vec<Encoded> {
+    published_values: &mut BTreeSet<Bytes>,
+    current_values: &BTreeSet<Bytes>,
+    observed_values: Vec<Bytes>,
+    prunes_observed_value: impl Fn(&Bytes) -> bool,
+) -> Vec<Bytes> {
     let mut stale_values = published_values
         .iter()
         .filter(|published| !current_values.contains(*published))
@@ -344,7 +303,7 @@ fn begin_registration_publish(
         observed_values
             .into_iter()
             .filter(|observed| !current_values.contains(observed))
-            .filter(replaces_observed_value),
+            .filter(prunes_observed_value),
     );
     // Invariant: every value whose touch may have reached storage is remembered
     // before the first await. If the publish future is later cancelled by an
@@ -354,8 +313,8 @@ fn begin_registration_publish(
 }
 
 fn finish_registration_publish(
-    published_values: &mut BTreeSet<Encoded>,
-    current_values: BTreeSet<Encoded>,
+    published_values: &mut BTreeSet<Bytes>,
+    current_values: BTreeSet<Bytes>,
 ) {
     *published_values = current_values;
 }
@@ -441,29 +400,17 @@ impl OnlineNodeRegistration {
     ) -> Result<OnlineNodeDescriptor> {
         let now_ms = get_epoch_ms();
         let descriptor = self.descriptor_at(context, now_ms)?;
-        let encoded = descriptor.encode().map_err(Error::CoreError)?;
-        self.publisher
-            .publish_many_replacing_and_compacting(
-                context,
-                std::iter::once(encoded),
-                |observed| {
-                    observed
-                        .decode::<OnlineNodeDescriptor>()
-                        .is_ok_and(|descriptor| {
-                            descriptor.did == context.did()
-                                || (descriptor.verify_signature(context.network_id())
-                                    && descriptor.is_expired_at(now_ms))
-                        })
-                },
-                |observed| {
-                    observed
-                        .decode::<OnlineNodeDescriptor>()
-                        .is_ok_and(|descriptor| {
-                            descriptor.verify_signature(context.network_id())
-                                && !descriptor.is_expired_at(now_ms)
-                        })
-                },
+        let element = descriptor.to_element().map_err(Error::CoreError)?;
+        let prunes_observed_value = |observed: &Bytes| {
+            prunes_registry_element::<OnlineNodeDescriptor>(
+                observed,
+                context.did(),
+                now_ms,
+                context.network_id(),
             )
+        };
+        self.publisher
+            .publish_replacing(context, std::iter::once(element), prunes_observed_value)
             .await?;
         Ok(descriptor)
     }
@@ -475,7 +422,7 @@ impl OnlineNodeRegistration {
         entry
             .data
             .iter()
-            .filter_map(|value| value.decode::<OnlineNodeDescriptor>().ok())
+            .filter_map(|value| OnlineNodeDescriptor::from_element(value).ok())
             .collect()
     }
 }
@@ -500,27 +447,27 @@ impl RegistrationTask for OnlineNodeRegistration {
 mod tests {
     use std::collections::BTreeSet;
 
-    use rings_core::message::Encoded;
-
     use super::*;
 
-    fn encoded(value: &str) -> Encoded {
-        value.into()
+    /// The registry element holding the bytes of `value`.
+    fn element(value: &'static str) -> Bytes {
+        Bytes::from_static(value.as_bytes())
     }
 
-    fn encoded_subset(mask: u8) -> BTreeSet<Encoded> {
+    /// The subset of the elements `a`, `b`, `c` that `mask` selects bit by bit.
+    fn element_subset(mask: u8) -> BTreeSet<Bytes> {
         ["a", "b", "c"]
             .into_iter()
             .enumerate()
             .filter(|(bit, _value)| mask & (1 << bit) != 0)
-            .map(|(_bit, value)| encoded(value))
+            .map(|(_bit, value)| element(value))
             .collect()
     }
 
     #[test]
     fn test_registration_publish_remembers_attempted_values_before_effects() {
-        let old = encoded("old");
-        let attempted = encoded("attempted");
+        let old = element("old");
+        let attempted = element("attempted");
         let current = BTreeSet::from([attempted.clone()]);
         let mut known = BTreeSet::from([old.clone()]);
 
@@ -532,9 +479,9 @@ mod tests {
 
     #[test]
     fn test_registration_publish_retry_tombstones_values_from_cancelled_attempts() {
-        let old = encoded("old");
-        let cancelled = encoded("cancelled");
-        let replacement = encoded("replacement");
+        let old = element("old");
+        let cancelled = element("cancelled");
+        let replacement = element("replacement");
         let mut known = BTreeSet::from([old.clone()]);
 
         let cancelled_current = BTreeSet::from([cancelled.clone()]);
@@ -556,9 +503,9 @@ mod tests {
         for old_mask in 0..8 {
             for current_mask in 0..8 {
                 for replacement_mask in 0..8 {
-                    let old = encoded_subset(old_mask);
-                    let current = encoded_subset(current_mask);
-                    let replacement = encoded_subset(replacement_mask);
+                    let old = element_subset(old_mask);
+                    let current = element_subset(current_mask);
+                    let replacement = element_subset(replacement_mask);
                     let mut known = old.clone();
 
                     let _ = begin_registration_publish(&mut known, &current, vec![], |_| false);
@@ -584,9 +531,9 @@ mod tests {
 
     #[test]
     fn test_registration_publish_tombstones_matching_observed_values() {
-        let current = BTreeSet::from([encoded("self-new")]);
-        let observed_self_old = encoded("self-old");
-        let observed_other = encoded("other");
+        let current = BTreeSet::from([element("self-new")]);
+        let observed_self_old = element("self-old");
+        let observed_other = element("other");
         let mut known = BTreeSet::new();
 
         let stale = begin_registration_publish(
@@ -601,30 +548,11 @@ mod tests {
     }
 
     #[test]
-    fn test_registration_pruning_removes_replaced_or_unpreserved_observed_values() {
-        let observed_self_old = encoded("self-old");
-        let observed_live = encoded("other-live");
-        let observed_invalid = encoded("invalid");
-
-        let should_prune = |observed: &Encoded| {
-            should_prune_observed_registry_value(
-                observed,
-                &|value| value == &observed_self_old,
-                &|value| value == &observed_live,
-            )
-        };
-
-        assert!(should_prune(&observed_self_old));
-        assert!(!should_prune(&observed_live));
-        assert!(should_prune(&observed_invalid));
-    }
-
-    #[test]
     fn test_registration_publish_tombstones_unpreserved_observed_values() {
-        let current = BTreeSet::from([encoded("self-new")]);
-        let observed_self_old = encoded("self-old");
-        let observed_live = encoded("other-live");
-        let observed_invalid = encoded("invalid");
+        let current = BTreeSet::from([element("self-new")]);
+        let observed_self_old = element("self-old");
+        let observed_live = element("other-live");
+        let observed_invalid = element("invalid");
         let mut known = BTreeSet::new();
 
         let stale = begin_registration_publish(

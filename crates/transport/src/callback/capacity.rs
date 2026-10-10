@@ -1,124 +1,52 @@
-use std::collections::BTreeMap;
+//! Receive-side admission: a frame is admitted against its lane's credit window, and the
+//! admission is held until the protocol callback takes the frame over.
+//!
+//! There is no node-wide frame budget to refuse an honest frame against: each connection holds
+//! at most [`INBOUND_PEER_FRAME_CAPACITY`] frames of at most `MAX_DATA_CHANNEL_MESSAGE_SIZE`
+//! bytes (4 MiB), by the credit law of [`crate::core::credit`]. Across connections the bound is
+//! soft: above [`NODE_RECEIVE_SOFT_LIMIT_BYTES`](crate::callback::NODE_RECEIVE_SOFT_LIMIT_BYTES)
+//! no lane advertises new credit, so a node exceeds that limit by at most the credit already
+//! advertised; at the protocol's connection cap (core's connection admission:
+//! `2 × (160 + successors + 1)`, 328 by default) that is about 1.3 GiB in the worst case (#934).
+
 #[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU8;
 #[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use bytes::Bytes;
 
-pub(super) const INBOUND_FRAME_CAPACITY: usize = 256;
-const INBOUND_FRAME_BYTE_CAPACITY: usize = 16 * 1024 * 1024;
-/// Raw frames one peer may have in flight at this end, admitted but not yet released by the
-/// protocol callback: the per-peer bound every protocol-side per-peer budget derives from.
-pub const INBOUND_PEER_FRAME_CAPACITY: usize = 64;
-pub(super) const INBOUND_PEER_BYTE_CAPACITY: usize = 4 * 1024 * 1024;
-
+use super::link_credit::CreditPermit;
+use crate::core::credit::LANE_CREDIT_WINDOW;
 #[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
-pub(super) const INBOUND_DATA_CHANNEL_CAPACITY: usize = 4;
+use crate::core::pool::ChannelLane;
+use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 
-#[derive(Default)]
-struct InboundFrameState {
-    frames: usize,
-    bytes: usize,
-    peers: BTreeMap<Arc<str>, PeerInboundFrameState>,
-}
+/// Raw frames one peer may have admitted at this end and not yet taken over by the protocol
+/// callback: one credit window per lane. Every protocol-side per-peer budget derives from it.
+pub const INBOUND_PEER_FRAME_CAPACITY: usize =
+    DATA_CHANNEL_POOL_SIZE as usize * LANE_CREDIT_WINDOW as usize;
 
-#[derive(Default)]
-struct PeerInboundFrameState {
-    frames: usize,
-    bytes: usize,
-}
+/// The label prefix of a data channel; the lane index follows it.
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+pub(crate) const DATA_CHANNEL_LABEL_PREFIX: &str = "rings_data_channel_";
 
-/// Node-wide bound held before a backend retains a frame for async dispatch.
-pub struct InboundFrameCapacity {
-    state: Mutex<InboundFrameState>,
-}
-
-impl InboundFrameCapacity {
-    /// Construct one capacity accountant to share across every connection in a transport.
-    pub fn new() -> Self {
-        Self {
-            state: Mutex::new(InboundFrameState::default()),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn try_acquire(
-        self: &Arc<Self>,
-        peer: &str,
-        bytes: usize,
-    ) -> Option<InboundFramePermit> {
-        self.try_acquire_raw(Arc::from(peer), bytes)
-    }
-
-    pub(super) fn try_acquire_raw(
-        self: &Arc<Self>,
-        peer: Arc<str>,
-        bytes: usize,
-    ) -> Option<InboundFramePermit> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let next_frames = state.frames.checked_add(1)?;
-        let next_bytes = state.bytes.checked_add(bytes)?;
-        if next_frames > INBOUND_FRAME_CAPACITY || next_bytes > INBOUND_FRAME_BYTE_CAPACITY {
-            return None;
-        }
-        let peer_state = state.peers.get(peer.as_ref());
-        let next_peer_frames = peer_state.map_or(0, |state| state.frames).checked_add(1)?;
-        let next_peer_bytes = peer_state
-            .map_or(0, |state| state.bytes)
-            .checked_add(bytes)?;
-        if next_peer_frames > INBOUND_PEER_FRAME_CAPACITY
-            || next_peer_bytes > INBOUND_PEER_BYTE_CAPACITY
-        {
-            return None;
-        }
-        {
-            let peer_state = state.peers.entry(Arc::clone(&peer)).or_default();
-            peer_state.frames = next_peer_frames;
-            peer_state.bytes = next_peer_bytes;
-        }
-        state.frames = next_frames;
-        state.bytes = next_bytes;
-        Some(InboundFramePermit {
-            capacity: self.clone(),
-            peer,
-            bytes,
-        })
-    }
-}
-
-impl Default for InboundFrameCapacity {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(all(test, feature = "dummy"))]
-pub(crate) const fn inbound_peer_frame_capacity_for_test() -> usize {
-    INBOUND_PEER_FRAME_CAPACITY
+/// The label of the data channel `lane` is pinned to.
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+pub(crate) fn data_channel_label(lane: ChannelLane) -> String {
+    format!("{DATA_CHANNEL_LABEL_PREFIX}{}", lane.index())
 }
 
 pub(crate) const fn inbound_frame_exceeds_protocol_ceiling(bytes: usize) -> bool {
     bytes > crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE
 }
 
-/// RAII ownership of one admitted raw frame until a downstream bounded queue takes ownership.
-pub(crate) struct InboundFramePermit {
-    capacity: Arc<InboundFrameCapacity>,
-    pub(super) peer: Arc<str>,
-    bytes: usize,
-}
-
-/// One decoded transport frame retaining raw capacity until downstream admission.
+/// One decoded transport frame holding its lane's credit until downstream admission.
 pub struct AdmittedInboundFrame {
     pub(super) payload: Bytes,
     pub(super) owner: Arc<()>,
-    pub(super) permit: InboundFramePermit,
+    pub(super) permit: CreditPermit,
 }
 
 impl AdmittedInboundFrame {
@@ -128,10 +56,12 @@ impl AdmittedInboundFrame {
     }
 }
 
-/// Result of decoding and capacity-admitting one raw backend frame.
+/// Result of decoding and credit-admitting one raw backend frame.
 pub enum InboundFrameAdmission {
-    /// The frame decoded and reserved raw capacity successfully.
+    /// A custom frame decoded and took its place in its lane's credit window.
     Admitted(AdmittedInboundFrame),
+    /// A credit frame decoded and was applied to this end's sends; nothing is dispatched.
+    Credit,
     /// The transport envelope could not be decoded exactly.
     Malformed(rings_codec::Error),
     /// The frame exceeds the data-channel protocol ceiling.
@@ -141,35 +71,29 @@ pub enum InboundFrameAdmission {
         /// Maximum permitted wire bytes.
         max_bytes: usize,
     },
-    /// Node-wide or per-peer raw-frame capacity was unavailable.
-    CapacityExceeded,
+    /// The frame arrived beyond the credit this end advertised for its lane: the peer broke
+    /// the flow-control protocol.
+    CreditExceeded {
+        /// Frames of the lane already received.
+        received: u64,
+        /// The credit advertised for the lane.
+        advertised: u64,
+    },
 }
 
-impl Drop for InboundFramePermit {
-    fn drop(&mut self) {
-        let mut state = self
-            .capacity
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.frames = state.frames.saturating_sub(1);
-        state.bytes = state.bytes.saturating_sub(self.bytes);
-        if let Some(peer_state) = state.peers.get_mut(self.peer.as_ref()) {
-            peer_state.frames = peer_state.frames.saturating_sub(1);
-            peer_state.bytes = peer_state.bytes.saturating_sub(self.bytes);
-            if peer_state.frames == 0 {
-                state.peers.remove(self.peer.as_ref());
-            }
-        }
-    }
-}
-
+/// Admit a remote-created data channel by its label: the lane its label names, at most once.
+///
+/// Post: `Some(lane)` for the first channel labelled with `lane`, `lane < DATA_CHANNEL_POOL_SIZE`;
+/// `None` for an unknown label or a lane that already has its channel, so a peer cannot open
+/// more channels than the pool, nor two for one lane.
 #[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
-/// Admit at most the protocol's fixed number of remote-created channels.
-pub(crate) fn admit_inbound_data_channel(admitted: &AtomicUsize) -> bool {
-    admitted
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            (current < INBOUND_DATA_CHANNEL_CAPACITY).then_some(current + 1)
-        })
-        .is_ok()
+pub(crate) fn admit_inbound_data_channel(admitted: &AtomicU8, label: &str) -> Option<ChannelLane> {
+    let index = label
+        .strip_prefix(DATA_CHANNEL_LABEL_PREFIX)?
+        .parse::<u8>()
+        .ok()
+        .filter(|index| *index < DATA_CHANNEL_POOL_SIZE)?;
+    let bit = 1u8 << index;
+    let previous = admitted.fetch_or(bit, Ordering::AcqRel);
+    (previous & bit == 0).then(|| ChannelLane::new(index))
 }

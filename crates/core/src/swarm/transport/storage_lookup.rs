@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use super::SwarmTransport;
 use crate::dht::entry::PlacementMiss;
@@ -32,6 +34,30 @@ pub(super) struct StorageLookupObservationKey {
 pub(super) struct StorageLookupObservation {
     observed_at_ms: i64,
     misses: BTreeSet<PlacementMiss>,
+    /// The node's answer clock at the last entry cached for this key, `0` before any: the reply
+    /// marker (see [`StorageAnswerClock`]).
+    answered_at: u64,
+}
+
+/// The node's storage answer clock: one tick per entry a lookup caches, for any key.
+///
+/// Law (marker): a fetcher reads the clock (its mark) before it fetches, and knows its key was
+/// answered once the key's `answered_at` exceeds the mark. Ticks are monotone and node-wide, so
+/// every answer after the mark stamps above it, whatever round of the key starts or bucket is
+/// evicted meanwhile; an answer before the mark stamps at or below it.
+#[derive(Default)]
+pub(super) struct StorageAnswerClock(AtomicU64);
+
+impl StorageAnswerClock {
+    /// The clock now.
+    fn mark(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// Tick, and return the tick's stamp, above every mark read before it.
+    fn tick(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::AcqRel).saturating_add(1)
+    }
 }
 
 fn storage_lookup_observation_now_ms() -> i64 {
@@ -107,15 +133,67 @@ impl SwarmTransport {
             now,
             STORAGE_LOOKUP_OBSERVATION_CAPACITY.saturating_sub(1),
         );
+        let answered_at = observations
+            .get(&key)
+            .map_or(0, |observation| observation.answered_at);
         observations.insert(key, StorageLookupObservation {
             observed_at_ms: now,
             misses: BTreeSet::new(),
+            answered_at,
         });
         self.observer().lookup_started(
             LookupKind::Storage,
             LookupCorrelation::StorageResource(resource),
         );
         Ok(())
+    }
+
+    /// Record an answer of the active lookup round of `(resource, redundancy)`: an entry it
+    /// found has just been cached, and the cache serves it.
+    ///
+    /// Post: the key is answered since every mark read before this call
+    /// ([`Self::storage_lookup_answered_since`]); a missing bucket is left missing.
+    pub(crate) fn answer_storage_lookup(&self, resource: Did, redundancy: u16) -> Result<()> {
+        let key = self.storage_lookup_observation_key(resource, redundancy)?;
+        let mut observations = self
+            .storage_lookup_observations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        if let Some(observation) = observations.get_mut(&key) {
+            observation.answered_at = self.storage_answer_clock.tick();
+        }
+        Ok(())
+    }
+
+    /// The storage answer clock now: the mark a fetcher reads before it fetches.
+    pub(crate) fn storage_lookup_mark(&self) -> u64 {
+        self.storage_answer_clock.mark()
+    }
+
+    /// Whether a lookup of `(resource, redundancy)` cached an entry after `mark` was read.
+    ///
+    /// Post: `true` exactly when the key's latest answer stamps above `mark`; `false` once no
+    /// round of the key is retained, so a reader that waits for it falls back to the cache when
+    /// its poll budget ends.
+    pub(crate) fn storage_lookup_answered_since(
+        &self,
+        resource: Did,
+        redundancy: u16,
+        mark: u64,
+    ) -> Result<bool> {
+        let key = self.storage_lookup_observation_key(resource, redundancy)?;
+        let mut observations = self
+            .storage_lookup_observations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        evict_storage_lookup_observations(
+            &mut observations,
+            storage_lookup_observation_now_ms(),
+            STORAGE_LOOKUP_OBSERVATION_CAPACITY,
+        );
+        Ok(observations
+            .get(&key)
+            .is_some_and(|observation| observation.answered_at > mark))
     }
 
     /// Validate that a storage lookup response belongs to a local lookup round.

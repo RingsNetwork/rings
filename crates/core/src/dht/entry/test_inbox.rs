@@ -19,7 +19,6 @@ use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::Encoder;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
@@ -310,7 +309,7 @@ fn test_witness_refuses_a_delta_larger_than_the_inbox_before_verifying() -> Resu
     for _ in 0..RELAY_INBOX_MAX_LEN {
         delta
             .data
-            .push(held_by(&holder, destination, TEST_NETWORK_ID)?.encode()?);
+            .push(held_by(&holder, destination, TEST_NETWORK_ID)?.to_element()?);
     }
     assert_eq!(delta.data.len(), RELAY_INBOX_MAX_LEN + 1);
     assert!(matches!(
@@ -394,17 +393,13 @@ fn test_removal_authority_is_the_recipient_alone_and_nothing_else_is_allowed() -
         ),
         Err(Error::RelayInboxWriterNotRecipient)
     ));
-    for op in [
-        EntryOperation::Overwrite(carrier.clone()),
-        EntryOperation::CompactData(carrier.clone()),
-    ] {
-        assert!(matches!(
-            op.validate_inbox_write(destination, Some(responsible), now_ms, TEST_NETWORK_ID),
-            Err(Error::RelayInboxOperationNotAllowed)
-        ));
-    }
     assert!(matches!(
-        carrier.compact_data(now_ms, carrier.clone(), destination),
+        EntryOperation::Overwrite(carrier.clone()).validate_inbox_write(
+            destination,
+            Some(responsible),
+            now_ms,
+            TEST_NETWORK_ID
+        ),
         Err(Error::RelayInboxOperationNotAllowed)
     ));
     Ok(())
@@ -469,7 +464,7 @@ fn test_partition_pairs_each_witnessed_element_with_its_dot_and_retires_the_rest
     assert!(retired.join(stale)?.data.is_empty());
     let third = held_by(&holder, destination, TEST_NETWORK_ID)?;
     let after = retired.extend(now_ms + 4, Entry::inbox_delta(&third)?, actor)?;
-    assert_eq!(after.data, vec![third.encode()?]);
+    assert_eq!(after.data, vec![third.to_element()?]);
     Ok(())
 }
 
@@ -488,7 +483,7 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
         let mut newest = None;
         for _ in 0..RELAY_INBOX_MAX_LEN + 1 {
             let held = held_by(&holder, destination, TEST_NETWORK_ID)?;
-            newest = Some(held.encode()?);
+            newest = Some(held.to_element()?);
             carrier = carrier.extend(get_epoch_ms(), Entry::inbox_delta(&held)?, actor)?;
         }
         assert_eq!(carrier.data.len(), RELAY_INBOX_MAX_LEN);
@@ -507,8 +502,36 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
         .crdt
         .tombstones
         .iter()
-        .copied()
+        .map(|tombstone| tombstone.dot)
         .collect::<std::collections::BTreeSet<_>>();
     assert!(first_round_dots.iter().all(|dot| !kept.contains(dot)));
+    Ok(())
+}
+
+/// Law (only what time cannot cure is retired, #913 R7 M1): after this clock steps back, an
+/// element held ahead of it by more than σ is neither delivered nor retired, and it is
+/// delivered once the clock catches up.
+#[test]
+fn test_an_element_held_ahead_of_a_stepped_back_clock_is_kept_for_a_later_pass() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let holder = session()?;
+    let destination: Did = SecretKey::random().address().into();
+    let held = held_by(&holder, destination, TEST_NETWORK_ID)?;
+    let carrier = Entry::new(inbox_key(destination), Vec::new(), EntryKind::RelayMessage).extend(
+        now_ms,
+        Entry::inbox_delta(&held)?,
+        holder.delegator_did(),
+    )?;
+
+    let stepped_back = now_ms - TS_OFFSET_TOLERANCE_MS - 1;
+    let drain = carrier.partition_inbox(stepped_back, TEST_NETWORK_ID);
+    assert!(drain.deliverable.is_empty());
+    assert!(
+        drain.rejected.crdt.dots.is_empty(),
+        "a clock gate failure retires nothing"
+    );
+
+    let drain = carrier.partition_inbox(now_ms, TEST_NETWORK_ID);
+    assert_eq!(drain.deliverable.len(), 1);
     Ok(())
 }

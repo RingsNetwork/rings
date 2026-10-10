@@ -6,11 +6,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::InboundFrameAdmission;
-use super::InboundFrameCapacity;
 use super::InnerTransportCallback;
-use super::INBOUND_PEER_FRAME_CAPACITY;
+use super::NodeReceiveLoad;
 use crate::core::callback::AdmittedInboundMessage;
 use crate::core::callback::TransportCallback;
+use crate::core::pool::ChannelLane;
 use crate::core::transport::TransportMessage;
 use crate::notifier::Notifier;
 
@@ -45,14 +45,15 @@ impl TransportCallback for PendingAfterCapacityHandoff {
     }
 }
 
+/// A frame's credit is released when the protocol takes the frame over, not when its callback
+/// completes, so a slow handler holds no place in the window.
 #[tokio::test]
-async fn test_downstream_capacity_handoff_releases_raw_limit_before_callback_completion() {
-    let capacity = Arc::new(InboundFrameCapacity::new());
-    let callback = InnerTransportCallback::new_for_test(
+async fn test_downstream_handoff_releases_the_credit_before_callback_completion() {
+    let callback = InnerTransportCallback::new(
         "peer",
         Box::new(PendingAfterCapacityHandoff),
         Notifier::default(),
-        Arc::clone(&capacity),
+        NodeReceiveLoad::new(),
     );
     let raw_dropped = Arc::new(AtomicBool::new(false));
     let raw = Bytes::from_owner(DropObservedBytes {
@@ -60,19 +61,17 @@ async fn test_downstream_capacity_handoff_releases_raw_limit_before_callback_com
             .expect("data frame must serialize"),
         dropped: raw_dropped.clone(),
     });
-    let frame = match callback.admit_inbound_frame(raw) {
+    let frame = match callback.admit_inbound_frame(raw, ChannelLane::default()) {
         InboundFrameAdmission::Admitted(frame) => frame,
         _ => panic!("data frame must be admitted"),
     };
     let mut dispatch = Box::pin(callback.handle_admitted_frame(frame));
 
+    assert_eq!(callback.link_credit().occupancy(), [1, 0, 0, 0]);
     assert!(futures::poll!(&mut dispatch).is_pending());
     assert!(raw_dropped.load(Ordering::Acquire));
-    let permits = (0..INBOUND_PEER_FRAME_CAPACITY)
-        .map(|_| capacity.try_acquire("peer", 1))
-        .collect::<Option<Vec<_>>>()
-        .expect("raw capacity must be free while the downstream callback remains pending");
-
-    assert!(capacity.try_acquire("peer", 1).is_none());
-    drop(permits);
+    // The callback took the frame over and released its place in the window, while the
+    // callback itself is still pending: the peer's sender waits only as long as this end's
+    // transport holds the frame.
+    assert_eq!(callback.link_credit().occupancy(), [0, 0, 0, 0]);
 }

@@ -7,6 +7,7 @@ use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
 use rings_transport::core::pool::ChannelLane;
+use rings_transport::core::transport::LaneCreditReservation;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::delivery::DeliveryFuture;
 
@@ -288,9 +289,16 @@ pub(super) struct FrameTarget {
     pub(super) context: &'static str,
 }
 
+/// Send one frame under `credit`, its lane's transport credit, timing only the transport's
+/// acceptance.
+///
+/// Pre: `credit` was reserved by the scheduler ahead of the send, so the receiver's
+/// backpressure is never charged to the accept timeout. Without one (its connection could not
+/// grant credit) the transport reserves itself and fails as the connection does.
 pub(super) async fn send_data_with_timeout(
     admitted: &AdmittedConnection,
     data: Bytes,
+    credit: Option<LaneCreditReservation>,
     permit: &ChunkSendPermit,
     stop: &TransferStop,
     detached_admission: Option<&DetachedAdmission>,
@@ -299,6 +307,10 @@ pub(super) async fn send_data_with_timeout(
     let FrameTarget { did, lane, context } = target;
     let bytes = data.len();
     let send_permit = build_transport_send_permit(admitted, permit, stop, detached_admission);
+    let send_permit = match credit {
+        Some(credit) => send_permit.with_credit(credit),
+        None => send_permit,
+    };
     let acceptance = send_permit.acceptance();
     let send = admitted
         .connection()
@@ -676,6 +688,66 @@ mod tests {
         assert!(matches!(terminal, Err(Error::SwarmConnectionLifecycleLock)));
         assert!(matches!(close, Ok(true)));
         assert!(closed.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    /// Witness of the chunk reserves of `consts`, with equality: the widest frame
+    /// [`frame_chunk`] can emit, with every field it leaves free at its widest (the signer's
+    /// delegation in both slots, [`Delegation::widest_for_test`]; the sequence, timestamps and
+    /// lifetimes at their types' maxima; the chunk header at the most chunks one message is cut
+    /// into; `MAX_DATA_CHANNEL_MESSAGE_SIZE` data bytes), encodes to exactly its chunk data plus
+    /// [`MAX_CHUNK_ENVELOPE_OVERHEAD`], and the transport wrapper adds exactly
+    /// [`TRANSPORT_CUSTOM_OVERHEAD`]. The fields `frame_chunk` fixes (no `reply_via`, the
+    /// relay aim toward the receiver, an exhausted hop budget) are taken as it fixes them.
+    ///
+    /// [`Delegation::widest_for_test`]: crate::delegation::Delegation::widest_for_test
+    /// [`MAX_CHUNK_ENVELOPE_OVERHEAD`]: crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD
+    /// [`TRANSPORT_CUSTOM_OVERHEAD`]: crate::consts::TRANSPORT_CUSTOM_OVERHEAD
+    #[test]
+    fn test_chunk_envelope_reserves_are_the_widest_framed_chunk() -> Result<()> {
+        use rings_transport::core::transport::TransportMessage;
+        use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+
+        use crate::chunk::ChunkMeta;
+        use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
+        use crate::consts::MIN_CHUNK_DATA;
+        use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
+        use crate::consts::TRANSPORT_MAX_SIZE;
+        use crate::delegation::Delegation;
+
+        let key = Delegation::widest_key_for_test();
+        let most_chunks = TRANSPORT_MAX_SIZE.div_ceil(MIN_CHUNK_DATA);
+        let chunk = Chunk {
+            chunk: [most_chunks, most_chunks],
+            data: bytes::Bytes::from(vec![u8::MAX; MAX_DATA_CHANNEL_MESSAGE_SIZE]),
+            meta: ChunkMeta {
+                id: uuid::Uuid::from_u128(u128::MAX),
+                ts_ms: u128::MAX,
+                ttl_ms: u64::MAX,
+            },
+        };
+        let mut payload = frame_chunk(
+            MessageSigner::new(&key, u32::MAX),
+            Did::from(u32::MAX),
+            chunk,
+            u64::MAX,
+        )?;
+        for verification in [
+            &mut payload.transaction.verification,
+            &mut payload.verification,
+        ] {
+            verification.ttl_ms = u64::MAX;
+            verification.ts_ms = u128::MAX;
+        }
+
+        let frame = payload.to_wire()?;
+        let wire = rings_codec::serialize(&TransportMessage::Custom(frame.clone()))
+            .map_err(Error::CodecSerialize)?;
+        assert_eq!(
+            frame.len(),
+            MAX_DATA_CHANNEL_MESSAGE_SIZE + MAX_CHUNK_ENVELOPE_OVERHEAD
+        );
+        assert_eq!(wire.len(), frame.len() + TRANSPORT_CUSTOM_OVERHEAD);
+        Ok(())
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 
+use bytes::Bytes;
+
 use super::super::ChordStorageInterface;
 use super::super::ChordStorageInterfaceCacheChecker;
 use super::test_support::assert_cached_data_values;
@@ -12,7 +14,6 @@ use crate::dht::Did;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Result;
 use crate::message::types::Message;
-use crate::message::Encoder;
 use crate::message::MessageVerificationExt;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
@@ -132,14 +133,14 @@ async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> 
 
     node1
         .swarm
-        .storage_append_data(&topic, "111".to_string().encode()?)
+        .storage_append_data(&topic, Bytes::from("111"))
         .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
     node1
         .swarm
-        .storage_append_data(&topic, "222".to_string().encode()?)
+        .storage_append_data(&topic, Bytes::from("222"))
         .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
@@ -157,7 +158,7 @@ async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> 
 
     node1
         .swarm
-        .storage_append_data(&topic, "333".to_string().encode()?)
+        .storage_append_data(&topic, Bytes::from("333"))
         .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
@@ -196,7 +197,7 @@ async fn test_storage_append_data_moves_existing_entry_payload_to_end_once() -> 
     for value in ["111", "222", "333", "222"] {
         node1
             .swarm
-            .storage_append_data(&topic, value.to_string().encode()?)
+            .storage_append_data(&topic, Bytes::from(value.to_string()))
             .await?;
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
@@ -241,7 +242,7 @@ async fn test_storage_tombstone_data_removes_observed_payload() -> Result<()> {
     for value in ["111", "222"] {
         node1
             .swarm
-            .storage_append_data(&topic, value.to_string().encode()?)
+            .storage_append_data(&topic, Bytes::from(value.to_string()))
             .await?;
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
@@ -249,7 +250,7 @@ async fn test_storage_tombstone_data_removes_observed_payload() -> Result<()> {
 
     node1
         .swarm
-        .storage_tombstone_data(&topic, "111".to_string().encode()?)
+        .storage_tombstone_data(&topic, Bytes::from("111"))
         .await?;
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
@@ -259,68 +260,6 @@ async fn test_storage_tombstone_data_removes_observed_payload() -> Result<()> {
     assert_no_more_msg([&node1, &node2]).await;
 
     assert_cached_data_values(&node1, entry_key, &["222"]).await?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_storage_compact_data_prunes_tombstones_and_preserves_owner_values() -> Result<()> {
-    let mut keys = gen_ordered_keys::<2>().into_iter();
-    let key1 = next_generated_key(&mut keys)?;
-    let key2 = next_generated_key(&mut keys)?;
-    let node1 = prepare_node(key1).await;
-    let node2 = prepare_node(key2).await;
-
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_msgs([&node1, &node2]).await;
-    assert_no_more_msg([&node1, &node2]).await;
-
-    let topic = "compact data prunes tombstone metadata".to_string();
-    let entry: Entry = (topic.clone(), topic.clone()).try_into()?;
-    let entry_key = entry.did;
-
-    let (node1, node2) = if key_strictly_between(entry_key, node2.did(), node1.did()) {
-        (node1, node2)
-    } else {
-        (node2, node1)
-    };
-
-    for value in ["111", "222", "333"] {
-        node1
-            .swarm
-            .storage_append_data(&topic, value.to_string().encode()?)
-            .await?;
-        wait_for_msgs([&node1, &node2]).await;
-        assert_no_more_msg([&node1, &node2]).await;
-    }
-
-    node1
-        .swarm
-        .storage_tombstone_data(&topic, "111".to_string().encode()?)
-        .await?;
-    wait_for_msgs([&node1, &node2]).await;
-    assert_no_more_msg([&node1, &node2]).await;
-
-    let compact_removals = vec!["111".to_string().encode()?];
-    node1
-        .swarm
-        .storage_compact_data(&topic, compact_removals)
-        .await?;
-    wait_for_msgs([&node1, &node2]).await;
-    assert_no_more_msg([&node1, &node2]).await;
-
-    node1.swarm.storage_fetch(entry_key).await?;
-    wait_for_msgs([&node1, &node2]).await;
-    assert_no_more_msg([&node1, &node2]).await;
-
-    assert_cached_data_values(&node1, entry_key, &["222", "333"]).await?;
-    let entry = node1
-        .swarm
-        .storage_check_cache(entry_key)
-        .await
-        .ok_or_else(|| crate::error::Error::InvalidMessage("expected cached entry".to_string()))?;
-    assert!(entry.crdt.register.is_some());
-    assert!(entry.crdt.tombstones.is_empty());
 
     Ok(())
 }

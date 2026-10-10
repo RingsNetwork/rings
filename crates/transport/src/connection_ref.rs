@@ -16,6 +16,7 @@ use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
+use crate::delivery::SendCreditWait;
 use crate::error::Error;
 use crate::error::Result;
 
@@ -125,6 +126,15 @@ where
             .await
     }
 
+    /// The wait is taken from the connection and the connection let go at once: a long wait
+    /// keeps the connection alive no longer than this call.
+    fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
+        match self.upgrade() {
+            Ok(connection) => connection.reserve_send_credit(lane),
+            Err(error) => Box::pin(std::future::ready(Err(error))),
+        }
+    }
+
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.upgrade()
             .map(|c| c.webrtc_connection_state())
@@ -214,6 +224,9 @@ mod tests {
             _: ChannelLane,
             _: SendPermit,
         ) -> Result<DeliveryFuture> {
+            unreachable!("a released ref must fail before reaching the inner connection")
+        }
+        fn reserve_send_credit(&self, _: ChannelLane) -> crate::delivery::SendCreditWait<Error> {
             unreachable!("a released ref must fail before reaching the inner connection")
         }
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {

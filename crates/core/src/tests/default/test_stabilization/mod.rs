@@ -62,6 +62,8 @@ use crate::tests::replace_observed_fingers;
 use crate::utils::get_epoch_ms_i64;
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_credit_liveness;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_storage_handoff;
 mod test_storage_repair;
 

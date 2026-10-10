@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
+use bytes::Bytes;
 
 use crate::dht::entry::Entry;
-use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::SyncedEntryAck;
@@ -29,29 +29,38 @@ use crate::message::types::Message;
 use crate::message::types::SearchEntry;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
-use crate::message::Encoded;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::swarm::transport::StorageSyncSend;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
 use crate::utils::get_epoch_ms;
 
 /// ChordStorageInterface should imply necessary method for DHT storage
+///
+/// Element lifetime: every element of a data topic expires at the earlier of its dot's issue time
+/// plus the element horizon `H = EntryKind::Data.max_lifetime_ms()` and its topic's retention
+/// bound, the latest bound any write joined into the topic requested (a plain write requests
+/// `EntryKind::Data.default_lifetime_ms()`); writing the value again issues a fresh dot and a
+/// fresh bound. A removal covers every earlier dot of its value, and is collected `H + σ` after
+/// the dot it covers, with `σ = TS_OFFSET_TOLERANCE_MS`. The laws are stated in the `retention`
+/// module of `dht::entry`.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterface {
     /// Fetch an entry from DHT storage.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()>;
-    /// Store an entry on DHT storage.
+    /// Store an entry on DHT storage, replacing its payloads (an `Overwrite`). Each stored
+    /// payload expires as the trait documentation states unless it is written again.
     async fn storage_store(&self, entry: Entry) -> Result<()>;
-    /// Append data to a Data kind entry.
-    async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()>;
-    /// Tombstone observed data in a Data kind entry.
-    async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()>;
-    /// Compact a Data kind entry after removing listed payloads.
-    async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()>;
+    /// Append the element `data`, as its bytes, to a Data kind entry. The element expires as
+    /// the trait documentation states unless it is appended again.
+    async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()>;
+    /// Tombstone the observed element `data` in a Data kind entry: the removal covers every dot
+    /// of `data` the storage owner holds or has held under a later one.
+    async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()>;
 }
 
 /// ChordStorageInterfaceCacheChecker defines the interface for checking the local cache of the DHT.
@@ -81,6 +90,8 @@ async fn reset_storage_relay_destination(
         .await
 }
 
+/// Repair the misses a remote lookup observed for `entry`; a handler runs it, so each repair is
+/// only queued.
 async fn repair_observed_storage_misses(
     transport: Arc<SwarmTransport>,
     entry: Entry,
@@ -91,7 +102,28 @@ async fn repair_observed_storage_misses(
         .dht
         .read_repair_entry(entry, &misses, redundancy)
         .await?;
-    run_storage_repair_transport_effects(transport, repair).await
+    run_storage_repair_transport_effects(transport, repair, StorageSyncSend::Enqueued).await
+}
+
+/// Cache `entry`, a reply to the lookup round of `(resource, redundancy)`, and count it as the
+/// round's answer iff the cache now serves it.
+///
+/// Law (an answer is what a reader can read): the reply marker advances only for a value the
+/// cache serves at this clock. A carrier read just before its retention bound and cached just
+/// after it (or under a clock up to σ ahead) is admitted, since an unstable remove or register
+/// holds it live, but it is served as absent; counting it would end a fetcher's wait on a cache
+/// that holds nothing to read while another placement's reply may still be in flight.
+async fn cache_lookup_reply(
+    transport: &SwarmTransport,
+    resource: Did,
+    redundancy: u16,
+    entry: Entry,
+) -> Result<()> {
+    transport.dht.local_cache_put(entry).await?;
+    if transport.dht.local_cache_get(resource).await?.is_some() {
+        transport.answer_storage_lookup(resource, redundancy)?;
+    }
+    Ok(())
 }
 
 /// Execute storage fetch actions for the Swarm-facing storage API.
@@ -105,16 +137,18 @@ async fn handle_storage_fetch_act(
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
-            transport
-                .dht
-                .local_cache_put(evidence.entry.clone())
-                .await?;
+            cache_lookup_reply(&transport, resource, redundancy, evidence.entry.clone()).await?;
             let misses = evidence.misses;
             let repair = transport
                 .dht
                 .read_repair_entry(evidence.entry, &misses, redundancy)
                 .await?;
-            run_storage_repair_transport_effects(transport.clone(), repair).await?;
+            run_storage_repair_transport_effects(
+                transport.clone(),
+                repair,
+                StorageSyncSend::Admitted,
+            )
+            .await?;
         }
         PeerRingAction::RemoteAction(next, dht_act) => {
             if let PeerRingRemoteAction::FindEntry(query) = dht_act {
@@ -151,22 +185,20 @@ async fn handle_storage_fetch_act(
     Ok(())
 }
 
-/// Execute storage store actions for the Swarm-facing storage API.
+/// Execute storage store actions, sending each remote operation through `sender`.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
-pub(super) async fn handle_storage_store_act(
-    transport: Arc<SwarmTransport>,
-    act: PeerRingAction,
-) -> Result<()> {
+pub(super) async fn handle_storage_store_act<S>(sender: &S, act: PeerRingAction) -> Result<()>
+where S: PayloadSender + rings_runtime::MaybeSendSync + ?Sized {
     match act {
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindEntryForOperate(op)) => {
-            transport
+            sender
                 .send_message(Message::OperateEntry(*op), target)
                 .await?;
         }
         PeerRingAction::MultiActions(acts) => {
             for (act, has_next) in core_actor_steps(acts) {
-                handle_storage_store_act(transport.clone(), act).await?;
+                handle_storage_store_act(sender, act).await?;
                 if has_next {
                     yield_core_actor_step().await;
                 }
@@ -215,15 +247,17 @@ async fn handle_placed_entry_operation(
     }
 }
 
-/// Execute copy-only storage repair actions at the Swarm API adapter boundary.
+/// Execute copy-only storage repair actions under the sender's discipline `send`: the Swarm
+/// storage API waits for each repair's admission, a handler only queues it.
 async fn run_storage_repair_transport_effects(
     transport: Arc<SwarmTransport>,
     act: PeerRingAction,
+    send: StorageSyncSend,
 ) -> Result<()> {
     for (delivery, has_next) in core_actor_steps(act.coalesced_storage_sync_deliveries()?) {
         let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
         transport
-            .send_storage_sync_or_defer(msg, "storage_repair")
+            .send_storage_sync_or_defer(msg, send, "storage_repair")
             .await?;
         if has_next {
             yield_core_actor_step().await;
@@ -287,16 +321,23 @@ async fn handle_storage_search_act(
 }
 
 /// Apply `operation` under the transport's configured redundancy: locally where this node is
-/// an accepted placement and by `OperateEntry` toward every remote one.
-pub(crate) async fn operate_entry(
-    transport: Arc<SwarmTransport>,
+/// an accepted placement and by `OperateEntry`, sent through `sender`, toward every remote one.
+///
+/// The Swarm storage API passes the transport itself (the application discipline); the
+/// protocol context passes its [`ProtocolEgress`](crate::swarm::transport::egress::ProtocolEgress).
+pub(crate) async fn operate_entry<S>(
+    transport: &SwarmTransport,
+    sender: &S,
     operation: EntryOperation,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: PayloadSender + rings_runtime::MaybeSendSync + ?Sized,
+{
     let action = transport
         .dht
         .entry_operate(operation, transport.storage_redundancy())
         .await?;
-    handle_storage_store_act(transport, action).await
+    handle_storage_store_act(sender, action).await
 }
 
 fn next_hop_for_sync_entries(
@@ -381,22 +422,32 @@ impl ChordStorageInterface for Swarm {
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types
     async fn storage_store(&self, entry: Entry) -> Result<()> {
-        operate_entry(self.transport.clone(), EntryOperation::Overwrite(entry)).await
+        operate_entry(
+            &self.transport,
+            &*self.transport,
+            EntryOperation::Overwrite(entry),
+        )
+        .await
     }
 
-    async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
+    async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_entry(self.transport.clone(), EntryOperation::Extend(entry)).await
+        operate_entry(
+            &self.transport,
+            &*self.transport,
+            EntryOperation::Extend(entry),
+        )
+        .await
     }
 
-    async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
+    async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_entry(self.transport.clone(), EntryOperation::Tombstone(entry)).await
-    }
-
-    async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
-        let entry = Entry::new(Entry::gen_did(topic)?, removals, EntryKind::Data);
-        operate_entry(self.transport.clone(), EntryOperation::CompactData(entry)).await
+        operate_entry(
+            &self.transport,
+            &*self.transport,
+            EntryOperation::Tombstone(entry),
+        )
+        .await
     }
 }
 
@@ -437,11 +488,15 @@ impl HandleMsg<FoundEntry> for MessageHandler {
             msg.misses.iter().copied(),
         )?;
         if let Some(data) = found_entry {
-            self.dht.local_cache_put(data.clone()).await?;
+            cache_lookup_reply(&self.transport, msg.resource, msg.redundancy, data.clone()).await?;
             repair_observed_storage_misses(self.transport.clone(), data.clone(), msg.redundancy)
                 .await?;
         } else if !msg.misses.is_empty() {
-            if let Some(entry) = self.dht.local_cache_get(msg.resource).await? {
+            if let Some(entry) = self
+                .dht
+                .local_cache_held(msg.resource, crate::utils::get_epoch_ms())
+                .await?
+            {
                 repair_observed_storage_misses(self.transport.clone(), entry, msg.redundancy)
                     .await?;
             }

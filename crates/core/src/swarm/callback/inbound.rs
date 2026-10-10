@@ -1,12 +1,16 @@
 //! Bounded inbound admission and per-lane actor scheduling.
 //!
-//! Transport first bounds undecoded frames and transfers an opaque capacity lease.
-//! Core then verifies the frame and atomically reserves per-peer plus class-aware
-//! actor capacity before waiting for its lane ticket. The raw transport lease is
-//! released after the ticket wait, when both capacity ownership and lane order are
-//! established. Decode, validation, reassembly, and dispatch retain only the core
-//! permit. Capacity pressure fails without peer penalty rather than parking ingress
-//! behind the actor that releases it.
+//! Transport first bounds undecoded frames by per-lane credit and transfers an opaque
+//! credit lease. Core then verifies the frame and reserves per-peer plus class-aware actor
+//! capacity, and only then takes its lane ticket. The transport lease is released after the
+//! ticket, when both capacity ownership and lane order are established, which returns the
+//! sender's credit. Decode, validation, reassembly, and dispatch retain only the core permit.
+//!
+//! Capacity pressure parks the arrival instead of refusing it: the arrival keeps its lease, so
+//! the pressure reaches the sender as transport backpressure. Parked arrivals are admitted in
+//! resource order (`capacity::InboundResource`). The wait cannot deadlock against the actor that
+//! releases capacity, because a waiting arrival holds no ticket: the actor never orders its
+//! lanes behind it, and releases capacity as the events it already admitted complete.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -254,7 +258,8 @@ impl InboundMailbox {
             lease:
                 InboundFrameLease {
                     bytes,
-                    transport_capacity,
+                    transport_credit,
+                    held: _,
                     #[cfg(test)]
                     in_flight,
                 },
@@ -271,10 +276,13 @@ impl InboundMailbox {
                 .admit_final_transaction(&prepared.payload, &prepared.message, lane, edge)
                 .await?;
         }
-        let ticket = self.reserve_ticket(lane)?;
+        // Capacity before the ticket: an arrival waiting for capacity holds no sequence, so
+        // the actor's ordering never waits on it.
         let permit = self
             .capacity
-            .acquire(peer, lane, memory_reservation(bytes.len()))?;
+            .acquire(peer, lane, memory_reservation(bytes.len()))
+            .await?;
+        let ticket = self.reserve_ticket(lane)?;
         let PreparedInboundFrame {
             payload,
             message,
@@ -284,7 +292,7 @@ impl InboundMailbox {
         // Core now owns both retained decoded representations. Release the raw
         // bytes and their transport lease together at this handoff boundary.
         let wire_bytes = bytes.len();
-        drop((bytes, transport_capacity));
+        drop((bytes, transport_credit));
         // Test builds: the actor's capacity permit now covers the frame.
         #[cfg(test)]
         drop(in_flight);
@@ -335,6 +343,12 @@ impl InboundMailbox {
         self.capacity.await_admitted_count_for_test(predicate).await;
     }
 
+    /// Wait until the number of arrivals waiting for the mailbox satisfies `predicate`.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) async fn await_waiting_for_test(&self, predicate: impl Fn(usize) -> bool) {
+        self.capacity.await_waiting_for_test(predicate).await;
+    }
+
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) async fn await_handoffs_for_test(&self, predicate: impl Fn(u64) -> bool) {
         self.handoffs.await_until(predicate).await;
@@ -371,11 +385,6 @@ impl InboundMailbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .close_channel();
     }
-}
-
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(super) const fn capacity_for_test() -> usize {
-    INBOUND_MAILBOX_CAPACITY
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

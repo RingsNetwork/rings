@@ -5,7 +5,7 @@ use serde::Serialize;
 use super::StorageSyncDestination;
 use super::StorageSyncPurpose;
 use super::StorageSyncTarget;
-use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
+use crate::consts::MAX_PAYLOAD_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
@@ -28,8 +28,9 @@ use crate::utils::get_epoch_ms;
 /// reserves the payload/chunk envelope bytes below.
 pub(crate) const SYNC_BATCH_MAX_BYTES: usize = MAX_DATA_CHANNEL_MESSAGE_SIZE / 4;
 
+/// The envelope a batch is sent whole in: the payload envelope and the transport wrapper.
 const SYNC_BATCH_ENVELOPE_HEADROOM_BYTES: usize =
-    MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD;
+    MAX_PAYLOAD_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD;
 
 fn serialized_wire_size<T: Serialize>(value: &T) -> Result<usize> {
     let bytes = rings_codec::serialized_size(value).map_err(Error::CodecSerialize)?;
@@ -116,17 +117,22 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// `Entry`s that are no longer between current node and `new_successor`,
     /// and copy them to the new successor.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
-        let all_items = self.live_storage_entries(get_epoch_ms()).await?;
+        let now_ms = get_epoch_ms();
+        let all_items = self.live_storage_entries(now_ms).await?;
         // Relay inboxes are placed by the ring geometry in every storage mode
         // (see the `inbox` module); data topics follow the configured mode.
         let (relay, data): (Vec<_>, Vec<_>) = all_items
             .into_iter()
             .partition(|(_, entry)| entry.kind.is_relay_inbox());
-        let mut actions = vec![self.hand_off_beyond_successor(new_successor, relay)?];
+        // Only the carriers this hand-off offers are judged for retirement.
+        let relay = self
+            .retire_unwitnessed_inbox_elements(self.beyond(new_successor, relay), now_ms)
+            .await?;
+        let mut actions = vec![self.hand_off_to(new_successor, relay)?];
         actions.push(if self.storage_virtual_nodes_enabled()? {
             self.copy_entries_to_observed_virtual_storage_owners(data)?
         } else {
-            self.hand_off_beyond_successor(new_successor, data)?
+            self.hand_off_to(new_successor, self.beyond(new_successor, data))?
         });
         Ok(actions.into())
     }
@@ -135,13 +141,15 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         // Pre S2': each ack in acks is contained in a
         // SyncEntriesWithSuccessorReport sent only after the receiver persisted
         // SyncedEntryAck { key, entry } at key.
-        // Post S2': a local key is removed only if canonical(local_before[key])
-        // == canonical(ack.entry). If the canonical local value differs, the
-        // local value is preserved and will be offered again by a later
-        // sync_entries_with_successor transition.
-        // Preservation #614: a write racing between copy and ack changes the
-        // canonical local value, so confirms_local_value is false and delete
-        // is skipped.
+        // Post S2': a local key is removed only if
+        // retire_now(canonical(local_before[key])) == retire_now(canonical(ack.entry)),
+        // with retire_now = Entry::retired_at at this node's clock (an element or
+        // remove that crossed its horizon since the copy is not a newer write). If the
+        // projected local value differs, the local value is preserved and will be
+        // offered again by a later sync_entries_with_successor transition.
+        // Preservation #614: a write racing between copy and ack is still live at this
+        // clock, so it changes the projected local value, confirms_local_value is false,
+        // and delete is skipped.
         let now_ms = get_epoch_ms();
         for ack in acks {
             let key = StorageKey::new(ack.entry.kind, ack.key);
@@ -154,8 +162,55 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
 }
 
 impl PeerRing {
-    /// Offer every item placed beyond `(self, new_successor]` to `new_successor` as an
-    /// ownership hand-off.
+    /// Bring each relay carrier in `inboxes` to a shape its receiver admits before it is
+    /// offered: remove the elements that fail the witness for good at `now_ms`, and return the
+    /// carriers that remain.
+    ///
+    /// Law: what is removed is what no receiver admits and time cannot cure (see
+    /// [`Entry::partition_inbox`]; an element held ahead of this clock is kept), which only a
+    /// carrier written before the storage cutover holds: offered as it is, it would be skipped
+    /// without an ack on every pass until its retention bound. Removing it here, as the
+    /// recipient's drain does, is what lets the rest of the carrier be acked and handed off.
+    async fn retire_unwitnessed_inbox_elements(
+        &self,
+        inboxes: Vec<(StorageKey, Entry)>,
+        now_ms: u128,
+    ) -> Result<Vec<(StorageKey, Entry)>> {
+        let mut offered = Vec::with_capacity(inboxes.len());
+        for (key, inbox) in inboxes {
+            let rejected = inbox.partition_inbox(now_ms, self.network_id()).rejected;
+            if rejected.crdt.dots.is_empty() {
+                offered.push((key, inbox));
+                continue;
+            }
+            tracing::warn!(
+                local = %self.did,
+                inbox = %key,
+                rejected = rejected.crdt.dots.len(),
+                "relay inbox elements failed the witness and are retired unoffered"
+            );
+            if let Some(remaining) = self.remove_inbox_elements(key, rejected, now_ms).await? {
+                offered.push((key, remaining));
+            }
+        }
+        Ok(offered)
+    }
+
+    /// The items of `items` placed beyond `(self, new_successor]`: what a hand-off to
+    /// `new_successor` offers.
+    fn beyond(
+        &self,
+        new_successor: Did,
+        items: Vec<(StorageKey, Entry)>,
+    ) -> Vec<(StorageKey, Entry)> {
+        items
+            .into_iter()
+            .filter(|(key, _)| self.placed_beyond(key.placement(), new_successor))
+            .collect()
+    }
+
+    /// Offer `items`, each placed beyond `(self, new_successor]` ([`Self::beyond`]), to
+    /// `new_successor` as an ownership hand-off.
     ///
     /// Pre: new_successor is the current successor head, whichever input
     /// moved it. The storage repair pass runs this, so a delivery deferred
@@ -169,17 +224,15 @@ impl PeerRing {
     /// cleanup. acknowledge_synced_entries is the only value-dependent local
     /// cleanup transition and does not define storage convergence; retention
     /// expiry retires values independently of their content.
-    fn hand_off_beyond_successor(
+    fn hand_off_to(
         &self,
         new_successor: Did,
         items: Vec<(StorageKey, Entry)>,
     ) -> Result<PeerRingAction> {
-        let mut data = Vec::<PlacedEntry>::new();
-        for (key, entry) in items {
-            if self.placed_beyond(key.placement(), new_successor) {
-                data.push(PlacedEntry::new(key.placement(), entry));
-            }
-        }
+        let data = items
+            .into_iter()
+            .map(|(key, entry)| PlacedEntry::new(key.placement(), entry))
+            .collect::<Vec<_>>();
 
         let batches = sync_entries_batches(data, SYNC_BATCH_MAX_BYTES)?;
         Ok(batches

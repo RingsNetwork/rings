@@ -10,6 +10,12 @@ use serde_json::Value as JsonValue;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
 
+use crate::dht::entry::Entry;
+use crate::dht::entry::EntryDot;
+use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryVersion;
+use crate::dht::Did;
+use crate::message::Encoded;
 use crate::storage::idb::clock_store_name;
 use crate::storage::idb::restamp;
 use crate::storage::idb::AccessClock;
@@ -20,6 +26,7 @@ use crate::storage::idb::ACCESS_STAMP_INDEX;
 use crate::storage::idb::CLOCK_LIMIT;
 use crate::storage::idb::SCHEMA_VERSION;
 use crate::storage::KvStorageInterface;
+use crate::storage::RecordAuthority;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TestDataStruct {
@@ -48,6 +55,14 @@ async fn create_db_instance(cap: u32) -> IdbStorage {
     let count = instance.count().await.unwrap();
     assert_eq!(count, 0, "store not empty");
     instance
+}
+
+/// A fresh authoritative database under a unique name.
+async fn create_authoritative_db_instance(cap: u32) -> IdbStorage {
+    let name = format!("rings-idb-authoritative-test-{}", uuid::Uuid::new_v4());
+    IdbStorage::new_with_cap_name_and_authority(cap, &name, RecordAuthority::Authoritative)
+        .await
+        .unwrap()
 }
 
 async fn create_kv_db<V>(cap: u32) -> Box<dyn KvStorageInterface<V>>
@@ -478,11 +493,12 @@ async fn migrating_under_a_smaller_capacity_retires_legacy_oldest_rows() {
     assert_eq!(warm.as_deref(), Some("warm"));
 }
 
-/// Missing keys complete cleanly; a decode error does not rewrite or remove the stored payload.
+/// Missing keys complete cleanly; in an authoritative store a decode error does not rewrite or
+/// remove the stored payload.
 #[wasm_bindgen_test]
-async fn missing_and_invalid_reads_preserve_storage() {
+async fn test_missing_and_invalid_reads_preserve_storage() {
     // Isolated store exercises the public error boundary with incompatible value types.
-    let instance = create_db_instance(2).await;
+    let instance = create_authoritative_db_instance(2).await;
     let missing: Option<String> = instance.get("missing").await.unwrap();
     assert!(missing.is_none());
     instance.put("number", &42_u32).await.unwrap();
@@ -491,6 +507,102 @@ async fn missing_and_invalid_reads_preserve_storage() {
     let retained: Option<u32> = instance.get("number").await.unwrap();
     assert_eq!(retained, Some(42));
     assert_eq!(instance.count().await.unwrap(), 1);
+}
+
+/// A disposable store deletes a row the caller's type cannot decode on the read that finds it
+/// and reports it absent, by `get` and by `get_all` alike, and keeps decodable rows.
+#[wasm_bindgen_test]
+async fn test_disposable_store_retires_undecodable_rows_on_read() {
+    // Rows of an incompatible type stand in for rows written by an earlier build.
+    let instance = create_db_instance(4).await;
+    instance.put("old", &42_u32).await.unwrap();
+    instance.put("older", &7_u32).await.unwrap();
+    instance
+        .put("current", &TestDataStruct {
+            content: "kept".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let retired: Option<TestDataStruct> = instance.get("old").await.unwrap();
+    assert!(retired.is_none());
+    assert_eq!(instance.count().await.unwrap(), 2);
+
+    let all: Vec<(String, TestDataStruct)> = instance.get_all().await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all.first().map(|(key, _)| key.as_str()), Some("current"));
+    assert_eq!(instance.count().await.unwrap(), 1);
+}
+
+/// An authoritative scan reports a row the caller's type cannot decode and keeps every row.
+#[wasm_bindgen_test]
+async fn test_authoritative_scan_reports_and_keeps_undecodable_rows() {
+    let instance = create_authoritative_db_instance(4).await;
+    instance.put("old", &42_u32).await.unwrap();
+    instance
+        .put("current", &TestDataStruct {
+            content: "kept".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let scanned: crate::error::Result<Vec<(String, TestDataStruct)>> = instance.get_all().await;
+    assert!(scanned.is_err());
+    assert_eq!(instance.count().await.unwrap(), 2);
+}
+
+/// The shape of `EntryCrdt` before #874: tombstones were bare dots.
+#[derive(Serialize, Deserialize)]
+struct LegacyEntryCrdt {
+    /// The reset register.
+    register: Option<EntryVersion>,
+    /// The element dots.
+    dots: Vec<EntryDot>,
+    /// The removes, as bare dots.
+    tombstones: Vec<EntryDot>,
+}
+
+/// The shape of `Entry` before #874.
+#[derive(Serialize, Deserialize)]
+struct LegacyEntry {
+    /// The ring key.
+    did: Did,
+    /// The payloads, as base58-check text (before #926).
+    data: Vec<Encoded>,
+    /// The kind.
+    kind: EntryKind,
+    /// The CRDT metadata of the old shape.
+    crdt: LegacyEntryCrdt,
+    /// The retention bound.
+    expires_at_ms: Option<u128>,
+}
+
+/// The cutover premise of #913: a carrier stored with a tombstone of the old shape does not
+/// decode as the current `Entry`, and the disposable entry store retires it on read instead of
+/// failing every scan.
+#[wasm_bindgen_test]
+async fn test_legacy_tombstone_entry_row_is_retired_by_the_entry_store() {
+    let instance = create_db_instance(4).await;
+    let dot = EntryDot {
+        version: EntryVersion::new(1_790_000_000_000, Did::from(1u32), Did::from(2u32)),
+        index: 0,
+    };
+    let legacy = LegacyEntry {
+        did: Did::from(10u32),
+        data: vec![],
+        kind: EntryKind::Data,
+        crdt: LegacyEntryCrdt {
+            register: None,
+            dots: vec![],
+            tombstones: vec![dot],
+        },
+        expires_at_ms: Some(1_790_000_600_000),
+    };
+    instance.put("legacy", &legacy).await.unwrap();
+
+    let scanned: Vec<(String, Entry)> = instance.get_all().await.unwrap();
+    assert!(scanned.is_empty());
+    assert_eq!(instance.count().await.unwrap(), 0);
 }
 
 /// The named constructor rejects zero capacity before opening IndexedDB.

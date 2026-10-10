@@ -111,39 +111,47 @@ fn test_origin_is_the_account_behind_the_signing_session() -> Result<()> {
     Ok(())
 }
 
-/// The sender cuts chunk data at `max_message_size - (MAX_CHUNK_ENVELOPE_OVERHEAD +
-/// TRANSPORT_CUSTOM_OVERHEAD)`. This pins that those reserves are large enough by measuring the
-/// *exact* bytes the data channel carries: a full-size chunk, re-wrapped in its `MessagePayload`
-/// **and** the outer `TransportMessage::Custom` frame (what `send_data` actually serializes),
-/// stays at or below `MAX_DATA_CHANNEL_MESSAGE_SIZE`. If either envelope grows past its reserve,
-/// this fails instead of silently producing oversized frames the channel would reject.
+/// Witness of [`MAX_PAYLOAD_ENVELOPE_OVERHEAD`], with equality: a whole payload with every
+/// envelope field at its widest (both delegation slots with [`Delegation::widest_for_test`],
+/// `reply_via` and the relay aim present and handed off, the hop budget full, every sequence,
+/// timestamp and lifetime at its type's maximum) encodes to exactly its message's own encoding
+/// plus the reserve, for a message whose length prefix is the widest a data-channel frame has.
+///
+/// [`MAX_PAYLOAD_ENVELOPE_OVERHEAD`]: crate::consts::MAX_PAYLOAD_ENVELOPE_OVERHEAD
+/// [`Delegation::widest_for_test`]: crate::delegation::Delegation::widest_for_test
 #[test]
-fn test_chunk_envelope_fits_reserve() {
-    use rings_transport::core::transport::TransportMessage;
+fn test_payload_envelope_reserve_is_the_widest_envelope() -> Result<()> {
     use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
-    use crate::chunk::Chunk;
-    use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
-    use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
+    use crate::consts::MAX_PAYLOAD_ENVELOPE_OVERHEAD;
+    use crate::delegation::Delegation;
+    use crate::dht::delivery::RouteStage;
+    use crate::message::protocols::HopBudget;
 
-    let next_hop = SecretKey::random().address().into();
-    let chunk_size =
-        MAX_DATA_CHANNEL_MESSAGE_SIZE - (MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD);
-    let data: Bytes = vec![0xab; chunk_size].into();
-    let chunk = Chunk::stream(data, chunk_size).next().expect("one chunk");
+    let peer: Did = SecretKey::random().address().into();
+    let message = Message::custom(&vec![u8::MAX; MAX_DATA_CHANNEL_MESSAGE_SIZE / 2])?;
+    let message_bytes =
+        usize::try_from(rings_codec::serialized_size(&message).map_err(Error::CodecSerialize)?)
+            .map_err(|_| Error::MessageSizeOverflow)?;
+    let mut payload = new_payload(message, peer);
+    payload.transaction.sequence = u64::MAX;
+    payload.transaction.reply_via = Some(peer);
+    payload.relay.hop_budget = HopBudget::MAX;
+    payload.relay.stage = RouteStage::replying_via(Some(peer)).handed_off();
+    for verification in [
+        &mut payload.transaction.verification,
+        &mut payload.verification,
+    ] {
+        verification.delegation = Delegation::widest_for_test();
+        verification.ttl_ms = u64::MAX;
+        verification.ts_ms = u128::MAX;
+    }
 
-    // The bytes actually handed to SCTP: rings codec(Custom(rings codec(MessagePayload))).
-    let payload_bytes = new_payload(Message::Chunk(chunk), next_hop)
-        .to_wire()
-        .unwrap();
-    let wire = rings_codec::serialize(&TransportMessage::Custom(payload_bytes)).unwrap();
-
-    assert!(
-        wire.len() <= MAX_DATA_CHANNEL_MESSAGE_SIZE,
-        "wrapped chunk frame is {} bytes, exceeds limit {}; raise the reserves",
-        wire.len(),
-        MAX_DATA_CHANNEL_MESSAGE_SIZE,
+    assert_eq!(
+        payload.to_wire()?.len(),
+        message_bytes + MAX_PAYLOAD_ENVELOPE_OVERHEAD
     );
+    Ok(())
 }
 
 /// The other framing boundary: a payload [`WireReserves::plan`] keeps `Whole`, once wrapped in

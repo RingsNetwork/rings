@@ -109,6 +109,13 @@ impl InnerSwarmCallback {
         self.inbound.await_admitted_count_for_test(predicate).await;
     }
 
+    /// Resolve once `predicate` holds over the number of inbound arrivals waiting for mailbox
+    /// capacity, re-checked whenever an arrival starts to wait or capacity changes.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn await_inbound_waiting_for_test(&self, predicate: impl Fn(usize) -> bool) {
+        self.inbound.await_waiting_for_test(predicate).await;
+    }
+
     /// Resolve once `predicate` holds over the number of frames whose raw
     /// transport lease this mailbox has released after core admission.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -554,8 +561,8 @@ impl TransportCallback for InnerSwarmCallback {
         &self,
         message: AdmittedInboundMessage<'_>,
     ) -> Result<(), TransportCallbackError> {
-        let (cid, msg, transport_capacity) = message.into_parts();
-        self.submit_inbound_message(cid, msg, Some(transport_capacity))
+        let (cid, msg, transport_credit) = message.into_parts();
+        self.submit_inbound_message(cid, msg, Some(transport_credit))
             .await
     }
 
@@ -563,6 +570,8 @@ impl TransportCallback for InnerSwarmCallback {
         // Test builds: the transport rejected a frame that was sent; it arrived and is done.
         #[cfg(test)]
         drop(self.processor.logical.transport.frames_for_test().arrive());
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        crate::simulation::record_rejected_frame();
         let peer = Did::from_str(cid).ok();
         self.processor.record_receive_failure_now(peer).await;
         Ok(())

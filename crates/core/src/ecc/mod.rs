@@ -512,6 +512,18 @@ pub(crate) mod tests {
         keys
     }
 
+    /// The secret key whose scalar is `index + 1`: a fixed, valid key per index, so a test
+    /// built on it replays the same identities, ring positions and routes on every run.
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    pub(crate) fn deterministic_key(index: usize) -> SecretKey {
+        let mut bytes = [0_u8; 32];
+        let scalar = u64::try_from(index)
+            .expect("key index must fit u64")
+            .saturating_add(1);
+        bytes[24..].copy_from_slice(&scalar.to_be_bytes());
+        SecretKey::from_bytes(bytes).expect("positive test scalar must be a valid secret key")
+    }
+
     #[allow(dead_code)]
     pub(crate) fn gen_ordered_keys<const N: usize>() -> [SecretKey; N] {
         let mut keys = std::array::from_fn(|_| SecretKey::random());

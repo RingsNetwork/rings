@@ -2,6 +2,7 @@ use std::str::FromStr;
 #[cfg(feature = "dummy")]
 use std::sync::Arc;
 
+use bytes::Bytes;
 #[cfg(feature = "dummy")]
 use rings_transport::connections::dummy_controlled;
 use rings_transport::core::transport::WebrtcConnectionState;
@@ -26,7 +27,6 @@ use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::message;
-use crate::message::Encoder;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
@@ -554,9 +554,8 @@ async fn test_handle_storage() -> Result<()> {
 
     assert!(node2.dht().storage.count().await.unwrap() == 0);
     let message = String::from("this is a test string");
-    let encoded_message = message.encode().unwrap();
     // the entry_key is hash of string
-    let entry: Entry = (message.clone(), encoded_message).try_into().unwrap();
+    let entry: Entry = (message.clone(), message.clone()).try_into().unwrap();
     node1
         .swarm
         .send_message(
@@ -571,6 +570,6 @@ async fn test_handle_storage() -> Result<()> {
     let data = wait_for_storage_entry(&node2, StorageKey::new(EntryKind::Data, entry.did)).await?;
     assert!(node1.dht().storage.count().await.unwrap() == 0);
     assert!(node2.dht().storage.count().await.unwrap() > 0);
-    assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
+    assert_eq!(data.data[0], Bytes::from(message));
     Ok(())
 }

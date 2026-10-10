@@ -24,9 +24,9 @@ use crate::error::Result;
 use crate::message::MessageCategory;
 use crate::storage::file::test_root::TempRoot;
 use crate::storage::file::FileStorage;
-use crate::storage::file::RecordAuthority;
 use crate::storage::KvStorageInterface;
 use crate::storage::KvStorageScan;
+use crate::storage::RecordAuthority;
 
 /// The digest of the transaction a test admits, one per `value`.
 fn digest(value: u8) -> TransactionDigest {

@@ -42,17 +42,41 @@ pub const DEFAULT_DELEGATION_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 /// and the chunk layer sizes frames to that.
 pub const TRANSPORT_MAX_SIZE: usize = 60_000_000;
 /// Bytes the transport adds when it serializes the data-channel frame: every send is wrapped in
-/// `rings_codec::serialize(TransportMessage::Custom(bytes))` before it reaches SCTP. The framing
-/// decision must account for this outer wrapper, not just the inner payload, or a payload sized
-/// exactly at the limit would overflow once wrapped. Generous bound on that framing.
-pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 64;
+/// `rings_codec::serialize(TransportMessage::Custom(bytes))` before it reaches SCTP, and the
+/// framing decision accounts for this outer wrapper so a payload sized at the limit still fits
+/// once wrapped.
+///
+/// Derivation: the enum tag (1 byte) and the varint length prefix of a frame of at most
+/// `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes (3 bytes), `1 + 3 = 4`; the supremum, witnessed with
+/// equality by `test_chunk_envelope_reserves_are_the_widest_framed_chunk`.
+pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 4;
 /// Bytes reserved, per chunk, for the `MessagePayload` envelope a chunk is re-wrapped in before
-/// sending (signature, DIDs, relay, codec framing) — *not* counting the outer
-/// [`TRANSPORT_CUSTOM_OVERHEAD`], which is added separately. The chunk *data* size is the
-/// connection's negotiated `max_message_size` minus both reserves, so the wrapped on-wire message
-/// stays within the data-channel limit. Generous; bounded by the
-/// `test_chunk_envelope_fits_reserve` test.
-pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 4096;
+/// sending, *not* counting the outer [`TRANSPORT_CUSTOM_OVERHEAD`], which is added separately.
+/// The chunk *data* size is the connection's negotiated `max_message_size` minus both reserves,
+/// so the wrapped on-wire message stays within the data-channel limit.
+///
+/// Derivation: the encoded size, less its chunk data, of the widest frame the chunk framer
+/// (`frame_chunk`) emits. The fields it fixes are as it fixes them: no `reply_via`, the relay
+/// aim toward the receiver, an exhausted hop budget. Every field it leaves free takes its
+/// widest encoding: both delegation slots inline with the widest delegation (a BLS12-381
+/// account key, 48 bytes, and its 96-byte signature, the longest any verified delegation
+/// carries; `SignatureAlgorithm::signature_len`), every timestamp, lifetime and sequence at its
+/// type's maximum, the chunk header at the most chunks one message is cut into
+/// (`TRANSPORT_MAX_SIZE / MIN_CHUNK_DATA`), and the length prefixes of
+/// `MAX_DATA_CHANNEL_MESSAGE_SIZE` data bytes. The value is that supremum, witnessed with
+/// equality through `frame_chunk` itself by
+/// `test_chunk_envelope_reserves_are_the_widest_framed_chunk`: a larger reserve wastes the same
+/// bytes in every chunk frame (#925), a smaller one lets a frame overflow the channel. A field
+/// the framer sets differently changes the witness, which then re-derives this value.
+pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 911;
+/// Bytes a whole `MessagePayload` encodes beyond its message's own encoding, at most: the
+/// envelope reserve of a payload sent unchunked, such as a storage hand-off batch.
+///
+/// Derivation: every envelope field at its widest, both delegation slots with the widest
+/// delegation, `reply_via` and the relay aim present (a relayed payload may carry both), and
+/// the length prefix of a message of up to `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes; the
+/// supremum, witnessed with equality by `test_payload_envelope_reserve_is_the_widest_envelope`.
+pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 941;
 /// Smallest per-chunk *data* payload we are willing to produce. A peer that advertises a
 /// `max_message_size` so small that, after the envelope reserves, fewer than this many data bytes
 /// fit per chunk is rejected outright (`WireReserves::plan` returns `None`) rather than fragmenting a
@@ -63,7 +87,7 @@ pub const MIN_CHUNK_DATA: usize = 1024;
 pub const ENTRY_DATA_MAX_LEN: usize = 1024;
 /// Maximum number of held messages kept in a relay inbox.
 pub const RELAY_INBOX_MAX_LEN: usize = 64;
-/// Maximum encoded bytes of one payload element in a DHT storage entry.
+/// Maximum bytes of one element in a DHT storage entry.
 ///
 /// The bound is per element so that filtering by it is a lattice morphism; with
 /// [`ENTRY_DATA_MAX_LEN`] it bounds every carrier at `ENTRY_DATA_MAX_LEN * ENTRY_PAYLOAD_MAX_BYTES`.

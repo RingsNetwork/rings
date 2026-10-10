@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
@@ -23,11 +24,11 @@ use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::ecc::SecretKey;
 use crate::lifecycle::StopSource;
-use crate::message::Encoder;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::NotifyPredecessorSend;
 use crate::message::SyncEntriesWithSuccessor;
+use crate::swarm::transport::StorageSyncSend;
 use crate::swarm::transport::Transport;
 use crate::swarm::Swarm;
 use crate::tests::activity::probe_on_activity;
@@ -183,12 +184,12 @@ async fn seed_remote_repair_entries(node1: &Swarm, node2: &Swarm, node3: &Swarm)
     // next read and would never be republished.
     let head_entry = live_entry(
         head_key,
-        vec![b"repair-head".as_slice().encode().unwrap()],
+        vec![Bytes::from_static(b"repair-head")],
         EntryKind::Data,
     );
     let tail_entry = live_entry(
         tail_key,
-        vec![b"repair-tail".as_slice().encode().unwrap()],
+        vec![Bytes::from_static(b"repair-tail")],
         EntryKind::Data,
     );
     let expected_head = head_entry.clone().try_into_storage_entry().unwrap();
@@ -242,7 +243,7 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
     assert!(
         node1
             .transport
-            .send_storage_sync(msg)
+            .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
             .await
             .unwrap()
             .is_sent(),

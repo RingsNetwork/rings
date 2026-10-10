@@ -17,10 +17,11 @@ use super::DummyConnectionState;
 use super::DummySendTarget;
 use super::Event;
 use super::CONNS;
-use crate::callback::inbound_peer_frame_capacity_for_test;
-use crate::callback::InboundFrameCapacity;
+use crate::callback::InboundFrameAdmission;
 use crate::callback::InnerTransportCallback;
+use crate::callback::NodeReceiveLoad;
 use crate::core::callback::TransportCallback;
+use crate::core::credit::LANE_CREDIT_WINDOW;
 use crate::core::pool::ChannelLane;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::IrrevocableSendGuard;
@@ -223,15 +224,17 @@ fn test_close_waits_for_claimed_dummy_dispatch_commit() {
     assert!(acceptance.is_accepted());
 }
 
+/// A frame queued in the controlled scheduler holds its place in the receiver's credit window,
+/// as a frame in flight on a real channel is charged to the window it was sent under; dropping
+/// the queue releases it.
 #[tokio::test]
-async fn test_queued_dummy_message_retains_raw_frame_capacity() {
+async fn test_queued_dummy_message_holds_its_place_in_the_receiver_window() {
     controlled::enable(true);
-    let capacity = Arc::new(InboundFrameCapacity::new());
-    let callback = InnerTransportCallback::new_for_test(
+    let callback = InnerTransportCallback::new(
         "remote-peer",
         Box::new(NoopCallback),
         Notifier::default(),
-        capacity.clone(),
+        NodeReceiveLoad::new(),
     );
     let remote = Arc::new(DummyConnection::new(callback));
     let connection_state = Arc::new(Mutex::new(DummyConnectionState {
@@ -245,46 +248,50 @@ async fn test_queued_dummy_message_retains_raw_frame_capacity() {
     let _delivery = complete_irrevocable_send(
         &connection_state,
         data,
-        DummySendTarget::Deliver(remote),
+        ChannelLane::default(),
+        DummySendTarget::Deliver(Arc::clone(&remote)),
         guarded_test_permit(&connection_state, SendPermit::always()),
     )
     .expect("first dummy frame must enter the controlled queue");
     assert_eq!(controlled::pending(), 1);
-
-    let permits = (1..inbound_peer_frame_capacity_for_test())
-        .map(|_| capacity.try_acquire("remote-peer", 1))
-        .collect::<Option<Vec<_>>>()
-        .expect("remaining peer data allowance must be available");
-    assert!(capacity.try_acquire("remote-peer", 1).is_none());
+    assert_eq!(remote.callback.link_credit().occupancy(), [1, 0, 0, 0]);
 
     controlled::enable(false);
-    assert!(capacity.try_acquire("remote-peer", 1).is_some());
-    drop(permits);
+    assert_eq!(remote.callback.link_credit().occupancy(), [0, 0, 0, 0]);
 }
 
+/// A frame beyond the receiver's credit is refused by the receiver, and the refusal does not
+/// fail the sender's irrevocable send: it is the receiver's verdict on a peer that broke flow
+/// control, reported as an invalid frame.
 #[tokio::test]
-async fn test_receiver_capacity_drop_does_not_fail_irrevocable_dummy_send() {
+async fn test_receiver_credit_refusal_does_not_fail_irrevocable_dummy_send() {
     controlled::enable(true);
     controlled::reset_sent_count();
-    let capacity = Arc::new(InboundFrameCapacity::new());
-    let callback = InnerTransportCallback::new_for_test(
+    let callback = InnerTransportCallback::new(
         "remote-peer",
         Box::new(NoopCallback),
         Notifier::default(),
-        capacity.clone(),
+        NodeReceiveLoad::new(),
     );
     let remote = Arc::new(DummyConnection::new(callback));
     let connection_state = Arc::new(Mutex::new(DummyConnectionState {
         webrtc: WebrtcConnectionState::Connected,
         data_channel_open_override: None,
     }));
-    let permits = (0..inbound_peer_frame_capacity_for_test())
-        .map(|_| capacity.try_acquire("remote-peer", 1))
-        .collect::<Option<Vec<_>>>()
-        .expect("test must fill the receiver's peer data allowance");
     let data = rings_codec::serialize(&TransportMessage::Custom(Bytes::from_static(&[1])))
         .map(Bytes::from)
         .expect("dummy transport frame must serialize");
+    let held = (0..LANE_CREDIT_WINDOW)
+        .map(|_| {
+            match remote
+                .callback
+                .admit_inbound_frame(data.clone(), ChannelLane::default())
+            {
+                InboundFrameAdmission::Admitted(frame) => frame,
+                _ => panic!("the test fills the receiver's window with admitted frames"),
+            }
+        })
+        .collect::<Vec<_>>();
     let permit = SendPermit::always();
     let acceptance = permit.acceptance();
     let permit = guarded_test_permit(&connection_state, permit);
@@ -292,10 +299,11 @@ async fn test_receiver_capacity_drop_does_not_fail_irrevocable_dummy_send() {
     let _delivery = complete_irrevocable_send(
         &connection_state,
         data,
+        ChannelLane::default(),
         DummySendTarget::Deliver(remote),
         permit,
     )
-    .expect("receiver-local capacity pressure must not fail the sender");
+    .expect("the receiver's credit refusal must not fail the sender");
 
     assert!(acceptance.is_accepted());
     assert_eq!(controlled::sent_count(), 1);
@@ -308,22 +316,21 @@ async fn test_receiver_capacity_drop_does_not_fail_irrevocable_dummy_send() {
         WebrtcConnectionState::Connected
     );
     controlled::enable(false);
-    drop(permits);
+    drop(held);
 }
 
 #[tokio::test]
 async fn test_oversized_dummy_frame_is_dropped_before_receiver_dispatch() {
     controlled::enable(true);
     controlled::reset_sent_count();
-    let capacity = Arc::new(InboundFrameCapacity::new());
     let invalid_frames = Arc::new(AtomicUsize::new(0));
-    let callback = InnerTransportCallback::new_for_test(
+    let callback = InnerTransportCallback::new(
         "remote-peer",
         Box::new(InvalidFrameCallback {
             invalid_frames: Arc::clone(&invalid_frames),
         }),
         Notifier::default(),
-        capacity,
+        NodeReceiveLoad::new(),
     );
     let remote = Arc::new(DummyConnection::new(callback));
     CONNS.insert(remote.rand_id.clone(), Arc::clone(&remote));
@@ -337,6 +344,7 @@ async fn test_oversized_dummy_frame_is_dropped_before_receiver_dispatch() {
     let _delivery = complete_irrevocable_send(
         &connection_state,
         Bytes::from(vec![0; MAX_DATA_CHANNEL_MESSAGE_SIZE + 1]),
+        ChannelLane::default(),
         DummySendTarget::Deliver(Arc::clone(&remote)),
         guarded_test_permit(&connection_state, permit),
     )
@@ -362,11 +370,11 @@ async fn test_pending_dummy_close_fences_an_irrevocable_dispatch_synchronously()
     controlled::set_drop_messages(true);
     controlled::pause_irrevocable_send();
     controlled::set_close_pending(true);
-    let callback = InnerTransportCallback::new_for_test(
+    let callback = InnerTransportCallback::new(
         "retired-peer",
         Box::new(NoopCallback),
         Notifier::default(),
-        Arc::new(InboundFrameCapacity::new()),
+        NodeReceiveLoad::new(),
     );
     let connection = Arc::new(DummyConnection::new(callback));
     connection.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
@@ -414,21 +422,21 @@ async fn test_cancelling_pending_close_completes_physical_retirement() {
     controlled::set_close_pending(true);
     let local_peer_closed = Arc::new(AtomicUsize::new(0));
     let local_data_closed = Arc::new(AtomicUsize::new(0));
-    let local_callback = InnerTransportCallback::new_for_test(
+    let local_callback = InnerTransportCallback::new(
         "local-peer",
         Box::new(CloseCallback {
             peer_closed: Arc::clone(&local_peer_closed),
             data_closed: Arc::clone(&local_data_closed),
         }),
         Notifier::default(),
-        Arc::new(InboundFrameCapacity::new()),
+        NodeReceiveLoad::new(),
     );
     let local = Arc::new(DummyConnection::new(local_callback));
-    let remote_callback = InnerTransportCallback::new_for_test(
+    let remote_callback = InnerTransportCallback::new(
         "remote-peer",
         Box::new(NoopCallback),
         Notifier::default(),
-        Arc::new(InboundFrameCapacity::new()),
+        NodeReceiveLoad::new(),
     );
     let remote = Arc::new(DummyConnection::new(remote_callback));
     local.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
@@ -471,11 +479,11 @@ fn test_irrevocable_retirement_drop_outside_runtime_is_panic_free() {
         .expect("test runtime must build");
     let (connection, guard) = {
         let _entered = runtime.enter();
-        let callback = InnerTransportCallback::new_for_test(
+        let callback = InnerTransportCallback::new(
             "runtime-peer",
             Box::new(NoopCallback),
             Notifier::default(),
-            Arc::new(InboundFrameCapacity::new()),
+            NodeReceiveLoad::new(),
         );
         let connection = Arc::new(DummyConnection::new(callback));
         connection.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
@@ -504,19 +512,19 @@ fn test_irrevocable_retirement_drop_outside_runtime_is_panic_free() {
 
 #[tokio::test]
 async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_later_send() {
-    let local_callback = InnerTransportCallback::new_for_test(
+    let local_callback = InnerTransportCallback::new(
         "local-peer",
         Box::new(NoopCallback),
         Notifier::default(),
-        Arc::new(InboundFrameCapacity::new()),
+        NodeReceiveLoad::new(),
     );
     let local = Arc::new(DummyConnection::new(local_callback));
     local.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
-    let remote_callback = InnerTransportCallback::new_for_test(
+    let remote_callback = InnerTransportCallback::new(
         "remote-peer",
         Box::new(NoopCallback),
         Notifier::default(),
-        Arc::new(InboundFrameCapacity::new()),
+        NodeReceiveLoad::new(),
     );
     let remote = Arc::new(DummyConnection::new(remote_callback));
     local.set_remote_rand_id(remote.rand_id.clone());

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Refuse a delegation signature that is not its algorithm's exact length (#933). BIP-137
+  recovery sliced the first 65 bytes of a peer-supplied signature and panicked on a shorter one;
+  it now converts exactly, and every `AccountVerifier` checks the length first
+  (`SignatureAlgorithm::signature_len`, new error `InvalidSignatureLength`), so a verified
+  delegation's signature is at most 96 bytes.
+
 - Remove the WebTransport-backed browser relay (#805). The browser `RelayHandle` with
   `register_wt_service` and `register_wt_udp_service`, its interpreter, and its session engine are
   gone, and the relay protocol and `extension::transport` now build for native targets only, where
@@ -144,6 +150,161 @@
   record. `StreamKey::new` takes the class, `Transaction::stream_key` returns a `Result`,
   `Transaction::class` is new, and `PayloadSender`'s send and originate methods take a `Message`
   instead of any `Serialize` value, with `reserve_transaction_sequences` taking the class.
+
+- Collect data-topic tombstones at a retention horizon and remove compaction (#867, #872, #874,
+  #871). The rule is stated once, in the DHT storage chapter and `dht::entry::retention`.
+  - A data-topic element expires at the earlier of its dot's issue time plus
+    `H = EntryKind::Data.max_lifetime_ms()` (100 minutes) and its topic's retention bound (10
+    minutes for a plain write); writing a value again refreshes both.
+  - A tombstone is collected `H + σ` after the dot it covers, an overwrite register `H + σ`
+    after it was issued, and a carrier holding either uncollected stays live but serves no
+    element past its bound. `Entry::retired_at` applies this on every read and stored value,
+    `Entry::live_at` is a read's projection when live, and
+    `SyncedEntryAck::confirms_local_value` takes the clock it compares at.
+  - `EntryOperation::CompactData`, `Entry::compact_data` and `storage_compact_data` (core and
+    node) are removed: a compaction floor erased concurrent adds its owner never received (#867).
+    Both registries are bounded by the horizon alone (#871).
+  - A removal covers every earlier dot of its value (#874): `EntryTombstone` holds a Keccak-256
+    `ElementDigest` and the greatest dot it covers, at most one per value.
+  - A carrier past its bound answers lookups as absent, from a replica and from a fetch cache,
+    and a read that retires part of a stored carrier writes the projection back. The new
+    `Swarm::storage_fetch_mark` and `Swarm::storage_fetch_answered_since` are the fetch's
+    reply marker: a fetcher reads a mark before fetching and learns when its key was answered
+    after it, which a projected cache value cannot show.
+  - `PeerRing::storage` and `PeerRing::cache` are crate-private, so every read outside core goes
+    through the projection (`Swarm` lookups, `inspect`).
+  - Registry heartbeat intervals must be below 595 s (a registry write's lifetime less the skew
+    tolerance and the fetch-poll budget); a node configured above it refuses to start.
+  - `RecordAuthority` moves from `rings_core::storage::file` to `rings_core::storage`, one type
+    whose shared law is the decode law. IndexedDB stores take one too:
+    `IdbStorage::new_with_cap_and_name` is disposable and the new
+    `IdbStorage::new_with_cap_name_and_authority` takes the authority; the browser replay store
+    is authoritative, as on native (#909). An IndexedDB `scan` deletes nothing.
+  - Cutover: the storage wire format changes, so a network upgrades together.
+    - Native: an old carrier holding a tombstone no longer decodes and is retired on first
+      read. One without still decodes, its elements read as the bytes of their old base58
+      text. A data topic serves those as values until the element horizon, `lookupService` and
+      `fetchTopicMessages` included. A relay inbox's held messages fail its witness and are
+      retired undelivered, by its holder's next hand-off or by its recipient's drain, so every
+      message held at the upgrade is lost.
+    - Browser: every non-empty old carrier is refused and retired on first read.
+    - A storage hand-off now skips an entry the receiver cannot admit, without acknowledging
+      it, instead of rejecting its batch; only a placement outside the entry's replica set
+      rejects the batch. So an old carrier holds back no other entry.
+    - Data topics and registries are repopulated by their next writes.
+
+- Make receive-side admission lossless with per-lane credit flow control in the transport (#924).
+
+  **Before.** The transport's node-wide raw-frame gate (256 frames, blind to traffic class)
+  silently dropped frames once full. A storage burst could therefore drop liveness probes and
+  falsely disconnect healthy peers. In the N=50 hotspot sync storm, 38 of 49 probes were dropped.
+
+  **Credit.**
+  - Each of a connection's four lanes is now credit flow controlled. A receiver holds at most
+    `LANE_CREDIT_WINDOW` (16) frames of a lane, and advertises more as its protocol takes frames
+    over, through the new `TransportMessage::Credit(u64)` variant: the cumulative credit of the
+    lane it travels on, idempotent.
+  - A sender holds a custom frame until its lane has credit. The wait is backpressure, not a
+    verdict on the peer: it ends only when credit arrives or the connection generation reaches a
+    terminal state (`LinkCreditClosed`), and never retires a link. A wait that pins a budget is
+    bounded by that budget's purpose: a link-control frame waits at most the session hold, then
+    is dropped. A send that carries a credit reserved on another connection fails with
+    `ForeignCredit`, and a native connection that cannot spawn its credit pump fails with
+    `CreditPumpUnavailable`. A credit whose send fails is sent again after a pause, until the
+    connection is gone. An abandoned wait leaves no registration behind.
+  - `ConnectionInterface::reserve_send_credit` and `SendPermit::with_credit` let a caller wait
+    for credit apart from a send it bounds in time; the wait (`SendCreditWait`) owns only the
+    lane's credit state, so it keeps no connection alive.
+  - A node defers new credit while its connections hold more than
+    `NODE_RECEIVE_SOFT_LIMIT_BYTES` (16 MiB) of received frames, counted in the transport's
+    `NodeReceiveLoad`, which `InnerTransportCallback::new` takes; the release that brings it
+    below the limit advertises what was deferred. The new `ChannelLane::PRIORITY` is never
+    deferred, and core puts DHT control on it, so control traffic never waits for the node's
+    load. The bound is soft; a hard node-wide bound needs credit that can be taken back (#934).
+  - The pure algebra (`rings_transport::core::credit`) is model checked: no honest violation,
+    bounded occupancy, deadlock freedom with deferred advertisements and failed credit sends,
+    completion, and refusal of a flooding sender, each refuted by a broken algebra.
+
+  **Receiving.**
+  - A credit frame is applied on arrival.
+  - Custom frames are queued per lane and handed to the protocol in order, so reading a channel
+    never waits on the protocol.
+  - A frame beyond the advertised credit is refused and reported as invalid.
+  - `InboundFrameCapacity`, its node-wide bounds and `TransportInterface::inbound_frame_capacity`
+    are removed; `InboundFrameAdmission::CapacityExceeded` becomes `CreditExceeded`, and a new
+    `Credit` variant is added.
+  - `admit_inbound_frame` and `prepare_inbound_frame` take the frame's lane.
+  - `InnerTransportCallback::for_transport` becomes `InnerTransportCallback::new`, and
+    `InboundFrameCapacityLease` becomes `InboundCreditLease`.
+  - Remote-created data channels are admitted only by their lane label, once per lane.
+
+  **Core.**
+  - The outbound worker serves only lanes that hold credit, so one lane's backpressure never
+    stalls another.
+  - An inbound lane's progress depends only on local resources (the inbound-locality law of
+    `swarm::transport::egress`). Every send in the protocol context goes through the new
+    `ProtocolEgress`: a handler's forward, report, query or notification, a connection offer it
+    starts, a read repair, a relay hold and a liveness probe take the connection's readiness and
+    their outbound capacity now, are dropped as local backpressure when either is lacking, and
+    return once queued, freeing the inbound event and lane that carried their cause; so a next
+    hop's backpressure never reaches upstream links. The first frame is awaited apart for at
+    most 25 s, credit included; a payload that waits longer is dropped as local backpressure.
+    A send through the Swarm API still returns once its first frame is admitted.
+    `SwarmTransport::send_storage_sync_or_defer` takes its `StorageSyncSend` discipline.
+  - Liveness judges a peer that withholds credit. A probe counts as sent once it is queued, or
+    when it cannot be queued while this end waits for the peer's credit, so a probe the peer's
+    control lane will not take is unanswered and the peer is evicted after the answer window; a
+    peer waited on for credit for the idle interval is probed however recently it sent
+    anything; while this end waits for a peer's credit only the probe's answer answers it, so a
+    peer cannot escape eviction by sending; and no probe waits on its peer, so a starved peer
+    delays no other peer's probe.
+  - The session-link holds of every connection keep at most 256 frames together, since their
+    frames have given their credit back.
+  - A frame the session-link hold keeps gives its transport credit back, so held frames never
+    fill the lane that carries the link-control answer releasing them.
+  - The inbound mailbox makes an arrival wait instead of refusing it, in resource order: first
+    come first served per exhausted resource (a peer's budget, a lane's share, the shared pool)
+    and per peer and lane, so a frame within its lane's reservation, such as DHT control, never
+    waits behind another lane's borrower, and no peer waits behind another peer's budget. The
+    order is `fair_admission::ResourceOrderedQueue`, model checked with stateright.
+
+  **Logging.** Both waits are logged at `warn` as backpressure.
+
+  **Sync storm.**
+  - Its scenarios derive their backlogs from the credit law.
+  - The legacy witness now shows the feedback loop broken at the reassembly barrier: per-lane
+    dispatch bounds the barrier's wait to one hand-over.
+  - The barrier-exemption ablation no longer violates its proposition (#927 evaluates removing
+    the layer).
+  - A new boundary test saturates one lane and conserves every frame.
+
+  **Cutover.** This is a wire change, and part of the storage-entry cutover above.
+
+- Store and send data-topic and relay-inbox elements as bytes, not base58-check text (#926).
+  `Entry::data` is `Vec<Bytes>`; an element is the application's own bytes, and its
+  `ElementDigest` is the Keccak-256 of those bytes. A held relay message is its wire encoding
+  (`HeldMessage::to_element`), and an online-node or onion-exit descriptor its codec encoding
+  (the node-internal `RegistryElement`). The `Encoder`/`Decoder` impls of `OnlineNodeDescriptor`
+  and `OnionExitDescriptor` are removed. `storage_append_data` and `storage_tombstone_data`
+  (core `ChordStorageInterface` and node `Processor`) take `Bytes`, and the entry constructor
+  `(String, Encoded)` becomes `(String, Bytes)`. `ENTRY_PAYLOAD_MAX_BYTES` now bounds element
+  bytes. JSON-RPC `publishMessageToTopic`, `fetchTopicMessages` and `lookupService` still
+  exchange strings, now as the elements' UTF-8. The inspect `StorageValue.data` lists each
+  element as base64 instead of its base58-check text. The browser
+  `Provider.storage_check_cache` returns the whole serialized `Entry`, so its `data` elements
+  are now byte arrays instead of base58 strings, and each of its removes (`crdt.tombstones`),
+  formerly a bare dot, is an `EntryTombstone` of the removed element's `ElementDigest` and its
+  dot. What an element written before this change becomes on each backend is stated in the
+  storage-entry wire cutover above.
+
+- Derive the chunk envelope reserve from the widest frame (#925). `MAX_CHUNK_ENVELOPE_OVERHEAD`
+  drops from a 4096-byte guess to 911 bytes, and `TRANSPORT_CUSTOM_OVERHEAD` from 64 to 4: each
+  is the supremum of what the chunk framer emits, with every field it leaves free at its widest
+  (both delegation slots inline with the widest account and signature, every varint at its
+  maximum), witnessed with equality through the framer itself. The new
+  `MAX_PAYLOAD_ENVELOPE_OVERHEAD` (941) bounds a whole payload's envelope, `reply_via` and the
+  relay aim included, and is the storage hand-off batch's headroom. At a negotiated 8 KiB limit,
+  a chunk now carries about 7.3 KB of data instead of 4032 bytes. The wire format is unchanged.
 
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`

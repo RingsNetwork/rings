@@ -7,6 +7,7 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::future::join_all;
 use jsonrpc_core::types::error::Error;
 use jsonrpc_core::types::error::ErrorCode;
@@ -256,11 +257,8 @@ impl HandleRpc<PublishMessageToTopicRequest, PublishMessageToTopicResponse> for 
         &self,
         req: PublishMessageToTopicRequest,
     ) -> Result<PublishMessageToTopicResponse> {
-        let encoded = req
-            .data
-            .encode()
-            .map_err(|e| Error::invalid_params(format!("Failed to encode data: {e:?}")))?;
-        self.storage_append_data(&req.topic, encoded).await?;
+        self.storage_append_data(&req.topic, Bytes::from(req.data))
+            .await?;
         Ok(PublishMessageToTopicResponse {})
     }
 }
@@ -275,10 +273,7 @@ impl HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse> for Proces
         let entry_key = Entry::gen_did(&req.topic)
             .map_err(|_| Error::invalid_params("Failed to get id of topic"))?;
 
-        self.storage_fetch(entry_key).await?;
-        let result = self.storage_check_cache(entry_key).await;
-
-        let Some(entry) = result else {
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(FetchTopicMessagesResponse { data: vec![] });
         };
 
@@ -286,8 +281,7 @@ impl HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse> for Proces
             .data
             .iter()
             .skip(req.skip as usize)
-            .map(|v| v.decode())
-            .filter_map(|v| v.ok())
+            .filter_map(|element| String::from_utf8(element.to_vec()).ok())
             .collect::<Vec<String>>();
 
         Ok(FetchTopicMessagesResponse { data })
@@ -310,18 +304,14 @@ impl HandleRpc<LookupServiceRequest, LookupServiceResponse> for Processor {
         let entry_key = Entry::gen_did(&req.name)
             .map_err(|_| Error::invalid_params("Failed to get id of topic"))?;
 
-        self.storage_fetch(entry_key).await?;
-        let result = self.storage_check_cache(entry_key).await;
-
-        let Some(entry) = result else {
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(LookupServiceResponse { dids: vec![] });
         };
 
         let dids = entry
             .data
             .iter()
-            .map(|v| v.decode())
-            .filter_map(|v| v.ok())
+            .filter_map(|element| String::from_utf8(element.to_vec()).ok())
             .collect::<Vec<String>>();
 
         Ok(LookupServiceResponse { dids })

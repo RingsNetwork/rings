@@ -9,6 +9,9 @@ use rings_core::dht::Chord;
 use rings_core::dht::PeerRingAction;
 #[cfg(feature = "dummy")]
 use rings_core::dht::PeerRingRemoteAction;
+#[cfg(feature = "dummy")]
+use rings_core::message::e2e;
+use rings_core::message::e2e::E2eStreamFrame;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::callback::SwarmEvent;

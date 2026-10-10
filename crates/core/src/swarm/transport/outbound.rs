@@ -24,11 +24,12 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::Weak;
 
+use class_credit::ClassCredit;
+use class_credit::CreditWaitFuture;
 use futures::future::FutureExt;
-use futures::pin_mut;
-use futures::select;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use queue::CLASSES;
 use rings_transport::delivery::DeliveryFuture;
 
 use super::delivery::await_delivery_or_cancel;
@@ -51,6 +52,7 @@ use crate::utils::get_epoch_ms;
 
 mod admission;
 mod capacity;
+mod class_credit;
 mod link_state;
 mod mailbox;
 mod measurement;
@@ -62,6 +64,7 @@ mod simulation_pressure;
 mod spawn;
 #[cfg(test)]
 mod test_trace;
+mod worker_input;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use link_state::LINK_CONTROL_IN_FLIGHT_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -83,6 +86,7 @@ pub(super) use admission::DetachedAdmissionCancel;
 pub(super) use admission::DetachedAdmissionClaim;
 use capacity::GlobalTransferCapacity;
 use capacity::TransferCapacity;
+use capacity::TransferCapacityAnchor;
 pub(super) use capacity::TransferCapacityPermit;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
@@ -92,6 +96,7 @@ pub(crate) use capacity::OUTBOUND_DATA_TRANSFER_CAPACITY;
 pub(crate) use capacity::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
+use link_state::CreditStall;
 pub(super) use link_state::LinkControlPermit;
 use link_state::PeerLinkState;
 use mailbox::MailboxReceiver;
@@ -209,28 +214,6 @@ struct OutboundPeerState {
     // Strong lifetime anchor; the peer registry intentionally stores only a Weak reference.
     _capacity_anchor: TransferCapacityAnchor,
     stop: StopSource,
-}
-
-struct TransferCapacityAnchor {
-    _capacity: Arc<TransferCapacity>,
-}
-
-impl TransferCapacityAnchor {
-    fn new(capacity: Arc<TransferCapacity>) -> Self {
-        Self {
-            _capacity: capacity,
-        }
-    }
-
-    #[cfg(all(test, not(target_family = "wasm")))]
-    fn try_acquire(
-        &self,
-        peer: Did,
-        class: TransferClass,
-        bytes: usize,
-    ) -> Result<TransferCapacityPermit> {
-        self._capacity.try_acquire(peer, class, bytes)
-    }
 }
 
 impl OutboundPeerHandle {
@@ -386,7 +369,7 @@ impl OutboundSchedulers {
         let (measurements, measurement_receiver) =
             MeasurementRecorder::channel(self.measure.clone(), peer);
         spawn_worker(
-            OutboundWorker::new(receiver, stop, measurements, peer, link.announced),
+            OutboundWorker::new(receiver, stop, measurements, peer, link),
             measurement_receiver,
         )?;
         registry.peers.insert(peer, handle.clone());
@@ -401,6 +384,17 @@ impl OutboundSchedulers {
     ) -> Result<TransferCapacityPermit> {
         let capacity = self.lock_registry().capacity(peer, &self.global_capacity);
         capacity.acquire(peer, class, bytes).await
+    }
+
+    /// [`Self::reserve`] without waiting; see [`TransferCapacity::admit_now`].
+    pub(super) fn reserve_now(
+        &self,
+        peer: Did,
+        class: TransferClass,
+        bytes: usize,
+    ) -> Result<TransferCapacityPermit> {
+        let capacity = self.lock_registry().capacity(peer, &self.global_capacity);
+        capacity.admit_now(peer, class, bytes)
     }
 
     pub(super) fn shutdown(&self, peer: Did) {
@@ -490,6 +484,15 @@ struct OutboundWorker {
     active: Option<RunnableTransfer<QueuedTransfer>>,
     announced: SharedAnnouncedDelegations,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
+    /// The transport credit of each class's lane.
+    credits: [ClassCredit; TransferClass::COUNT],
+    /// Pending credit reservations: at most one live per class; one its slot abandoned when the
+    /// generation changed resolves into nothing.
+    credit_waits: FuturesUnordered<CreditWaitFuture>,
+    /// Since when this worker has waited for credit, published for liveness.
+    credit_stall: CreditStall,
+    /// The identity of the next credit reservation.
+    next_credit_wait: u64,
     /// When a delivery to this peer last settled: the stall deadline's reference.
     delivery_progress: DeliveryProgress,
     measurements: MeasurementRecorder,
@@ -505,7 +508,7 @@ impl OutboundWorker {
         stop: StopSource,
         measurements: MeasurementRecorder,
         peer: Did,
-        announced: SharedAnnouncedDelegations,
+        link: PeerLinkState,
     ) -> Self {
         #[cfg(not(test))]
         let _ = peer;
@@ -519,8 +522,12 @@ impl OutboundWorker {
             receiver,
             ready: TransferQueues::default(),
             active: None,
-            announced,
+            announced: link.announced,
             deliveries: FuturesUnordered::new(),
+            credits: std::array::from_fn(|_| ClassCredit::Idle),
+            credit_waits: FuturesUnordered::new(),
+            credit_stall: link.credit_stall,
+            next_credit_wait: 0,
             delivery_progress: DeliveryProgress::default(),
             measurements,
             stop,
@@ -553,7 +560,12 @@ impl OutboundWorker {
                 self.shutdown();
                 return;
             }
-            if let Some(transfer) = self.ready.pop() {
+            self.acquire_credits();
+            let credited = CLASSES.map(|class| self.grants_a_frame(class));
+            let transfer = self
+                .ready
+                .pop(|class| credited.get(class.index()).copied().unwrap_or(false));
+            if let Some(transfer) = transfer {
                 self.active = Some(transfer);
                 self.admit_active_frame().await;
                 continue;
@@ -812,6 +824,7 @@ impl OutboundWorker {
                 bytes,
                 context,
             } => {
+                let credit = self.take_credit(class);
                 let Some(runnable) = self.active.as_ref() else {
                     tracing::error!("outbound worker lost its active transfer before send");
                     return;
@@ -822,6 +835,7 @@ impl OutboundWorker {
                 let admission = send_data_with_timeout(
                     &transfer.admitted,
                     bytes,
+                    credit,
                     &transfer.permit,
                     &transfer.stop,
                     transfer.detached_admission.as_ref(),
@@ -952,37 +966,6 @@ impl OutboundWorker {
             .await;
             DeliveryEvent { id, class, result }
         })
-    }
-
-    async fn wait_for_input(&mut self) {
-        if self.deliveries.is_empty() {
-            match self.receiver.next().await {
-                Some(command) => self.handle_commands([command]),
-                None => self.input_closed = true,
-            }
-            return;
-        }
-
-        enum WorkerInput {
-            Command(Option<OutboundCommand>),
-            Delivery(Option<DeliveryEvent>),
-        }
-
-        let input = {
-            let command = self.receiver.next().fuse();
-            let delivery = self.deliveries.next().fuse();
-            pin_mut!(command, delivery);
-            select! {
-                command = command => WorkerInput::Command(command),
-                delivery = delivery => WorkerInput::Delivery(delivery),
-            }
-        };
-        match input {
-            WorkerInput::Command(Some(command)) => self.handle_commands([command]),
-            WorkerInput::Command(None) => self.input_closed = true,
-            WorkerInput::Delivery(Some(event)) => self.handle_delivery(event),
-            WorkerInput::Delivery(None) => {}
-        }
     }
 }
 

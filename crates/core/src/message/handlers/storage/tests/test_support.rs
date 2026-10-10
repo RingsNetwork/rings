@@ -1,5 +1,6 @@
 use std::panic::AssertUnwindSafe;
 
+use bytes::Bytes;
 use futures::FutureExt;
 use tokio::time::timeout;
 use tokio::time::Duration;
@@ -20,7 +21,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessorReport;
-use crate::message::Encoder;
 use crate::message::HopBudget;
 use crate::message::MessagePayload;
 use crate::message::MessageRelay;
@@ -408,8 +408,8 @@ pub(super) async fn assert_cached_data_values(
         .ok_or_else(|| Error::InvalidMessage("expected cached entry".to_string()))?;
     let expected_data = expected
         .iter()
-        .map(|value| value.to_string().encode())
-        .collect::<Result<Vec<_>>>()?;
+        .map(|value| Bytes::from(value.to_string()))
+        .collect::<Vec<_>>();
 
     assert_eq!(entry.did, entry_key);
     assert_eq!(entry.kind, EntryKind::Data);

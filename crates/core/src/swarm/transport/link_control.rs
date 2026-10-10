@@ -16,7 +16,12 @@
 //!   link both ends are still using. The send runs in a task of its own, refused when no
 //!   runtime can carry one, bounded by the same accept timeout as every frame, and judged as
 //!   every frame is: a send that became irrevocable and timed out retires the connection
-//!   through the transport's termination path, never by dropping the send.
+//!   through the transport's termination path, never by dropping the send. Like every frame it
+//!   is charged to its lane's transport credit, which the task reserves before the timed send;
+//!   the peer's backpressure delays the task for at most
+//!   [`SESSION_HOLD_TIMEOUT`](super::SESSION_HOLD_TIMEOUT), the longest the frame is of use,
+//!   after which the frame is dropped and the connection kept: the frame is idempotent, and a
+//!   peer that grants no credit is liveness's to judge.
 //! - Bound law: nothing here reserves lane or memory capacity. Each inbound frame causes at
 //!   most two of these frames (a confirmation or question per delegation slot of a frame this
 //!   end verified, held, or dropped for want of room, or one answer per question), and at
@@ -32,6 +37,8 @@
 //! on the inbound clock. They are one clock outside tests.
 
 use bytes::Bytes;
+use futures::future::select;
+use futures::future::Either;
 
 use super::delivery::send_data_with_timeout;
 use super::delivery::ChunkSendPermit;
@@ -44,6 +51,7 @@ use super::outbound::TransferClass;
 use super::AdmittedConnection;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
+use super::SESSION_HOLD_TIMEOUT;
 use crate::delegation::DelegationDigest;
 use crate::error::Error;
 use crate::error::Result;
@@ -51,6 +59,7 @@ use crate::lifecycle::StopToken;
 use crate::message::LinkControl;
 use crate::swarm::detached::spawn_detached;
 use crate::utils::get_epoch_ms;
+use crate::utils::sleep;
 
 /// The send context every link-control frame is logged and judged under.
 const LINK_CONTROL_SEND_CONTEXT: &str = "link_control";
@@ -69,15 +78,35 @@ async fn deliver_link_control(
     let stop = TransferStop::new(StopToken::never());
     // Link control travels on the DHT-control lane. It needs no order against data frames:
     // a frame whose delegation reference is not yet announced waits in the session-link hold.
+    let lane = channel_lane(TransferClass::DhtControl);
+    // Law (bounded by its purpose): the frame holds its link-control permit while it waits for
+    // credit, so the wait is bounded by `SESSION_HOLD_TIMEOUT`, by when the peer's hold has
+    // dropped any frame this one answers and a later answer has no use. The frame is then
+    // lost, as a datagram may be, and the session-link laws repair a lost link-control frame;
+    // nothing is retired, since a slow receiver is backpressure, not a dead peer.
+    let reserve = std::pin::pin!(admitted.connection().reserve_send_credit(lane));
+    let expiry = std::pin::pin!(sleep(SESSION_HOLD_TIMEOUT));
+    let credit = match select(reserve, expiry).await {
+        Either::Left((Ok(credit), _)) => credit,
+        Either::Left((Err(error), _)) => {
+            tracing::debug!(peer = %peer, error = ?error, "link control found no credit");
+            return;
+        }
+        Either::Right(_) => {
+            tracing::debug!(peer = %peer, "link control waited past the session hold for credit");
+            return;
+        }
+    };
     let progress = send_data_with_timeout(
         &admitted,
         frame,
+        Some(credit),
         &ChunkSendPermit::Always,
         &stop,
         None,
         FrameTarget {
             did: peer,
-            lane: channel_lane(TransferClass::DhtControl),
+            lane,
             context: LINK_CONTROL_SEND_CONTEXT,
         },
     )

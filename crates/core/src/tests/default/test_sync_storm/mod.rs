@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
@@ -23,11 +24,10 @@ use crate::dht::PeerRingAction;
 use crate::dht::StorageRepairOutcome;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
-use crate::ecc::SecretKey;
+use crate::ecc::tests::deterministic_key;
 use crate::error::Error;
 use crate::fair_admission::retained_wire_bytes;
 use crate::message::test_probe_request;
-use crate::message::Encoder;
 use crate::message::Message;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::simulation::model::SimAction;
@@ -50,9 +50,7 @@ use crate::simulation::ScheduledDeliveryClass;
 use crate::simulation::SimulationRuntimeGuard;
 use crate::simulation::CONTROL_DEADLINE_MS;
 use crate::storage::MemStorage;
-use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::referenced_slots_for_test;
-use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::LinkDirection;
 use crate::swarm::transport::StorageSyncOutcome;
 
@@ -62,7 +60,6 @@ use crate::swarm::transport::OUTBOUND_CONTROL_BURST;
 use crate::swarm::transport::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
-use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::prepare_node;
 use crate::tests::default::Node;
@@ -101,146 +98,8 @@ enum ScenarioTopology {
 /// network simulation exercised by the surrounding scenarios.
 mod finger_schedule_tests;
 
-/// Five active dummy transports witness that revalidating the local successor
-/// interval stays local instead of traversing the ring and reporting back.
-#[tokio::test(start_paused = true)]
-async fn test_five_node_local_successor_range_emits_no_finger_submission() {
-    let runtime = SimulationRuntimeGuard::enter(767, TEST_EPOCH_MS, ProtectionProfile::ALL_ENABLED)
-        .expect("local-range simulation runtime must install");
-    let nodes = build_finger_nodes(&[3, 1, 10, 17, 29]);
-    establish_topology(&runtime, &nodes, ScenarioTopology::Ring).await;
-    install_chord_view(&nodes, ScenarioTopology::Ring);
-    let observer = sorted_indices(&nodes).first().copied().unwrap_or(0);
-    // Cancel the prepared local-successor request so the next convergence turn
-    // exercises retry scheduling while the range remains locally provable.
-    let request = nodes[observer]
-        .dht()
-        .lock_finger()
-        .expect("observer finger table must be readable")
-        .prepare_request_for_test(0)
-        .expect("local successor slot must be a valid test request");
-    nodes[observer]
-        .dht()
-        .cancel_finger_lookup(request)
-        .expect("test request cancellation must succeed");
-    runtime
-        .advance(Duration::from_millis(2_000))
-        .await
-        .expect("finger retry floor must advance on the simulation clock");
-
-    reset_outbound_submit_count_for_test();
-    nodes[observer]
-        .swarm
-        .stabilizer()
-        .converge_fingers_for_simulation()
-        .await
-        .expect("local successor range convergence must remain local");
-    drain_untraced(&runtime, &nodes).await;
-    assert_eq!(outbound_submit_count_for_test(), 0);
-
-    let generations = connection_endpoints(&nodes)
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    close_nodes(&runtime, &nodes, &generations).await;
-    drop(nodes);
-    drop(runtime);
-}
-
-/// Production-path budget witness for one lookup that discovers a missing
-/// finger peer. The measured submissions include lookup routing, its report,
-/// and every admission follow-up caused while the new connection quiesces.
-#[tokio::test(start_paused = true)]
-async fn test_finger_discovery_measures_the_complete_transport_cascade() {
-    /// Maximum control submissions allowed for this three-node convergence fixture.
-    ///
-    /// The bound includes routed lookup, proof report, connection admission,
-    /// and every resulting topology follow-up before the fixture quiesces.
-    const THREE_NODE_FIXTURE_MAX_CONTROL_SUBMISSIONS: usize = 20;
-
-    let runtime = SimulationRuntimeGuard::enter(768, TEST_EPOCH_MS, ProtectionProfile::ALL_ENABLED)
-        .expect("finger simulation runtime must install");
-    let nodes = build_finger_nodes(&[3, 1, 10]);
-    let (observer, seed, candidate) = finger_discovery_path(&nodes);
-
-    // Build a two-hop knowledge path: observer can route to seed, seed knows
-    // candidate, and observer has not already opened that connection.
-    manually_establish_connection(&nodes[observer].swarm, &nodes[seed].swarm).await;
-    drain_bootstrap(&runtime, &nodes).await;
-    manually_establish_connection(&nodes[seed].swarm, &nodes[candidate].swarm).await;
-    drain_bootstrap(&runtime, &nodes).await;
-    assert!(nodes[seed]
-        .dht()
-        .successors()
-        .list()
-        .expect("seed successor view must be readable")
-        .contains(&nodes[candidate].did()));
-    assert!(nodes[observer]
-        .swarm
-        .transport
-        .get_connection(nodes[candidate].did())
-        .is_none());
-
-    reset_outbound_submit_count_for_test();
-    nodes[observer]
-        .swarm
-        .stabilizer()
-        .converge_fingers_for_simulation()
-        .await
-        .expect("first routed production finger range must start");
-    drain_untraced(&runtime, &nodes).await;
-    // This is the complete production cascade, not just the lookup message and
-    // its report.
-    let submissions = outbound_submit_count_for_test();
-
-    assert!(nodes[observer]
-        .swarm
-        .transport
-        .get_connection(nodes[candidate].did())
-        .is_some(),
-        "candidate was not connected: observer_fingers={:?} seed_successors={:?} submissions={submissions}",
-        nodes[observer]
-            .dht()
-            .lock_finger()
-            .expect("observer finger table must be readable")
-            .list(),
-        nodes[seed]
-            .dht()
-            .successors()
-            .list()
-            .expect("seed successors must be readable"));
-    assert!(
-        submissions <= THREE_NODE_FIXTURE_MAX_CONTROL_SUBMISSIONS,
-        "three-node finger discovery emitted {submissions} control submissions; fixture regression limit is {THREE_NODE_FIXTURE_MAX_CONTROL_SUBMISSIONS}"
-    );
-
-    let generations = connection_endpoints(&nodes)
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    close_nodes(&runtime, &nodes, &generations).await;
-    drop(nodes);
-    drop(runtime);
-}
-
-/// Select observer -> seed -> candidate such that the candidate sits in a
-/// farther finger range than the seed. That makes the fixture prove routed
-/// discovery instead of a direct successor/local-range update.
-fn finger_discovery_path(nodes: &[Node]) -> (usize, usize, usize) {
-    let sorted = sorted_indices(nodes);
-    let observer = sorted.first().copied().unwrap_or(0);
-    for (seed_position, seed) in sorted.iter().copied().enumerate().skip(1) {
-        let seed_bits = crate::dht::topology::dist(nodes[observer].did(), nodes[seed].did()).bits();
-        for candidate in sorted.iter().copied().skip(seed_position.saturating_add(1)) {
-            let candidate_bits =
-                crate::dht::topology::dist(nodes[observer].did(), nodes[candidate].did()).bits();
-            if candidate_bits > seed_bits {
-                return (observer, seed, candidate);
-            }
-        }
-    }
-    panic!("deterministic node fixture must contain two distinct finger ranges");
-}
+/// Finger discovery through the real transport: what a revalidation sends, and what it costs.
+mod finger_discovery;
 
 impl ScenarioTopology {
     const fn name(self) -> &'static str {
@@ -459,15 +318,6 @@ fn model_class(class: ScheduledDeliveryClass) -> Option<SimTransferClass> {
     }
 }
 
-fn deterministic_key(index: usize) -> SecretKey {
-    let mut bytes = [0_u8; 32];
-    let scalar = u64::try_from(index)
-        .expect("node index must fit u64")
-        .saturating_add(1);
-    bytes[24..].copy_from_slice(&scalar.to_be_bytes());
-    SecretKey::from_bytes(bytes).expect("positive test scalar must be a valid secret key")
-}
-
 async fn build_nodes(count: usize) -> Vec<Node> {
     let mut nodes = Vec::with_capacity(count);
     for index in 0..count {
@@ -638,9 +488,10 @@ fn entry_owned_by(owner: &Node, label: &str) -> PlacedEntry {
             .find_storage_owner(key)
             .expect("test owner lookup must succeed");
         if matches!(action, PeerRingAction::Some(_)) {
-            let data = vec![u8::try_from(nonce % 251).expect("byte must fit"); ENTRY_PAYLOAD_BYTES]
-                .encode()
-                .expect("test payload must encode");
+            let data = Bytes::from(vec![
+                u8::try_from(nonce % 251).expect("byte must fit");
+                ENTRY_PAYLOAD_BYTES
+            ]);
             return PlacedEntry::new(key, live_entry(key, vec![data], EntryKind::Data));
         }
     }
@@ -940,9 +791,7 @@ async fn begin_liveness_under_storm(
             .await
             .expect("real liveness probe pass must succeed");
     }
-    let probes = runtime
-        .new_pending_deliveries()
-        .expect("real liveness probes must classify");
+    let probes = new_deliveries_with_controls(runtime, driver.endpoints.len()).await;
     driver.observe_pending(runtime, &probes);
     let control_probe_count = probes
         .iter()
@@ -1069,9 +918,10 @@ use artifacts::persist_trace_artifact;
 use artifacts::runtime_replay_snapshot;
 use artifacts::FailureState;
 use artifacts::ScenarioFailureGuard;
-use legacy::legacy_feedback_loop_state;
+use legacy::legacy_storm_state;
 use pressure::exercise_barrier_control_exemption;
 use pressure::exercise_bounded_control_burst;
 use pressure::exercise_per_entry_yield;
+use pressure::new_deliveries_with_controls;
 use scenario::run_scenario;
 use trace::TraceDriver;

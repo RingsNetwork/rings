@@ -79,6 +79,8 @@ mod test_admission;
 mod test_capacity;
 #[cfg(not(target_family = "wasm"))]
 mod test_capacity_handoff;
+#[cfg(all(not(target_family = "wasm"), feature = "native-webrtc"))]
+mod test_credit_pump;
 #[cfg(not(target_family = "wasm"))]
 mod test_invalid_report;
 mod test_wire;

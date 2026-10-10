@@ -28,6 +28,7 @@ use crate::message::WirePayload;
 use crate::swarm::session_link::FrameArrival;
 use crate::swarm::session_link::ReferencedDelegations;
 use crate::swarm::session_link::REFERENCED_TABLE_CAPACITY;
+use crate::tests::splitmix64;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 
@@ -112,7 +113,9 @@ fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
         let now_ms = get_epoch_ms();
         match LinkFrame::from_wire(&wire) {
             Ok(LinkFrame::Payload(frame)) => {
-                if let Ok(FrameArrival::Resolved(resolved)) = receiver.arrive(frame, case, now_ms) {
+                if let Ok(FrameArrival::Resolved(resolved)) =
+                    receiver.arrive(frame, case, now_ms, true)
+                {
                     judge_payload(&resolved.payload);
                     if resolved
                         .payload
@@ -386,12 +389,4 @@ fn fold_label(seed: u64, label: &str) -> u64 {
     label
         .bytes()
         .fold(seed, |state, byte| splitmix64(state ^ u64::from(byte)))
-}
-
-fn splitmix64(mut state: u64) -> u64 {
-    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut mixed = state;
-    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    mixed ^ (mixed >> 31)
 }

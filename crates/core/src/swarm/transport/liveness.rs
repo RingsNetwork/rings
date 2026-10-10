@@ -1,6 +1,11 @@
 use std::collections::BTreeMap;
 use std::sync::MutexGuard;
 
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+use rings_transport::core::pool::ChannelLane;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+use rings_transport::core::transport::LaneCreditReservation;
+
 use super::pending::ActiveConnectionSet;
 use crate::dht::Did;
 use crate::error::Error;
@@ -34,14 +39,20 @@ struct PendingProbe {
 #[derive(Clone, Copy)]
 enum PeerLivenessObservation {
     Connected,
-    Inbound,
+    /// An authenticated inbound payload, observed while this end does (`credit_stalled`) or
+    /// does not wait for the peer's credit.
+    Inbound {
+        credit_stalled: bool,
+    },
 }
 
 impl PeerLivenessObservation {
     fn apply(self, liveness: &mut PeerLivenessMap, peer: Did, generation: u64, now_ms: i64) {
         match self {
             Self::Connected => liveness.mark_connected(peer, generation, now_ms),
-            Self::Inbound => liveness.mark_inbound(peer, generation, now_ms),
+            Self::Inbound { credit_stalled } => {
+                liveness.mark_inbound(peer, generation, now_ms, credit_stalled)
+            }
         }
     }
 }
@@ -58,13 +69,32 @@ impl PeerLiveness {
         }
     }
 
-    fn mark_inbound(&mut self, now_ms: i64) {
+    /// Record an authenticated inbound payload at `now_ms`.
+    ///
+    /// Law (progress): a probe is answered by its answer ([`Self::consume_pending_probe`]), or
+    /// by any inbound payload while this end waits for none of the peer's credit. While this end
+    /// waits (`credit_stalled`), the peer's own traffic proves only that it can send, not that it
+    /// takes this end's control traffic, so it leaves an unanswered probe unanswered: a peer that
+    /// withholds credit cannot escape eviction by sending.
+    fn mark_inbound(&mut self, now_ms: i64, credit_stalled: bool) {
         self.last_inbound_ms = now_ms;
-        self.unanswered_probe_since_ms = None;
+        if !credit_stalled {
+            self.unanswered_probe_since_ms = None;
+        }
     }
 
-    fn should_probe(&self, now_ms: i64) -> bool {
-        now_ms.saturating_sub(self.last_inbound_ms) >= PEER_LIVENESS_IDLE_MS
+    /// Whether the peer is due a probe at `now_ms`: it has sent nothing for
+    /// [`PEER_LIVENESS_IDLE_MS`], or this end has waited that long for its credit
+    /// (`credit_stalled_since_ms`), and no probe was sent within that interval.
+    ///
+    /// A credit stall makes a probe due however recently the peer sent anything: the probe
+    /// rides the control lane, so a peer that withholds only a data lane's credit answers it,
+    /// and one that withholds the control lane's leaves it unanswered and is evicted.
+    fn should_probe(&self, now_ms: i64, credit_stalled_since_ms: Option<i64>) -> bool {
+        let idle = now_ms.saturating_sub(self.last_inbound_ms) >= PEER_LIVENESS_IDLE_MS;
+        let stalled = credit_stalled_since_ms
+            .is_some_and(|since_ms| now_ms.saturating_sub(since_ms) >= PEER_LIVENESS_IDLE_MS);
+        (idle || stalled)
             && self
                 .last_probe_ms
                 .map(|last_probe_ms| now_ms.saturating_sub(last_probe_ms) >= PEER_LIVENESS_IDLE_MS)
@@ -99,11 +129,14 @@ impl PeerLiveness {
         }
     }
 
+    /// Consume the pending probe `(tx_id, request)` on its answer, which answers every probe
+    /// sent before it (see [`Self::mark_inbound`]).
     fn consume_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) -> bool {
         if self.pending_probe != Some(PendingProbe { tx_id, request }) {
             return false;
         }
         self.pending_probe = None;
+        self.unanswered_probe_since_ms = None;
         true
     }
 
@@ -147,10 +180,10 @@ impl PeerLivenessMap {
             .insert(peer, PeerLiveness::new(generation, now_ms));
     }
 
-    fn mark_inbound(&mut self, peer: Did, generation: u64, now_ms: i64) {
+    fn mark_inbound(&mut self, peer: Did, generation: u64, now_ms: i64, credit_stalled: bool) {
         match self.peers.get_mut(&peer) {
             Some(liveness) if liveness.generation == generation => {
-                liveness.mark_inbound(now_ms);
+                liveness.mark_inbound(now_ms, credit_stalled);
             }
             _ => self.mark_connected(peer, generation, now_ms),
         }
@@ -172,6 +205,7 @@ impl PeerLivenessMap {
         &mut self,
         active: &ActiveConnectionSet,
         now_ms: i64,
+        credit_stalled_since_ms: impl Fn(Did) -> Option<i64>,
     ) -> Vec<PendingConnectionAttempt> {
         self.retain_active(active);
         for attempt in active.iter() {
@@ -183,9 +217,9 @@ impl PeerLivenessMap {
         active
             .iter()
             .filter(|attempt| {
-                self.peers
-                    .get(&attempt.peer)
-                    .is_some_and(|liveness| liveness.should_probe(now_ms))
+                self.peers.get(&attempt.peer).is_some_and(|liveness| {
+                    liveness.should_probe(now_ms, credit_stalled_since_ms(attempt.peer))
+                })
             })
             .collect()
     }
@@ -357,9 +391,13 @@ impl SwarmTransport {
     }
 
     pub(crate) fn mark_peer_liveness_inbound(&self, attempt: PendingConnectionAttempt) {
-        if let Err(error) =
-            self.observe_peer_liveness(attempt, PeerLivenessObservation::Inbound, || {})
-        {
+        // Read before the liveness lock: the outbound registry is never locked under it.
+        let credit_stalled = self.credit_stalled(attempt.peer);
+        if let Err(error) = self.observe_peer_liveness(
+            attempt,
+            PeerLivenessObservation::Inbound { credit_stalled },
+            || {},
+        ) {
             tracing::warn!(
                 "failed to mark liveness for inbound peer {} generation {}: {error}",
                 attempt.peer,
@@ -368,13 +406,31 @@ impl SwarmTransport {
         }
     }
 
+    /// Whether this end waits for any of `peer`'s credit.
+    pub(crate) fn credit_stalled(&self, peer: Did) -> bool {
+        self.outbound_schedulers
+            .credit_stalled_since_ms(peer)
+            .is_some()
+    }
+
     pub(crate) fn liveness_probe_candidates(
         &self,
         now_ms: i64,
     ) -> Result<Vec<PendingConnectionAttempt>> {
         self.with_connection_lifecycle(|| {
             let active = self.active_connections()?;
-            Ok(self.peer_liveness()?.probe_candidates(&active, now_ms))
+            // Read before the liveness lock: the outbound registry is never locked under it.
+            let stalls = active
+                .iter()
+                .filter_map(|attempt| {
+                    self.outbound_schedulers
+                        .credit_stalled_since_ms(attempt.peer)
+                        .map(|since_ms| (attempt.peer, since_ms))
+                })
+                .collect::<BTreeMap<_, _>>();
+            Ok(self
+                .peer_liveness()?
+                .probe_candidates(&active, now_ms, |peer| stalls.get(&peer).copied()))
         })
     }
 
@@ -516,6 +572,33 @@ impl SwarmTransport {
         })
     }
 
+    /// Hold every credit `peer` has granted this end on `lane`, as a peer that withholds the
+    /// lane's credit leaves this end: the reservations give it back when dropped.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn hold_lane_credit_for_test(
+        &self,
+        peer: Did,
+        lane: ChannelLane,
+    ) -> Result<Vec<LaneCreditReservation>> {
+        use futures::FutureExt;
+
+        let connection = self
+            .admitted_connection(peer)?
+            .ok_or(Error::SwarmMissDidInTable(peer))?;
+        let mut held = Vec::new();
+        while let Some(credit) = connection.reserve_send_credit(lane).now_or_never() {
+            held.push(credit?);
+        }
+        Ok(held)
+    }
+
+    /// Record that this end has waited for `peer`'s credit since `since_ms`.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn force_credit_stall_for_test(&self, peer: Did, since_ms: i64) {
+        self.outbound_schedulers
+            .force_credit_stall_for_test(peer, since_ms);
+    }
+
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn force_peer_last_inbound_at(&self, peer: Did, last_inbound_ms: i64) -> Result<()> {
         self.with_connection_lifecycle(|| {
@@ -589,5 +672,31 @@ mod tests {
         liveness.set_pending_probe(replacement_tx_id, replacement);
         liveness.cancel_pending_probe(tx_id, request);
         assert!(liveness.consume_pending_probe(replacement_tx_id, replacement));
+    }
+
+    /// Law (progress), #913 R8 M1: while this end waits for the peer's credit, the peer's own
+    /// traffic leaves an unanswered probe unanswered, so the window still expires, and only the
+    /// probe's answer clears it; without a stall any inbound payload clears it.
+    #[test]
+    fn test_only_the_answer_clears_an_unanswered_probe_while_credit_is_stalled() {
+        // Two distinct probes, each with a fresh nonce, as production issues them.
+        let epoch = crate::message::ProvisionalEpoch::from_unix_seconds(0);
+        let stalled = ProbeRequest::random_for_epoch(epoch);
+        let flowing = ProbeRequest::random_for_epoch(epoch);
+        let (stalled_tx, flowing_tx) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let mut liveness = PeerLiveness::new(1, 10);
+
+        liveness.set_pending_probe(stalled_tx, stalled);
+        assert!(liveness.mark_matching_probe_sent(11, stalled_tx, stalled));
+        liveness.mark_inbound(12, true);
+        assert_eq!(liveness.unanswered_probe_since_ms, Some(11));
+        assert!(liveness.expiry(11 + PEER_LIVENESS_TIMEOUT_MS).is_some());
+        assert!(liveness.consume_pending_probe(stalled_tx, stalled));
+        assert_eq!(liveness.unanswered_probe_since_ms, None);
+
+        liveness.set_pending_probe(flowing_tx, flowing);
+        assert!(liveness.mark_matching_probe_sent(13, flowing_tx, flowing));
+        liveness.mark_inbound(14, false);
+        assert_eq!(liveness.unanswered_probe_since_ms, None);
     }
 }

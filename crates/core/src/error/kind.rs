@@ -373,6 +373,17 @@ pub enum Error {
     #[error("ECDSA Invalid recover Id {0}")]
     InvalidRecoverId(u8),
 
+    /// A signature is not the exact length its algorithm's signatures have.
+    #[error("A {algorithm} signature has {expected} bytes, not {actual}")]
+    InvalidSignatureLength {
+        /// The signature algorithm.
+        algorithm: &'static str,
+        /// The length its signatures have.
+        expected: usize,
+        /// The length received.
+        actual: usize,
+    },
+
     /// Signature encoding is valid but not in its canonical form.
     #[error("Signature is not canonical")]
     NonCanonicalSignature,

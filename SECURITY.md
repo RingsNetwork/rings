@@ -104,9 +104,23 @@ and expire, but a party with many identities can try to hold several positions o
   handshake methods `nodeDid` and `answerOffer` are public. The external listener binds a
   non-loopback address only on opt-in, and browser requests must come from configured origins.
 - **DHT storage.** Retention is capped at the maximum TTL; carriers are bounded in count and
-  size; versions too far ahead of the receiver's clock are rejected. A relay inbox is
-  verified by its owner, readable and removable only by its recipient, and capped at 64
-  messages. Values are stored in the clear.
+  size; versions too far ahead of the receiver's clock are rejected. Each data-topic element
+  expires at its own horizon, and a removal is collected only once every write it covers has
+  expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
+  while the carrier is retained. A relay inbox is verified by its owner, readable and
+  removable by its recipient, and capped at 64 messages; its holder removes only an element
+  that fails the witness for good, which no write could have admitted. Values are stored in
+  the clear.
+- **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
+  holds at most 16 frames per lane, refuses and reports a frame beyond its advertised credit,
+  and refuses no honest frame for want of credit. Overload is pushed back to the sender and
+  every wait is logged. Above 16 MiB of received frames a node defers new credit on every
+  lane but the control lane, a soft bound; the hard bound is per connection (4 MiB), so a
+  node's worst case grows with its admitted connections (#934). A peer that withholds the
+  control lane's credit is evicted by liveness within its idle interval plus the answer
+  window, whether or not it keeps sending, and one peer's backpressure never holds another's
+  link: every send a handler makes (a forward, a report, a query) returns once queued.
+  [Details](docs/src/advanced-topic/transport-flow-control.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.
 - **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures
@@ -128,3 +142,9 @@ and expire, but a party with many identities can try to hold several positions o
 - #912: the browser replay store uses IndexedDB's default durability hint.
 - #915: a missing replay record restarts its stream from the first sequence.
 - #916: durable replay writes cap a node near 50 transitions per second on macOS.
+- #918: a registry holds about 25 KB of tombstones per registrant at the default heartbeat.
+- #920: storage byte-budget eviction can drop a removal before it is collected, resurrecting
+  the values it covered.
+- #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal
+  received by sync can hold a topic live for up to the horizon past the receiver's clock.
+- #932: a reassembled message whose full-size mailbox charge does not fit is dropped.

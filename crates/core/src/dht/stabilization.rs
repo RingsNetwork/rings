@@ -6,13 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::future::ready;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
-use futures::stream;
-use futures::StreamExt;
-use futures::TryStreamExt;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 pub use self::storage_repair::StorageRepairOutcome;
@@ -27,15 +23,11 @@ use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
-use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::message::ProbeRequest;
-use crate::message::ProvisionalEpoch;
 use crate::message::QueryForTopoInfoSend;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::TransportReadiness;
-use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
 use crate::swarm::transport::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
@@ -74,18 +66,6 @@ pub(crate) const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
 /// data-channel admission wait, and tracked completion prevents a chunk tail
 /// from escaping into the following topology phase.
 pub(crate) const STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP: usize = 1;
-
-/// Liveness probe data after signing but before the send is recorded.
-struct PreparedLivenessProbe {
-    /// Transport attempt whose state owns the probe.
-    attempt: PendingConnectionAttempt,
-    /// Challenge registered against the outbound payload transaction.
-    request: ProbeRequest,
-    /// Signed probe payload ready for transport delivery.
-    payload: MessagePayload,
-    /// Best-effort state snapshot for diagnostics around the send.
-    peer_state: Option<WebrtcConnectionState>,
-}
 
 /// Reason the stabilization cleaner decided a peer should leave local topology
 /// and possibly the transport map.
@@ -703,119 +683,6 @@ impl Stabilizer {
         Ok(())
     }
 
-    /// Send liveness probes for idle admitted peers that do not already have one pending.
-    async fn probe_peer_liveness(&self) -> Result<()> {
-        let now_ms = get_epoch_ms_i64();
-        // Probe epochs use wall-clock seconds; topology deadlines use the
-        // monotonic ring clock elsewhere.
-        let unix_seconds = u64::try_from(now_ms).unwrap_or(0) / 1_000;
-        let epoch = ProvisionalEpoch::from_unix_seconds(unix_seconds);
-        let candidates = self.transport.liveness_probe_candidates(now_ms)?;
-        stream::iter(candidates)
-            .then(|attempt| self.prepare_liveness_probe(attempt, epoch))
-            .try_filter_map(|probe| ready(self.register_liveness_probe(probe)))
-            .try_for_each(|probe| self.send_registered_liveness_probe(probe, now_ms))
-            .await
-    }
-
-    /// Build and sign one liveness probe before it is registered as pending.
-    async fn prepare_liveness_probe(
-        &self,
-        attempt: PendingConnectionAttempt,
-        epoch: ProvisionalEpoch,
-    ) -> Result<PreparedLivenessProbe> {
-        let peer = attempt.peer();
-        let peer_state = self
-            .transport
-            .get_connection(peer)
-            .map(|conn| conn.webrtc_connection_state());
-        let request = ProbeRequest::random_for_epoch(epoch);
-        let payload = self
-            .transport
-            .originate(Message::ProbeRequest(request), peer, Some(peer))
-            .await?;
-        Ok(PreparedLivenessProbe {
-            attempt,
-            request,
-            payload,
-            peer_state,
-        })
-    }
-
-    /// Register the probe transaction; returns `None` if another current probe
-    /// already owns this attempt.
-    fn register_liveness_probe(
-        &self,
-        probe: PreparedLivenessProbe,
-    ) -> Result<Option<PreparedLivenessProbe>> {
-        self.transport
-            .register_pending_liveness_probe(
-                probe.attempt,
-                probe.payload.transaction.tx_id,
-                probe.request,
-            )
-            .map(|registered| registered.then_some(probe))
-    }
-
-    /// Send a registered probe and either mark it sent or cancel the pending record.
-    async fn send_registered_liveness_probe(
-        &self,
-        probe: PreparedLivenessProbe,
-        now_ms: i64,
-    ) -> Result<()> {
-        let PreparedLivenessProbe {
-            attempt,
-            request,
-            payload,
-            peer_state,
-        } = probe;
-        let peer = attempt.peer();
-        let tx_id = payload.transaction.tx_id;
-        tracing::debug!(
-            target: "rings_core::dht::stabilization",
-            local = %self.dht.did,
-            peer = %peer,
-            state = ?peer_state,
-            idle_ms = PEER_LIVENESS_IDLE_MS,
-            "STABILIZATION peer liveness probe send start"
-        );
-        match self.transport.send_payload(payload).await {
-            Ok(()) => {
-                let matching_probe_recorded = self
-                    .transport
-                    .record_peer_liveness_probe_sent(attempt, now_ms, tx_id, request)?;
-                tracing::debug!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    tx_id = %tx_id,
-                    matching_probe_recorded,
-                    "STABILIZATION peer liveness probe send complete"
-                );
-            }
-            Err(error) => {
-                self.transport
-                    .cancel_pending_liveness_probe(attempt, tx_id, request)?;
-                tracing::warn!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    state = ?peer_state,
-                    error = ?error,
-                    records_peer_failure = error.records_peer_send_failure(),
-                    "STABILIZATION peer liveness probe send failed"
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Test-only hook that exposes liveness probing to the simulator.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn probe_peer_liveness_for_simulation(&self) -> Result<()> {
-        self.probe_peer_liveness().await
-    }
-
     /// Fix fingers from finger table, this is a DHT operation.
     async fn fix_fingers(&self) -> Result<()> {
         self.begin_finger_revalidation().await?;
@@ -1036,6 +903,8 @@ pub(crate) use maintenance::reset_maintenance_phase_trace_for_test;
 pub(crate) use maintenance::MaintenancePhaseEvent;
 #[cfg(all(test, target_family = "wasm"))]
 pub(crate) use maintenance::MaintenancePhaseKind;
+/// Liveness probing of admitted peers.
+mod liveness_probe;
 mod storage_repair;
 
 /// Deadline behavior for stabilization sub-steps.

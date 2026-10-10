@@ -3,7 +3,7 @@ use crate::message::MessageKind;
 
 pub(super) const INBOUND_LANE_COUNT: usize = MessageCategory::COUNT + 1;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum InboundLane {
     DhtControl,
     Storage,

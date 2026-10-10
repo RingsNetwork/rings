@@ -9,14 +9,14 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
+use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
 use rings_core::error::Result;
 use rings_core::message::DomainTag;
-use rings_core::message::Encoded;
-use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
 use rings_core::message::SigningDomain;
@@ -149,13 +149,45 @@ where
     latest.into_values().collect()
 }
 
-pub(crate) fn encode_descriptor<T: Serialize>(descriptor: &T) -> Result<Encoded> {
-    rings_codec::serialize(descriptor)
-        .map_err(Error::CodecSerialize)?
-        .encode()
+/// Whether a registrant `own` that publishes at `now_ms` prunes the observed registry element
+/// `element`: its own earlier descriptors, which its publication replaces, and every element
+/// that does not decode as `D`, does not verify under `network_id`, or expired more than the
+/// clock-skew tolerance `σ` ago.
+///
+/// Law: an element is kept iff it is a descriptor of another registrant that verifies and is
+/// live at some clock within `σ` of this one, so no publisher carries junk forward to the
+/// element horizon, and a publisher whose clock runs ahead by up to `σ` never prunes a
+/// descriptor its registrant still holds live.
+pub(crate) fn prunes_registry_element<D>(
+    element: &[u8],
+    own: Did,
+    now_ms: u128,
+    network_id: u32,
+) -> bool
+where
+    D: SignedDescriptor + RegistryElement,
+{
+    D::from_element(element).map_or(true, |descriptor| {
+        descriptor.descriptor_did() == own
+            || !descriptor.descriptor_verify_signature(network_id)
+            || descriptor.descriptor_is_expired_at(now_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS))
+    })
 }
 
-pub(crate) fn decode_descriptor<T: DeserializeOwned>(encoded: &Encoded) -> Result<T> {
-    let data: Vec<u8> = encoded.decode()?;
-    rings_codec::deserialize(&data).map_err(Error::CodecDeserialize)
+/// A descriptor as one element of its DHT registry: the element is the descriptor's codec
+/// encoding, carried as is.
+///
+/// Law (round trip): `from_element(to_element(d)) = Ok(d)`.
+pub(crate) trait RegistryElement: Serialize + DeserializeOwned {
+    /// This descriptor as a registry element.
+    fn to_element(&self) -> Result<Bytes> {
+        rings_codec::serialize(self)
+            .map(Bytes::from)
+            .map_err(Error::CodecSerialize)
+    }
+
+    /// The descriptor the registry element `element` encodes.
+    fn from_element(element: &[u8]) -> Result<Self> {
+        rings_codec::deserialize(element).map_err(Error::CodecDeserialize)
+    }
 }

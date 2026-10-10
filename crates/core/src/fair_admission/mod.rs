@@ -3,9 +3,11 @@
 //! Reservation law: a class may borrow only the capacity left after preserving
 //! every other class's unmet minimum. Fixed-reservation requests never wait
 //! behind borrowers; larger requests share one FIFO queue with a hard retained-
-//! memory budget.
+//! memory budget, or wait in resource order ([`ResourceOrderedQueue`]), first
+//! come first served per exhausted resource.
 
 mod capacity;
+mod resource_order;
 mod wait_queue;
 
 pub(crate) use capacity::admissible_capacity;
@@ -14,6 +16,8 @@ pub(crate) use capacity::try_reserve_atomic;
 pub(crate) use capacity::CountedReservationRejection;
 pub(crate) use capacity::CountedReservedCapacity;
 pub(crate) use capacity::ReservedCapacity;
+pub(crate) use resource_order::AdmissionLedger;
+pub(crate) use resource_order::ResourceOrderedQueue;
 pub(crate) use wait_queue::acquire_fair;
 pub(crate) use wait_queue::FairWaitBudget;
 pub(crate) use wait_queue::FairWaitQueue;
@@ -22,3 +26,5 @@ pub(crate) use wait_queue::FairWaitQueue;
 mod test_fair_wait_queue;
 #[cfg(test)]
 mod test_reserved_capacity;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_resource_order_model;

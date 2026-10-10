@@ -2,15 +2,17 @@ use std::collections::BTreeSet;
 use std::hash::Hash;
 use std::hash::Hasher;
 
+use bytes::Bytes;
+
 use crate::algebra::JoinSemilattice;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryCrdt;
 use crate::dht::entry::EntryDot;
 use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryTombstone;
 use crate::dht::entry::EntryVersion;
 use crate::dht::Did;
-use crate::message::Encoded;
 
 // ===================================================================
 // Stage 3: storage CRDT SEC topology model.
@@ -195,8 +197,9 @@ fn storage_dot(version: EntryVersion, index: usize) -> EntryDot {
     EntryDot { version, index }
 }
 
-fn storage_encoded(label: &str) -> Encoded {
-    Encoded::from(label)
+/// The element whose bytes are `label`'s: elements are stored as their bytes (#926).
+fn storage_element(label: &str) -> Bytes {
+    Bytes::copy_from_slice(label.as_bytes())
 }
 
 pub(super) fn storage_join_entry(left: Entry, right: Entry) -> Entry {
@@ -212,7 +215,7 @@ pub(super) fn storage_join_entry(left: Entry, right: Entry) -> Entry {
 
 fn data_value_range(did: Did, label: &'static str, start_time: u128, count: usize) -> Entry {
     let data = (0..count)
-        .map(|index| storage_encoded(&format!("{label}-{index}")))
+        .map(|index| storage_element(&format!("{label}-{index}")))
         .collect::<Vec<_>>();
     let dots = (0..count)
         .map(|offset| {
@@ -240,7 +243,7 @@ fn data_value_range(did: Did, label: &'static str, start_time: u128, count: usiz
 fn data_overwrite_value(did: Did, label: &'static str, version: EntryVersion) -> Entry {
     Entry {
         did,
-        data: vec![storage_encoded(label)],
+        data: vec![storage_element(label)],
         kind: EntryKind::Data,
         crdt: EntryCrdt {
             register: Some(version),
@@ -254,7 +257,7 @@ fn data_overwrite_value(did: Did, label: &'static str, version: EntryVersion) ->
 fn relay_add_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
     Entry {
         did,
-        data: vec![storage_encoded(label)],
+        data: vec![storage_element(label)],
         kind: EntryKind::RelayMessage,
         crdt: EntryCrdt {
             register: None,
@@ -265,7 +268,8 @@ fn relay_add_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
     }
 }
 
-fn relay_remove_value(did: Did, dot: EntryDot) -> Entry {
+/// A relay-inbox removal of the held message `label`, covering its dots up to `dot`.
+fn relay_remove_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
     Entry {
         did,
         data: Vec::new(),
@@ -273,7 +277,7 @@ fn relay_remove_value(did: Did, dot: EntryDot) -> Entry {
         crdt: EntryCrdt {
             register: None,
             dots: Vec::new(),
-            tombstones: vec![dot],
+            tombstones: vec![EntryTombstone::of(&storage_element(label), dot)],
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
     }
@@ -311,7 +315,7 @@ fn storage_delta_entry(carrier: StorageJoinCarrier, bit: u8) -> Entry {
             match bit {
                 0b001 => relay_add_value(storage_model_did(3), "relay-a", relay_a_dot),
                 0b010 => relay_add_value(storage_model_did(3), "relay-b", relay_b_dot),
-                0b100 => relay_remove_value(storage_model_did(3), relay_a_dot),
+                0b100 => relay_remove_value(storage_model_did(3), "relay-a", relay_a_dot),
                 _ => panic!("storage model delta bit must be singleton"),
             }
         }

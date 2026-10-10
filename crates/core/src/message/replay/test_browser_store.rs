@@ -8,7 +8,9 @@ use super::TransactionReplay;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::message::MessageCategory;
+use crate::storage::idb::IdbStorage;
 use crate::storage::KvStorageInterface;
+use crate::storage::RecordAuthority::Authoritative;
 
 /// The digest of the transaction a test admits, one per `value`.
 fn digest(value: u8) -> TransactionDigest {
@@ -22,9 +24,10 @@ fn digest(value: u8) -> TransactionDigest {
 async fn test_browser_store_fails_closed_only_on_the_stream_of_an_undecodable_row() {
     /// The IndexedDB database this test owns.
     const STORAGE_NAME: &str = "rings-core/replay-store-undecodable-row";
-    let open = || crate::storage::idb::IdbStorage::new_with_cap_and_name(4, STORAGE_NAME);
+    // Authoritative, as the browser provider opens its replay store.
+    let open = || IdbStorage::new_with_cap_name_and_authority(4, STORAGE_NAME, Authoritative);
     let storage = open().await.expect("IndexedDB opens");
-    <crate::storage::idb::IdbStorage as KvStorageInterface<ReplayRecord>>::clear(&storage)
+    <IdbStorage as KvStorageInterface<ReplayRecord>>::clear(&storage)
         .await
         .expect("IndexedDB clears");
     let corrupt = StreamKey::new(7, Did::from(1_u32), Did::from(99_u32), MessageCategory::E2e);
@@ -53,12 +56,9 @@ async fn test_browser_store_fails_closed_only_on_the_stream_of_an_undecodable_ro
     drop(replay);
 
     let reopened = open().await.expect("IndexedDB reopens");
-    <crate::storage::idb::IdbStorage as KvStorageInterface<ReplayRecord>>::remove(
-        &reopened,
-        corrupt_key.as_str(),
-    )
-    .await
-    .expect("the operator removes the row");
+    <IdbStorage as KvStorageInterface<ReplayRecord>>::remove(&reopened, corrupt_key.as_str())
+        .await
+        .expect("the operator removes the row");
     let restarted = TransactionReplay::new_shared(Box::new(reopened));
     assert_eq!(
         restarted

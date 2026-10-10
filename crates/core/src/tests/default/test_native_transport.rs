@@ -28,6 +28,7 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::message::TRANSACTION_REPLAY_WINDOW;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::callback::SwarmEvent;
+use crate::swarm::transport::StorageSyncSend;
 use crate::tests::activity::ActivityCallback;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
@@ -66,7 +67,7 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
     assert!(node1
         .swarm
         .transport
-        .send_storage_sync(storage)
+        .send_storage_sync_or_defer(storage, StorageSyncSend::Admitted, "test")
         .await?
         .is_sent());
 
@@ -200,6 +201,11 @@ fn backlog_index(payload: &MessagePayload) -> Result<Option<usize>> {
 /// control keeps flowing on its own channel, and the held Application backlog, twice the replay
 /// window, arrives afterwards in send order with no replay rejection.
 ///
+/// Under per-lane credit (#924) the stalled lane holds back its sender once the receiver holds
+/// a window of its frames, so the backlog is sent in order by a task of its own, whose sends
+/// complete only after the release; control, on its own lane with its own credit, is not held
+/// back.
+///
 /// The control and order checks are what discriminate. Spreading Application frames over every
 /// channel puts some on the control channel, so control stalls behind the held handler; spreading
 /// them over the other three channels delivers the backlog out of send order. The stale count
@@ -223,10 +229,14 @@ async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order()
     let peer = node2.did();
 
     let backlog = 2 * TRANSACTION_REPLAY_WINDOW;
-    for index in 0..backlog {
-        let message = Message::custom(format!("backlog-{index}").as_bytes())?;
-        node1.swarm.send_direct_message(message, peer).await?;
-    }
+    let sender = node1.swarm.clone();
+    let backlog_sends = tokio::spawn(async move {
+        for index in 0..backlog {
+            let message = Message::custom(format!("backlog-{index}").as_bytes())?;
+            sender.send_direct_message(message, peer).await?;
+        }
+        Ok::<(), Error>(())
+    });
     wait_until_result("the receiver's Application handler stalls", || {
         Ok(callback.stalled.load(Ordering::SeqCst) >= 1)
     })
@@ -265,6 +275,9 @@ async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order()
         arrived.extend(backlog_index(&payload)?);
     }
     assert_eq!(arrived, (0..backlog).collect::<Vec<_>>());
+    backlog_sends
+        .await
+        .map_err(|error| Error::InvalidMessage(format!("backlog task failed: {error}")))??;
     assert_eq!(node2.swarm.transaction_replay_counters().stale, 0);
     Ok(())
 }

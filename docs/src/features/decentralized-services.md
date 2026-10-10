@@ -20,7 +20,7 @@ In fact, we will utilize the Chord algorithm to find the corresponding data base
 
 ### Lookup of de-service
 
-De-services can declare themselves as "alive" by using polling. This will help them maintain a relatively higher position in the de-service provider list. When a requester needs to request a de-service, it should first use the "service lookup" command to find the nodes that provide the required service:
+De-services declare themselves alive by registering again periodically: a registration expires by the element lifetime rule of [DHT storage](../advanced-topic/chord.md#data-topic-storage).
 
 ```
 rings service lookup --help

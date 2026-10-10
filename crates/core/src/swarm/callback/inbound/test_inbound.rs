@@ -1,3 +1,4 @@
+use futures::FutureExt;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
 use super::*;
@@ -73,11 +74,15 @@ fn test_maximum_transport_frame_fits_every_lane_reservation() {
     .into_iter()
     .enumerate()
     .map(|(peer, lane)| {
-        capacity.acquire(
-            Some(Did::from(u32::try_from(peer + 1).expect("test peer fits"))),
-            lane,
-            reserved,
-        )
+        // Each lane's reservation admits at once: the acquisition completes without waiting.
+        capacity
+            .acquire(
+                Some(Did::from(u32::try_from(peer + 1).expect("test peer fits"))),
+                lane,
+                reserved,
+            )
+            .now_or_never()
+            .unwrap_or(Err(Error::InboundMailboxClosed))
     })
     .collect::<Result<Vec<_>>>()
     .expect("every lane must admit one maximum transport frame from its reservation");

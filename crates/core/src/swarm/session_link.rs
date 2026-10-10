@@ -510,12 +510,14 @@ impl<F> ReferencedDelegations<F> {
         }))
     }
 
-    /// Judge one arriving frame at `now_ms`.
+    /// Judge one arriving frame at `now_ms`; an unresolved frame is held only while the hold
+    /// is below its capacity and `room` says the node's holds together have room for it.
     pub(crate) fn arrive(
         &mut self,
         frame: Box<WirePayload<'static>>,
         carrier: F,
         now_ms: u128,
+        room: bool,
     ) -> Result<FrameArrival<F>> {
         let missing: Digests = missing_references(frame.as_ref(), &self.known, now_ms).collect();
         if missing.is_empty() {
@@ -523,7 +525,7 @@ impl<F> ReferencedDelegations<F> {
                 .resolve(frame, carrier, now_ms)
                 .map(FrameArrival::Resolved);
         }
-        if self.held.len() >= self.hold_capacity {
+        if !room || self.held.len() >= self.hold_capacity {
             let request = self
                 .held
                 .front()
