@@ -20,6 +20,7 @@ use crate::dht::PeerRingRemoteAction;
 use crate::dht::StorageKey;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
+use crate::ecc::tests::deterministic_key;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -295,7 +296,9 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
 #[tokio::test]
 async fn test_sync_entries_physical_destination_routes_by_physical_did_not_storage_owner(
 ) -> Result<()> {
-    let mut keys = gen_ordered_keys::<6>().into_iter();
+    // Fixed keys: the routes must diverge for some peer, a property of the identities, so a
+    // random draw would make the witness a matter of luck.
+    let mut keys = (0..6).map(deterministic_key);
     let node = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 4)?;
     let mut peers = Vec::new();
     for _ in 0..5 {

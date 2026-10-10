@@ -24,7 +24,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::StorageRepairOutcome;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
-use crate::ecc::SecretKey;
+use crate::ecc::tests::deterministic_key;
 use crate::error::Error;
 use crate::fair_admission::retained_wire_bytes;
 use crate::message::test_probe_request;
@@ -456,15 +456,6 @@ fn model_class(class: ScheduledDeliveryClass) -> Option<SimTransferClass> {
         ScheduledDeliveryClass::E2e => Some(SimTransferClass::E2e),
         ScheduledDeliveryClass::Application => Some(SimTransferClass::Application),
     }
-}
-
-fn deterministic_key(index: usize) -> SecretKey {
-    let mut bytes = [0_u8; 32];
-    let scalar = u64::try_from(index)
-        .expect("node index must fit u64")
-        .saturating_add(1);
-    bytes[24..].copy_from_slice(&scalar.to_be_bytes());
-    SecretKey::from_bytes(bytes).expect("positive test scalar must be a valid secret key")
 }
 
 async fn build_nodes(count: usize) -> Vec<Node> {
