@@ -168,8 +168,9 @@
     `ElementDigest` and the greatest dot it covers, at most one per value.
   - A carrier past its bound answers lookups as absent, from a replica and from a fetch cache,
     and a read that retires part of a stored carrier writes the projection back. The new
-    `Swarm::storage_fetch_answered` reports whether a fetch was answered, which a projected
-    cache value cannot show.
+    `Swarm::storage_fetch_answers` counts the answers fetches of a key received, across
+    fetches, so a fetcher that noted it before fetching knows when it was answered, which a
+    projected cache value cannot show.
   - `PeerRing::storage` and `PeerRing::cache` are crate-private, so every read outside core goes
     through the projection (`Swarm` lookups, `inspect`).
   - Registry heartbeat intervals must be below 595 s (a registry write's lifetime less the skew

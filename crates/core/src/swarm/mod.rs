@@ -108,20 +108,20 @@ impl Swarm {
         self.transport.storage_redundancy()
     }
 
-    /// Whether the latest `storage_fetch` of `entry_key` has been answered: a found entry of the
-    /// key has been cached since that fetch started, locally or from a reply. The marker carries
-    /// no round identity, so a late reply to an earlier fetch of the key also answers it; the
-    /// entry it caches is still a reply received after this fetch started.
+    /// The answers `storage_fetch` of `entry_key` has received: the found entries of the key
+    /// cached, locally or from a reply, that the cache then serves, counted across fetches. A fetcher notes the count
+    /// before its fetch and knows it was answered once the count grows; a fetch of the key that
+    /// starts meanwhile does not reset it. A late reply to an earlier fetch also counts, and the
+    /// entry it caches is still a reply received after the count was noted.
     ///
     /// This is the fetch's reply marker. A reader cannot tell a reply by comparing cached values,
     /// since a cached value is projected at the clock of each read and changes, with no reply,
     /// when one of its elements crosses its horizon.
     ///
-    /// Post: `false` once a newer fetch of `entry_key` starts, until it is answered, and once the
-    /// round is no longer retained.
-    pub fn storage_fetch_answered(&self, entry_key: Did) -> Result<bool> {
+    /// Post: monotone while a fetch of `entry_key` is retained; `0` once none is.
+    pub fn storage_fetch_answers(&self, entry_key: Did) -> Result<u64> {
         self.transport
-            .storage_lookup_answered(entry_key, self.transport.storage_redundancy())
+            .storage_lookup_answers(entry_key, self.transport.storage_redundancy())
     }
 
     /// Get the storage virtual-node positions for this swarm's DHT protocol mode.

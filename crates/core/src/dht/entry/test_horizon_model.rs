@@ -9,9 +9,12 @@
 //! result. The retention law is a parameter, its horizons and what holds a carrier past its
 //! bound: the production law ([`ElementRetention::of`], [`Entry::is_live_under`]), or a
 //! deliberately broken one, for which a test witnesses that the named law fails; every law,
-//! Bounded included, has such a mutant. Whether the funnels apply the projection at all is a
-//! parameter too (`HorizonFilter`): skipping it under the production law fails Bounded, so
-//! Bounded judges the projection's implementation and not only the law's constants. The model owns
+//! Bounded included, has such a mutant. Whether the model's funnels (its `project`, standing
+//! for the production ones) apply the projection at all is a parameter too (`HorizonFilter`):
+//! skipping it under the production law fails Bounded, so Bounded judges the projection's
+//! presence and not only the law's constants. The bound-elapsed element drop inside it has no
+//! mutant of its own, since no law here requires a bound-elapsed element to be gone: NoLoss
+//! keeps only live adds, and Bounded caps what is kept by the horizon. The model owns
 //! only the world: which replica acts, when a carrier is delivered, and how far real time
 //! advances. Every walk is a fixed-seed random interleaving, so a failure replays exactly.
 //!
@@ -279,9 +282,9 @@ impl Holders {
     }
 }
 
-/// Whether the storage funnels apply the horizon projection `Entry::retired_under` to what they
-/// store and read: production applies it; a mutant skips it, so the `Bounded` clauses are shown
-/// to judge the projection's implementation, not only the law's constants.
+/// Whether the model's funnels apply the horizon projection `Entry::retired_under` to what they
+/// store and read: production applies it; a mutant skips it whole, so the `Bounded` clauses are
+/// shown to judge the projection's presence, not only the law's constants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HorizonFilter {
     /// The production funnels: every store and read is projected.

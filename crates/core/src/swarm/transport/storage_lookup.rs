@@ -32,8 +32,10 @@ pub(super) struct StorageLookupObservationKey {
 pub(super) struct StorageLookupObservation {
     observed_at_ms: i64,
     misses: BTreeSet<PlacementMiss>,
-    /// Whether an entry has been cached for this round: the round's reply marker.
-    answered: bool,
+    /// The entries cached for rounds of this key, counted across rounds: the reply marker. A
+    /// new round keeps the count, so a fetcher that noted it before its fetch sees a reply
+    /// whatever fetch of the key starts meanwhile.
+    answers: u64,
 }
 
 fn storage_lookup_observation_now_ms() -> i64 {
@@ -109,10 +111,13 @@ impl SwarmTransport {
             now,
             STORAGE_LOOKUP_OBSERVATION_CAPACITY.saturating_sub(1),
         );
+        let answers = observations
+            .get(&key)
+            .map_or(0, |observation| observation.answers);
         observations.insert(key, StorageLookupObservation {
             observed_at_ms: now,
             misses: BTreeSet::new(),
-            answered: false,
+            answers,
         });
         self.observer().lookup_started(
             LookupKind::Storage,
@@ -121,11 +126,11 @@ impl SwarmTransport {
         Ok(())
     }
 
-    /// Mark the active lookup round of `(resource, redundancy)` answered: an entry it found has
-    /// just been cached.
+    /// Count an answer of the active lookup round of `(resource, redundancy)`: an entry it
+    /// found has just been cached, and the cache serves it.
     ///
-    /// Post: [`Self::storage_lookup_answered`] is `true` until a new round for the same key
-    /// starts or the bucket is evicted; a missing bucket is left missing.
+    /// Post: [`Self::storage_lookup_answers`] has grown by one, until the bucket is evicted; a
+    /// missing bucket is left missing.
     pub(crate) fn answer_storage_lookup(&self, resource: Did, redundancy: u16) -> Result<()> {
         let key = self.storage_lookup_observation_key(resource, redundancy)?;
         let mut observations = self
@@ -133,16 +138,16 @@ impl SwarmTransport {
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
         if let Some(observation) = observations.get_mut(&key) {
-            observation.answered = true;
+            observation.answers = observation.answers.saturating_add(1);
         }
         Ok(())
     }
 
-    /// Whether the latest lookup round of `(resource, redundancy)` has cached an entry since it
-    /// started.
+    /// The entries cached for lookup rounds of `(resource, redundancy)`, counted across rounds.
     ///
-    /// Post: `false` when no fresh round is retained, so a reader falls back to the cache.
-    pub(crate) fn storage_lookup_answered(&self, resource: Did, redundancy: u16) -> Result<bool> {
+    /// Post: monotone while a round of the key is retained; `0` once none is, so a reader that
+    /// waits for it to grow falls back to the cache when its poll budget ends.
+    pub(crate) fn storage_lookup_answers(&self, resource: Did, redundancy: u16) -> Result<u64> {
         let key = self.storage_lookup_observation_key(resource, redundancy)?;
         let mut observations = self
             .storage_lookup_observations
@@ -155,7 +160,7 @@ impl SwarmTransport {
         );
         Ok(observations
             .get(&key)
-            .is_some_and(|observation| observation.answered))
+            .map_or(0, |observation| observation.answers))
     }
 
     /// Validate that a storage lookup response belongs to a local lookup round.

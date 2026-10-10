@@ -124,6 +124,11 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         let (relay, data): (Vec<_>, Vec<_>) = all_items
             .into_iter()
             .partition(|(_, entry)| entry.kind.is_relay_inbox());
+        // Only the carriers this hand-off offers are judged for retirement.
+        let relay = relay
+            .into_iter()
+            .filter(|(key, _)| self.placed_beyond(key.placement(), new_successor))
+            .collect();
         let relay = self
             .retire_unwitnessed_inbox_elements(relay, now_ms)
             .await?;
@@ -161,13 +166,13 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
 }
 
 impl PeerRing {
-    /// Remove from each relay carrier in `inboxes` the elements that fail the witness at
-    /// `now_ms`, and return the carriers that remain, to be offered.
+    /// Bring each relay carrier in `inboxes` to a shape its receiver admits before it is
+    /// offered: remove the elements that fail the witness for good at `now_ms`, and drop a
+    /// reset floor, which a relay carrier never holds; return the carriers that remain.
     ///
-    /// Law: the witness of a stored element never turns from pass to fail. Each element passed
-    /// it when its delta was admitted here, and it is judged as of the element's hold instant,
-    /// which was then within σ of this clock. So an element failing it is one no receiver
-    /// admits (a carrier written before the storage cutover): offered, it would be skipped
+    /// Law: what is removed is what no receiver admits and time cannot cure (see
+    /// [`Entry::partition_inbox`]; an element held ahead of this clock is kept), which only a
+    /// carrier written before the storage cutover holds: offered as it is, it would be skipped
     /// without an ack on every pass until its retention bound. Removing it here, as the
     /// recipient's drain does, is what lets the rest of the carrier be acked and handed off.
     async fn retire_unwitnessed_inbox_elements(
@@ -178,7 +183,7 @@ impl PeerRing {
         let mut offered = Vec::with_capacity(inboxes.len());
         for (key, inbox) in inboxes {
             let rejected = inbox.partition_inbox(now_ms, self.network_id()).rejected;
-            if rejected.crdt.dots.is_empty() {
+            if rejected.crdt.dots.is_empty() && inbox.crdt.register.is_none() {
                 offered.push((key, inbox));
                 continue;
             }
@@ -186,6 +191,7 @@ impl PeerRing {
                 local = %self.did,
                 inbox = %key,
                 rejected = rejected.crdt.dots.len(),
+                reset_floor = inbox.crdt.register.is_some(),
                 "relay inbox elements failed the witness and are retired unoffered"
             );
             if let Some(remaining) = self.remove_inbox_elements(key, rejected, now_ms).await? {

@@ -102,6 +102,27 @@ async fn repair_observed_storage_misses(
     run_storage_repair_transport_effects(transport, repair).await
 }
 
+/// Cache `entry`, a reply to the lookup round of `(resource, redundancy)`, and count it as the
+/// round's answer iff the cache now serves it.
+///
+/// Law (an answer is what a reader can read): the reply marker advances only for a value the
+/// cache serves at this clock. A carrier read just before its retention bound and cached just
+/// after it (or under a clock up to σ ahead) is admitted, since an unstable remove or register
+/// holds it live, but it is served as absent; counting it would end a fetcher's wait on a cache
+/// that holds nothing to read while another placement's reply may still be in flight.
+async fn cache_lookup_reply(
+    transport: &SwarmTransport,
+    resource: Did,
+    redundancy: u16,
+    entry: Entry,
+) -> Result<()> {
+    transport.dht.local_cache_put(entry).await?;
+    if transport.dht.local_cache_get(resource).await?.is_some() {
+        transport.answer_storage_lookup(resource, redundancy)?;
+    }
+    Ok(())
+}
+
 /// Execute storage fetch actions for the Swarm-facing storage API.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
@@ -113,11 +134,7 @@ async fn handle_storage_fetch_act(
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
-            transport
-                .dht
-                .local_cache_put(evidence.entry.clone())
-                .await?;
-            transport.answer_storage_lookup(resource, redundancy)?;
+            cache_lookup_reply(&transport, resource, redundancy, evidence.entry.clone()).await?;
             let misses = evidence.misses;
             let repair = transport
                 .dht
@@ -441,9 +458,7 @@ impl HandleMsg<FoundEntry> for MessageHandler {
             msg.misses.iter().copied(),
         )?;
         if let Some(data) = found_entry {
-            self.dht.local_cache_put(data.clone()).await?;
-            self.transport
-                .answer_storage_lookup(msg.resource, msg.redundancy)?;
+            cache_lookup_reply(&self.transport, msg.resource, msg.redundancy, data.clone()).await?;
             repair_observed_storage_misses(self.transport.clone(), data.clone(), msg.redundancy)
                 .await?;
         } else if !msg.misses.is_empty() {

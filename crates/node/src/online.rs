@@ -455,18 +455,30 @@ mod tests {
 
     #[test]
     fn test_a_publisher_keeps_only_live_descriptors_of_other_registrants() -> Result<()> {
-        let own = descriptor_at(20, 100)?;
-        let other_live = descriptor_at(25, 100)?;
+        let skew = rings_core::consts::TS_OFFSET_TOLERANCE_MS;
+        let now_ms = 40 + skew + 1;
+        let own = descriptor_at(20, 10 * now_ms)?;
+        let other_live = descriptor_at(25, 10 * now_ms)?;
         let expired = descriptor_at(30, 40)?;
-        let mut forged = descriptor_at(35, 100)?;
+        let expired_within_skew = descriptor_at(35, 41)?;
+        let mut forged = descriptor_at(35, 10 * now_ms)?;
         forged.version = "forged".to_string();
         let prunes = |element: &[u8]| {
-            prunes_registry_element::<OnlineNodeDescriptor>(element, own.did, 50, TEST_NETWORK_ID)
+            prunes_registry_element::<OnlineNodeDescriptor>(
+                element,
+                own.did,
+                now_ms,
+                TEST_NETWORK_ID,
+            )
         };
 
         assert!(prunes(&own.to_element()?));
         assert!(!prunes(&other_live.to_element()?));
         assert!(prunes(&expired.to_element()?));
+        assert!(
+            !prunes(&expired_within_skew.to_element()?),
+            "a clock up to σ behind still holds it live"
+        );
         assert!(prunes(&forged.to_element()?));
         assert!(prunes(b"not a descriptor"));
         Ok(())

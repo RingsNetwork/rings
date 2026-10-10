@@ -665,11 +665,13 @@ async fn test_storage_fetch_starts_fresh_observation_round() -> Result<()> {
     Ok(())
 }
 
-/// A fetch round's reply marker is set by a reply that caches an entry, not by a
-/// found-empty one, and a new round clears it; a reader polls the marker instead of comparing
-/// cached values, which change with no reply as elements cross their horizon.
+/// A fetch's reply marker counts a reply that caches an entry, not a found-empty one, and a new
+/// round of the key keeps the count, so a fetcher that noted it is not reset by a concurrent
+/// fetch; a reader polls the marker instead of comparing cached values, which change with no
+/// reply as elements cross their horizon.
 #[tokio::test]
-async fn test_storage_fetch_answered_marks_a_round_answered_by_an_entry() -> Result<()> {
+async fn test_storage_fetch_answers_count_replies_that_cache_an_entry_across_rounds() -> Result<()>
+{
     let node = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let redundancy = node.swarm.storage_redundancy();
@@ -695,18 +697,70 @@ async fn test_storage_fetch_answered_marks_a_round_answered_by_an_entry() -> Res
     node.swarm
         .transport
         .start_storage_lookup(entry.did, redundancy)?;
-    assert!(!node.swarm.storage_fetch_answered(entry.did)?);
+    assert_eq!(node.swarm.storage_fetch_answers(entry.did)?, 0);
     handler.handle(&context, &reply(vec![])).await?;
-    assert!(!node.swarm.storage_fetch_answered(entry.did)?);
+    assert_eq!(node.swarm.storage_fetch_answers(entry.did)?, 0);
     handler
         .handle(&context, &reply(vec![entry.clone()]))
         .await?;
-    assert!(node.swarm.storage_fetch_answered(entry.did)?);
+    assert_eq!(node.swarm.storage_fetch_answers(entry.did)?, 1);
 
     node.swarm
         .transport
         .start_storage_lookup(entry.did, redundancy)?;
-    assert!(!node.swarm.storage_fetch_answered(entry.did)?);
+    assert_eq!(
+        node.swarm.storage_fetch_answers(entry.did)?,
+        1,
+        "a concurrent round does not reset what an earlier fetcher noted"
+    );
+    Ok(())
+}
+
+/// A reply the cache cannot serve is not an answer: a carrier one placement read just before
+/// its retention bound, received just after it (or under a clock up to σ ahead), is admitted
+/// and cached, since an unstable remove holds it live, but it is served as absent, so the
+/// marker stays put; the live reply a second placement sends afterwards is the answer.
+#[tokio::test]
+async fn test_a_reply_past_its_bound_is_no_answer_and_a_later_live_placement_is() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let redundancy = node.swarm.storage_redundancy();
+    let now_ms = get_epoch_ms();
+    let live = live_entry(
+        Did::from(10u32),
+        vec![Bytes::from("answer")],
+        EntryKind::Data,
+    );
+    let mut past_bound = live.clone();
+    past_bound.expires_at_ms = Some(now_ms - 1);
+    past_bound.crdt.tombstones = vec![EntryTombstone::of(&Bytes::from("removed"), EntryDot {
+        version: EntryVersion::new(now_ms - 1_000, Did::from(1u32), Did::from(2u32)),
+        index: 0,
+    })];
+    let reply = |data: Vec<Entry>| FoundEntry {
+        data,
+        misses: vec![],
+        resource: live.did,
+        redundancy,
+    };
+    let context_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(reply(vec![])),
+        MessageSigner::new(&context_session, TEST_NETWORK_ID),
+        node.did(),
+        node.did(),
+    )?;
+
+    node.swarm
+        .transport
+        .start_storage_lookup(live.did, redundancy)?;
+    handler.handle(&context, &reply(vec![past_bound])).await?;
+    assert_eq!(node.swarm.storage_fetch_answers(live.did)?, 0);
+    assert_eq!(node.swarm.storage_check_cache(live.did).await, None);
+
+    handler.handle(&context, &reply(vec![live.clone()])).await?;
+    assert_eq!(node.swarm.storage_fetch_answers(live.did)?, 1);
+    assert!(node.swarm.storage_check_cache(live.did).await.is_some());
     Ok(())
 }
 

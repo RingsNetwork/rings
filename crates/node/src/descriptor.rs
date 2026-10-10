@@ -10,6 +10,7 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
+use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
@@ -150,10 +151,13 @@ where
 
 /// Whether a registrant `own` that publishes at `now_ms` prunes the observed registry element
 /// `element`: its own earlier descriptors, which its publication replaces, and every element
-/// that does not decode as `D`, does not verify under `network_id`, or has expired.
+/// that does not decode as `D`, does not verify under `network_id`, or expired more than the
+/// clock-skew tolerance `σ` ago.
 ///
-/// Law: an element is kept iff it is a live descriptor of another registrant, so no publisher
-/// carries junk forward to the element horizon.
+/// Law: an element is kept iff it is a descriptor of another registrant that verifies and is
+/// live at some clock within `σ` of this one, so no publisher carries junk forward to the
+/// element horizon, and a publisher whose clock runs ahead by up to `σ` never prunes a
+/// descriptor its registrant still holds live.
 pub(crate) fn prunes_registry_element<D>(
     element: &[u8],
     own: Did,
@@ -164,7 +168,9 @@ where
     D: SignedDescriptor + RegistryElement,
 {
     D::from_element(element).map_or(true, |descriptor| {
-        descriptor.descriptor_did() == own || !descriptor.descriptor_is_live_at(now_ms, network_id)
+        descriptor.descriptor_did() == own
+            || !descriptor.descriptor_verify_signature(network_id)
+            || descriptor.descriptor_is_expired_at(now_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS))
     })
 }
 

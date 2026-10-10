@@ -255,13 +255,15 @@ impl PeerRing {
     }
 
     /// Remove the elements `removal` names from the relay carrier stored at `key`, as this node
-    /// holds it at `now_ms`, and return the carrier that remains.
+    /// holds it at `now_ms`, drop any reset floor it holds, and return the carrier that remains.
     ///
     /// Pre: `removal` is a removal delta of that carrier ([`Entry::removal_of`]). It is applied
     /// locally, outside the inbox write law, which admits a remote removal only from the
-    /// recipient: the caller removes what fails the witness, which no write law could have
-    /// admitted. Post: dots are unique to elements, so a join landing since `removal` was
-    /// computed loses nothing it did not name; a carrier left without retention is removed.
+    /// recipient: the caller removes what fails the witness for good, which no write law could
+    /// have admitted. A relay carrier never holds a reset floor (a pre-cutover carrier may), and
+    /// this node is its only replica, so dropping one shadows nothing back into existence.
+    /// Post: dots are unique to elements, so a join landing since `removal` was computed loses
+    /// nothing it did not name; a carrier left without retention is removed.
     pub(crate) async fn remove_inbox_elements(
         &self,
         key: StorageKey,
@@ -274,7 +276,8 @@ impl PeerRing {
         else {
             return Ok(None);
         };
-        let stored = local.tombstone(removal)?.retired_at(now_ms);
+        let mut stored = local.tombstone(removal)?.retired_at(now_ms);
+        stored.crdt.register = None;
         if stored.is_live_at(now_ms) {
             self.storage.put(&key, &stored).await?;
             Ok(Some(stored))

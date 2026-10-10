@@ -507,3 +507,31 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
     assert!(first_round_dots.iter().all(|dot| !kept.contains(dot)));
     Ok(())
 }
+
+/// Law (only what time cannot cure is retired, #913 R7 M1): after this clock steps back, an
+/// element held ahead of it by more than σ is neither delivered nor retired, and it is
+/// delivered once the clock catches up.
+#[test]
+fn test_an_element_held_ahead_of_a_stepped_back_clock_is_kept_for_a_later_pass() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let holder = session()?;
+    let destination: Did = SecretKey::random().address().into();
+    let held = held_by(&holder, destination, TEST_NETWORK_ID)?;
+    let carrier = Entry::new(inbox_key(destination), Vec::new(), EntryKind::RelayMessage).extend(
+        now_ms,
+        Entry::inbox_delta(&held)?,
+        holder.delegator_did(),
+    )?;
+
+    let stepped_back = now_ms - TS_OFFSET_TOLERANCE_MS - 1;
+    let drain = carrier.partition_inbox(stepped_back, TEST_NETWORK_ID);
+    assert!(drain.deliverable.is_empty());
+    assert!(
+        drain.rejected.crdt.dots.is_empty(),
+        "a clock gate failure retires nothing"
+    );
+
+    let drain = carrier.partition_inbox(now_ms, TEST_NETWORK_ID);
+    assert_eq!(drain.deliverable.len(), 1);
+    Ok(())
+}
