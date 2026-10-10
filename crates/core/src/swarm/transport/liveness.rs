@@ -679,8 +679,10 @@ mod tests {
     /// probe's answer clears it; without a stall any inbound payload clears it.
     #[test]
     fn test_only_the_answer_clears_an_unanswered_probe_while_credit_is_stalled() {
-        let stalled = crate::message::test_probe_request(12);
-        let flowing = crate::message::test_probe_request(13);
+        // Two distinct probes, each with a fresh nonce, as production issues them.
+        let epoch = crate::message::ProvisionalEpoch::from_unix_seconds(0);
+        let stalled = ProbeRequest::random_for_epoch(epoch);
+        let flowing = ProbeRequest::random_for_epoch(epoch);
         let (stalled_tx, flowing_tx) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         let mut liveness = PeerLiveness::new(1, 10);
 
