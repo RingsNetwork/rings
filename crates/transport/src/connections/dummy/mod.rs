@@ -215,7 +215,7 @@ pub struct DummyConnection {
 pub struct DummyTransport {
     pool: Pool<DummyConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
-    receive_pool: NodeReceiveLoad,
+    receive_load: NodeReceiveLoad,
 }
 
 impl DummyConnection {
@@ -423,7 +423,7 @@ impl DummyTransport {
 
         Self {
             pool: Pool::new(),
-            receive_pool: NodeReceiveLoad::new(),
+            receive_load: NodeReceiveLoad::new(),
         }
     }
 }
@@ -685,7 +685,7 @@ impl TransportInterface for DummyTransport {
             cid,
             callback,
             Notifier::default(),
-            self.receive_pool.clone(),
+            self.receive_load.clone(),
         );
         let conn = DummyConnection::new(inner_callback);
 

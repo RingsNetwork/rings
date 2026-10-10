@@ -496,7 +496,7 @@ async fn migrating_under_a_smaller_capacity_retires_legacy_oldest_rows() {
 /// Missing keys complete cleanly; in an authoritative store a decode error does not rewrite or
 /// remove the stored payload.
 #[wasm_bindgen_test]
-async fn missing_and_invalid_reads_preserve_storage() {
+async fn test_missing_and_invalid_reads_preserve_storage() {
     // Isolated store exercises the public error boundary with incompatible value types.
     let instance = create_authoritative_db_instance(2).await;
     let missing: Option<String> = instance.get("missing").await.unwrap();

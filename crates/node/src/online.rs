@@ -453,6 +453,9 @@ mod tests {
         Ok(())
     }
 
+    /// A publisher prunes its own descriptors and every one that does not decode, does not
+    /// verify, or expired more than the skew tolerance ago; a descriptor of another registrant
+    /// expired within the tolerance is kept.
     #[test]
     fn test_a_publisher_keeps_only_live_descriptors_of_other_registrants() -> Result<()> {
         let skew = rings_core::consts::TS_OFFSET_TOLERANCE_MS;

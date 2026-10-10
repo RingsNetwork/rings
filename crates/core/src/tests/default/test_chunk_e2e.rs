@@ -37,6 +37,7 @@ use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
+use crate::swarm::transport::StorageSyncSend;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
 use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
@@ -340,7 +341,11 @@ async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_de
     };
 
     let failed_before = measure.count(node2.did(), MeasurementEvent::FailedToSend);
-    node1.swarm.transport.send_storage_sync(msg).await?;
+    node1
+        .swarm
+        .transport
+        .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
+        .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
         1,
@@ -383,7 +388,11 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
     };
 
     let failed_before = measure.count(node2.did(), MeasurementEvent::FailedToSend);
-    node1.swarm.transport.send_storage_sync(msg).await?;
+    node1
+        .swarm
+        .transport
+        .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
+        .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
         1,
@@ -441,7 +450,11 @@ async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Resul
     };
 
     let failed_before = measure.count(node2.did(), MeasurementEvent::FailedToSend);
-    node1.swarm.transport.send_storage_sync(msg).await?;
+    node1
+        .swarm
+        .transport
+        .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
+        .await?;
     assert_eq!(dummy_controlled::sent_count(), 1);
 
     let (old, replacement) = node1
@@ -660,7 +673,7 @@ async fn test_detached_storage_sync_missing_routable_transport_does_not_degrade_
     assert!(node1
         .swarm
         .transport
-        .send_storage_sync(msg)
+        .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
         .await?
         .is_deferred());
     assert_eq!(
@@ -698,7 +711,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
     assert!(node1
         .swarm
         .transport
-        .send_storage_sync(msg)
+        .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
         .await?
         .is_sent());
     assert_eq!(

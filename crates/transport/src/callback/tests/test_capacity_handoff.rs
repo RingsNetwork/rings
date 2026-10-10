@@ -45,6 +45,8 @@ impl TransportCallback for PendingAfterCapacityHandoff {
     }
 }
 
+/// A frame's credit is released when the protocol takes the frame over, not when its callback
+/// completes, so a slow handler holds no place in the window.
 #[tokio::test]
 async fn test_downstream_handoff_releases_the_credit_before_callback_completion() {
     let callback = InnerTransportCallback::new(

@@ -292,7 +292,7 @@ fn begin_registration_publish(
     published_values: &mut BTreeSet<Bytes>,
     current_values: &BTreeSet<Bytes>,
     observed_values: Vec<Bytes>,
-    replaces_observed_value: impl Fn(&Bytes) -> bool,
+    prunes_observed_value: impl Fn(&Bytes) -> bool,
 ) -> Vec<Bytes> {
     let mut stale_values = published_values
         .iter()
@@ -303,7 +303,7 @@ fn begin_registration_publish(
         observed_values
             .into_iter()
             .filter(|observed| !current_values.contains(observed))
-            .filter(replaces_observed_value),
+            .filter(prunes_observed_value),
     );
     // Invariant: every value whose touch may have reached storage is remembered
     // before the first await. If the publish future is later cancelled by an

@@ -491,6 +491,8 @@ struct OutboundWorker {
     credit_waits: FuturesUnordered<CreditWaitFuture>,
     /// Since when this worker has waited for credit, published for liveness.
     credit_stall: CreditStall,
+    /// The identity of the next credit reservation.
+    next_credit_wait: u64,
     /// When a delivery to this peer last settled: the stall deadline's reference.
     delivery_progress: DeliveryProgress,
     measurements: MeasurementRecorder,
@@ -525,6 +527,7 @@ impl OutboundWorker {
             credits: std::array::from_fn(|_| ClassCredit::Idle),
             credit_waits: FuturesUnordered::new(),
             credit_stall: link.credit_stall,
+            next_credit_wait: 0,
             delivery_progress: DeliveryProgress::default(),
             measurements,
             stop,

@@ -295,10 +295,9 @@ async fn test_sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -
     Ok(())
 }
 
-/// Hand-off law for relay carriers: an element that fails the witness for good, and a reset
-/// floor (both only in a carrier written before the storage cutover), are retired by the sender
-/// rather than offered, so the receiver can admit and ack the rest instead of skipping the whole
-/// carrier on every pass.
+/// Hand-off law for relay carriers: an element that fails the witness for good (only in a
+/// carrier written before the storage cutover) is retired by the sender rather than offered, so
+/// the receiver can admit and ack the rest instead of skipping the whole carrier on every pass.
 #[tokio::test]
 async fn test_handoff_retires_an_unwitnessed_inbox_element_and_offers_the_rest() -> Result<()> {
     let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
@@ -317,15 +316,12 @@ async fn test_handoff_retires_an_unwitnessed_inbox_element_and_offers_the_rest()
     // as a carrier from before the cutover was.
     let junk = Entry::new(position, vec![Bytes::from("junk")], EntryKind::RelayMessage);
     let junk = EntryOperation::Extend(junk).stamped(now_ms, node.did)?;
-    let mut stored = node
+    let stored = node
         .live_storage_entry(key, now_ms)
         .await?
         .ok_or_else(|| Error::InvalidMessage("hold was not stored".to_string()))?
         .operate(now_ms, junk, node.did)?;
     assert_eq!(stored.data.len(), 2);
-    // A pre-cutover carrier may also hold a reset floor, older than its elements, which no
-    // receiver admits on a relay carrier.
-    stored.crdt.register = Some(EntryVersion::new(now_ms - 1_000, node.did, node.did));
     node.storage.put(&key.to_string(), &stored).await?;
 
     let batches = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
@@ -335,7 +331,6 @@ async fn test_handoff_retires_an_unwitnessed_inbox_element_and_offers_the_rest()
         .await?
         .ok_or_else(|| Error::InvalidMessage("the witnessed hold was retired".to_string()))?;
     assert_eq!(remaining.data.len(), 1);
-    assert_eq!(remaining.crdt.register, None, "the reset floor is dropped");
     remaining.witnessed_inbox_elements(now_ms, node.network_id())?;
     assert_eq!(batches, vec![(new_successor, vec![PlacedEntry::new(
         position, remaining

@@ -34,8 +34,8 @@ impl OutboundWorker {
             WorkerInput::Command(Some(command)) => self.handle_commands([command]),
             WorkerInput::Command(None) => self.input_closed = true,
             WorkerInput::Delivery(event) => self.handle_delivery(event),
-            WorkerInput::Credit((class, attempt, credit)) => {
-                self.settle_credit(class, attempt, credit);
+            WorkerInput::Credit((class, wait, attempt, credit)) => {
+                self.settle_credit(class, wait, attempt, credit);
             }
         }
     }

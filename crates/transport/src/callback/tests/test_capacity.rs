@@ -94,6 +94,61 @@ fn test_a_loaded_node_defers_credit_until_any_release_relieves_it() {
     assert_eq!(load.held(), 0);
 }
 
+/// The priority lane is never deferred (#913 R8 M3): while the node holds its soft limit, a
+/// batch released on [`ChannelLane::PRIORITY`] is advertised at once, and a batch released on any
+/// other lane is deferred, so a peer's control traffic never waits for what other traffic makes
+/// the node hold.
+#[cfg(any(feature = "dummy", feature = "native-webrtc"))]
+#[test]
+fn test_a_loaded_node_still_advertises_the_priority_lane() {
+    use futures::FutureExt;
+
+    use crate::core::credit::credit_index;
+
+    let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
+    let frame = u64::try_from(custom.len()).expect("a frame length fits u64");
+    let batch = usize::try_from(LANE_CREDIT_WINDOW / 2).expect("the batch fits usize");
+    // One full window loads the node.
+    let load = NodeReceiveLoad::with_limit(LANE_CREDIT_WINDOW * frame);
+    let callback = InnerTransportCallback::new(
+        "loaded",
+        Box::new(IgnoredCallback),
+        crate::notifier::Notifier::default(),
+        load.clone(),
+    );
+    let fill = |lane| {
+        (0..LANE_CREDIT_WINDOW)
+            .map(
+                |_| match callback.admit_inbound_frame(custom.clone(), lane) {
+                    InboundFrameAdmission::Admitted(frame) => frame,
+                    _ => panic!("a frame within the window must be admitted"),
+                },
+            )
+            .collect::<Vec<_>>()
+    };
+    let credit = |lane| {
+        callback
+            .link_credit()
+            .next_credit(credit_index(lane))
+            .now_or_never()
+            .flatten()
+    };
+    let bulk_lane = ChannelLane::new(1);
+    let (mut control, mut bulk) = (fill(ChannelLane::PRIORITY), fill(bulk_lane));
+
+    control.truncate(control.len() - batch);
+    assert_eq!(
+        credit(ChannelLane::PRIORITY),
+        Some(LANE_CREDIT_WINDOW / 2 + LANE_CREDIT_WINDOW),
+        "the priority lane advertises while the node is loaded"
+    );
+    bulk.truncate(bulk.len() - batch);
+    assert!(load.held() >= LANE_CREDIT_WINDOW * frame);
+    assert_eq!(credit(bulk_lane), None, "any other lane defers");
+    drop((control, bulk));
+    assert_eq!(load.held(), 0);
+}
+
 /// A connection admits exactly one credit window per lane; the frame beyond it is a credit
 /// violation, and a released frame frees its place.
 #[test]

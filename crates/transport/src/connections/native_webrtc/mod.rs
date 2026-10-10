@@ -418,7 +418,7 @@ pub struct WebrtcTransport {
     udp_port_range: Option<WebrtcUdpPortRange>,
     pool: Pool<WebrtcConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
-    receive_pool: NodeReceiveLoad,
+    receive_load: NodeReceiveLoad,
 }
 
 impl WebrtcConnection {
@@ -519,7 +519,7 @@ impl WebrtcTransport {
             external_address,
             udp_port_range,
             pool: Pool::new(),
-            receive_pool: NodeReceiveLoad::new(),
+            receive_load: NodeReceiveLoad::new(),
         }
     }
 }
@@ -907,7 +907,7 @@ impl TransportInterface for WebrtcTransport {
             cid,
             callback,
             webrtc_data_channel_state_notifier.clone(),
-            self.receive_pool.clone(),
+            self.receive_load.clone(),
         ));
 
         // Wire open/close on the channels *this* side creates (the pool), not

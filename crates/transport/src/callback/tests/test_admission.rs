@@ -50,6 +50,8 @@ async fn test_admission_dispatches_decoded_payload_once() {
     ));
 }
 
+/// A malformed frame, an oversized one and one beyond the advertised credit are each refused
+/// and reported to the callback as invalid.
 #[cfg(all(not(target_family = "wasm"), feature = "tokio"))]
 #[tokio::test]
 async fn test_prepare_inbound_frame_reports_malformed_oversized_and_over_credit_frames() {

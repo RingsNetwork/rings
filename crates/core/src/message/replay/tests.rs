@@ -20,7 +20,7 @@ fn stream(destination: Did) -> StreamKey {
 }
 
 #[test]
-fn duplicate_late_stale_fork_and_gap_transitions_are_typed() {
+fn test_duplicate_late_stale_fork_and_gap_transitions_are_typed() {
     let (state, first) = observe(None, 10, digest(1));
     assert_eq!(first, SequenceVerdict::First);
 
@@ -153,7 +153,7 @@ fn test_honest_sender_is_never_stale_under_any_cross_class_interleaving() {
 }
 
 #[test]
-fn transition_is_deterministic_for_the_same_state_and_input() {
+fn test_transition_is_deterministic_for_the_same_state_and_input() {
     let (state, _) = observe(None, 4, digest(1));
     assert_eq!(
         observe(Some(state.clone()), 7, digest(2)),
@@ -162,7 +162,7 @@ fn transition_is_deterministic_for_the_same_state_and_input() {
 }
 
 #[test]
-fn destinations_advance_independently() {
+fn test_destinations_advance_independently() {
     let origin: Did = SecretKey::random().address().into();
     let a: Did = SecretKey::random().address().into();
     let b: Did = SecretKey::random().address().into();
@@ -189,7 +189,7 @@ fn destinations_advance_independently() {
 }
 
 #[test]
-fn every_slot_in_the_bounded_reordering_window_is_admitted_once() {
+fn test_every_slot_in_the_bounded_reordering_window_is_admitted_once() {
     let high = TRANSACTION_REPLAY_BACKTRACK.saturating_add(50);
     let (mut state, verdict) = observe(None, high, digest(0));
     assert_eq!(verdict, SequenceVerdict::First);
@@ -206,7 +206,7 @@ fn every_slot_in_the_bounded_reordering_window_is_admitted_once() {
 }
 
 #[test]
-fn session_rotation_preserves_the_account_destination_stream_key() -> Result<()> {
+fn test_session_rotation_preserves_the_account_destination_stream_key() -> Result<()> {
     let account = SecretKey::random();
     let first_session = crate::delegation::DelegateeKey::new_with_seckey(&account)?;
     let rotated_session = crate::delegation::DelegateeKey::new_with_seckey(&account)?;
@@ -238,7 +238,7 @@ fn session_rotation_preserves_the_account_destination_stream_key() -> Result<()>
 
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
-async fn sender_allocators_are_independent_per_destination() -> Result<()> {
+async fn test_sender_allocators_are_independent_per_destination() -> Result<()> {
     let origin: Did = SecretKey::random().address().into();
     let a: Did = SecretKey::random().address().into();
     let b: Did = SecretKey::random().address().into();
@@ -254,7 +254,7 @@ async fn sender_allocators_are_independent_per_destination() -> Result<()> {
 
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
-async fn sender_and_receiver_state_survive_runtime_recreation() -> Result<()> {
+async fn test_sender_and_receiver_state_survive_runtime_recreation() -> Result<()> {
     let destination: Did = SecretKey::random().address().into();
     let key = stream(destination);
     let storage = std::sync::Arc::new(crate::storage::MemStorage::new());
@@ -277,7 +277,7 @@ async fn sender_and_receiver_state_survive_runtime_recreation() -> Result<()> {
 
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
-async fn counter_exhaustion_fails_closed() -> Result<()> {
+async fn test_counter_exhaustion_fails_closed() -> Result<()> {
     let key = stream(SecretKey::random().address().into());
     let storage = crate::storage::MemStorage::new();
     let (storage_key, record) = sender_record(&key, u64::MAX)?;
@@ -301,7 +301,7 @@ const CLASSES: [MessageCategory; MessageCategory::COUNT] = [
 /// The table retains every class stream of 4096 pairs; the next pair's stream fails closed.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
-async fn new_sender_stream_fails_closed_at_the_table_bound() -> Result<()> {
+async fn test_new_sender_stream_fails_closed_at_the_table_bound() -> Result<()> {
     let pairs = u32::try_from(TRANSACTION_REPLAY_PAIR_CAPACITY)
         .map_err(|_| Error::TransactionReplayStateInvalid)?;
     let runtime = TransactionReplay::new_shared(Box::new(crate::storage::MemStorage::new()));
@@ -337,7 +337,7 @@ async fn new_sender_stream_fails_closed_at_the_table_bound() -> Result<()> {
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test]
-async fn browser_storage_round_trip_retains_nonempty_replay_state() {
+async fn test_browser_storage_round_trip_retains_nonempty_replay_state() {
     const STORAGE_NAME: &str = "rings-core/replay-store-round-trip";
     let storage = crate::storage::idb::IdbStorage::new_with_cap_name_and_authority(
         2,

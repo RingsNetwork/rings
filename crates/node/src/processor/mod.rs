@@ -355,10 +355,11 @@ impl Processor {
     /// Fetch `entry_key` and read the cache once the fetch is answered, stopping early on
     /// `stop`.
     ///
-    /// A reply is recognised by the fetch's reply marker ([`Swarm::storage_fetch_answers`])
-    /// growing past its count before the fetch, not by the cache holding a value: the cache
-    /// may hold a value from before this fetch, and a cached value is projected at the clock of
-    /// each read, so it changes with no reply when an element crosses its horizon.
+    /// A reply is recognised by the fetch's reply marker
+    /// ([`Swarm::storage_fetch_answered_since`] the mark read before the fetch), not by the
+    /// cache holding a value: the cache may hold a value from before this fetch, and a cached
+    /// value is projected at the clock of each read, so it changes with no reply when an element
+    /// crosses its horizon.
     ///
     /// Post: the cache read after the reply, or, if none arrives within the fetch-poll budget,
     /// the cache read at its end.
@@ -370,10 +371,7 @@ impl Processor {
         if stop.should_stop() {
             return Err(Error::RegistrationStopped);
         }
-        let answers_before = self
-            .swarm
-            .storage_fetch_answers(entry_key)
-            .map_err(Error::EntryError)?;
+        let mark = self.swarm.storage_fetch_mark();
         self.storage_fetch(entry_key).await?;
         for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
             if stop.should_stop() {
@@ -381,9 +379,8 @@ impl Processor {
             }
             let answered = self
                 .swarm
-                .storage_fetch_answers(entry_key)
-                .map_err(Error::EntryError)?
-                > answers_before;
+                .storage_fetch_answered_since(entry_key, mark)
+                .map_err(Error::EntryError)?;
             if answered || attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
                 break;
             }

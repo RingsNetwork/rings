@@ -75,12 +75,12 @@ impl ReassemblyProfile {
 }
 
 /// Parse a singular onion-exit service name from the run command.
-pub(crate) fn parse_onion_exit_service(raw: &str) -> Result<OnionServiceName, String> {
+fn parse_onion_exit_service(raw: &str) -> Result<OnionServiceName, String> {
     OnionServiceName::parse(raw).map_err(|error| error.to_string())
 }
 
 /// Parse a canonical service name for client-side onion proxy options.
-pub(crate) fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
+fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
     OnionServiceName::parse(raw).map_err(|error| error.to_string())
 }
 
@@ -377,7 +377,7 @@ pub(crate) struct ClientArgs {
         help = "rings-node endpoint url. If not provided, use endpoint_url in config file or http://127.0.0.1:50000",
         env
     )]
-    pub(crate) endpoint_url: Option<String>,
+    endpoint_url: Option<String>,
 
     #[arg(
         long,
@@ -462,7 +462,7 @@ impl DelegationArgs {
         Ok(ssk_path)
     }
 
-    pub(crate) fn load_or_create_key(&self) -> anyhow::Result<SecretKey> {
+    fn load_or_create_key(&self) -> anyhow::Result<SecretKey> {
         if let Some(key) = &self.ecdsa_key {
             return Ok(key.clone());
         }
@@ -477,7 +477,7 @@ impl DelegationArgs {
     }
 }
 
-pub(crate) fn read_secret_key_file(path: &str) -> anyhow::Result<SecretKey> {
+fn read_secret_key_file(path: &str) -> anyhow::Result<SecretKey> {
     let path = expand_home(path)?;
     let raw = std::fs::read_to_string(path)?;
     let Some(key) = raw

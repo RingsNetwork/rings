@@ -169,11 +169,13 @@ async fn retire_unless_live(
 /// else, so it never nests and never waits on the network.
 impl PeerRing {
     /// Read the live replicated entry of `kind` stored at `placement` on this node, projected at
-    /// `now_ms` as every storage read is: the read outside core, whose stores are crate-private
-    /// so that no reader bypasses the projection.
+    /// `now_ms` as every storage read is: test support for the controlled-network tests of
+    /// downstream crates, which observe one replica; production reads a key through a lookup.
+    /// The stores are crate-private, so no reader bypasses the projection.
     ///
     /// Post: read only. Unlike a read under the storage transition, it neither writes the
     /// projection back nor retires a value that is no longer live; it reports that as absent.
+    #[cfg(feature = "dummy")]
     pub async fn stored_entry_at(
         &self,
         kind: EntryKind,
@@ -255,13 +257,12 @@ impl PeerRing {
     }
 
     /// Remove the elements `removal` names from the relay carrier stored at `key`, as this node
-    /// holds it at `now_ms`, drop any reset floor it holds, and return the carrier that remains.
+    /// holds it at `now_ms`, and return the carrier that remains.
     ///
     /// Pre: `removal` is a removal delta of that carrier ([`Entry::removal_of`]). It is applied
     /// locally, outside the inbox write law, which admits a remote removal only from the
     /// recipient: the caller removes what fails the witness for good, which no write law could
-    /// have admitted. A relay carrier never holds a reset floor (a pre-cutover carrier may), and
-    /// this node is its only replica, so dropping one shadows nothing back into existence.
+    /// have admitted.
     /// Post: dots are unique to elements, so a join landing since `removal` was computed loses
     /// nothing it did not name; a carrier left without retention is removed.
     pub(crate) async fn remove_inbox_elements(
@@ -276,8 +277,7 @@ impl PeerRing {
         else {
             return Ok(None);
         };
-        let mut stored = local.tombstone(removal)?.retired_at(now_ms);
-        stored.crdt.register = None;
+        let stored = local.tombstone(removal)?.retired_at(now_ms);
         if stored.is_live_at(now_ms) {
             self.storage.put(&key, &stored).await?;
             Ok(Some(stored))

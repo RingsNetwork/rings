@@ -22,7 +22,7 @@ use crate::error::Result;
 ///
 /// Pre: none; a signature of any length other than 65 bytes is refused, never sliced.
 pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey<33>> {
-    let mut sig_byte = SignatureAlgorithm::Bip137.signature_array::<65>(sig.as_ref())?;
+    let mut sig_byte = SignatureAlgorithm::Bip137.recoverable_signature(sig.as_ref())?;
     // BIP-137 puts the header byte `v` first; recovery wants `r ‖ s ‖ v`.
     sig_byte.rotate_left(1);
     let hash = self::magic_hash(msg);

@@ -28,6 +28,7 @@ use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::NotifyPredecessorSend;
 use crate::message::SyncEntriesWithSuccessor;
+use crate::swarm::transport::StorageSyncSend;
 use crate::swarm::transport::Transport;
 use crate::swarm::Swarm;
 use crate::tests::activity::probe_on_activity;
@@ -242,7 +243,7 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
     assert!(
         node1
             .transport
-            .send_storage_sync(msg)
+            .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
             .await
             .unwrap()
             .is_sent(),

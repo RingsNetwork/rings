@@ -61,6 +61,7 @@ use crate::utils::get_epoch_ms_i64;
 
 mod connection;
 mod delivery;
+pub(crate) mod egress;
 mod event_delivery;
 #[cfg(test)]
 mod frame_ledger;
@@ -81,6 +82,7 @@ mod transaction_replay;
 pub(crate) use storage_sync::StorageSyncBatch;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use storage_sync::StorageSyncBatchStep;
+pub(crate) use storage_sync::StorageSyncSend;
 mod timeouts;
 pub(crate) use self::connection::AdmittedConnection;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -140,6 +142,7 @@ use self::pending::PENDING_CONNECTION_TIMEOUT_MS;
 pub(crate) use self::readiness::TransportReadiness;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::retention::UNREFERENCED_CONNECTION_GRACE_MS;
+use self::storage_lookup::StorageAnswerClock;
 use self::storage_lookup::StorageLookupObservationMap;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
@@ -192,6 +195,8 @@ pub struct SwarmTransport {
     pending_finger_updates: Mutex<PendingFingerUpdates>,
     peer_liveness: Mutex<PeerLivenessMap>,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
+    /// The reply marker of storage lookups; see [`StorageAnswerClock`].
+    storage_answer_clock: StorageAnswerClock,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     storage_repair_requested: AtomicBool,
     /// Test builds: the frames this node sent and received; see [`FrameLedger`].
@@ -330,6 +335,7 @@ impl SwarmTransport {
             pending_finger_updates: Mutex::new(BTreeMap::new()),
             peer_liveness: Mutex::new(PeerLivenessMap::new()),
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
+            storage_answer_clock: StorageAnswerClock::default(),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             storage_repair_requested: AtomicBool::new(false),
             #[cfg(test)]

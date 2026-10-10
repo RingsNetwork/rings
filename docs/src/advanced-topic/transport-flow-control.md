@@ -37,12 +37,15 @@ What a node holds of received frames is bounded twice:
   that only if every connection fills the credit it holds at once. Session-link holds add at
   most 256 frames (16 MiB) across the node.
 - **Soft, per node.** While the frames a node's connections hold together exceed 16 MiB
-  (`NODE_RECEIVE_SOFT_LIMIT_BYTES`), no lane advertises new credit; a lane that releases a
-  batch meanwhile defers its advertisement, and the release that brings the node below the
-  limit makes every deferred one. Deferring narrows what senders may send next, never what
-  they were granted, so no honest frame is refused; the node exceeds the limit by at most the
-  credit already advertised. A hard node-wide bound needs credit that can be taken back, a
-  wire change (#934).
+  (`NODE_RECEIVE_SOFT_LIMIT_BYTES`), no lane but the priority lane advertises new credit; a
+  lane that releases a batch meanwhile defers its advertisement, and the release that brings
+  the node below the limit makes every deferred one. The priority lane
+  (`ChannelLane::PRIORITY`), which core gives to DHT control, is never deferred, so a peer's
+  control traffic, and with it every link's liveness, never waits for what other peers make
+  the node hold. Deferring narrows what senders may send next, never what they were granted,
+  so no honest frame is refused; the node exceeds the limit by at most the credit already
+  advertised and one priority window per connection. A hard node-wide bound needs credit that
+  can be taken back, a wire change (#934).
 
 A wait for credit is backpressure, not a verdict on the peer: it ends when credit arrives or
 when the connection generation ends (it fails or closes), and the wait itself never retires a
@@ -53,11 +56,16 @@ credit:
 - a liveness probe counts as sent once it is queued on the peer's control lane, so a probe the
   peer will not let this end send, for want of the control lane's credit, is unanswered, and
   the peer is evicted once the answer window passes;
+- a probe that cannot even be queued while this end waits for the peer's credit (the
+  capacity it lacks is held by the peer's own backpressure) is charged as sent too;
 - a peer this end has waited `PEER_LIVENESS_IDLE_MS` (15 seconds) for credit on any lane is due
   a probe however recently it sent anything; the probe rides the control lane, so a peer slow
   only on a data lane answers it and is kept;
-- probes are sent concurrently, each returning once queued, so one starved peer delays no other
-  peer's probe.
+- while this end waits for a peer's credit, only the probe's answer answers it: the peer's own
+  traffic proves it can send, not that it takes this end's control traffic, so a peer that
+  withholds credit cannot escape eviction by sending;
+- no probe waits on its peer (it is sent through the protocol egress below), so one starved
+  peer delays no other peer's probe.
 
 A peer that does not progress this end's control traffic is therefore evicted within the idle
 interval plus the answer window, and its eviction fails every wait on its credit. A wait that
@@ -82,15 +90,20 @@ lane.
   re-charged at its full size on the actor, where it cannot wait, and is dropped if the
   budgets cannot hold it (#932).
 - Core's outbound scheduler serves only lanes that hold credit, and times a send only for the
-  transport's acceptance, never for the receiver's consumption. A payload the node forwards or
-  relays is released once it is queued: it takes its outbound capacity without waiting (a
-  forward refused for capacity is dropped as local backpressure), returns, and frees the
-  inbound event and lane that carried it, so the next peer's backpressure never reaches
-  upstream links, and neither does a liveness verdict. Its first frame's admission, credit
-  included, is awaited apart from it, at most `DETACHED_FIRST_FRAME_TIMEOUT` (25 seconds), and
-  a forward that waits longer is dropped, as a best-effort relay may drop; the origin's own
-  tracked send or retry covers it. A payload the node originates returns once its first frame
-  is admitted, so its sender learns whether it left.
+  transport's acceptance, never for the receiver's consumption.
+- An inbound lane's progress depends only on local resources (`swarm::transport::egress`).
+  Every send made in the protocol context (a handler's forward, report, query or
+  notification, a connection offer it starts, a read repair, a relay hold, a liveness probe)
+  goes through the protocol egress: it takes the connection's readiness and its outbound
+  capacity now (refused for either, it is dropped as local backpressure), returns once queued,
+  and so frees the inbound event and lane that carried its cause. The next peer's
+  backpressure never reaches upstream links, and neither does a liveness verdict. Its first
+  frame's admission, credit included, is awaited apart from it, at most
+  `DETACHED_FIRST_FRAME_TIMEOUT` (25 seconds), and a payload that waits longer is dropped, as
+  a best-effort relay may drop; the origin's own tracked send or retry covers it. A send
+  through the Swarm API, the application boundary, waits for its first frame's admission, so
+  its caller learns whether it left; an application callback that sends from inside
+  `on_inbound` waits so too, and holds its lane while it does.
 
 Every such wait is logged at `warn`, with the peer and lane: a sender waiting for credit, and an
 arrival waiting for the mailbox.

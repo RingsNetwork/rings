@@ -335,6 +335,9 @@ pub fn release_delivery_future_gate() {
 
 /// Test hook: the connection generation `generation_id` grants its peer no more credit, as a
 /// receiver that withholds it: what its peer may send is what it was granted already.
+///
+/// The set is this thread's, as every dummy hook's: it governs the credit pumps that run on the
+/// calling thread, so a test uses it on a current-thread runtime, where every pump does.
 pub fn withhold_credit(generation_id: &str) {
     WITHHELD_CREDIT.with(|withheld| withheld.borrow_mut().insert(generation_id.to_string()));
 }

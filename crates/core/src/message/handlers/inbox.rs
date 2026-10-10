@@ -32,7 +32,8 @@ pub(crate) async fn hold_for_offline_destination(
 ) -> Result<()> {
     let held = HeldMessage::hold(payload.clone(), transport.message_signer(), get_epoch_ms())?;
     operate_entry(
-        transport,
+        &transport,
+        &transport.protocol_egress(),
         EntryOperation::Extend(Entry::inbox_delta(&held)?),
     )
     .await

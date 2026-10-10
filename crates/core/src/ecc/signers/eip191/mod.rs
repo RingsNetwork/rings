@@ -2,6 +2,7 @@
 //! ref <https://eips.ethereum.org/EIPS/eip-191>
 
 use crate::ecc::keccak256;
+use crate::ecc::keys::SignatureAlgorithm;
 use crate::ecc::PublicKey;
 use crate::ecc::PublicKeyAddress;
 use crate::ecc::SecretKey;
@@ -28,7 +29,7 @@ pub fn hash(msg: &[u8]) -> [u8; 32] {
 
 /// recover pubkey according to signature.
 pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey<33>> {
-    let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
+    let sig_byte = SignatureAlgorithm::Eip191.recoverable_signature(sig.as_ref())?;
     let hash = hash(msg);
     let mut sig712 = sig_byte;
     sig712[64] = super::recovery_id_from_v(sig712[64], 27)?;

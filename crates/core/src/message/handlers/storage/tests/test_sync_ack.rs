@@ -20,6 +20,7 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::swarm::transport::StorageSyncSend;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
@@ -235,7 +236,10 @@ async fn test_send_storage_sync_applies_local_destination_without_transport_send
         data: vec![PlacedEntry::new(placement_key, entry)],
     };
 
-    node.swarm.transport.send_storage_sync(sync_msg).await?;
+    node.swarm
+        .transport
+        .send_storage_sync_or_defer(sync_msg, StorageSyncSend::Admitted, "test")
+        .await?;
 
     assert_eq!(
         node.dht().storage.get(&placement_key.to_string()).await?,
@@ -264,7 +268,7 @@ async fn test_local_storage_sync_validates_entire_batch_before_persisting() -> R
     let error = node
         .swarm
         .transport
-        .send_storage_sync(sync_msg)
+        .send_storage_sync_or_defer(sync_msg, StorageSyncSend::Admitted, "test")
         .await
         .expect_err("an invalid later placement must reject the complete local batch");
 

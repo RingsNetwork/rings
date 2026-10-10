@@ -467,60 +467,30 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     // ready, so the actor dispatches no application frame and no permit is
     // released while the capacity laws are observed.
     let application_hold = callback.hold_application_admission_for_test()?;
-    let peer_count = inbound_application_capacity_for_test() / inbound_peer_capacity_for_test();
-    assert_eq!(
-        peer_count * inbound_peer_capacity_for_test(),
-        inbound_application_capacity_for_test()
-    );
-    let mut application_inputs = Vec::with_capacity(peer_count);
-    for _ in 0..peer_count {
-        let key = SecretKey::random();
-        let peer: Did = key.address().into();
-        let session = DelegateeKey::new_with_seckey(&key)?;
-        let mut messages = Vec::with_capacity(inbound_peer_capacity_for_test());
-        for _ in 0..inbound_peer_capacity_for_test() {
-            messages.push(
-                MessagePayload::new_send(
-                    Message::custom(b"bounded-inbound-mailbox")?,
-                    MessageSigner::new(&session, TEST_NETWORK_ID),
-                    transport.dht.did,
-                    transport.dht.did,
-                )?
-                .to_wire()?,
-            );
-        }
-        application_inputs.push((peer.to_string(), messages));
-    }
+    let application_inputs = saturating_application_inputs(transport.dht.did)?;
     let control_key = SecretKey::random();
     let control_peer: Did = control_key.address().into();
     let control_session = DelegateeKey::new_with_seckey(&control_key)?;
-    let overflow_message = MessagePayload::new_send(
+    let overflow_message = local_wire(
         Message::custom(b"global-application-overflow")?,
-        MessageSigner::new(&control_session, TEST_NETWORK_ID),
+        &control_session,
         transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
-    let control = MessagePayload::new_send(
+    )?;
+    let control = local_wire(
         noop_control_message(transport.dht.did),
-        MessageSigner::new(&control_session, TEST_NETWORK_ID),
+        &control_session,
         transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
+    )?;
     let control_cid = control_peer.to_string();
     let mut deliveries = Vec::new();
 
     for (cid, messages) in application_inputs {
         for message in messages {
-            let callback = Arc::clone(&callback);
-            let cid = cid.clone();
-            deliveries.push(tokio::spawn(async move {
-                callback
-                    .on_admitted_message_for_test(&cid, &message)
-                    .await
-                    .map_err(|error| Error::InvalidMessage(error.to_string()))
-            }));
+            deliveries.push(spawn_inbound_delivery(
+                Arc::clone(&callback),
+                cid.clone(),
+                message,
+            ));
         }
     }
     callback
@@ -531,14 +501,8 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
 
     // Work beyond the active and queued capacity is not refused: it waits, holding its
     // sender's credit, until the mailbox drains.
-    let overflow_callback = Arc::clone(&callback);
-    let overflow_cid = control_cid.clone();
-    let overflow = tokio::spawn(async move {
-        overflow_callback
-            .on_admitted_message_for_test(&overflow_cid, &overflow_message)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
+    let overflow =
+        spawn_inbound_delivery(Arc::clone(&callback), control_cid.clone(), overflow_message);
     callback
         .await_inbound_waiting_for_test(|waiting| waiting == 1)
         .await;
@@ -623,6 +587,33 @@ fn local_wire(message: Message, session: &DelegateeKey, local: Did) -> Result<by
         local,
     )?
     .to_wire()
+}
+
+/// One full peer budget of application frames from each of the peers that together fill the
+/// application capacity of `local`'s inbound mailbox, as `(cid, frames)`.
+fn saturating_application_inputs(local: Did) -> Result<Vec<(String, Vec<bytes::Bytes>)>> {
+    let peer_count = inbound_application_capacity_for_test() / inbound_peer_capacity_for_test();
+    assert_eq!(
+        peer_count * inbound_peer_capacity_for_test(),
+        inbound_application_capacity_for_test()
+    );
+    (0..peer_count)
+        .map(|_| {
+            let key = SecretKey::random();
+            let peer: Did = key.address().into();
+            let session = DelegateeKey::new_with_seckey(&key)?;
+            let frames = (0..inbound_peer_capacity_for_test())
+                .map(|_| {
+                    local_wire(
+                        Message::custom(b"bounded-inbound-mailbox")?,
+                        &session,
+                        local,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((peer.to_string(), frames))
+        })
+        .collect()
 }
 
 fn noop_control_message(did: Did) -> Message {

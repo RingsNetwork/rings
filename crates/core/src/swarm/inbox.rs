@@ -3,8 +3,9 @@
 //! The inbox carrier `d + 1` lies in `d`'s own storage interval once `d` is online, so the
 //! predecessor's storage repair pass hands the held messages to `d`. Every storage maintenance
 //! pass the DHT emits [`InboxDelivery::deliver_inbox`]; this interpreter reads the inbox from
-//! local storage, retires at once every element that fails the witness under the local overlay,
-//! and then, element by element, delivers through the inbound pipeline (application validation,
+//! local storage, retires at once every element that fails the witness for good under the local
+//! overlay (an element held ahead of this clock is kept for a later pass, as
+//! `Entry::partition_inbox` states), and then, element by element, delivers through the inbound pipeline (application validation,
 //! handler dispatch, `on_inbound`, each under the inbound deadline) and retires the delivered
 //! element by its add dot. Retiring per element makes progress durable: a pass cut short by its
 //! step deadline resumes after the last retired element instead of redelivering the same prefix.
@@ -40,7 +41,13 @@ impl SwarmInboxDelivery {
 
     /// Tombstone `removal` at the carrier's owner.
     async fn retire(&self, removal: Entry) -> Result<()> {
-        operate_entry(self.transport.clone(), EntryOperation::Tombstone(removal)).await
+        let transport = &self.transport;
+        operate_entry(
+            transport,
+            &transport.protocol_egress(),
+            EntryOperation::Tombstone(removal),
+        )
+        .await
     }
 }
 
@@ -49,7 +56,8 @@ impl SwarmInboxDelivery {
 impl InboxDelivery for SwarmInboxDelivery {
     /// Post: every element of the locally stored inbox that passes the witness was offered to
     /// the application and then tombstoned at its owner; every element that fails the witness
-    /// was tombstoned unread.
+    /// for good was tombstoned unread; an element held ahead of this clock is left for a later
+    /// pass.
     async fn deliver_inbox(&self) -> Result<()> {
         let now_ms = get_epoch_ms();
         let key = StorageKey::inbox_of(self.transport.dht.did);

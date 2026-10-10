@@ -108,15 +108,18 @@ and expire, but a party with many identities can try to hold several positions o
   expires at its own horizon, and a removal is collected only once every write it covers has
   expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
   while the carrier is retained. A relay inbox is verified by its owner, readable and
-  removable only by its recipient, and capped at 64 messages. Values are stored in the clear.
+  removable by its recipient, and capped at 64 messages; its holder removes only an element
+  that fails the witness for good, which no write could have admitted. Values are stored in
+  the clear.
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
   holds at most 16 frames per lane, refuses and reports a frame beyond its advertised credit,
   and refuses no honest frame for want of credit. Overload is pushed back to the sender and
-  every wait is logged. Above 16 MiB of received frames a node defers new credit, a soft
-  bound; the hard bound is per connection (4 MiB), so a node's worst case grows with its
-  admitted connections (#934). A peer that withholds the control lane's credit is evicted by
-  liveness within its idle interval plus the answer window, and one peer's backpressure never
-  holds another's link: a forward is released once queued.
+  every wait is logged. Above 16 MiB of received frames a node defers new credit on every
+  lane but the control lane, a soft bound; the hard bound is per connection (4 MiB), so a
+  node's worst case grows with its admitted connections (#934). A peer that withholds the
+  control lane's credit is evicted by liveness within its idle interval plus the answer
+  window, whether or not it keeps sending, and one peer's backpressure never holds another's
+  link: every send a handler makes (a forward, a report, a query) returns once queued.
   [Details](docs/src/advanced-topic/transport-flow-control.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.

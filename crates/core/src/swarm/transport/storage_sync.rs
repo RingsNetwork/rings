@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::mem;
 
 use super::delivery::SendCompletionOutcome;
-use super::outbound::OutboundCompletion;
 use super::SwarmTransport;
 use crate::dht::entry::inbox::relocates_from_predecessor;
 use crate::dht::entry::PlacedEntry;
@@ -34,7 +33,20 @@ pub(super) struct StorageSyncAckCapability {
     expected_acks: Vec<SyncedEntryAck>,
 }
 
-/// Outcome of one storage-sync send, detached or tracked: local persistence,
+/// How a storage sync payload meets its next hop: the egress discipline of its sender (see
+/// `swarm::transport::egress`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StorageSyncSend {
+    /// The protocol discipline: return once queued; only a copy-only repair, since no
+    /// acknowledgement capability can be revoked after the queue.
+    Enqueued,
+    /// The application discipline: return once the first frame is admitted.
+    Admitted,
+    /// Return once every frame has completed or been cancelled.
+    Tracked,
+}
+
+/// Outcome of one storage-sync send, enqueued, detached or tracked: local persistence,
 /// remote submission (tracked: completion) under `tx_id`, or a cancelled
 /// data-plane admission that maintenance must recompute and retry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -486,14 +498,14 @@ impl SwarmTransport {
         Ok(acks)
     }
 
-    /// Interpret tracked and detached sends through the same storage outcome.
+    /// Interpret every storage sync send through the same storage outcome.
     /// Local ownership persists directly; successful remote work retains its transaction
     /// identity. Cancellation and deferrable failures revoke any cleanup acknowledgement
     /// capability before returning `Deferred`, so maintenance can safely recompute the route.
-    async fn send_storage_sync_with_completion(
+    async fn send_storage_sync_as(
         &self,
         msg: SyncEntriesWithSuccessor,
-        completion: OutboundCompletion,
+        send: StorageSyncSend,
     ) -> Result<StorageSyncOutcome> {
         let destination = msg.destination.did();
         match self
@@ -525,11 +537,16 @@ impl SwarmTransport {
                         &msg.data,
                     )?;
                 }
-                let send_outcome = match completion {
-                    OutboundCompletion::Detached => {
+                let send_outcome = match send {
+                    StorageSyncSend::Enqueued => self
+                        .protocol_egress()
+                        .send_payload(payload)
+                        .await
+                        .map(|()| SendCompletionOutcome::Succeeded),
+                    StorageSyncSend::Admitted => {
                         self.send_payload_detached_with_outcome(payload).await
                     }
-                    OutboundCompletion::Tracked => self.send_payload_tracked(payload).await,
+                    StorageSyncSend::Tracked => self.send_payload_tracked(payload).await,
                 };
                 match send_outcome {
                     Ok(SendCompletionOutcome::Succeeded) => Ok(StorageSyncOutcome::Sent(tx_id)),
@@ -554,35 +571,37 @@ impl SwarmTransport {
         }
     }
 
-    /// Send a storage-sync payload and register cleanup acks only for hand-off sync.
-    pub(crate) async fn send_storage_sync(
-        &self,
-        msg: SyncEntriesWithSuccessor,
-    ) -> Result<StorageSyncOutcome> {
-        self.send_storage_sync_with_completion(msg, OutboundCompletion::Detached)
-            .await
-    }
-
     /// Send storage repair and wait until every frame has completed or cancelled.
     pub(crate) async fn send_storage_sync_tracked(
         &self,
         msg: SyncEntriesWithSuccessor,
     ) -> Result<StorageSyncOutcome> {
-        self.send_storage_sync_with_completion(msg, OutboundCompletion::Tracked)
+        self.send_storage_sync_as(msg, StorageSyncSend::Tracked)
             .await
     }
 
-    /// Send storage sync as a deferrable data-plane effect.
+    /// Send storage sync under `send` as a deferrable data-plane effect. A read repair a
+    /// handler starts is [`StorageSyncSend::Enqueued`], so it never waits on the replica it
+    /// repairs (the inbound-locality law of `swarm::transport::egress`).
     ///
     /// Backpressure, connection replacement, transport readiness loss, or a
     /// vanished route means this anti-entropy payload was not accepted. These
     /// are not DHT safety failures and may not bubble through message callbacks
     /// as failed control-plane events.
+    ///
+    /// Pre: an [`StorageSyncSend::Enqueued`] `msg` is copy-only. A hand-off registers a cleanup
+    /// acknowledgement that only a sender awaiting its outcome can revoke, so one is refused.
     pub(crate) async fn send_storage_sync_or_defer(
         &self,
         msg: SyncEntriesWithSuccessor,
+        send: StorageSyncSend,
         context: &'static str,
     ) -> Result<StorageSyncOutcome> {
+        if send == StorageSyncSend::Enqueued && msg.purpose.permits_source_cleanup() {
+            return Err(Error::InvalidMessage(format!(
+                "{context}: an ownership hand-off is not a copy-only repair"
+            )));
+        }
         let purpose = msg.purpose;
         let destination = msg.destination;
         let destination_did = destination.did();
@@ -596,7 +615,7 @@ impl SwarmTransport {
             .and_then(|did| self.get_connection(did))
             .map(|conn| conn.webrtc_connection_state());
 
-        let outcome = self.send_storage_sync(msg).await?;
+        let outcome = self.send_storage_sync_as(msg, send).await?;
         if outcome.is_deferred() {
             tracing::warn!(
                 target: "rings_core::storage_sync",

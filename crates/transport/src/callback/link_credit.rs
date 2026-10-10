@@ -59,10 +59,13 @@ pub const NODE_RECEIVE_SOFT_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 /// whose credit advertisements wait for that load to fall below
 /// [`NODE_RECEIVE_SOFT_LIMIT_BYTES`]: one per transport, shared by its connections.
 ///
-/// Law (soft bound). Above the limit no lane advertises new credit, so the frames a node holds
-/// exceed the limit by at most the credit already advertised (one window per lane); the hard
-/// bound remains the windows themselves. Deferring narrows what senders may send next, never
-/// what they were granted, so no honest frame is refused. Law (progress): a deferred link is
+/// Law (soft bound). Above the limit no lane but [`ChannelLane::PRIORITY`] advertises new
+/// credit, so the frames a node holds exceed the limit by at most the credit already advertised
+/// and the priority lane's window per connection; the hard bound remains the windows themselves.
+/// Deferring narrows what senders may send next, never what they were granted, so no honest
+/// frame is refused; and the priority lane never waits for the node's load, so a peer's control
+/// traffic (and with it the liveness of every link) never depends on how much other peers make
+/// this node hold. Law (progress): a deferred link is
 /// woken by the release that brings the load below the limit, and the decision to defer is
 /// taken under the same lock as its registration, so no such release is missed.
 ///
@@ -322,24 +325,28 @@ impl LinkCredit {
 
     /// Release one admitted frame of credit index `index`, of `bytes`: advertise the credit it
     /// completes, unless the node is at its soft limit, which defers the advertisement until
-    /// the load falls; a release that brings it below the limit wakes the deferred links.
+    /// the load falls (the priority lane's excepted); a release that brings it below the limit
+    /// wakes the deferred links.
     ///
     /// The release is counted before the load is judged, so a link registered as deferred has
     /// counted every release the wake must advertise.
     fn release(self: &Arc<Self>, index: CreditIndex, bytes: u64) {
         self.lock().receive[index].release();
-        if let LoadVerdict::Open(deferred) = self.load.release(bytes, self) {
-            self.advertise_due();
-            deferred
-                .iter()
-                .filter_map(Weak::upgrade)
-                .for_each(|link| link.advertise_due());
+        match self.load.release(bytes, self) {
+            LoadVerdict::Open(deferred) => {
+                self.advertise_due(CreditIndex::ALL);
+                deferred
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .for_each(|link| link.advertise_due(CreditIndex::ALL));
+            }
+            LoadVerdict::Deferred => self.advertise_due([credit_index(ChannelLane::PRIORITY)]),
         }
     }
 
-    /// Advertise every lane's credit that its releases have completed, queuing it for the
-    /// lane's pump. A closed link advertises nothing.
-    fn advertise_due(&self) {
+    /// Advertise the credit of every lane of `indices` that its releases have completed,
+    /// queuing it for the lane's pump. A closed link advertises nothing.
+    fn advertise_due(&self, indices: impl IntoIterator<Item = CreditIndex>) {
         let pumps = {
             let mut state = self.lock();
             if state.closed {
@@ -347,7 +354,7 @@ impl LinkCredit {
             }
             let state = &mut *state;
             let mut pumps = Vec::new();
-            for index in CreditIndex::ALL {
+            for index in indices {
                 let Some(limit) = state.receive[index].advertise(self.window) else {
                     continue;
                 };

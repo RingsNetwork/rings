@@ -391,8 +391,11 @@ impl TransferCapacity {
     /// [`Self::acquire`] without waiting: a permit if both the peer's and the node's capacity
     /// admit `bytes` now, otherwise the refusal a wait would have started from.
     ///
-    /// Law: it never overtakes a queued waiter, so a request that cannot wait (a forward, which
-    /// holds the inbound lane that carried it) costs the fair waiters nothing.
+    /// Law: it never overtakes a queued waiter, so a request that cannot wait (a protocol send,
+    /// which runs inside the inbound event that carried it) costs the fair waiters nothing.
+    /// The price is the converse: while waiters are queued on the shared pool, a request larger
+    /// than its class's fixed reservation is refused, however long they wait, and a protocol send
+    /// that size is dropped as local backpressure until the queue drains.
     pub(super) fn admit_now(
         self: &Arc<Self>,
         peer: Did,

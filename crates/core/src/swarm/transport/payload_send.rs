@@ -1,8 +1,6 @@
 use std::future::Future;
-use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use futures::future::FusedFuture;
 use futures::future::FutureExt;
 use futures::pin_mut;
@@ -12,6 +10,7 @@ use rings_transport::core::drop_guard::ArmedDropGuard;
 use super::delivery::terminate_accepted_connection;
 use super::delivery::ChunkSendPermit;
 use super::delivery::SendCompletionOutcome;
+use super::egress::QueueAdmission;
 use super::outbound::ChunkFrames;
 use super::outbound::ChunkedFrameSource;
 use super::outbound::DetachedAdmission;
@@ -32,9 +31,7 @@ use crate::chunk::Chunk;
 use crate::chunk::Framing;
 use crate::chunk::WireReserves;
 use crate::consts::TRANSPORT_MAX_SIZE;
-use crate::delegation::DelegateeKey;
 use crate::dht::Did;
-use crate::dht::PeerRing;
 use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopSource;
@@ -42,7 +39,6 @@ use crate::lifecycle::StopToken;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::MessagePayload;
-use crate::message::MessageSigner;
 use crate::message::PayloadSender;
 use crate::swarm::detached::run_detached_or_inline;
 use crate::swarm::observer::LookupCorrelation;
@@ -99,6 +95,26 @@ struct OutboundPreparation {
     destination: Did,
     relay_destination: Did,
     next_hop: Did,
+}
+
+impl OutboundPreparation {
+    /// What the send of this preparation is logged and observed against, at the node `local`.
+    fn send_log(&self, local: Did, completion: OutboundCompletion) -> OutboundSendLog {
+        OutboundSendLog {
+            origin: self.origin,
+            next_hop: self.next_hop,
+            destination: self.destination,
+            relay_destination: self.relay_destination,
+            tx_id: self.tx_id,
+            message_kind: self.message_kind.as_str(),
+            category: self.message_kind.class(),
+            starts_successor_lookup: matches!(
+                self.message_kind,
+                OutboundMessageKind::FindSuccessorSend
+            ) && self.origin == local,
+            completion,
+        }
+    }
 }
 
 struct PreparedOutboundTransfer {
@@ -271,10 +287,9 @@ fn resolve_scheduler_loss(
 impl SwarmTransport {
     /// Reserve outbound capacity to `peer` for a transfer of `bytes`.
     ///
-    /// A forward (a detached payload this node did not originate) takes it without waiting and
-    /// is refused as local backpressure when it is full: the forward holds the inbound lane
-    /// that carried it until it is queued, so a wait here would carry the next peer's
-    /// backpressure upstream. An originated detached payload waits up to
+    /// A detached send under [`QueueAdmission::Immediate`] takes it without waiting and is
+    /// refused as local backpressure when it is full (the inbound-locality law of the `egress`
+    /// module). One under [`QueueAdmission::Waiting`] waits up to
     /// [`DATA_CHANNEL_SEND_ACCEPT_BUDGET`]; a tracked one waits as long as its own deadline.
     async fn reserve_outbound_capacity(
         &self,
@@ -282,9 +297,9 @@ impl SwarmTransport {
         kind: OutboundMessageKind,
         bytes: usize,
         completion: OutboundCompletion,
-        forward: bool,
+        admission: QueueAdmission,
     ) -> Result<TransferCapacityPermit> {
-        if forward && completion == OutboundCompletion::Detached {
+        if admission == QueueAdmission::Immediate && completion == OutboundCompletion::Detached {
             return self
                 .outbound_schedulers
                 .reserve_now(peer, kind.class(), bytes);
@@ -342,6 +357,7 @@ impl SwarmTransport {
                     payload.relay.next_hop,
                     payload,
                     OutboundCompletion::Tracked,
+                    QueueAdmission::Waiting,
                     stop_token,
                     None,
                 )
@@ -447,14 +463,20 @@ impl SwarmTransport {
         .await
     }
 
+    /// The admitted connection a send to `did` is framed for.
+    ///
+    /// A detached send under [`QueueAdmission::Waiting`] waits, bounded, for its data channels
+    /// to open; a tracked send, and a detached one under [`QueueAdmission::Immediate`], take
+    /// the connection only if it can make progress now.
     async fn connection_for_send(
         &self,
         did: Did,
         completion: OutboundCompletion,
+        admission: QueueAdmission,
         records_missing_connection_failure: bool,
     ) -> Result<AdmittedConnection> {
-        match completion {
-            OutboundCompletion::Detached => {
+        match (completion, admission) {
+            (OutboundCompletion::Detached, QueueAdmission::Waiting) => {
                 let Some(connection) = self.get_and_check_send_connection(did).await else {
                     if records_missing_connection_failure {
                         self.record_peer_message_send_failed(
@@ -467,7 +489,24 @@ impl SwarmTransport {
                 };
                 Ok(connection)
             }
-            OutboundCompletion::Tracked => {
+            (OutboundCompletion::Detached, QueueAdmission::Immediate) => {
+                let Some(connection) = self.admitted_send_connection(did)? else {
+                    if records_missing_connection_failure {
+                        self.record_peer_message_send_failed(
+                            did,
+                            crate::measure::Authentication::LocallyAddressed,
+                        )
+                        .await;
+                    }
+                    return Err(Error::SwarmMissDidInTable(did));
+                };
+                connection
+                    .connection()
+                    .readiness()
+                    .ensure_can_make_progress()?;
+                Ok(connection)
+            }
+            (OutboundCompletion::Tracked, _) => {
                 let Some(connection) = self.admitted_send_connection(did)? else {
                     return Err(Error::SwarmMissDidInTable(did));
                 };
@@ -504,7 +543,13 @@ impl SwarmTransport {
         let deadline = deadline.fuse();
         pin_mut!(deadline);
         match self
-            .enqueue_detached(did, payload, timeout_budget, &mut deadline)
+            .enqueue_detached(
+                did,
+                payload,
+                QueueAdmission::Waiting,
+                timeout_budget,
+                &mut deadline,
+            )
             .await?
         {
             Some(enqueued) => enqueued.await_admission(deadline).await,
@@ -512,15 +557,16 @@ impl SwarmTransport {
         }
     }
 
-    /// Queue `payload` to `did` as a detached transfer, preparing it before `deadline`.
+    /// Queue `payload` to `did` as a detached transfer under `admission`, preparing it before
+    /// `deadline`.
     ///
     /// Post: `Ok(Some(_))` once the transfer is in the peer's outbound queue, its capacity held;
-    /// `Ok(None)` when its generation was superseded. A forward takes its capacity without
-    /// waiting (see [`Self::reserve_outbound_capacity`]).
+    /// `Ok(None)` when its generation was superseded.
     async fn enqueue_detached(
         &self,
         did: Did,
         payload: MessagePayload,
+        queue_admission: QueueAdmission,
         timeout_budget: Duration,
         mut deadline: &mut (impl FusedFuture<Output = ()> + Unpin),
     ) -> Result<Option<EnqueuedDetached>> {
@@ -531,6 +577,7 @@ impl SwarmTransport {
                     did,
                     payload,
                     OutboundCompletion::Detached,
+                    queue_admission,
                     admission.stop_token(),
                     Some(admission.clone()),
                 )
@@ -559,22 +606,30 @@ impl SwarmTransport {
         }))
     }
 
-    /// Queue `payload` to `did` and return; its first frame's admission is awaited apart from
-    /// the sender, bounded by [`DETACHED_FIRST_FRAME_TIMEOUT`].
+    /// The protocol discipline ([`ProtocolEgress`](super::egress::ProtocolEgress)): queue
+    /// `payload` to `did` under [`QueueAdmission::Immediate`] and return; its first frame's
+    /// admission is awaited apart from the sender, bounded by [`DETACHED_FIRST_FRAME_TIMEOUT`].
     ///
-    /// Law: the sender is released once the transfer is queued, so a forward never holds the
-    /// inbound event and lane that carried it while the next peer withholds credit, and the
-    /// next peer's backpressure never reaches upstream links. The caller sees only failures
-    /// before the queue (no route, no capacity); a transfer the deadline cancels is dropped as
-    /// local backpressure, and the origin's own retry or tracked send covers it.
-    pub(crate) async fn send_payload_enqueued(
+    /// Law: nothing before the queue waits on `did` (its readiness and this end's capacity are
+    /// taken now), and nothing after it holds the sender, so a handler never holds the inbound
+    /// event and lane that carried it while the next peer withholds credit (the
+    /// inbound-locality law of the `egress` module). The caller sees only failures before the
+    /// queue (no route, no ready connection, no capacity); a transfer the deadline cancels is
+    /// dropped as local backpressure, and the origin's own retry or tracked send covers it.
+    pub(super) async fn send_payload_enqueued(
         &self,
         did: Did,
         payload: MessagePayload,
     ) -> Result<()> {
         let mut deadline = Box::pin(sleep(DETACHED_FIRST_FRAME_TIMEOUT).fuse());
         let Some(enqueued) = self
-            .enqueue_detached(did, payload, DETACHED_FIRST_FRAME_TIMEOUT, &mut deadline)
+            .enqueue_detached(
+                did,
+                payload,
+                QueueAdmission::Immediate,
+                DETACHED_FIRST_FRAME_TIMEOUT,
+                &mut deadline,
+            )
             .await?
         else {
             return Ok(());
@@ -584,11 +639,12 @@ impl SwarmTransport {
         // it runs inline when no runtime can take it.
         run_detached_or_inline(Box::pin(async move {
             if let Err(error) = enqueued.await_admission(deadline).await {
-                tracing::debug!(
+                tracing::warn!(
                     local = %local,
                     peer = %did,
                     error = ?error,
-                    "detached payload dropped before its first frame was admitted"
+                    "transport backpressure: a queued protocol payload was dropped before its \
+                     first frame was admitted"
                 );
             }
         }))
@@ -601,6 +657,7 @@ impl SwarmTransport {
         did: Did,
         payload: MessagePayload,
         completion: OutboundCompletion,
+        queue_admission: QueueAdmission,
         stop: StopToken,
         detached_admission: Option<DetachedAdmission>,
     ) -> Result<Option<PreparedOutboundTransfer>> {
@@ -618,7 +675,7 @@ impl SwarmTransport {
                 message_kind,
                 outbound_memory_reservation(wire_bytes),
                 completion,
-                preparation.origin != self.dht.did,
+                queue_admission,
             )
             .await?;
         let permit = if message_kind.requires_storage_route() {
@@ -631,6 +688,7 @@ impl SwarmTransport {
             .connection_for_send(
                 did,
                 completion,
+                queue_admission,
                 preparation.records_missing_connection_failure,
             )
             .await?;
@@ -681,20 +739,7 @@ impl SwarmTransport {
             transfer: framed.transfer,
             capacity_permit,
             receiver: framed.receiver,
-            log: OutboundSendLog {
-                origin: preparation.origin,
-                next_hop: preparation.next_hop,
-                destination: preparation.destination,
-                relay_destination: preparation.relay_destination,
-                tx_id: preparation.tx_id,
-                message_kind: message_kind.as_str(),
-                category: message_kind.class(),
-                starts_successor_lookup: matches!(
-                    message_kind,
-                    OutboundMessageKind::FindSuccessorSend
-                ) && preparation.origin == self.dht.did,
-                completion,
-            },
+            log: preparation.send_log(self.dht.did, completion),
         }))
     }
 
@@ -856,6 +901,7 @@ impl SwarmTransport {
                 payload.relay.next_hop,
                 payload,
                 OutboundCompletion::Detached,
+                QueueAdmission::Waiting,
                 admission.stop_token(),
                 Some(admission),
             )
@@ -878,6 +924,7 @@ impl SwarmTransport {
                 payload.relay.next_hop,
                 payload,
                 OutboundCompletion::Detached,
+                QueueAdmission::Waiting,
                 admission.stop_token(),
                 Some(admission.clone()),
             )
@@ -891,49 +938,25 @@ impl SwarmTransport {
         self.submit_prepared_outbound_transfer(prepared).await
     }
 
+    /// The application discipline ([`SwarmTransport`] as a
+    /// [`PayloadSender`](crate::message::PayloadSender)): queue `payload` to `did` under
+    /// [`QueueAdmission::Waiting`] and return once its first frame is admitted, bounded by
+    /// [`DETACHED_FIRST_FRAME_TIMEOUT`], so the caller learns whether the payload left.
+    pub(super) async fn send_payload_admitted(
+        &self,
+        did: Did,
+        payload: MessagePayload,
+    ) -> Result<()> {
+        self.do_send_payload_detached(did, payload)
+            .await
+            .map(|_| ())
+    }
+
     pub(super) async fn send_payload_detached_with_outcome(
         &self,
         payload: MessagePayload,
     ) -> Result<SendCompletionOutcome> {
         self.do_send_payload_detached(payload.relay.next_hop, payload)
             .await
-    }
-}
-
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl PayloadSender for SwarmTransport {
-    fn message_signer(&self) -> MessageSigner<&DelegateeKey> {
-        MessageSigner::new(&self.delegatee_key, self.network_id)
-    }
-
-    fn dht(&self) -> Arc<PeerRing> {
-        self.dht.clone()
-    }
-
-    fn is_connected(&self, did: Did) -> bool {
-        self.get_connection(did).is_some()
-    }
-
-    async fn reserve_transaction_sequences(
-        &self,
-        destination: Did,
-        class: crate::message::MessageCategory,
-        count: std::num::NonZeroU64,
-    ) -> Result<std::ops::RangeInclusive<u64>> {
-        SwarmTransport::reserve_transaction_sequences(self, destination, class, count).await
-    }
-
-    /// A forward returns once it is queued ([`SwarmTransport::send_payload_enqueued`]), so it
-    /// never holds the inbound lane that carried it; a payload this node originated returns
-    /// once its first frame is admitted, so its sender learns whether it left.
-    async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
-        if payload.transaction.origin() == self.dht.did {
-            self.do_send_payload_detached(did, payload)
-                .await
-                .map(|_| ())
-        } else {
-            self.send_payload_enqueued(did, payload).await
-        }
     }
 }
