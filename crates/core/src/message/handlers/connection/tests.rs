@@ -605,14 +605,6 @@ async fn test_fourth_node_connection() -> Result<()> {
     println!("========================================");
     println!("| test node4 connect node3 via dht     |");
     println!("========================================");
-    println!(
-        "node1.did(): {:?}, node2.did(): {:?}, node3.did(): {:?}, node4.did(): {:?}",
-        node1.did(),
-        node2.did(),
-        node3.did(),
-        node4.did(),
-    );
-    println!("==================================================");
 
     if node4.swarm.transport.get_connection(node3.did()).is_none() {
         node4.swarm.connect(node3.did()).await?;
