@@ -284,13 +284,15 @@
     most 25 s, credit included; a payload that waits longer is dropped as local backpressure.
     A send through the Swarm API still returns once its first frame is admitted.
     `SwarmTransport::send_storage_sync_or_defer` takes its `StorageSyncSend` discipline.
-  - Liveness judges a peer that withholds credit. A probe counts as sent once it is queued, or
-    when it cannot be queued while this end waits for the peer's credit, so a probe the peer's
-    control lane will not take is unanswered and the peer is evicted after the answer window; a
-    peer waited on for credit for the idle interval is probed however recently it sent
-    anything; while this end waits for a peer's credit only the probe's answer answers it, so a
-    peer cannot escape eviction by sending; and no probe waits on its peer, so a starved peer
-    delays no other peer's probe.
+  - Liveness judges every admitted peer by probes alone and reads no credit state
+    (`ProbeClock`): a probe is due every `PEER_LIVENESS_PERIOD_MS` (renamed from
+    `PEER_LIVENESS_IDLE_MS`) after the previous one, at most one is outstanding per peer, its
+    deadline counts from its issue, and only its answer clears it, so a peer whose control lane
+    will not take the probe is evicted and cannot escape by sending. A probe takes no shared
+    outbound capacity, and no probe waits on its peer, so a starved peer delays no other
+    peer's probe. A composed stateright model checks these laws and refutes each earlier
+    design. The outbound worker holds a lane's credit only while a transfer awaits it, so a
+    peer that stops granting credit stops this end's traffic on the lane outright.
   - The session-link holds of every connection keep at most 256 frames together, since their
     frames have given their credit back.
   - A frame the session-link hold keeps gives its transport credit back, so held frames never

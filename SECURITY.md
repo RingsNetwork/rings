@@ -121,10 +121,11 @@ and expire, but a party with many identities can try to hold several positions o
   and refuses no honest frame for want of credit. Overload is pushed back to the sender and
   every wait is logged. Above 16 MiB of received frames a node defers new credit on every
   lane but the control lane, a soft bound; the hard bound is per connection (4 MiB), so a
-  node's worst case grows with its admitted connections (#934). A peer that withholds the
-  control lane's credit is evicted by liveness within its idle interval plus the answer
-  window, whether or not it keeps sending, and one peer's backpressure never holds another's
-  link: every send a handler makes (a forward, a report, a query) returns once queued.
+  node's worst case grows with its admitted connections (#934). Liveness reads no credit
+  state: a periodic probe with a deadline from its issue evicts a peer that withholds the
+  control lane's credit within the period plus the deadline, whether or not it keeps sending,
+  and one peer's backpressure never holds another's link: every send a handler makes (a
+  forward, a report, a query) returns once queued.
   [Details](docs/src/advanced-topic/transport-flow-control.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.

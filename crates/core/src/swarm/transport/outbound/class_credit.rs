@@ -14,7 +14,6 @@ use super::TransferClass;
 use super::CLASSES;
 use crate::error::Result;
 use crate::swarm::transport::PendingConnectionAttempt;
-use crate::utils::get_epoch_ms_i64;
 
 /// The transport credit of one class's lane, as the worker holds it.
 ///
@@ -38,8 +37,8 @@ pub(super) enum ClassCredit {
     /// No credit is held or awaited.
     Idle,
     /// The reservation `wait` on the generation `attempt` is pending in
-    /// [`OutboundWorker::credit_waits`], since `since_ms`.
-    Awaiting(PendingConnectionAttempt, i64, CreditWaitId),
+    /// [`OutboundWorker::credit_waits`].
+    Awaiting(PendingConnectionAttempt, CreditWaitId),
     /// A credit is held for the class's next frame on the generation `attempt`.
     Held(LaneCreditReservation, PendingConnectionAttempt),
     /// The lane of the generation `attempt` cannot grant credit (its connection is gone): the
@@ -66,14 +65,6 @@ impl ClassCredit {
             Self::Idle | Self::Awaiting(..) => None,
         }
     }
-
-    /// Since when the slot has waited for its lane's credit, if it is waiting.
-    const fn awaiting_since_ms(&self) -> Option<i64> {
-        match self {
-            Self::Awaiting(_, since_ms, _) => Some(*since_ms),
-            Self::Idle | Self::Held(..) | Self::Unavailable(_) => None,
-        }
-    }
 }
 
 /// The identity of one pending credit reservation, unique within its worker.
@@ -95,14 +86,23 @@ pub(super) type CreditWaitFuture = Pin<Box<dyn Future<Output = CreditWaitOutput>
 
 impl OutboundWorker {
     /// Reserve a transport credit for every class with a runnable transfer and none held or
-    /// awaited.
+    /// awaited, and return the credit a class holds with none runnable.
     ///
     /// A credit available at once is held now; otherwise its reservation joins
     /// [`Self::credit_waits`], and the class stays gated until it resolves.
+    ///
+    /// Law (no idle credit): a slot holds a credit only while a runnable transfer of its class
+    /// awaits it, so a peer that stops granting credit has stopped this end's traffic on the
+    /// lane, with no credit left behind by a transfer that went away.
     pub(super) fn acquire_credits(&mut self) {
         for class in CLASSES {
             let index = class.index();
             let Some(next) = self.ready.next_of(class) else {
+                if let Some(slot) = self.credits.get_mut(index) {
+                    if matches!(slot, ClassCredit::Held(..)) {
+                        *slot = ClassCredit::Idle;
+                    }
+                }
                 continue;
             };
             let admitted = next.scheduled.transfer.admitted.clone();
@@ -128,24 +128,12 @@ impl OutboundWorker {
                 Some((_, _, attempt, credit)) => self.hold_credit(class, attempt, credit),
                 None => {
                     if let Some(slot) = self.credits.get_mut(index) {
-                        *slot = ClassCredit::Awaiting(attempt, get_epoch_ms_i64(), id);
+                        *slot = ClassCredit::Awaiting(attempt, id);
                     }
                     self.credit_waits.push(wait);
                 }
             }
         }
-        self.publish_credit_stall();
-    }
-
-    /// Publish since when this worker has waited for a lane's credit (its oldest pending
-    /// reservation), for liveness to probe a peer that withholds credit.
-    fn publish_credit_stall(&self) {
-        let since_ms = self
-            .credits
-            .iter()
-            .filter_map(ClassCredit::awaiting_since_ms)
-            .min();
-        self.credit_stall.set(since_ms);
     }
 
     /// A fresh credit wait identity.
@@ -167,7 +155,7 @@ impl OutboundWorker {
     ) {
         if matches!(
             self.credits.get(class.index()),
-            Some(ClassCredit::Awaiting(_, _, awaited)) if *awaited == wait
+            Some(ClassCredit::Awaiting(_, awaited)) if *awaited == wait
         ) {
             self.hold_credit(class, attempt, credit);
         }
@@ -190,7 +178,6 @@ impl OutboundWorker {
         if let Some(slot) = self.credits.get_mut(class.index()) {
             *slot = settled;
         }
-        self.publish_credit_stall();
     }
 
     /// Whether `class` may admit its next frame: its slot holds a credit, or the verdict that

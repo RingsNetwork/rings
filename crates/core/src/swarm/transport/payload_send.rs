@@ -289,7 +289,8 @@ impl SwarmTransport {
     ///
     /// A detached send under [`QueueAdmission::Immediate`] takes it without waiting and is
     /// refused as local backpressure when it is full (the inbound-locality law of the `egress`
-    /// module). One under [`QueueAdmission::Waiting`] waits up to
+    /// module); one under [`QueueAdmission::Reserved`] takes none (a liveness probe, bounded by
+    /// its sender). One under [`QueueAdmission::Waiting`] waits up to
     /// [`DATA_CHANNEL_SEND_ACCEPT_BUDGET`]; a tracked one waits as long as its own deadline.
     async fn reserve_outbound_capacity(
         &self,
@@ -299,10 +300,16 @@ impl SwarmTransport {
         completion: OutboundCompletion,
         admission: QueueAdmission,
     ) -> Result<TransferCapacityPermit> {
-        if admission == QueueAdmission::Immediate && completion == OutboundCompletion::Detached {
-            return self
-                .outbound_schedulers
-                .reserve_now(peer, kind.class(), bytes);
+        match (admission, completion) {
+            (QueueAdmission::Reserved, _) => {
+                return Ok(self.outbound_schedulers.reserve_bounded_by_sender())
+            }
+            (QueueAdmission::Immediate, OutboundCompletion::Detached) => {
+                return self
+                    .outbound_schedulers
+                    .reserve_now(peer, kind.class(), bytes);
+            }
+            _ => {}
         }
         let reserve = self
             .outbound_schedulers
@@ -466,8 +473,8 @@ impl SwarmTransport {
     /// The admitted connection a send to `did` is framed for.
     ///
     /// A detached send under [`QueueAdmission::Waiting`] waits, bounded, for its data channels
-    /// to open; a tracked send, and a detached one under [`QueueAdmission::Immediate`], take
-    /// the connection only if it can make progress now.
+    /// to open; a tracked send, and a detached one under [`QueueAdmission::Immediate`] or
+    /// [`QueueAdmission::Reserved`], take the connection only if it can make progress now.
     async fn connection_for_send(
         &self,
         did: Did,
@@ -489,7 +496,10 @@ impl SwarmTransport {
                 };
                 Ok(connection)
             }
-            (OutboundCompletion::Detached, QueueAdmission::Immediate) => {
+            (
+                OutboundCompletion::Detached,
+                QueueAdmission::Immediate | QueueAdmission::Reserved,
+            ) => {
                 let Some(connection) = self.admitted_send_connection(did)? else {
                     if records_missing_connection_failure {
                         self.record_peer_message_send_failed(
@@ -607,7 +617,8 @@ impl SwarmTransport {
     }
 
     /// The protocol discipline ([`ProtocolEgress`](super::egress::ProtocolEgress)): queue
-    /// `payload` to `did` under [`QueueAdmission::Immediate`] and return; its first frame's
+    /// `payload` to `did` under `admission` ([`QueueAdmission::Immediate`], or
+    /// [`QueueAdmission::Reserved`] for a liveness probe) and return; its first frame's
     /// admission is awaited apart from the sender, bounded by [`DETACHED_FIRST_FRAME_TIMEOUT`].
     ///
     /// Law: nothing before the queue waits on `did` (its readiness and this end's capacity are
@@ -620,13 +631,14 @@ impl SwarmTransport {
         &self,
         did: Did,
         payload: MessagePayload,
+        admission: QueueAdmission,
     ) -> Result<()> {
         let mut deadline = Box::pin(sleep(DETACHED_FIRST_FRAME_TIMEOUT).fuse());
         let Some(enqueued) = self
             .enqueue_detached(
                 did,
                 payload,
-                QueueAdmission::Immediate,
+                admission,
                 DETACHED_FIRST_FRAME_TIMEOUT,
                 &mut deadline,
             )

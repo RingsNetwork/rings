@@ -251,7 +251,7 @@ async fn test_a_class_credit_of_another_generation_is_not_spent() {
     let stale_wait = worker.next_credit_wait();
     for slot in [
         ClassCredit::Unavailable(stale),
-        ClassCredit::Awaiting(stale, 0, stale_wait),
+        ClassCredit::Awaiting(stale, stale_wait),
     ] {
         if let Some(credit) = worker.credits.get_mut(class.index()) {
             *credit = slot;
@@ -305,7 +305,7 @@ async fn test_a_late_credit_outcome_of_an_abandoned_wait_settles_nothing() {
     assert_eq!(slot(&worker), Some(None), "an idle slot awaits no wait");
 
     if let Some(credit) = worker.credits.get_mut(class.index()) {
-        *credit = ClassCredit::Awaiting(attempt, 0, awaited);
+        *credit = ClassCredit::Awaiting(attempt, awaited);
     }
     worker.settle_credit(class, abandoned, attempt, refusal());
     assert_eq!(slot(&worker), Some(None), "the slot awaits another wait");

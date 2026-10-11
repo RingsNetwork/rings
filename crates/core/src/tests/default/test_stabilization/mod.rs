@@ -41,7 +41,7 @@ use crate::measure::ProvisionalEvidenceRecord;
 use crate::message::ProvisionalServiceReceipt;
 use crate::storage::MemStorage;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
+use crate::swarm::transport::PEER_LIVENESS_PERIOD_MS;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
@@ -403,10 +403,10 @@ async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> 
 
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_successor(&node1, node2.did()).await?;
-    node1
-        .swarm
-        .transport
-        .force_peer_connected_at(node2.did(), get_epoch_ms_i64() - PEER_LIVENESS_IDLE_MS - 1)?;
+    node1.swarm.transport.force_peer_connected_at(
+        node2.did(),
+        get_epoch_ms_i64() - PEER_LIVENESS_PERIOD_MS - 1,
+    )?;
 
     let _pending_send = PendingSendGuard::new();
     node1
@@ -436,10 +436,10 @@ async fn test_liveness_probe_round_trip_admits_provider_evidence() -> Result<()>
     wait_for_successor(&beneficiary, provider.did()).await?;
     wait_for_successor(&provider, beneficiary.did()).await?;
     wait_for_msgs([&beneficiary, &provider]).await;
-    beneficiary.swarm.transport.force_peer_last_inbound_at(
-        provider.did(),
-        get_epoch_ms_i64() - PEER_LIVENESS_IDLE_MS - 1,
-    )?;
+    beneficiary
+        .swarm
+        .transport
+        .force_peer_liveness_probe_due(provider.did())?;
 
     beneficiary
         .swarm
@@ -489,7 +489,7 @@ async fn test_clean_unavailable_connections_removes_silent_connected_peer() -> R
     node1
         .swarm
         .transport
-        .force_peer_liveness_probe_sent_at(node2.did(), stale_probe_sent_at)?;
+        .force_peer_liveness_probe_issued_at(node2.did(), stale_probe_sent_at)?;
 
     let _drop_messages = DropMessagesGuard::new();
     node1
@@ -528,7 +528,7 @@ async fn test_clean_unavailable_connections_requests_no_repair_for_unreferenced_
     node1
         .swarm
         .transport
-        .force_peer_liveness_probe_sent_at(node2.did(), stale_probe_sent_at)?;
+        .force_peer_liveness_probe_issued_at(node2.did(), stale_probe_sent_at)?;
 
     let _drop_messages = DropMessagesGuard::new();
     node1

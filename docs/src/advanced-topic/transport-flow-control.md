@@ -49,26 +49,28 @@ What a node holds of received frames is bounded twice:
 
 A wait for credit is backpressure, not a verdict on the peer: it ends when credit arrives or
 when the connection generation ends (it fails or closes), and the wait itself never retires a
-link. A receiver may legitimately consume slowly (a protocol handler may take up to 30 seconds),
-and whether a peer is alive is liveness's to judge. Liveness does judge a peer that withholds
-credit:
+link. A receiver may legitimately consume slowly (its application reads its inbox at its own
+pace), and whether a peer is alive is liveness's to judge. Liveness reads no credit state; it
+judges every admitted peer by probes alone (`swarm::transport::liveness`):
 
-- a liveness probe counts as sent once it is queued on the peer's control lane, so a probe the
-  peer will not let this end send, for want of the control lane's credit, is unanswered, and
-  the peer is evicted once the answer window passes;
-- a probe that cannot even be queued while this end waits for the peer's credit (the
-  capacity it lacks is held by the peer's own backpressure) is charged as sent too;
-- a peer this end has waited `PEER_LIVENESS_IDLE_MS` (15 seconds) for credit on any lane is due
-  a probe however recently it sent anything; the probe rides the control lane, so a peer slow
-  only on a data lane answers it and is kept;
-- while this end waits for a peer's credit, only the probe's answer answers it: the peer's own
-  traffic proves it can send, not that it takes this end's control traffic, so a peer that
-  withholds credit cannot escape eviction by sending;
-- no probe waits on its peer (it is sent through the protocol egress below), so one starved
+- every `PEER_LIVENESS_PERIOD_MS` (15 seconds) after its previous probe, a peer is due a probe,
+  whatever its traffic or credit, and at most one probe per peer is outstanding;
+- a probe's deadline, `PEER_LIVENESS_TIMEOUT_MS` (45 seconds), counts from its issue, so a probe
+  the peer will not let this end send, for want of the control lane's credit, waits in the
+  peer's own queue and goes unanswered;
+- only the answer to the outstanding probe clears it: the peer's own traffic proves it can
+  send, not that it takes this end's control traffic, so a peer that withholds credit cannot
+  escape eviction by sending;
+- the probe rides the control lane, so a peer slow only on a data lane answers it and is kept;
+- a probe takes no shared outbound capacity (one outstanding per peer bounds it), so other
+  transfers waiting on the peer cannot refuse it, and no probe waits on its peer, so one starved
   peer delays no other peer's probe.
 
-A peer that does not progress this end's control traffic is therefore evicted within the idle
-interval plus the answer window, and its eviction fails every wait on its credit. A wait that
+The outbound worker holds a lane's credit only while a transfer of that lane awaits it, so no
+credit lingers at the sender after its transfer went away. A peer that does not progress this
+end's control traffic is therefore evicted within the period plus the deadline, and its eviction fails every wait on its credit. A composed model
+(`liveness::test_composed_model`) checks these laws over credit, lanes, the application inbox
+and a third peer, and refutes each design they replace. A wait that
 pins one of the sender's budgets is bounded by what that budget is for: a link-control frame,
 which holds a link-control permit, waits at most the session hold, after which the frame it
 would answer is gone, and is then dropped; a scheduled transfer is bounded by its own send

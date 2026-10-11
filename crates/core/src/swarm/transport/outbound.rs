@@ -96,7 +96,6 @@ pub(crate) use capacity::OUTBOUND_DATA_TRANSFER_CAPACITY;
 pub(crate) use capacity::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
-use link_state::CreditStall;
 pub(super) use link_state::LinkControlPermit;
 use link_state::PeerLinkState;
 use mailbox::MailboxReceiver;
@@ -296,6 +295,9 @@ pub(super) struct OutboundSchedulers {
     registry: Mutex<OutboundRegistry>,
     global_capacity: Arc<GlobalTransferCapacity>,
     measure: Option<MeasureImpl>,
+    /// Test builds: the sender-bounded transfers in flight, which hold no capacity.
+    #[cfg(test)]
+    sender_bounded: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Default)]
@@ -331,6 +333,8 @@ impl OutboundSchedulers {
             registry: Mutex::new(OutboundRegistry::default()),
             global_capacity: Arc::new(GlobalTransferCapacity::new()),
             measure,
+            #[cfg(test)]
+            sender_bounded: Arc::default(),
         }
     }
 
@@ -397,6 +401,15 @@ impl OutboundSchedulers {
         capacity.admit_now(peer, class, bytes)
     }
 
+    /// A permit for a transfer whose count its sender bounds (a liveness probe): it holds no
+    /// shared capacity; see [`TransferCapacityPermit::bounded_by_sender`].
+    pub(super) fn reserve_bounded_by_sender(&self) -> TransferCapacityPermit {
+        let permit = TransferCapacityPermit::bounded_by_sender();
+        #[cfg(test)]
+        let permit = permit.counted_in(&self.sender_bounded);
+        permit
+    }
+
     pub(super) fn shutdown(&self, peer: Did) {
         let handle = self.lock_registry().peers.remove(&peer);
         if let Some(handle) = handle {
@@ -449,7 +462,10 @@ impl OutboundSchedulers {
             .values()
             .filter_map(Weak::upgrade)
             .map(|capacity| capacity.admitted())
-            .sum()
+            .sum::<usize>()
+            + self
+                .sender_bounded
+                .load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn lock_registry(&self) -> MutexGuard<'_, OutboundRegistry> {
@@ -489,8 +505,6 @@ struct OutboundWorker {
     /// Pending credit reservations: at most one live per class; one its slot abandoned when the
     /// generation changed resolves into nothing.
     credit_waits: FuturesUnordered<CreditWaitFuture>,
-    /// Since when this worker has waited for credit, published for liveness.
-    credit_stall: CreditStall,
     /// The identity of the next credit reservation.
     next_credit_wait: u64,
     /// When a delivery to this peer last settled: the stall deadline's reference.
@@ -526,7 +540,6 @@ impl OutboundWorker {
             deliveries: FuturesUnordered::new(),
             credits: std::array::from_fn(|_| ClassCredit::Idle),
             credit_waits: FuturesUnordered::new(),
-            credit_stall: link.credit_stall,
             next_credit_wait: 0,
             delivery_progress: DeliveryProgress::default(),
             measurements,

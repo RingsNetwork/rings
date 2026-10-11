@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::IssuedProbe;
 use super::SwarmTransport;
 use crate::delegation::DelegateeKey;
 use crate::dht::Did;
@@ -47,6 +48,10 @@ pub(super) enum QueueAdmission {
     /// The application discipline: wait, bounded, for the connection's readiness and for
     /// capacity.
     Waiting,
+    /// The probe discipline: the connection must be ready now, and the transfer takes no
+    /// shared capacity, because one outstanding probe per peer bounds it. Reached only through
+    /// [`ProtocolEgress::send_probe`], whose [`IssuedProbe`] witnesses that bound.
+    Reserved,
 }
 
 /// The sender of the protocol context: every send returns once its payload is queued, and
@@ -122,6 +127,22 @@ impl PayloadSender for ProtocolEgress<'_> {
     /// The protocol discipline: return once the payload is queued
     /// ([`SwarmTransport::send_payload_enqueued`]).
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
-        self.transport.send_payload_enqueued(did, payload).await
+        self.transport
+            .send_payload_enqueued(did, payload, QueueAdmission::Immediate)
+            .await
+    }
+}
+
+impl ProtocolEgress<'_> {
+    /// Queue an issued liveness probe toward its peer and return, as every protocol send does.
+    ///
+    /// The probe takes no shared outbound capacity (see [`QueueAdmission::Reserved`]), so
+    /// other transfers waiting on a peer that withholds credit cannot refuse the probe that
+    /// judges the peer. Only a failure before the queue, no ready connection, is returned.
+    pub(crate) async fn send_probe(&self, probe: IssuedProbe) -> Result<()> {
+        let peer = probe.attempt.peer();
+        self.transport
+            .send_payload_enqueued(peer, probe.payload, QueueAdmission::Reserved)
+            .await
     }
 }

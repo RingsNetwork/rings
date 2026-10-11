@@ -244,7 +244,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
         )?;
         self.handler
             .transport
-            .consume_pending_probe(provider, ctx.transaction.tx_id, request)?
+            .answer_liveness_probe(provider, ctx.transaction.tx_id, request)?
             .then_some(())
             .ok_or_else(|| {
                 Error::InvalidMessage("probe offer has no matching outstanding request".to_string())

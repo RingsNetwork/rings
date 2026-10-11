@@ -17,7 +17,7 @@ use std::time::Duration;
 use rings_transport::connections::dummy_controlled;
 use tokio::sync::Notify;
 
-use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
+use crate::swarm::transport::PEER_LIVENESS_PERIOD_MS;
 
 mod delivery;
 pub(crate) mod model;
@@ -57,7 +57,7 @@ pub(crate) use spawn::spawn_storage_progress_observer;
 
 const UUID_VERSION_4: u8 = 0x40;
 const UUID_RFC4122_VARIANT: u8 = 0x80;
-pub(crate) const CONTROL_DEADLINE_MS: u64 = PEER_LIVENESS_IDLE_MS as u64;
+pub(crate) const CONTROL_DEADLINE_MS: u64 = PEER_LIVENESS_PERIOD_MS as u64;
 
 thread_local! {
     static RUNTIME: RefCell<Option<SimulationRuntimeState>> = const { RefCell::new(None) };

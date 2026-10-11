@@ -261,7 +261,7 @@ async fn test_stale_inbound_observation_cannot_refresh_replacement_liveness() ->
     assert!(transport.activate_connection_for_test(old_attempt)?);
     let now_ms = crate::utils::get_epoch_ms_i64();
     let expired_at_ms = now_ms - PEER_LIVENESS_TIMEOUT_MS - 1;
-    transport.force_peer_liveness_probe_sent_at(peer, expired_at_ms)?;
+    transport.force_peer_liveness_probe_issued_at(peer, expired_at_ms)?;
     assert!(transport
         .peer_liveness_expiry(old_attempt, now_ms)?
         .is_some());
@@ -272,7 +272,7 @@ async fn test_stale_inbound_observation_cannot_refresh_replacement_liveness() ->
     );
     let replacement = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(replacement)?);
-    transport.force_peer_liveness_probe_sent_at(peer, expired_at_ms)?;
+    transport.force_peer_liveness_probe_issued_at(peer, expired_at_ms)?;
 
     transport.mark_peer_liveness_inbound(old_attempt);
 

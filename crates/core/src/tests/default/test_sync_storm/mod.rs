@@ -59,7 +59,7 @@ pub(super) const CHUNKED_MAX_MESSAGE_SIZE: usize = 60_000;
 use crate::swarm::transport::OUTBOUND_CONTROL_BURST;
 use crate::swarm::transport::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
-use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
+use crate::swarm::transport::PEER_LIVENESS_PERIOD_MS;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::prepare_node;
 use crate::tests::default::Node;

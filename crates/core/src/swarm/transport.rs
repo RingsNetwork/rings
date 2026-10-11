@@ -99,8 +99,10 @@ pub(crate) use self::hold_budget::SessionHoldBudget;
 pub(crate) use self::hold_budget::SessionHoldPermit;
 #[cfg(test)]
 pub(crate) use self::inbound_tap::InboundTap;
+pub(crate) use self::liveness::IssuedProbe;
 use self::liveness::PeerLivenessMap;
-pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
+#[cfg(all(test, feature = "dummy"))]
+pub(crate) use self::liveness::PEER_LIVENESS_PERIOD_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

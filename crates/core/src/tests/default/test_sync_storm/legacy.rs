@@ -154,11 +154,11 @@ async fn probe_healthy_peer_behind_barrier(
     driver: &mut TraceDriver,
 ) {
     let peer_did = nodes[peer].did();
-    let idle_ms = u64::try_from(PEER_LIVENESS_IDLE_MS)
+    let idle_ms = u64::try_from(PEER_LIVENESS_PERIOD_MS)
         .expect("production liveness idle interval must be positive")
         .saturating_add(1);
     advance_liveness_deadline(runtime, driver, idle_ms).await;
-    refresh_non_target_peer_liveness(runtime, nodes, observer, peer).await;
+    refresh_non_target_peer_liveness(nodes, observer, peer);
     nodes[observer]
         .swarm
         .stabilizer()
@@ -177,7 +177,7 @@ async fn probe_healthy_peer_behind_barrier(
         nodes[observer]
             .swarm
             .transport
-            .peer_liveness_unanswered_since_for_test(peer_did)
+            .peer_liveness_outstanding_since_for_test(peer_did)
             .expect("active peer liveness state must remain readable"),
         Some(sent_at_ms),
         "the liveness clock must originate at the real stabilizer probe"
@@ -191,7 +191,7 @@ async fn probe_healthy_peer_behind_barrier(
         nodes[observer]
             .swarm
             .transport
-            .peer_liveness_unanswered_since_for_test(peer_did)
+            .peer_liveness_outstanding_since_for_test(peer_did)
             .expect("active peer liveness state must remain readable"),
         None,
         "the probe must be answered once the barrier released it"
@@ -299,34 +299,18 @@ async fn observe_stabilizer_probe(
     probe
 }
 
-async fn refresh_non_target_peer_liveness(
-    runtime: &SimulationRuntimeGuard,
-    nodes: &[Node],
-    observer: usize,
-    target: usize,
-) {
-    let other = (0..nodes.len())
-        .find(|index| *index != observer && *index != target)
-        .expect("legacy topology must contain a non-target peer");
-    nodes[other]
-        .swarm
-        .send_direct_message(
-            Message::custom(b"legacy-non-target-liveness")
-                .expect("liveness refresh payload must encode"),
-            nodes[observer].did(),
-        )
-        .await
-        .expect("non-target liveness refresh must enter the scheduler");
-    let refresh = runtime
-        .pending_deliveries()
-        .expect("liveness refresh queue must classify")
-        .into_iter()
-        .find(|delivery| delivery.class == ScheduledDeliveryClass::Application)
-        .expect("non-target liveness refresh frame must be queued");
-    assert!(runtime
-        .deliver(&refresh)
-        .await
-        .expect("liveness refresh delivery must remain stable"));
+/// Restart the observer's probe period of every peer but `target`, so the pass probes only
+/// `target`.
+fn refresh_non_target_peer_liveness(nodes: &[Node], observer: usize, target: usize) {
+    for (index, node) in nodes.iter().enumerate() {
+        if index != observer && index != target {
+            nodes[observer]
+                .swarm
+                .transport
+                .restart_peer_liveness_period_for_test(node.did())
+                .expect("non-target peer liveness must be restartable");
+        }
+    }
 }
 
 async fn advance_liveness_deadline(

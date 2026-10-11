@@ -1,7 +1,9 @@
-//! Liveness judges a peer that withholds credit (#913 R7 H1): a probe counts as sent once it is
-//! queued, so a probe the peer will not let this end send is unanswered; a credit stall makes a
-//! probe due however recently the peer sent anything; a probe refused before the queue behind
-//! withheld credit is charged (#913 R8 M2); and no probe waits on its peer.
+//! Liveness judges a peer by its probes alone (L3, `swarm::transport::liveness`): a probe's
+//! deadline counts from its issue, so a probe the peer will not let this end send goes
+//! unanswered (#913 R7 H1); the peer's own traffic clears nothing (#913 R8 M1); a peer slow
+//! only on a data lane answers on lane 0 and is kept (#913 R6 H1); a probe takes no shared
+//! outbound capacity, so other traffic cannot refuse it (#913 R8 M2); and no probe waits on
+//! its peer.
 //! Every send a handler makes is released once it is queued (#913 R8 H1, the inbound-locality
 //! law of `swarm::transport::egress`), so one peer's backpressure never holds the inbound lane
 //! of another; a send through the Swarm API still waits for its first frame's admission.
@@ -19,17 +21,24 @@ use crate::tests::default::TEST_HANG_GUARD;
 
 /// The control lane, which every probe rides.
 const CONTROL_LANE: ChannelLane = ChannelLane::new(0);
+/// The application data lane.
+const APPLICATION_LANE: ChannelLane = ChannelLane::new(3);
 
-/// Age `peer` past the liveness idle interval at `node`.
-fn age_past_idle(node: &Node, peer: Did) -> Result<()> {
-    node.swarm
-        .transport
-        .force_peer_last_inbound_at(peer, get_epoch_ms_i64() - PEER_LIVENESS_IDLE_MS - 1)
+/// Make a probe of `peer` due at `node`.
+fn make_probe_due(node: &Node, peer: Did) -> Result<()> {
+    node.swarm.transport.force_peer_liveness_probe_due(peer)
 }
 
-/// A peer that withholds the control lane's credit is evicted by liveness: its probe, queued
-/// but never sendable, counts as sent from the moment it is queued, and once the answer window
-/// passes unanswered the peer is evicted.
+/// When `node`'s outstanding probe of `peer` was issued, if one is.
+fn outstanding(node: &Node, peer: Did) -> Result<Option<i64>> {
+    node.swarm
+        .transport
+        .peer_liveness_outstanding_since_for_test(peer)
+}
+
+/// A peer that withholds the control lane's credit is evicted by liveness: its probe is issued
+/// before it is queued, so its deadline runs while the probe waits in the peer's queue, and
+/// once it passes unanswered the peer is evicted.
 #[tokio::test]
 async fn test_a_peer_withholding_control_credit_is_evicted_by_liveness() -> Result<()> {
     let (node1, node2) = connected_pair().await?;
@@ -39,24 +48,21 @@ async fn test_a_peer_withholding_control_credit_is_evicted_by_liveness() -> Resu
         !held.is_empty(),
         "the peer granted the control lane a window"
     );
-    age_past_idle(&node1, peer)?;
+    make_probe_due(&node1, peer)?;
 
-    let queued_at = get_epoch_ms_i64();
+    let issued_at = get_epoch_ms_i64();
     node1
         .swarm
         .stabilizer()
         .probe_peer_liveness_for_simulation()
         .await?;
-    let unanswered = node1
-        .swarm
-        .transport
-        .peer_liveness_unanswered_since_for_test(peer)?;
+    let unanswered = outstanding(&node1, peer)?;
     assert!(
-        unanswered.is_some_and(|since| since >= queued_at),
-        "a probe waiting for credit counts as sent once queued: {unanswered:?}"
+        unanswered.is_some_and(|since| since >= issued_at),
+        "a probe waiting for credit is outstanding from its issue: {unanswered:?}"
     );
 
-    node1.swarm.transport.force_peer_liveness_probe_sent_at(
+    node1.swarm.transport.force_peer_liveness_probe_issued_at(
         peer,
         get_epoch_ms_i64() - PEER_LIVENESS_TIMEOUT_MS - 1,
     )?;
@@ -70,36 +76,25 @@ async fn test_a_peer_withholding_control_credit_is_evicted_by_liveness() -> Resu
     Ok(())
 }
 
-/// A credit stall makes a probe due although the peer is not idle; the probe rides the control
-/// lane, so a peer whose control lane progresses answers it and is kept.
+/// A peer that stopped granting credit and starved its application lane is still probed on
+/// its period, answers on its control lane's window, and is kept: a data-lane stall is
+/// backpressure, never a verdict.
 #[tokio::test]
-async fn test_a_credit_stall_probes_a_busy_peer_that_answers_and_is_kept() -> Result<()> {
+async fn test_a_peer_slow_on_a_data_lane_answers_its_probe_and_is_kept() -> Result<()> {
     let (node1, node2) = connected_pair().await?;
     let peer = node2.did();
-    node1
-        .swarm
-        .transport
-        .force_credit_stall_for_test(peer, get_epoch_ms_i64() - PEER_LIVENESS_IDLE_MS - 1);
+    let held = starve(&node2, &node1, APPLICATION_LANE)?;
+    make_probe_due(&node1, peer)?;
 
     node1
         .swarm
         .stabilizer()
         .probe_peer_liveness_for_simulation()
         .await?;
-    assert!(
-        node1
-            .swarm
-            .transport
-            .peer_liveness_unanswered_since_for_test(peer)?
-            .is_some(),
-        "the stall made a probe due"
-    );
+    assert!(outstanding(&node1, peer)?.is_some(), "the probe was issued");
     wait_for_msgs([&node1, &node2]).await;
     assert_eq!(
-        node1
-            .swarm
-            .transport
-            .peer_liveness_unanswered_since_for_test(peer)?,
+        outstanding(&node1, peer)?,
         None,
         "the peer answered on its control lane"
     );
@@ -109,6 +104,45 @@ async fn test_a_credit_stall_probes_a_busy_peer_that_answers_and_is_kept() -> Re
         .clean_unavailable_connections()
         .await?;
     assert!(node1.swarm.transport.get_connection(peer).is_some());
+    drop(held);
+    Ok(())
+}
+
+/// A peer that withholds control credit cannot clear its outstanding probe by sending: only
+/// the probe's answer clears it.
+#[tokio::test]
+async fn test_a_withholding_peers_own_traffic_leaves_its_probe_outstanding() -> Result<()> {
+    let (node1, node2) = connected_pair().await?;
+    let peer = node2.did();
+    let held = starve(&node2, &node1, CONTROL_LANE)?;
+    make_probe_due(&node1, peer)?;
+    node1
+        .swarm
+        .stabilizer()
+        .probe_peer_liveness_for_simulation()
+        .await?;
+    let issued = outstanding(&node1, peer)?;
+    assert!(issued.is_some(), "the probe was issued");
+
+    node2
+        .swarm
+        .send_direct_message(Message::custom(b"still sending")?, node1.did())
+        .await?;
+    timeout(TEST_HANG_GUARD, async {
+        while let Some(payload) = node1.listen_once().await {
+            if matches!(payload.transaction.data(), Ok(Message::CustomMessage(_))) {
+                return;
+            }
+        }
+    })
+    .await
+    .map_err(|_| Error::InvalidMessage("the peer's message never arrived".to_string()))?;
+    assert_eq!(
+        outstanding(&node1, peer)?,
+        issued,
+        "traffic cleared nothing"
+    );
+    drop(held);
     Ok(())
 }
 
@@ -133,7 +167,7 @@ async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
         held.extend(starve(starving, &node, CONTROL_LANE)?);
     }
     for peer in &peers {
-        age_past_idle(&node, peer.did())?;
+        make_probe_due(&node, peer.did())?;
     }
 
     timeout(
@@ -145,7 +179,7 @@ async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
     let unanswered = |peer: &Node| {
         node.swarm
             .transport
-            .peer_liveness_unanswered_since_for_test(peer.did())
+            .peer_liveness_outstanding_since_for_test(peer.did())
     };
     // The starved probes stay queued, so the node never quiesces: wait for the live answer.
     probe_on_activity("the live peer answers its probe", TEST_HANG_GUARD, || {
@@ -153,60 +187,36 @@ async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
         async move { answered }
     })
     .await?;
-    // The starved probes still wait in their peers' queues: the pass did not wait for them.
+    // The starved probes are still outstanding, their deadlines running from issue: the pass
+    // returned without waiting for them. (Their transfers are dropped at the first-frame
+    // deadline, a wall-clock bound, which the deadline from issue makes irrelevant.)
     for starving in [starving_a, starving_b] {
-        assert!(node
-            .swarm
-            .transport
-            .outbound_admitted_transfer_count_for_test(starving.did())
-            .is_some_and(|queued| queued >= 1));
+        assert!(unanswered(starving)?.is_some());
     }
     drop(held);
     Ok(())
 }
 
-/// A probe that cannot even be queued is charged as sent while this end waits for the peer's
-/// credit (#913 R8 M2): the capacity it lacks is held by the peer's own backpressure, so a peer
-/// that withholds credit cannot keep its probe unsent and itself unjudged. Without a stall the
-/// same refusal is this end's failure and charges the peer nothing.
+/// A probe takes no shared outbound capacity (#913 R8 M2): with the control capacity toward a
+/// peer that withholds control credit held full by other transfers, the probe is still queued
+/// and its deadline runs.
 #[tokio::test]
-async fn test_a_probe_refused_capacity_is_charged_only_behind_withheld_credit() -> Result<()> {
+async fn test_a_probe_is_queued_although_the_peers_outbound_capacity_is_full() -> Result<()> {
     let (node1, node2) = connected_pair().await?;
     let peer = node2.did();
     let credit = starve(&node2, &node1, CONTROL_LANE)?;
     let capacity = node1.swarm.transport.hold_control_capacity_for_test(peer)?;
-    age_past_idle(&node1, peer)?;
-    let unanswered = || {
-        node1
-            .swarm
-            .transport
-            .peer_liveness_unanswered_since_for_test(peer)
-    };
+    make_probe_due(&node1, peer)?;
 
-    node1
-        .swarm
-        .stabilizer()
-        .probe_peer_liveness_for_simulation()
-        .await?;
-    assert_eq!(
-        unanswered()?,
-        None,
-        "a refusal while credit flows charges nothing"
-    );
-
-    node1
-        .swarm
-        .transport
-        .force_credit_stall_for_test(peer, get_epoch_ms_i64() - PEER_LIVENESS_IDLE_MS - 1);
-    let refused_at = get_epoch_ms_i64();
+    let issued_at = get_epoch_ms_i64();
     node1
         .swarm
         .stabilizer()
         .probe_peer_liveness_for_simulation()
         .await?;
     assert!(
-        unanswered()?.is_some_and(|since| since >= refused_at),
-        "a probe refused behind withheld credit counts as unanswered"
+        outstanding(&node1, peer)?.is_some_and(|since| since >= issued_at),
+        "the probe was issued and queued despite the full capacity"
     );
     drop((capacity, credit));
     Ok(())
@@ -235,5 +245,22 @@ async fn test_an_application_send_waits_for_its_first_frame_while_the_peer_withh
         "the application send waited for admission and timed out: {sent:?}"
     );
     drop(held);
+    Ok(())
+}
+
+/// No idle credit: once a link is quiet, the sending end's outbound worker holds none of the
+/// control lane's credit, so the whole window is free, and a peer that stops granting credit
+/// stops this end's control traffic outright.
+#[tokio::test]
+async fn test_a_quiet_link_holds_no_credit_at_its_sender() -> Result<()> {
+    let (node1, node2) = connected_pair().await?;
+    let free = node1
+        .swarm
+        .transport
+        .hold_lane_credit_for_test(node2.did(), CONTROL_LANE)?;
+    assert_eq!(
+        u64::try_from(free.len()).map_err(|_| Error::InvalidMessage("window".to_string()))?,
+        rings_transport::core::credit::LANE_CREDIT_WINDOW
+    );
     Ok(())
 }

@@ -1,3 +1,7 @@
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 #[cfg(test)]
@@ -382,10 +386,7 @@ impl TransferCapacity {
         let global_permit =
             self.global
                 .try_acquire_inner(peer, class, bytes, CapacityScope::Shared)?;
-        Ok(TransferCapacityPermit {
-            _peer: peer_permit,
-            _global: global_permit,
-        })
+        Ok(TransferCapacityPermit::held(peer_permit, global_permit))
     }
 
     /// [`Self::acquire`] without waiting: a permit if both the peer's and the node's capacity
@@ -411,10 +412,7 @@ impl TransferCapacity {
             || self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::Shared),
         )?;
         let global_permit = self.global.admit_now(peer, class, bytes)?;
-        Ok(TransferCapacityPermit {
-            _peer: peer_permit,
-            _global: global_permit,
-        })
+        Ok(TransferCapacityPermit::held(peer_permit, global_permit))
     }
 
     pub(super) async fn acquire(
@@ -427,10 +425,7 @@ impl TransferCapacity {
         let bytes = bytes.max(1);
         let peer_permit = self.acquire_peer(peer, class, bytes).await?;
         let global_permit = self.global.acquire(peer, class, bytes).await?;
-        Ok(TransferCapacityPermit {
-            _peer: peer_permit,
-            _global: global_permit,
-        })
+        Ok(TransferCapacityPermit::held(peer_permit, global_permit))
     }
 
     /// Observe live permit ownership for the common native/browser contract tests.
@@ -459,9 +454,56 @@ impl TransferCapacity {
     }
 }
 
+/// The outbound capacity one transfer holds until it ends: a share of its peer's and of the
+/// node's, or none for a transfer its sender's own law bounds.
 pub(in crate::swarm::transport) struct TransferCapacityPermit {
-    _peer: PeerCapacityPermit,
-    _global: GlobalCapacityPermit,
+    _held: Option<(PeerCapacityPermit, GlobalCapacityPermit)>,
+    /// Test builds: the count of sender-bounded transfers this one is in, so quiescence probes
+    /// see it in flight.
+    #[cfg(test)]
+    _sender_bounded: Option<SenderBoundedTransfer>,
+}
+
+impl TransferCapacityPermit {
+    /// A permit holding the peer's and the node's shares.
+    fn held(peer: PeerCapacityPermit, global: GlobalCapacityPermit) -> Self {
+        Self {
+            _held: Some((peer, global)),
+            #[cfg(test)]
+            _sender_bounded: None,
+        }
+    }
+
+    /// A permit holding no shared capacity, for a transfer whose count its sender bounds: a
+    /// liveness probe, at most one outstanding per peer (see `transport::liveness`).
+    pub(in crate::swarm::transport) fn bounded_by_sender() -> Self {
+        Self {
+            _held: None,
+            #[cfg(test)]
+            _sender_bounded: None,
+        }
+    }
+
+    /// Test builds: count this sender-bounded transfer in `count` while it lives.
+    #[cfg(test)]
+    pub(in crate::swarm::transport) fn counted_in(mut self, count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        self._sender_bounded = Some(SenderBoundedTransfer(Arc::clone(count)));
+        self
+    }
+}
+
+/// Test builds: one sender-bounded transfer in flight, counted until it is dropped.
+#[cfg(test)]
+struct SenderBoundedTransfer(Arc<AtomicUsize>);
+
+#[cfg(test)]
+impl Drop for SenderBoundedTransfer {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+        // A released transfer is a state change that quiescence probes read.
+        crate::tests::activity::record_activity();
+    }
 }
 
 struct PeerCapacityPermit {
