@@ -482,7 +482,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                 }
 
                 let callback = InnerSwarmCallback::new(Arc::clone(self.transport));
-                match self.transport.connect_with(peer, callback, &egress).await {
+                match self.transport.connect_detached(peer, callback).await {
                     Ok(()) | Err(Error::AlreadyConnected) => Ok(()),
                     Err(
                         error @ (Error::PendingConnectionCapacityExceeded { .. }

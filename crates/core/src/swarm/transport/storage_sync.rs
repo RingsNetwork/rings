@@ -520,6 +520,7 @@ impl SwarmTransport {
             }
             Some(next_hop) => {
                 let payload = self
+                    .protocol_egress()
                     .originate(
                         Message::SyncEntriesWithSuccessor(msg.clone()),
                         destination,

@@ -40,7 +40,10 @@ What a node holds of received frames is bounded twice:
   (`NODE_RECEIVE_SOFT_LIMIT_BYTES`), no lane but the priority lane advertises new credit; a
   lane that releases a batch meanwhile defers its advertisement, and the release that brings
   the node below the limit makes every deferred one. The priority lane
-  (`ChannelLane::PRIORITY`), which core gives to DHT control, is never deferred, so a peer's
+  (`ChannelLane::PRIORITY`), which core gives to DHT control, is never deferred; the receiver
+  refuses as invalid a frame whose content belongs to another lane than the one it arrived on
+  (a chunked message by the lane every chunk shared), so the priority lane's credit carries DHT
+  control alone, so a peer's
   control traffic, and with it every link's liveness, never waits for what other peers make
   the node hold. Deferring narrows what senders may send next, never what they were granted,
   so no honest frame is refused; the node exceeds the limit by at most the credit already
@@ -95,13 +98,17 @@ lane.
   transport's acceptance, never for the receiver's consumption.
 - An inbound lane's progress depends only on local resources (`swarm::transport::egress`).
   Every send made in the protocol context (a handler's forward, report, query or
-  notification, a connection offer it starts, a read repair, a relay hold, a liveness probe)
-  goes through the protocol egress: it takes the connection's readiness and its outbound
+  notification, a connection offer it starts, a read repair, a relay hold, a liveness probe,
+  and maintenance's queries) goes through the protocol egress, the only sender handlers and
+  maintenance can reach (the waiting discipline is constructible only at the Swarm API): it takes the connection's readiness and its outbound
   capacity now (refused for either, it is dropped as local backpressure), returns once queued,
   and so frees the inbound event and lane that carried its cause. The next peer's
-  backpressure never reaches upstream links, and neither does a liveness verdict. Its first
+  backpressure never reaches upstream links, and neither does a liveness verdict. A
+  connection a handler starts or answers is reserved and created at once, and its offer or
+  answer, whose ICE gathering waits on STUN or TURN, is negotiated and sent apart from the
+  event. Its first
   frame's admission, credit included, is awaited apart from it, at most
-  `DETACHED_FIRST_FRAME_TIMEOUT` (25 seconds), and a payload that waits longer is dropped, as
+  the first-frame deadline (25 seconds), and a payload that waits longer is dropped, as
   a best-effort relay may drop; the origin's own tracked send or retry covers it. A send
   through the Swarm API, the application boundary, waits for its first frame's admission, so
   its caller learns whether it left. No application code runs on a lane: the application

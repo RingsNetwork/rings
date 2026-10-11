@@ -34,7 +34,6 @@ use crate::message::test_probe_request;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::swarm::transport::StorageSyncSend;

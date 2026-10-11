@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::callback::link_credit::CreditPermit;
+use crate::core::pool::ChannelLane;
 use crate::core::transport::WebrtcConnectionState;
 
 type CallbackError = Box<dyn std::error::Error>;
@@ -21,18 +22,32 @@ type CallbackError = Box<dyn std::error::Error>;
 pub struct AdmittedInboundMessage<'a> {
     cid: &'a str,
     payload: Bytes,
+    lane: ChannelLane,
     capacity: InboundCreditLease,
 }
 
 impl<'a> AdmittedInboundMessage<'a> {
-    /// The admitted message `payload` from the connection `cid`, holding its frame's place in
-    /// the lane's credit window through `capacity`.
-    pub(crate) fn new(cid: &'a str, payload: Bytes, capacity: InboundCreditLease) -> Self {
+    /// The admitted message `payload` from the connection `cid`, which arrived on the channel
+    /// of `lane` and holds its frame's place in that lane's credit window through `capacity`.
+    pub(crate) fn new(
+        cid: &'a str,
+        payload: Bytes,
+        lane: ChannelLane,
+        capacity: InboundCreditLease,
+    ) -> Self {
         Self {
             cid,
             payload,
+            lane,
             capacity,
         }
+    }
+
+    /// The lane whose channel the frame arrived on, named by the channel's least lane: the
+    /// lane whose credit window it took a place in. A receiver checks it against the lane the
+    /// frame's content belongs to.
+    pub const fn lane(&self) -> ChannelLane {
+        self.lane
     }
 
     /// Return the connection identifier associated with this frame.

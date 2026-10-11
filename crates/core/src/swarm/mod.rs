@@ -11,6 +11,8 @@ mod inbox;
 /// Non-blocking observation hooks for operator telemetry.
 pub mod observer;
 pub(crate) mod session_link;
+/// The Swarm's storage API, at the application boundary.
+pub mod storage_api;
 pub(crate) mod transport;
 
 use std::num::NonZeroUsize;
@@ -225,7 +227,10 @@ impl Swarm {
 
     /// Send [Message] to peer.
     pub async fn send_message(&self, msg: Message, destination: Did) -> Result<uuid::Uuid> {
-        self.transport.send_message(msg, destination).await
+        self.transport
+            .application_egress()
+            .send_message(msg, destination)
+            .await
     }
 
     /// Send a message directly to an already connected peer, without a Chord lookup.
@@ -233,7 +238,10 @@ impl Swarm {
     /// This preserves an application protocol's explicit next-hop selection. Callers must
     /// ensure the destination has an active direct transport connection.
     pub async fn send_direct_message(&self, msg: Message, destination: Did) -> Result<uuid::Uuid> {
-        self.transport.send_direct_message(msg, destination).await
+        self.transport
+            .application_egress()
+            .send_direct_message(msg, destination)
+            .await
     }
 
     /// List active, routable peers and their connection status.
@@ -315,13 +323,14 @@ impl Swarm {
                     strict: false,
                     then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
                 });
-                let payload = self.transport.originate(request, key, Some(next)).await?;
+                let egress = self.transport.application_egress();
+                let payload = egress.originate(request, key, Some(next)).await?;
                 let report = self
                     .transport
                     .application()
                     .lookups
                     .register(payload.transaction.tx_id);
-                self.transport.send_payload(payload).await?;
+                egress.send_payload(payload).await?;
                 Ok(SuccessorLookup::Routed(report))
             }
             action => Err(Error::PeerRingUnexpectedAction(Box::new(action))),
@@ -390,6 +399,7 @@ impl Swarm {
         // The invoker should fix it before sending.
         let payload = self
             .transport
+            .application_egress()
             .originate(Message::ConnectNodeSend(offer_msg), peer, Some(self.did()))
             .await?;
 
@@ -430,6 +440,7 @@ impl Swarm {
         // The invoker should fix it before sending.
         let answer_payload = self
             .transport
+            .application_egress()
             .originate(
                 Message::ConnectNodeReport(answer_msg),
                 peer,

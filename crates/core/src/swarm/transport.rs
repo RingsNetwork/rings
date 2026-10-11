@@ -131,6 +131,8 @@ pub(crate) use self::outbound::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 pub(crate) use self::outbound::OUTBOUND_LANE_WINDOW;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::payload_send::hold_first_frame_deadlines_for_test;
 use self::peer_operation::PeerOperationLocks;
 use self::pending::ConnectionLifecycleBoundary;
 pub(crate) use self::pending::PendingConnectionAttempt;

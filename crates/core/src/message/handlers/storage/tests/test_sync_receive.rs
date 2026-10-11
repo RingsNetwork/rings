@@ -27,7 +27,6 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
-use crate::message::PayloadSender;
 use crate::swarm::transport::StorageSyncBatch;
 use crate::swarm::transport::StorageSyncBatchStep;
 use crate::tests::default::assert_no_more_msg;

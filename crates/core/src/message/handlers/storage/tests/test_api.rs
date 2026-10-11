@@ -2,8 +2,6 @@ use std::cmp::Ordering;
 
 use bytes::Bytes;
 
-use super::super::ChordStorageInterface;
-use super::super::ChordStorageInterfaceCacheChecker;
 use super::test_support::assert_cached_data_values;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload_matching;
@@ -14,6 +12,8 @@ use crate::dht::Did;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Result;
 use crate::message::types::Message;
+use crate::message::ChordStorageInterface;
+use crate::message::ChordStorageInterfaceCacheChecker;
 use crate::message::MessageVerificationExt;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;

@@ -596,3 +596,44 @@ fn test_future_timestamp_is_dropped() {
     });
     assert!(out.is_none());
 }
+
+/// A message's chunks travel one lane (#913 R9 M3): a chunk that arrives on another lane than
+/// the message's first chunk is refused as invalid, and the message completes on its own lane,
+/// reporting it as its carrier.
+#[test]
+fn test_a_chunk_that_changes_lanes_is_refused_and_the_message_keeps_its_carrier() {
+    use rings_transport::core::pool::ChannelLane;
+
+    let mut reassembler = MessageReassembler::new();
+    let now = get_epoch_ms();
+    let (data, other) = (ChannelLane::new(3), ChannelLane::PRIORITY);
+    let meta = ChunkMeta::default();
+    let chunk = |position, bytes: &'static [u8]| Chunk {
+        chunk: [position, 2],
+        data: Bytes::from_static(bytes),
+        meta,
+    };
+    let handle = |reassembler: &mut MessageReassembler, chunk, carrier| {
+        reassembler
+            .handle_retained_at_with_attribution(chunk, now, true, Some(carrier))
+            .0
+    };
+    assert!(matches!(
+        handle(&mut reassembler, chunk(0, b"first"), data),
+        ReassemblyOutcome::Incomplete
+    ));
+    assert!(matches!(
+        handle(&mut reassembler, chunk(1, b"second"), other),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
+    ));
+
+    let mut reassembler = MessageReassembler::new();
+    assert!(matches!(
+        handle(&mut reassembler, chunk(0, b"first"), data),
+        ReassemblyOutcome::Incomplete
+    ));
+    match handle(&mut reassembler, chunk(1, b"second"), data) {
+        ReassemblyOutcome::Complete(message) => assert_eq!(message.carrier(), Some(data)),
+        _ => panic!("the message completes on its own lane"),
+    }
+}

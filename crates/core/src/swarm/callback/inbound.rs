@@ -26,6 +26,7 @@ use futures::channel::oneshot;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
+use rings_transport::core::pool::ChannelLane;
 
 use super::logical::edge_relation;
 use super::InboundFrameLease;
@@ -112,6 +113,9 @@ struct InboundEvent {
     payload: MessagePayload,
     prepared_message: Option<crate::message::Message>,
     lane: InboundLane,
+    /// The transport lane the frame arrived on; a chunk's carrier is checked against its
+    /// message once reassembled.
+    carrier: Option<ChannelLane>,
     wire_bytes: usize,
     permit: InboundCapacityPermit,
     completion: InboundCompletion,
@@ -240,6 +244,7 @@ impl InboundMailbox {
                 InboundFrameLease {
                     bytes,
                     transport_credit,
+                    carrier,
                     held: _,
                     #[cfg(test)]
                     in_flight,
@@ -300,6 +305,7 @@ impl InboundMailbox {
             payload,
             prepared_message: Some(message),
             lane,
+            carrier,
             wire_bytes,
             permit,
             completion,

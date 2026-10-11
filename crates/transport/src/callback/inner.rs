@@ -444,8 +444,9 @@ impl InnerTransportCallback {
             owner: _,
             permit,
         } = frame;
+        let lane = permit.lane();
         let message =
-            AdmittedInboundMessage::new(&self.cid, payload, InboundCreditLease::new(permit));
+            AdmittedInboundMessage::new(&self.cid, payload, lane, InboundCreditLease::new(permit));
         if let Err(error) = self.callback.on_admitted_message(message).await {
             tracing::error!("Callback on_admitted_message failed: {error:?}");
         }

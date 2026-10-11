@@ -90,6 +90,7 @@ async fn test_oversized_payload_log_omits_the_custom_message_body() -> Result<()
     let error = node1
         .swarm
         .transport
+        .protocol_egress()
         .send_payload(payload)
         .await
         .expect_err("oversized payload must be rejected before scheduling");

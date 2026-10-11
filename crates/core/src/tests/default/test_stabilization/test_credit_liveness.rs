@@ -235,7 +235,6 @@ async fn test_an_application_send_waits_for_its_first_frame_while_the_peer_withh
         TEST_HANG_GUARD,
         node1
             .swarm
-            .transport
             .send_direct_message(Message::custom(b"from the application")?, node2.did()),
     )
     .await
@@ -262,5 +261,48 @@ async fn test_a_quiet_link_holds_no_credit_at_its_sender() -> Result<()> {
         u64::try_from(free.len()).map_err(|_| Error::InvalidMessage("window".to_string()))?,
         rings_transport::core::credit::LANE_CREDIT_WINDOW
     );
+    Ok(())
+}
+
+/// The three-node cascade (#913 R7, R8): `M` withholds every credit from `B`, and `X` relays
+/// through `B` a control message whose next hop is `M`. `B` queues the forward toward `M` and
+/// frees the lane-0 event that carried it, so `X`'s lane 0 at `B` keeps progressing: `X`'s
+/// probe of `B`, behind the relayed message on the same lane, is answered, and `X` keeps `B`.
+#[tokio::test]
+async fn test_a_peer_withholding_credit_from_a_relay_never_costs_the_relay_its_other_links(
+) -> Result<()> {
+    let (x, b) = connected_pair().await?;
+    let m = prepare_node(SecretKey::random()).await;
+    manually_establish_connection(&b.swarm, &m.swarm).await;
+    wait_for_msgs([&x, &b, &m]).await;
+    let held = starve_every_lane(&m, &b)?;
+    // B's forward toward M stays stuck for the whole witness, not only until the short dummy
+    // first-frame deadline, so a forward that held its lane would hold it throughout.
+    let _stuck = crate::swarm::transport::hold_first_frame_deadlines_for_test();
+
+    // A report B forwards toward M on its control lane, as it would a relayed request's.
+    let relayed = Message::FindSuccessorReport(crate::message::FindSuccessorReport {
+        did: m.did(),
+        handler: crate::message::FindSuccessorReportHandler::None,
+    });
+    x.swarm
+        .transport
+        .protocol_egress()
+        .send_message_by_hop(relayed, m.did(), b.did())
+        .await?;
+    make_probe_due(&x, b.did())?;
+    x.swarm
+        .stabilizer()
+        .probe_peer_liveness_for_simulation()
+        .await?;
+    // M's starved queue keeps B from quiescing: wait for X's answer itself.
+    probe_on_activity("B answers X's probe", TEST_HANG_GUARD, || {
+        let answered = outstanding(&x, b.did()).map(|since| since.is_none().then_some(()));
+        async move { answered }
+    })
+    .await?;
+    x.swarm.stabilizer().clean_unavailable_connections().await?;
+    assert!(x.swarm.transport.get_connection(b.did()).is_some());
+    drop(held);
     Ok(())
 }

@@ -88,6 +88,7 @@ async fn relay_custom(
     sender
         .swarm
         .transport
+        .protocol_egress()
         .send_message_by_hop(Message::custom(data)?, destination.did(), relay.did())
         .await?;
     let delivered = next_custom_message_from(destination, sender.did(), data).await?;
@@ -118,7 +119,6 @@ async fn test_link_reaches_references_without_a_question() -> Result<()> {
             "the link never switched to references"
         );
         left.swarm
-            .transport
             .send_direct_message(Message::custom(b"steady")?, right.did())
             .await?;
         next_custom_message_from(&right, left.did(), b"steady").await?;

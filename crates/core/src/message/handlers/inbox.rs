@@ -18,7 +18,6 @@ use crate::dht::Did;
 use crate::error::Result;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
 

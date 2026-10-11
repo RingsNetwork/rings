@@ -1,7 +1,5 @@
 use bytes::Bytes;
 
-use super::super::ChordStorageInterface;
-use super::super::ChordStorageInterfaceCacheChecker;
 #[cfg(feature = "dummy")]
 use super::test_support::install_two_node_chord_view;
 use super::test_support::next_generated_key;
@@ -25,6 +23,8 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
+use crate::message::ChordStorageInterface;
+use crate::message::ChordStorageInterfaceCacheChecker;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
@@ -845,5 +845,3 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
     );
     Ok(())
 }
-#[cfg(feature = "dummy")]
-use crate::message::PayloadSender;

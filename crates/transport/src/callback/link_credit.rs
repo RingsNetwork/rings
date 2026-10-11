@@ -553,6 +553,13 @@ pub(crate) struct CreditPermit {
     bytes: u64,
 }
 
+impl CreditPermit {
+    /// The lane whose window the permit holds a place in, named by its channel's least lane.
+    pub(crate) const fn lane(&self) -> ChannelLane {
+        self.index.lane()
+    }
+}
+
 impl Drop for CreditPermit {
     fn drop(&mut self) {
         self.link.release(self.index, self.bytes);

@@ -10,19 +10,22 @@
 //! this node's other peers evict it).
 //!
 //! ```text
-//!   application boundary ── SwarmTransport ──▶ wait for capacity and readiness, then for the
-//!   (Swarm API, callers                         first frame's admission: the caller learns
-//!    outside the actor)                         whether the payload left
+//!   application boundary ── ApplicationEgress ─▶ wait for capacity and readiness, then for
+//!   (the Swarm API)                                the first frame's admission: the caller
+//!                                                  learns whether the payload left
 //!
-//!   protocol context ────── ProtocolEgress ──▶ capacity and readiness now, or refused as local
-//!   (handlers, core effects,                    backpressure; return once queued; the first
-//!    maintenance)                               frame's admission is watched apart
+//!   protocol context ────── ProtocolEgress ────▶ capacity and readiness now, or refused as
+//!   (handlers, core effects,                       local backpressure; return once queued;
+//!    maintenance)                                  the first frame's admission is watched
+//!                                                  apart
 //! ```
 //!
 //! Both are [`PayloadSender`]s and share every derived operation (originate, report, forward);
 //! they differ only in [`PayloadSender::do_send_payload`], the one point where a send meets the
-//! peer. Code that runs in the protocol context receives a [`ProtocolEgress`], so it cannot
-//! reach the waiting discipline through the sender it is given.
+//! peer. The transport itself is no sender (#913 R9 M1): a [`ProtocolEgress`] can be taken
+//! anywhere, but an [`ApplicationEgress`] only inside `crate::swarm`, the application boundary.
+//! Handlers (`crate::message`) and maintenance (`crate::dht`) therefore cannot reach the
+//! waiting discipline at all; the compiler, not a convention, keeps them local.
 
 use std::sync::Arc;
 
@@ -68,19 +71,39 @@ impl SwarmTransport {
     }
 }
 
+/// The sender of the application boundary: a send returns once its first frame is admitted,
+/// waiting, bounded, for capacity and readiness, so the caller learns whether the payload left.
+/// Constructible only inside `crate::swarm`.
+#[derive(Clone, Copy)]
+pub(crate) struct ApplicationEgress<'transport> {
+    transport: &'transport SwarmTransport,
+}
+
+impl SwarmTransport {
+    /// The application-boundary sender over this transport; see the module law.
+    pub(in crate::swarm) fn application_egress(&self) -> ApplicationEgress<'_> {
+        ApplicationEgress { transport: self }
+    }
+
+    /// The signer of every payload this transport originates; signing sends nothing.
+    pub(crate) fn message_signer(&self) -> MessageSigner<&DelegateeKey> {
+        MessageSigner::new(&self.delegatee_key, self.network_id)
+    }
+}
+
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl PayloadSender for SwarmTransport {
+impl PayloadSender for ApplicationEgress<'_> {
     fn message_signer(&self) -> MessageSigner<&DelegateeKey> {
-        MessageSigner::new(&self.delegatee_key, self.network_id)
+        self.transport.message_signer()
     }
 
     fn dht(&self) -> Arc<PeerRing> {
-        self.dht.clone()
+        self.transport.dht.clone()
     }
 
     fn is_connected(&self, did: Did) -> bool {
-        self.get_connection(did).is_some()
+        self.transport.get_connection(did).is_some()
     }
 
     async fn reserve_transaction_sequences(
@@ -89,13 +112,14 @@ impl PayloadSender for SwarmTransport {
         class: MessageCategory,
         count: std::num::NonZeroU64,
     ) -> Result<std::ops::RangeInclusive<u64>> {
-        SwarmTransport::reserve_transaction_sequences(self, destination, class, count).await
+        SwarmTransport::reserve_transaction_sequences(self.transport, destination, class, count)
+            .await
     }
 
     /// The application discipline: return once the first frame is admitted, so the caller
     /// learns whether the payload left.
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
-        self.send_payload_admitted(did, payload).await
+        self.transport.send_payload_admitted(did, payload).await
     }
 }
 
@@ -111,7 +135,7 @@ impl PayloadSender for ProtocolEgress<'_> {
     }
 
     fn is_connected(&self, did: Did) -> bool {
-        self.transport.is_connected(did)
+        self.transport.get_connection(did).is_some()
     }
 
     async fn reserve_transaction_sequences(

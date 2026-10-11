@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::InboundCreditLease;
+use rings_transport::core::pool::ChannelLane;
 
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
@@ -141,6 +142,8 @@ pub(super) struct InboundProcessor {
 pub(super) struct InboundFrameLease {
     bytes: Bytes,
     transport_credit: Option<InboundCreditLease>,
+    /// The transport lane the frame arrived on, whose credit it took.
+    carrier: Option<ChannelLane>,
     /// The frame's place in the node's session-hold budget, while the session link holds it.
     held: Option<SessionHoldPermit>,
     /// Test builds: the frame's conservation witness, released with the lease.

@@ -26,6 +26,7 @@ use super::InnerSwarmCallback;
 use super::PreparedInboundFrame;
 use super::TransportCallbackError;
 use crate::dht::Did;
+use crate::error::Error;
 use crate::message::MessagePayload;
 use crate::swarm::application::SwarmEvent;
 use crate::swarm::detached::run_detached_or_inline;
@@ -374,6 +375,10 @@ impl InnerSwarmCallback {
         lease: InboundFrameLease,
         provenance: FrameProvenance,
     ) -> Result<(), TransportCallbackError> {
+        if !prepared.lane.admits_carrier(lease.carrier) {
+            self.processor.record_receive_failure_now(peer).await;
+            return Err(Error::InboundLaneMismatch.into());
+        }
         let authentication = self.processor.authentication_of(peer);
         let admitted = match self.processor.pending_connection_gate(peer).await? {
             InboundGate::Admitted => true,
@@ -500,7 +505,7 @@ impl InnerSwarmCallback {
         cid: &str,
         msg: &[u8],
     ) -> Result<(), TransportCallbackError> {
-        self.submit_inbound_message(cid, Bytes::copy_from_slice(msg), None)
+        self.submit_inbound_message(cid, Bytes::copy_from_slice(msg), None, None)
             .await
     }
 }
@@ -512,8 +517,9 @@ impl TransportCallback for InnerSwarmCallback {
         &self,
         message: AdmittedInboundMessage<'_>,
     ) -> Result<(), TransportCallbackError> {
+        let carrier = message.lane();
         let (cid, msg, transport_credit) = message.into_parts();
-        self.submit_inbound_message(cid, msg, Some(transport_credit))
+        self.submit_inbound_message(cid, msg, Some(transport_credit), Some(carrier))
             .await
     }
 

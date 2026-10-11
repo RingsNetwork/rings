@@ -39,6 +39,7 @@ use std::str::FromStr;
 
 use bytes::Bytes;
 use rings_transport::core::callback::InboundCreditLease;
+use rings_transport::core::pool::ChannelLane;
 
 use super::processor::HeldFrameDrop;
 use super::FrameProvenance;
@@ -77,6 +78,7 @@ impl InnerSwarmCallback {
         cid: &str,
         msg: Bytes,
         transport_credit: Option<InboundCreditLease>,
+        carrier: Option<ChannelLane>,
     ) -> std::result::Result<(), TransportCallbackError> {
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         let _depth_guard = OnMessageRecursionDepthGuard::enter();
@@ -103,6 +105,7 @@ impl InnerSwarmCallback {
         let mut lease = InboundFrameLease {
             bytes: msg,
             transport_credit,
+            carrier,
             held: None,
             #[cfg(test)]
             in_flight,

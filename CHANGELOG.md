@@ -303,6 +303,22 @@
     waits behind another lane's borrower, and no peer waits behind another peer's budget. The
     order is `fair_admission::ResourceOrderedQueue`, model checked with stateright.
 
+  **Typed egress and lane-0 locality (#913 R9 M1–M4).**
+  - `SwarmTransport` is no `PayloadSender`. The waiting discipline is `ApplicationEgress`,
+    constructible only inside `crate::swarm` (the Swarm API, including the storage API, which
+    moves to `swarm::storage_api`); handlers and maintenance reach only `ProtocolEgress`.
+    `fix_fingers` and `correct_stabilize` now queue their queries.
+  - A connection a handler starts (`connect_detached`) or answers is reserved and created at
+    once; its offer or answer, which waits on ICE gathering, is negotiated and sent on a
+    detached task.
+  - The receiver refuses a frame whose content belongs to another lane than the one it
+    arrived on (`AdmittedInboundMessage::lane`, `Error::InboundLaneMismatch`); a chunked
+    message's chunks must share one lane, the lane of the message they carry. The
+    category-to-lane mapping is one function, `MessageCategory::channel_lane`.
+  - The effect witness enumerates every `CoreEffect` through an exhaustive match, and a
+    three-node witness shows a peer withholding credit from a relay never costs the relay its
+    other links.
+
   **Logging.** Both waits are logged at `warn` as backpressure.
 
   **Sync storm.**

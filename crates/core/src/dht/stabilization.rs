@@ -755,6 +755,7 @@ impl Stabilizer {
                     });
                     let payload = match self
                         .transport
+                        .protocol_egress()
                         .originate(msg.clone(), closest_predecessor, Some(closest_predecessor))
                         .await
                     {
@@ -780,7 +781,9 @@ impl Stabilizer {
                         tx_id = %tx_id,
                         "STABILIZATION fix_fingers send start"
                     );
-                    if let Err(e) = self.transport.send_payload(payload).await {
+                    // Maintenance never waits on a peer (#913 R9 M2): the query is queued and the
+                    // step moves on; a query that leaves no report expires with its lookup.
+                    if let Err(e) = self.transport.protocol_egress().send_payload(payload).await {
                         tracing::error!(
                             target: "rings_core::dht::stabilization",
                             local = %self.dht.did,
@@ -840,6 +843,7 @@ impl Stabilizer {
                 );
                 match self
                     .transport
+                    .protocol_egress()
                     .send_direct_message(
                         Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_stab(
                             next, request_id,

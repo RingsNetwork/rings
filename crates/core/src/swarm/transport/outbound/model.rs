@@ -10,12 +10,7 @@ pub(in crate::swarm::transport) use crate::message::MessageKind as OutboundMessa
 /// whatever the other classes' channels do. With at most `OUTBOUND_LANE_WINDOW` of them in
 /// flight, fewer than the replay window, a class stream never arrives reordered beyond it.
 pub(in crate::swarm::transport) const fn channel_lane(class: TransferClass) -> ChannelLane {
-    match class {
-        TransferClass::DhtControl => ChannelLane::PRIORITY,
-        TransferClass::Storage => ChannelLane::new(1),
-        TransferClass::E2e => ChannelLane::new(2),
-        TransferClass::Application => ChannelLane::new(3),
-    }
+    class.channel_lane()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

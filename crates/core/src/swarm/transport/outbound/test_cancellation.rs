@@ -9,7 +9,6 @@ use super::*;
 use crate::ecc::SecretKey;
 use crate::message::Message;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::Swarm;
 use crate::tests::fixed_secret_keys;

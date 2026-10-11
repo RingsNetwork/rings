@@ -27,7 +27,6 @@ use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;

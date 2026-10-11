@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use rings_transport::core::pool::ChannelLane;
 use uuid::Uuid;
 
 use super::Chunk;
@@ -34,10 +35,18 @@ pub(super) struct Pending {
     local_capacity_rejected: bool,
     /// Every retained chunk was bound to an authenticated peer at ingress.
     peer_attributable: bool,
+    /// The lane the first chunk arrived on, which every later chunk must share.
+    carrier: Option<ChannelLane>,
 }
 
 impl Pending {
-    fn new(total: usize, ts_ms: u128, ttl_ms: u64, peer_attributable: bool) -> Self {
+    fn new(
+        total: usize,
+        ts_ms: u128,
+        ttl_ms: u64,
+        peer_attributable: bool,
+        carrier: Option<ChannelLane>,
+    ) -> Self {
         Self {
             total,
             slots: BTreeMap::new(),
@@ -47,6 +56,7 @@ impl Pending {
             failure_charged: false,
             local_capacity_rejected: false,
             peer_attributable,
+            carrier,
         }
     }
 
@@ -196,6 +206,8 @@ pub(crate) struct RetainedReassembly {
     bytes: Bytes,
     budget: Arc<ReassemblyBudget>,
     cost: usize,
+    /// The lane every chunk of the message arrived on.
+    carrier: Option<ChannelLane>,
 }
 
 /// Result of applying one chunk to a reassembler.
@@ -220,6 +232,12 @@ pub(crate) enum ReassemblyRejection {
 }
 
 impl RetainedReassembly {
+    /// The lane every chunk of the message arrived on, for the receiver to check against the
+    /// lane its content belongs to.
+    pub(crate) const fn carrier(&self) -> Option<ChannelLane> {
+        self.carrier
+    }
+
     fn into_bytes(mut self) -> Bytes {
         self.budget.release(self.cost);
         self.cost = 0;
@@ -479,7 +497,7 @@ impl MessageReassembler {
     }
 
     fn handle_retained_at(&mut self, chunk: Chunk, now: u128) -> (ReassemblyOutcome, usize) {
-        self.handle_retained_at_with_attribution(chunk, now, true)
+        self.handle_retained_at_with_attribution(chunk, now, true, None)
     }
 
     /// Accept one chunk against the caller's clock and also report how many older incomplete
@@ -493,13 +511,14 @@ impl MessageReassembler {
         chunk: Chunk,
         now: u128,
         peer_attributable: bool,
+        carrier: Option<ChannelLane>,
     ) -> (ReassemblyOutcome, usize) {
         // Reclaim expired pending entries and tombstones first, before classify reads them, so
         // invalid traffic still frees memory and an expired tombstone cannot suppress a fresh
         // message that reuses its id after the TTL window.
         let expired = self.remove_expired_at(now);
-        let outcome = match self.classify(&chunk, now) {
-            Ok(cost) => self.admit(chunk, cost, peer_attributable),
+        let outcome = match self.classify(&chunk, now, carrier) {
+            Ok(cost) => self.admit(chunk, cost, peer_attributable, carrier),
             Err(reason) => {
                 tracing::debug!(?reason, id = ?chunk.meta.id, "reassembler dropped chunk");
                 let rejection = match reason.rejection() {
@@ -529,7 +548,12 @@ impl MessageReassembler {
     /// retain bounded failure/capacity evidence after this pure verdict.
     ///
     /// [`admit`]: Self::admit
-    fn classify(&self, chunk: &Chunk, now: u128) -> std::result::Result<usize, Rejected> {
+    fn classify(
+        &self,
+        chunk: &Chunk,
+        now: u128,
+        carrier: Option<ChannelLane>,
+    ) -> std::result::Result<usize, Rejected> {
         let meta = &chunk.meta;
         let transmission = LogicalTransmission::new(meta.id, meta.ts_ms, meta.ttl_ms);
         if self
@@ -595,6 +619,11 @@ impl MessageReassembler {
                 // transmission must not be merged in (it would skew expiry/tombstone behaviour).
                 if p.ts_ms != meta.ts_ms || p.ttl_ms != meta.ttl_ms {
                     return Err(Rejected::MetadataMismatch);
+                }
+                // A message's chunks travel one lane; one that changes lanes would take credit
+                // on a lane its content does not belong to.
+                if p.carrier != carrier {
+                    return Err(Rejected::CarrierMismatch);
                 }
                 // First write per position wins; a duplicate position is a no-op, not an error.
                 if let Some(existing) = p.slots.get(&position) {
@@ -689,7 +718,13 @@ impl MessageReassembler {
     /// reassembled payload.
     ///
     /// [`classify`]: Self::classify
-    fn admit(&mut self, chunk: Chunk, cost: usize, peer_attributable: bool) -> ReassemblyOutcome {
+    fn admit(
+        &mut self,
+        chunk: Chunk,
+        cost: usize,
+        peer_attributable: bool,
+        carrier: Option<ChannelLane>,
+    ) -> ReassemblyOutcome {
         if !self.budget.try_reserve(cost) {
             self.mark_pending_capacity_rejection(&chunk);
             tracing::debug!(
@@ -707,6 +742,7 @@ impl MessageReassembler {
                 chunk.meta.ts_ms,
                 chunk.meta.ttl_ms,
                 peer_attributable,
+                carrier,
             )
         });
         pending.peer_attributable &= peer_attributable;
@@ -750,6 +786,7 @@ impl MessageReassembler {
             self.pending.len().saturating_add(1),
             self.limits.max_pending_messages,
         );
+        let carrier = pending.carrier;
         let done = pending;
         let done_cost = done.cost(self.limits.slot_overhead);
         let expiry = done.ts_ms.saturating_add(done.ttl_ms as u128);
@@ -762,6 +799,7 @@ impl MessageReassembler {
             bytes,
             budget: self.budget.clone(),
             cost: output_cost,
+            carrier,
         })
     }
 }
@@ -802,6 +840,8 @@ enum Rejected {
     TotalMismatch,
     /// `ts_ms`/`ttl_ms` disagree with the in-flight message's (a different transmission).
     MetadataMismatch,
+    /// The chunk arrived on another lane than the in-flight message's first chunk.
+    CarrierMismatch,
     /// This position is already buffered (a duplicate/retransmit).
     DuplicatePosition,
     /// This position is buffered with different bytes.
@@ -835,6 +875,7 @@ impl Rejected {
             | Self::ChunkTooLarge
             | Self::TotalMismatch
             | Self::MetadataMismatch
+            | Self::CarrierMismatch
             | Self::ConflictingPosition
             | Self::PerMessageBytes => ReassemblyRejection::Invalid,
         }

@@ -125,8 +125,8 @@ impl CreditIndex {
     /// Every index, in channel order.
     pub(crate) const ALL: [Self; 4] = [Self::C0, Self::C1, Self::C2, Self::C3];
 
-    /// The least lane of the channel, which credit frames are sent on and logs name.
-    #[cfg(rings_transport_backend)]
+    /// The least lane of the channel, which credit frames are sent on, logs name, and an
+    /// admitted frame reports as the lane it arrived on.
     pub(crate) const fn lane(self) -> ChannelLane {
         ChannelLane::new(self as u8)
     }

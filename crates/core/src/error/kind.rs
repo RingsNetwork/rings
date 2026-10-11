@@ -162,6 +162,11 @@ pub enum Error {
     #[error("Link-control frame is meaningful only on the connection it arrived on")]
     LinkControlOutsideLink,
 
+    /// No runtime is current to negotiate a protocol-context handshake detached from its
+    /// inbound event.
+    #[error("A protocol-context handshake needs a runtime to negotiate detached")]
+    HandshakeRuntimeUnavailable,
+
     /// No runtime is current to carry a link-control send detached from the read loop.
     #[error("Link-control send needs a runtime to run detached")]
     LinkControlRuntimeUnavailable,
@@ -569,6 +574,10 @@ pub enum Error {
     /// The inbound actor observed an impossible message/lane state.
     #[error("Inbound actor state invariant violated")]
     InboundActorInvariantViolation,
+
+    /// A frame arrived on a transport lane its content does not belong to.
+    #[error("Inbound frame arrived on a lane its content does not belong to")]
+    InboundLaneMismatch,
 
     /// A reassembled chunk payload attempted to contain another chunk envelope.
     #[error("Nested chunk messages are not allowed")]

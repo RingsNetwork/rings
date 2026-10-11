@@ -39,24 +39,22 @@ use crate::lifecycle::StopToken;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::swarm::detached::run_detached_or_inline;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
 use crate::utils::sleep;
 
+mod first_frame;
 mod submission;
 
+use first_frame::first_frame_deadline;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use first_frame::hold_first_frame_deadlines_for_test;
 use submission::EnqueuedDetached;
 use submission::SubmittedTransfer;
 use submission::TransferReceipt;
 
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
-/// How long a detached payload (a forward, a relay, a probe) waits for its first frame's
-/// admission, credit wait included. The wait runs apart from the sender once the payload is
-/// queued ([`SwarmTransport::send_payload_enqueued`]); a payload the next peer's backpressure
-/// holds longer is dropped as local backpressure.
-const DETACHED_FIRST_FRAME_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.first_frame_admission;
 
 struct OversizedPayloadLog {
     local: Did,
@@ -537,8 +535,8 @@ impl SwarmTransport {
         self.do_send_payload_detached_until(
             did,
             payload,
-            DETACHED_FIRST_FRAME_TIMEOUT,
-            sleep(DETACHED_FIRST_FRAME_TIMEOUT),
+            first_frame_deadline(),
+            sleep(first_frame_deadline()),
         )
         .await
     }
@@ -619,7 +617,7 @@ impl SwarmTransport {
     /// The protocol discipline ([`ProtocolEgress`](super::egress::ProtocolEgress)): queue
     /// `payload` to `did` under `admission` ([`QueueAdmission::Immediate`], or
     /// [`QueueAdmission::Reserved`] for a liveness probe) and return; its first frame's
-    /// admission is awaited apart from the sender, bounded by [`DETACHED_FIRST_FRAME_TIMEOUT`].
+    /// admission is awaited apart from the sender, bounded by the first-frame deadline (`first_frame::first_frame_deadline`).
     ///
     /// Law: nothing before the queue waits on `did` (its readiness and this end's capacity are
     /// taken now), and nothing after it holds the sender, so a handler never holds the inbound
@@ -633,15 +631,10 @@ impl SwarmTransport {
         payload: MessagePayload,
         admission: QueueAdmission,
     ) -> Result<()> {
-        let mut deadline = Box::pin(sleep(DETACHED_FIRST_FRAME_TIMEOUT).fuse());
+        let timeout_budget = first_frame_deadline();
+        let mut deadline = Box::pin(sleep(timeout_budget).fuse());
         let Some(enqueued) = self
-            .enqueue_detached(
-                did,
-                payload,
-                admission,
-                DETACHED_FIRST_FRAME_TIMEOUT,
-                &mut deadline,
-            )
+            .enqueue_detached(did, payload, admission, timeout_budget, &mut deadline)
             .await?
         else {
             return Ok(());
@@ -953,7 +946,7 @@ impl SwarmTransport {
     /// The application discipline ([`SwarmTransport`] as a
     /// [`PayloadSender`](crate::message::PayloadSender)): queue `payload` to `did` under
     /// [`QueueAdmission::Waiting`] and return once its first frame is admitted, bounded by
-    /// [`DETACHED_FIRST_FRAME_TIMEOUT`], so the caller learns whether the payload left.
+    /// the first-frame deadline (`first_frame::first_frame_deadline`), so the caller learns whether the payload left.
     pub(super) async fn send_payload_admitted(
         &self,
         did: Did,

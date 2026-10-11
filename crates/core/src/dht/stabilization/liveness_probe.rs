@@ -62,6 +62,7 @@ impl Stabilizer {
         let request = ProbeRequest::random_for_epoch(epoch);
         let payload = self
             .transport
+            .protocol_egress()
             .originate(Message::ProbeRequest(request), peer, Some(peer))
             .await?;
         match self

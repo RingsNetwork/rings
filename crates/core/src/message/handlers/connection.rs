@@ -84,37 +84,23 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 sdp_bytes = msg.sdp.len(),
                 "CONNECT_NODE offer answer start"
             );
-            let answer = match self
+            // The answer waits on ICE gathering, so it is negotiated and reported apart from
+            // this inbound event (#913 R9 M4).
+            if let Err(error) = self
                 .transport
-                .answer_remote_connection(peer, self.inner_callback(), msg)
+                .answer_remote_connection_detached(self.inner_callback(), ctx, msg)
                 .await
             {
-                Ok(answer) => {
-                    tracing::trace!(
-                        local = %self.dht.did,
-                        peer = %peer,
-                        tx_id = %ctx.transaction.tx_id,
-                        sdp_bytes = answer.sdp.len(),
-                        "CONNECT_NODE offer answer complete"
-                    );
-                    answer
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        local = %self.dht.did,
-                        peer = %peer,
-                        tx_id = %ctx.transaction.tx_id,
-                        error = ?error,
-                        "CONNECT_NODE offer answer failed"
-                    );
-                    return Err(error);
-                }
-            };
-            self.run_effects([CoreEffect::send_report_message(
-                ctx,
-                Message::ConnectNodeReport(answer),
-            )])
-            .await
+                tracing::warn!(
+                    local = %self.dht.did,
+                    peer = %peer,
+                    tx_id = %ctx.transaction.tx_id,
+                    error = ?error,
+                    "CONNECT_NODE offer answer failed"
+                );
+                return Err(error);
+            }
+            Ok(())
         }
     }
 }

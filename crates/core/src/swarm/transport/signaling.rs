@@ -1,11 +1,14 @@
 //! Connection signaling: offering a connection to a peer, answering a remote offer, and
 //! accepting the answer to this end's offer.
 
+use std::sync::Arc;
+
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use super::pending::AnswerSlot;
+use super::pending::PendingTransportConnection;
 use super::pending::RawConnectionOwner;
 use super::IncomingOfferAdmittedPeer;
 use super::PendingConnectionAttempt;
@@ -16,105 +19,143 @@ use crate::error::Result;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::Message;
+use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::detached::spawn_detached;
+use crate::swarm::detached::DetachedTask;
 
 impl SwarmTransport {
     /// Connect a given Did. If the did is already connected, return Err,
     /// else try prepare offer and establish connection by dht.
     ///
-    /// The offer is sent under the application discipline: this returns once the offer's first
-    /// frame is admitted.
+    /// The application boundary: the offer is created here, waiting on ICE gathering, and sent
+    /// under the application discipline, so this returns once the offer's first frame is
+    /// admitted.
     pub async fn connect(&self, peer: Did, callback: InnerSwarmCallback) -> Result<()> {
-        self.connect_with(peer, callback, self).await
+        let Some(pending) = self.open_offer(peer, callback).await? else {
+            return Ok(());
+        };
+        let attempt = pending.attempt();
+        let offer = self.create_offer(&pending).await?;
+        self.send_offer(attempt, offer, &self.application_egress())
+            .await
     }
 
-    /// [`Self::connect`] with the offer sent through `offer_sender`; the protocol context passes
-    /// its [`ProtocolEgress`](super::egress::ProtocolEgress), so a connection a handler starts never
-    /// waits on the relay that carries its offer.
-    pub(crate) async fn connect_with<S>(
+    /// Connect from the protocol context (#913 R9 M4): the generation is reserved and its
+    /// connection created now, so a finger proof waiting for it has an owner at once; the offer,
+    /// whose ICE gathering waits on STUN or TURN servers, is created and queued through the
+    /// protocol egress on a task detached from the inbound event that asked for it.
+    ///
+    /// Law (inbound locality): nothing here waits on a remote party; a failure of the detached
+    /// half abandons the generation it reserved, as the application path does.
+    pub(crate) async fn connect_detached(
+        self: &Arc<Self>,
+        peer: Did,
+        callback: InnerSwarmCallback,
+    ) -> Result<()> {
+        let Some(pending) = self.open_offer(peer, callback).await? else {
+            return Ok(());
+        };
+        let attempt = pending.attempt();
+        let transport = Arc::clone(self);
+        let negotiate: DetachedTask = Box::pin(async move {
+            let sent = match transport.create_offer(&pending).await {
+                Ok(offer) => {
+                    transport
+                        .send_offer(attempt, offer, &transport.protocol_egress())
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = sent {
+                tracing::debug!(
+                    target: "rings_core::swarm::transport::handshake",
+                    peer = %attempt.peer,
+                    generation = attempt.generation,
+                    error = ?error,
+                    "detached connection offer did not leave"
+                );
+            }
+        });
+        if spawn_detached(negotiate).is_err() {
+            self.abandon_pending_connection(attempt, "scheduling connection offer")
+                .await;
+            return Err(Error::HandshakeRuntimeUnavailable);
+        }
+        Ok(())
+    }
+
+    /// Reserve a generation for `peer` and create its connection, both local. `None` when a
+    /// concurrent handshake already satisfied the request.
+    async fn open_offer(
         &self,
         peer: Did,
         callback: InnerSwarmCallback,
-        offer_sender: &S,
-    ) -> Result<()>
-    where
-        S: PayloadSender + rings_runtime::MaybeSendSync + ?Sized,
-    {
-        let (attempt, offer_msg) = match self
-            .prepare_connection_offer_with_attempt(peer, callback)
-            .await
-        {
-            Ok(offer) => offer,
-            Err(Error::AlreadyConnected) => return Err(Error::AlreadyConnected),
-            Err(e) => {
+    ) -> Result<Option<PendingTransportConnection>> {
+        match self.open_pending_connection(peer, callback).await {
+            Ok(pending) => Ok(Some(pending)),
+            Err(Error::AlreadyConnected) => Err(Error::AlreadyConnected),
+            Err(error) => {
                 if self.get_connection(peer).is_some() {
                     tracing::debug!(
                         target: "rings_core::swarm::transport::handshake",
                         local = %self.dht.did,
                         peer = %peer,
-                        error = ?e,
+                        error = ?error,
                         "connection request satisfied by concurrent handshake"
                     );
-                    return Ok(());
+                    return Ok(None);
                 }
                 self.record_peer_message_send_failed(
                     peer,
                     crate::measure::Authentication::LocallyAddressed,
                 )
                 .await;
-                return Err(e);
+                Err(error)
             }
-        };
-        let sdp_len = offer_msg.sdp.len();
+        }
+    }
+
+    /// Send the offer of `attempt` through `offer_sender`; a failure abandons the generation.
+    async fn send_offer<S>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        offer_msg: ConnectNodeSend,
+        offer_sender: &S,
+    ) -> Result<()>
+    where
+        S: PayloadSender + rings_runtime::MaybeSendSync + ?Sized,
+    {
+        let peer = attempt.peer;
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
             generation = attempt.generation,
-            sdp_bytes = sdp_len,
+            sdp_bytes = offer_msg.sdp.len(),
             "connection offer send start"
         );
-        match offer_sender
+        let Err(error) = offer_sender
             .send_message(Message::ConnectNodeSend(offer_msg), peer)
             .await
-        {
-            Ok(tx_id) => {
-                tracing::trace!(
-                    target: "rings_core::swarm::transport::handshake",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    generation = attempt.generation,
-                    tx_id = %tx_id,
-                    "connection offer send complete"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "rings_core::swarm::transport::handshake",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    generation = attempt.generation,
-                    error = ?error,
-                    "connection offer send failed"
-                );
-                self.abandon_pending_connection(attempt, "sending connection offer")
-                    .await;
-                if self.get_connection(peer).is_some() {
-                    tracing::debug!(
-                        target: "rings_core::swarm::transport::handshake",
-                        local = %self.dht.did,
-                        peer = %peer,
-                        generation = attempt.generation,
-                        error = ?error,
-                        "connection offer send failure satisfied by concurrent handshake"
-                    );
-                    return Ok(());
-                }
-                return Err(error);
-            }
+        else {
+            return Ok(());
+        };
+        tracing::warn!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %peer,
+            generation = attempt.generation,
+            error = ?error,
+            "connection offer send failed"
+        );
+        self.abandon_pending_connection(attempt, "sending connection offer")
+            .await;
+        if self.get_connection(peer).is_some() {
+            return Ok(());
         }
-        Ok(())
+        Err(error)
     }
 
     /// Reserve a connection generation for `peer` and produce its offer; the attempt names the
@@ -124,12 +165,28 @@ impl SwarmTransport {
         peer: Did,
         callback: InnerSwarmCallback,
     ) -> Result<(PendingConnectionAttempt, ConnectNodeSend)> {
+        let pending = self.open_pending_connection(peer, callback).await?;
+        let offer = self.create_offer(&pending).await?;
+        Ok((pending.attempt(), offer))
+    }
+
+    /// Reserve a generation for `peer` and create its transport connection: local work only.
+    async fn open_pending_connection(
+        &self,
+        peer: Did,
+        callback: InnerSwarmCallback,
+    ) -> Result<PendingTransportConnection> {
         let attempt = self.reserve_pending_connection(peer).await?;
         let callback = callback.with_pending_connection_attempt(attempt);
-        let pending_connection = self.new_pending_connection(attempt, callback).await?;
-        let attempt = pending_connection.attempt();
-        let conn = pending_connection.connection();
+        self.new_pending_connection(attempt, callback).await
+    }
 
+    /// Create the offer of `pending`, which waits on ICE gathering; a failure abandons the
+    /// generation.
+    async fn create_offer(&self, pending: &PendingTransportConnection) -> Result<ConnectNodeSend> {
+        let attempt = pending.attempt();
+        let peer = attempt.peer;
+        let conn = pending.connection();
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
@@ -154,29 +211,15 @@ impl SwarmTransport {
                 return Err(Error::Transport(error));
             }
         };
-        tracing::trace!(
-            target: "rings_core::swarm::transport::handshake",
-            local = %self.dht.did,
-            peer = %peer,
-            generation = attempt.generation,
-            sdp_bytes = offer.len(),
-            state = ?conn.webrtc_connection_state(),
-            "connection offer create complete"
-        );
-        let offer_str = match serde_json::to_string(&offer) {
-            Ok(offer) => offer,
-            Err(_) => {
-                self.abandon_pending_connection(attempt, "serializing connection offer")
-                    .await;
-                return Err(Error::SerializeToString);
-            }
+        let Ok(offer_str) = serde_json::to_string(&offer) else {
+            self.abandon_pending_connection(attempt, "serializing connection offer")
+                .await;
+            return Err(Error::SerializeToString);
         };
-        let offer_msg = ConnectNodeSend {
+        Ok(ConnectNodeSend {
             sdp: offer_str,
             dht_protocol_mode: self.dht_protocol_mode(),
-        };
-
-        Ok((attempt, offer_msg))
+        })
     }
 
     async fn reconcile_incoming_offer_peer(&self, peer: Did) -> Result<()> {
@@ -225,18 +268,16 @@ impl SwarmTransport {
         Ok(())
     }
 
-    async fn create_connection_answer(
+    /// Create the answer of `pending` to `offer`, which waits on ICE gathering; a failure
+    /// abandons the generation.
+    async fn create_answer(
         &self,
-        peer: Did,
-        callback: InnerSwarmCallback,
+        pending: &PendingTransportConnection,
         offer: String,
     ) -> Result<ConnectNodeReport> {
-        let attempt = self.reserve_pending_connection(peer).await?;
-        let callback = callback.with_pending_connection_attempt(attempt);
-        let pending_connection = self.new_pending_connection(attempt, callback).await?;
-        let attempt = pending_connection.attempt();
-        let conn = pending_connection.connection();
-
+        let attempt = pending.attempt();
+        let peer = attempt.peer;
+        let conn = pending.connection();
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
@@ -262,38 +303,25 @@ impl SwarmTransport {
                 return Err(Error::Transport(error));
             }
         };
-        tracing::trace!(
-            target: "rings_core::swarm::transport::handshake",
-            local = %self.dht.did,
-            peer = %peer,
-            generation = attempt.generation,
-            answer_sdp_bytes = answer.len(),
-            state = ?conn.webrtc_connection_state(),
-            "connection answer create complete"
-        );
-        let answer_str = match serde_json::to_string(&answer) {
-            Ok(answer) => answer,
-            Err(_) => {
-                self.abandon_pending_connection(attempt, "serializing connection answer")
-                    .await;
-                return Err(Error::SerializeToString);
-            }
+        let Ok(answer_str) = serde_json::to_string(&answer) else {
+            self.abandon_pending_connection(attempt, "serializing connection answer")
+                .await;
+            return Err(Error::SerializeToString);
         };
-        let answer_msg = ConnectNodeReport {
+        Ok(ConnectNodeReport {
             sdp: answer_str,
             dht_protocol_mode: self.dht_protocol_mode(),
-        };
-
-        Ok(answer_msg)
+        })
     }
 
-    /// Answer the offer of remote connection.
-    pub async fn answer_remote_connection(
+    /// Validate `offer_msg` from `peer`, reconcile the peer's slot, and open the answering
+    /// generation: local work only. Returns the decoded offer with the opened connection.
+    async fn open_answer(
         &self,
         peer: Did,
         callback: InnerSwarmCallback,
         offer_msg: &ConnectNodeSend,
-    ) -> Result<ConnectNodeReport> {
+    ) -> Result<(PendingTransportConnection, String)> {
         if !self.accepts_connection_offer(offer_msg) {
             return Err(Error::InvalidMessage(
                 "connection offer DHT protocol mismatch".to_string(),
@@ -301,7 +329,61 @@ impl SwarmTransport {
         }
         let offer: String = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
         self.reconcile_incoming_offer_peer(peer).await?;
-        self.create_connection_answer(peer, callback, offer).await
+        let pending = self.open_pending_connection(peer, callback).await?;
+        Ok((pending, offer))
+    }
+
+    /// Answer the offer of remote connection, waiting on ICE gathering: the application
+    /// boundary.
+    pub async fn answer_remote_connection(
+        &self,
+        peer: Did,
+        callback: InnerSwarmCallback,
+        offer_msg: &ConnectNodeSend,
+    ) -> Result<ConnectNodeReport> {
+        let (pending, offer) = self.open_answer(peer, callback, offer_msg).await?;
+        self.create_answer(&pending, offer).await
+    }
+
+    /// Answer the offer `request` carries from the protocol context (#913 R9 M4): the slot is
+    /// reconciled and the answering generation opened now; the answer, which waits on ICE
+    /// gathering, is created and reported through the protocol egress on a detached task.
+    pub(crate) async fn answer_remote_connection_detached(
+        self: &Arc<Self>,
+        callback: InnerSwarmCallback,
+        request: &MessagePayload,
+        offer_msg: &ConnectNodeSend,
+    ) -> Result<()> {
+        let peer = request.transaction.origin();
+        let (pending, offer) = self.open_answer(peer, callback, offer_msg).await?;
+        let attempt = pending.attempt();
+        let (transport, request) = (Arc::clone(self), request.clone());
+        let negotiate: DetachedTask = Box::pin(async move {
+            let reported = match transport.create_answer(&pending, offer).await {
+                Ok(answer) => {
+                    transport
+                        .protocol_egress()
+                        .send_report_message(&request, Message::ConnectNodeReport(answer))
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = reported {
+                tracing::debug!(
+                    target: "rings_core::swarm::transport::handshake",
+                    peer = %attempt.peer,
+                    generation = attempt.generation,
+                    error = ?error,
+                    "detached connection answer did not leave"
+                );
+            }
+        });
+        if spawn_detached(negotiate).is_err() {
+            self.abandon_pending_connection(attempt, "scheduling connection answer")
+                .await;
+            return Err(Error::HandshakeRuntimeUnavailable);
+        }
+        Ok(())
     }
 
     /// Accept the answer of remote connection.

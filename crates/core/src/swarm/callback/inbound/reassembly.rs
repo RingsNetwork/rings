@@ -1,3 +1,5 @@
+use rings_transport::core::pool::ChannelLane;
+
 use super::finish_completion;
 use super::memory_reservation;
 use super::InboundEvent;
@@ -16,6 +18,7 @@ impl InboundProcessor {
         peer: Option<crate::dht::Did>,
         authentication: Authentication,
         chunk: crate::chunk::Chunk,
+        carrier: Option<ChannelLane>,
     ) -> ReassemblyOutcome {
         let now_ms = self.reassembly_clock.now_ms();
         let (outcome, expired) = self
@@ -26,6 +29,7 @@ impl InboundProcessor {
                 chunk,
                 now_ms,
                 matches!(authentication, Authentication::Authenticated),
+                carrier,
             );
         self.record_expired_reassembly_failures(peer, expired).await;
         outcome
@@ -99,6 +103,7 @@ pub(super) async fn process_chunk_event(
                 payload: reassembled.payload,
                 prepared_message: Some(reassembled.message),
                 lane: reassembled.lane,
+                carrier: event.carrier,
                 wire_bytes: event.wire_bytes,
                 permit: event.permit,
                 completion: event.completion,
@@ -118,7 +123,7 @@ async fn advance_chunk_event(
     let transaction_id = event.payload.transaction.tx_id;
     let chunk = take_prepared_chunk(&mut event.prepared_message)?;
     let outcome = processor
-        .handle_chunk(event.peer, event.authentication, chunk)
+        .handle_chunk(event.peer, event.authentication, chunk, event.carrier)
         .await;
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     if matches!(
@@ -163,6 +168,14 @@ async fn advance_chunk_event(
         return Err(Error::NestedChunkMessage);
     }
     let lane = InboundLane::from_kind(kind);
+    // Every chunk took credit on the lane they arrived on, which must be the lane of the
+    // message they carry (#913 R9 M3).
+    if !lane.admits_carrier(bytes.carrier()) {
+        processor
+            .record_receive_failure(event.peer, event.authentication)
+            .await;
+        return Err(Error::InboundLaneMismatch);
+    }
     // Chunk envelopes are transport framing. The verified original transaction is admitted here,
     // before it reserves or enters its logical lane, and therefore consumes one quota charge no
     // matter how many envelopes carried it.

@@ -18,7 +18,6 @@ use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
-use crate::message::PayloadSender;
 use crate::message::ProbeAcknowledgement;
 use crate::message::ProbeCompletion;
 use crate::message::ProbeOffer;

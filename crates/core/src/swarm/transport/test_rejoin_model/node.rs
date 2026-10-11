@@ -328,7 +328,7 @@ impl NodeState {
         }
     }
 
-    /// `reconcile_incoming_offer_peer` then `create_connection_answer`.
+    /// `reconcile_incoming_offer_peer` then `open_answer` and `create_answer`.
     ///
     /// ```text
     /// [admitted record?] ── sendable ──▶ refuse (AlreadyConnected)

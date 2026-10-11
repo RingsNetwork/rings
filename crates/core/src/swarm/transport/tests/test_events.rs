@@ -229,7 +229,7 @@ async fn test_malformed_outbound_payload_is_rejected_before_connection_admission
     payload.transaction.data = vec![0xff];
 
     assert!(matches!(
-        transport.send_payload(payload).await,
+        transport.application_egress().send_payload(payload).await,
         Err(Error::CodecDeserialize(_))
     ));
     Ok(())

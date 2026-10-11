@@ -19,7 +19,6 @@ use crate::error::Result;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
-use crate::message::PayloadSender;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
@@ -87,7 +86,6 @@ async fn hold_message_for_offline_peer(
 
     node1
         .swarm
-        .transport
         .send_message(Message::custom(HELD_MESSAGE)?, offline)
         .await?;
     let held = wait_for_storage_entry(node1, StorageKey::inbox_of(offline)).await?;

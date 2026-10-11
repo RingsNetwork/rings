@@ -3,6 +3,7 @@
 //! Most of the messages follow the Ping/Pong pattern, where there is a one-to-one correspondence between them,
 //! such as xxxSend and xxxReport messages.
 
+use rings_transport::core::pool::ChannelLane;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -513,6 +514,18 @@ pub enum MessageCategory {
 impl MessageCategory {
     /// Number of disjoint traffic categories used to size lane tables.
     pub(crate) const COUNT: usize = 4;
+
+    /// The connection lane a category travels on: one lane per category (#906), chosen by the
+    /// sender and enforced by the receiver (#913 R9 M3), so the priority lane carries DHT
+    /// control alone.
+    pub(crate) const fn channel_lane(self) -> ChannelLane {
+        match self {
+            Self::DhtControl => ChannelLane::PRIORITY,
+            Self::Storage => ChannelLane::new(1),
+            Self::E2e => ChannelLane::new(2),
+            Self::Application => ChannelLane::new(3),
+        }
+    }
 
     /// Stable local lane index shared by scheduling and quota tables.
     pub(crate) const fn index(self) -> usize {
