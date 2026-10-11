@@ -1,6 +1,4 @@
 use std::str::FromStr;
-#[cfg(feature = "dummy")]
-use std::sync::Arc;
 
 use bytes::Bytes;
 #[cfg(feature = "dummy")]
@@ -35,8 +33,6 @@ use crate::message::MessageHandler;
 #[cfg(feature = "dummy")]
 use crate::message::MessageVerificationExt;
 #[cfg(feature = "dummy")]
-use crate::swarm::callback::SwarmCallback;
-#[cfg(feature = "dummy")]
 use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
 #[cfg(feature = "dummy")]
 use crate::tests::default::has_connection_in_state;
@@ -52,12 +48,6 @@ use crate::tests::default::Node;
 #[cfg(feature = "dummy")]
 use crate::tests::fixed_secret_keys;
 use crate::tests::manually_establish_connection;
-
-#[cfg(feature = "dummy")]
-struct NoopCallback;
-
-#[cfg(feature = "dummy")]
-impl SwarmCallback for NoopCallback {}
 
 /// Deliver every queued controlled event, each to a live connection; see [`deliver_until`].
 #[cfg(feature = "dummy")]
@@ -159,7 +149,7 @@ async fn test_handle_dht_notify_remote_action_sends_predecessor_to_target() -> R
     // explicit handler action below.
     dummy_controlled::enable(false);
 
-    let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node1.swarm.transport.clone());
     handler
         .handle_dht_events(&PeerRingAction::RemoteAction(
             node2.did(),

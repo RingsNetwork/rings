@@ -1,13 +1,15 @@
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 
 use super::super::RecordingMeasure;
 use super::super::TestLatch;
+use super::claim_full_application_inbox;
 use super::local_wire;
-use super::noop_control_message;
 use super::spawn_inbound_delivery;
 use crate::chunk::ReassemblyLimits;
 use crate::delegation::DelegateeKey;
@@ -24,14 +26,12 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::Message;
-use crate::message::MessagePayload;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
-use crate::swarm::callback::DefaultCallback;
+use crate::swarm::application::ApplicationDelivery;
+use crate::swarm::application::ApplicationInbox;
 use crate::swarm::callback::InnerSwarmCallback;
-use crate::swarm::callback::SwarmCallback;
-use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::observer::NoopSwarmObserver;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportParts;
@@ -39,14 +39,27 @@ use crate::swarm::transport::SwarmTransportSettings;
 use crate::swarm::transport::SwarmWebrtcConfig;
 use crate::tests::live_entry;
 
+/// The witnesses of one storage batch interleaved with a waiting application delivery.
 #[derive(Default)]
 struct InterleaveProbe {
+    /// Persistence steps the storage batch has taken.
     put_calls: AtomicUsize,
+    /// Set once the first entry is persisted.
     first_persisted: TestLatch,
+    /// Released by the test to let the first persistence step return.
     release_first_persist: TestLatch,
-    control_waiting: TestLatch,
-    control_may_progress: TestLatch,
-    control_progressed: TestLatch,
+    /// The claimed, full application inbox: reading it at the end of the first step makes room
+    /// for the waiting application delivery.
+    inbox: OnceLock<ApplicationInbox>,
+}
+
+impl InterleaveProbe {
+    /// The application inbox; claimed before any frame is submitted.
+    fn inbox(&self) -> Result<&ApplicationInbox> {
+        self.inbox
+            .get()
+            .ok_or_else(|| Error::InvalidMessage("application inbox not claimed".to_string()))
+    }
 }
 
 struct InterleaveStorage {
@@ -62,16 +75,27 @@ impl KvStorageInterface<Entry> for InterleaveStorage {
 
     async fn put(&self, key: &str, value: &Entry) -> Result<()> {
         let call = self.probe.put_calls.fetch_add(1, Ordering::SeqCst);
-        if call == 1 && !self.probe.control_progressed.is_set() {
+        if call == 1
+            && !matches!(
+                self.probe.inbox()?.try_next(),
+                Some(ApplicationDelivery::Message(_))
+            )
+        {
             return Err(Error::InvalidMessage(
-                "second storage effect ran before queued control traffic".to_string(),
+                "second storage effect ran before the woken application delivery".to_string(),
             ));
         }
         self.inner.put(key, value).await?;
         if call == 0 {
             self.probe.first_persisted.set();
             self.probe.release_first_persist.wait().await;
-            self.probe.control_may_progress.set();
+            // Reading the filler makes room: the waiting application delivery is woken here,
+            // before this step returns and the batch yields.
+            if self.probe.inbox()?.try_next().is_none() {
+                return Err(Error::InvalidMessage(
+                    "the inbox filler is missing".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -93,30 +117,11 @@ impl KvStorageInterface<Entry> for InterleaveStorage {
     }
 }
 
-struct InterleaveCallback {
-    probe: Arc<InterleaveProbe>,
-}
-
-#[async_trait]
-impl SwarmCallback for InterleaveCallback {
-    async fn on_validate(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        if matches!(
-            payload.transaction.data::<Message>()?,
-            Message::FindSuccessorReport(_)
-        ) {
-            self.probe.control_waiting.set();
-            self.probe.control_may_progress.wait().await;
-            self.probe.control_progressed.set();
-        }
-        Ok(())
-    }
-}
-
+/// A storage batch yields between persistence steps, so work of another lane that became ready
+/// during one step runs before the next. The other lane's work is an application delivery
+/// waiting for inbox room, which the first step makes; the second step checks it was queued.
 #[tokio::test]
-async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps() -> Result<()> {
+async fn test_inbound_storage_batch_yields_between_persistence_steps() -> Result<()> {
     let probe = Arc::new(InterleaveProbe::default());
     let local_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
@@ -142,15 +147,19 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
             VirtualNodeConfig::disabled(),
             ReassemblyLimits::production(),
         ),
-        callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
         observer: Arc::new(NoopSwarmObserver),
     }));
-    let callback = Arc::new(InnerSwarmCallback::new(
-        Arc::clone(&transport),
-        Arc::new(InterleaveCallback {
-            probe: Arc::clone(&probe),
-        }),
-    ));
+    if probe
+        .inbox
+        .set(claim_full_application_inbox(&transport)?)
+        .is_err()
+    {
+        return Err(Error::InvalidMessage(
+            "application inbox claimed twice".to_string(),
+        ));
+    }
+    let mut tap = transport.inbound_tap_for_test().subscribe();
+    let callback = Arc::new(InnerSwarmCallback::new(Arc::clone(&transport)));
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
@@ -175,23 +184,30 @@ async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps(
     let storage_delivery = spawn_inbound_delivery(Arc::clone(&callback), cid.clone(), storage);
     probe.first_persisted.wait().await;
 
-    let control = local_wire(
-        noop_control_message(transport.dht.did),
+    let application = local_wire(
+        Message::custom(b"waits-for-inbox-room")?,
         &peer_session,
         transport.dht.did,
     )?;
-    let control_delivery = spawn_inbound_delivery(callback, cid, control);
-    probe.control_waiting.wait().await;
+    let application_delivery = spawn_inbound_delivery(callback, cid, application);
+    // The storage frame entered the logical stage first, then the application frame. The
+    // latter's handling has no suspension point before the inbox, so once it is observed it
+    // waits for room.
+    for _ in 0..2 {
+        tap.next()
+            .await
+            .ok_or_else(|| Error::InvalidMessage("inbound tap closed".to_string()))?;
+    }
+    assert!(!application_delivery.is_finished());
     probe.release_first_persist.set();
 
     storage_delivery
         .await
         .map_err(|_| Error::InvalidMessage("storage mailbox task panicked".to_string()))??;
-    control_delivery
+    application_delivery
         .await
-        .map_err(|_| Error::InvalidMessage("control mailbox task panicked".to_string()))??;
+        .map_err(|_| Error::InvalidMessage("application mailbox task panicked".to_string()))??;
 
     assert_eq!(probe.put_calls.load(Ordering::SeqCst), 2);
-    assert!(probe.control_progressed.is_set());
     Ok(())
 }

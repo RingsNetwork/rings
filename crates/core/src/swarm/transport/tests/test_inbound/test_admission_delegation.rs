@@ -8,11 +8,7 @@
 //!   `byte_burst − max(cost, DELEGATED_MIN_CHARGE)`;
 //! - message limit enforced: the buckets hold `burst − 1` and `byte_burst − cost`.
 
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-
-use async_trait::async_trait;
 
 use super::local_wire;
 use crate::chunk::Chunk;
@@ -37,7 +33,6 @@ use crate::message::DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST;
 use crate::message::DELEGATED_MIN_CHARGE;
 use crate::storage::MemStorage;
 use crate::swarm::callback::InnerSwarmCallback;
-use crate::swarm::callback::SwarmCallback;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
@@ -57,22 +52,6 @@ fn messages_charged() -> u128 {
     messages_skipped() - 1
 }
 
-/// A stand-in for the application registry: payloads under [`DELEGATED_PREFIX`] belong to a
-/// namespace that declared delegated admission, every other payload to one that did not.
-#[derive(Default)]
-struct DelegatingCallback {
-    /// How often core consulted the registry.
-    consulted: AtomicUsize,
-}
-
-#[async_trait]
-impl SwarmCallback for DelegatingCallback {
-    fn delegates_admission(&self, application_payload: &[u8]) -> bool {
-        self.consulted.fetch_add(1, Ordering::SeqCst);
-        application_payload.starts_with(DELEGATED_PREFIX)
-    }
-}
-
 /// One connected peer: its account, its session key, and the callback of its connection.
 struct Peer {
     /// Account DID, the connection's peer identity.
@@ -83,31 +62,25 @@ struct Peer {
     callback: InnerSwarmCallback,
 }
 
-/// A local swarm with the test application installed.
+/// A local swarm whose application delegated the admission of [`DELEGATED_PREFIX`]: payloads
+/// under it belong to a delegating namespace, every other payload to one that does not.
 struct Harness {
     /// The local swarm.
     swarm: Swarm,
     /// Its transport.
     transport: Arc<SwarmTransport>,
-    /// The test application registry.
-    app: Arc<DelegatingCallback>,
 }
 
 impl Harness {
     /// A fresh local swarm owned by `key`, under `quota`.
     fn new(key: &SecretKey, quota: OriginQuotaConfig) -> Result<Self> {
         let local = DelegateeKey::new_with_seckey(key)?;
-        let app = Arc::new(DelegatingCallback::default());
         let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
             .origin_quota(quota)
-            .callback(app.clone())
             .build();
+        swarm.set_admission_delegation(DELEGATED_PREFIX.to_vec(), true);
         let transport = Arc::clone(&swarm.transport);
-        Ok(Self {
-            swarm,
-            transport,
-            app,
-        })
+        Ok(Self { swarm, transport })
     }
 
     /// A fresh local swarm owned by `key`, under the default quota.
@@ -120,16 +93,16 @@ impl Harness {
         let did: Did = key.address().into();
         let session = DelegateeKey::new_with_seckey(key)?;
         let callback = if authenticated {
-            let offer = InnerSwarmCallback::new(Arc::clone(&self.transport), self.app.clone());
+            let offer = InnerSwarmCallback::new(Arc::clone(&self.transport));
             let (attempt, _offer) = self
                 .transport
                 .prepare_connection_offer_with_attempt(did, offer)
                 .await?;
             assert!(self.transport.activate_connection_for_test(attempt)?);
-            InnerSwarmCallback::new(Arc::clone(&self.transport), self.app.clone())
+            InnerSwarmCallback::new(Arc::clone(&self.transport))
                 .with_pending_connection_attempt(attempt)
         } else {
-            InnerSwarmCallback::new(Arc::clone(&self.transport), self.app.clone())
+            InnerSwarmCallback::new(Arc::clone(&self.transport))
         };
         Ok(Peer {
             did,
@@ -254,8 +227,6 @@ async fn test_relayed_origin_keeps_the_message_limit() -> Result<()> {
         harness.tokens(relayed.delegator_did()).await,
         Some((messages_charged(), bytes_after(cost)))
     );
-    // Ineligible traffic never reaches the application registry.
-    assert_eq!(harness.app.consulted.load(Ordering::SeqCst), 0);
     Ok(())
 }
 
@@ -297,7 +268,6 @@ async fn test_unauthenticated_peer_claiming_its_origin_keeps_the_message_limit()
         harness.tokens(stranger.did).await,
         Some((messages_charged(), bytes_after(cost)))
     );
-    assert_eq!(harness.app.consulted.load(Ordering::SeqCst), 0);
     Ok(())
 }
 

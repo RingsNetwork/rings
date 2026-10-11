@@ -1,10 +1,10 @@
-//! What the swarm reports about the managed targets, as three records written by the
-//! [`Backend`] and read by the probe, the dial and the supervisor.
+//! What the swarm reports about the managed targets, as two records written by the
+//! [`Backend`] and read by the dial and the supervisor. A probe's lookup report needs no record:
+//! the probe awaits the handle `Swarm::lookup_successor` returns.
 //!
 //! ```text
-//!   BackendObserver::lookup_report(tx, s) ─▶ reports: Rendezvous<Uuid, Did> ─▶ probe waiting for tx
-//!   BackendObserver::peer_admitted(p)     ─▶ admissions: Rendezvous<Did, ()> ─▶ dial waiting for p
-//!   BackendObserver::peer_retired(p)      ─▶ losses: PeerLosses            ─▶ supervisor drain + wake
+//!   BackendObserver::peer_admitted(p) ─▶ admissions: Rendezvous<Did, ()> ─▶ dial waiting for p
+//!   BackendObserver::peer_retired(p)  ─▶ losses: PeerLosses              ─▶ supervisor drain + wake
 //! ```
 //!
 //! "Retired" is the swarm's word for the fact; "loss" is the supervisor's word for what it means
@@ -36,11 +36,6 @@ use tokio::sync::Notify;
 use crate::error::Result;
 use crate::extension::BackendObserver;
 use crate::sync_lock::lock;
-
-/// Reports retained while no probe has registered for them, so a report that overtakes the
-/// return path of its own send is not lost. Older entries are evicted first; only reports of
-/// application lookups reach the record, so the buffer is not diluted by core maintenance.
-pub(super) const EARLY_REPORT_CAPACITY: usize = 32;
 
 /// Rendezvous between one waiter per key and the value observed for that key, in either order:
 ///
@@ -188,9 +183,6 @@ impl<K: Copy + Eq + Hash, V> Drop for Waiter<'_, K, V> {
     }
 }
 
-/// Successor lookup reports keyed by the transaction id of their request.
-pub(super) type LookupReportLedger = Rendezvous<uuid::Uuid, Did>;
-
 /// Admissions keyed by peer; a dial checks the transport directly after registering, so no
 /// early buffer is needed.
 pub(super) type Admissions = Rendezvous<Did, ()>;
@@ -223,22 +215,20 @@ impl PeerLosses {
     }
 }
 
-/// What the swarm reports about the managed targets: the successor lookup reports the probe
-/// waits for, the admissions the dial waits for, and the retirements the supervisor reacts to.
-/// Installed on the [`Backend`] as its [`BackendObserver`].
+/// What the swarm reports about the managed targets: the admissions the dial waits for and the
+/// retirements the supervisor reacts to. Installed on the [`Backend`] as its
+/// [`BackendObserver`].
 ///
 /// [`Backend`]: crate::extension::Backend
 pub(crate) struct ReachabilityEvidence {
-    reports: LookupReportLedger,
     admissions: Admissions,
     losses: PeerLosses,
 }
 
 impl Default for ReachabilityEvidence {
-    /// Empty records with the report buffer at [`EARLY_REPORT_CAPACITY`].
+    /// Empty records; admissions keep no early buffer.
     fn default() -> Self {
         Self {
-            reports: Rendezvous::new(EARLY_REPORT_CAPACITY),
             admissions: Rendezvous::new(0),
             losses: PeerLosses::default(),
         }
@@ -246,11 +236,6 @@ impl Default for ReachabilityEvidence {
 }
 
 impl ReachabilityEvidence {
-    /// The lookup-report rendezvous.
-    pub(crate) fn reports(&self) -> &LookupReportLedger {
-        &self.reports
-    }
-
     /// The admission rendezvous.
     pub(crate) fn admissions(&self) -> &Admissions {
         &self.admissions
@@ -263,13 +248,6 @@ impl ReachabilityEvidence {
 }
 
 impl BackendObserver for ReachabilityEvidence {
-    /// Hand the report to the ledger; a poisoned record is logged, never propagated.
-    fn lookup_report(&self, tx_id: uuid::Uuid, successor: Did) {
-        if let Err(error) = self.reports.observe(tx_id, successor) {
-            tracing::error!(%tx_id, %error, "bootstrap lookup record unavailable");
-        }
-    }
-
     /// Resolve a dial waiting for this admission; a poisoned record is logged, never propagated.
     fn peer_admitted(&self, peer: Did) {
         if let Err(error) = self.admissions.observe(peer, ()) {

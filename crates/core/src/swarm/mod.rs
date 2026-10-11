@@ -2,8 +2,9 @@
 
 //! This mod is the main entrance of swarm.
 
+pub mod application;
 mod builder;
-/// Callback interface for swarm
+/// The transport callback of a connection: its inbound pipeline and lifecycle handling.
 pub mod callback;
 mod detached;
 mod inbox;
@@ -43,7 +44,8 @@ use crate::message::MessageVerificationExt;
 use crate::message::OriginQuotaCounters;
 use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
-use crate::swarm::callback::SharedSwarmCallback;
+use crate::swarm::application::ApplicationInbox;
+use crate::swarm::application::SuccessorReport;
 use crate::swarm::inbox::SwarmInboxDelivery;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
@@ -51,15 +53,15 @@ use crate::swarm::observer::LookupOutcome;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
-/// How a successor lookup was decided: from the local topology, or routed under a
-/// transaction id whose report answers it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// How a successor lookup was decided: from the local topology, or routed, with the handle its
+/// report resolves.
+#[derive(Debug)]
 pub enum SuccessorLookup {
     /// The successor of the key as the local topology knows it.
     Local(Did),
-    /// The lookup was routed through the hop the local step chose; its report returns under
-    /// this transaction id.
-    Routed(uuid::Uuid),
+    /// The lookup was routed through the hop the local step chose; its report resolves this
+    /// handle.
+    Routed(SuccessorReport),
 }
 
 /// An opaque handle to one connection generation this node reserved by offering; accepted or
@@ -156,24 +158,45 @@ impl Swarm {
         self.dht.clone()
     }
 
-    fn callback(&self) -> Result<SharedSwarmCallback> {
-        self.transport.callback_slot().current()
+    fn inner_callback(&self) -> InnerSwarmCallback {
+        InnerSwarmCallback::new(self.transport.clone())
     }
 
-    fn inner_callback(&self) -> Result<InnerSwarmCallback> {
-        Ok(InnerSwarmCallback::new(
-            self.transport.clone(),
-            self.callback()?,
-        ))
+    /// Claim the application inbox: everything core hands the application, in order (#935).
+    ///
+    /// Claimed once; a second claim is refused as `ApplicationInboxClaimed`. Until it is
+    /// claimed, application data addressed to this node is discarded and peer facts are kept;
+    /// once it is dropped, everything is discarded. Core never waits on the reader except for
+    /// room on the application data lanes.
+    pub fn application_inbox(&self) -> Result<ApplicationInbox> {
+        self.transport.application().outlet.claim()
     }
 
-    /// Set callback for swarm.
-    pub fn set_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
-        self.transport.callback_slot().replace(callback)
+    /// Record whether application payloads starting with `namespace_prefix` delegate their
+    /// admission (see [`MessageLimit`](crate::message::MessageLimit)).
+    ///
+    /// The application registers its namespaces in advance and core matches the prefix on its
+    /// admission path, without calling the application. The match is exact when the
+    /// application's namespace encoding is prefix-free. Delegation is trusted local
+    /// configuration: a delegating namespace must enforce its own per-neighbour admission.
+    pub fn set_admission_delegation(&self, namespace_prefix: Vec<u8>, delegates: bool) {
+        self.transport
+            .application()
+            .delegations
+            .set(namespace_prefix, delegates);
+    }
+
+    /// Whether an application payload belongs to a namespace registered as delegating through
+    /// [`Swarm::set_admission_delegation`].
+    pub fn delegates_admission(&self, application_payload: &[u8]) -> bool {
+        self.transport
+            .application()
+            .delegations
+            .delegates(application_payload)
     }
 
     /// Create [Stabilizer] for swarm; its inbox-delivery intent is interpreted here, toward
-    /// whichever callback is set when it delivers.
+    /// the application inbox.
     pub fn stabilizer(&self) -> Stabilizer {
         Stabilizer::new(
             self.transport.clone(),
@@ -197,7 +220,7 @@ impl Swarm {
         if peer == self.did() {
             return Err(Error::ShouldNotConnectSelf);
         }
-        self.transport.connect(peer, self.inner_callback()?).await
+        self.transport.connect(peer, self.inner_callback()).await
     }
 
     /// Send [Message] to peer.
@@ -239,10 +262,11 @@ impl Swarm {
     }
 
     /// Whether `peer` is admitted as the application sees it: its connection record is active
-    /// and the admission was announced as `ConnectionStateChange { Connected }`. Ready or
+    /// and the admission was announced as
+    /// [`SwarmEvent::PeerAdmitted`](application::SwarmEvent::PeerAdmitted). Ready or
     /// recovering, its transport is the swarm's to heal or retire. Law:
-    /// `is_peer_admitted(p) ⟹` the record's retirement is delivered as
-    /// [`SwarmEvent::PeerRetired`](callback::SwarmEvent::PeerRetired). A record admitted but
+    /// `is_peer_admitted(p) ⟹` the record's retirement is announced as
+    /// [`SwarmEvent::PeerRetired`](application::SwarmEvent::PeerRetired). A record admitted but
     /// not yet announced is not counted, since its retirement would be silent.
     pub fn is_peer_admitted(&self, peer: Did) -> Result<bool> {
         Ok(self.transport.announced_attempt(peer)?.is_some())
@@ -267,10 +291,10 @@ impl Swarm {
     /// in the local successor interval `(n, head]`, and `Local(n)` when this node has no
     /// successor; otherwise the request `FindSuccessorSend { did: key, strict: false }` is sent
     /// to the hop that same step chose, never to `key` itself even when `key` is a direct peer
-    /// (`key` would answer with its own successor), and the answer returns as a
-    /// `FindSuccessorReport` under the returned transaction id, recognisable by
-    /// [`FindSuccessorReport::is_application_lookup`](crate::message::FindSuccessorReport::is_application_lookup).
-    /// The step and the hop come from one topology snapshot.
+    /// (`key` would answer with its own successor), and the answer, a `FindSuccessorReport`
+    /// under the request's transaction, resolves the returned [`SuccessorReport`]. The handle is
+    /// registered before the request is sent, so its report always finds it; dropping it
+    /// withdraws the lookup. The step and the hop come from one topology snapshot.
     pub async fn lookup_successor(&self, key: Did) -> Result<SuccessorLookup> {
         match self.dht.find_successor(key)? {
             PeerRingAction::Some(successor) => {
@@ -291,10 +315,14 @@ impl Swarm {
                     strict: false,
                     then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
                 });
-                self.transport
-                    .send_message_by_hop(request, key, next)
-                    .await
-                    .map(SuccessorLookup::Routed)
+                let payload = self.transport.originate(request, key, Some(next)).await?;
+                let report = self
+                    .transport
+                    .application()
+                    .lookups
+                    .register(payload.transaction.tx_id);
+                self.transport.send_payload(payload).await?;
+                Ok(SuccessorLookup::Routed(report))
             }
             action => Err(Error::PeerRingUnexpectedAction(Box::new(action))),
         }
@@ -355,7 +383,7 @@ impl Swarm {
     pub async fn offer_connection(&self, peer: Did) -> Result<(ConnectionAttempt, MessagePayload)> {
         let (attempt, offer_msg) = self
             .transport
-            .prepare_connection_offer_with_attempt(peer, self.inner_callback()?)
+            .prepare_connection_offer_with_attempt(peer, self.inner_callback())
             .await?;
 
         // This payload has fake next_hop.
@@ -395,7 +423,7 @@ impl Swarm {
         let peer = offer_payload.transaction.origin();
         let answer_msg = self
             .transport
-            .answer_remote_connection(peer, self.inner_callback()?, &msg)
+            .answer_remote_connection(peer, self.inner_callback(), &msg)
             .await?;
 
         // This payload has fake next_hop.

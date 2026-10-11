@@ -13,9 +13,9 @@
 //!    destructible handle that owns the Rust provider resources behind a raw C pointer. Callers
 //!    never receive raw `Arc` ownership tokens.
 //!
-//! 2. **Message Callback for FFI**: The `SwarmCallbackInstanceFFI` struct serves as a bridge
-//!    for message callback functionalities between Rust and other languages. It can hold
-//!    function pointers to C-compatible functions that handle custom and built-in messages.
+//! 2. **Application inbox for FFI**: `FfiBackend` consumes the swarm's application inbox on the
+//!    provider runtime, routing custom messages to the extension [`Backend`] and retaining E2E
+//!    messages for `rings_node_take_e2e_events`.
 //!
 //! 3. **Functions for Provider Interaction**: The `rings_node_*` C ABI functions create providers,
 //!    start listeners, configure logging, and make internal requests. The prefix prevents symbol
@@ -40,13 +40,13 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use async_trait::async_trait;
+use futures::FutureExt;
 use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopSource;
-use rings_core::message::Message;
-use rings_core::message::MessagePayload;
-use rings_core::message::MessageVerificationExt;
-use rings_core::swarm::callback::SwarmCallback;
+use rings_core::lifecycle::StopToken;
+use rings_core::swarm::application::ApplicationData;
+use rings_core::swarm::application::ApplicationDelivery;
+use rings_core::swarm::application::ApplicationInbox;
 use serde::Serialize;
 use tokio::runtime::Runtime;
 
@@ -95,19 +95,32 @@ impl FfiBackend {
     }
 }
 
-#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
-impl SwarmCallback for FfiBackend {
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), rings_core::error::CallbackError> {
-        let data: Message = payload.transaction.data()?;
-        let from = payload.transaction.signer().to_string();
+impl FfiBackend {
+    /// Consume `inbox` until `stop` is requested or the swarm is gone; a failed item is logged
+    /// and skipped.
+    async fn serve(self, inbox: ApplicationInbox, stop: StopToken) {
+        loop {
+            let delivery = futures::select_biased! {
+                () = stop.stopped().fuse() => return,
+                delivery = inbox.next().fuse() => delivery,
+            };
+            let Some(delivery) = delivery else {
+                return;
+            };
+            if let Err(error) = self.handle(delivery).await {
+                tracing::warn!(%error, "FFI application delivery failed");
+            }
+        }
+    }
 
-        match data {
-            Message::CustomMessage(_) => self.backend.on_inbound(payload).await?,
-            Message::E2eHandshakeRequest(request) => self.push_e2e_event(FfiE2eEvent {
+    /// Retain an E2E message as an FFI event; hand everything else to the extension backend.
+    async fn handle(&self, delivery: ApplicationDelivery) -> Result<()> {
+        let ApplicationDelivery::Message(message) = &delivery else {
+            return self.backend.handle(delivery).await;
+        };
+        let from = message.from.to_string();
+        let event = match &message.data {
+            ApplicationData::E2eHandshakeRequest(request) => FfiE2eEvent {
                 kind: "handshakeRequest",
                 from,
                 public_key: Some(public_key_json_string(request.requester_public_key)?),
@@ -115,8 +128,8 @@ impl SwarmCallback for FfiBackend {
                 sequence: None,
                 is_final: None,
                 ciphertext_blocks: None,
-            })?,
-            Message::E2eHandshakeResponse(response) => self.push_e2e_event(FfiE2eEvent {
+            },
+            ApplicationData::E2eHandshakeResponse(response) => FfiE2eEvent {
                 kind: "handshakeResponse",
                 from,
                 public_key: Some(public_key_json_string(response.responder_public_key)?),
@@ -124,8 +137,8 @@ impl SwarmCallback for FfiBackend {
                 sequence: None,
                 is_final: None,
                 ciphertext_blocks: None,
-            })?,
-            Message::E2eStreamFrame(frame) => self.push_e2e_event(FfiE2eEvent {
+            },
+            ApplicationData::E2eStreamFrame(frame) => FfiE2eEvent {
                 kind: "streamFrame",
                 from,
                 public_key: Some(public_key_json_string(frame.sender_public_key)?),
@@ -133,11 +146,10 @@ impl SwarmCallback for FfiBackend {
                 sequence: Some(frame.sequence),
                 is_final: Some(frame.is_final),
                 ciphertext_blocks: Some(frame.ciphertext.len()),
-            })?,
-            _ => {}
-        }
-
-        Ok(())
+            },
+            _ => return self.backend.handle(delivery).await,
+        };
+        self.push_e2e_event(event)
     }
 }
 
@@ -191,6 +203,16 @@ impl ProviderHandle {
         Ok(())
     }
 
+    /// Serve the swarm's application inbox with `backend` on the provider runtime until the
+    /// handle stops.
+    fn spawn_application(&self, backend: Backend) -> Result<()> {
+        let inbox = self.provider.application_inbox()?;
+        let application = FfiBackend::new(backend, self.e2e_events.clone());
+        self.runtime
+            .spawn(application.serve(inbox, self.stop.token()));
+        Ok(())
+    }
+
     fn take_e2e_events(&self) -> Result<Vec<FfiE2eEvent>> {
         let mut events = self.e2e_events.lock().map_err(|_| Error::Lock)?;
         Ok(std::mem::take(&mut *events))
@@ -215,9 +237,6 @@ impl ProviderHandle {
             }
         }
         flush_provider_before_runtime_shutdown(&provider, &runtime);
-        if let Err(error) = provider.clear_swarm_callback_internal() {
-            tracing::warn!("failed to clear FFI provider callback during shutdown: {error}");
-        }
         drop(provider);
         // Invariant: joined listeners, the completed flush thread, and the dropped provider have
         // released every intentional runtime clone. If an unexpected in-flight owner remains,
@@ -441,12 +460,9 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
         let provider = Arc::new(provider);
         let backend = Backend::new(provider.clone());
         let e2e_events = Arc::new(Mutex::new(Vec::new()));
-        let callback = FfiBackend::new(backend, e2e_events.clone());
-
-        provider.set_swarm_callback_internal(Arc::new(callback))?;
-        Ok(Box::into_raw(Box::new(ProviderHandle::new(
-            provider, runtime, e2e_events,
-        ))))
+        let handle = ProviderHandle::new(provider, runtime, e2e_events);
+        handle.spawn_application(backend)?;
+        Ok(Box::into_raw(Box::new(handle)))
     })() {
         Ok(provider_ptr) => provider_ptr,
         Err(error) => {
@@ -470,6 +486,7 @@ mod tests {
     use std::ffi::CStr;
     use std::ffi::CString;
 
+    use async_trait::async_trait;
     use rings_core::delegation::DelegateeKey;
     use rings_core::dht::Did;
     use rings_core::ecc::signers::eip191;

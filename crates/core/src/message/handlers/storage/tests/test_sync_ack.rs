@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use super::test_support::next_payload_for_tx;
 use super::test_support::non_affine_placement;
 use super::test_support::storage_sync_report_payload;
-use super::test_support::NoopCallback;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -30,7 +27,7 @@ use crate::tests::manually_establish_connection;
 #[tokio::test]
 async fn test_sync_entries_report_handler_deletes_only_acked_keys() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let acked_key = Did::from(100u32);
     let pending_key = Did::from(120u32);
     let acked_entry = live_entry(Did::from(10u32), vec![], EntryKind::Data);
@@ -90,7 +87,7 @@ async fn test_sync_entries_report_handler_deletes_only_acked_keys() -> Result<()
 #[tokio::test]
 async fn test_sync_entries_report_handler_rejects_untracked_acks() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let acked_key = Did::from(100u32);
     let acked_entry = live_entry(Did::from(10u32), vec![], EntryKind::Data);
     let acked_storage_entry = acked_entry.clone().try_into_storage_entry()?;
@@ -146,7 +143,7 @@ async fn test_sync_entries_report_handler_forwards_before_pending_capability_che
     wait_for_msgs([&sender, &relay]).await;
     assert_no_more_msg([&sender, &relay]).await;
 
-    let handler = MessageHandler::new(relay.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(relay.swarm.transport.clone());
     let sync_msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
@@ -290,7 +287,7 @@ async fn test_local_storage_sync_validates_entire_batch_before_persisting() -> R
 async fn test_sync_entries_report_handler_rejects_wrong_physical_receiver() -> Result<()> {
     let sender = prepare_node(SecretKey::random()).await;
     let receiver = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(sender.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(sender.swarm.transport.clone());
     let acked_key = Did::from(100u32);
     let acked_entry = live_entry(Did::from(10u32), vec![], EntryKind::Data);
     let acked_storage_entry = acked_entry.clone().try_into_storage_entry()?;
@@ -350,7 +347,7 @@ async fn test_sync_entries_report_handler_rejects_unproven_placement_receiver() 
     let sender = prepare_node(SecretKey::random()).await;
     let route_next_hop = prepare_node(SecretKey::random()).await;
     let final_receiver = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(sender.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(sender.swarm.transport.clone());
     let placement_key = Did::from(100u32);
     let acked_entry = live_entry(Did::from(10u32), vec![], EntryKind::Data);
     let acked_storage_entry = acked_entry.clone().try_into_storage_entry()?;

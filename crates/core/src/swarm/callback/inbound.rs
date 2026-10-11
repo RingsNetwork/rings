@@ -44,8 +44,6 @@ use crate::utils::Instant;
 
 mod barrier;
 mod capacity;
-mod deadline;
-mod failure;
 mod lane;
 mod reassembly;
 mod reassembly_clock;
@@ -57,10 +55,6 @@ use self::barrier::ReassemblyHandoffBarrier;
 use self::capacity::memory_reservation;
 pub(crate) use self::capacity::InboundCapacity;
 use self::capacity::InboundCapacityPermit;
-use self::deadline::await_inbound_deadline;
-use self::deadline::InboundDeadline;
-use self::failure::inbound_failure_error;
-use self::failure::InboundFailure;
 pub(crate) use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
@@ -100,24 +94,11 @@ const INBOUND_PEER_CAPACITY: usize = 32;
 const INBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 /// Bounds command work before completed lane tasks are observed.
 const INBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
-/// Maximum time an application-owned inbound callback may retain one lane and
-/// its capacity permit. The deadline cancels the future; callback
-/// implementations must therefore be cancellation-safe at every suspension.
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-const INBOUND_CALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
-#[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
-const INBOUND_CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InboundValidation {
-    Dispatch,
-    AcknowledgeDrop,
-}
-
-type InboundReply = oneshot::Sender<std::result::Result<(), InboundFailure>>;
+type InboundReply = oneshot::Sender<Result<()>>;
 
 enum InboundCompletion {
     Await(InboundReply),
@@ -214,7 +195,7 @@ impl InboundMailbox {
             .await?;
         match completion.await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(inbound_failure_error(error)),
+            Ok(Err(error)) => Err(error),
             Err(_) => Err(Error::InboundMailboxClosed),
         }
     }
@@ -744,9 +725,16 @@ async fn process_event(
     }
     let lane = event.lane();
     let sequence = event.sequence;
-    match validate_event(&processor, &event).await {
-        Ok(InboundValidation::Dispatch) => {}
-        Ok(InboundValidation::AcknowledgeDrop) => {
+    match processor.pending_connection_admits(event.peer).await {
+        Ok(true) => {
+            #[cfg(test)]
+            processor
+                .logical
+                .transport
+                .inbound_tap_for_test()
+                .observe(&event.payload);
+        }
+        Ok(false) => {
             finish_completion(event.completion, Ok(()));
             return InboundTaskCompletion {
                 lane,
@@ -774,13 +762,8 @@ async fn process_event(
         };
     }
 
-    let result = process_logical_message(
-        &processor.logical,
-        event.peer,
-        &event.payload,
-        event.prepared_message,
-    )
-    .await;
+    let result =
+        process_logical_message(&processor.logical, &event.payload, event.prepared_message).await;
     finish_completion(event.completion, result);
     InboundTaskCompletion {
         lane,
@@ -789,104 +772,70 @@ async fn process_event(
     }
 }
 
-/// Offer `payload` to the application's `on_validate` under the inbound deadline.
-async fn validate_payload(
-    pipeline: &LogicalInbound,
-    peer: Option<Did>,
-    payload: &MessagePayload,
-) -> std::result::Result<(), InboundFailure> {
-    match await_inbound_deadline(
-        pipeline.callback.on_validate(payload),
-        INBOUND_CALLBACK_TIMEOUT,
-    )
-    .await
-    {
-        InboundDeadline::Completed(result) => result.map_err(InboundFailure::Validation),
-        InboundDeadline::TimedOut => Err(InboundFailure::ValidationTimeout { peer }),
-        InboundDeadline::TimerUnavailable => Err(InboundFailure::TimerUnavailable {
-            peer,
-            operation: "validation",
-        }),
-    }
-}
-
-/// Deliver a locally sourced payload: validation, dispatch, and `on_inbound`, exactly as for a
-/// verified frame from a connection, but with no connection to gate on.
+/// Deliver a locally sourced payload: dispatch, then the application inbox, exactly as for a
+/// verified frame from a connection, but with no connection to gate on and never waiting.
+///
+/// Room for application data is reserved before the transaction is admitted, so a payload this
+/// pass cannot hand over is left unadmitted for a later pass instead of being admitted, handled
+/// and lost to the replay window.
 pub(super) async fn deliver_local(
     pipeline: &LogicalInbound,
     payload: &MessagePayload,
-) -> Result<()> {
+) -> Result<LocalDelivered> {
     let message = payload.transaction.data::<crate::message::Message>()?;
     let lane = InboundLane::from_kind(crate::message::MessageKind::from_message(&message));
+    let application = pipeline.application_message(payload, message.clone());
+    let room = match &application {
+        Some(application) => match pipeline.reserve_room(application) {
+            Some(room) => Some(room),
+            None => return Ok(LocalDelivered::Deferred),
+        },
+        None => None,
+    };
+    #[cfg(test)]
+    pipeline.transport.inbound_tap_for_test().observe(payload);
     // A local payload crossed no connection, so no neighbour can have its admission delegated.
     pipeline
         .admit_final_transaction(payload, &message, lane, EdgeRelation::Remote)
         .await?;
-    validate_payload(pipeline, None, payload)
-        .await
-        .map_err(inbound_failure_error)?;
-    process_logical_message(pipeline, None, payload, Some(message))
-        .await
-        .map_err(inbound_failure_error)
-}
-
-async fn validate_event(
-    processor: &InboundProcessor,
-    event: &InboundEvent,
-) -> std::result::Result<InboundValidation, InboundFailure> {
-    if !processor
-        .pending_connection_admits(event.peer)
-        .await
-        .map_err(InboundFailure::Core)?
-    {
-        return Ok(InboundValidation::AcknowledgeDrop);
+    pipeline.handle_payload(payload, Some(message)).await?;
+    if let (Some(room), Some(application)) = (room, application) {
+        room.fill(application);
     }
-    validate_payload(&processor.logical, event.peer, &event.payload).await?;
-    let still_admitted = processor
-        .pending_connection_admits(event.peer)
-        .await
-        .map_err(InboundFailure::Core)?;
-    Ok(if still_admitted {
-        InboundValidation::Dispatch
-    } else {
-        InboundValidation::AcknowledgeDrop
-    })
+    Ok(LocalDelivered::Delivered)
 }
 
+/// What [`deliver_local`] did with a payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalDelivered {
+    /// Admitted, handled, and its application data, if any, queued.
+    Delivered,
+    /// The application inbox had no room: nothing was admitted or handled.
+    Deferred,
+}
+
+/// Dispatch `payload`, then queue its application data, if any, for the application, waiting
+/// only for inbox room. Only the `Application` and `E2e` lanes carry application data, so only
+/// they can wait here.
 async fn process_logical_message(
     pipeline: &LogicalInbound,
-    peer: Option<Did>,
     payload: &MessagePayload,
     prepared_message: Option<crate::message::Message>,
-) -> std::result::Result<(), InboundFailure> {
-    pipeline
-        .handle_payload(payload, prepared_message)
-        .await
-        .map_err(InboundFailure::Core)?;
-    if !pipeline.is_local_destination(payload) {
-        return Ok(());
+) -> Result<()> {
+    let message = pipeline.handle_payload(payload, prepared_message).await?;
+    if let Some(application) = pipeline.application_message(payload, message) {
+        pipeline.deliver(application).await;
     }
-    match await_inbound_deadline(pipeline.on_inbound(payload), INBOUND_CALLBACK_TIMEOUT).await {
-        InboundDeadline::Completed(result) => result.map_err(InboundFailure::Callback),
-        InboundDeadline::TimedOut => Err(InboundFailure::ProcessingTimeout { peer }),
-        InboundDeadline::TimerUnavailable => Err(InboundFailure::TimerUnavailable {
-            peer,
-            operation: "processing",
-        }),
-    }
+    Ok(())
 }
 
-fn finish_completion(
-    completion: InboundCompletion,
-    result: std::result::Result<(), InboundFailure>,
-) {
+fn finish_completion(completion: InboundCompletion, result: Result<()>) {
     match completion {
         InboundCompletion::Await(reply) => {
             let _ = reply.send(result);
         }
         InboundCompletion::LogHeld { peer } => {
-            if let Err(failure) = result {
-                let error = inbound_failure_error(failure);
+            if let Err(error) = result {
                 tracing::warn!(
                     peer = %peer,
                     error = ?error,

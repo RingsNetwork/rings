@@ -25,6 +25,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
+use crate::swarm::application::SwarmEvent;
 use crate::utils::sleep;
 
 /// Maximum wait for the data channel to open after the peer connection is usable.
@@ -563,26 +564,26 @@ impl SwarmTransport {
         connection.readiness().can_make_progress()
     }
 
-    /// Retire `attempt` if `action` decides to, announcing the retirement in the peer's ordered
-    /// delivery. The delivery turn is taken before the record is retired, so a later admission
-    /// of the same peer cannot announce ahead of this retirement.
-    async fn retire_announced_if<T>(
+    /// Retire `attempt` if `action` decides to, announcing [`SwarmEvent::PeerRetired`] iff the
+    /// admission it ends was announced, in the same step as the decision, so a later admission
+    /// of the same peer cannot be announced ahead of this retirement.
+    fn retire_announced_if<T>(
         &self,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
     ) -> Result<RetirementOutcome<T>> {
-        self.with_delivery_turn(attempt.peer, |turn| async move {
+        self.decide_and_announce(|| {
             Ok(match self.retire_active_connection_if(attempt, action)? {
-                RetirementOutcome::Superseded => RetirementOutcome::Superseded,
-                RetirementOutcome::Declined => RetirementOutcome::Declined,
-                RetirementOutcome::Retired((value, retirement)) => {
-                    self.announce_retirement(turn, attempt.peer, retirement)
-                        .await;
-                    RetirementOutcome::Retired(value)
-                }
+                RetirementOutcome::Superseded => (RetirementOutcome::Superseded, None),
+                RetirementOutcome::Declined => (RetirementOutcome::Declined, None),
+                RetirementOutcome::Retired((value, retirement)) => (
+                    RetirementOutcome::Retired(value),
+                    retirement
+                        .announced_admission()
+                        .then_some(SwarmEvent::PeerRetired { peer: attempt.peer }),
+                ),
             })
         })
-        .await
     }
 
     async fn disconnect_with_removal(
@@ -605,8 +606,7 @@ impl SwarmTransport {
                     let removal = self.dht.remove_unavailable(attempt.peer, replacements)?;
                     Ok(Some(PeerRemovalOutcome { fallback, removal }))
                 }
-            })
-            .await?
+            })?
             .retired()
         else {
             return Ok(None);
@@ -638,18 +638,16 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
     ) -> Result<RetirementOutcome<()>> {
         let connection = self.get_raw_connection(attempt.peer);
-        let outcome = self
-            .retire_announced_if(attempt, |_| {
-                if self
-                    .dht
-                    .with_topology_state(|topology| topology.references(attempt.peer))?
-                {
-                    return Ok(None);
-                }
-                self.dht.remove(attempt.peer)?;
-                Ok(Some(()))
-            })
-            .await?;
+        let outcome = self.retire_announced_if(attempt, |_| {
+            if self
+                .dht
+                .with_topology_state(|topology| topology.references(attempt.peer))?
+            {
+                return Ok(None);
+            }
+            self.dht.remove(attempt.peer)?;
+            Ok(Some(()))
+        })?;
         if let (true, Some(connection)) = (outcome.is_retired(), connection) {
             if let Err(error) = self.close_connection_for_disconnect(&connection).await {
                 tracing::warn!(

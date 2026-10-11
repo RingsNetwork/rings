@@ -28,14 +28,9 @@ use crate::message::MessageSigner;
 use crate::message::PayloadSender;
 use crate::message::Transaction;
 use crate::storage::MemStorage;
-use crate::swarm::callback::SwarmCallback;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
-
-pub(super) struct NoopCallback;
-
-impl SwarmCallback for NoopCallback {}
 
 fn payload_observation_error(label: &str, observed: &[MessagePayload]) -> Error {
     let observed = observed

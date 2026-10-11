@@ -109,12 +109,6 @@ impl FindSuccessorSend {
 }
 
 impl FindSuccessorReport {
-    /// Whether this report answers a lookup that requested no core action, i.e. one issued by
-    /// the application rather than by finger maintenance or connection setup.
-    pub fn is_application_lookup(&self) -> bool {
-        matches!(self.handler, FindSuccessorReportHandler::None)
-    }
-
     /// Returns whether the reported successor is remote from `local`.
     pub(crate) fn reports_remote_successor(&self, local: Did) -> bool {
         self.did != local
@@ -313,7 +307,7 @@ impl SyncEntriesWithSuccessorReport {
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct CustomMessage(pub Vec<u8>);
 
 /// MessageType enum Report contain FindSuccessorSend.
@@ -341,8 +335,6 @@ pub enum FindSuccessorReportHandler {
         /// ownership before the reported successor can update or defer a slot.
         request: crate::dht::FingerFixRequest,
     },
-    /// - CustomCallback: custom callback handle by `custom_message` method.
-    CustomCallback(u8),
 }
 
 macro_rules! with_message_variants {

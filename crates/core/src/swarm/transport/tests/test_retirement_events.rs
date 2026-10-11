@@ -1,17 +1,21 @@
-//! The retirement law: for every retired connection generation, `Connected` started ⟺
-//! `PeerRetired` started, and a topology prune that keeps the record delivers nothing.
+//! The retirement law: for every retired connection generation, `PeerAdmitted` announced ⟺
+//! `PeerRetired` announced, and a topology prune that keeps the record announces nothing.
+//!
+//! The inbox withdraws an unread `PeerAdmitted p` together with its `PeerRetired p`, so a test
+//! that observes both reads the admission before the retirement is decided.
 
 use std::sync::Arc;
 
 use super::pending::RetirementOutcome;
 use super::*;
 use crate::dht::topology::TopologyRemoval;
+#[cfg(feature = "dummy")]
+use crate::swarm::application::SwarmEvent;
 
-/// A transport whose application callback is a fresh event log.
-fn transport_with_log() -> Result<(SwarmTransport, Arc<EventLog>)> {
+/// A transport whose application inbox is claimed by a fresh recorder.
+fn transport_with_log() -> Result<(SwarmTransport, ApplicationRecorder)> {
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
-    let log = Arc::new(EventLog::default());
-    transport.callback_slot().replace(log.clone())?;
+    let log = ApplicationRecorder::attach(&transport)?;
     Ok((transport, log))
 }
 
@@ -151,43 +155,32 @@ async fn test_eviction_of_an_unreferenced_peer_is_reported_retired() -> Result<(
     Ok(())
 }
 
-/// Through the production admission and terminal paths, the application observes
-/// `Connected`, then `PeerRetired`, then the terminal state: the retirement is decided and
-/// announced before the physical terminal event is reported. The dummy transport reports
-/// `Connecting` while its data channel opens, before the admission.
+/// Through the production admission and terminal paths, the application reads
+/// `PeerAdmitted`, then `PeerRetired`: the physical terminal state itself is never announced.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn test_retirement_is_reported_between_admission_and_terminal_state() -> Result<()> {
+async fn test_retirement_is_announced_after_the_read_admission() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let peer = SecretKey::random().address().into();
-    let log = Arc::new(EventLog::default());
-    transport.callback_slot().replace(log.clone())?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), log.clone());
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, callback)
-        .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), log.clone())
-        .with_pending_connection_attempt(attempt);
-    callback
-        .on_data_channel_open(&peer.to_string())
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert!(transport.is_active_connection_attempt(attempt));
+    let log = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
+    let peer = pending.peer;
+    pending.admit(&transport).await?;
+    let attempt = transport
+        .active_attempt(peer)?
+        .ok_or(Error::SwarmMissTransport(peer))?;
+    assert_eq!(log.events(), vec![SwarmEvent::PeerAdmitted { peer }]);
 
-    callback
+    pending
+        .callback
         .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Failed)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert!(!transport.is_active_connection_attempt(attempt));
-    let state = |state| SwarmEvent::ConnectionStateChange { peer, state };
     assert_eq!(log.events(), vec![
-        state(WebrtcConnectionState::Connecting),
-        state(WebrtcConnectionState::Connected),
+        SwarmEvent::PeerAdmitted { peer },
         SwarmEvent::PeerRetired { peer },
-        state(WebrtcConnectionState::Failed),
     ]);
     Ok(())
 }

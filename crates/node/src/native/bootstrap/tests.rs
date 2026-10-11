@@ -19,7 +19,6 @@ use tokio::time::Instant;
 
 use super::evidence::ReachabilityEvidence;
 use super::evidence::Rendezvous;
-use super::evidence::EARLY_REPORT_CAPACITY;
 use super::schedule::duration_ms;
 use super::schedule::is_one_slow_delay_after;
 use super::BootstrapPort;
@@ -506,7 +505,7 @@ fn targets_validate_as_a_seed_set_and_skip_self() {
 /// dropped waiter forgets its own registration.
 #[tokio::test]
 async fn rendezvous_resolves_in_either_order_replaces_and_forgets() {
-    let rendezvous: Rendezvous<u8, Did> = Rendezvous::new(EARLY_REPORT_CAPACITY);
+    let rendezvous: Rendezvous<u8, Did> = Rendezvous::new(1);
 
     rendezvous.observe(1, Did::from(1)).unwrap();
     let waiter = rendezvous.wait_for(1).unwrap();

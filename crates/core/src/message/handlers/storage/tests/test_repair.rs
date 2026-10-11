@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use bytes::Bytes;
 
 use super::super::ChordStorageInterface;
@@ -11,7 +9,6 @@ use super::test_support::next_payload_matching;
 use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::split_redundant_entry;
-use super::test_support::NoopCallback;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryDot;
@@ -83,7 +80,7 @@ async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
         .storage
         .put(&placement_keys[0].to_string(), &entry)
         .await?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
 
     handler.leave_dht(departed).await?;
 
@@ -117,7 +114,7 @@ async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
 async fn test_leave_dht_attempt_requests_repair_only_for_a_referenced_peer() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let transport = node.swarm.transport.clone();
-    let handler = MessageHandler::new(transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(transport.clone());
 
     let unreferenced = SecretKey::random().address().into();
     let attempt = transport
@@ -172,7 +169,7 @@ async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
         node1.did(),
         node1.did(),
     )?;
-    let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node1.swarm.transport.clone());
     node1.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
     handler
@@ -215,7 +212,7 @@ async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
 #[tokio::test]
 async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let topic = "reject misplaced remote storage operation".to_string();
     let entry: Entry = crate::tests::live((topic.clone(), topic).try_into()?);
     let invalid_placement = non_affine_placement(entry.did, 2)?;
@@ -354,7 +351,7 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
 #[tokio::test]
 async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let entry = live_entry(
         Did::from(10u32),
         vec![Bytes::from("repair")],
@@ -418,7 +415,7 @@ async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
 #[tokio::test]
 async fn test_found_empty_reply_repairs_misses_from_a_held_carrier_past_its_bound() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let now_ms = get_epoch_ms();
     let resource = Did::from(10u32);
     let mut carrier = Entry::new(resource, vec![], EntryKind::Data);
@@ -468,7 +465,7 @@ async fn test_found_empty_reply_repairs_misses_from_a_held_carrier_past_its_boun
 #[tokio::test]
 async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let resource = Did::from(10u32);
     let first = live_entry(resource, vec![Bytes::from("first")], EntryKind::Data);
     let second = live_entry(resource, vec![Bytes::from("second")], EntryKind::Data);
@@ -506,7 +503,7 @@ async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
 #[tokio::test]
 async fn test_found_entry_rejects_redundancy_outside_local_protocol_mode() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let resource = Did::from(10u32);
     let entry = live_entry(
         resource,
@@ -551,7 +548,7 @@ async fn test_found_entry_rejects_redundancy_outside_local_protocol_mode() -> Re
 #[tokio::test]
 async fn test_found_entry_rejects_response_without_active_lookup() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let resource = Did::from(10u32);
     let entry = live_entry(resource, vec![Bytes::from("unsolicited")], EntryKind::Data);
     let context_key = SecretKey::random();
@@ -588,7 +585,7 @@ async fn test_found_entry_rejects_response_without_active_lookup() -> Result<()>
 #[tokio::test]
 async fn test_found_entry_rejects_resource_mismatch_without_cache_write() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let resource = Did::from(10u32);
     let entry = live_entry(
         Did::from(11u32),
@@ -673,7 +670,7 @@ async fn test_storage_fetch_starts_fresh_observation_round() -> Result<()> {
 #[tokio::test]
 async fn test_storage_fetch_answers_are_stamped_after_every_earlier_mark() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let redundancy = node.swarm.storage_redundancy();
     let entry = live_entry(
         Did::from(10u32),
@@ -745,7 +742,7 @@ async fn test_storage_fetch_answers_are_stamped_after_every_earlier_mark() -> Re
 #[tokio::test]
 async fn test_a_reply_past_its_bound_is_no_answer_and_a_later_live_placement_is() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let redundancy = node.swarm.storage_redundancy();
     let now_ms = get_epoch_ms();
     let live = live_entry(
@@ -790,7 +787,7 @@ async fn test_a_reply_past_its_bound_is_no_answer_and_a_later_live_placement_is(
 #[tokio::test]
 async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let entry = live_entry(
         Did::from(10u32),
         vec![Bytes::from("fresh")],

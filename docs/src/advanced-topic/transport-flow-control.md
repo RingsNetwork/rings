@@ -102,8 +102,9 @@ lane.
   `DETACHED_FIRST_FRAME_TIMEOUT` (25 seconds), and a payload that waits longer is dropped, as
   a best-effort relay may drop; the origin's own tracked send or retry covers it. A send
   through the Swarm API, the application boundary, waits for its first frame's admission, so
-  its caller learns whether it left; an application callback that sends from inside
-  `on_inbound` waits so too, and holds its lane while it does.
+  its caller learns whether it left. No application code runs on a lane: the application
+  reads its data and peer facts from a bounded inbox at its own pace (#935), and a full inbox
+  holds only the application data lanes (`Application`, `E2e`).
 
 Every such wait is logged at `warn`, with the peer and lane: a sender waiting for credit, and an
 arrival waiting for the mailbox.

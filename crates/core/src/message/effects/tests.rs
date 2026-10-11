@@ -19,25 +19,12 @@ use crate::ecc::SecretKey;
 use crate::message::types::QueryFor;
 use crate::message::MessageSigner;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::swarm::callback::SwarmCallback;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::default::prepare_node;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::default::wait_for_connection_state;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::manually_establish_connection;
 use crate::tests::TEST_NETWORK_ID;
-
-/// Callback fixture for tests that exercise only interpreter-owned transport effects.
-///
-/// It intentionally implements no event behavior, ensuring assertions
-/// observe request registration, delivery, and cancellation rather than a
-/// callback-generated DHT transition.
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-struct NoopCallback;
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-impl SwarmCallback for NoopCallback {}
 
 fn did() -> Did {
     SecretKey::random().address().into()
@@ -348,8 +335,7 @@ async fn test_successor_query_effect_registers_before_send_and_cancels_send_fail
     .await?;
     first.dht().admit_connected(second.did(), None)?;
 
-    let callback: SharedSwarmCallback = Arc::new(NoopCallback);
-    let interpreter = CoreEffectInterpreter::new(&first.swarm.transport, &callback);
+    let interpreter = CoreEffectInterpreter::new(&first.swarm.transport);
     let sent = QueryForTopoInfoSend::new_for_sync(second.did());
     // Keep the id before the query is moved into the effect; the assertion
     // below proves the interpreter registered this exact request.

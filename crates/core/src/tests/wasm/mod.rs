@@ -7,7 +7,6 @@ use crate::ecc::SecretKey;
 use crate::storage::idb::IdbStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
-use crate::tests::activity::ActivityCallback;
 use crate::tests::activity::ActivityObserver;
 
 mod test_ice_servers;
@@ -28,7 +27,7 @@ enum TestStorageMode {
     Repair,
 }
 
-/// Build a browser test swarm whose observer and callback record activity,
+/// Build a browser test swarm whose observer and inbound tap record activity,
 /// so tests can probe its state on activity instead of on a timer.
 async fn prepare_node_with_storage_mode(key: SecretKey, mode: TestStorageMode) -> Arc<Swarm> {
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
@@ -45,7 +44,6 @@ async fn prepare_node_with_storage_mode(key: SecretKey, mode: TestStorageMode) -
         TestStorageMode::Repair => builder.dht_storage_redundancy(2).dht_virtual_nodes(0),
     };
     let swarm = Arc::new(builder.build());
-    swarm.set_callback(Arc::new(ActivityCallback)).unwrap();
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());

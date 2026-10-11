@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Core never calls, awaits or consults application code (#935). Since 2022 core awaited
+  application hooks inside its own processing (`custom_message`/`builtin_message`, then
+  `SwarmCallback::on_validate`/`on_inbound`/`on_event` under a 30 s per-payload deadline on every
+  lane, lane 0 included), and since #924's lossless credit an application stall held the sender's
+  credit, coupling nodes through the application. Breaking changes:
+  - `SwarmCallback`, `SharedSwarmCallback`, `Swarm::set_callback` and `SwarmBuilder::callback`
+    are removed, with the application validation veto, the inbound callback deadline and its
+    errors (`InboundValidationFailed`, `InboundValidationTimeout`, `InboundCallbackFailed`,
+    `InboundProcessingTimeout`, `InboundTimerUnavailable`).
+  - New `swarm::application`: `Swarm::application_inbox()` claims, once, a bounded ordered inbox
+    of `ApplicationDelivery` items: `Message(ApplicationMessage)`, only application data
+    (`ApplicationData::{Custom, E2eHandshakeRequest, E2eHandshakeResponse, E2eStreamFrame}`),
+    and `Event(SwarmEvent)`. No control message has a representation there. A full inbox
+    (`APPLICATION_INBOX_WEIGHT`, 64 MiB) holds only the `Application` and `E2e` lanes; the
+    relay-inbox drain never waits and leaves what does not fit, unadmitted, for a later pass.
+  - `SwarmEvent` carries only logical facts, `PeerAdmitted` and `PeerRetired`;
+    `ConnectionStateChange`, `PeerTransition` and `peer_transition` are removed. An admission
+    retired before the application read it is withdrawn with its retirement. Deciding a
+    transition and announcing it are one synchronous step, so the per-peer delivery turns are
+    removed.
+  - `Swarm::lookup_successor` returns `SuccessorLookup::Routed(SuccessorReport)`, a handle that
+    resolves to the reported successor; a report no live handle awaits is dropped by core.
+    `FindSuccessorReport::is_application_lookup` and the unused
+    `FindSuccessorReportHandler::CustomCallback` are removed.
+  - Delegated admission is data: `Swarm::set_admission_delegation(prefix, delegates)` registers
+    an encoded namespace prefix, which core matches on admission; the node publishes each
+    protocol's declaration when it installs the protocol.
+  - Node: `Backend::serve(inbox)` and `Backend::handle(delivery)` consume the inbox;
+    `Provider::set_backend` claims it and serves it on a detached task; `BackendObserver` loses
+    `lookup_report` (the bootstrap probe awaits its `SuccessorReport`). The FFI provider serves
+    the inbox on its runtime until the handle is destroyed.
+
 - Refuse a delegation signature that is not its algorithm's exact length (#933). BIP-137
   recovery sliced the first 65 bytes of a peer-supplied signature and panicked on a shorter one;
   it now converts exactly, and every `AccountVerifier` checks the length first

@@ -290,7 +290,7 @@ async fn test_stale_pending_close_cannot_remove_replacement_transport() -> Resul
     ))?);
     let peer = SecretKey::random().address().into();
     let old_attempt = transport.reserve_pending_connection(peer).await?;
-    let old_callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
+    let old_callback = InnerSwarmCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(old_attempt);
     let old_connection = transport
         .new_pending_connection(old_attempt, old_callback)
@@ -300,9 +300,8 @@ async fn test_stale_pending_close_cannot_remove_replacement_transport() -> Resul
     assert!(transport.retire_pending_connection(old_attempt)?);
 
     let replacement = transport.reserve_pending_connection(peer).await?;
-    let replacement_callback =
-        InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
-            .with_pending_connection_attempt(replacement);
+    let replacement_callback = InnerSwarmCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(replacement);
     transport
         .new_pending_connection(replacement, replacement_callback)
         .await?;
@@ -319,21 +318,22 @@ async fn test_stale_pending_close_cannot_remove_replacement_transport() -> Resul
     Ok(())
 }
 
+/// A terminal event of a generation retired while it was in flight cannot retire the
+/// announced replacement: the replacement stays admitted and no `PeerRetired` is announced.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn test_stale_terminal_callback_cannot_report_replacement_closed() -> Result<()> {
+async fn test_stale_terminal_callback_cannot_retire_replacement() -> Result<()> {
     let measure = Arc::new(BlockingDisconnectMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let recorder = ApplicationRecorder::attach(&transport)?;
     let peer = SecretKey::random().address().into();
-    let callback = Arc::new(CountingSwarmCallback::default());
     let old_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(old_attempt)?);
     transport.dht.admit_connected(peer, None)?;
 
     let terminal_transport = Arc::clone(&transport);
-    let terminal_callback = callback.clone();
     let terminal = tokio::spawn(async move {
-        InnerSwarmCallback::new(terminal_transport, terminal_callback)
+        InnerSwarmCallback::new(terminal_transport)
             .with_pending_connection_attempt(old_attempt)
             .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
             .await
@@ -350,6 +350,7 @@ async fn test_stale_terminal_callback_cannot_report_replacement_closed() -> Resu
     );
     let replacement = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(replacement)?);
+    assert!(transport.mark_admission_announced(replacement)?);
     transport.dht.admit_connected(peer, None)?;
     measure.release_disconnect();
 
@@ -359,25 +360,29 @@ async fn test_stale_terminal_callback_cannot_report_replacement_closed() -> Resu
 
     assert!(transport.is_active_connection_attempt(replacement));
     assert!(transport.dht.successors().contains(&peer)?);
-    assert!(!callback.events()?.contains(&WebrtcConnectionState::Closed));
+    assert_eq!(recorder.retired(), Vec::<Did>::new());
     Ok(())
 }
 
+/// The retirement of an announced generation is announced exactly once, whatever follows it:
+/// a pending replacement of the same peer does not suppress it, and the retired generation's
+/// late terminal event does not repeat it.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn test_pending_replacement_does_not_suppress_retired_generation_closed() -> Result<()> {
+async fn test_pending_replacement_does_not_suppress_retired_generation_announcement() -> Result<()>
+{
     let measure = Arc::new(BlockingDisconnectMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let recorder = ApplicationRecorder::attach(&transport)?;
     let peer = SecretKey::random().address().into();
-    let callback = Arc::new(CountingSwarmCallback::default());
     let old_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(old_attempt)?);
+    assert!(transport.mark_admission_announced(old_attempt)?);
     transport.dht.admit_connected(peer, None)?;
 
     let terminal_transport = Arc::clone(&transport);
-    let terminal_callback = callback.clone();
     let terminal = tokio::spawn(async move {
-        InnerSwarmCallback::new(terminal_transport, terminal_callback)
+        InnerSwarmCallback::new(terminal_transport)
             .with_pending_connection_attempt(old_attempt)
             .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
             .await
@@ -385,13 +390,7 @@ async fn test_pending_replacement_does_not_suppress_retired_generation_closed() 
     });
 
     measure.wait_for_disconnect_started().await;
-    assert_eq!(
-        transport.retire_active_connection_for_test(old_attempt, |_| {
-            transport.dht.remove(peer)?;
-            Ok(())
-        })?,
-        Some(())
-    );
+    assert!(transport.disconnect_attempt(old_attempt).await?.is_some());
     let replacement = transport.reserve_pending_connection(peer).await?;
     measure.release_disconnect();
 
@@ -401,7 +400,7 @@ async fn test_pending_replacement_does_not_suppress_retired_generation_closed() 
 
     assert!(transport.is_pending_connection_attempt(replacement)?);
     assert!(!transport.is_active_connection_attempt(replacement));
-    assert!(callback.events()?.contains(&WebrtcConnectionState::Closed));
+    assert_eq!(recorder.retired(), vec![peer]);
     assert!(transport.cancel_unadmitted_connection(replacement).await?);
     Ok(())
 }

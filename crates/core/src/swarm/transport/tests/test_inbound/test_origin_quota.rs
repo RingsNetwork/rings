@@ -37,12 +37,11 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
     let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let app_callback = Arc::new(CountingSwarmCallback::default());
     let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
         .origin_quota(quota)
-        .callback(app_callback.clone())
         .build();
     let transport = Arc::clone(&swarm.transport);
+    let application = ApplicationRecorder::attach(&transport)?;
 
     let relay_a_key = SecretKey::random();
     let relay_a: Did = relay_a_key.address().into();
@@ -50,20 +49,20 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
     let relay_b_key = SecretKey::random();
     let relay_b: Did = relay_b_key.address().into();
     let relay_b_session = DelegateeKey::new_with_seckey(&relay_b_key)?;
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
     let (attempt_a, _offer) = transport
         .prepare_connection_offer_with_attempt(relay_a, offer_callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt_a)?);
-    let callback_a = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-        .with_pending_connection_attempt(attempt_a);
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let callback_a =
+        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt_a);
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
     let (attempt_b, _offer) = transport
         .prepare_connection_offer_with_attempt(relay_b, offer_callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt_b)?);
-    let callback_b = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-        .with_pending_connection_attempt(attempt_b);
+    let callback_b =
+        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt_b);
 
     let origin_a = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let first = relayed_wire(
@@ -108,8 +107,8 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
-    assert_eq!(app_callback.validates(), 2);
-    assert_eq!(app_callback.inbounds(), 2);
+    assert_eq!(application.validates(), 2);
+    assert_eq!(application.inbounds(), 2);
     assert!(transport.is_active_connection_attempt(attempt_a));
     assert!(transport.is_active_connection_attempt(attempt_b));
     assert_eq!(
@@ -158,22 +157,21 @@ async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() ->
     let lane = OriginQuotaLaneConfig::new(10, 10, 1, byte_burst, 8)
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
     let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
         .origin_quota(quota)
-        .callback(app_callback.clone())
         .build();
     let transport = Arc::clone(&swarm.transport);
+    let application = ApplicationRecorder::attach(&transport)?;
     let relay_key = SecretKey::random();
     let relay: Did = relay_key.address().into();
     let relay_session = DelegateeKey::new_with_seckey(&relay_key)?;
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(relay, offer_callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-        .with_pending_connection_attempt(attempt);
+    let callback =
+        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt);
 
     let chunks: Vec<Chunk> = Chunk::stream(reassembled.to_wire()?, 32).collect();
     assert!(chunks.len() > 1);
@@ -200,8 +198,8 @@ async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() ->
             OriginQuotaError::ByteRateExhausted { .. }
         ))
     ));
-    assert_eq!(app_callback.validates(), chunk_count.saturating_add(2));
-    assert_eq!(app_callback.inbounds(), 2);
+    assert_eq!(application.validates(), chunk_count.saturating_add(2));
+    assert_eq!(application.inbounds(), 2);
     assert_eq!(
         swarm
             .origin_quota_counters()

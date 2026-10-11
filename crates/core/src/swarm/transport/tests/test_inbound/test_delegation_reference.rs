@@ -1,6 +1,6 @@
 //! The link stage of one inbound connection: frames whose delegation slots are references, the
 //! hold behind a miss, and the link-control frames that repair it. Every wait is on the
-//! application callback's delivery event.
+//! application inbox's delivery event.
 
 use super::*;
 use crate::delegation::DelegationDigest;
@@ -101,8 +101,8 @@ async fn test_referenced_session_resolves_after_a_verified_inline_frame() -> Res
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
 
     pending
@@ -110,10 +110,10 @@ async fn test_referenced_session_resolves_after_a_verified_inline_frame() -> Res
         .await?;
     let steady = custom_payload(&pending, &transport, b"referenced")?;
     pending.receive(&referenced_wire(&steady)?).await?;
-    app_callback.wait_for_inbounds_at_least(2).await;
+    application.wait_for_inbounds_at_least(2).await;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
-    assert_eq!(app_callback.inbound_custom_data()?, vec![
+    assert_eq!(application.inbound_custom_data(), vec![
         b"inline".to_vec(),
         b"referenced".to_vec(),
     ]);
@@ -127,8 +127,8 @@ async fn test_referenced_session_resolves_after_a_verified_inline_frame() -> Res
 async fn test_missed_session_holds_frames_until_the_peer_announces_it() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
 
     let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
@@ -137,19 +137,19 @@ async fn test_missed_session_holds_frames_until_the_peer_announces_it() -> Resul
     pending
         .receive(&pending.custom_message_wire(&transport, b"passing")?)
         .await?;
-    app_callback.wait_for_inbounds_at_least(1).await;
+    application.wait_for_inbounds_at_least(1).await;
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
-    assert_eq!(app_callback.inbounds(), 1);
+    assert_eq!(application.inbounds(), 1);
     assert!(!measure
         .snapshot_counters()?
         .contains(&(pending.peer, MeasurementEvent::FailedToReceive)));
 
     let announcement = LinkControl::Announce(stranger.delegation()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
-    app_callback.wait_for_inbounds_at_least(2).await;
+    application.wait_for_inbounds_at_least(2).await;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
-    assert_eq!(app_callback.inbound_custom_data()?, vec![
+    assert_eq!(application.inbound_custom_data(), vec![
         b"passing".to_vec(),
         b"missed".to_vec(),
     ]);
@@ -165,8 +165,8 @@ async fn test_missed_hop_session_is_repaired_by_announcement() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
     let digest = pending.session.delegation().digest()?;
     let dispatched_before = dispatched_link_control_for_test().len();
@@ -181,9 +181,9 @@ async fn test_missed_hop_session_is_repaired_by_announcement() -> Result<()> {
 
     let announcement = LinkControl::Announce(pending.session.delegation()).to_wire()?;
     pending.receive(announcement.as_ref()).await?;
-    app_callback.wait_for_inbounds_at_least(1).await;
+    application.wait_for_inbounds_at_least(1).await;
 
-    assert_eq!(app_callback.inbound_custom_data()?, vec![
+    assert_eq!(application.inbound_custom_data(), vec![
         b"hop-missed".to_vec()
     ]);
     assert_eq!(
@@ -205,14 +205,14 @@ async fn test_hold_overflow_drops_the_newcomer_uncharged_and_asks_the_oldest_que
 ) -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
     // The peer's own session is taught first, so each held frame misses its origin alone.
     pending
         .receive(&pending.custom_message_wire(&transport, b"teach-the-hop")?)
         .await?;
-    app_callback.wait_for_inbounds_at_least(1).await;
+    application.wait_for_inbounds_at_least(1).await;
     let dispatched_before = dispatched_link_control_for_test().len();
 
     let oldest_stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
@@ -254,7 +254,7 @@ async fn test_hold_overflow_drops_the_newcomer_uncharged_and_asks_the_oldest_que
             pending.peer,
             LinkControl::Request(newcomer_stranger.delegation().digest()?)
         )));
-    assert_eq!(app_callback.inbounds(), 1);
+    assert_eq!(application.inbounds(), 1);
     transport.disconnect(pending.peer).await?;
     Ok(())
 }
@@ -268,17 +268,17 @@ async fn test_receiver_table_does_not_outlive_the_connection_generation() -> Res
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let application = ApplicationRecorder::attach(&transport)?;
     let peer_key = SecretKey::random();
-    let first = pending_peer_with_key(&transport, &app_callback, peer_key.clone()).await?;
+    let first = pending_peer_with_key(&transport, peer_key.clone()).await?;
     first.admit(&transport).await?;
     first
         .receive(&first.custom_message_wire(&transport, b"inline")?)
         .await?;
-    app_callback.wait_for_inbounds_at_least(1).await;
+    application.wait_for_inbounds_at_least(1).await;
     transport.disconnect(first.peer).await?;
 
-    let next = pending_peer_with_key(&transport, &app_callback, peer_key).await?;
+    let next = pending_peer_with_key(&transport, peer_key).await?;
     next.admit(&transport).await?;
     let digest = next.session.delegation().digest()?;
     let dispatched_before = dispatched_link_control_for_test().len();
@@ -286,7 +286,7 @@ async fn test_receiver_table_does_not_outlive_the_connection_generation() -> Res
     next.receive(&referenced_wire(&referenced)?).await?;
 
     assert_eq!(next.callback.session_hold_count_for_test(), 1);
-    assert_eq!(app_callback.inbounds(), 1);
+    assert_eq!(application.inbounds(), 1);
     assert_eq!(
         dispatched_link_control_for_test().split_off(dispatched_before),
         vec![(next.peer, LinkControl::Request(digest))]
@@ -302,8 +302,8 @@ async fn test_disclaimed_session_fails_awaiting_frames_and_leaves_resolved_ones_
 ) -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
 
     let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
@@ -313,17 +313,15 @@ async fn test_disclaimed_session_fails_awaiting_frames_and_leaves_resolved_ones_
     pending
         .receive(&pending.custom_message_wire(&transport, b"passing")?)
         .await?;
-    app_callback.wait_for_inbounds_at_least(1).await;
+    application.wait_for_inbounds_at_least(1).await;
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
 
     let disclaimer = LinkControl::Unknown(digest).to_wire()?;
     pending.receive(disclaimer.as_ref()).await?;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
-    assert_eq!(app_callback.inbounds(), 1);
-    assert_eq!(app_callback.inbound_custom_data()?, vec![
-        b"passing".to_vec()
-    ]);
+    assert_eq!(application.inbounds(), 1);
+    assert_eq!(application.inbound_custom_data(), vec![b"passing".to_vec()]);
     assert!(measure
         .snapshot_counters()?
         .contains(&(pending.peer, MeasurementEvent::FailedToReceive)));
@@ -338,8 +336,8 @@ async fn test_unsolicited_announcement_does_not_populate_the_link() -> Result<()
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
 
     let announcement = LinkControl::Announce(pending.session.delegation()).to_wire()?;
@@ -348,7 +346,7 @@ async fn test_unsolicited_announcement_does_not_populate_the_link() -> Result<()
     pending.receive(&referenced_wire(&referenced)?).await?;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
-    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(application.inbounds(), 0);
     transport.disconnect(pending.peer).await?;
     Ok(())
 }
@@ -364,14 +362,9 @@ async fn test_frames_held_past_the_timeout_are_swept_and_charged() -> Result<()>
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let now_ms = Arc::new(Mutex::new(crate::utils::get_epoch_ms()));
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer_with(
-        &transport,
-        &app_callback,
-        SecretKey::random(),
-        Some(Arc::clone(&now_ms)),
-    )
-    .await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending =
+        pending_peer_with(&transport, SecretKey::random(), Some(Arc::clone(&now_ms))).await?;
     pending.admit(&transport).await?;
     let peer = pending.peer;
 
@@ -392,7 +385,7 @@ async fn test_frames_held_past_the_timeout_are_swept_and_charged() -> Result<()>
     assert!(measure
         .snapshot_counters()?
         .contains(&(peer, MeasurementEvent::FailedToReceive)));
-    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(application.inbounds(), 0);
     transport.disconnect(peer).await?;
     Ok(())
 }
@@ -404,15 +397,15 @@ async fn test_frames_held_past_the_timeout_are_swept_and_charged() -> Result<()>
 async fn test_control_frames_judged_on_a_superseded_generation_are_not_sent() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let application = ApplicationRecorder::attach(&transport)?;
     let peer_key = SecretKey::random();
-    let first = pending_peer_with_key(&transport, &app_callback, peer_key.clone()).await?;
+    let first = pending_peer_with_key(&transport, peer_key.clone()).await?;
     first.admit(&transport).await?;
     transport.disconnect(first.peer).await?;
-    let next = pending_peer_with_key(&transport, &app_callback, peer_key).await?;
+    let next = pending_peer_with_key(&transport, peer_key).await?;
     next.admit(&transport).await?;
     let dispatched_before = dispatched_link_control_for_test().len();
-    let inbounds_before = app_callback.inbounds();
+    let inbounds_before = application.inbounds();
 
     // The old generation's callback still verifies the frame (nothing is charged) and would
     // confirm its session; the gate then drops the frame as superseded, so it is not delivered.
@@ -424,7 +417,7 @@ async fn test_control_frames_judged_on_a_superseded_generation_are_not_sent() ->
         .snapshot_counters()?
         .contains(&(first.peer, MeasurementEvent::FailedToReceive)));
     assert_eq!(first.callback.pre_admission_held_count_for_test(), 0);
-    assert_eq!(app_callback.inbounds(), inbounds_before);
+    assert_eq!(application.inbounds(), inbounds_before);
     transport.disconnect(next.peer).await?;
     Ok(())
 }
@@ -438,8 +431,8 @@ async fn test_control_frames_never_pace_the_read_loop() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
     let digest = pending.session.delegation().digest()?;
     let dispatched_before = dispatched_link_control_for_test().len();
@@ -448,7 +441,7 @@ async fn test_control_frames_never_pace_the_read_loop() -> Result<()> {
     pending
         .receive(&pending.custom_message_wire(&transport, b"delivered-anyway")?)
         .await?;
-    app_callback.wait_for_inbounds_at_least(1).await;
+    application.wait_for_inbounds_at_least(1).await;
     assert_eq!(
         dispatched_link_control_for_test().split_off(dispatched_before),
         vec![(pending.peer, LinkControl::Known(digest))]
@@ -468,8 +461,8 @@ async fn test_control_sends_beyond_the_in_flight_budget_are_refused() -> Result<
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
     let digest = pending.session.delegation().digest()?;
     transport.outbound_schedulers.handle(pending.peer)?;
@@ -487,14 +480,14 @@ async fn test_control_sends_beyond_the_in_flight_budget_are_refused() -> Result<
     pending
         .receive(&pending.custom_message_wire(&transport, b"beyond-the-budget")?)
         .await?;
-    app_callback.wait_for_inbounds_at_least(1).await;
+    application.wait_for_inbounds_at_least(1).await;
     assert_eq!(dispatched_link_control_for_test().len(), dispatched_before);
 
     drop(in_flight);
     pending
         .receive(&pending.custom_message_wire(&transport, b"within-the-budget-again")?)
         .await?;
-    app_callback.wait_for_inbounds_at_least(2).await;
+    application.wait_for_inbounds_at_least(2).await;
     assert_eq!(
         dispatched_link_control_for_test().split_off(dispatched_before),
         vec![(pending.peer, LinkControl::Known(digest))]
@@ -510,8 +503,7 @@ async fn test_a_request_is_answered_from_the_announced_table() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
     let own_session = transport.delegatee_key.delegation();
     let own_digest = own_session.digest()?;
@@ -562,9 +554,9 @@ async fn test_referenced_frame_on_an_unbound_callback_is_refused() -> Result<()>
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
-    let unbound = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
+    let unbound = InnerSwarmCallback::new(Arc::clone(&transport));
     let dispatched_before = dispatched_link_control_for_test().len();
 
     let referenced = custom_payload(&pending, &transport, b"referenced-off-link")?;
@@ -579,7 +571,7 @@ async fn test_referenced_frame_on_an_unbound_callback_is_refused() -> Result<()>
     );
     assert_eq!(unbound.session_hold_count_for_test(), 0);
     assert_eq!(dispatched_link_control_for_test().len(), dispatched_before);
-    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(application.inbounds(), 0);
     Ok(())
 }
 
@@ -591,8 +583,8 @@ async fn test_frames_from_a_peer_other_than_the_bound_one_are_off_the_link() -> 
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
     let stranger_did: Did = SecretKey::random().address().into();
 
@@ -620,7 +612,7 @@ async fn test_frames_from_a_peer_other_than_the_bound_one_are_off_the_link() -> 
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
-    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(application.inbounds(), 0);
     transport.disconnect(pending.peer).await?;
     Ok(())
 }
@@ -634,8 +626,8 @@ async fn test_a_frame_teaches_the_link_before_it_is_gated() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
 
     pending
         .receive(&pending.custom_message_wire(&transport, b"inline-before-admission")?)
@@ -645,11 +637,11 @@ async fn test_a_frame_teaches_the_link_before_it_is_gated() -> Result<()> {
 
     assert_eq!(pending.callback.pre_admission_held_count_for_test(), 2);
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
-    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(application.inbounds(), 0);
 
     pending.admit(&transport).await?;
-    app_callback.wait_for_inbounds_at_least(2).await;
-    assert_eq!(app_callback.inbound_custom_data()?, vec![
+    application.wait_for_inbounds_at_least(2).await;
+    assert_eq!(application.inbound_custom_data(), vec![
         b"inline-before-admission".to_vec(),
         b"referenced-before-admission".to_vec(),
     ]);
@@ -671,14 +663,9 @@ async fn test_an_expired_announcement_is_refused_and_charged() -> Result<()> {
     const SHORT_LIFETIME_MS: u64 = 900;
     let short_lived = delegatee_key_with_ttl(SHORT_LIFETIME_MS)?;
     let now_ms = Arc::new(Mutex::new(crate::utils::get_epoch_ms()));
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer_with(
-        &transport,
-        &app_callback,
-        SecretKey::random(),
-        Some(Arc::clone(&now_ms)),
-    )
-    .await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending =
+        pending_peer_with(&transport, SecretKey::random(), Some(Arc::clone(&now_ms))).await?;
     pending.admit(&transport).await?;
 
     let missed = stranger_payload(
@@ -695,7 +682,7 @@ async fn test_an_expired_announcement_is_refused_and_charged() -> Result<()> {
     pending.receive(announcement.as_ref()).await?;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
-    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(application.inbounds(), 0);
     assert!(measure
         .snapshot_counters()?
         .contains(&(pending.peer, MeasurementEvent::FailedToReceive)));
@@ -732,8 +719,7 @@ async fn test_held_frames_give_their_transport_credit_back() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = Arc::new(pending_peer(&transport, &app_callback).await?);
+    let pending = Arc::new(pending_peer(&transport).await?);
     pending.admit(&transport).await?;
     let window = usize::try_from(LANE_CREDIT_WINDOW).map_err(|_| Error::MessageSizeOverflow)?;
     assert!(
@@ -794,8 +780,8 @@ async fn test_link_control_without_credit_expires_and_keeps_the_connection() -> 
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
     let connection = transport
         .admitted_connection(pending.peer)?
@@ -812,7 +798,7 @@ async fn test_link_control_without_credit_expires_and_keeps_the_connection() -> 
     pending
         .receive(&pending.custom_message_wire(&transport, b"confirmed-without-credit")?)
         .await?;
-    app_callback.wait_for_inbounds_at_least(1).await;
+    application.wait_for_inbounds_at_least(1).await;
     probe_on_activity("the confirmation holds its permit", TEST_HANG_GUARD, || {
         let held = transport
             .outbound_schedulers

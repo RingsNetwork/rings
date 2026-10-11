@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use super::inbound;
-use super::CallbackError;
 use super::LocalDelivery;
 use super::LogicalInbound;
-use super::SharedSwarmCallback;
 use crate::dht::Did;
 use crate::measure::Authentication;
 use crate::message::with_message_variants;
@@ -16,6 +14,8 @@ use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::OriginQuotaCharge;
+use crate::swarm::application::ApplicationMessage;
+use crate::swarm::application::InboxRoom;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
 use crate::swarm::observer::LookupOutcome;
@@ -25,10 +25,10 @@ use crate::swarm::observer::ObservationOutcome;
 use crate::swarm::transport::SwarmTransport;
 
 impl LocalDelivery {
-    /// Deliver to `callback` through `transport`'s handlers.
-    pub(crate) fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
+    /// Deliver through `transport`'s handlers to its application inbox.
+    pub(crate) fn new(transport: Arc<SwarmTransport>) -> Self {
         Self {
-            pipeline: LogicalInbound::new(transport, callback),
+            pipeline: LogicalInbound::new(transport),
         }
     }
 
@@ -36,7 +36,10 @@ impl LocalDelivery {
     ///
     /// Pre: `payload.transaction.destination` is this node and the payload was verified by the
     /// caller (the inbox witness verifies it as of its hold instant).
-    pub(crate) async fn deliver(&self, payload: &MessagePayload) -> crate::error::Result<()> {
+    pub(crate) async fn deliver(
+        &self,
+        payload: &MessagePayload,
+    ) -> crate::error::Result<inbound::LocalDelivered> {
         inbound::deliver_local(&self.pipeline, payload).await
     }
 }
@@ -55,20 +58,20 @@ pub(super) fn edge_relation(
 }
 
 impl LogicalInbound {
-    pub(super) fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
-        let message_handler = MessageHandler::new(transport.clone(), callback.clone());
+    pub(super) fn new(transport: Arc<SwarmTransport>) -> Self {
+        let message_handler = MessageHandler::new(transport.clone());
         Self {
             transport,
             message_handler,
-            callback,
         }
     }
 
+    /// Dispatch `payload` to its handler and record the observation; returns the decoded body.
     pub(super) async fn handle_payload(
         &self,
         payload: &MessagePayload,
         prepared_message: Option<Message>,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<Message> {
         let message = match prepared_message {
             Some(message) => message,
             None => payload.transaction.data()?,
@@ -133,14 +136,14 @@ impl LogicalInbound {
             }
         }
 
-        // A handler that errored must not then be reported to the application as a successful
-        // inbound message: surface the error and do not run `on_inbound` for it.
+        // A handler that errored must not then be handed to the application as a successful
+        // inbound message: surface the error and deliver nothing.
         if let Err(e) = result {
             tracing::error!("Failed to handle_payload: {e:?}");
             return Err(e);
         }
 
-        Ok(())
+        Ok(message)
     }
 
     pub(super) fn is_local_destination(&self, payload: &MessagePayload) -> bool {
@@ -172,30 +175,46 @@ impl LogicalInbound {
         Ok(())
     }
 
-    /// Whether the namespace of an application message delegated its admission.
+    /// Whether the namespace of an application message delegated its admission, as the
+    /// application registered it in advance; no application code runs here.
     fn delegates_admission(&self, message: &Message) -> bool {
         match message {
             Message::CustomMessage(CustomMessage(application_payload)) => self
-                .callback
-                .delegates_admission(application_payload.as_slice()),
+                .transport
+                .application()
+                .delegations
+                .delegates(application_payload.as_slice()),
             _ => false,
         }
     }
 
-    pub(super) async fn on_inbound(
+    /// The application message `payload` carries for this node: `None` when it is addressed
+    /// elsewhere or its body is core's own.
+    pub(super) fn application_message(
         &self,
         payload: &MessagePayload,
-    ) -> std::result::Result<(), CallbackError> {
-        self.callback.on_inbound(payload).await
+        message: Message,
+    ) -> Option<ApplicationMessage> {
+        if !self.is_local_destination(payload) {
+            return None;
+        }
+        ApplicationMessage::project(payload, message)
+    }
+
+    /// Room for `message` in the application inbox, if it has room now. Never waits.
+    pub(super) fn reserve_room(&self, message: &ApplicationMessage) -> Option<InboxRoom> {
+        self.transport.application().outlet.try_reserve(message)
+    }
+
+    /// Queue `message` for the application, waiting only for room; only the caller's
+    /// application-data lane waits.
+    pub(super) async fn deliver(&self, message: ApplicationMessage) {
+        self.transport.application().outlet.deliver(message).await;
     }
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-    use std::sync::Arc;
-
     use super::*;
     use crate::delegation::DelegateeKey;
     use crate::dht::delivery::NextHop;
@@ -210,45 +229,22 @@ mod tests {
     use crate::swarm::SwarmBuilder;
     use crate::tests::TEST_NETWORK_ID;
 
-    #[derive(Default)]
-    struct ObservedCallback {
-        validations: AtomicUsize,
-        inbounds: AtomicUsize,
-    }
-
-    #[derive(Default)]
-    struct RejectingValidationCallback {
-        validations: AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::swarm::callback::SwarmCallback for RejectingValidationCallback {
-        async fn on_validate(
-            &self,
-            _payload: &MessagePayload,
-        ) -> std::result::Result<(), CallbackError> {
-            self.validations.fetch_add(1, Ordering::Relaxed);
-            Err(std::io::Error::other("rejected by application").into())
+    /// A swarm with the given origin quota whose application inbox is claimed.
+    fn claimed_swarm(
+        quota: Option<OriginQuotaConfig>,
+    ) -> (
+        crate::swarm::Swarm,
+        crate::swarm::application::ApplicationInbox,
+    ) {
+        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
+        let builder = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local);
+        let swarm = match quota {
+            Some(quota) => builder.origin_quota(quota),
+            None => builder,
         }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::swarm::callback::SwarmCallback for ObservedCallback {
-        async fn on_validate(
-            &self,
-            _payload: &MessagePayload,
-        ) -> std::result::Result<(), CallbackError> {
-            self.validations.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        async fn on_inbound(
-            &self,
-            _payload: &MessagePayload,
-        ) -> std::result::Result<(), CallbackError> {
-            self.inbounds.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
+        .build();
+        let inbox = swarm.application_inbox().expect("unclaimed inbox");
+        (swarm, inbox)
     }
 
     fn payload(
@@ -282,58 +278,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_destination_persists_before_validation_and_rejects_duplicate_dispatch() {
-        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
-        let callback = Arc::new(ObservedCallback::default());
-        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-            .callback(callback.clone())
-            .build();
-        let delivery = LocalDelivery::new(swarm.transport.clone(), callback.clone());
+    async fn test_a_final_destination_persists_before_delivery_and_rejects_a_duplicate() {
+        let (swarm, inbox) = claimed_swarm(None);
+        let delivery = LocalDelivery::new(swarm.transport.clone());
         let payload = payload(swarm.did(), 0).expect("payload");
 
-        delivery.deliver(&payload).await.expect("first delivery");
+        assert_eq!(
+            delivery.deliver(&payload).await.expect("first delivery"),
+            inbound::LocalDelivered::Delivered
+        );
         assert!(matches!(
             delivery.deliver(&payload).await,
             Err(Error::TransactionReplay { .. })
         ));
-        assert_eq!(callback.validations.load(Ordering::Relaxed), 1);
-        assert_eq!(callback.inbounds.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            inbox.try_next(),
+            Some(crate::swarm::application::ApplicationDelivery::Message(_))
+        ));
+        assert_eq!(inbox.try_next(), None);
     }
 
+    /// Room in the application inbox is reserved before admission: a payload deferred for want
+    /// of room is neither admitted nor charged, so the later pass that delivers it is not
+    /// refused as a replay or by the quota.
     #[tokio::test]
-    async fn application_validation_failure_still_consumes_committed_quota() {
-        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
+    async fn test_a_deferred_local_delivery_commits_no_admission() {
         let sender = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("sender session");
-        let callback = Arc::new(RejectingValidationCallback::default());
         let lane =
             OriginQuotaLaneConfig::new(1, 1, 1024, 1024, 8).expect("test quota configuration");
-        let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
-        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-            .origin_quota(quota)
-            .callback(callback.clone())
-            .build();
-        let delivery = LocalDelivery::new(swarm.transport.clone(), callback.clone());
+        let (swarm, inbox) = claimed_swarm(Some(OriginQuotaConfig::new(lane, lane, lane, lane)));
+        let delivery = LocalDelivery::new(swarm.transport.clone());
+        let filler = payload(swarm.did(), 0).expect("filler payload");
+        let fill = crate::swarm::application::ApplicationMessage::project(
+            &filler,
+            Message::CustomMessage(crate::message::CustomMessage(vec![
+                0;
+                crate::swarm::application::APPLICATION_INBOX_WEIGHT
+            ])),
+        )
+        .expect("application data");
+        let room = swarm
+            .transport
+            .application()
+            .outlet
+            .try_reserve(&fill)
+            .expect("room in an empty inbox");
+        room.fill(fill);
         let first = payload_from(&sender, swarm.did(), 0).expect("first payload");
         let second = payload_from(&sender, swarm.did(), 1).expect("second payload");
 
-        assert!(delivery.deliver(&first).await.is_err());
+        assert_eq!(
+            delivery.deliver(&first).await.expect("deferred"),
+            inbound::LocalDelivered::Deferred
+        );
+        assert!(inbox.try_next().is_some());
+        assert_eq!(
+            delivery.deliver(&first).await.expect("delivered"),
+            inbound::LocalDelivered::Delivered
+        );
         assert!(matches!(
             delivery.deliver(&second).await,
             Err(Error::OriginQuota(
                 OriginQuotaError::MessageRateExhausted { .. }
             ))
         ));
-        assert_eq!(callback.validations.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
     async fn intermediate_relay_does_not_create_origin_replay_state() {
         let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
-        let callback = Arc::new(ObservedCallback::default());
-        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-            .callback(callback.clone())
-            .build();
-        let logical = LogicalInbound::new(swarm.transport.clone(), callback);
+        let swarm =
+            SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local).build();
+        let logical = LogicalInbound::new(swarm.transport.clone());
         let remote_destination = SecretKey::random().address().into();
         let payload = payload(remote_destination, 0).expect("payload");
         let message = payload.transaction.data::<Message>().expect("message");

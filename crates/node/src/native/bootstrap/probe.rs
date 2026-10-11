@@ -7,7 +7,7 @@
 //!
 //! ```text
 //!   reachable(t)  ⟺  is_peer_admitted(t)
-//!                  ∨  lookup_successor(t) = Routed(tx) ∧ report(tx).successor = t
+//!                  ∨  lookup_successor(t) = Routed(report) ∧ await(report) = t
 //! ```
 //!
 //! Two cases are decided without any network round trip. A target admitted as the application
@@ -20,7 +20,7 @@
 //! connected and settles as a miss until the announcement lands) or because stabilization
 //! adopted it from a report without an edge (the dial proceeds and creates the edge Chord's own
 //! stabilization seeks). Otherwise the lookup is routed toward `t` and `t` is reachable iff the
-//! report that returns under the same transaction id names `t`. A partition that lost `t`
+//! report its handle resolves to names `t`. A partition that lost `t`
 //! answers with the node now succeeding `t`'s position.
 //!
 //! The report returns Chord-routed to this node, so it also needs this node to be adopted by
@@ -49,7 +49,6 @@ use rings_core::dht::Did;
 use rings_core::swarm::SuccessorLookup;
 use rings_core::swarm::Swarm;
 
-use super::evidence::LookupReportLedger;
 use super::evidence::ReachabilityEvidence;
 use super::BootstrapPort;
 use super::DialFailure;
@@ -74,7 +73,7 @@ pub(crate) struct ProcessorPort {
 }
 
 impl ProcessorPort {
-    /// A port whose probes and dials rendezvous with the swarm's reports in `evidence`.
+    /// A port whose dials rendezvous with the admissions recorded in `evidence`.
     pub(crate) fn new(processor: Arc<Processor>, evidence: Arc<ReachabilityEvidence>) -> Self {
         Self {
             processor,
@@ -100,7 +99,7 @@ impl BootstrapPort for ProcessorPort {
         let swarm = &self.processor.swarm;
         match swarm.is_peer_admitted(target) {
             Ok(true) => true,
-            Ok(false) => lookup_reaches(swarm, self.evidence.reports(), target).await,
+            Ok(false) => lookup_reaches(swarm, target).await,
             Err(error) => {
                 tracing::error!(peer = %target, %error, "connection records unavailable");
                 false
@@ -161,24 +160,17 @@ impl ProcessorPort {
 /// Whether a successor lookup for `target` answers `target` itself: a lookup the local topology
 /// decides is refuted (see the module doc), a routed one must report within
 /// [`LOOKUP_PROBE_TIMEOUT`].
-async fn lookup_reaches(swarm: &Swarm, reports: &LookupReportLedger, target: Did) -> bool {
-    let tx_id = match swarm.lookup_successor(target).await {
-        Ok(SuccessorLookup::Routed(tx_id)) => tx_id,
+async fn lookup_reaches(swarm: &Swarm, target: Did) -> bool {
+    let report = match swarm.lookup_successor(target).await {
+        Ok(SuccessorLookup::Routed(report)) => report,
         Ok(SuccessorLookup::Local(_)) => return false,
         Err(error) => {
             tracing::debug!(peer = %target, %error, "bootstrap lookup could not be issued");
             return false;
         }
     };
-    let waiter = match reports.wait_for(tx_id) {
-        Ok(waiter) => waiter,
-        Err(error) => {
-            tracing::error!(peer = %target, %error, "bootstrap lookup record unavailable");
-            return false;
-        }
-    };
     matches!(
-        tokio::time::timeout(LOOKUP_PROBE_TIMEOUT, waiter).await,
+        tokio::time::timeout(LOOKUP_PROBE_TIMEOUT, report).await,
         Ok(Ok(successor)) if successor == target
     )
 }

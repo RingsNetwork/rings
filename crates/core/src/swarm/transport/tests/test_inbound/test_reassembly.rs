@@ -10,13 +10,13 @@ async fn test_chunk_reassembly_records_one_exact_logical_receive() -> Result<()>
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let application = ApplicationRecorder::attach(&transport)?;
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-        .with_pending_connection_attempt(attempt);
+    let callback =
+        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt);
     open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
     callback
         .on_data_channel_open(&peer.to_string())
@@ -61,7 +61,7 @@ async fn test_chunk_reassembly_records_one_exact_logical_receive() -> Result<()>
             .count(),
         0
     );
-    assert_eq!(app_callback.inbounds(), 1);
+    assert_eq!(application.inbounds(), 1);
     Ok(())
 }
 
@@ -72,13 +72,13 @@ async fn test_reassembled_undecodable_message_records_one_failure_only() -> Resu
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let application = ApplicationRecorder::attach(&transport)?;
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-        .with_pending_connection_attempt(attempt);
+    let callback =
+        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt);
     open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
     callback
         .on_data_channel_open(&peer.to_string())
@@ -108,10 +108,13 @@ async fn test_reassembled_undecodable_message_records_one_failure_only() -> Resu
 
     assert_eq!(failed_receive_count(&measure, peer)?, 1);
     assert_eq!(successful_receive_count(&measure, peer)?, 0);
-    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(application.inbounds(), 0);
     Ok(())
 }
 
+/// A reassembled message is handed to its logical lane in arrival order: while the hand-off
+/// cannot start, because an earlier application delivery holds the application lane waiting for
+/// inbox room, a later storage frame waits behind it and a control frame does not.
 #[tokio::test]
 async fn test_reassembly_handoff_preserves_data_order_without_blocking_control() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -120,11 +123,22 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(OrderedReassemblyCallback::default());
-    let callback = Arc::new(InnerSwarmCallback::new(
-        Arc::clone(&transport),
-        app_callback.clone(),
-    ));
+    let inbox = claim_full_application_inbox(&transport)?;
+    let mut tap = transport.inbound_tap_for_test().subscribe();
+    let callback = Arc::new(InnerSwarmCallback::new(Arc::clone(&transport)));
+    let cid = peer.to_string();
+
+    let blocker = local_wire(
+        Message::custom(b"holds-the-application-lane")?,
+        &peer_session,
+        transport.dht.did,
+    )?;
+    let blocker_delivery = spawn_inbound_delivery(Arc::clone(&callback), cid.clone(), blocker);
+    assert_eq!(
+        next_tapped_custom(&mut tap).await?,
+        b"holds-the-application-lane".to_vec()
+    );
+
     let first_wire = local_wire(
         Message::custom(b"reassembled-first")?,
         &peer_session,
@@ -132,8 +146,6 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
     )?;
     let chunks: Vec<Chunk> = Chunk::stream(first_wire, 32).collect();
     assert!(chunks.len() > 1);
-    let cid = peer.to_string();
-
     for chunk in &chunks[..chunks.len() - 1] {
         let frame = local_wire(
             Message::Chunk(chunk.clone()),
@@ -145,7 +157,6 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     }
-
     let final_chunk = chunks
         .last()
         .cloned()
@@ -156,7 +167,9 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
         transport.dht.did,
     )?;
     let final_delivery = spawn_inbound_delivery(Arc::clone(&callback), cid.clone(), final_frame);
-    app_callback.wait_for_final_chunk().await;
+    for _ in 0..chunks.len() {
+        assert!(matches!(next_tapped(&mut tap).await?, Message::Chunk(_)));
+    }
 
     let later = local_wire(
         Message::FoundEntry(FoundEntry {
@@ -179,10 +192,17 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
     control_delivery
         .await
         .map_err(|_| Error::InvalidMessage("control lane task panicked".to_string()))??;
-    assert!(app_callback.delivered()?.is_empty());
-    assert!(app_callback.validated()?.is_empty());
+    // Only the control frame entered the logical stage behind the held hand-off.
+    assert!(matches!(
+        next_tapped(&mut tap).await?,
+        Message::FindSuccessorReport(_)
+    ));
+    assert!(tap.try_recv().is_err());
 
-    app_callback.release_final_chunk();
+    release_full_application_inbox(&inbox)?;
+    blocker_delivery
+        .await
+        .map_err(|_| Error::InvalidMessage("blocker task panicked".to_string()))??;
     final_delivery
         .await
         .map_err(|_| Error::InvalidMessage("final chunk task panicked".to_string()))??;
@@ -193,10 +213,22 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
         later_result.is_err(),
         "unsolicited storage response must fail"
     );
-    assert_eq!(app_callback.delivered()?, vec![
+    assert_eq!(
+        next_tapped_custom(&mut tap).await?,
         b"reassembled-first".to_vec()
-    ]);
-    assert_eq!(app_callback.validated()?, vec!["reassembled", "storage"]);
+    );
+    assert!(matches!(
+        next_tapped(&mut tap).await?,
+        Message::FoundEntry(_)
+    ));
+    assert_eq!(
+        next_custom_data(&inbox).await?,
+        b"holds-the-application-lane".to_vec()
+    );
+    assert_eq!(
+        next_custom_data(&inbox).await?,
+        b"reassembled-first".to_vec()
+    );
     Ok(())
 }
 
@@ -295,10 +327,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let saturated = Arc::new(InnerSwarmCallback::new(
-        Arc::clone(&transport),
-        Arc::new(NoopSwarmCallback),
-    ));
+    let saturated = Arc::new(InnerSwarmCallback::new(Arc::clone(&transport)));
     let capacity_holds = hold_saturated_application_capacity(&saturated)?;
 
     let peer_key = SecretKey::random();
@@ -317,7 +346,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
     );
     let tampered_wire = tampered.to_wire()?;
     let chunks: Vec<Chunk> = Chunk::stream(tampered_wire, 32).collect();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
     for chunk in &chunks[..chunks.len() - 1] {
         let frame = local_wire(Message::Chunk(chunk.clone()), &session, transport.dht.did)?;
         callback

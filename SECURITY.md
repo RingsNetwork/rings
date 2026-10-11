@@ -94,8 +94,13 @@ and expire, but a party with many identities can try to hold several positions o
   Exactly-once effects are not claimed.
   [Details](docs/src/advanced-topic/transaction-replay.md).
 - **Rate limits.** After verification, the destination charges per-origin message and byte
-  buckets keyed by the account DID, committed together with replay and before application
-  code. Rotating keys or relays does not reset them, and a drop never disconnects the relay.
+  buckets keyed by the account DID, committed together with replay and before the application
+  sees the message. Rotating keys or relays does not reset them, and a drop never disconnects
+  the relay.
+- **Application boundary.** Core never calls, awaits or consults application code: the
+  application cannot see, validate or veto a protocol message. It reads its own data and peer
+  facts from a bounded inbox (#935); a slow application fills only that inbox, which holds
+  only the application data lanes.
 - **Measurement and credit.** Local and advisory: they may reorder eligible candidates but
   never add one or change DHT placement. Service receipts affect neither.
 - **Connection admission.** Connection records are bounded at twice the topology's

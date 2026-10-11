@@ -303,27 +303,6 @@ fn test_one_peer_cannot_exhaust_another_peers_inbound_allowance() {
     drop(permits);
 }
 
-#[cfg_attr(
-    all(feature = "wasm", target_family = "wasm"),
-    wasm_bindgen_test::wasm_bindgen_test
-)]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), test)]
-fn test_inbound_callback_failures_preserve_typed_sources() {
-    let validation = inbound_failure_error(InboundFailure::Validation(Box::new(
-        std::io::Error::other("validation source"),
-    )));
-    let callback = inbound_failure_error(InboundFailure::Callback(Box::new(
-        std::io::Error::other("callback source"),
-    )));
-
-    assert!(std::error::Error::source(&validation)
-        .and_then(|source| source.downcast_ref::<std::io::Error>())
-        .is_some());
-    assert!(std::error::Error::source(&callback)
-        .and_then(|source| source.downcast_ref::<std::io::Error>())
-        .is_some());
-}
-
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 #[test]
 fn test_native_callback_error_contract_is_send_and_sync() {

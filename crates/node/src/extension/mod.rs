@@ -4,35 +4,27 @@ pub mod ext;
 pub mod protocols;
 #[cfg(rings_native)]
 pub mod transport;
-use std::result::Result;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use rings_core::dht::Did;
 use rings_core::message::CustomMessage;
-use rings_core::message::Message;
-use rings_core::message::MessagePayload;
-use rings_core::message::MessageVerificationExt;
-use rings_core::swarm::callback::PeerTransition;
-use rings_core::swarm::callback::SwarmCallback;
-use rings_core::swarm::callback::SwarmEvent;
-use rings_runtime::run_detached;
+use rings_core::swarm::application::ApplicationData;
+use rings_core::swarm::application::ApplicationDelivery;
+use rings_core::swarm::application::ApplicationInbox;
+use rings_core::swarm::application::ApplicationMessage;
+use rings_core::swarm::application::SwarmEvent;
 
+use crate::error::Result;
 use crate::extension::ext::Envelope;
 use crate::extension::ext::Extensions;
 use crate::provider::Provider;
 
-/// Observer of swarm facts the [`Backend`] decodes or receives but does not act on itself.
+/// Observer of the peer facts the [`Backend`] reads from the application inbox but does not act
+/// on itself.
 ///
-/// The backend hands the observer each fact synchronously, before any await, so a later
-/// callback for the same peer observes it. Facts are the swarm's logical conclusions, never a
-/// physical connection state: the backend is the one place that translates.
+/// The backend hands the observer each fact in inbox order, before it reads the next item.
+/// Facts are the swarm's logical conclusions, never a physical connection state.
 pub trait BackendObserver: Send + Sync {
-    /// A successor lookup report addressed to this node for a lookup that requested no core
-    /// action (`FindSuccessorReportHandler::None`), i.e. an application-issued lookup:
-    /// `successor` is the reported successor of the key queried under transaction `tx_id`.
-    fn lookup_report(&self, tx_id: uuid::Uuid, successor: Did);
-
     /// `peer` was admitted: its transport is ready and it joined the local DHT.
     fn peer_admitted(&self, peer: Did);
 
@@ -40,15 +32,15 @@ pub trait BackendObserver: Send + Sync {
     fn peer_retired(&self, peer: Did);
 }
 
-/// Backend handles inbound custom messages from the Swarm, routing each decoded
-/// [`Envelope`] to its namespace's protocol via the [`Extensions`] registry. The
-/// registry is shared with the [`Provider`], so protocols registered there are visible
-/// to inbound dispatch here. Each protocol's interpreter does its IO through a
-/// namespace-scoped [`Scope`](ext::Scope); the underlying router capability is internal.
-/// Dispatch owns a detached task so a swarm callback deadline stops waiting without
-/// cancelling an already committed protocol transition or its ordered effect trace.
-/// Core lookup reports, admissions and retirements are not dispatched; they are handed to the
-/// optional [`BackendObserver`].
+/// Backend consumes the swarm's application inbox, routing each inbound custom message, decoded
+/// as an [`Envelope`], to its namespace's protocol via the [`Extensions`] registry. The registry
+/// is shared with the [`Provider`], so protocols registered there are visible to inbound dispatch
+/// here. Each protocol's interpreter does its IO through a namespace-scoped
+/// [`Scope`](ext::Scope); the underlying router capability is internal.
+///
+/// The swarm never waits on the backend: it reads at its own pace, and a slow protocol fills
+/// only the inbox, which backpressures only the application data lanes (#935). Admissions and
+/// retirements are handed to the optional [`BackendObserver`]; E2E messages are not routed.
 pub struct Backend {
     extensions: Extensions,
     observer: Option<Arc<dyn BackendObserver>>,
@@ -63,60 +55,44 @@ impl Backend {
         }
     }
 
-    /// Attach the observer that receives application lookup reports, admissions and retirements.
+    /// Attach the observer that receives admissions and retirements.
     pub fn observed_by(mut self, observer: Arc<dyn BackendObserver>) -> Self {
         self.observer = Some(observer);
         self
     }
-}
 
-#[cfg_attr(rings_browser, async_trait(?Send))]
-#[cfg_attr(rings_native, async_trait)]
-impl SwarmCallback for Backend {
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> Result<(), rings_core::error::CallbackError> {
-        let data: Message = payload.transaction.data()?;
-
-        let msg = match data {
-            Message::CustomMessage(CustomMessage(msg)) => msg,
-            Message::FindSuccessorReport(report) if report.is_application_lookup() => {
-                if let Some(observer) = self.observer.as_deref() {
-                    observer.lookup_report(payload.transaction.tx_id, report.did);
-                }
-                return Ok(());
+    /// Consume `inbox` until the swarm is gone. Each item is handled to completion before the
+    /// next is read, so the protocols see the inbox order; a failed item is logged and skipped.
+    pub async fn serve(self, inbox: ApplicationInbox) {
+        while let Some(delivery) = inbox.next().await {
+            if let Err(error) = self.handle(delivery).await {
+                tracing::warn!(?error, "application delivery failed");
             }
-            _ => return Ok(()),
-        };
-
-        let envelope = Envelope::decode(&msg)?;
-        let from = payload.transaction.signer();
-        let extensions = self.extensions.clone();
-        let dispatch =
-            run_detached(async move { extensions.dispatch(from, envelope).await }).await?;
-        dispatch?;
-
-        Ok(())
-    }
-
-    /// Report whether an inbound envelope's namespace delegates its admission, so a protocol's
-    /// declaration (see [`ext::Protocol::delegates_admission`]) reaches core's admission. Core
-    /// alone decides whether delegation applies to the delivering edge.
-    fn delegates_admission(&self, application_payload: &[u8]) -> bool {
-        self.extensions.delegates_admission(application_payload)
-    }
-
-    /// Translate the swarm's events into the observer's facts: an admission and a retirement.
-    async fn on_event(&self, event: &SwarmEvent) -> Result<(), rings_core::error::CallbackError> {
-        let Some(observer) = self.observer.as_deref() else {
-            return Ok(());
-        };
-        match event.peer_transition() {
-            Some((peer, PeerTransition::Admitted)) => observer.peer_admitted(peer),
-            Some((peer, PeerTransition::Retired)) => observer.peer_retired(peer),
-            None => {}
         }
-        Ok(())
+    }
+
+    /// Handle one item of the application inbox.
+    pub async fn handle(&self, delivery: ApplicationDelivery) -> Result<()> {
+        match delivery {
+            ApplicationDelivery::Message(ApplicationMessage {
+                from,
+                data: ApplicationData::Custom(CustomMessage(bytes)),
+                ..
+            }) => {
+                let envelope = Envelope::decode(&bytes)?;
+                self.extensions.dispatch(from, envelope).await
+            }
+            ApplicationDelivery::Event(event) => {
+                if let Some(observer) = self.observer.as_deref() {
+                    match event {
+                        SwarmEvent::PeerAdmitted { peer } => observer.peer_admitted(peer),
+                        SwarmEvent::PeerRetired { peer } => observer.peer_retired(peer),
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 }

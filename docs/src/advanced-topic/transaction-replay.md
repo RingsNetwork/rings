@@ -81,7 +81,7 @@ SequenceState {
 - `Stale` rejects a sequence below the retained window.
 
 The final destination applies this transition after both transaction and payload signatures
-verify and before application validation, handler effects, or the application inbound callback.
+verify and before handler effects or the application inbox.
 An intermediate Chord relay does not read or advance origin replay state. Chunk envelopes retain
 their existing bounded reassembly/tombstone replay defense and do not advance logical transaction
 replay state. Each envelope binds the already-reserved logical sequence without consuming another

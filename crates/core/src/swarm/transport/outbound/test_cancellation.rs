@@ -46,7 +46,6 @@ async fn admit_detached_peer(node: &Swarm, peer: Did) {
         .expect("fixture reserves a pending generation");
     let callback = node
         .inner_callback()
-        .expect("fixture callback is installed")
         .with_pending_connection_attempt(attempt);
     node.transport
         .new_pending_connection(attempt, callback)

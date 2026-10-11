@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -44,7 +43,6 @@ use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::StorageSyncDeliveryCursor;
 use crate::dht::VirtualNodeConfig;
-use crate::error::CallbackError;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::MeasureImpl;
@@ -53,8 +51,8 @@ use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::DhtProtocolMode;
 use crate::message::TransactionReplay;
-use crate::swarm::callback::SwarmCallbackSlot;
-use crate::swarm::callback::SwarmEvent;
+use crate::swarm::application::ApplicationPort;
+use crate::swarm::application::SwarmEvent;
 use crate::swarm::observer::MessageObservation;
 use crate::swarm::observer::SharedSwarmObserver;
 use crate::utils::get_epoch_ms_i64;
@@ -62,15 +60,17 @@ use crate::utils::get_epoch_ms_i64;
 mod connection;
 mod delivery;
 pub(crate) mod egress;
-mod event_delivery;
 #[cfg(test)]
 mod frame_ledger;
 mod hold_budget;
+#[cfg(test)]
+mod inbound_tap;
 mod link_control;
 mod liveness;
 mod measurement;
 mod outbound;
 mod payload_send;
+mod peer_operation;
 mod pending;
 mod readiness;
 mod retention;
@@ -89,10 +89,6 @@ pub(crate) use self::connection::AdmittedConnection;
 pub(crate) use self::delivery::delivery_stall_deadline_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::delivery::SendCompletionOutcome;
-use self::event_delivery::PeerOperationLocks;
-use self::event_delivery::SwarmEventDeliveryLock;
-use self::event_delivery::SwarmEventDeliveryLocks;
-pub(crate) use self::event_delivery::SwarmEventDeliveryTurn;
 #[cfg(test)]
 pub(crate) use self::frame_ledger::FrameInFlight;
 #[cfg(test)]
@@ -101,6 +97,8 @@ use self::frame_ledger::FrameLedger;
 pub(crate) use self::frame_ledger::FrameSample;
 pub(crate) use self::hold_budget::SessionHoldBudget;
 pub(crate) use self::hold_budget::SessionHoldPermit;
+#[cfg(test)]
+pub(crate) use self::inbound_tap::InboundTap;
 use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -131,11 +129,10 @@ pub(crate) use self::outbound::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 pub(crate) use self::outbound::OUTBOUND_LANE_WINDOW;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
-pub(crate) use self::pending::ConnectionEventDisposition;
+use self::peer_operation::PeerOperationLocks;
 use self::pending::ConnectionLifecycleBoundary;
 pub(crate) use self::pending::PendingConnectionAttempt;
 use self::pending::PendingFingerUpdates;
-use self::pending::Retirement;
 use self::pending::SharedConnectionLifecycles;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 use self::pending::PENDING_CONNECTION_TIMEOUT_MS;
@@ -169,8 +166,6 @@ pub(crate) struct SwarmTransportParts {
     pub(crate) transaction_replay: Arc<TransactionReplay>,
     /// Storage, virtual-node and reassembly settings.
     pub(crate) settings: SwarmTransportSettings,
-    /// The application callback slot; see `SwarmTransport::callback_slot`.
-    pub(crate) callback: SwarmCallbackSlot,
     /// Bounded synchronous sink for privacy-safe operational observations.
     pub(crate) observer: SharedSwarmObserver,
 }
@@ -188,8 +183,11 @@ pub struct SwarmTransport {
     /// The frames every connection's session-link hold keeps, together.
     session_hold_budget: SessionHoldBudget,
     connection_lifecycle: ConnectionLifecycleBoundary,
-    swarm_event_delivery: SwarmEventDeliveryLocks,
-    callback: SwarmCallbackSlot,
+    /// Core's side of the application boundary (#935).
+    application: ApplicationPort,
+    /// Serializes deciding a peer transition with announcing it, so the inbox reads the
+    /// transitions of every peer in the order they were decided.
+    announcements: Mutex<()>,
     connection_creation: PeerOperationLocks,
     peer_lifecycles: SharedConnectionLifecycles,
     pending_finger_updates: Mutex<PendingFingerUpdates>,
@@ -202,6 +200,9 @@ pub struct SwarmTransport {
     /// Test builds: the frames this node sent and received; see [`FrameLedger`].
     #[cfg(test)]
     frames: Arc<FrameLedger>,
+    /// Test builds: every payload entering the logical inbound stage; see [`InboundTap`].
+    #[cfg(test)]
+    inbound_tap: InboundTap,
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
     outbound_schedulers: OutboundSchedulers,
     measured_disconnects: Mutex<MeasuredDisconnectMap>,
@@ -306,7 +307,6 @@ impl SwarmTransport {
             measure,
             transaction_replay,
             settings,
-            callback,
             observer,
         } = parts;
         let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
@@ -326,8 +326,8 @@ impl SwarmTransport {
             inbound_capacity: Arc::new(InboundCapacity::new()),
             session_hold_budget: SessionHoldBudget::new(),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
-            swarm_event_delivery: SwarmEventDeliveryLocks::new(),
-            callback,
+            application: ApplicationPort::new(),
+            announcements: Mutex::new(()),
             connection_creation: PeerOperationLocks::new(),
             peer_lifecycles: Arc::new(Mutex::new(self::pending::ConnectionLifecycleRegistry::new(
                 lifecycle_bounds,
@@ -340,6 +340,8 @@ impl SwarmTransport {
             storage_repair_requested: AtomicBool::new(false),
             #[cfg(test)]
             frames: Arc::default(),
+            #[cfg(test)]
+            inbound_tap: InboundTap::default(),
             storage_repair_cursor: Mutex::new(None),
             outbound_schedulers: OutboundSchedulers::new(measure.clone()),
             measured_disconnects: Mutex::new(BTreeMap::new()),
@@ -506,75 +508,41 @@ impl SwarmTransport {
         &self.frames
     }
 
+    /// Test builds: every payload entering the logical inbound stage; see [`InboundTap`].
+    #[cfg(test)]
+    pub(crate) fn inbound_tap_for_test(&self) -> &InboundTap {
+        &self.inbound_tap
+    }
+
     #[cfg(test)]
     pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
         self.inbound_capacity.admitted_count_for_test()
     }
 
-    fn swarm_event_delivery_lock(&self, peer: Did) -> SwarmEventDeliveryLock {
-        self.swarm_event_delivery.lock(peer)
+    /// Core's side of the application boundary: the inbox it writes, the lookups it answers
+    /// and the delegations it reads.
+    pub(crate) fn application(&self) -> &ApplicationPort {
+        &self.application
     }
 
-    /// The application callback slot this transport delivers swarm events through; the swarm
-    /// shares it so `Swarm::set_callback` replaces the target of both.
-    pub(super) fn callback_slot(&self) -> &SwarmCallbackSlot {
-        &self.callback
-    }
-
-    /// Announce a retirement through `turn`, the peer's ordered delivery turn acquired before
-    /// the record was retired: [`SwarmEvent::PeerRetired`] is delivered iff the admission it
-    /// ends was announced, so the application sees one retirement per admission it saw, in
-    /// the order the swarm decided them. A failing application callback is logged, never
-    /// propagated: the retirement has already happened.
-    async fn announce_retirement(
+    /// Decide a peer transition and announce the fact it concludes, if any, as one step:
+    /// no other announcement interleaves, so for every peer the inbox reads its facts in the
+    /// order they were decided. `decide` must not wait; nothing here awaits the application.
+    pub(crate) fn decide_and_announce<T>(
         &self,
-        turn: SwarmEventDeliveryTurn,
-        peer: Did,
-        retirement: Retirement,
-    ) {
-        if !retirement.announced_admission() {
-            return;
+        decide: impl FnOnce() -> Result<(T, Option<SwarmEvent>)>,
+    ) -> Result<T> {
+        let _order = self
+            .announcements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (decided, event) = decide()?;
+        if let Some(event) = event {
+            #[cfg(test)]
+            crate::tests::activity::record_activity();
+            self.application.outlet.announce(event);
         }
-        if let Err(error) = self.deliver_retirement(turn, peer).await {
-            tracing::error!(%peer, %error, "peer retirement callback failed");
-        }
-    }
-
-    /// Start [`SwarmEvent::PeerRetired`] for `peer` on the current application callback under
-    /// `turn`.
-    async fn deliver_retirement(
-        &self,
-        turn: SwarmEventDeliveryTurn,
-        peer: Did,
-    ) -> std::result::Result<(), CallbackError> {
-        let callback = self.callback.current()?;
-        turn.poll_once_then_release(callback.on_event(&SwarmEvent::PeerRetired { peer }))
-            .await
-    }
-
-    /// Run `deliver` under `peer`'s ordered delivery turn: the turn is acquired before `deliver`
-    /// runs, and the turn's sequence is pruned once it returns, whatever it returns.
-    pub(crate) async fn with_delivery_turn<T, Fut>(
-        &self,
-        peer: Did,
-        deliver: impl FnOnce(SwarmEventDeliveryTurn) -> Fut,
-    ) -> T
-    where
-        Fut: Future<Output = T>,
-    {
-        let delivery = self.swarm_event_delivery_lock(peer);
-        let outcome = deliver(delivery.acquire().await).await;
-        self.prune_swarm_event_delivery_lock(peer, &delivery);
-        outcome
-    }
-
-    fn prune_swarm_event_delivery_lock(&self, peer: Did, delivery: &SwarmEventDeliveryLock) {
-        self.swarm_event_delivery
-            .prune(peer, delivery, self.connection_epoch_exists(peer));
-    }
-
-    fn connection_epoch_exists(&self, peer: Did) -> bool {
-        self.has_connection_attempt(peer).unwrap_or(false)
+        Ok(decided)
     }
 
     /// Record that `peer` reached an open data channel.

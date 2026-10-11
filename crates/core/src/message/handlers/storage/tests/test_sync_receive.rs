@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use bytes::Bytes;
 
 use super::super::finish_storage_action;
@@ -9,7 +7,6 @@ use super::test_support::next_payload_for_tx;
 use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::remote_storage_placement_after;
-use super::test_support::NoopCallback;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::EntryKind;
@@ -64,7 +61,7 @@ fn test_finish_storage_action_rejects_unhandled_action() -> Result<()> {
 #[tokio::test]
 async fn test_sync_entries_handler_stores_entry_at_placement_key() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let resource_id = Did::from(10u32);
     let entry = live_entry(resource_id, vec![Bytes::from("placed")], EntryKind::Data);
     let placement_key = entry
@@ -105,7 +102,7 @@ async fn test_sync_entries_handler_stores_entry_at_placement_key() -> Result<()>
 #[tokio::test]
 async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let entry = live_entry(
         Did::from(10u32),
         (0..ENTRY_DATA_MAX_LEN + 3)
@@ -150,7 +147,7 @@ async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
 #[tokio::test]
 async fn test_sync_entries_handler_rejects_non_affine_placement_before_writing() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let valid_entry = live_entry(
         Did::from(20u32),
         vec![Bytes::from("valid")],
@@ -323,7 +320,7 @@ async fn test_sync_entries_handler_accepts_placement_destination_on_local_branch
     assert_no_more_msg([&node1, &node2]).await;
     install_two_node_chord_view(&node1, &node2)?;
 
-    let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node1.swarm.transport.clone());
     let placement_key = node2.did();
     assert!(matches!(
         node1.dht().find_storage_owner(placement_key)?,
@@ -381,8 +378,7 @@ async fn test_additive_repair_sync_persists_without_cleanup_report() -> Result<(
     }
     *receiver.dht().lock_predecessor()? = None;
 
-    let receiver_handler =
-        MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+    let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
     let placement_key = Did::from(10u32);
     assert!(matches!(
         receiver.dht().find_storage_owner(placement_key)?,
@@ -448,8 +444,7 @@ async fn test_sync_entries_handler_rejects_mismatched_placement_destination() ->
         receiver.did(),
         destination_key,
     )?;
-    let receiver_handler =
-        MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+    let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
 
     receiver_handler.handle(&context, &sync_msg).await?;
 
@@ -498,8 +493,7 @@ async fn test_sync_entries_handler_rejects_physical_destination_for_unowned_plac
         receiver.did(),
         receiver.did(),
     )?;
-    let receiver_handler =
-        MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+    let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
 
     receiver_handler.handle(&context, &sync_msg).await?;
 
@@ -553,8 +547,7 @@ async fn test_sync_entries_handler_acks_local_branch_with_successor_witness() ->
         receiver.did(),
         receiver.did(),
     )?;
-    let receiver_handler =
-        MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+    let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
 
     receiver_handler.handle(&context, &sync_msg).await?;
 

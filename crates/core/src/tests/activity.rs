@@ -1,24 +1,20 @@
 //! Activity sources and the quiescence predicate of core's test nodes, native and browser.
 //!
 //! The activity cell and the activity-woken probe live in [`rings_test_support::activity`];
-//! this module wires core's test nodes to it. A node's observer ([`ActivityObserver`]) and
-//! callback ([`ActivityCallback`]) record activity on every message delivered, received,
-//! handled or stored and on every lookup event and connection event; the transport's frame
-//! ledger records it on every frame sent, arrived or handed off, and feeds the conservation
-//! clause of [`swarms_quiescent`].
+//! this module wires core's test nodes to it. A node's observer ([`ActivityObserver`]) records
+//! activity on every message delivered, received, handled or stored and on every lookup event;
+//! the transport's inbound tap records it on every payload entering the logical stage, and its
+//! announcements on every peer fact; the transport's frame ledger records it on every frame
+//! sent, arrived or handed off, and feeds the conservation clause of [`swarms_quiescent`].
 
 use std::future::Future;
 use std::time::Duration;
 
-use async_trait::async_trait;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use rings_test_support::activity::activity_after;
 pub(crate) use rings_test_support::activity::activity_mark;
 pub(crate) use rings_test_support::activity::record_activity;
 
-use crate::message::MessagePayload;
-use crate::swarm::callback::SwarmCallback;
-use crate::swarm::callback::SwarmEvent;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
 use crate::swarm::observer::LookupOutcome;
@@ -58,39 +54,6 @@ impl SwarmObserver for ActivityObserver {
         _outcome: LookupOutcome,
     ) {
         record_activity();
-    }
-}
-
-/// Callback of a test swarm: records activity on every validated or handled message and on
-/// every connection event.
-pub(crate) struct ActivityCallback;
-
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl SwarmCallback for ActivityCallback {
-    async fn on_validate(
-        &self,
-        _payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        record_activity();
-        Ok(())
-    }
-
-    async fn on_inbound(
-        &self,
-        _payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        // The message has been handled; the state it changed is now observable.
-        record_activity();
-        Ok(())
-    }
-
-    async fn on_event(
-        &self,
-        _event: &SwarmEvent,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        record_activity();
-        Ok(())
     }
 }
 

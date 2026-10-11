@@ -1,7 +1,6 @@
 use super::finish_completion;
 use super::memory_reservation;
 use super::InboundEvent;
-use super::InboundFailure;
 use super::InboundLane;
 use super::InboundProcessor;
 use crate::chunk::ReassemblyOutcome;
@@ -105,7 +104,7 @@ pub(super) async fn process_chunk_event(
                 completion: event.completion,
             });
         }
-        Err(error) => Err(InboundFailure::Core(error)),
+        Err(error) => Err(error),
     };
     finish_completion(event.completion, terminal_reply);
     None

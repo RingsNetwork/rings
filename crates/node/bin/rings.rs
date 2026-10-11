@@ -316,7 +316,8 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         Some(supervisor) => backend.observed_by(supervisor.observer()),
         None => backend,
     };
-    processor.swarm.set_callback(Arc::new(backend))?;
+    // Claimed before the processor listens, so no application data is discarded unclaimed.
+    let application_inbox = processor.swarm.application_inbox()?;
 
     let stop = StopSource::new();
     let gateway_configured = gateway_runner.is_some();
@@ -335,6 +336,11 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     await_gateway_startup(gateway_configured, gateway_startup, &mut gateway_task).await?;
 
     let mut tasks = JoinSet::new();
+    tasks.spawn(async move {
+        // Returns only once the swarm is gone, which no running node reaches.
+        backend.serve(application_inbox).await;
+        anyhow::bail!("application inbox closed unexpectedly")
+    });
     let processor_task = processor.clone();
     let processor_stop = stop.token();
     let mut processor_task = tokio::spawn(async move {

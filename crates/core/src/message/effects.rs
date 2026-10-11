@@ -35,7 +35,6 @@ use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
 use crate::swarm::callback::InnerSwarmCallback;
-use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::observer::MessageActivity;
 use crate::swarm::observer::MessageObservation;
 use crate::swarm::observer::ObservationOutcome;
@@ -395,19 +394,12 @@ pub(crate) fn lower_dht_action<'payload>(
 /// Interpreter from `CoreEffect` into the current transport implementation.
 pub(crate) struct CoreEffectInterpreter<'handler> {
     transport: &'handler Arc<SwarmTransport>,
-    swarm_callback: &'handler SharedSwarmCallback,
 }
 
 impl<'handler> CoreEffectInterpreter<'handler> {
     /// Create an interpreter over the current swarm transport.
-    pub(crate) fn new(
-        transport: &'handler Arc<SwarmTransport>,
-        swarm_callback: &'handler SharedSwarmCallback,
-    ) -> Self {
-        Self {
-            transport,
-            swarm_callback,
-        }
+    pub(crate) fn new(transport: &'handler Arc<SwarmTransport>) -> Self {
+        Self { transport }
     }
 
     fn connection_is_satisfied(&self, peer: Did) -> bool {
@@ -489,10 +481,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                     return Ok(());
                 }
 
-                let callback = InnerSwarmCallback::new(
-                    Arc::clone(self.transport),
-                    Arc::clone(self.swarm_callback),
-                );
+                let callback = InnerSwarmCallback::new(Arc::clone(self.transport));
                 match self.transport.connect_with(peer, callback, &egress).await {
                     Ok(()) | Err(Error::AlreadyConnected) => Ok(()),
                     Err(

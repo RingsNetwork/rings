@@ -18,8 +18,7 @@ use rings_core::measure::EvidencePage;
 use rings_core::measure::PeerMeasurement;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::MemStorage;
-use rings_core::swarm::callback::SharedSwarmCallback;
-use rings_core::swarm::callback::SwarmCallback;
+use rings_core::swarm::application::ApplicationInbox;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
 use crate::error::Error;
@@ -81,10 +80,6 @@ pub enum Signer {
     /// Async signer
     Async(AsyncSigner),
 }
-
-struct NoopSwarmCallback;
-
-impl SwarmCallback for NoopSwarmCallback {}
 
 #[allow(dead_code)]
 impl Provider {
@@ -298,28 +293,24 @@ impl Provider {
         .await
     }
 
-    /// Install the extension [`Backend`] as the swarm's inbound callback, so inbound
-    /// custom messages are decoded as [`Envelope`](crate::extension::ext::Envelope)s and
-    /// routed to their namespace's protocol. Call once after registering protocols.
+    /// Serve the swarm's application inbox with the extension [`Backend`] on a detached task,
+    /// so inbound custom messages are decoded as
+    /// [`Envelope`](crate::extension::ext::Envelope)s and routed to their namespace's protocol.
+    /// Call once after registering protocols; the inbox is claimed once, so a second call fails.
     pub fn set_backend(&self) -> Result<()> {
         let backend = Backend::new(Arc::new(self.clone()));
-        self.processor
-            .swarm
-            .set_callback(Arc::new(backend))
-            .map_err(Error::InternalError)
+        let inbox = self.application_inbox()?;
+        rings_runtime::spawn_detached(backend.serve(inbox)).map_err(|_| {
+            Error::ExtensionError("no runtime to serve the application inbox".to_owned())
+        })
     }
 
-    pub(crate) fn set_swarm_callback_internal(&self, callback: SharedSwarmCallback) -> Result<()> {
+    /// Claim the swarm's application inbox, once (see
+    /// [`Swarm::application_inbox`](rings_core::swarm::Swarm::application_inbox)).
+    pub(crate) fn application_inbox(&self) -> Result<ApplicationInbox> {
         self.processor
             .swarm
-            .set_callback(callback)
-            .map_err(Error::InternalError)
-    }
-
-    pub(crate) fn clear_swarm_callback_internal(&self) -> Result<()> {
-        self.processor
-            .swarm
-            .set_callback(Arc::new(NoopSwarmCallback))
+            .application_inbox()
             .map_err(Error::InternalError)
     }
 

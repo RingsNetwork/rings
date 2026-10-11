@@ -1,8 +1,6 @@
 //! The inbound-locality law at the boundary every handler sends through (#913 R8 H1; see
 //! `swarm::transport::egress`).
 
-use std::sync::Arc;
-
 use tokio::time::timeout;
 
 use super::CoreEffect;
@@ -17,18 +15,11 @@ use crate::message::MessageSigner;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
-use crate::swarm::callback::SharedSwarmCallback;
-use crate::swarm::callback::SwarmCallback;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::default::credit_starvation::connected_pair;
 use crate::tests::default::credit_starvation::starve_every_lane;
 use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::TEST_NETWORK_ID;
-
-/// A callback without behaviour: the interpreter needs one to start connections.
-struct NoopCallback;
-
-impl SwarmCallback for NoopCallback {}
 
 /// While the next hop withholds credit on every lane, each sending [`CoreEffect`] returns `Ok`
 /// with its payload waiting in the next hop's queue. A handler therefore never holds the
@@ -41,8 +32,7 @@ async fn test_every_effect_returns_once_queued_while_its_next_hop_withholds_cred
     let (node1, node2) = connected_pair().await?;
     let peer = node2.did();
     let held = starve_every_lane(&node2, &node1)?;
-    let callback: SharedSwarmCallback = Arc::new(NoopCallback);
-    let interpreter = CoreEffectInterpreter::new(&node1.swarm.transport, &callback);
+    let interpreter = CoreEffectInterpreter::new(&node1.swarm.transport);
     let third = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let carried = || {
         MessagePayload::new_send(

@@ -5,13 +5,12 @@ use std::sync::Mutex;
 use rings_transport::core::transport::TransportInterface;
 /// Finger-table proof admission at the pending/active transport boundary.
 ///
-/// The module-level algorithm and its exhaustive lifecycle branches are
-/// documented in `pending::finger`.
+/// The module-level algorithm, its exhaustive lifecycle branches and the transition that
+/// interprets them live in `pending::finger`.
 mod finger;
 mod registry;
 
-use finger::finger_candidate_admission;
-use finger::FingerCandidateAdmission;
+#[cfg(all(test, feature = "dummy"))]
 pub(crate) use finger::FingerUpdateDisposition;
 pub(super) use registry::ActiveConnectionSet;
 pub(super) use registry::ConnectionLifecycleRegistry;
@@ -24,8 +23,6 @@ pub(super) use registry::RetirementOutcome;
 
 use super::SwarmConnection;
 use super::SwarmTransport;
-use crate::dht::finger::FingerDeferOutcome;
-use crate::dht::finger::FingerRetireOutcome;
 use crate::dht::Did;
 use crate::dht::FingerFixRequest;
 use crate::dht::PeerRingAction;
@@ -142,17 +139,6 @@ impl PendingConnectionAttempt {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ConnectionEventDisposition {
-    /// Deliver the callback because it still belongs to the current generation or no owner exists.
-    Deliver,
-    /// Drop the callback because another active generation already owns the peer.
-    Suppress {
-        /// Current active generation that superseded the callback source.
-        active: PendingConnectionAttempt,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RawConnectionOwner {
     /// Raw transport belongs to a still-unadmitted logical attempt.
     Pending(PendingConnectionAttempt),
@@ -160,21 +146,6 @@ pub(super) enum RawConnectionOwner {
     Owned,
     /// Raw transport exists after its logical lifecycle slot was removed.
     Orphan,
-}
-
-fn event_disposition(
-    state: Option<PeerConnectionLifecycle>,
-    source: PendingConnectionAttempt,
-) -> ConnectionEventDisposition {
-    match state {
-        Some(PeerConnectionLifecycle::Active {
-            attempt: active, ..
-        }) if active != source => ConnectionEventDisposition::Suppress { active },
-        Some(PeerConnectionLifecycle::Pending { .. })
-        | Some(PeerConnectionLifecycle::Admitting { .. })
-        | Some(PeerConnectionLifecycle::Active { .. })
-        | None => ConnectionEventDisposition::Deliver,
-    }
 }
 
 /// The retired value of an outcome, its announcement witness projected away; for tests that
@@ -477,20 +448,6 @@ impl SwarmTransport {
             .is_some_and(|state| state.attempt() == attempt))
     }
 
-    pub(crate) fn connection_event_disposition(
-        &self,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<ConnectionEventDisposition> {
-        Ok(event_disposition(
-            self.peer_connection_lifecycle(attempt.peer)?,
-            attempt,
-        ))
-    }
-
-    fn peer_connection_lifecycle(&self, peer: Did) -> Result<Option<PeerConnectionLifecycle>> {
-        Ok(self.peer_lifecycles()?.state(peer))
-    }
-
     /// Start admission only after the coherent transport product state can make progress.
     ///
     /// Data-channel and peer-connection callbacks are independent inputs. Browsers may therefore
@@ -672,8 +629,8 @@ impl SwarmTransport {
     }
 
     /// Mark the admission of `attempt` as announced to the application, iff `attempt` still
-    /// owns the active slot. Called in the delivery turn that then starts `Connected`, and
-    /// observed atomically with retirement under the lifecycle boundary; see
+    /// owns the active slot. Called in the announcement step that announces `PeerAdmitted`,
+    /// and observed atomically with retirement under the lifecycle boundary; see
     /// `PeerConnectionLifecycle::Active`.
     pub(crate) fn mark_admission_announced(
         &self,
@@ -750,111 +707,6 @@ impl SwarmTransport {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn retirement_waiter_count_for_test(&self) -> usize {
         self.connection_lifecycle.waiting_for_test()
-    }
-
-    /// Apply one finger candidate or retain its proof until its current handshake commits.
-    ///
-    /// `request` identifies the specific finger lookup being satisfied. The
-    /// returned disposition tells the message handler whether it should open a
-    /// transport connection or cancel a proof that could not gain an owner.
-    pub(crate) fn record_finger_candidate(
-        &self,
-        peer: Did,
-        request: FingerFixRequest,
-    ) -> Result<FingerUpdateDisposition> {
-        self.record_finger_candidate_with_observer(peer, request, || {})
-    }
-
-    /// Classify and either apply, retain, or reject a reported finger candidate.
-    ///
-    /// The lifecycle boundary covers the snapshot, proof transfer, and queue
-    /// attachment so retirement cannot change the owning generation between
-    /// validation and commit. `observe_admission` is a test synchronization
-    /// hook invoked only after the branch is selected and before its mutation.
-    fn record_finger_candidate_with_observer(
-        &self,
-        peer: Did,
-        request: FingerFixRequest,
-        observe_admission: impl FnOnce(),
-    ) -> Result<FingerUpdateDisposition> {
-        // The lifecycle guard keeps classification, proof transfer, and queue
-        // attachment in one critical section. No async network effect occurs
-        // while it is held.
-        let _lifecycle_guard = self.connection_lifecycle()?;
-        if peer == self.dht.did {
-            return self
-                .dht
-                .apply_fixed_finger(request, peer)
-                .map(FingerUpdateDisposition::from);
-        }
-        let (lifecycle, active) = {
-            let lifecycles = self.peer_lifecycles()?;
-            (lifecycles.state(peer), lifecycles.active_connections())
-        };
-        let is_routable = self.is_routable_active_candidate(peer, &active);
-        match finger_candidate_admission(lifecycle, is_routable) {
-            FingerCandidateAdmission::Queue(current) => {
-                observe_admission();
-                // Acquire the queue before transferring proof ownership. If
-                // this lock fails, the proof remains AwaitingReport rather
-                // than becoming an admission proof with no transport owner.
-                let mut pending_updates = self.pending_finger_updates()?;
-                match self.dht.defer_fixed_finger(request, peer)? {
-                    FingerDeferOutcome::Deferred => {
-                        // The DHT owns one attempt at a time, so a generation
-                        // retains one proof; a newer request replaces one the
-                        // DHT has already released.
-                        pending_updates.insert(current, request);
-                        Ok(FingerUpdateDisposition::Queued)
-                    }
-                    FingerDeferOutcome::Rejected(rejection) => {
-                        Ok(FingerUpdateDisposition::Rejected(rejection))
-                    }
-                }
-            }
-            FingerCandidateAdmission::Apply => {
-                observe_admission();
-                self.dht
-                    .apply_fixed_finger(request, peer)
-                    .map(FingerUpdateDisposition::from)
-            }
-            FingerCandidateAdmission::Missing => {
-                observe_admission();
-                // The report becomes a durable, expiring admission proof
-                // before the caller starts an async WebRTC handshake. A
-                // cancelled or hung handler therefore cannot strand it.
-                self.dht
-                    .defer_fixed_finger(request, peer)
-                    .map(|outcome| match outcome {
-                        FingerDeferOutcome::Deferred => FingerUpdateDisposition::Missing,
-                        FingerDeferOutcome::Rejected(rejection) => {
-                            FingerUpdateDisposition::Rejected(rejection)
-                        }
-                    })
-            }
-            FingerCandidateAdmission::Unroutable => {
-                // Validate token and successor in the same topology
-                // transition that retires the unusable candidate. Checking
-                // only the token here would let a conflicting duplicate evict
-                // a different successor's retained admission proof.
-                match self.dht.retire_finger_candidate(request, peer)? {
-                    FingerRetireOutcome::Retired => Ok(FingerUpdateDisposition::Unroutable),
-                    FingerRetireOutcome::Rejected(rejection) => {
-                        Ok(FingerUpdateDisposition::Rejected(rejection))
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn record_finger_candidate_with_observer_for_test(
-        &self,
-        peer: Did,
-        request: FingerFixRequest,
-        observe_admission: impl FnOnce(),
-    ) -> Result<FingerUpdateDisposition> {
-        self.record_finger_candidate_with_observer(peer, request, observe_admission)
     }
 
     /// Cancel a current pending or admitting handshake and release its transport object.

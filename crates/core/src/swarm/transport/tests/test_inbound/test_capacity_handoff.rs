@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use rings_transport::callback::AdmittedInboundFrame;
 use rings_transport::callback::InboundFrameAdmission;
 use rings_transport::callback::InnerTransportCallback;
@@ -9,24 +10,6 @@ use rings_transport::core::transport::TransportMessage;
 use rings_transport::notifier::Notifier;
 
 use super::*;
-
-#[derive(Default)]
-struct BlockingValidateSwarmCallback {
-    started: TestLatch,
-    release: TestLatch,
-}
-
-#[async_trait]
-impl SwarmCallback for BlockingValidateSwarmCallback {
-    async fn on_validate(
-        &self,
-        _payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        self.started.set();
-        self.release.wait().await;
-        Ok(())
-    }
-}
 
 struct SharedCoreCallback(Arc<InnerSwarmCallback>);
 
@@ -97,11 +80,9 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
         rings_codec::serialize(&TransportMessage::Custom(payload))
             .map_err(|error| Error::InvalidMessage(error.to_string()))?,
     );
-    let application = Arc::new(BlockingValidateSwarmCallback::default());
-    let core_callback = Arc::new(InnerSwarmCallback::new(
-        Arc::clone(&transport),
-        application.clone(),
-    ));
+    let inbox = claim_full_application_inbox(&transport)?;
+    let mut tap = transport.inbound_tap_for_test().subscribe();
+    let core_callback = Arc::new(InnerSwarmCallback::new(Arc::clone(&transport)));
     let admission_blocker = core_callback.hold_application_admission_for_test()?;
     let transport_callback = Arc::new(InnerTransportCallback::new(
         &peer.to_string(),
@@ -120,19 +101,23 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
     });
 
     // The raw lease is released at the core handoff, once core capacity admits
-    // the decoded frame and before the application sees it: the application
-    // lane is still held, so `on_validate` has not started.
+    // the decoded frame and before the logical stage sees it: the application
+    // lane is still held, so the frame has not entered that stage.
     let released =
         wait_for_raw_capacity_release(&core_callback, &transport_callback, &raw, &mut window)
             .await?;
     assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
-    assert!(!application.started.is_set());
+    assert!(tap.try_recv().is_err());
     drop((released, window));
 
+    // Released, the frame is handled and then waits for inbox room, still holding its core
+    // permit: only the core permit outlives the handoff.
     drop(admission_blocker);
-    application.started.wait().await;
+    tap.next()
+        .await
+        .ok_or_else(|| Error::InvalidMessage("inbound tap closed".to_string()))?;
     assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
-    application.release.set();
+    release_full_application_inbox(&inbox)?;
     dispatch
         .await
         .map_err(|_| Error::InvalidMessage("transport dispatch task panicked".to_string()))?;

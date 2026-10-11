@@ -24,13 +24,11 @@ use super::InboundGate;
 use super::InboundProcessor;
 use super::InnerSwarmCallback;
 use super::PreparedInboundFrame;
-use super::SharedSwarmCallback;
-use super::SwarmEvent;
 use super::TransportCallbackError;
 use crate::dht::Did;
 use crate::message::MessagePayload;
+use crate::swarm::application::SwarmEvent;
 use crate::swarm::detached::run_detached_or_inline;
-use crate::swarm::transport::ConnectionEventDisposition;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -47,18 +45,17 @@ impl InnerSwarmCallback {
         }
     }
 
-    /// Create a new [InnerSwarmCallback] with the provided transport and callback.
-    pub fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
-        Self::new_with_reassembly_clock(transport, callback, ReassemblyClock::system())
+    /// Create the transport callback of one connection of `transport`.
+    pub fn new(transport: Arc<SwarmTransport>) -> Self {
+        Self::new_with_reassembly_clock(transport, ReassemblyClock::system())
     }
 
     fn new_with_reassembly_clock(
         transport: Arc<SwarmTransport>,
-        callback: SharedSwarmCallback,
         reassembly_clock: ReassemblyClock,
     ) -> Self {
         let inbound_capacity = transport.inbound_capacity();
-        let processor = InboundProcessor::new(transport, callback, reassembly_clock.clone());
+        let processor = InboundProcessor::new(transport, reassembly_clock.clone());
         let inbound = InboundMailbox::spawn(processor.clone(), inbound_capacity, reassembly_clock);
         Self { processor, inbound }
     }
@@ -68,10 +65,9 @@ impl InnerSwarmCallback {
     /// read one injected clock.
     pub(crate) fn new_with_reassembly_clock_for_test(
         transport: Arc<SwarmTransport>,
-        callback: SharedSwarmCallback,
         now_ms: Arc<Mutex<u128>>,
     ) -> Self {
-        Self::new_with_reassembly_clock(transport, callback, ReassemblyClock::controlled(now_ms))
+        Self::new_with_reassembly_clock(transport, ReassemblyClock::controlled(now_ms))
     }
 
     /// Bind this callback to the pending handshake that created its transport.
@@ -222,7 +218,7 @@ impl InnerSwarmCallback {
         {
             return Ok(false);
         }
-        let connected = self.emit_connected_event_for_attempt(did, attempt).await;
+        let connected = self.emit_connected_event_for_attempt(did, attempt);
         if self
             .processor
             .logical
@@ -234,69 +230,24 @@ impl InnerSwarmCallback {
         connected
     }
 
-    async fn emit_connected_event_for_attempt(
+    /// Announce `attempt`'s admission as [`SwarmEvent::PeerAdmitted`] in the same step as
+    /// marking it announced, unless it was retired first. Returns whether it was announced.
+    fn emit_connected_event_for_attempt(
         &self,
         did: Did,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool, CallbackError> {
         let transport = &self.processor.logical.transport;
-        transport
-            .with_delivery_turn(did, |delivery_turn| async move {
-                if !transport.mark_admission_announced(attempt)? {
-                    tracing::debug!("suppressing connected event for {did}; connection was retired before event delivery");
-                    return Ok(false);
-                }
-                self.emit_connection_state_change_after_ordered_start(
-                    delivery_turn,
-                    did,
-                    WebrtcConnectionState::Connected,
-                )
-                .await?;
-                Ok(true)
-            })
-            .await
-    }
-
-    async fn emit_connection_state_change(
-        &self,
-        did: Did,
-        state: WebrtcConnectionState,
-        attempt: Option<PendingConnectionAttempt>,
-    ) -> Result<(), CallbackError> {
-        let transport = &self.processor.logical.transport;
-        transport
-            .with_delivery_turn(did, |delivery_turn| async move {
-                if let Some(attempt) = attempt {
-                    match transport.connection_event_disposition(attempt)? {
-                        ConnectionEventDisposition::Deliver => {}
-                        ConnectionEventDisposition::Suppress { active } => {
-                            tracing::debug!(
-                                peer = %did,
-                                generation = attempt.generation(),
-                                active_generation = active.generation(),
-                                state = ?state,
-                                "suppressing connection event from superseded generation"
-                            );
-                            return Ok(());
-                        }
-                    }
-                }
-                self.emit_connection_state_change_after_ordered_start(delivery_turn, did, state)
-                    .await
-            })
-            .await
-    }
-
-    async fn emit_connection_state_change_after_ordered_start(
-        &self,
-        delivery_turn: crate::swarm::transport::SwarmEventDeliveryTurn,
-        did: Did,
-        state: WebrtcConnectionState,
-    ) -> Result<(), CallbackError> {
-        let event = SwarmEvent::ConnectionStateChange { peer: did, state };
-        delivery_turn
-            .poll_once_then_release(self.processor.logical.callback.on_event(&event))
-            .await
+        Ok(transport.decide_and_announce(|| {
+            if !transport.mark_admission_announced(attempt)? {
+                tracing::debug!(
+                    "suppressing connected event for {did}; connection was retired before event \
+                     delivery"
+                );
+                return Ok((false, None));
+            }
+            Ok((true, Some(SwarmEvent::PeerAdmitted { peer: did })))
+        })?)
     }
 
     fn pending_disconnected_before_admission(&self, did: Did) -> bool {
@@ -597,14 +548,17 @@ impl TransportCallback for InnerSwarmCallback {
             return Ok(());
         }
 
-        let admission_completed = match s {
+        // Admission announces `PeerAdmitted` and retirement `PeerRetired`; a physical state is
+        // never the application's, so nothing here is announced as such.
+        match s {
             // Peer-state progress may complete admission, but only when the
             // product snapshot also observes an open data channel. This makes
             // either browser callback order converge on the same transition.
-            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected => self
-                .admit_pending_connection(did)
-                .await
-                .map_err(into_transport_callback_error)?,
+            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected => {
+                self.admit_pending_connection(did)
+                    .await
+                    .map_err(into_transport_callback_error)?;
+            }
             // `Failed` and `Closed` are terminal states. Pending handshakes are
             // discarded without touching the DHT; active peers leave it.
             WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
@@ -637,7 +591,6 @@ impl TransportCallback for InnerSwarmCallback {
                     .message_handler
                     .leave_dht_attempt(attempt)
                     .await?;
-                false
             }
             // `Disconnected` is a transient ICE state that frequently recovers
             // back to `Connected` on its own (e.g. a brief network blip or ICE
@@ -662,20 +615,9 @@ impl TransportCallback for InnerSwarmCallback {
                     .record_peer_disconnected(attempt)
                     .await;
                 tracing::debug!("Connection to {did} is disconnected, waiting for recovery");
-                false
             }
-            _ => false,
-        };
-
-        // Data-channel admission emits the application-level Connected event.
-        // Other state changes are passed through directly, unless this exact
-        // callback completed admission and already emitted the ordered Connected event.
-        if s != WebrtcConnectionState::Connected && !admission_completed {
-            self.emit_connection_state_change(did, s, self.pending_attempt())
-                .await
-                .map_err(into_transport_callback_error)?
+            _ => {}
         }
-
         Ok(())
     }
 

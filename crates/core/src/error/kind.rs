@@ -1,5 +1,3 @@
-use super::CallbackError;
-
 /// Errors collections in ring-core.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -300,6 +298,14 @@ pub enum Error {
     #[error("A lock was poisoned by a panicking holder")]
     LockPoisoned,
 
+    /// The application inbox was already claimed
+    #[error("The application inbox was already claimed")]
+    ApplicationInboxClaimed,
+
+    /// The swarm stopped before the awaited answer arrived
+    #[error("The swarm stopped before the awaited answer arrived")]
+    SwarmStopped,
+
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
     InvalidAffineScalar,
@@ -571,49 +577,6 @@ pub enum Error {
     /// A chunk was rejected for an invalid remote wire shape or metadata.
     #[error("Invalid chunk message")]
     InvalidChunkMessage,
-
-    /// The application rejected an inbound message during validation.
-    #[error("Inbound message validation failed: {source}")]
-    InboundValidationFailed {
-        /// Original application validation error.
-        #[source]
-        source: CallbackError,
-    },
-
-    /// An application validation callback did not complete within its deadline.
-    #[error("Inbound validation for {peer:?} timed out after {timeout_ms}ms")]
-    InboundValidationTimeout {
-        /// Peer associated with the inbound connection, when its DID parsed successfully.
-        peer: Option<crate::dht::Did>,
-        /// Callback deadline in milliseconds.
-        timeout_ms: u128,
-    },
-
-    /// An application callback failed after core inbound handling.
-    #[error("Inbound message callback failed: {source}")]
-    InboundCallbackFailed {
-        /// Original application callback error.
-        #[source]
-        source: CallbackError,
-    },
-
-    /// Inbound handling and its application callback did not complete within the deadline.
-    #[error("Inbound processing for {peer:?} timed out after {timeout_ms}ms")]
-    InboundProcessingTimeout {
-        /// Peer associated with the inbound connection, when its DID parsed successfully.
-        peer: Option<crate::dht::Did>,
-        /// Processing deadline in milliseconds.
-        timeout_ms: u128,
-    },
-
-    /// The browser runtime could not schedule an inbound deadline timer.
-    #[error("Inbound {operation} timer unavailable for {peer:?}")]
-    InboundTimerUnavailable {
-        /// Peer associated with the inbound connection, when its DID parsed successfully.
-        peer: Option<crate::dht::Did>,
-        /// Inbound phase whose deadline could not be scheduled.
-        operation: &'static str,
-    },
 
     /// Recv message through channel failed {0}
     #[error("Recv message through channel failed {0}")]

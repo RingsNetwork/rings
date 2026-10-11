@@ -19,7 +19,7 @@ async fn transport_with_routable_peer(
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
@@ -525,7 +525,7 @@ async fn test_pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
 
     let _offer = transport
         .prepare_connection_offer_with_attempt(peer, callback)
@@ -552,7 +552,7 @@ async fn test_incoming_offer_replaces_an_unroutable_admitted_generation() -> Res
     )?);
     let peer_did = peer.dht.did;
 
-    let old_callback = InnerSwarmCallback::new(Arc::clone(&local), Arc::new(NoopSwarmCallback));
+    let old_callback = InnerSwarmCallback::new(Arc::clone(&local));
     let (old, _) = local
         .prepare_connection_offer_with_attempt(peer_did, old_callback)
         .await?;
@@ -564,11 +564,11 @@ async fn test_incoming_offer_replaces_an_unroutable_admitted_generation() -> Res
     )?;
     local.force_peer_data_channel_open_without_callback(peer_did, Some(true))?;
 
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&peer), Arc::new(NoopSwarmCallback));
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&peer));
     let (_, offer) = peer
         .prepare_connection_offer_with_attempt(local.dht.did, offer_callback)
         .await?;
-    let answer_callback = InnerSwarmCallback::new(Arc::clone(&local), Arc::new(NoopSwarmCallback));
+    let answer_callback = InnerSwarmCallback::new(Arc::clone(&local));
 
     local
         .answer_remote_connection(peer_did, answer_callback, &offer)
@@ -602,7 +602,7 @@ async fn test_incoming_offer_replaces_an_orphaned_physical_connection() -> Resul
     )?);
     let peer_did = peer.dht.did;
 
-    let orphan_callback = InnerSwarmCallback::new(Arc::clone(&local), Arc::new(NoopSwarmCallback));
+    let orphan_callback = InnerSwarmCallback::new(Arc::clone(&local));
     let (orphan, _) = local
         .prepare_connection_offer_with_attempt(peer_did, orphan_callback)
         .await?;
@@ -612,11 +612,11 @@ async fn test_incoming_offer_replaces_an_orphaned_physical_connection() -> Resul
         RawConnectionOwner::Orphan
     );
 
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&peer), Arc::new(NoopSwarmCallback));
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&peer));
     let (_, offer) = peer
         .prepare_connection_offer_with_attempt(local.dht.did, offer_callback)
         .await?;
-    let answer_callback = InnerSwarmCallback::new(Arc::clone(&local), Arc::new(NoopSwarmCallback));
+    let answer_callback = InnerSwarmCallback::new(Arc::clone(&local));
     local
         .answer_remote_connection(peer_did, answer_callback, &offer)
         .await?;
@@ -646,17 +646,16 @@ async fn test_physical_connection_creation_serializes_replaced_generations() -> 
     let creation_guard = creation.lock().await;
 
     let old = transport.reserve_pending_connection(peer).await?;
-    let old_callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
-        .with_pending_connection_attempt(old);
+    let old_callback =
+        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(old);
     let old_creation = transport.new_pending_connection(old, old_callback);
     futures::pin_mut!(old_creation);
     assert!(futures::poll!(old_creation.as_mut()).is_pending());
 
     assert!(transport.retire_pending_connection(old)?);
     let replacement = transport.reserve_pending_connection(peer).await?;
-    let replacement_callback =
-        InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
-            .with_pending_connection_attempt(replacement);
+    let replacement_callback = InnerSwarmCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(replacement);
     let replacement_creation = transport.new_pending_connection(replacement, replacement_callback);
     futures::pin_mut!(replacement_creation);
     assert!(futures::poll!(replacement_creation.as_mut()).is_pending());
@@ -804,127 +803,6 @@ async fn test_stale_send_after_retirement_does_not_recreate_outbound_scheduler()
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn test_scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch() -> Result<()> {
-    let (transport, peer, _attempt) = transport_with_routable_peer().await?;
-    let payload = MessagePayload::new_send(
-        Message::custom(b"shutdown-at-dispatch")?,
-        transport.message_signer(),
-        peer,
-        peer,
-    )?;
-    dummy_controlled::reset_sent_count();
-    dummy_controlled::pause_send_message_at_dispatch();
-    let sending_transport = Arc::clone(&transport);
-    let send = tokio::spawn(async move {
-        sending_transport
-            .send_payload_detached_with_outcome(payload)
-            .await
-    });
-
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while !dummy_controlled::send_message_waiting_at_dispatch() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("send did not reach dispatch gate".to_string()))?;
-    transport.outbound_schedulers.shutdown(peer);
-    dummy_controlled::release_send_message_gate();
-
-    let outcome = send
-        .await
-        .map_err(|error| Error::InvalidMessage(format!("send task failed: {error}")))??;
-    assert_eq!(outcome, SendCompletionOutcome::Cancelled);
-    assert_eq!(dummy_controlled::sent_count(), 0);
-    Ok(())
-}
-
-#[cfg(feature = "dummy")]
-#[tokio::test]
-async fn test_scheduler_shutdown_after_backend_acceptance_preserves_detached_success() -> Result<()>
-{
-    let (transport, peer, _attempt) = transport_with_routable_peer().await?;
-    let payload = MessagePayload::new_send(
-        Message::custom(b"shutdown-after-backend-acceptance")?,
-        transport.message_signer(),
-        peer,
-        peer,
-    )?;
-    dummy_controlled::reset_sent_count();
-    dummy_controlled::set_drop_messages(true);
-    dummy_controlled::pause_irrevocable_send();
-    let sending_transport = Arc::clone(&transport);
-    let send = tokio::spawn(async move {
-        sending_transport
-            .send_payload_detached_with_outcome(payload)
-            .await
-    });
-
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while !dummy_controlled::irrevocable_send_gate_waiting() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("send did not become irrevocable".to_string()))?;
-    transport.outbound_schedulers.shutdown(peer);
-    dummy_controlled::release_irrevocable_send_gate();
-
-    let outcome = send
-        .await
-        .map_err(|error| Error::InvalidMessage(format!("send task failed: {error}")))??;
-    dummy_controlled::set_drop_messages(false);
-    assert_eq!(outcome, SendCompletionOutcome::Succeeded);
-    assert_eq!(dummy_controlled::sent_count(), 1);
-    assert_eq!(
-        transport.outbound_admitted_transfer_total_for_test(),
-        0,
-        "accepted completion must publish only after scheduler capacity is released"
-    );
-    Ok(())
-}
-
-#[cfg(feature = "dummy")]
-#[tokio::test]
-async fn test_scheduler_shutdown_cancels_a_send_before_queue_acceptance() -> Result<()> {
-    let (transport, peer, _attempt) = transport_with_routable_peer().await?;
-    let payload = MessagePayload::new_send(
-        Message::custom(b"linearized-before-shutdown")?,
-        transport.message_signer(),
-        peer,
-        peer,
-    )?;
-    dummy_controlled::reset_sent_count();
-    dummy_controlled::set_drop_messages(true);
-    dummy_controlled::pause_send_message_after_permit();
-    let sending_transport = Arc::clone(&transport);
-    let send = tokio::spawn(async move {
-        sending_transport
-            .send_payload_detached_with_outcome(payload)
-            .await
-    });
-
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while !dummy_controlled::post_permit_send_gate_waiting() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("send did not reach its acceptance gate".to_string()))?;
-    transport.outbound_schedulers.shutdown(peer);
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), send)
-        .await
-        .map_err(|_| Error::InvalidMessage("unaccepted send did not cancel".to_string()))?
-        .map_err(|error| Error::InvalidMessage(format!("send task failed: {error}")))??;
-    dummy_controlled::release_post_permit_send_gate();
-    dummy_controlled::set_drop_messages(false);
-    assert_eq!(outcome, SendCompletionOutcome::Cancelled);
-    assert_eq!(dummy_controlled::sent_count(), 0);
-    Ok(())
-}
-
-#[cfg(feature = "dummy")]
-#[tokio::test]
 async fn test_routable_join_serializes_with_generation_retirement() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
     let (hold_lifecycle, lifecycle_gate) = lifecycle_test_gate();
@@ -1019,3 +897,10 @@ async fn test_predecessor_notification_serializes_with_generation_retirement() -
 /// The child module checks that deferred proofs follow the exact connection
 /// generation that owns admission, cancellation, or retirement.
 mod finger;
+
+#[cfg(feature = "dummy")]
+/// Outbound scheduler shutdown regression tests.
+///
+/// The child module checks that a shutdown cancels exactly the sends that were not yet
+/// irrevocable.
+mod scheduler;

@@ -5,14 +5,15 @@
 //! pass the DHT emits [`InboxDelivery::deliver_inbox`]; this interpreter reads the inbox from
 //! local storage, retires at once every element that fails the witness for good under the local
 //! overlay (an element held ahead of this clock is kept for a later pass, as
-//! `Entry::partition_inbox` states), and then, element by element, delivers through the inbound pipeline (application validation,
-//! handler dispatch, `on_inbound`, each under the inbound deadline) and retires the delivered
-//! element by its add dot. Retiring per element makes progress durable: a pass cut short by its
-//! step deadline resumes after the last retired element instead of redelivering the same prefix.
+//! `Entry::partition_inbox` states), and then, element by element, delivers through the inbound
+//! pipeline (handler dispatch, then the application inbox) and retires the delivered element by
+//! its add dot. Retiring per element makes progress durable: a pass cut short by its step
+//! deadline resumes after the last retired element instead of redelivering the same prefix.
 //! Delivery is at least once: an element held again between the read and its tombstone is
-//! delivered by the next pass, and a message rejected by the application is retired like a
-//! delivered one, as the inbound path drops it. The application is resolved at delivery time, so
-//! `Swarm::set_callback` after `listen` is honoured.
+//! delivered by the next pass, and a message core refuses is retired like a delivered one, as the
+//! inbound path drops it. The pass never waits on the application: when the application inbox
+//! has no room, the pass stops and leaves this element and the rest, unadmitted, for a later
+//! pass.
 
 use std::sync::Arc;
 
@@ -24,17 +25,18 @@ use crate::dht::InboxDelivery;
 use crate::dht::StorageKey;
 use crate::error::Result;
 use crate::message::handlers::storage::operate_entry;
+use crate::swarm::callback::LocalDelivered;
 use crate::swarm::callback::LocalDelivery;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
 
-/// Delivery of this node's inbox to whichever application the swarm currently serves.
+/// Delivery of this node's inbox to the application inbox.
 pub(crate) struct SwarmInboxDelivery {
     transport: Arc<SwarmTransport>,
 }
 
 impl SwarmInboxDelivery {
-    /// Deliver through `transport` to the application it serves at delivery time.
+    /// Deliver through `transport` to its application inbox.
     pub(crate) fn new(transport: Arc<SwarmTransport>) -> Self {
         Self { transport }
     }
@@ -54,10 +56,10 @@ impl SwarmInboxDelivery {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl InboxDelivery for SwarmInboxDelivery {
-    /// Post: every element of the locally stored inbox that passes the witness was offered to
-    /// the application and then tombstoned at its owner; every element that fails the witness
-    /// for good was tombstoned unread; an element held ahead of this clock is left for a later
-    /// pass.
+    /// Post: a prefix of the elements of the locally stored inbox that pass the witness was
+    /// handed to the application inbox and then tombstoned at its owner, the whole of them
+    /// unless the application inbox ran out of room; every element that fails the witness for
+    /// good was tombstoned unread; an element held ahead of this clock is left for a later pass.
     async fn deliver_inbox(&self) -> Result<()> {
         let now_ms = get_epoch_ms();
         let key = StorageKey::inbox_of(self.transport.dht.did);
@@ -76,18 +78,17 @@ impl InboxDelivery for SwarmInboxDelivery {
             );
             self.retire(drain.rejected).await?;
         }
-        let delivery = LocalDelivery::new(
-            self.transport.clone(),
-            self.transport.callback_slot().current()?,
-        );
+        let delivery = LocalDelivery::new(self.transport.clone());
         for element in drain.deliverable {
-            if let Err(error) = delivery.deliver(&element.payload).await {
-                tracing::warn!(
+            match delivery.deliver(&element.payload).await {
+                Ok(LocalDelivered::Delivered) => {}
+                Ok(LocalDelivered::Deferred) => return Ok(()),
+                Err(error) => tracing::warn!(
                     local = %self.transport.dht.did,
                     tx_id = %element.payload.transaction.tx_id,
                     error = ?error,
-                    "relay inbox message not accepted by the application"
-                );
+                    "relay inbox message refused by core"
+                ),
             }
             self.retire(inbox.removal_of([element.dot])).await?;
         }

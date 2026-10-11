@@ -31,41 +31,45 @@ pub(super) fn onion_policy(
             .collect(),
     )
 }
-pub(super) struct SwarmCallbackInstance {
-    inbound: Mutex<Vec<Message>>,
+
+/// The application of a test processor: claims the processor's application inbox and records
+/// every application message read from it, in arrival order.
+///
+/// Every item read, message or peer fact, records activity, so helpers probing what the
+/// application received, or what an admission or retirement changed, wake on it.
+pub(super) struct ApplicationRecorder {
+    /// The application data read so far, in arrival order.
+    inbound: Arc<Mutex<Vec<ApplicationData>>>,
+    /// The task reading the inbox; aborted with the recorder.
+    reader: tokio::task::JoinHandle<()>,
 }
 
-#[async_trait]
-impl SwarmCallback for SwarmCallbackInstance {
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), rings_core::error::CallbackError> {
-        let msg: Message = payload.transaction.data().map_err(Box::new)?;
-        {
-            let mut inbound = self.inbound.lock().unwrap();
-            inbound.push(msg);
-        }
-        record_activity();
-
-        Ok(())
-    }
-
-    async fn on_event(
-        &self,
-        _event: &SwarmEvent,
-    ) -> std::result::Result<(), rings_core::error::CallbackError> {
-        // Admission and retirement change what the helpers probe.
-        record_activity();
-
-        Ok(())
+impl ApplicationRecorder {
+    /// Claim `processor`'s application inbox and start recording it. The inbox is claimable
+    /// once, so a processor has at most one recorder.
+    pub(super) fn attach(processor: &Processor) -> Arc<Self> {
+        let inbox = processor
+            .swarm
+            .application_inbox()
+            .expect("the test processor's inbox is unclaimed");
+        let inbound = Arc::new(Mutex::new(Vec::new()));
+        let recorded = inbound.clone();
+        let reader = tokio::spawn(async move {
+            while let Some(delivery) = inbox.next().await {
+                if let ApplicationDelivery::Message(message) = delivery {
+                    recorded.lock().unwrap().push(message.data);
+                }
+                record_activity();
+            }
+        });
+        Arc::new(Self { inbound, reader })
     }
 }
 
-pub(super) fn test_callback() -> Arc<SwarmCallbackInstance> {
-    Arc::new(SwarmCallbackInstance {
-        inbound: Mutex::new(Vec::new()),
-    })
+impl Drop for ApplicationRecorder {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
 }
 
 /// Exclusive use of the test network for one test.
@@ -374,7 +378,7 @@ pub(super) const PROCESSOR_TEST_HANG_GUARD: Duration = Duration::from_secs(5);
 pub(super) const PROCESSOR_TEST_HANG_GUARD: Duration = Duration::from_secs(60);
 
 /// Await, on activity, both processors admitting each other. Admission is announced as a
-/// `Connected` event, which the test callback records as activity.
+/// `PeerAdmitted` event, which an [`ApplicationRecorder`] records as activity.
 pub(super) async fn wait_processors_connected(p1: &Processor, p2: &Processor) {
     probe_on_activity(
         "processors admitted each other",
@@ -493,16 +497,16 @@ pub(super) async fn wait_for_peer_measurement(
     .unwrap()
 }
 
-/// Await, on activity, an inbound message on `callback` that satisfies `predicate`.
-pub(super) async fn wait_for_inbound_message(
-    callback: &SwarmCallbackInstance,
-    predicate: impl Fn(&Message) -> bool,
-) -> Message {
+/// Await, on activity, application data read by `recorder` that satisfies `predicate`.
+pub(super) async fn wait_for_application_data(
+    recorder: &ApplicationRecorder,
+    predicate: impl Fn(&ApplicationData) -> bool,
+) -> ApplicationData {
     probe_on_activity(
-        "inbound message delivered",
+        "application data delivered",
         PROCESSOR_TEST_HANG_GUARD,
         || {
-            let found = callback
+            let found = recorder
                 .inbound
                 .lock()
                 .unwrap()
@@ -546,20 +550,22 @@ pub(super) fn e2e_stream_complete<'a>(
         .any(|last| (0..=last).all(|sequence| sequences.contains(&sequence)))
 }
 
-/// Every frame of the E2E stream `stream_id` that `callback` received, raw and in arrival
-/// order: duplicates, stray frames and the actual order are all preserved.
+/// Every frame of the E2E stream `stream_id` that `recorder` read, raw and in arrival order:
+/// duplicates, stray frames and the actual order are all preserved.
 #[cfg(feature = "dummy")]
 pub(super) fn received_e2e_stream_frames(
-    callback: &SwarmCallbackInstance,
+    recorder: &ApplicationRecorder,
     stream_id: e2e::E2eStreamId,
 ) -> Vec<E2eStreamFrame> {
-    callback
+    recorder
         .inbound
         .lock()
         .unwrap()
         .iter()
-        .filter_map(|msg| match msg {
-            Message::E2eStreamFrame(frame) if frame.stream_id == stream_id => Some(frame.clone()),
+        .filter_map(|data| match data {
+            ApplicationData::E2eStreamFrame(frame) if frame.stream_id == stream_id => {
+                Some(frame.clone())
+            }
             _ => None,
         })
         .collect()

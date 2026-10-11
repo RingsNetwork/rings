@@ -13,7 +13,6 @@ use super::InboundLane;
 use super::InboundProcessor;
 use super::LogicalInbound;
 use super::PreparedInboundFrame;
-use super::SharedSwarmCallback;
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
 use crate::measure::Authentication;
@@ -70,17 +69,13 @@ impl std::fmt::Display for HeldFrameDrop {
 }
 
 impl InboundProcessor {
-    pub(super) fn new(
-        transport: Arc<SwarmTransport>,
-        callback: SharedSwarmCallback,
-        reassembly_clock: ReassemblyClock,
-    ) -> Self {
+    pub(super) fn new(transport: Arc<SwarmTransport>, reassembly_clock: ReassemblyClock) -> Self {
         let reassembler = MessageReassembler::with_limits_and_budget(
             transport.reassembly_limits(),
             transport.reassembly_budget(),
         );
         Self {
-            logical: LogicalInbound::new(transport, callback),
+            logical: LogicalInbound::new(transport),
             reassembler: Arc::new(FuturesMutex::new(reassembler)),
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),

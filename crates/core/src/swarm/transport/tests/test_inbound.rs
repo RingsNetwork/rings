@@ -1,17 +1,24 @@
-use std::future::pending;
 use std::time::Duration;
+
+use futures::channel::mpsc;
+use futures::StreamExt;
 
 use super::*;
 use crate::message::CustomMessage;
 use crate::message::FoundEntry;
 use crate::message::MessageSigner;
+use crate::swarm::application::ApplicationData;
+use crate::swarm::application::ApplicationDelivery;
+use crate::swarm::application::ApplicationInbox;
+use crate::swarm::application::ApplicationMessage;
+use crate::swarm::application::APPLICATION_INBOX_WEIGHT;
 use crate::swarm::callback::inbound_application_capacity_for_test;
 use crate::swarm::callback::inbound_peer_capacity_for_test;
 use crate::swarm::callback::InboundLane;
 use crate::tests::TEST_NETWORK_ID;
 
 mod test_admission_delegation;
-mod test_callback_failure;
+mod test_application_backpressure;
 mod test_capacity_handoff;
 mod test_delegation_reference;
 mod test_origin_quota;
@@ -19,278 +26,78 @@ mod test_pre_admission;
 mod test_reassembly;
 mod test_storage_interleave;
 
-#[derive(Default)]
-struct BlockingValidateSwarmCallback {
-    validates: TestCounter,
-    inbounds: TestCounter,
-    validate_started: TestLatch,
-    release_validate: TestLatch,
+/// The transaction id of the filler [`claim_full_application_inbox`] queues.
+const INBOX_FILLER_TX: uuid::Uuid = uuid::Uuid::nil();
+
+/// Claim `transport`'s application inbox and fill it to [`APPLICATION_INBOX_WEIGHT`] with one
+/// filler message: until the filler is read, every application-data delivery waits for room,
+/// and only the `Application` and `E2e` lanes with it.
+fn claim_full_application_inbox(transport: &SwarmTransport) -> Result<ApplicationInbox> {
+    let inbox = transport.application().outlet.claim()?;
+    let filler = ApplicationMessage {
+        tx_id: INBOX_FILLER_TX,
+        from: transport.dht.did,
+        data: ApplicationData::Custom(CustomMessage(vec![0; APPLICATION_INBOX_WEIGHT])),
+    };
+    transport
+        .application()
+        .outlet
+        .try_reserve(&filler)
+        .ok_or_else(|| Error::InvalidMessage("an empty inbox has room".to_string()))?
+        .fill(filler);
+    Ok(inbox)
 }
 
-impl BlockingValidateSwarmCallback {
-    async fn wait_for_first_validate_started(&self) {
-        self.validate_started.wait().await;
-    }
-
-    async fn wait_for_validates_at_least(&self, count: usize) {
-        self.validates
-            .await_until(|validates| validates >= count)
-            .await;
-    }
-
-    async fn wait_for_inbounds_at_least(&self, count: usize) {
-        self.inbounds
-            .await_until(|inbounds| inbounds >= count)
-            .await;
-    }
-
-    fn release_first_validate(&self) {
-        self.release_validate.set();
-    }
-
-    fn validates(&self) -> usize {
-        self.validates.get()
-    }
-
-    fn inbounds(&self) -> usize {
-        self.inbounds.get()
-    }
-}
-
-#[async_trait]
-impl SwarmCallback for BlockingValidateSwarmCallback {
-    async fn on_validate(
-        &self,
-        _payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        if self.validates.increment() == 0 {
-            self.validate_started.set();
-            self.release_validate.wait().await;
-        }
-        Ok(())
-    }
-
-    async fn on_inbound(
-        &self,
-        _payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        self.inbounds.increment();
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct PendingValidateSwarmCallback {
-    started: TestLatch,
-    dropped: TestLatch,
-}
-
-struct PendingValidateDropGuard<'a>(&'a TestLatch);
-
-impl Drop for PendingValidateDropGuard<'_> {
-    fn drop(&mut self) {
-        self.0.set();
-    }
-}
-
-impl PendingValidateSwarmCallback {
-    async fn wait_for_started(&self) {
-        self.started.wait().await;
-    }
-}
-
-#[async_trait]
-impl SwarmCallback for PendingValidateSwarmCallback {
-    async fn on_validate(
-        &self,
-        _payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        let _drop_guard = PendingValidateDropGuard(&self.dropped);
-        self.started.set();
-        pending::<()>().await;
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct OrderedReassemblyCallback {
-    final_chunk_started: TestLatch,
-    release_final_chunk: TestLatch,
-    delivered: Mutex<Vec<Vec<u8>>>,
-    validated: Mutex<Vec<&'static str>>,
-}
-
-impl OrderedReassemblyCallback {
-    async fn wait_for_final_chunk(&self) {
-        self.final_chunk_started.wait().await;
-    }
-
-    fn release_final_chunk(&self) {
-        self.release_final_chunk.set();
-    }
-
-    fn delivered(&self) -> std::io::Result<Vec<Vec<u8>>> {
-        self.delivered
-            .lock()
-            .map(|delivered| delivered.clone())
-            .map_err(|_| std::io::Error::other("delivered messages poisoned"))
-    }
-
-    fn validated(&self) -> std::io::Result<Vec<&'static str>> {
-        self.validated
-            .lock()
-            .map(|validated| validated.clone())
-            .map_err(|_| std::io::Error::other("validated messages poisoned"))
-    }
-}
-
-#[async_trait]
-impl SwarmCallback for OrderedReassemblyCallback {
-    async fn on_validate(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        match payload.transaction.data::<Message>()? {
-            Message::Chunk(chunk) if chunk.chunk[0].saturating_add(1) == chunk.chunk[1] => {
-                self.final_chunk_started.set();
-                self.release_final_chunk.wait().await;
+/// Read the filler of [`claim_full_application_inbox`], making room for the waiting deliveries.
+/// Peer facts queued ahead of it (the inbox yields events first) are read past.
+fn release_full_application_inbox(inbox: &ApplicationInbox) -> Result<()> {
+    loop {
+        match inbox.try_next() {
+            Some(ApplicationDelivery::Event(_)) => continue,
+            Some(ApplicationDelivery::Message(message)) if message.tx_id == INBOX_FILLER_TX => {
+                return Ok(());
             }
-            Message::CustomMessage(_) => self
-                .validated
-                .lock()
-                .map_err(|_| std::io::Error::other("validated messages poisoned"))?
-                .push("reassembled"),
-            Message::FoundEntry(_) => self
-                .validated
-                .lock()
-                .map_err(|_| std::io::Error::other("validated messages poisoned"))?
-                .push("storage"),
-            _ => {}
+            _ => {
+                return Err(Error::InvalidMessage(
+                    "the inbox filler is not the first message".to_string(),
+                ))
+            }
         }
-        Ok(())
-    }
-
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        if let Message::CustomMessage(CustomMessage(body)) =
-            payload.transaction.data::<Message>()?
-        {
-            self.delivered
-                .lock()
-                .map_err(|_| std::io::Error::other("delivered messages poisoned"))?
-                .push(body);
-        }
-        Ok(())
     }
 }
 
-#[tokio::test]
-async fn test_pending_message_rechecks_admission_after_async_validation() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(BlockingValidateSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    assert!(transport.activate_connection_for_test(attempt)?);
-
-    let message = MessagePayload::new_send(
-        Message::custom(b"must-not-dispatch-after-retire")?,
-        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
-        transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
-    let pending_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-        .with_pending_connection_attempt(attempt);
-    let cid = peer.to_string();
-    let delivery = tokio::spawn(async move {
-        pending_callback
-            .on_admitted_message_for_test(&cid, &message)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
-
-    app_callback.wait_for_first_validate_started().await;
-    assert!(matches!(
-        transport.retire_active_connection_for_test(attempt, |_| Ok(())),
-        Ok(Some(()))
-    ));
-    app_callback.release_first_validate();
-    delivery
-        .await
-        .map_err(|_| Error::InvalidMessage("mailbox task panicked".to_string()))??;
-
-    assert_eq!(app_callback.validates(), 1);
-    assert_eq!(app_callback.inbounds(), 0);
-    Ok(())
+/// The body of the next custom message `inbox` yields, waiting for it.
+async fn next_custom_data(inbox: &ApplicationInbox) -> Result<Vec<u8>> {
+    match inbox.next().await {
+        Some(ApplicationDelivery::Message(ApplicationMessage {
+            data: ApplicationData::Custom(CustomMessage(body)),
+            ..
+        })) => Ok(body),
+        other => Err(Error::InvalidMessage(format!(
+            "expected a custom message, found {other:?}"
+        ))),
+    }
 }
 
-#[tokio::test]
-async fn test_inbound_control_lane_progresses_while_application_validation_is_blocked() -> Result<()>
-{
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(BlockingValidateSwarmCallback::default());
-    let callback = Arc::new(InnerSwarmCallback::new(
-        Arc::clone(&transport),
-        app_callback.clone(),
-    ));
-    let application = MessagePayload::new_send(
-        Message::custom(b"blocked-application")?,
-        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
-        transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
-    let control = MessagePayload::new_send(
-        noop_control_message(transport.dht.did),
-        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
-        transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
-    let cid = peer.to_string();
-
-    let blocked_callback = Arc::clone(&callback);
-    let blocked_cid = cid.clone();
-    let blocked = tokio::spawn(async move {
-        blocked_callback
-            .on_admitted_message_for_test(&blocked_cid, &application)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
-    app_callback.wait_for_first_validate_started().await;
-
-    let control_callback = Arc::clone(&callback);
-    let control_task = tokio::spawn(async move {
-        control_callback
-            .on_admitted_message_for_test(&cid, &control)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
-    app_callback.wait_for_validates_at_least(2).await;
-
-    app_callback.release_first_validate();
-    blocked
+/// The message of the next payload the inbound tap observed entering the logical stage,
+/// waiting for it.
+async fn next_tapped(tap: &mut mpsc::UnboundedReceiver<MessagePayload>) -> Result<Message> {
+    tap.next()
         .await
-        .map_err(|_| Error::InvalidMessage("application mailbox task panicked".to_string()))??;
-    control_task
-        .await
-        .map_err(|_| Error::InvalidMessage("control mailbox task panicked".to_string()))??;
-    assert_eq!(app_callback.inbounds(), 2);
-    Ok(())
+        .ok_or_else(|| Error::InvalidMessage("inbound tap closed".to_string()))?
+        .transaction
+        .data()
+}
+
+/// The body of the next payload the inbound tap observed, which must be a custom message,
+/// waiting for it.
+async fn next_tapped_custom(tap: &mut mpsc::UnboundedReceiver<MessagePayload>) -> Result<Vec<u8>> {
+    match next_tapped(tap).await? {
+        Message::CustomMessage(CustomMessage(body)) => Ok(body),
+        other => Err(Error::InvalidMessage(format!(
+            "expected a custom message, found {other:?}"
+        ))),
+    }
 }
 
 /// The drain of pre-admission frames must not block the data-channel open, and an
@@ -304,14 +111,13 @@ async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arriva
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let application = ApplicationRecorder::attach(&transport)?;
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     let callback = Arc::new(
-        InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-            .with_pending_connection_attempt(attempt),
+        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt),
     );
     let early = MessagePayload::new_send(
         Message::custom(b"early-drain-must-not-block-open")?,
@@ -360,9 +166,9 @@ async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arriva
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
-    // The late arrival's completion is the actor's validation, which the held
+    // The late arrival's completion is the actor's dispatch, which the held
     // lane defers: nothing reaches the application until the lane is released.
-    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(application.inbounds(), 0);
 
     drop(application_admission);
     tokio::time::timeout(Duration::from_secs(1), late_delivery)
@@ -371,33 +177,40 @@ async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arriva
             Error::InvalidMessage("admitted arrival waited beyond the lane release".to_string())
         })?
         .map_err(|_| Error::InvalidMessage("admitted-arrival task panicked".to_string()))??;
-    app_callback.wait_for_inbounds_at_least(2).await;
+    application.wait_for_inbounds_at_least(2).await;
     assert_eq!(callback.pre_admission_held_count_for_test(), 0);
-    assert_eq!(app_callback.inbounds(), 2);
+    assert_eq!(application.inbound_custom_data(), vec![
+        b"early-drain-must-not-block-open".to_vec(),
+        b"late-admitted-arrival-queues-behind-drain".to_vec(),
+    ]);
 
     transport.disconnect(peer).await?;
     Ok(())
 }
 
+/// The drain of pre-admission frames returns once the frames are submitted, not once the
+/// application has room for them: with the inbox full, the data-channel open completes while
+/// the drained frame waits for room, and reading the inbox delivers it.
 #[tokio::test]
-async fn test_pre_admission_drain_returns_before_application_validation_completes() -> Result<()> {
+async fn test_pre_admission_drain_returns_before_application_delivery_completes() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(BlockingValidateSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let inbox = claim_full_application_inbox(&transport)?;
+    let mut tap = transport.inbound_tap_for_test().subscribe();
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     let callback = Arc::new(
-        InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-            .with_pending_connection_attempt(attempt),
+        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt),
     );
+    let body = b"early-delivery-must-not-block-admission";
     let message = MessagePayload::new_send(
-        Message::custom(b"early-validation-must-not-block-admission")?,
+        Message::custom(body)?,
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
@@ -410,7 +223,7 @@ async fn test_pre_admission_drain_returns_before_application_validation_complete
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert_eq!(callback.pre_admission_held_count_for_test(), 1);
-    assert_eq!(app_callback.validates(), 0);
+    assert!(tap.try_recv().is_err());
 
     transport
         .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connecting)?;
@@ -425,24 +238,20 @@ async fn test_pre_admission_drain_returns_before_application_validation_complete
     });
     tokio::time::timeout(Duration::from_secs(1), open)
         .await
-        .map_err(|_| Error::InvalidMessage("data-channel open waited on validation".to_string()))?
+        .map_err(|_| Error::InvalidMessage("data-channel open waited on delivery".to_string()))?
         .map_err(|_| Error::InvalidMessage("data-channel-open task panicked".to_string()))??;
 
     assert!(transport.has_active_connection(peer));
     assert!(transport.is_active_connection_attempt(attempt));
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        app_callback.wait_for_first_validate_started(),
-    )
-    .await
-    .map_err(|_| {
-        Error::InvalidMessage("held frame was not submitted to inbound actor".to_string())
-    })?;
+    let drained = tokio::time::timeout(Duration::from_secs(1), next_tapped_custom(&mut tap))
+        .await
+        .map_err(|_| {
+            Error::InvalidMessage("held frame was not submitted to inbound actor".to_string())
+        })??;
+    assert_eq!(drained, body.to_vec());
     assert_eq!(callback.pre_admission_held_count_for_test(), 0);
-    assert_eq!(app_callback.inbounds(), 0);
-    app_callback.release_first_validate();
-    app_callback.wait_for_inbounds_at_least(1).await;
-    assert_eq!(app_callback.inbounds(), 1);
+    release_full_application_inbox(&inbox)?;
+    assert_eq!(next_custom_data(&inbox).await?, body.to_vec());
 
     transport.disconnect(peer).await?;
     Ok(())
@@ -458,11 +267,8 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let callback = Arc::new(InnerSwarmCallback::new(
-        Arc::clone(&transport),
-        app_callback.clone(),
-    ));
+    let application = ApplicationRecorder::attach(&transport)?;
+    let callback = Arc::new(InnerSwarmCallback::new(Arc::clone(&transport)));
     // Held for the whole saturation: the lane's front sequence never becomes
     // ready, so the actor dispatches no application frame and no permit is
     // released while the capacity laws are observed.
@@ -508,13 +314,13 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         .await;
 
     // The reserved control lane is independent of the held application lane, and of the
-    // same peer's waiting application arrival: the control frame is admitted, validated, and
-    // delivered while every application permit stays held and the overflow still waits.
+    // same peer's waiting application arrival: the control frame is admitted and handled while
+    // every application permit stays held and the overflow still waits.
     callback
         .on_admitted_message_for_test(&control_cid, &control)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert_eq!(app_callback.validates(), 1);
+    assert_eq!(application.validates(), 1);
     assert_eq!(
         callback.inbound_admitted_count_for_test(),
         inbound_application_capacity_for_test()
@@ -534,21 +340,21 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     Ok(())
 }
 
+/// Closing the inbound mailbox cancels the work in flight: an application delivery waiting for
+/// inbox room fails with the closed mailbox, releases its permit, and queues nothing.
 #[tokio::test]
-async fn test_closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
+async fn test_closing_inbound_mailbox_cancels_waiting_application_delivery() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(PendingValidateSwarmCallback::default());
-    let callback = Arc::new(InnerSwarmCallback::new(
-        Arc::clone(&transport),
-        app_callback.clone(),
-    ));
+    let inbox = claim_full_application_inbox(&transport)?;
+    let mut tap = transport.inbound_tap_for_test().subscribe();
+    let callback = Arc::new(InnerSwarmCallback::new(Arc::clone(&transport)));
     let message = MessagePayload::new_send(
-        Message::custom(b"pending-inbound-callback")?,
+        Message::custom(b"waiting-application-delivery")?,
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
         transport.dht.did,
         transport.dht.did,
@@ -569,13 +375,15 @@ async fn test_closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
         }
     });
 
-    app_callback.wait_for_started().await;
+    // Handled, the frame waits for inbox room: nothing between the tap and the inbox suspends.
+    next_tapped(&mut tap).await?;
     callback.close_inbound_for_test();
-    app_callback.dropped.wait().await;
     assert!(delivery
         .await
         .map_err(|_| Error::InvalidMessage("inbound mailbox task panicked".to_string()))?);
     assert_eq!(callback.inbound_admitted_count_for_test(), 0);
+    release_full_application_inbox(&inbox)?;
+    assert!(inbox.try_next().is_none());
     Ok(())
 }
 

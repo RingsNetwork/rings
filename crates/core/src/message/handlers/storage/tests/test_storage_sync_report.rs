@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use bytes::Bytes;
 
 use super::super::next_hop_for_sync_entries;
@@ -8,7 +6,6 @@ use super::test_support::next_payload_for_tx;
 use super::test_support::physical_sync_route_next_hop;
 use super::test_support::prepare_node_with_virtual_nodes;
 use super::test_support::storage_sync_route_next_hop;
-use super::test_support::NoopCallback;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
@@ -50,8 +47,7 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
     }
     *receiver.dht().lock_predecessor()? = None;
 
-    let receiver_handler =
-        MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+    let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
     let entry = live_entry(
         Did::from(10u32),
         vec![Bytes::from("handler acked")],
@@ -262,8 +258,7 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
         receiver.did(),
         &sync_msg.data,
     )?;
-    let receiver_handler =
-        MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+    let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
 
     receiver_handler.handle(&context, &sync_msg).await?;
 
@@ -335,7 +330,7 @@ async fn test_sync_entries_physical_destination_routes_by_physical_did_not_stora
         node.did(),
         destination,
     )?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
 
     let next = next_hop_for_sync_entries(&handler, &context, &msg)?;
 

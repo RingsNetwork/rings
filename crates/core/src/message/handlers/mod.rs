@@ -18,7 +18,6 @@ use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
 use crate::swarm::callback::InnerSwarmCallback;
-use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -37,13 +36,12 @@ pub mod stabilization;
 pub mod storage;
 /// Shared message-handler handle.
 ///
-/// Clone law: cloning duplicates `Arc` handles to the same transport, DHT
-/// state, and callback. It never forks protocol state or transfers ownership.
+/// Clone law: cloning duplicates `Arc` handles to the same transport and DHT state. It never
+/// forks protocol state or transfers ownership.
 #[derive(Clone)]
 pub struct MessageHandler {
     transport: Arc<SwarmTransport>,
     dht: Arc<PeerRing>,
-    swarm_callback: SharedSwarmCallback,
 }
 
 /// Generic trait for handle message ,inspired by Actor-Model.
@@ -56,18 +54,14 @@ pub trait HandleMsg<T> {
 
 impl MessageHandler {
     /// Create a new MessageHandler instance.
-    pub fn new(transport: Arc<SwarmTransport>, swarm_callback: SharedSwarmCallback) -> Self {
+    pub fn new(transport: Arc<SwarmTransport>) -> Self {
         let dht = transport.dht.clone();
-        Self {
-            transport,
-            dht,
-            swarm_callback,
-        }
+        Self { transport, dht }
     }
 
     /// Build the callback handle passed into a newly created transport connection.
     fn inner_callback(&self) -> InnerSwarmCallback {
-        InnerSwarmCallback::new(self.transport.clone(), self.swarm_callback.clone())
+        InnerSwarmCallback::new(self.transport.clone())
     }
 
     /// Interpret already-lowered core effects against this handler's transport.
@@ -75,7 +69,7 @@ impl MessageHandler {
         &self,
         effects: impl IntoIterator<Item = CoreEffect<'payload>>,
     ) -> Result<()> {
-        CoreEffectInterpreter::new(&self.transport, &self.swarm_callback)
+        CoreEffectInterpreter::new(&self.transport)
             .run_all(effects)
             .await
     }
