@@ -508,9 +508,7 @@ impl NodeState {
             };
             Ok(Some((next, expected_after_head_replacement, requested)))
         });
-        let Ok(RetirementOutcome::Retired(((topology, expected, requested), _announcement))) =
-            retired
-        else {
+        let Ok(RetirementOutcome::Retired((topology, expected, requested))) = retired else {
             return None;
         };
         if expected.is_some_and(|expected| expected != topology.successors) {

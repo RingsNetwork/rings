@@ -3,6 +3,8 @@ use rings_transport::core::transport::TransportInterface;
 
 use super::*;
 use crate::dht::FingerFixRequest;
+#[cfg(feature = "dummy")]
+use crate::swarm::application::SwarmEvent;
 
 #[cfg(feature = "dummy")]
 #[derive(Default)]
@@ -350,7 +352,7 @@ async fn test_stale_terminal_callback_cannot_retire_replacement() -> Result<()> 
     );
     let replacement = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(replacement)?);
-    assert!(transport.mark_admission_announced(replacement)?);
+    assert_eq!(recorder.events(), vec![SwarmEvent::PeerAdmitted { peer }]);
     transport.dht.admit_connected(peer, None)?;
     measure.release_disconnect();
 
@@ -377,7 +379,7 @@ async fn test_pending_replacement_does_not_suppress_retired_generation_announcem
     let peer = SecretKey::random().address().into();
     let old_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(old_attempt)?);
-    assert!(transport.mark_admission_announced(old_attempt)?);
+    assert_eq!(recorder.events(), vec![SwarmEvent::PeerAdmitted { peer }]);
     transport.dht.admit_connected(peer, None)?;
 
     let terminal_transport = Arc::clone(&transport);

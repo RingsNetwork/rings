@@ -1,15 +1,16 @@
-//! The retirement law: for every retired connection generation, `PeerAdmitted` announced ⟺
-//! `PeerRetired` announced, and a topology prune that keeps the record announces nothing.
+//! The retirement law: every connection generation is announced `PeerAdmitted` in the
+//! transition that activates it and `PeerRetired` in the transition that retires it, and a
+//! topology prune that keeps the record announces nothing.
 //!
-//! The inbox withdraws an unread `PeerAdmitted p` together with its `PeerRetired p`, so a test
-//! that observes both reads the admission before the retirement is decided.
+//! The inbox withdraws an unread `PeerAdmitted p` together with its `PeerRetired p`, so the
+//! application never reads a departure without its admission: a test that observes both reads
+//! the admission before the retirement is decided.
 
 use std::sync::Arc;
 
 use super::pending::RetirementOutcome;
 use super::*;
 use crate::dht::topology::TopologyRemoval;
-#[cfg(feature = "dummy")]
 use crate::swarm::application::SwarmEvent;
 
 /// A transport whose application inbox is claimed by a fresh recorder.
@@ -19,15 +20,15 @@ fn transport_with_log() -> Result<(SwarmTransport, ApplicationRecorder)> {
     Ok((transport, log))
 }
 
-/// An admission that was announced is reported retired exactly once; a second retirement of
-/// the same attempt is not one.
+/// An admission is announced as the record activates, and its retirement is reported exactly
+/// once; a second retirement of the same attempt is not one.
 #[tokio::test]
-async fn test_announced_admission_is_reported_retired_once() -> Result<()> {
+async fn test_a_read_admission_is_reported_retired_once() -> Result<()> {
     let (transport, log) = transport_with_log()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    assert!(transport.mark_admission_announced(attempt)?);
+    assert_eq!(log.events(), vec![SwarmEvent::PeerAdmitted { peer }]);
 
     assert!(transport.disconnect_attempt(attempt).await?.is_some());
     assert_eq!(log.retired(), vec![peer]);
@@ -41,40 +42,38 @@ async fn test_announced_admission_is_reported_retired_once() -> Result<()> {
     Ok(())
 }
 
-/// An admission that was never announced retires silently, so the application never sees a
-/// departure without an admission.
+/// An admission retired before the application reads it leaves no fact: its retirement
+/// withdraws it, so the application never sees a departure without an admission.
 #[tokio::test]
-async fn test_unannounced_admission_retires_silently() -> Result<()> {
+async fn test_an_admission_retired_unread_leaves_no_fact() -> Result<()> {
     let (transport, log) = transport_with_log()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
 
     assert!(transport.disconnect_attempt(attempt).await?.is_some());
-    assert!(log.retired().is_empty());
+    assert!(log.events().is_empty());
     Ok(())
 }
 
-/// The announcement mark is per generation: once the record is retired, the same attempt can
-/// no longer be announced, and a later generation starts unannounced.
+/// Facts are per generation: a read generation is reported retired, and a replacement admitted
+/// and retired before the application reads it leaves no fact of its own.
 #[tokio::test]
-async fn test_announcement_is_bound_to_the_active_generation() -> Result<()> {
+async fn test_each_generation_is_announced_in_its_own_transitions() -> Result<()> {
     let (transport, log) = transport_with_log()?;
     let peer = SecretKey::random().address().into();
     let old = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(old)?);
-    assert!(transport.mark_admission_announced(old)?);
+    assert_eq!(log.events(), vec![SwarmEvent::PeerAdmitted { peer }]);
     assert!(transport.disconnect_attempt(old).await?.is_some());
-    assert!(!transport.mark_admission_announced(old)?);
 
     let replacement = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(replacement)?);
     assert!(transport.disconnect_attempt(replacement).await?.is_some());
-    assert_eq!(
-        log.retired(),
-        vec![peer],
-        "the unannounced replacement generation retires silently"
-    );
+    assert_eq!(log.events(), vec![
+        SwarmEvent::PeerAdmitted { peer },
+        SwarmEvent::PeerRetired { peer },
+    ]);
     Ok(())
 }
 
@@ -111,7 +110,7 @@ async fn test_topology_prune_keeps_the_record_and_reports_nothing() -> Result<()
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    assert!(transport.mark_admission_announced(attempt)?);
+    assert_eq!(log.events(), vec![SwarmEvent::PeerAdmitted { peer }]);
     transport.dht.admit_connected(peer, None)?;
 
     assert!(transport
@@ -135,11 +134,13 @@ async fn test_eviction_of_an_unreferenced_peer_is_reported_retired() -> Result<(
     let unreferenced = SecretKey::random().address().into();
     let kept = transport.reserve_pending_connection(referenced).await?;
     assert!(transport.activate_connection_for_test(kept)?);
-    assert!(transport.mark_admission_announced(kept)?);
     transport.dht.admit_connected(referenced, None)?;
     let evicted = transport.reserve_pending_connection(unreferenced).await?;
     assert!(transport.activate_connection_for_test(evicted)?);
-    assert!(transport.mark_admission_announced(evicted)?);
+    assert_eq!(log.events(), vec![
+        SwarmEvent::PeerAdmitted { peer: referenced },
+        SwarmEvent::PeerAdmitted { peer: unreferenced },
+    ]);
 
     assert_eq!(
         transport.retire_unless_referenced(kept).await?,

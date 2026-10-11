@@ -28,7 +28,6 @@ use super::TransportCallbackError;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::message::MessagePayload;
-use crate::swarm::application::SwarmEvent;
 use crate::swarm::detached::run_detached_or_inline;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
@@ -219,36 +218,8 @@ impl SwarmTransportCallback {
         {
             return Ok(false);
         }
-        let connected = self.emit_connected_event_for_attempt(did, attempt);
-        if self
-            .processor
-            .logical
-            .transport
-            .is_active_connection_attempt(attempt)
-        {
-            self.start_pre_admission_drain().await;
-        }
-        connected
-    }
-
-    /// Announce `attempt`'s admission as [`SwarmEvent::PeerAdmitted`] in the same step as
-    /// marking it announced, unless it was retired first. Returns whether it was announced.
-    fn emit_connected_event_for_attempt(
-        &self,
-        did: Did,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<bool, CallbackError> {
-        let transport = &self.processor.logical.transport;
-        Ok(transport.decide_and_announce(|| {
-            if !transport.mark_admission_announced(attempt)? {
-                tracing::debug!(
-                    "suppressing PeerAdmitted for {did}; connection was retired before it was \
-                     announced"
-                );
-                return Ok((false, None));
-            }
-            Ok((true, Some(SwarmEvent::PeerAdmitted { peer: did })))
-        })?)
+        self.start_pre_admission_drain().await;
+        Ok(true)
     }
 
     fn pending_disconnected_before_admission(&self, did: Did) -> bool {

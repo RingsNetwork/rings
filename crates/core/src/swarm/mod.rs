@@ -269,15 +269,14 @@ impl Swarm {
         Ok(self.transport.unadmitted_attempt(peer)?.is_some())
     }
 
-    /// Whether `peer` is admitted as the application sees it: its connection record is active
-    /// and the admission was announced as
-    /// [`SwarmEvent::PeerAdmitted`](application::SwarmEvent::PeerAdmitted). Ready or
-    /// recovering, its transport is the swarm's to heal or retire. Law:
-    /// `is_peer_admitted(p) ⟹` the record's retirement is announced as
-    /// [`SwarmEvent::PeerRetired`](application::SwarmEvent::PeerRetired). A record admitted but
-    /// not yet announced is not counted, since its retirement would be silent.
+    /// Whether `peer` is admitted: its connection record is active. Ready or recovering, its
+    /// transport is the swarm's to heal or retire. Law: an admission is announced as
+    /// [`SwarmEvent::PeerAdmitted`](application::SwarmEvent::PeerAdmitted) in the transition
+    /// that activates the record, so `is_peer_admitted(p) ⟹` that admission was announced and
+    /// the record's retirement will be, as
+    /// [`SwarmEvent::PeerRetired`](application::SwarmEvent::PeerRetired).
     pub fn is_peer_admitted(&self, peer: Did) -> Result<bool> {
-        Ok(self.transport.announced_attempt(peer)?.is_some())
+        Ok(self.transport.active_attempt(peer)?.is_some())
     }
 
     /// Cancel the handshake `attempt` iff it is still pending, that is, no data channel has

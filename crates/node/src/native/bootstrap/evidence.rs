@@ -157,7 +157,7 @@ impl<K: Copy + Eq + Hash, V> Drop for Waiter<'_, K, V> {
 }
 
 /// Admissions keyed by peer; a dial checks the transport directly after registering, so an
-/// admission announced before the waiter needs no record.
+/// admission committed before the waiter needs no record.
 pub(super) type Admissions = Rendezvous<Did, ()>;
 
 /// Peers that left the local DHT since the supervisor last drained, with a wake for the

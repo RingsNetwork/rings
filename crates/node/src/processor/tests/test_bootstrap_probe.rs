@@ -230,8 +230,8 @@ async fn test_backend_translates_admission_and_retirement() {
 
 /// A disconnect decided by the local node retires the peer through the core's single
 /// retirement transition and reaches the evidence as a loss, without any physical terminal
-/// state. The disconnect follows the admission *event*, not merely transport readiness: by the
-/// retirement law a retirement before the admission was announced is silent.
+/// state. The disconnect follows the admission *event*, not merely transport readiness: a
+/// retirement before the backend read the admission withdraws it, and the loss is never seen.
 ///
 /// The retirement is announced to the inbox before `disconnect` returns, and the backend reads
 /// it at its own pace (#935), so the loss is awaited on the activity the backend records.

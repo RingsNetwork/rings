@@ -52,7 +52,6 @@ use crate::message::ConnectNodeSend;
 use crate::message::DhtProtocolMode;
 use crate::message::TransactionReplay;
 use crate::swarm::application::ApplicationPort;
-use crate::swarm::application::SwarmEvent;
 use crate::swarm::observer::MessageObservation;
 use crate::swarm::observer::SharedSwarmObserver;
 use crate::utils::get_epoch_ms_i64;
@@ -189,9 +188,6 @@ pub struct SwarmTransport {
     connection_lifecycle: ConnectionLifecycleBoundary,
     /// Core's side of the application boundary (#935).
     application: ApplicationPort,
-    /// Serializes deciding a peer transition with announcing it, so the inbox reads the
-    /// transitions of every peer in the order they were decided.
-    announcements: Mutex<()>,
     connection_creation: PeerOperationLocks,
     peer_lifecycles: SharedConnectionLifecycles,
     pending_finger_updates: Mutex<PendingFingerUpdates>,
@@ -331,7 +327,6 @@ impl SwarmTransport {
             session_hold_budget: SessionHoldBudget::new(),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             application: ApplicationPort::new(),
-            announcements: Mutex::new(()),
             connection_creation: PeerOperationLocks::new(),
             peer_lifecycles: Arc::new(Mutex::new(self::pending::ConnectionLifecycleRegistry::new(
                 lifecycle_bounds,
@@ -527,26 +522,6 @@ impl SwarmTransport {
     /// and the delegations it reads.
     pub(crate) fn application(&self) -> &ApplicationPort {
         &self.application
-    }
-
-    /// Decide a peer transition and announce the fact it concludes, if any, as one step:
-    /// no other announcement interleaves, so for every peer the inbox reads its facts in the
-    /// order they were decided. `decide` must not wait; nothing here awaits the application.
-    pub(crate) fn decide_and_announce<T>(
-        &self,
-        decide: impl FnOnce() -> Result<(T, Option<SwarmEvent>)>,
-    ) -> Result<T> {
-        let _order = self
-            .announcements
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (decided, event) = decide()?;
-        if let Some(event) = event {
-            #[cfg(test)]
-            crate::tests::activity::record_activity();
-            self.application.outlet.announce(event);
-        }
-        Ok(decided)
     }
 
     /// Record that `peer` reached an open data channel.

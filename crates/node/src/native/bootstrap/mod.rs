@@ -112,7 +112,7 @@ impl BootstrapTargets {
 #[derive(Debug)]
 pub(crate) enum DialFailure {
     /// The target's slot is owned by another attempt (a handshake in flight, whichever side
-    /// started it, or an admission not yet announced): refused before any request when the
+    /// started it, or an admission being committed): refused before any request when the
     /// local core already holds an unadmitted handshake, or by the local core during the
     /// exchange. A refusal by the remote core arrives as an RPC error and is a failure.
     InFlight,

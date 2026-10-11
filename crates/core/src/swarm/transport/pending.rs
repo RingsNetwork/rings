@@ -18,7 +18,6 @@ pub(super) use registry::LifecycleBounds;
 use registry::PeerConnectionLifecycle;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(super) use registry::ReservationVerdict;
-pub(super) use registry::Retirement;
 pub(super) use registry::RetirementOutcome;
 
 use super::SwarmConnection;
@@ -28,6 +27,7 @@ use crate::dht::FingerFixRequest;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
+use crate::swarm::application::SwarmEvent;
 use crate::swarm::callback::SwarmTransportCallback;
 use crate::utils::get_epoch_ms_i64;
 
@@ -69,6 +69,14 @@ pub(super) struct ConnectionLifecycleBoundary {
     waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// Evidence that the lifecycle boundary is held: only [`ConnectionLifecycleBoundary::lock`]
+/// makes one, and the boundary is released when it drops. A transition that must run inside the
+/// boundary (an announcement, a retirement under an already held boundary) takes it by
+/// reference, so the compiler checks the precondition.
+pub(super) struct LifecycleHeld<'boundary> {
+    _guard: std::sync::MutexGuard<'boundary, ()>,
+}
+
 impl ConnectionLifecycleBoundary {
     pub(super) fn new() -> Self {
         Self {
@@ -78,9 +86,11 @@ impl ConnectionLifecycleBoundary {
         }
     }
 
-    pub(super) fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+    /// Hold the boundary until the returned evidence drops.
+    pub(super) fn lock(&self) -> Result<LifecycleHeld<'_>> {
         self.inner
             .lock()
+            .map(|guard| LifecycleHeld { _guard: guard })
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
     }
 
@@ -93,7 +103,7 @@ impl ConnectionLifecycleBoundary {
     fn lock_with_waiter_observer_for_test(
         &self,
         waiter_registered: impl FnOnce(),
-    ) -> Result<std::sync::MutexGuard<'_, ()>> {
+    ) -> Result<LifecycleHeld<'_>> {
         self.waiting
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         waiter_registered();
@@ -146,13 +156,6 @@ pub(super) enum RawConnectionOwner {
     Owned,
     /// Raw transport exists after its logical lifecycle slot was removed.
     Orphan,
-}
-
-/// The retired value of an outcome, its announcement witness projected away; for tests that
-/// assert the retirement itself.
-#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
-fn retired_value<T>(outcome: RetirementOutcome<(T, Retirement)>) -> Option<T> {
-    outcome.retired().map(|(value, _witness)| value)
 }
 
 /// A peer's slot as an answer to this node's offer finds it.
@@ -208,7 +211,7 @@ impl PendingTransportConnection {
 }
 
 impl SwarmTransport {
-    fn connection_lifecycle(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+    fn connection_lifecycle(&self) -> Result<LifecycleHeld<'_>> {
         self.connection_lifecycle.lock()
     }
 
@@ -417,11 +420,6 @@ impl SwarmTransport {
         })
     }
 
-    /// The active generation of `peer` whose admission was announced to the application.
-    pub(crate) fn announced_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
-        Ok(self.peer_lifecycles()?.announced_attempt(peer))
-    }
-
     #[cfg(all(test, feature = "dummy"))]
     pub(crate) fn is_pending_connection_attempt(
         &self,
@@ -551,10 +549,11 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         observe_transition: impl FnOnce(&Self),
     ) -> Result<bool> {
-        let _lifecycle = self.connection_lifecycle()?;
+        let lifecycle = self.connection_lifecycle()?;
         if !self.peer_lifecycles()?.activate_for_test(attempt) {
             return Ok(false);
         }
+        self.announce(&lifecycle, SwarmEvent::PeerAdmitted { peer: attempt.peer });
         observe_transition(self);
         Ok(true)
     }
@@ -564,7 +563,7 @@ impl SwarmTransport {
         &self,
         peer: Did,
     ) -> Result<(PendingConnectionAttempt, PendingConnectionAttempt)> {
-        let _lifecycle = self.connection_lifecycle()?;
+        let lifecycle = self.connection_lifecycle()?;
         let mut lifecycles = self.peer_lifecycles()?;
         let old = lifecycles
             .active_attempt(peer)
@@ -575,6 +574,7 @@ impl SwarmTransport {
                 generation: old.generation,
             });
         }
+        self.announce(&lifecycle, SwarmEvent::PeerRetired { peer });
         let replacement = lifecycles.reserve(peer, get_epoch_ms_i64())?;
         if !lifecycles.activate_for_test(replacement) {
             return Err(Error::ConnectionAttemptSuperseded {
@@ -582,6 +582,7 @@ impl SwarmTransport {
                 generation: replacement.generation,
             });
         }
+        self.announce(&lifecycle, SwarmEvent::PeerAdmitted { peer });
         Ok((old, replacement))
     }
 
@@ -590,7 +591,7 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<Option<PeerRingAction>> {
-        let _lifecycle = self.connection_lifecycle()?;
+        let lifecycle = self.connection_lifecycle()?;
         let mut lifecycles = self.peer_lifecycles()?;
         let Some(admitting) = lifecycles.admitting_connection(attempt) else {
             return Ok(None);
@@ -607,6 +608,7 @@ impl SwarmTransport {
         let action = self.dht.admit_connected(attempt.peer, deferred_proof)?;
 
         admitting.activate();
+        self.announce(&lifecycle, SwarmEvent::PeerAdmitted { peer: attempt.peer });
         pending_finger_updates.remove(&attempt);
         tracing::info!(
             target: "rings_core::swarm::transport::handshake",
@@ -628,37 +630,38 @@ impl SwarmTransport {
             .map(|retired| retired.is_some())
     }
 
-    /// Mark the admission of `attempt` as announced to the application, iff `attempt` still
-    /// owns the active slot. Called in the announcement step that announces `PeerAdmitted`,
-    /// and observed atomically with retirement under the lifecycle boundary; see
-    /// `PeerConnectionLifecycle::Active`.
-    pub(crate) fn mark_admission_announced(
-        &self,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<bool> {
-        let _lifecycle = self.connection_lifecycle()?;
-        Ok(self.peer_lifecycles()?.mark_announced(attempt))
+    /// Announce a peer fact to the application inbox, inside the lifecycle boundary `_held`
+    /// whose transition (an activation or a retirement) `event` concludes. Never waits.
+    ///
+    /// Every peer fact is announced there, so for every peer the inbox reads its facts in the
+    /// order they were decided, with no other lock: the boundary serializes the transitions,
+    /// and the inbox is the one lock taken under it.
+    fn announce(&self, _held: &LifecycleHeld<'_>, event: SwarmEvent) {
+        #[cfg(test)]
+        crate::tests::activity::record_activity();
+        self.application.outlet.announce(event);
     }
 
-    /// Retire `attempt` only if `action` decides to, under the lifecycle boundary; see
-    /// `ConnectionLifecycleRegistry::retire_active_if` for the post-conditions. The witness in
-    /// a `Retired` outcome is the caller's to announce.
+    /// Retire `attempt` only if `action` decides to, under the lifecycle boundary, announcing
+    /// [`SwarmEvent::PeerRetired`] in the same step; see
+    /// `ConnectionLifecycleRegistry::retire_active_if` for the post-conditions.
     pub(super) fn retire_active_connection_if<T>(
         &self,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
-    ) -> Result<RetirementOutcome<(T, Retirement)>> {
-        let _lifecycle = self.connection_lifecycle()?;
-        self.retire_active_connection_locked(attempt, action)
+    ) -> Result<RetirementOutcome<T>> {
+        let lifecycle = self.connection_lifecycle()?;
+        self.retire_active_connection_locked(&lifecycle, attempt, action)
     }
 
-    /// The retirement transition under an already held lifecycle boundary: the registry
-    /// decides, and the per-peer side tables follow a `Retired` decision.
+    /// The retirement transition under the held lifecycle boundary `lifecycle`: the registry
+    /// decides, and the per-peer side tables and the announcement follow a `Retired` decision.
     fn retire_active_connection_locked<T>(
         &self,
+        lifecycle: &LifecycleHeld<'_>,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
-    ) -> Result<RetirementOutcome<(T, Retirement)>> {
+    ) -> Result<RetirementOutcome<T>> {
         let mut lifecycles = self.peer_lifecycles()?;
         // Acquire every fallible local-state guard before the action mutates the DHT, so the
         // side-table mutations after a commit are infallible; if the action fails or declines,
@@ -674,12 +677,12 @@ impl SwarmTransport {
             peer_liveness.remove(attempt.peer);
             measured_disconnects.remove(&attempt.peer);
             self.outbound_schedulers.shutdown(attempt.peer);
+            self.announce(lifecycle, SwarmEvent::PeerRetired { peer: attempt.peer });
         }
         Ok(outcome)
     }
 
-    /// Unconditional retirement for tests that assert the retirement itself; the announcement
-    /// witness is projected away.
+    /// Unconditional retirement for tests that assert the retirement itself.
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(super) fn retire_active_connection_for_test<T>(
         &self,
@@ -687,7 +690,7 @@ impl SwarmTransport {
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
     ) -> Result<Option<T>> {
         self.retire_active_connection_if(attempt, |active| action(active).map(Some))
-            .map(retired_value)
+            .map(RetirementOutcome::retired)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -697,11 +700,11 @@ impl SwarmTransport {
         before_lifecycle_gate: impl FnOnce(),
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
     ) -> Result<Option<T>> {
-        let _lifecycle = self
+        let lifecycle = self
             .connection_lifecycle
             .lock_with_waiter_observer_for_test(before_lifecycle_gate)?;
-        self.retire_active_connection_locked(attempt, |active| action(active).map(Some))
-            .map(retired_value)
+        self.retire_active_connection_locked(&lifecycle, attempt, |active| action(active).map(Some))
+            .map(RetirementOutcome::retired)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

@@ -25,7 +25,6 @@ use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
-use crate::swarm::application::SwarmEvent;
 use crate::utils::sleep;
 
 /// Maximum wait for the data channel to open after the peer connection is usable.
@@ -564,28 +563,6 @@ impl SwarmTransport {
         connection.readiness().can_make_progress()
     }
 
-    /// Retire `attempt` if `action` decides to, announcing [`SwarmEvent::PeerRetired`] iff the
-    /// admission it ends was announced, in the same step as the decision, so a later admission
-    /// of the same peer cannot be announced ahead of this retirement.
-    fn retire_announced_if<T>(
-        &self,
-        attempt: PendingConnectionAttempt,
-        action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
-    ) -> Result<RetirementOutcome<T>> {
-        self.decide_and_announce(|| {
-            Ok(match self.retire_active_connection_if(attempt, action)? {
-                RetirementOutcome::Superseded => (RetirementOutcome::Superseded, None),
-                RetirementOutcome::Declined => (RetirementOutcome::Declined, None),
-                RetirementOutcome::Retired((value, retirement)) => (
-                    RetirementOutcome::Retired(value),
-                    retirement
-                        .announced_admission()
-                        .then_some(SwarmEvent::PeerRetired { peer: attempt.peer }),
-                ),
-            })
-        })
-    }
-
     async fn disconnect_with_removal(
         &self,
         attempt: PendingConnectionAttempt,
@@ -594,7 +571,7 @@ impl SwarmTransport {
         let connection = self.get_raw_connection(attempt.peer);
         // Removal never declines: the action always commits.
         let Some(outcome) = self
-            .retire_announced_if(attempt, |active| match removal {
+            .retire_active_connection_if(attempt, |active| match removal {
                 DhtPeerRemoval::Ordinary => Ok(Some(PeerRemovalOutcome {
                     fallback: None,
                     removal: self.dht.remove(attempt.peer)?,
@@ -638,7 +615,7 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
     ) -> Result<RetirementOutcome<()>> {
         let connection = self.get_raw_connection(attempt.peer);
-        let outcome = self.retire_announced_if(attempt, |_| {
+        let outcome = self.retire_active_connection_if(attempt, |_| {
             if self
                 .dht
                 .with_topology_state(|topology| topology.references(attempt.peer))?

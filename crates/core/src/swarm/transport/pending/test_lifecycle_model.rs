@@ -46,18 +46,12 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
             FingerCandidateAdmission::Queue(attempt),
         ),
         (
-            Some(PeerConnectionLifecycle::Active {
-                attempt,
-                announced: false,
-            }),
+            Some(PeerConnectionLifecycle::Active { attempt }),
             false,
             FingerCandidateAdmission::Unroutable,
         ),
         (
-            Some(PeerConnectionLifecycle::Active {
-                attempt,
-                announced: false,
-            }),
+            Some(PeerConnectionLifecycle::Active { attempt }),
             true,
             FingerCandidateAdmission::Apply,
         ),
@@ -347,7 +341,7 @@ impl LifecycleImplementation {
             Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => {
                 PeerLifecycle::Admitting(attempt.generation)
             }
-            Some(PeerConnectionLifecycle::Active { attempt, .. }) => {
+            Some(PeerConnectionLifecycle::Active { attempt }) => {
                 PeerLifecycle::Active(attempt.generation)
             }
             None => PeerLifecycle::Absent,

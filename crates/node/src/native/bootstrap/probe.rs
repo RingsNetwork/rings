@@ -10,14 +10,12 @@
 //!                  ∨  lookup_successor(t) = Routed(report) ∧ await(report) = t
 //! ```
 //!
-//! Two cases are decided without any network round trip. A target admitted as the application
-//! sees it is reachable: ready or recovering, its transport is the swarm's to heal or retire,
-//! its retirement will be reported, and a dial would be refused as already connected. A lookup
-//! the local topology decides, `Local(head)`, never confirms: either `head ≠ t`, so `t` is
-//! absent from the interval; or `head` is this node, which has no successor and is not `t`; or
-//! `head = t` is in the local successor list without an announced admission at the first read,
-//! because it is admitted but not yet announced (the dial that follows is refused as already
-//! connected and settles as a miss until the announcement lands) or because stabilization
+//! Two cases are decided without any network round trip. An admitted target is reachable:
+//! ready or recovering, its transport is the swarm's to heal or retire, its retirement will be
+//! reported, and a dial would be refused as already connected. A lookup the local topology
+//! decides, `Local(head)`, never confirms: either `head ≠ t`, so `t` is absent from the
+//! interval; or `head` is this node, which has no successor and is not `t`; or `head = t` is in
+//! the local successor list without an admission at the first read, because stabilization
 //! adopted it from a report without an edge (the dial proceeds and creates the edge Chord's own
 //! stabilization seeks). Otherwise the lookup is routed toward `t` and `t` is reachable iff the
 //! report its handle resolves to names `t`. A partition that lost `t`
@@ -94,7 +92,7 @@ impl From<HandshakeFailure> for DialFailure {
 
 #[async_trait]
 impl BootstrapPort for ProcessorPort {
-    /// An announced admission short-circuits; otherwise the lookup decides.
+    /// An admission short-circuits; otherwise the lookup decides.
     async fn reachable(&self, target: Did) -> bool {
         let swarm = &self.processor.swarm;
         match swarm.is_peer_admitted(target) {
@@ -135,9 +133,9 @@ impl BootstrapPort for ProcessorPort {
 }
 
 impl ProcessorPort {
-    /// Whether `peer`'s admission is announced within [`DIAL_ADMISSION_TIMEOUT`]. The waiter is
-    /// registered before the record is checked, which closes the window: an admission announced
-    /// before the check is seen by it, one announced after resolves the waiter. A closed waiter
+    /// Whether `peer` is admitted within [`DIAL_ADMISSION_TIMEOUT`]. The waiter is registered
+    /// before the record is checked, which closes the window: an admission committed before the
+    /// check is seen by it, one committed after is announced and resolves the waiter. A closed waiter
     /// is unreachable under one turn per target; it reads as the timeout it would otherwise
     /// become.
     async fn await_admission(&self, peer: Did) -> Result<bool> {
