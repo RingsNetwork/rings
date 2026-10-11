@@ -69,7 +69,7 @@ async fn test_local_did_lifecycle_callbacks_are_ignored() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let local_cid = transport.dht.did.to_string();
 
     callback
@@ -96,12 +96,12 @@ async fn test_mismatched_pending_callback_cancels_attempt_without_admission() ->
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
-    let mismatched_callback =
-        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt);
+    let mismatched_callback = SwarmTransportCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(attempt);
     let local_cid = transport.dht.did.to_string();
 
     mismatched_callback
@@ -125,7 +125,7 @@ async fn test_late_terminal_callback_cannot_remove_replacement_active_slot() -> 
     assert!(transport.cancel_pending_connection(old_attempt).await?);
     let current_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(current_attempt)?);
-    let late_callback = InnerSwarmCallback::new(Arc::clone(&transport))
+    let late_callback = SwarmTransportCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(old_attempt);
 
     late_callback

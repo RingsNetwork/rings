@@ -1,6 +1,7 @@
 //! Connection signaling: offering a connection to a peer, answering a remote offer, and
 //! accepting the answer to this end's offer.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use rings_transport::core::transport::ConnectionInterface;
@@ -21,7 +22,7 @@ use crate::message::ConnectNodeSend;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::detached::spawn_detached;
 use crate::swarm::detached::DetachedTask;
 
@@ -32,7 +33,7 @@ impl SwarmTransport {
     /// The application boundary: the offer is created here, waiting on ICE gathering, and sent
     /// under the application discipline, so this returns once the offer's first frame is
     /// admitted.
-    pub async fn connect(&self, peer: Did, callback: InnerSwarmCallback) -> Result<()> {
+    pub(crate) async fn connect(&self, peer: Did, callback: SwarmTransportCallback) -> Result<()> {
         let Some(pending) = self.open_offer(peer, callback).await? else {
             return Ok(());
         };
@@ -52,36 +53,49 @@ impl SwarmTransport {
     pub(crate) async fn connect_detached(
         self: &Arc<Self>,
         peer: Did,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
     ) -> Result<()> {
         let Some(pending) = self.open_offer(peer, callback).await? else {
             return Ok(());
         };
         let attempt = pending.attempt();
         let transport = Arc::clone(self);
-        let negotiate: DetachedTask = Box::pin(async move {
-            let sent = match transport.create_offer(&pending).await {
-                Ok(offer) => {
-                    transport
-                        .send_offer(attempt, offer, &transport.protocol_egress())
-                        .await
-                }
-                Err(error) => Err(error),
-            };
-            if let Err(error) = sent {
+        self.negotiate_detached(attempt, "offer", async move {
+            let offer = transport.create_offer(&pending).await?;
+            transport
+                .send_offer(attempt, offer, &transport.protocol_egress())
+                .await
+        })
+        .await
+    }
+
+    /// Run the `side` (offer or answer) of `attempt`'s handshake, which waits on ICE gathering
+    /// and the next hop, on a detached task, so its caller never waits on a remote party. A
+    /// failure there is logged; the runtime refusing the task abandons the generation.
+    async fn negotiate_detached(
+        &self,
+        attempt: PendingConnectionAttempt,
+        side: &'static str,
+        negotiate: impl Future<Output = Result<()>> + rings_runtime::MaybeSend + 'static,
+    ) -> Result<()> {
+        let task: DetachedTask = Box::pin(async move {
+            if let Err(error) = negotiate.await {
                 tracing::debug!(
                     target: "rings_core::swarm::transport::handshake",
                     peer = %attempt.peer,
                     generation = attempt.generation,
                     error = ?error,
-                    "detached connection offer did not leave"
+                    side,
+                    "detached connection negotiation did not leave"
                 );
             }
         });
-        if spawn_detached(negotiate).is_err() {
-            self.abandon_pending_connection(attempt, "scheduling connection offer")
+        if spawn_detached(task).is_err() {
+            self.abandon_pending_connection(attempt, "scheduling connection negotiation")
                 .await;
-            return Err(Error::HandshakeRuntimeUnavailable);
+            return Err(Error::DetachedRuntimeUnavailable(
+                "a protocol-context handshake",
+            ));
         }
         Ok(())
     }
@@ -91,7 +105,7 @@ impl SwarmTransport {
     async fn open_offer(
         &self,
         peer: Did,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
     ) -> Result<Option<PendingTransportConnection>> {
         match self.open_pending_connection(peer, callback).await {
             Ok(pending) => Ok(Some(pending)),
@@ -163,7 +177,7 @@ impl SwarmTransport {
     pub(in crate::swarm) async fn prepare_connection_offer_with_attempt(
         &self,
         peer: Did,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
     ) -> Result<(PendingConnectionAttempt, ConnectNodeSend)> {
         let pending = self.open_pending_connection(peer, callback).await?;
         let offer = self.create_offer(&pending).await?;
@@ -174,7 +188,7 @@ impl SwarmTransport {
     async fn open_pending_connection(
         &self,
         peer: Did,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
     ) -> Result<PendingTransportConnection> {
         let attempt = self.reserve_pending_connection(peer).await?;
         let callback = callback.with_pending_connection_attempt(attempt);
@@ -319,7 +333,7 @@ impl SwarmTransport {
     async fn open_answer(
         &self,
         peer: Did,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
         offer_msg: &ConnectNodeSend,
     ) -> Result<(PendingTransportConnection, String)> {
         if !self.accepts_connection_offer(offer_msg) {
@@ -335,10 +349,10 @@ impl SwarmTransport {
 
     /// Answer the offer of remote connection, waiting on ICE gathering: the application
     /// boundary.
-    pub async fn answer_remote_connection(
+    pub(crate) async fn answer_remote_connection(
         &self,
         peer: Did,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
         offer_msg: &ConnectNodeSend,
     ) -> Result<ConnectNodeReport> {
         let (pending, offer) = self.open_answer(peer, callback, offer_msg).await?;
@@ -350,7 +364,7 @@ impl SwarmTransport {
     /// gathering, is created and reported through the protocol egress on a detached task.
     pub(crate) async fn answer_remote_connection_detached(
         self: &Arc<Self>,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
         request: &MessagePayload,
         offer_msg: &ConnectNodeSend,
     ) -> Result<()> {
@@ -358,32 +372,14 @@ impl SwarmTransport {
         let (pending, offer) = self.open_answer(peer, callback, offer_msg).await?;
         let attempt = pending.attempt();
         let (transport, request) = (Arc::clone(self), request.clone());
-        let negotiate: DetachedTask = Box::pin(async move {
-            let reported = match transport.create_answer(&pending, offer).await {
-                Ok(answer) => {
-                    transport
-                        .protocol_egress()
-                        .send_report_message(&request, Message::ConnectNodeReport(answer))
-                        .await
-                }
-                Err(error) => Err(error),
-            };
-            if let Err(error) = reported {
-                tracing::debug!(
-                    target: "rings_core::swarm::transport::handshake",
-                    peer = %attempt.peer,
-                    generation = attempt.generation,
-                    error = ?error,
-                    "detached connection answer did not leave"
-                );
-            }
-        });
-        if spawn_detached(negotiate).is_err() {
-            self.abandon_pending_connection(attempt, "scheduling connection answer")
-                .await;
-            return Err(Error::HandshakeRuntimeUnavailable);
-        }
-        Ok(())
+        self.negotiate_detached(attempt, "answer", async move {
+            let answer = transport.create_answer(&pending, offer).await?;
+            transport
+                .protocol_egress()
+                .send_report_message(&request, Message::ConnectNodeReport(answer))
+                .await
+        })
+        .await
     }
 
     /// Accept the answer of remote connection.

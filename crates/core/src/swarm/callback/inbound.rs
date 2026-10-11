@@ -39,6 +39,7 @@ use crate::error::Result;
 use crate::measure::Authentication;
 use crate::message::EdgeRelation;
 use crate::message::MessagePayload;
+use crate::swarm::application::Delivered;
 use crate::utils::try_sleep;
 use crate::utils::GenerationWitness;
 use crate::utils::Instant;
@@ -99,6 +100,7 @@ const INBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+/// Where the drainer that handed an event over learns its logical outcome.
 type InboundReply = oneshot::Sender<Result<()>>;
 
 enum InboundCompletion {
@@ -732,14 +734,7 @@ async fn process_event(
     let lane = event.lane();
     let sequence = event.sequence;
     match processor.pending_connection_admits(event.peer).await {
-        Ok(true) => {
-            #[cfg(test)]
-            processor
-                .logical
-                .transport
-                .inbound_tap_for_test()
-                .observe(&event.payload);
-        }
+        Ok(true) => processor.logical.observe_for_test(&event.payload),
         Ok(false) => {
             finish_completion(event.completion, Ok(()));
             return InboundTaskCompletion {
@@ -768,6 +763,7 @@ async fn process_event(
         };
     }
 
+    processor.logical.pass_lane_for_test(lane).await;
     let result =
         process_logical_message(&processor.logical, &event.payload, event.prepared_message).await;
     finish_completion(event.completion, result);
@@ -782,8 +778,10 @@ async fn process_event(
 /// verified frame from a connection, but with no connection to gate on and never waiting.
 ///
 /// Room for application data is reserved before the transaction is admitted, so a payload this
-/// pass cannot hand over is left unadmitted for a later pass instead of being admitted, handled
-/// and lost to the replay window.
+/// pass cannot hand over (no room, or no application reading) is left unadmitted for a later
+/// pass instead of being admitted, handled and lost to the replay window. A payload carrying
+/// application data is queued with a consumption signal, so its stored copy is retired only once
+/// the application takes it (#913 R10 H3).
 pub(super) async fn deliver_local(
     pipeline: &LogicalInbound,
     payload: &MessagePayload,
@@ -798,31 +796,37 @@ pub(super) async fn deliver_local(
         },
         None => None,
     };
-    #[cfg(test)]
-    pipeline.transport.inbound_tap_for_test().observe(payload);
+    pipeline.observe_for_test(payload);
     // A local payload crossed no connection, so no neighbour can have its admission delegated.
     pipeline
         .admit_final_transaction(payload, &message, lane, EdgeRelation::Remote)
         .await?;
     pipeline.handle_payload(payload, Some(message)).await?;
-    if let (Some(room), Some(application)) = (room, application) {
-        room.fill(application);
+    let (Some(room), Some(application)) = (room, application) else {
+        return Ok(LocalDelivered::Handled);
+    };
+    let (consumed, taken) = futures::channel::oneshot::channel();
+    if room.fill(application, Some(consumed)) {
+        Ok(LocalDelivered::Queued(taken))
+    } else {
+        Ok(LocalDelivered::Deferred)
     }
-    Ok(LocalDelivered::Delivered)
 }
 
 /// What [`deliver_local`] did with a payload.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) enum LocalDelivered {
-    /// Admitted, handled, and its application data, if any, queued.
-    Delivered,
-    /// The application inbox had no room: nothing was admitted or handled.
+    /// Admitted and handled, with no application data to hand over.
+    Handled,
+    /// Admitted, handled, and its application data queued: the receiver resolves once the
+    /// application takes it, and is cancelled if the inbox discards it first.
+    Queued(futures::channel::oneshot::Receiver<()>),
+    /// No application inbox had room, or none reads: nothing was admitted or handled.
     Deferred,
 }
 
-/// Dispatch `payload`, then queue its application data, if any, for the application, waiting
-/// only for inbox room. Only the `Application` and `E2e` lanes carry application data, so only
-/// they can wait here.
+/// Dispatch `payload`, then hand its application data, if any, to the application inbox,
+/// queued or, when full, dropped and counted. Never waits on the application (#913 R10).
 async fn process_logical_message(
     pipeline: &LogicalInbound,
     payload: &MessagePayload,
@@ -830,11 +834,16 @@ async fn process_logical_message(
 ) -> Result<()> {
     let message = pipeline.handle_payload(payload, prepared_message).await?;
     if let Some(application) = pipeline.application_message(payload, message) {
-        pipeline.deliver(application).await;
+        let tx_id = application.tx_id;
+        if pipeline.deliver(application) == Delivered::Dropped {
+            tracing::debug!(%tx_id, "application inbox full: live message dropped");
+        }
     }
     Ok(())
 }
 
+/// Report an event's logical `result` as its `completion` asks: to the awaiting drainer, or to
+/// the log for a message released from a hold, which nobody awaits.
 fn finish_completion(completion: InboundCompletion, result: Result<()>) {
     match completion {
         InboundCompletion::Await(reply) => {

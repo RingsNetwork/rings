@@ -118,6 +118,18 @@ async fn live_entry(
     }
 }
 
+/// Write `live` to `key`, or clear the slot when the value is no longer live, so a stored value
+/// is always live when written; returns what the slot holds.
+///
+/// Pre: the caller holds the ring's storage transition.
+async fn write_live(store: &EntryStorage, key: &str, live: Option<Entry>) -> Result<Option<Entry>> {
+    match &live {
+        Some(entry) => store.put(key, entry).await?,
+        None => store.remove(key).await?,
+    }
+    Ok(live)
+}
+
 /// The counts a projection can change: elements, element dots, removes, and whether a register
 /// is held. On a stored value, which is normalized, [`Entry::retired_at`] only drops, so a
 /// projection with the same shape is the same value.
@@ -183,11 +195,7 @@ impl PeerRing {
         now_ms: u128,
     ) -> Result<Option<Entry>> {
         let key = StorageKey::new(kind, placement).to_string();
-        Ok(self
-            .storage
-            .get(&key)
-            .await?
-            .and_then(|entry| entry.live_at(now_ms)))
+        live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await
     }
 
     /// Read the live replicated entry stored at `key`.
@@ -277,14 +285,12 @@ impl PeerRing {
         else {
             return Ok(None);
         };
-        let stored = local.tombstone(removal)?.retired_at(now_ms);
-        if stored.is_live_at(now_ms) {
-            self.storage.put(&key, &stored).await?;
-            Ok(Some(stored))
-        } else {
-            self.storage.remove(&key).await?;
-            Ok(None)
-        }
+        write_live(
+            &self.storage,
+            &key,
+            local.tombstone(removal)?.live_at(now_ms),
+        )
+        .await
     }
 
     /// Join a peer-supplied replicated value into local storage at time `now_ms`.
@@ -302,16 +308,48 @@ impl PeerRing {
         incoming: Entry,
     ) -> Result<Entry> {
         incoming.validate_admissible_at(now_ms, self.network_id())?;
-        let key = StorageKey::new(incoming.kind, key).to_string();
-        let _transition = self.storage_transition.lock().await;
+        let kind = incoming.kind;
         // The join normalizes the union once, so the incoming value is normalized on its own
         // only when there is nothing to join it with.
-        let stored = match live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await?
-        {
-            Some(local) => local.join(incoming)?,
-            None => incoming.try_into_storage_entry()?,
-        }
-        .retired_at(now_ms);
+        self.join_into_slot(now_ms, kind, key, |local| match local {
+            Some(local) => local.join(incoming),
+            None => incoming.try_into_storage_entry(),
+        })
+        .await
+    }
+
+    /// [`Self::join_storage_entry`] for a value a storage sync batch already admitted, so its
+    /// admission (signatures included) runs once.
+    ///
+    /// Pre: `admitted` passed [`Entry::validate_admissible_at`] at `now_ms` and is normalized
+    /// for storage ([`Entry::try_into_storage_entry`]).
+    pub(crate) async fn join_admitted_storage_entry(
+        &self,
+        now_ms: u128,
+        key: Did,
+        admitted: Entry,
+    ) -> Result<Entry> {
+        let kind = admitted.kind;
+        self.join_into_slot(now_ms, kind, key, |local| match local {
+            Some(local) => local.join(admitted),
+            None => Ok(admitted),
+        })
+        .await
+    }
+
+    /// Write `join(live local value)` to the slot of `kind` at `key`, projected to its element
+    /// horizon at `now_ms`, under the storage transition; returns what was written.
+    async fn join_into_slot(
+        &self,
+        now_ms: u128,
+        kind: EntryKind,
+        key: Did,
+        join: impl FnOnce(Option<Entry>) -> Result<Entry>,
+    ) -> Result<Entry> {
+        let key = StorageKey::new(kind, key).to_string();
+        let _transition = self.storage_transition.lock().await;
+        let local = live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await?;
+        let stored = join(local)?.retired_at(now_ms);
         self.storage.put(&key, &stored).await?;
         Ok(stored)
     }
@@ -356,12 +394,13 @@ impl PeerRing {
             Some(local) => local,
             None => op.gen_default_entry()?,
         };
-        let stored = local.operate(now_ms, op, self.did)?.retired_at(now_ms);
-        if stored.is_live_at(now_ms) {
-            self.storage.put(&key, &stored).await
-        } else {
-            self.storage.remove(&key).await
-        }
+        write_live(
+            &self.storage,
+            &key,
+            local.operate(now_ms, op, self.did)?.live_at(now_ms),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn entry_lookup_inner(
@@ -386,7 +425,7 @@ impl PeerRing {
                     let served = self
                         .live_storage_entry(key, now_ms)
                         .await
-                        .map(|value| value.filter(|value| value.answers_lookups_at(now_ms)));
+                        .map(|value| value.filter(|value| value.bound_live_at(now_ms)));
                     match served {
                         Ok(Some(value)) => {
                             let observed_misses = std::mem::take(&mut misses);
@@ -526,10 +565,10 @@ impl PeerRing {
     ///
     /// Post: the live carrier projected at the current clock, a carrier past its retention
     /// bound included: such a carrier serves no element and is absent from
-    /// [`ChordStorageCache::local_cache_get`] (see [`Entry::answers_lookups_at`]), but the
+    /// [`ChordStorageCache::local_cache_get`] (see [`Entry::bound_live_at`]), but the
     /// removes and register that hold it live are what the repair spreads.
     ///
-    /// `held` ⊇ `served`: `local_cache_get = filter(answers_lookups_at) ∘ local_cache_held`.
+    /// `held` ⊇ `served`: `local_cache_get = filter(bound_live_at) ∘ local_cache_held`.
     /// The fetch cache has no transition, so the projection is returned only.
     pub(crate) async fn local_cache_held(
         &self,
@@ -573,6 +612,6 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
         let now_ms = get_epoch_ms();
         let held = self.local_cache_held(entry_key, now_ms).await?;
-        Ok(held.filter(|entry| entry.answers_lookups_at(now_ms)))
+        Ok(held.filter(|entry| entry.bound_live_at(now_ms)))
     }
 }

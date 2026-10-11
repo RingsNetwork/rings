@@ -10,28 +10,6 @@ use crate::core::pool::ChannelLane;
 use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 use crate::core::transport::TransportMessage;
 
-/// A transport callback that ignores every event, for admission tests that never dispatch.
-struct IgnoredCallback;
-
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
-impl crate::core::callback::TransportCallback for IgnoredCallback {}
-
-/// The wire form of `message`.
-fn wire(message: &TransportMessage) -> Bytes {
-    Bytes::from(rings_codec::serialize(message).expect("transport frame must serialize"))
-}
-
-/// A callback for `peer` with the production credit window.
-fn callback(peer: &str) -> InnerTransportCallback {
-    InnerTransportCallback::new(
-        peer,
-        Box::new(IgnoredCallback),
-        crate::notifier::Notifier::default(),
-        NodeReceiveLoad::new(),
-    )
-}
-
 /// Soft bound (#913 R7 M3): while the node's connections hold at least its soft limit, a lane
 /// whose releases complete a batch defers its advertisement; the release, on any connection,
 /// that brings the load below the limit makes it.
@@ -48,26 +26,11 @@ fn test_a_loaded_node_defers_credit_until_any_release_relieves_it() {
     let batch = LANE_CREDIT_WINDOW / 2;
     // The limit sits where one connection's batch of releases leaves the node.
     let load = NodeReceiveLoad::with_limit((2 * LANE_CREDIT_WINDOW - batch) * frame);
-    let open = |peer| {
-        InnerTransportCallback::new(
-            peer,
-            Box::new(IgnoredCallback),
-            crate::notifier::Notifier::default(),
-            load.clone(),
-        )
-    };
-    let (deferred, relieving) = (open("deferred"), open("relieving"));
+    let (deferred, relieving) = (
+        loaded_callback("deferred", load.clone()),
+        loaded_callback("relieving", load.clone()),
+    );
     let lane = ChannelLane::new(1);
-    let fill = |callback: &InnerTransportCallback| {
-        (0..LANE_CREDIT_WINDOW)
-            .map(
-                |_| match callback.admit_inbound_frame(custom.clone(), lane) {
-                    InboundFrameAdmission::Admitted(frame) => frame,
-                    _ => panic!("a frame within the window must be admitted"),
-                },
-            )
-            .collect::<Vec<_>>()
-    };
     let credit = |callback: &InnerTransportCallback| {
         callback
             .link_credit()
@@ -75,7 +38,10 @@ fn test_a_loaded_node_defers_credit_until_any_release_relieves_it() {
             .now_or_never()
             .flatten()
     };
-    let (mut held, mut other) = (fill(&deferred), fill(&relieving));
+    let (mut held, mut other) = (
+        admit_window(&deferred, &custom, lane),
+        admit_window(&relieving, &custom, lane),
+    );
     assert_eq!(load.held(), 2 * LANE_CREDIT_WINDOW * frame);
 
     // A batch released with the node still at its limit: deferred.
@@ -110,22 +76,7 @@ fn test_a_loaded_node_still_advertises_the_priority_lane() {
     let batch = usize::try_from(LANE_CREDIT_WINDOW / 2).expect("the batch fits usize");
     // One full window loads the node.
     let load = NodeReceiveLoad::with_limit(LANE_CREDIT_WINDOW * frame);
-    let callback = InnerTransportCallback::new(
-        "loaded",
-        Box::new(IgnoredCallback),
-        crate::notifier::Notifier::default(),
-        load.clone(),
-    );
-    let fill = |lane| {
-        (0..LANE_CREDIT_WINDOW)
-            .map(
-                |_| match callback.admit_inbound_frame(custom.clone(), lane) {
-                    InboundFrameAdmission::Admitted(frame) => frame,
-                    _ => panic!("a frame within the window must be admitted"),
-                },
-            )
-            .collect::<Vec<_>>()
-    };
+    let callback = loaded_callback("loaded", load.clone());
     let credit = |lane| {
         callback
             .link_credit()
@@ -134,7 +85,10 @@ fn test_a_loaded_node_still_advertises_the_priority_lane() {
             .flatten()
     };
     let bulk_lane = ChannelLane::new(1);
-    let (mut control, mut bulk) = (fill(ChannelLane::PRIORITY), fill(bulk_lane));
+    let (mut control, mut bulk) = (
+        admit_window(&callback, &custom, ChannelLane::PRIORITY),
+        admit_window(&callback, &custom, bulk_lane),
+    );
 
     control.truncate(control.len() - batch);
     assert_eq!(
@@ -149,47 +103,27 @@ fn test_a_loaded_node_still_advertises_the_priority_lane() {
     assert_eq!(load.held(), 0);
 }
 
-/// A connection admits exactly one credit window per lane; the frame beyond it is a credit
-/// violation, and a released frame frees its place.
+/// A connection admits exactly one credit window per lane, and a full lane leaves every other
+/// lane its window: lanes are filled in turn, each to the frame beyond its window, which is a
+/// credit violation. The frame bound is per lane, the per-connection bound is their sum, and
+/// released frames free their places.
 #[test]
-fn test_each_lane_admits_exactly_its_credit_window() {
-    let callback = callback("peer");
-    let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
-    let lane = ChannelLane::new(1);
-    let held = (0..LANE_CREDIT_WINDOW)
-        .map(
-            |_| match callback.admit_inbound_frame(custom.clone(), lane) {
-                InboundFrameAdmission::Admitted(frame) => frame,
-                _ => panic!("a frame within the window must be admitted"),
-            },
-        )
-        .collect::<Vec<_>>();
-
-    assert!(matches!(
-        callback.admit_inbound_frame(custom.clone(), lane),
-        InboundFrameAdmission::CreditExceeded {
-            received: LANE_CREDIT_WINDOW,
-            advertised: LANE_CREDIT_WINDOW,
-        }
-    ));
-    drop(held);
-    assert_eq!(callback.link_credit().occupancy(), [0, 0, 0, 0]);
-}
-
-/// One lane's full window does not touch another lane's: the frame bound is per lane, and the
-/// per-connection bound is their sum.
-#[test]
-fn test_a_full_lane_leaves_every_other_lane_its_window() {
+fn test_each_lane_admits_exactly_its_own_credit_window() {
     let callback = callback("peer");
     let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
     let held = (0..DATA_CHANNEL_POOL_SIZE)
-        .flat_map(|index| (0..LANE_CREDIT_WINDOW).map(move |_| ChannelLane::new(index)))
-        .map(
-            |lane| match callback.admit_inbound_frame(custom.clone(), lane) {
-                InboundFrameAdmission::Admitted(frame) => frame,
-                _ => panic!("every lane must admit its own window"),
-            },
-        )
+        .flat_map(|index| {
+            let lane = ChannelLane::new(index);
+            let window = admit_window(&callback, &custom, lane);
+            assert!(matches!(
+                callback.admit_inbound_frame(custom.clone(), lane),
+                InboundFrameAdmission::CreditExceeded {
+                    received: LANE_CREDIT_WINDOW,
+                    advertised: LANE_CREDIT_WINDOW,
+                }
+            ));
+            window
+        })
         .collect::<Vec<_>>();
 
     assert_eq!(held.len(), INBOUND_PEER_FRAME_CAPACITY);
@@ -197,6 +131,8 @@ fn test_a_full_lane_leaves_every_other_lane_its_window() {
         callback.link_credit().occupancy(),
         [LANE_CREDIT_WINDOW; DATA_CHANNEL_POOL_SIZE as usize]
     );
+    drop(held);
+    assert_eq!(callback.link_credit().occupancy(), [0, 0, 0, 0]);
 }
 
 /// A credit frame is applied, not admitted: it takes no place in any window and is never
@@ -438,15 +374,7 @@ fn test_a_credit_whose_send_failed_is_queued_again() {
     let lane = ChannelLane::new(1);
     let index = CreditIndex::ALL[1];
     let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
-    let frames = (0..LANE_CREDIT_WINDOW)
-        .map(
-            |_| match callback.admit_inbound_frame(custom.clone(), lane) {
-                InboundFrameAdmission::Admitted(frame) => frame,
-                _ => panic!("a frame within the window must be admitted"),
-            },
-        )
-        .collect::<Vec<_>>();
-    drop(frames);
+    drop(admit_window(&callback, &custom, lane));
     let link = callback.link_credit();
     let advertised = link
         .next_credit(index)

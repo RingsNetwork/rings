@@ -9,7 +9,7 @@ async fn admitted_dummy_transport() -> Result<(Arc<SwarmTransport>, Did)> {
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
@@ -25,7 +25,7 @@ async fn test_disconnected_open_transport_cannot_commit_admission() -> Result<()
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
@@ -57,14 +57,14 @@ async fn test_data_channel_open_before_peer_state_converges_preserves_pending_ad
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
     transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
 
-    let callback =
-        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt);
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(attempt);
     callback
         .on_data_channel_open(&peer.to_string())
         .await

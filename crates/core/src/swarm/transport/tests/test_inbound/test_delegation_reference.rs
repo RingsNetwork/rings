@@ -422,10 +422,11 @@ async fn test_control_frames_judged_on_a_superseded_generation_are_not_sent() ->
     Ok(())
 }
 
-/// Law (detachment): the read loop is never paced by a control-frame send. With the dummy
-/// transport's dispatch gate closed, so that the confirmation's send cannot complete, an inline
-/// frame still completes its delivery; a send awaited in the read loop would sit behind the
-/// gate instead, and the frame with it. The gate is then opened and the send goes through.
+/// Law (detachment): a frame's delivery, and so its transport lane, is never paced by a
+/// control-frame send. With the dummy transport's dispatch gate closed, so that the
+/// confirmation's send cannot complete, an inline frame still completes its delivery; a send
+/// awaited in the delivery would sit behind the gate instead, and the frame with it. The gate
+/// is then opened and the send goes through.
 #[tokio::test]
 async fn test_control_frames_never_pace_the_read_loop() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -556,7 +557,7 @@ async fn test_referenced_frame_on_an_unbound_callback_is_refused() -> Result<()>
     ))?);
     let application = ApplicationRecorder::attach(&transport)?;
     let pending = pending_peer(&transport).await?;
-    let unbound = InnerSwarmCallback::new(Arc::clone(&transport));
+    let unbound = SwarmTransportCallback::new(Arc::clone(&transport));
     let dispatched_before = dispatched_link_control_for_test().len();
 
     let referenced = custom_payload(&pending, &transport, b"referenced-off-link")?;
@@ -770,9 +771,6 @@ async fn test_held_frames_give_their_transport_credit_back() -> Result<()> {
 /// is not retired, since a receiver that grants no credit is backpressure, not a dead peer.
 #[tokio::test]
 async fn test_link_control_without_credit_expires_and_keeps_the_connection() -> Result<()> {
-    use futures::FutureExt;
-
-    use crate::swarm::transport::outbound::channel_lane;
     use crate::swarm::transport::outbound::TransferClass;
     use crate::tests::activity::probe_on_activity;
     use crate::tests::default::TEST_HANG_GUARD;
@@ -783,15 +781,9 @@ async fn test_link_control_without_credit_expires_and_keeps_the_connection() -> 
     let application = ApplicationRecorder::attach(&transport)?;
     let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
-    let connection = transport
-        .admitted_connection(pending.peer)?
-        .ok_or(Error::SwarmMissDidInTable(pending.peer))?;
-    let lane = channel_lane(TransferClass::DhtControl);
     // Hold every credit the peer has granted on the lane, however much that is.
-    let mut window = Vec::new();
-    while let Some(credit) = connection.reserve_send_credit(lane).now_or_never() {
-        window.push(credit?);
-    }
+    let window = transport
+        .hold_lane_credit_for_test(pending.peer, TransferClass::DhtControl.channel_lane())?;
 
     // An inline frame teaches its session; its confirmation now waits for credit, which the
     // held window never grants, so it cannot be sent.

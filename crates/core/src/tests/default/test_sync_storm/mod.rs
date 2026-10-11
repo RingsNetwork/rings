@@ -34,7 +34,6 @@ use crate::simulation::model::SimAction;
 use crate::simulation::model::SimConnectionState;
 use crate::simulation::model::SimEventId;
 use crate::simulation::model::SimFrameIdentity;
-use crate::simulation::model::SimInvariantViolation;
 use crate::simulation::model::SimLimits;
 use crate::simulation::model::SimMaintenanceOutcome;
 use crate::simulation::model::SimNodeId;
@@ -74,7 +73,7 @@ const QUIESCENT_POLLS: usize = 8;
 // The normal storm drain models transport dispatch at 256 B/ms and caps each
 // frame at 64 ms; that cap is the service term in `recovery_bound_ms`.
 // Reassembly pressure separately uses the slower actor cost in
-// `simulation::service` only while barrier/legacy witnesses deliberately hold
+// `simulation::service` only while the barrier witness deliberately holds
 // inbound work pending, and disables it before bounded recovery is measured.
 const VIRTUAL_SERVICE_BYTES_PER_MS: usize = 256;
 const MAX_FRAME_SERVICE_MS: u64 = 64;
@@ -906,19 +905,16 @@ fn assert_enabled_outcome(outcome: &ScenarioOutcome) {
 
 mod artifacts;
 mod cases;
-mod legacy;
 mod pressure;
 mod scenario;
 mod trace;
 
 use artifacts::persist_inflight_trace_artifact;
-use artifacts::persist_named_trace_artifact;
 use artifacts::persist_runtime_artifact;
 use artifacts::persist_trace_artifact;
 use artifacts::runtime_replay_snapshot;
 use artifacts::FailureState;
 use artifacts::ScenarioFailureGuard;
-use legacy::legacy_storm_state;
 use pressure::exercise_barrier_control_exemption;
 use pressure::exercise_bounded_control_burst;
 use pressure::exercise_per_entry_yield;

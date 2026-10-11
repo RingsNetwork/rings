@@ -277,12 +277,16 @@ impl ProcessorBuilder {
     /// schedule, and virtual-node combinations.
     fn validate(&self) -> Result<()> {
         validate_dht_virtual_nodes(self.dht_virtual_nodes)?;
-        validate_online_node_registration_timing(
+        validate_registration_timing(
+            "online_node",
+            "advertise_presence",
             self.advertise_presence,
             self.online_node_heartbeat_interval,
             self.online_node_ttl,
         )?;
-        validate_onion_exit_registration_timing(
+        validate_registration_timing(
+            "onion_exit",
+            "advertise_onion_exit",
             self.advertise_onion_exit,
             self.onion_exit_heartbeat_interval,
             self.onion_exit_ttl,

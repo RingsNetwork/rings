@@ -162,14 +162,10 @@ pub enum Error {
     #[error("Link-control frame is meaningful only on the connection it arrived on")]
     LinkControlOutsideLink,
 
-    /// No runtime is current to negotiate a protocol-context handshake detached from its
-    /// inbound event.
-    #[error("A protocol-context handshake needs a runtime to negotiate detached")]
-    HandshakeRuntimeUnavailable,
-
-    /// No runtime is current to carry a link-control send detached from the read loop.
-    #[error("Link-control send needs a runtime to run detached")]
-    LinkControlRuntimeUnavailable,
+    /// No runtime is current to run the named work detached from its caller: a
+    /// protocol-context handshake, or a link-control send.
+    #[error("{0} needs a runtime to run detached")]
+    DetachedRuntimeUnavailable(&'static str),
 
     /// The peer already has the most link-control sends this end keeps in flight for it.
     #[error("Link-control sends in flight to {0} are at capacity")]

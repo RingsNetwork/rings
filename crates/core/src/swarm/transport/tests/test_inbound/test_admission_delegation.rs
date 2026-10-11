@@ -32,7 +32,7 @@ use crate::message::DEFAULT_ORIGIN_QUOTA_BYTE_BURST;
 use crate::message::DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST;
 use crate::message::DELEGATED_MIN_CHARGE;
 use crate::storage::MemStorage;
-use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
@@ -59,7 +59,7 @@ struct Peer {
     /// Session key signing on the peer's behalf.
     session: DelegateeKey,
     /// Inbound callback of the connection to this peer.
-    callback: InnerSwarmCallback,
+    callback: SwarmTransportCallback,
 }
 
 /// A local swarm whose application delegated the admission of [`DELEGATED_PREFIX`]: payloads
@@ -93,16 +93,16 @@ impl Harness {
         let did: Did = key.address().into();
         let session = DelegateeKey::new_with_seckey(key)?;
         let callback = if authenticated {
-            let offer = InnerSwarmCallback::new(Arc::clone(&self.transport));
+            let offer = SwarmTransportCallback::new(Arc::clone(&self.transport));
             let (attempt, _offer) = self
                 .transport
                 .prepare_connection_offer_with_attempt(did, offer)
                 .await?;
             assert!(self.transport.activate_connection_for_test(attempt)?);
-            InnerSwarmCallback::new(Arc::clone(&self.transport))
+            SwarmTransportCallback::new(Arc::clone(&self.transport))
                 .with_pending_connection_attempt(attempt)
         } else {
-            InnerSwarmCallback::new(Arc::clone(&self.transport))
+            SwarmTransportCallback::new(Arc::clone(&self.transport))
         };
         Ok(Peer {
             did,

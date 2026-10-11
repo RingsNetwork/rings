@@ -10,16 +10,14 @@
 //! "Retired" is the swarm's word for the fact; "loss" is the supervisor's word for what it means
 //! to a managed target. The translation happens here, once, in `peer_retired`.
 //!
-//! Each record is bounded: a rendezvous by its early-value capacity plus one waiter per key in
-//! flight (one per probe, one per dial), losses by the distinct peers that leave between two
-//! drains. Writers never block and never fail the swarm callback: a poisoned record is logged
-//! at the observer boundary.
+//! Each record is bounded: a rendezvous by one waiter per key in flight (one per dial), losses
+//! by the distinct peers that leave between two drains. Writers never block and never fail the
+//! [`Backend`]'s observer call: a poisoned record is logged at the observer boundary.
 //!
 //! [`Backend`]: crate::extension::Backend
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::future::Future;
 use std::hash::Hash;
 use std::ops::DerefMut;
@@ -37,87 +35,63 @@ use crate::error::Result;
 use crate::extension::BackendObserver;
 use crate::sync_lock::lock;
 
-/// Rendezvous between one waiter per key and the value observed for that key, in either order:
+/// Rendezvous between one waiter per key and the value observed for that key once the waiter
+/// is registered:
 ///
 /// ```text
-///   wait_for(k) ─┬─ early value buffered? ─▶ resolved at once
-///                └─ else register waiter ─▶ observe(k, v) ─▶ resolved
-///   observe(k, v) with no waiter ─▶ buffered as an early value (bounded FIFO; dropped at 0)
+///   wait_for(k) ─▶ register waiter ─▶ observe(k, v) ─▶ resolved
+///   observe(k, v) with no waiter ─▶ dropped
 ///   drop(Waiter(k)) ─▶ waiter forgotten; idempotent, so a resolved waiter may drop too
 /// ```
 ///
-/// A second `wait_for` on the same key replaces the first waiter, which is then closed. Each
-/// registration carries a ticket and a waiter forgets only its own registration, so dropping a
-/// replaced or resolved waiter never touches its successor; a turn dropped mid-wait (at
-/// shutdown) leaves no registration behind.
+/// A value observed before its waiter is not kept: a caller that may race the value registers
+/// first and then checks the source of truth (see [`Admissions`]). A second `wait_for` on the
+/// same key replaces the first waiter, which is then closed. Each registration carries a ticket
+/// and a waiter forgets only its own registration, so dropping a replaced or resolved waiter
+/// never touches its successor; a turn dropped mid-wait (at shutdown) leaves no registration
+/// behind.
 pub(crate) struct Rendezvous<K, V> {
     state: Mutex<RendezvousState<K, V>>,
-    early_capacity: usize,
 }
 
-/// Rendezvous state: one waiter per key and a bounded FIFO of early values.
+/// Rendezvous state: one waiter per key.
 struct RendezvousState<K, V> {
     /// One waiter per key, with the ticket that identifies its registration.
     awaiting: HashMap<K, (u64, oneshot::Sender<V>)>,
-    early: VecDeque<(K, V)>,
     /// Ticket of the next registration.
     next_ticket: u64,
 }
 
-impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
-    /// A rendezvous that buffers up to `early_capacity` values observed before their waiter.
-    pub(super) fn new(early_capacity: usize) -> Self {
+impl<K, V> Default for Rendezvous<K, V> {
+    /// A rendezvous with no waiter registered.
+    fn default() -> Self {
         Self {
             state: Mutex::new(RendezvousState {
                 awaiting: HashMap::new(),
-                early: VecDeque::new(),
                 next_ticket: 0,
             }),
-            early_capacity,
         }
     }
+}
 
-    /// Deliver `value` for `key`: to its waiter when one is registered, otherwise into the
-    /// early buffer.
+impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
+    /// Deliver `value` to the waiter registered for `key`; dropped when none is.
     pub(super) fn observe(&self, key: K, value: V) -> Result<()> {
-        let mut state = lock(&self.state)?;
-        match state.awaiting.remove(&key) {
-            // A waiter that already gave up and dropped its receiver is simply satisfied late.
-            Some((_, waiter)) => {
-                let _ = waiter.send(value);
-            }
-            // Law: the oldest early values are dropped so that at most `early_capacity` are
-            // kept; a capacity of zero keeps none.
-            None => {
-                state.early.push_back((key, value));
-                if state.early.len() > self.early_capacity {
-                    state.early.pop_front();
-                }
-            }
+        // A waiter that already gave up and dropped its receiver is simply satisfied late.
+        if let Some((_, waiter)) = lock(&self.state)?.awaiting.remove(&key) {
+            let _ = waiter.send(value);
         }
         Ok(())
     }
 
-    /// Await the value for `key`; resolves at once when the value arrived first. The waiter
-    /// forgets its registration when dropped.
+    /// Await the value observed for `key` from now on. The waiter forgets its registration
+    /// when dropped.
     pub(crate) fn wait_for(&self, key: K) -> Result<Waiter<'_, K, V>> {
         let mut state = lock(&self.state)?;
         let (sender, receiver) = oneshot::channel();
-        let early = state
-            .early
-            .iter()
-            .position(|(early_key, _)| *early_key == key)
-            .and_then(|position| state.early.remove(position));
         let ticket = state.next_ticket;
         state.next_ticket = state.next_ticket.wrapping_add(1);
-        match early {
-            Some((_, value)) => {
-                let _ = sender.send(value);
-            }
-            None => {
-                state.awaiting.insert(key, (ticket, sender));
-            }
-        }
+        state.awaiting.insert(key, (ticket, sender));
         Ok(Waiter {
             rendezvous: self,
             key,
@@ -141,11 +115,10 @@ impl<K: Copy + Eq + Hash, V> Rendezvous<K, V> {
         }
     }
 
-    /// Number of outstanding waiters plus buffered early values.
+    /// Number of outstanding waiters.
     #[cfg(test)]
     pub(crate) fn len(&self) -> Result<usize> {
-        let state = lock(&self.state)?;
-        Ok(state.awaiting.len() + state.early.len())
+        Ok(lock(&self.state)?.awaiting.len())
     }
 }
 
@@ -183,8 +156,8 @@ impl<K: Copy + Eq + Hash, V> Drop for Waiter<'_, K, V> {
     }
 }
 
-/// Admissions keyed by peer; a dial checks the transport directly after registering, so no
-/// early buffer is needed.
+/// Admissions keyed by peer; a dial checks the transport directly after registering, so an
+/// admission announced before the waiter needs no record.
 pub(super) type Admissions = Rendezvous<Did, ()>;
 
 /// Peers that left the local DHT since the supervisor last drained, with a wake for the
@@ -220,19 +193,10 @@ impl PeerLosses {
 /// [`BackendObserver`].
 ///
 /// [`Backend`]: crate::extension::Backend
+#[derive(Default)]
 pub(crate) struct ReachabilityEvidence {
     admissions: Admissions,
     losses: PeerLosses,
-}
-
-impl Default for ReachabilityEvidence {
-    /// Empty records; admissions keep no early buffer.
-    fn default() -> Self {
-        Self {
-            admissions: Rendezvous::new(0),
-            losses: PeerLosses::default(),
-        }
-    }
 }
 
 impl ReachabilityEvidence {

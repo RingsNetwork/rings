@@ -1,8 +1,40 @@
 //! Ownership hand-off to the successor: batching, acknowledgement-gated cleanup, and the
 //! shape a relay carrier is offered in.
 
-use super::*;
+use bytes::Bytes;
 
+use super::super::super::chord::PeerRing;
+use super::super::super::chord::PeerRingAction;
+use super::super::sync::sync_entries_batch_wire_cost;
+use super::super::sync::sync_entries_batches;
+use super::super::sync::SYNC_BATCH_MAX_BYTES;
+use crate::consts::MAX_PAYLOAD_ENVELOPE_OVERHEAD;
+use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
+use crate::delegation::DelegateeKey;
+use crate::dht::entry::inbox::inbox_key;
+use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryOperation;
+use crate::dht::entry::PlacedEntry;
+use crate::dht::entry::SyncedEntryAck;
+use crate::dht::storage::tests::collect_sync_batches;
+use crate::dht::storage::tests::data_entry;
+use crate::dht::storage::tests::data_entry_with_data;
+use crate::dht::storage::tests::data_entry_with_payload_len;
+use crate::dht::storage::tests::placed_entries_by_key;
+use crate::dht::types::ChordStorageSync;
+use crate::dht::Did;
+use crate::dht::StorageKey;
+use crate::dht::StorageSyncDestination;
+use crate::dht::StorageSyncPurpose;
+use crate::ecc::SecretKey;
+use crate::error::Error;
+use crate::error::Result;
+use crate::message::types::Message;
+use crate::message::types::SyncEntriesWithSuccessor;
+use crate::storage::MemStorage;
+use crate::tests::held_inbox_for;
+use crate::utils::get_epoch_ms;
 #[tokio::test]
 async fn test_sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
     let node_did = Did::from(0u32);

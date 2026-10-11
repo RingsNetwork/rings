@@ -99,8 +99,10 @@ and expire, but a party with many identities can try to hold several positions o
   the relay.
 - **Application boundary.** Core never calls, awaits or consults application code: the
   application cannot see, validate or veto a protocol message. It reads its own data and peer
-  facts from a bounded inbox (#935); a slow application fills only that inbox, which holds
-  only the application data lanes.
+  facts from a bounded inbox (#935), and no inbound lane waits for it: a live message that
+  does not fit is dropped and counted, as the network may drop it, while relay-inbox mail
+  stays stored until the application has taken it. A slow application therefore costs only
+  its own messages, never a peer's credit or another link's liveness.
 - **Measurement and credit.** Local and advisory: they may reorder eligible candidates but
   never add one or change DHT placement. Service receipts affect neither.
 - **Connection admission.** Connection records are bounded at twice the topology's
@@ -123,9 +125,11 @@ and expire, but a party with many identities can try to hold several positions o
   lane but the control lane, a soft bound; the hard bound is per connection (4 MiB), so a
   node's worst case grows with its admitted connections (#934). Liveness reads no credit
   state: a periodic probe with a deadline from its issue evicts a peer that withholds the
-  control lane's credit within the period plus the deadline, whether or not it keeps sending,
-  and one peer's backpressure never holds another's link: every send a handler makes (a
-  forward, a report, a query) returns once queued.
+  control lane's credit within the period plus the deadline, whether or not it keeps sending
+  or keeps its connection unready (an unsent probe is resent under its first deadline).
+  Probes, and one probe answer in flight per next hop, take no shared outbound capacity, and
+  one peer's backpressure never holds another's link: every send a handler makes (a forward,
+  a report, a query) returns once queued.
   [Details](docs/src/advanced-topic/transport-flow-control.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.

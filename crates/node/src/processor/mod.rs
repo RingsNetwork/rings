@@ -69,7 +69,6 @@ use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
-use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionEntryGuardStorage;
 use crate::onion::OnionEntryGuards;
 use crate::onion::OnionExitDescriptor;
@@ -91,7 +90,7 @@ use crate::registration::default_advertise_presence;
 use crate::registration::default_online_node_heartbeat_interval_secs;
 use crate::registration::default_online_node_ttl_secs;
 use crate::registration::default_online_node_type;
-use crate::registration::validate_online_node_registration_timing;
+use crate::registration::validate_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
@@ -274,29 +273,19 @@ impl Processor {
         OnionExitRegistration::descriptors_from_entry(entry)
     }
 
+    /// The registry entry under `topic` whose elements are `descriptors`.
     #[cfg(all(test, feature = "node"))]
-    fn online_node_registry_entry(descriptors: Vec<OnlineNodeDescriptor>) -> Result<entry::Entry> {
+    fn registry_entry<D: RegistryElement>(
+        topic: &str,
+        descriptors: Vec<D>,
+    ) -> Result<entry::Entry> {
         let data = descriptors
             .into_iter()
             .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(entry::Entry::new(
-            entry::Entry::gen_did(ONLINE_NODES_TOPIC)?,
-            data,
-            entry::EntryKind::Data,
-        ))
-    }
-
-    #[cfg(all(test, feature = "node"))]
-    fn onion_exit_registry_entry(descriptors: Vec<OnionExitDescriptor>) -> Result<entry::Entry> {
-        let data = descriptors
-            .into_iter()
-            .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(entry::Entry::new(
-            entry::Entry::gen_did(ONION_EXITS_TOPIC)?,
+            entry::Entry::gen_did(topic)?,
             data,
             entry::EntryKind::Data,
         ))
@@ -581,10 +570,10 @@ impl Processor {
     /// unadmitted handshake to it, and before any offer if the endpoint answers as another
     /// node; then create, exchange and accept the offer. Returns the generation the offer
     /// reserved once the answer is accepted; admission of the resulting transport completes
-    /// asynchronously and is reported through the swarm callback. The exchange is pinned to
-    /// that generation, so a handshake the peer started meanwhile is neither answered nor
-    /// cancelled by this one; a failure after the offer was created cancels the generation iff
-    /// it is still pending.
+    /// asynchronously and reaches the [`Backend`](crate::extension::Backend) as an item of the
+    /// core's `ApplicationInbox`. The exchange is pinned to that generation, so a handshake the
+    /// peer started meanwhile is neither answered nor cancelled by this one; a failure after the
+    /// offer was created cancels the generation iff it is still pending.
     pub(crate) async fn connect_peer_via_http(
         &self,
         endpoint: &RemoteRpcEndpoint,
@@ -709,6 +698,36 @@ impl Processor {
             .map_err(Error::EntryError)
     }
 
+    /// Append `text` to the data topic `topic` as one UTF-8 element: the encoding
+    /// [`Self::fetch_text_elements`] decodes.
+    pub(crate) async fn append_text_element(&self, topic: &str, text: String) -> Result<()> {
+        self.storage_append_data(topic, Bytes::from(text)).await
+    }
+
+    /// The elements of the data topic `topic` past the first `skip`, decoded as UTF-8 text; an
+    /// element that is not UTF-8 is omitted, and a topic not found has no elements.
+    ///
+    /// Law: `append_text_element(t, x)` then `fetch_text_elements(t, 0)` contains `x` while the
+    /// element is live.
+    pub(crate) async fn fetch_text_elements(
+        &self,
+        topic: &str,
+        skip: usize,
+    ) -> Result<Vec<String>> {
+        let Some(entry) = self
+            .fetch_storage_entry(entry::Entry::gen_did(topic)?)
+            .await?
+        else {
+            return Ok(vec![]);
+        };
+        Ok(entry
+            .data
+            .iter()
+            .skip(skip)
+            .filter_map(|element| String::from_utf8(element.to_vec()).ok())
+            .collect())
+    }
+
     /// Tombstone observed data in an entry on DHT storage.
     ///
     /// The removal covers every dot of `data` the storage owner holds, including earlier dots
@@ -774,7 +793,7 @@ impl Processor {
     /// The registration is one appended element, so it expires by the element lifetime rule of
     /// [`ChordStorageInterface`] unless it is registered again.
     pub async fn register_service(&self, name: &str) -> Result<()> {
-        self.storage_append_data(name, Bytes::from(self.did().to_string()))
+        self.append_text_element(name, self.did().to_string())
             .await
             .map_err(|error| match error {
                 Error::EntryError(error) => Error::ServiceRegisterError(error),

@@ -82,7 +82,6 @@ mod transaction_replay;
 pub(crate) use storage_sync::StorageSyncBatch;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use storage_sync::StorageSyncBatchStep;
-pub(crate) use storage_sync::StorageSyncSend;
 mod timeouts;
 pub(crate) use self::connection::AdmittedConnection;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -101,6 +100,7 @@ pub(crate) use self::hold_budget::SessionHoldPermit;
 pub(crate) use self::inbound_tap::InboundTap;
 pub(crate) use self::liveness::IssuedProbe;
 use self::liveness::PeerLivenessMap;
+pub(crate) use self::liveness::ProbeWork;
 #[cfg(all(test, feature = "dummy"))]
 pub(crate) use self::liveness::PEER_LIVENESS_PERIOD_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

@@ -9,7 +9,6 @@ use std::sync::Arc;
 use js_sys;
 use js_sys::Uint8Array;
 use rings_core::dht::entry;
-use rings_core::dht::entry::Entry;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 use rings_core::ecc::PublicKey;
@@ -618,24 +617,14 @@ impl Provider {
         let p = self.processor.clone();
 
         future_to_promise(async move {
-            let entry_key = Entry::gen_did(&name).map_err(JsError::from)?;
-
-            let result = p
-                .fetch_storage_entry(entry_key)
+            let dids = p
+                .fetch_text_elements(&name, 0)
                 .await
-                .map_err(JsError::from)?;
-
-            if let Some(entry) = result {
-                let dids = entry
-                    .data
-                    .iter()
-                    .filter_map(|element| String::from_utf8(element.to_vec()).ok())
-                    .map(|did| JsValue::from_str(did.as_str()))
-                    .collect::<js_sys::Array>();
-                Ok(JsValue::from(dids))
-            } else {
-                Ok(JsValue::from(js_sys::Array::new()))
-            }
+                .map_err(JsError::from)?
+                .into_iter()
+                .map(JsValue::from)
+                .collect::<js_sys::Array>();
+            Ok(JsValue::from(dids))
         })
     }
 }

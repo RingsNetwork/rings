@@ -16,9 +16,13 @@ use crate::dht::StorageKey;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::CustomMessage;
 use crate::message::Message;
 use crate::message::MessagePayload;
-use crate::message::MessageVerificationExt;
+use crate::swarm::application::ApplicationData;
+use crate::swarm::application::ApplicationDelivery;
+use crate::swarm::application::ApplicationInbox;
+use crate::swarm::application::ApplicationMessage;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
@@ -40,24 +44,30 @@ fn is_held_message(payload: &MessagePayload) -> bool {
     )
 }
 
-async fn next_held_message(node: &Node) -> Result<MessagePayload> {
+/// The held message, as the application reads it from `inbox`: every other delivery (a peer
+/// fact, other application data) is skipped.
+async fn next_held_message(inbox: &ApplicationInbox) -> Result<ApplicationMessage> {
     let deadline = Instant::now() + TEST_HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(Error::InvalidMessage(
-                "held message was not delivered from the inbox".to_string(),
-            ));
-        }
-        match tokio::time::timeout(remaining, node.listen_once()).await {
-            Ok(Some(payload)) if is_held_message(&payload) => return Ok(payload),
+        match tokio::time::timeout(remaining, inbox.next()).await {
+            Ok(Some(ApplicationDelivery::Message(message)))
+                if message.data
+                    == ApplicationData::Custom(CustomMessage(HELD_MESSAGE.to_vec())) =>
+            {
+                return Ok(message);
+            }
             Ok(Some(_)) => continue,
             Ok(None) => {
                 return Err(Error::InvalidMessage(
-                    "message channel closed before the held message arrived".to_string(),
+                    "application inbox closed before the held message arrived".to_string(),
                 ));
             }
-            Err(_) => continue,
+            Err(_) => {
+                return Err(Error::InvalidMessage(
+                    "held message was not delivered from the inbox".to_string(),
+                ));
+            }
         }
     }
 }
@@ -112,15 +122,18 @@ async fn hand_off_inbox(owner: &Node, peer: &Node) -> Result<()> {
     wait_for_storage_absence(owner, inbox).await
 }
 
-/// Phase 3: the returned peer's own stabilization round drains its inbox to the application and
-/// retires the delivered message from the carrier by its dot.
+/// Phase 3: the returned peer's own stabilization round drains its relay inbox to the
+/// application, which reads it; once read, the next round retires the delivered message from
+/// the carrier by its dot. Mail is offered only to an application reading its inbox, so the
+/// peer's application claims it first.
 async fn drain_and_assert_delivered(peer: &Node, sender: Did) -> Result<()> {
     let inbox = StorageKey::inbox_of(peer.did());
+    let application = peer.swarm.application_inbox()?;
     peer.swarm.stabilizer().stabilize().await?;
 
-    let delivered = next_held_message(peer).await?;
-    assert_eq!(delivered.transaction.destination, peer.did());
-    assert_eq!(delivered.transaction.signer(), sender);
+    let delivered = next_held_message(&application).await?;
+    assert_eq!(delivered.from, sender);
+    peer.swarm.stabilizer().stabilize().await?;
 
     let retired = wait_for_storage_state(peer, inbox, "drained", |stored| {
         stored.is_some_and(|entry| entry.data.is_empty())

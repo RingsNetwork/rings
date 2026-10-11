@@ -5,13 +5,11 @@ use futures::StreamExt;
 
 use super::*;
 use crate::message::CustomMessage;
-use crate::message::FoundEntry;
 use crate::message::MessageSigner;
 use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationDelivery;
 use crate::swarm::application::ApplicationInbox;
 use crate::swarm::application::ApplicationMessage;
-use crate::swarm::application::APPLICATION_INBOX_WEIGHT;
 use crate::swarm::callback::inbound_application_capacity_for_test;
 use crate::swarm::callback::inbound_peer_capacity_for_test;
 use crate::swarm::callback::InboundLane;
@@ -26,56 +24,22 @@ mod test_pre_admission;
 mod test_reassembly;
 mod test_storage_interleave;
 
-/// The transaction id of the filler [`claim_full_application_inbox`] queues.
-const INBOX_FILLER_TX: uuid::Uuid = uuid::Uuid::nil();
-
-/// Claim `transport`'s application inbox and fill it to [`APPLICATION_INBOX_WEIGHT`] with one
-/// filler message: until the filler is read, every application-data delivery waits for room,
-/// and only the `Application` and `E2e` lanes with it.
-fn claim_full_application_inbox(transport: &SwarmTransport) -> Result<ApplicationInbox> {
-    let inbox = transport.application().outlet.claim()?;
-    let filler = ApplicationMessage {
-        tx_id: INBOX_FILLER_TX,
-        from: transport.dht.did,
-        data: ApplicationData::Custom(CustomMessage(vec![0; APPLICATION_INBOX_WEIGHT])),
-    };
-    transport
-        .application()
-        .outlet
-        .try_reserve(&filler)
-        .ok_or_else(|| Error::InvalidMessage("an empty inbox has room".to_string()))?
-        .fill(filler);
-    Ok(inbox)
-}
-
-/// Read the filler of [`claim_full_application_inbox`], making room for the waiting deliveries.
-/// Peer facts queued ahead of it (the inbox yields events first) are read past.
-fn release_full_application_inbox(inbox: &ApplicationInbox) -> Result<()> {
+/// The body of the next custom message `inbox` yields, waiting for it. Peer facts, which share
+/// the inbox's one order with messages, are read past.
+async fn next_custom_data(inbox: &ApplicationInbox) -> Result<Vec<u8>> {
     loop {
-        match inbox.try_next() {
+        match inbox.next().await {
             Some(ApplicationDelivery::Event(_)) => continue,
-            Some(ApplicationDelivery::Message(message)) if message.tx_id == INBOX_FILLER_TX => {
-                return Ok(());
-            }
-            _ => {
-                return Err(Error::InvalidMessage(
-                    "the inbox filler is not the first message".to_string(),
-                ))
+            Some(ApplicationDelivery::Message(ApplicationMessage {
+                data: ApplicationData::Custom(CustomMessage(body)),
+                ..
+            })) => return Ok(body),
+            other => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected a custom message, found {other:?}"
+                )))
             }
         }
-    }
-}
-
-/// The body of the next custom message `inbox` yields, waiting for it.
-async fn next_custom_data(inbox: &ApplicationInbox) -> Result<Vec<u8>> {
-    match inbox.next().await {
-        Some(ApplicationDelivery::Message(ApplicationMessage {
-            data: ApplicationData::Custom(CustomMessage(body)),
-            ..
-        })) => Ok(body),
-        other => Err(Error::InvalidMessage(format!(
-            "expected a custom message, found {other:?}"
-        ))),
     }
 }
 
@@ -112,12 +76,13 @@ async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arriva
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let application = ApplicationRecorder::attach(&transport)?;
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     let callback = Arc::new(
-        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt),
+        SwarmTransportCallback::new(Arc::clone(&transport))
+            .with_pending_connection_attempt(attempt),
     );
     let early = MessagePayload::new_send(
         Message::custom(b"early-drain-must-not-block-open")?,
@@ -188,9 +153,10 @@ async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arriva
     Ok(())
 }
 
-/// The drain of pre-admission frames returns once the frames are submitted, not once the
-/// application has room for them: with the inbox full, the data-channel open completes while
-/// the drained frame waits for room, and reading the inbox delivers it.
+/// The drain of pre-admission frames returns once the frames are submitted, not once their
+/// application delivery completes: with the Application lane held, the data-channel open
+/// completes while the drained frame waits at the logical stage, and releasing the lane
+/// delivers it.
 #[tokio::test]
 async fn test_pre_admission_drain_returns_before_application_delivery_completes() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -199,14 +165,18 @@ async fn test_pre_admission_drain_returns_before_application_delivery_completes(
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let inbox = claim_full_application_inbox(&transport)?;
+    let inbox = transport.application().outlet.claim()?;
+    let lane_hold = transport
+        .inbound_tap_for_test()
+        .hold_lane(InboundLane::Application);
     let mut tap = transport.inbound_tap_for_test().subscribe();
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     let callback = Arc::new(
-        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt),
+        SwarmTransportCallback::new(Arc::clone(&transport))
+            .with_pending_connection_attempt(attempt),
     );
     let body = b"early-delivery-must-not-block-admission";
     let message = MessagePayload::new_send(
@@ -250,7 +220,7 @@ async fn test_pre_admission_drain_returns_before_application_delivery_completes(
         })??;
     assert_eq!(drained, body.to_vec());
     assert_eq!(callback.pre_admission_held_count_for_test(), 0);
-    release_full_application_inbox(&inbox)?;
+    drop(lane_hold);
     assert_eq!(next_custom_data(&inbox).await?, body.to_vec());
 
     transport.disconnect(peer).await?;
@@ -268,7 +238,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         RecordingMeasure::default(),
     ))?);
     let application = ApplicationRecorder::attach(&transport)?;
-    let callback = Arc::new(InnerSwarmCallback::new(Arc::clone(&transport)));
+    let callback = Arc::new(SwarmTransportCallback::new(Arc::clone(&transport)));
     // Held for the whole saturation: the lane's front sequence never becomes
     // ready, so the actor dispatches no application frame and no permit is
     // released while the capacity laws are observed.
@@ -320,7 +290,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         .on_admitted_message_for_test(&control_cid, &control)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert_eq!(application.validates(), 1);
+    assert_eq!(application.observed(), 1);
     assert_eq!(
         callback.inbound_admitted_count_for_test(),
         inbound_application_capacity_for_test()
@@ -340,8 +310,8 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     Ok(())
 }
 
-/// Closing the inbound mailbox cancels the work in flight: an application delivery waiting for
-/// inbox room fails with the closed mailbox, releases its permit, and queues nothing.
+/// Closing the inbound mailbox cancels the work in flight: an application delivery waiting at
+/// its held lane fails with the closed mailbox, releases its permit, and queues nothing.
 #[tokio::test]
 async fn test_closing_inbound_mailbox_cancels_waiting_application_delivery() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -350,9 +320,12 @@ async fn test_closing_inbound_mailbox_cancels_waiting_application_delivery() -> 
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let inbox = claim_full_application_inbox(&transport)?;
+    let inbox = transport.application().outlet.claim()?;
+    let lane_hold = transport
+        .inbound_tap_for_test()
+        .hold_lane(InboundLane::Application);
     let mut tap = transport.inbound_tap_for_test().subscribe();
-    let callback = Arc::new(InnerSwarmCallback::new(Arc::clone(&transport)));
+    let callback = Arc::new(SwarmTransportCallback::new(Arc::clone(&transport)));
     let message = MessagePayload::new_send(
         Message::custom(b"waiting-application-delivery")?,
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
@@ -375,14 +348,14 @@ async fn test_closing_inbound_mailbox_cancels_waiting_application_delivery() -> 
         }
     });
 
-    // Handled, the frame waits for inbox room: nothing between the tap and the inbox suspends.
+    // Observed, the frame waits at its held lane, just before dispatch.
     next_tapped(&mut tap).await?;
     callback.close_inbound_for_test();
     assert!(delivery
         .await
         .map_err(|_| Error::InvalidMessage("inbound mailbox task panicked".to_string()))?);
     assert_eq!(callback.inbound_admitted_count_for_test(), 0);
-    release_full_application_inbox(&inbox)?;
+    drop(lane_hold);
     assert!(inbox.try_next().is_none());
     Ok(())
 }
@@ -447,8 +420,35 @@ fn successful_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usi
         .count())
 }
 
+/// Deliver `message`, signed by `session` and addressed to `local`, as chunks of 32 bytes:
+/// every chunk but the last in turn, then the last on its own task, whose delivery completes
+/// the message. Returns that delivery and the number of chunks.
+async fn deliver_chunked(
+    callback: &Arc<SwarmTransportCallback>,
+    cid: &str,
+    session: &DelegateeKey,
+    local: Did,
+    message: Message,
+) -> Result<(tokio::task::JoinHandle<Result<()>>, usize)> {
+    let mut chunks: Vec<Chunk> = Chunk::stream(local_wire(message, session, local)?, 32).collect();
+    let count = chunks.len();
+    let last = chunks.pop().ok_or(Error::InboundActorInvariantViolation)?;
+    assert!(!chunks.is_empty(), "the message spans several chunks");
+    for chunk in chunks {
+        callback
+            .on_admitted_message_for_test(cid, &local_wire(Message::Chunk(chunk), session, local)?)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    }
+    let last = local_wire(Message::Chunk(last), session, local)?;
+    Ok((
+        spawn_inbound_delivery(Arc::clone(callback), cid.to_string(), last),
+        count,
+    ))
+}
+
 fn spawn_inbound_delivery(
-    callback: Arc<InnerSwarmCallback>,
+    callback: Arc<SwarmTransportCallback>,
     cid: String,
     frame: bytes::Bytes,
 ) -> tokio::task::JoinHandle<Result<()>> {
@@ -460,7 +460,9 @@ fn spawn_inbound_delivery(
     })
 }
 
-fn hold_saturated_application_capacity(callback: &InnerSwarmCallback) -> Result<Vec<impl Drop>> {
+fn hold_saturated_application_capacity(
+    callback: &SwarmTransportCallback,
+) -> Result<Vec<impl Drop>> {
     let lane_capacity = inbound_application_capacity_for_test();
     let peer_capacity = inbound_peer_capacity_for_test();
     let mut capacity_holds = Vec::with_capacity(lane_capacity);

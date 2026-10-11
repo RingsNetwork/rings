@@ -134,7 +134,7 @@ They are meaningful only on the authenticated connection generation they arrive 
 announced delegation authenticates itself through its account signature, and a digest names a
 value rather than asserting one; a duplicate or a stale one changes nothing. They are emitted
 in a task of their own (refused, never run inline, when no runtime can carry one), never
-awaited from the transport's read loop, and never through the transfer lanes. Each inbound
+awaited by the transport lane whose frame caused them, and never through the transfer lanes. Each inbound
 frame causes at most two of them, and at most 128 are in flight to one peer at a time, twice
 the raw frames that peer may have in flight at this end's transport; a send beyond that budget
 is dropped and repeated by the next frame that misses or teaches the same delegation. So what this

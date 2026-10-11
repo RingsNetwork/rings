@@ -1,14 +1,15 @@
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::PoisonError;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 
 use super::super::RecordingMeasure;
 use super::super::TestLatch;
-use super::claim_full_application_inbox;
 use super::local_wire;
 use super::spawn_inbound_delivery;
 use crate::chunk::ReassemblyLimits;
@@ -31,15 +32,18 @@ use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::swarm::application::ApplicationDelivery;
 use crate::swarm::application::ApplicationInbox;
-use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::InboundLane;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::observer::NoopSwarmObserver;
+use crate::swarm::transport::inbound_tap::LaneHold;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportParts;
 use crate::swarm::transport::SwarmTransportSettings;
 use crate::swarm::transport::SwarmWebrtcConfig;
 use crate::tests::live_entry;
 
-/// The witnesses of one storage batch interleaved with a waiting application delivery.
+/// The witnesses of one storage batch interleaved with an application delivery waiting at its
+/// held lane.
 #[derive(Default)]
 struct InterleaveProbe {
     /// Persistence steps the storage batch has taken.
@@ -48,9 +52,11 @@ struct InterleaveProbe {
     first_persisted: TestLatch,
     /// Released by the test to let the first persistence step return.
     release_first_persist: TestLatch,
-    /// The claimed, full application inbox: reading it at the end of the first step makes room
-    /// for the waiting application delivery.
+    /// The claimed application inbox, where the second step looks for the woken delivery.
     inbox: OnceLock<ApplicationInbox>,
+    /// The hold on the Application lane, dropped at the end of the first step to wake the
+    /// waiting application delivery from within the storage batch.
+    lane_hold: Mutex<Option<LaneHold>>,
 }
 
 impl InterleaveProbe {
@@ -89,13 +95,18 @@ impl KvStorageInterface<Entry> for InterleaveStorage {
         if call == 0 {
             self.probe.first_persisted.set();
             self.probe.release_first_persist.wait().await;
-            // Reading the filler makes room: the waiting application delivery is woken here,
-            // before this step returns and the batch yields.
-            if self.probe.inbox()?.try_next().is_none() {
-                return Err(Error::InvalidMessage(
-                    "the inbox filler is missing".to_string(),
-                ));
-            }
+            // Releasing the lane wakes the waiting application delivery here, before this step
+            // returns and the batch yields.
+            let lane_hold = self
+                .probe
+                .lane_hold
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .ok_or_else(|| {
+                    Error::InvalidMessage("the Application lane is not held".to_string())
+                })?;
+            drop(lane_hold);
         }
         Ok(())
     }
@@ -119,7 +130,8 @@ impl KvStorageInterface<Entry> for InterleaveStorage {
 
 /// A storage batch yields between persistence steps, so work of another lane that became ready
 /// during one step runs before the next. The other lane's work is an application delivery
-/// waiting for inbox room, which the first step makes; the second step checks it was queued.
+/// waiting at its held lane, which the first step releases; the second step checks it was
+/// queued.
 #[tokio::test]
 async fn test_inbound_storage_batch_yields_between_persistence_steps() -> Result<()> {
     let probe = Arc::new(InterleaveProbe::default());
@@ -151,15 +163,23 @@ async fn test_inbound_storage_batch_yields_between_persistence_steps() -> Result
     }));
     if probe
         .inbox
-        .set(claim_full_application_inbox(&transport)?)
+        .set(transport.application().outlet.claim()?)
         .is_err()
     {
         return Err(Error::InvalidMessage(
             "application inbox claimed twice".to_string(),
         ));
     }
+    *probe
+        .lane_hold
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(
+        transport
+            .inbound_tap_for_test()
+            .hold_lane(InboundLane::Application),
+    );
     let mut tap = transport.inbound_tap_for_test().subscribe();
-    let callback = Arc::new(InnerSwarmCallback::new(Arc::clone(&transport)));
+    let callback = Arc::new(SwarmTransportCallback::new(Arc::clone(&transport)));
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
@@ -190,9 +210,8 @@ async fn test_inbound_storage_batch_yields_between_persistence_steps() -> Result
         transport.dht.did,
     )?;
     let application_delivery = spawn_inbound_delivery(callback, cid, application);
-    // The storage frame entered the logical stage first, then the application frame. The
-    // latter's handling has no suspension point before the inbox, so once it is observed it
-    // waits for room.
+    // The storage frame entered the logical stage first, then the application frame, which
+    // waits at its held lane once it is observed.
     for _ in 0..2 {
         tap.next()
             .await

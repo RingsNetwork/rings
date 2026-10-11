@@ -19,7 +19,6 @@ use crate::dht::entry::PlacedEntry;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::ecc::SecretKey;
-use crate::error::Error;
 use crate::error::Result;
 use crate::measure::ApplyOutcome;
 use crate::measure::Authentication;
@@ -33,17 +32,13 @@ use crate::measure::PeerQuality;
 use crate::message::test_probe_request;
 use crate::message::Message;
 use crate::message::MessageCategory;
-use crate::message::MessagePayload;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
-use crate::swarm::transport::StorageSyncSend;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
 use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
 use crate::tests::default::dummy_hooks::PausedDispatchGuard;
 use crate::tests::default::dummy_hooks::PendingAfterSentCountGuard;
-use crate::tests::default::dummy_hooks::PendingCloseGuard;
-use crate::tests::default::dummy_hooks::PendingDeliveryGuard;
 use crate::tests::default::dummy_hooks::PendingSendGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_with_measure;
@@ -54,7 +49,6 @@ use crate::tests::default::wait_until_result;
 use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
 use crate::tests::multi_frame_storage_sync_entries;
-use crate::tests::outbound_capacity_released;
 
 struct CountingMeasure {
     counters: Mutex<Vec<(crate::dht::Did, MeasurementEvent)>>,
@@ -343,7 +337,11 @@ async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_de
     node1
         .swarm
         .transport
-        .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
+        .send_storage_sync_or_defer(
+            msg,
+            &node1.swarm.transport.application_egress_for_test(),
+            "test",
+        )
         .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
@@ -390,7 +388,11 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
     node1
         .swarm
         .transport
-        .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
+        .send_storage_sync_or_defer(
+            msg,
+            &node1.swarm.transport.application_egress_for_test(),
+            "test",
+        )
         .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
@@ -452,7 +454,11 @@ async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Resul
     node1
         .swarm
         .transport
-        .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
+        .send_storage_sync_or_defer(
+            msg,
+            &node1.swarm.transport.application_egress_for_test(),
+            "test",
+        )
         .await?;
     assert_eq!(dummy_controlled::sent_count(), 1);
 
@@ -672,7 +678,11 @@ async fn test_detached_storage_sync_missing_routable_transport_does_not_degrade_
     assert!(node1
         .swarm
         .transport
-        .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
+        .send_storage_sync_or_defer(
+            msg,
+            &node1.swarm.transport.application_egress_for_test(),
+            "test",
+        )
         .await?
         .is_deferred());
     assert_eq!(
@@ -710,7 +720,11 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
     assert!(node1
         .swarm
         .transport
-        .send_storage_sync_or_defer(msg, StorageSyncSend::Admitted, "test")
+        .send_storage_sync_or_defer(
+            msg,
+            &node1.swarm.transport.application_egress_for_test(),
+            "test",
+        )
         .await?
         .is_sent());
     assert_eq!(

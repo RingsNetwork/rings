@@ -5,7 +5,7 @@
 pub mod application;
 mod builder;
 /// The transport callback of a connection: its inbound pipeline and lifecycle handling.
-pub mod callback;
+pub(crate) mod callback;
 mod detached;
 mod inbox;
 /// Non-blocking observation hooks for operator telemetry.
@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 pub use builder::SwarmBuilder;
 
-use self::callback::InnerSwarmCallback;
+use self::callback::SwarmTransportCallback;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -160,8 +160,8 @@ impl Swarm {
         self.dht.clone()
     }
 
-    fn inner_callback(&self) -> InnerSwarmCallback {
-        InnerSwarmCallback::new(self.transport.clone())
+    fn inner_callback(&self) -> SwarmTransportCallback {
+        SwarmTransportCallback::new(self.transport.clone())
     }
 
     /// Claim the application inbox: everything core hands the application, in order (#935).

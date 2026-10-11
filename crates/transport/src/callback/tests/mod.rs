@@ -9,14 +9,57 @@ use std::sync::Mutex;
 
 #[cfg(not(target_family = "wasm"))]
 use async_trait::async_trait;
+use bytes::Bytes;
 
 use super::*;
 #[cfg(not(target_family = "wasm"))]
 use crate::core::callback::AdmittedInboundMessage;
-#[cfg(not(target_family = "wasm"))]
 use crate::core::callback::TransportCallback;
-#[cfg(not(target_family = "wasm"))]
+use crate::core::credit::LANE_CREDIT_WINDOW;
+use crate::core::pool::ChannelLane;
+use crate::core::transport::TransportMessage;
 use crate::notifier::Notifier;
+
+/// A transport callback that ignores every event, for tests that never dispatch.
+struct IgnoredCallback;
+
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+impl TransportCallback for IgnoredCallback {}
+
+/// The wire form of `message`.
+fn wire(message: &TransportMessage) -> Bytes {
+    Bytes::from(rings_codec::serialize(message).expect("transport frame must serialize"))
+}
+
+/// An [`IgnoredCallback`] for `peer` with the production credit window, its receive load
+/// counted in `load`.
+fn loaded_callback(peer: &str, load: NodeReceiveLoad) -> InnerTransportCallback {
+    InnerTransportCallback::new(peer, Box::new(IgnoredCallback), Notifier::default(), load)
+}
+
+/// An [`IgnoredCallback`] for `peer` with the production credit window, alone on its node.
+fn callback(peer: &str) -> InnerTransportCallback {
+    loaded_callback(peer, NodeReceiveLoad::new())
+}
+
+/// Admit a full [`LANE_CREDIT_WINDOW`] of copies of the custom frame `raw` on `lane`, holding
+/// every admission.
+///
+/// Post: `lane`'s window at `callback` is full, so the next custom frame on it is a credit
+/// violation until one of the returned frames drops; no other lane is touched.
+fn admit_window(
+    callback: &InnerTransportCallback,
+    raw: &Bytes,
+    lane: ChannelLane,
+) -> Vec<AdmittedInboundFrame> {
+    (0..LANE_CREDIT_WINDOW)
+        .map(|_| match callback.admit_inbound_frame(raw.clone(), lane) {
+            InboundFrameAdmission::Admitted(frame) => frame,
+            _ => panic!("a frame within the window must be admitted"),
+        })
+        .collect()
+}
 
 #[cfg(not(target_family = "wasm"))]
 type AdmittedPayloads = Arc<Mutex<Vec<(String, Vec<u8>)>>>;

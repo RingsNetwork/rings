@@ -181,8 +181,6 @@ struct LinkCreditState {
 pub(crate) struct LinkCredit {
     /// The peer, for logs.
     peer: Arc<str>,
-    /// The window every lane uses.
-    window: CreditWindow,
     /// The node's receive load, which every admission and release counts.
     load: NodeReceiveLoad,
     /// All lanes, under one lock.
@@ -190,19 +188,19 @@ pub(crate) struct LinkCredit {
 }
 
 impl LinkCredit {
-    /// The credit of a fresh connection generation with `peer`: every lane granted the window,
-    /// its receive load counted in the node's `load`.
-    pub(crate) fn new(peer: Arc<str>, window: CreditWindow, load: NodeReceiveLoad) -> Self {
+    /// The credit of a fresh connection generation with `peer`: every lane granted the
+    /// production window ([`CreditWindow::PRODUCTION`]), its receive load counted in the node's
+    /// `load`.
+    pub(crate) fn new(peer: Arc<str>, load: NodeReceiveLoad) -> Self {
         Self {
             peer,
-            window,
             load,
             state: Mutex::new(LinkCreditState {
-                send: PerLane::from_fn(|_| SendCredit::new(window)),
+                send: PerLane::from_fn(|_| SendCredit::new(CreditWindow::PRODUCTION)),
                 send_waiters: PerLane::default(),
                 #[cfg(rings_transport_backend)]
                 next_waiter: 0,
-                receive: PerLane::from_fn(|_| ReceiveWindow::new(window)),
+                receive: PerLane::from_fn(|_| ReceiveWindow::new(CreditWindow::PRODUCTION)),
                 outbox: PerLane::default(),
                 pump: PerLane::default(),
                 closed: false,
@@ -355,7 +353,7 @@ impl LinkCredit {
             let state = &mut *state;
             let mut pumps = Vec::new();
             for index in indices {
-                let Some(limit) = state.receive[index].advertise(self.window) else {
+                let Some(limit) = state.receive[index].advertise(CreditWindow::PRODUCTION) else {
                     continue;
                 };
                 let pending = &mut state.outbox[index];
@@ -554,6 +552,12 @@ pub(crate) struct CreditPermit {
 }
 
 impl CreditPermit {
+    /// Whether the permit holds a place in `link`'s windows: a permit is released only by the
+    /// connection that admitted it.
+    pub(crate) fn is_of(&self, link: &Arc<LinkCredit>) -> bool {
+        Arc::ptr_eq(&self.link, link)
+    }
+
     /// The lane whose window the permit holds a place in, named by its channel's least lane.
     pub(crate) const fn lane(&self) -> ChannelLane {
         self.index.lane()
@@ -611,10 +615,7 @@ pub(crate) async fn pump_lane_credits<C>(
             .await;
         if let Err(error) = sent {
             // The connection is gone for good: no send of it can succeed again.
-            if matches!(
-                error,
-                Error::ConnectionReleased(_) | Error::LinkCreditClosed(_)
-            ) {
+            if matches!(error, Error::ConnectionReleased(_)) {
                 return;
             }
             tracing::debug!(peer = %link.peer, %error, "failed to send a credit frame; resending");

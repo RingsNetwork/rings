@@ -41,7 +41,6 @@ use crate::measure::ProvisionalEvidenceRecord;
 use crate::message::ProvisionalServiceReceipt;
 use crate::storage::MemStorage;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::swarm::transport::PEER_LIVENESS_PERIOD_MS;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
@@ -393,6 +392,8 @@ async fn test_get_and_check_connection_waits_for_disconnected_open_transport() -
     Ok(())
 }
 
+/// A probe stuck in local backpressure (its transport send never completes) is no evidence
+/// against its peer: the pass issues it, and no failed send is measured against the peer.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
 async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> {
@@ -403,10 +404,10 @@ async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> 
 
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_successor(&node1, node2.did()).await?;
-    node1.swarm.transport.force_peer_connected_at(
-        node2.did(),
-        get_epoch_ms_i64() - PEER_LIVENESS_PERIOD_MS - 1,
-    )?;
+    node1
+        .swarm
+        .transport
+        .force_peer_liveness_probe_due(node2.did())?;
 
     let _pending_send = PendingSendGuard::new();
     node1
@@ -415,6 +416,14 @@ async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> 
         .stabilize_with_step_timeout(Duration::from_secs(1))
         .await?;
 
+    assert!(
+        node1
+            .swarm
+            .transport
+            .peer_liveness_outstanding_since_for_test(node2.did())?
+            .is_some(),
+        "the pass issued a probe"
+    );
     assert_eq!(
         measure
             .event_count(node2.did(), MeasurementEvent::FailedToSend)

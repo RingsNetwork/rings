@@ -3,13 +3,13 @@ use super::*;
 async fn admitted_callback(
     transport: Arc<SwarmTransport>,
     peer: Did,
-) -> Result<InnerSwarmCallback> {
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
+) -> Result<SwarmTransportCallback> {
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    Ok(InnerSwarmCallback::new(transport).with_pending_connection_attempt(attempt))
+    Ok(SwarmTransportCallback::new(transport).with_pending_connection_attempt(attempt))
 }
 
 #[tokio::test]
@@ -17,7 +17,7 @@ async fn test_malformed_unbound_transport_does_not_attribute_peer_failure() -> R
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer: Did = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(transport);
+    let callback = SwarmTransportCallback::new(transport);
 
     callback
         .on_admitted_message_for_test(&peer.to_string(), &[0xff])
@@ -179,12 +179,12 @@ async fn test_expired_partial_reassembly_releases_shared_budget_without_more_pee
     };
     let expiry = meta.ts_ms.saturating_add(meta.ttl_ms as u128);
     let cleanup_now_ms = Arc::new(Mutex::new(meta.ts_ms));
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    let callback = InnerSwarmCallback::new_with_reassembly_clock_for_test(
+    let callback = SwarmTransportCallback::new_with_reassembly_clock_for_test(
         Arc::clone(&transport),
         Arc::clone(&cleanup_now_ms),
     )
@@ -302,12 +302,12 @@ async fn test_authenticated_partial_expiry_remains_attributable_after_disconnect
     };
     let expiry = meta.ts_ms.saturating_add(meta.ttl_ms as u128);
     let cleanup_now_ms = Arc::new(Mutex::new(meta.ts_ms));
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    let callback = InnerSwarmCallback::new_with_reassembly_clock_for_test(
+    let callback = SwarmTransportCallback::new_with_reassembly_clock_for_test(
         Arc::clone(&transport),
         Arc::clone(&cleanup_now_ms),
     )
@@ -344,7 +344,7 @@ async fn test_invalid_unbound_transport_envelope_does_not_attribute_peer_failure
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer: Did = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(transport);
+    let callback = SwarmTransportCallback::new(transport);
 
     callback
         .on_invalid_inbound_frame(&peer.to_string())
@@ -367,7 +367,7 @@ fn test_inbound_mailbox_without_runtime_returns_typed_error() -> Result<()> {
         &peer_session,
         transport.dht.did,
     )?;
-    let callback = InnerSwarmCallback::new(transport);
+    let callback = SwarmTransportCallback::new(transport);
     let is_runtime_error = futures::executor::block_on(async {
         match callback
             .on_admitted_message_for_test("not-a-did", &wire)

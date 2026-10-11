@@ -2,7 +2,7 @@
 //! the logical inbound stage.
 //!
 //! ```text
-//!   InboundTap ──every payload entering the logical stage──▶ validates
+//!   InboundTap ──every payload entering the logical stage──▶ observed
 //!   ApplicationInbox ─┬─ Message ──▶ inbounds, inbound_custom_data
 //!                     └─ Event   ──▶ events
 //! ```
@@ -26,7 +26,7 @@ use crate::swarm::transport::SwarmTransport;
 /// What the recorder has read so far.
 #[derive(Default)]
 struct Readings {
-    validates: usize,
+    observed: usize,
     inbound_custom_data: Vec<Vec<u8>>,
     inbounds: usize,
     events: Vec<SwarmEvent>,
@@ -67,7 +67,7 @@ impl ApplicationRecorder {
         let mut readings = self.readings.lock().unwrap_or_else(PoisonError::into_inner);
         let mut tap = self.tap.lock().unwrap_or_else(PoisonError::into_inner);
         while let Ok(_payload) = tap.try_recv() {
-            readings.validates += 1;
+            readings.observed += 1;
         }
         while let Some(delivery) = self.inbox.try_next() {
             Self::record(&mut readings, delivery);
@@ -77,8 +77,8 @@ impl ApplicationRecorder {
 
     /// Payloads that entered the logical inbound stage.
     #[cfg(feature = "dummy")]
-    pub(super) fn validates(&self) -> usize {
-        self.read(|readings| readings.validates)
+    pub(super) fn observed(&self) -> usize {
+        self.read(|readings| readings.observed)
     }
 
     /// Application messages handed to the application.

@@ -34,7 +34,7 @@ use crate::message::MessagePayload;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
-use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::observer::MessageActivity;
 use crate::swarm::observer::MessageObservation;
 use crate::swarm::observer::ObservationOutcome;
@@ -409,7 +409,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
     /// Interpret one `CoreEffect`.
     ///
     /// Every send goes through the transport's
-    /// [`ProtocolEgress`](crate::swarm::transport::egress::ProtocolEgress): an effect runs inside the
+    /// protocol egress (`SwarmTransport::protocol_egress`): an effect runs inside the
     /// inbound event or maintenance step that emitted it, so it returns once its payload is
     /// queued and never waits on a remote peer (the inbound-locality law of
     /// `swarm::transport::egress`).
@@ -481,7 +481,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                     return Ok(());
                 }
 
-                let callback = InnerSwarmCallback::new(Arc::clone(self.transport));
+                let callback = SwarmTransportCallback::new(Arc::clone(self.transport));
                 match self.transport.connect_detached(peer, callback).await {
                     Ok(()) | Err(Error::AlreadyConnected) => Ok(()),
                     Err(

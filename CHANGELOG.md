@@ -14,25 +14,40 @@
   - New `swarm::application`: `Swarm::application_inbox()` claims, once, a bounded ordered inbox
     of `ApplicationDelivery` items: `Message(ApplicationMessage)`, only application data
     (`ApplicationData::{Custom, E2eHandshakeRequest, E2eHandshakeResponse, E2eStreamFrame}`),
-    and `Event(SwarmEvent)`. No control message has a representation there. A full inbox
-    (`APPLICATION_INBOX_WEIGHT`, 64 MiB) holds only the `Application` and `E2e` lanes; the
-    relay-inbox drain never waits and leaves what does not fit, unadmitted, for a later pass.
+    and `Event(SwarmEvent)`. No control message has a representation there. The application
+    reads it with `ApplicationInbox::next`, or `try_next` without waiting.
+  - Core never waits on the application, not even through a full inbox: a live application
+    message that does not fit is dropped and counted (`ApplicationInbox::dropped`), as a
+    best-effort network drops it, and no inbound lane waits for the application to read. The
+    bound, `APPLICATION_INBOX_WEIGHT` (64 MiB), weighs each message by its own size plus its
+    heap bytes, so empty messages are bounded too. Before the application claims the inbox,
+    live messages are discarded and peer facts kept.
+  - Relay-inbox mail is offered to the application only through a reservation of room in the
+    inbox, and retired from storage only once the application has taken it. Mail that finds no
+    room or no reader stays stored for a later pass, as does mail whose origin's quota is spent
+    for now (deferred, no longer discarded).
   - `SwarmEvent` carries only logical facts, `PeerAdmitted` and `PeerRetired`;
-    `ConnectionStateChange`, `PeerTransition` and `peer_transition` are removed. An admission
-    retired before the application read it is withdrawn with its retirement. Deciding a
-    transition and announcing it are one synchronous step, so the per-peer delivery turns are
-    removed.
+    `ConnectionStateChange`, `PeerTransition` and `peer_transition` are removed. Messages and
+    facts share the inbox's one queue, in the order core produced them, and an unread
+    `PeerAdmitted` is withdrawn by its `PeerRetired`. Deciding a transition and announcing it
+    are one synchronous step, so the per-peer delivery turns are removed.
   - `Swarm::lookup_successor` returns `SuccessorLookup::Routed(SuccessorReport)`, a handle that
     resolves to the reported successor; a report no live handle awaits is dropped by core.
-    `FindSuccessorReport::is_application_lookup` and the unused
+    `SuccessorReport::tx_id`, `FindSuccessorReport::is_application_lookup` and the unused
     `FindSuccessorReportHandler::CustomCallback` are removed.
   - Delegated admission is data: `Swarm::set_admission_delegation(prefix, delegates)` registers
     an encoded namespace prefix, which core matches on admission; the node publishes each
     protocol's declaration when it installs the protocol.
-  - Node: `Backend::serve(inbox)` and `Backend::handle(delivery)` consume the inbox;
-    `Provider::set_backend` claims it and serves it on a detached task; `BackendObserver` loses
-    `lookup_report` (the bootstrap probe awaits its `SuccessorReport`). The FFI provider serves
-    the inbox on its runtime until the handle is destroyed.
+  - Node: `Backend::serve(inbox, stop)` consumes the inbox until the swarm is gone or `stop`
+    is requested; `Backend::handle` is removed. The backend dispatches each registered
+    namespace on its own bounded queue (256 envelopes), in arrival order, so one slow protocol
+    holds back neither another namespace nor the peer facts; a full namespace queue drops
+    further envelopes, counted. `Provider::set_backend` claims the inbox and serves it on a
+    detached task. `BackendObserver`'s methods have default bodies; it loses `lookup_report`
+    (the bootstrap probe awaits its `SuccessorReport`) and gains `e2e_message`. The FFI
+    provider serves the inbox with the extension `Backend` on its runtime until the handle is
+    destroyed, and retains at most 4096 E2E events for its caller, dropping further ones,
+    counted.
 
 - Refuse a delegation signature that is not its algorithm's exact length (#933). BIP-137
   recovery sliced the first 65 bytes of a peer-supplied signature and panicked on a shorter one;
@@ -276,37 +291,42 @@
     stalls another.
   - An inbound lane's progress depends only on local resources (the inbound-locality law of
     `swarm::transport::egress`). Every send in the protocol context goes through the new
-    `ProtocolEgress`: a handler's forward, report, query or notification, a connection offer it
+    protocol egress: a handler's forward, report, query or notification, a connection offer it
     starts, a read repair, a relay hold and a liveness probe take the connection's readiness and
     their outbound capacity now, are dropped as local backpressure when either is lacking, and
     return once queued, freeing the inbound event and lane that carried their cause; so a next
     hop's backpressure never reaches upstream links. The first frame is awaited apart for at
     most 25 s, credit included; a payload that waits longer is dropped as local backpressure.
     A send through the Swarm API still returns once its first frame is admitted.
-    `SwarmTransport::send_storage_sync_or_defer` takes its `StorageSyncSend` discipline.
+    `SwarmTransport::send_storage_sync_or_defer` sends under the discipline of the egress it is
+    given.
   - Liveness judges every admitted peer by probes alone and reads no credit state
     (`ProbeClock`): a probe is due every `PEER_LIVENESS_PERIOD_MS` (renamed from
     `PEER_LIVENESS_IDLE_MS`) after the previous one, at most one is outstanding per peer, its
     deadline counts from its issue, and only its answer clears it, so a peer whose control lane
     will not take the probe is evicted and cannot escape by sending. A probe takes no shared
     outbound capacity, and no probe waits on its peer, so a starved peer delays no other
-    peer's probe. A composed stateright model checks these laws and refutes each earlier
-    design. The outbound worker holds a lane's credit only while a transfer awaits it, so a
+    peer's probe. A probe's transfer waits for credit until its answer deadline (45 s from
+    issue), not the 25 s first-frame deadline; a probe that could not reach the queue stays
+    outstanding, its deadline still counted from its first issue, and is sent again, never
+    withdrawn. A probe's answer likewise takes no shared capacity while its next hop has no
+    other answer in flight. A composed stateright model checks these laws and refutes each
+    earlier design. The outbound worker holds a lane's credit only while a transfer awaits it, so a
     peer that stops granting credit stops this end's traffic on the lane outright.
-  - The session-link holds of every connection keep at most 256 frames together, since their
-    frames have given their credit back.
   - A frame the session-link hold keeps gives its transport credit back, so held frames never
-    fill the lane that carries the link-control answer releasing them.
+    fill the lane that carries the link-control answer releasing them; the holds of every
+    connection therefore share one node-wide bound of 256 frames.
   - The inbound mailbox makes an arrival wait instead of refusing it, in resource order: first
     come first served per exhausted resource (a peer's budget, a lane's share, the shared pool)
     and per peer and lane, so a frame within its lane's reservation, such as DHT control, never
     waits behind another lane's borrower, and no peer waits behind another peer's budget. The
     order is `fair_admission::ResourceOrderedQueue`, model checked with stateright.
 
-  **Typed egress and lane-0 locality (#913 R9 M1–M4).**
-  - `SwarmTransport` is no `PayloadSender`. The waiting discipline is `ApplicationEgress`,
-    constructible only inside `crate::swarm` (the Swarm API, including the storage API, which
-    moves to `swarm::storage_api`); handlers and maintenance reach only `ProtocolEgress`.
+  **Typed egress and priority-lane locality.**
+  - `SwarmTransport` is no `PayloadSender`; every sender is an `Egress` of one discipline. The
+    waiting discipline, the application egress, is constructible only inside `crate::swarm`
+    (the Swarm API, including the storage API, which moves to `swarm::storage_api`); handlers
+    and maintenance reach only the protocol egresses.
     `fix_fingers` and `correct_stabilize` now queue their queries.
   - A connection a handler starts (`connect_detached`) or answers is reserved and created at
     once; its offer or answer, which waits on ICE gathering, is negotiated and sent on a

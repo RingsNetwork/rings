@@ -13,7 +13,6 @@
 use std::sync::atomic::AtomicU8;
 #[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use bytes::Bytes;
 
@@ -24,7 +23,7 @@ use crate::core::pool::ChannelLane;
 use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 
 /// Raw frames one peer may have admitted at this end and not yet taken over by the protocol
-/// callback: one credit window per lane. Every protocol-side per-peer budget derives from it.
+/// callback: one credit window per lane.
 pub const INBOUND_PEER_FRAME_CAPACITY: usize =
     DATA_CHANNEL_POOL_SIZE as usize * LANE_CREDIT_WINDOW as usize;
 
@@ -45,7 +44,6 @@ pub(crate) const fn inbound_frame_exceeds_protocol_ceiling(bytes: usize) -> bool
 /// One decoded transport frame holding its lane's credit until downstream admission.
 pub struct AdmittedInboundFrame {
     pub(super) payload: Bytes,
-    pub(super) owner: Arc<()>,
     pub(super) permit: CreditPermit,
 }
 

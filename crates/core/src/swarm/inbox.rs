@@ -6,14 +6,18 @@
 //! local storage, retires at once every element that fails the witness for good under the local
 //! overlay (an element held ahead of this clock is kept for a later pass, as
 //! `Entry::partition_inbox` states), and then, element by element, delivers through the inbound
-//! pipeline (handler dispatch, then the application inbox) and retires the delivered element by
-//! its add dot. Retiring per element makes progress durable: a pass cut short by its step
-//! deadline resumes after the last retired element instead of redelivering the same prefix.
-//! Delivery is at least once: an element held again between the read and its tombstone is
-//! delivered by the next pass, and a message core refuses is retired like a delivered one, as the
-//! inbound path drops it. The pass never waits on the application: when the application inbox
-//! has no room, the pass stops and leaves this element and the rest, unadmitted, for a later
-//! pass.
+//! pipeline (handler dispatch, then the application inbox) and retires the element by its add
+//! dot once it is done with: a message core handles itself at once, an application message only
+//! once the application took it from the inbox (its consumption signal, read by a later pass),
+//! so a later pass or a released inbox before that never loses it (a restart in between still
+//! can: the replay window refuses the redelivery, #936). Retiring per element
+//! makes progress durable: a pass cut short by its step deadline resumes after the last retired
+//! element instead of redelivering the same prefix. Delivery is at least once: an element held
+//! again between the read and its tombstone is delivered by the next pass, and a message core
+//! refuses is retired like a delivered one, as the inbound path drops it. The pass never waits
+//! on the application: an application message is offered only through a reservation in the
+//! application inbox, and when it finds no room or no reader, or its origin's quota is spent for
+//! now, the pass stops and leaves this element and the rest stored for a later pass.
 
 use std::sync::Arc;
 
@@ -23,8 +27,10 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
 use crate::dht::InboxDelivery;
 use crate::dht::StorageKey;
+use crate::error::Error;
 use crate::error::Result;
 use crate::message::handlers::storage::operate_entry;
+use crate::swarm::application::RelayConsumption;
 use crate::swarm::callback::LocalDelivered;
 use crate::swarm::callback::LocalDelivery;
 use crate::swarm::transport::SwarmTransport;
@@ -78,17 +84,36 @@ impl InboxDelivery for SwarmInboxDelivery {
             );
             self.retire(drain.rejected).await?;
         }
+        let relay = &self.transport.application().relay_in_flight;
+        relay.retain(
+            &drain
+                .deliverable
+                .iter()
+                .map(|element| element.payload.transaction.tx_id)
+                .collect(),
+        );
         let delivery = LocalDelivery::new(self.transport.clone());
         for element in drain.deliverable {
-            match delivery.deliver(&element.payload).await {
-                Ok(LocalDelivered::Delivered) => {}
-                Ok(LocalDelivered::Deferred) => return Ok(()),
-                Err(error) => tracing::warn!(
-                    local = %self.transport.dht.did,
-                    tx_id = %element.payload.transaction.tx_id,
-                    error = ?error,
-                    "relay inbox message refused by core"
-                ),
+            let tx_id = element.payload.transaction.tx_id;
+            match relay.poll(tx_id) {
+                RelayConsumption::Consumed => {}
+                RelayConsumption::Pending | RelayConsumption::Discarded => continue,
+                RelayConsumption::Unknown => match delivery.deliver(&element.payload).await {
+                    Ok(LocalDelivered::Handled) => {}
+                    Ok(LocalDelivered::Queued(taken)) => {
+                        relay.queued(tx_id, taken);
+                        continue;
+                    }
+                    // No room or no reader, or the origin's quota is spent for now: the rest
+                    // waits for a later pass, as it is.
+                    Ok(LocalDelivered::Deferred) | Err(Error::OriginQuota(_)) => return Ok(()),
+                    Err(error) => tracing::warn!(
+                        local = %self.transport.dht.did,
+                        %tx_id,
+                        error = ?error,
+                        "relay inbox message refused by core"
+                    ),
+                },
             }
             self.retire(inbox.removal_of([element.dot])).await?;
         }

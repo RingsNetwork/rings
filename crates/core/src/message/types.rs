@@ -307,7 +307,10 @@ impl SyncEntriesWithSuccessorReport {
     }
 }
 
-/// MessageType use to customize message, will be handle by `custom_message` method.
+/// An opaque application message. Core routes it like any payload and, at its destination,
+/// hands it to the application as
+/// [`ApplicationData::Custom`](crate::swarm::application::ApplicationData::Custom) through the
+/// [`ApplicationInbox`](crate::swarm::application::ApplicationInbox).
 #[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct CustomMessage(pub Vec<u8>);
 
@@ -518,6 +521,11 @@ impl MessageCategory {
     /// The connection lane a category travels on: one lane per category (#906), chosen by the
     /// sender and enforced by the receiver (#913 R9 M3), so the priority lane carries DHT
     /// control alone.
+    ///
+    /// Law: a category's frames reach the peer's handler in the order its lane admitted them,
+    /// whatever the other categories' channels do. With at most `OUTBOUND_LANE_WINDOW` of them
+    /// in flight, fewer than the replay window, a category stream never arrives reordered beyond
+    /// it.
     pub(crate) const fn channel_lane(self) -> ChannelLane {
         match self {
             Self::DhtControl => ChannelLane::PRIORITY,

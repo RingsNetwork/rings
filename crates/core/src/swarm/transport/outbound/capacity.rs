@@ -1,7 +1,3 @@
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 #[cfg(test)]
@@ -11,6 +7,7 @@ use std::task::Poll;
 use tokio::sync::watch;
 
 use super::model::TransferClass;
+use super::sender_bounded::SenderBoundedTransfer;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
@@ -458,10 +455,8 @@ impl TransferCapacity {
 /// node's, or none for a transfer its sender's own law bounds.
 pub(in crate::swarm::transport) struct TransferCapacityPermit {
     _held: Option<(PeerCapacityPermit, GlobalCapacityPermit)>,
-    /// Test builds: the count of sender-bounded transfers this one is in, so quiescence probes
-    /// see it in flight.
-    #[cfg(test)]
-    _sender_bounded: Option<SenderBoundedTransfer>,
+    /// The sender-bounded transfer this permit stands for, instead of a share.
+    _bound: Option<SenderBoundedTransfer>,
 }
 
 impl TransferCapacityPermit {
@@ -469,40 +464,17 @@ impl TransferCapacityPermit {
     fn held(peer: PeerCapacityPermit, global: GlobalCapacityPermit) -> Self {
         Self {
             _held: Some((peer, global)),
-            #[cfg(test)]
-            _sender_bounded: None,
+            _bound: None,
         }
     }
 
-    /// A permit holding no shared capacity, for a transfer whose count its sender bounds: a
-    /// liveness probe, at most one outstanding per peer (see `transport::liveness`).
-    pub(in crate::swarm::transport) fn bounded_by_sender() -> Self {
+    /// A permit holding no shared capacity, for a transfer its sender's own law bounds (see
+    /// `outbound::sender_bounded`).
+    pub(in crate::swarm::transport) fn bounded_by_sender(transfer: SenderBoundedTransfer) -> Self {
         Self {
             _held: None,
-            #[cfg(test)]
-            _sender_bounded: None,
+            _bound: Some(transfer),
         }
-    }
-
-    /// Test builds: count this sender-bounded transfer in `count` while it lives.
-    #[cfg(test)]
-    pub(in crate::swarm::transport) fn counted_in(mut self, count: &Arc<AtomicUsize>) -> Self {
-        count.fetch_add(1, Ordering::AcqRel);
-        self._sender_bounded = Some(SenderBoundedTransfer(Arc::clone(count)));
-        self
-    }
-}
-
-/// Test builds: one sender-bounded transfer in flight, counted until it is dropped.
-#[cfg(test)]
-struct SenderBoundedTransfer(Arc<AtomicUsize>);
-
-#[cfg(test)]
-impl Drop for SenderBoundedTransfer {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-        // A released transfer is a state change that quiescence probes read.
-        crate::tests::activity::record_activity();
     }
 }
 

@@ -22,8 +22,8 @@ use super::HeldInboundFrame;
 use super::InboundFrameLease;
 use super::InboundGate;
 use super::InboundProcessor;
-use super::InnerSwarmCallback;
 use super::PreparedInboundFrame;
+use super::SwarmTransportCallback;
 use super::TransportCallbackError;
 use crate::dht::Did;
 use crate::error::Error;
@@ -33,7 +33,7 @@ use crate::swarm::detached::run_detached_or_inline;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
-impl InnerSwarmCallback {
+impl SwarmTransportCallback {
     pub(super) fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
         self.processor.pending_attempt()
     }
@@ -242,8 +242,8 @@ impl InnerSwarmCallback {
         Ok(transport.decide_and_announce(|| {
             if !transport.mark_admission_announced(attempt)? {
                 tracing::debug!(
-                    "suppressing connected event for {did}; connection was retired before event \
-                     delivery"
+                    "suppressing PeerAdmitted for {did}; connection was retired before it was \
+                     announced"
                 );
                 return Ok((false, None));
             }
@@ -341,7 +341,7 @@ impl InnerSwarmCallback {
     }
 }
 
-impl InnerSwarmCallback {
+impl SwarmTransportCallback {
     /// Verify one self-contained payload of `wire_len` bytes from `peer`, charging a failure
     /// to `peer`. Post: the frame, ready for the admission gate; nothing about the link is
     /// touched, so the link stage decides what, if anything, the frame teaches it.
@@ -512,7 +512,7 @@ impl InnerSwarmCallback {
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl TransportCallback for InnerSwarmCallback {
+impl TransportCallback for SwarmTransportCallback {
     async fn on_admitted_message(
         &self,
         message: AdmittedInboundMessage<'_>,

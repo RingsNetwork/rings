@@ -33,6 +33,7 @@ use rings_runtime::MaybeSendSync;
 
 use crate::descriptor::prunes_registry_element;
 use crate::descriptor::RegistryElement;
+use crate::descriptor::SignedDescriptor;
 use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeDescriptor;
@@ -97,37 +98,35 @@ pub(crate) fn registry_refresh_bound() -> Duration {
         .saturating_sub(dht_lookup_poll_budget())
 }
 
-/// Validate a registry heartbeat interval against [`registry_refresh_bound`]; `setting` names
-/// the configuration key in the error.
-pub(crate) fn validate_registry_heartbeat(
-    setting: &str,
-    heartbeat_interval: Duration,
-) -> Result<()> {
-    let bound = registry_refresh_bound();
-    if heartbeat_interval >= bound {
-        return Err(Error::InvalidConfig(format!(
-            "{setting} ({heartbeat_interval:?}) must be less than {bound:?}, the lifetime of \
-             a registry write less the clock-skew tolerance and the fetch-poll budget"
-        )));
-    }
-    Ok(())
-}
-
-/// Validate online-node registration scheduling.
-pub(crate) fn validate_online_node_registration_timing(
-    advertise_presence: bool,
+/// Validate a registry's scheduling when the switch `advertise_setting` enables it: the
+/// heartbeat interval `{registry}_heartbeat_interval` is below the descriptor TTL
+/// `{registry}_ttl` and below [`registry_refresh_bound`]. `registry` is the configuration-key
+/// prefix of the registry the error names.
+pub(crate) fn validate_registration_timing(
+    registry: &str,
+    advertise_setting: &str,
+    advertised: bool,
     heartbeat_interval: Duration,
     ttl: Duration,
 ) -> Result<()> {
-    if !advertise_presence {
+    if !advertised {
         return Ok(());
     }
     if heartbeat_interval >= ttl {
         return Err(Error::InvalidConfig(format!(
-            "online_node_heartbeat_interval ({heartbeat_interval:?}) must be less than online_node_ttl ({ttl:?}) when advertise_presence is enabled"
+            "{registry}_heartbeat_interval ({heartbeat_interval:?}) must be less than \
+             {registry}_ttl ({ttl:?}) when {advertise_setting} is enabled"
         )));
     }
-    validate_registry_heartbeat("online_node_heartbeat_interval", heartbeat_interval)
+    let bound = registry_refresh_bound();
+    if heartbeat_interval >= bound {
+        return Err(Error::InvalidConfig(format!(
+            "{registry}_heartbeat_interval ({heartbeat_interval:?}) must be less than {bound:?}, \
+             the lifetime of a registry write less the clock-skew tolerance and the fetch-poll \
+             budget"
+        )));
+    }
+    Ok(())
 }
 
 /// Capability passed to registration tasks.
@@ -223,20 +222,29 @@ impl DhtRegistrationPublisher {
         }
     }
 
-    /// Publish the current value set, tombstoning every observed value `prunes_observed_value`
-    /// selects: older values with the same registry key, and, for a registry that prunes them,
-    /// values that no longer verify or have expired.
+    /// Publish `descriptors`, signed at `now_ms`, as the current value set, tombstoning every
+    /// observed value [`prunes_registry_element`] selects: this registrant's older values, and
+    /// values that no longer decode, verify or are live.
     ///
     /// Invariant: registry topics are keyed presence sets, not append-only heartbeat logs.
     /// Preservation: every observed value replaced by the current publish is tombstoned after the
     /// replacement value has been touched, while unrelated publisher keys stay joinable.
-    pub(crate) async fn publish_replacing(
+    pub(crate) async fn publish_replacing<D>(
         &self,
         context: &RegistrationContext<'_>,
-        values: impl IntoIterator<Item = Bytes>,
-        prunes_observed_value: impl Fn(&Bytes) -> bool,
-    ) -> Result<()> {
-        let current_values = values.into_iter().collect::<BTreeSet<_>>();
+        now_ms: u128,
+        descriptors: &[D],
+    ) -> Result<()>
+    where
+        D: SignedDescriptor + RegistryElement,
+    {
+        let current_values = descriptors
+            .iter()
+            .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
+            .collect::<Result<BTreeSet<_>>>()?;
+        let prunes_observed_value = |observed: &Bytes| {
+            prunes_registry_element::<D>(observed, context.did(), now_ms, context.network_id())
+        };
         let _publish_turn = self.publish_gate.lock().await;
         context.ensure_running()?;
         let observed_values = self.observed_registry_values(context).await?;
@@ -400,17 +408,8 @@ impl OnlineNodeRegistration {
     ) -> Result<OnlineNodeDescriptor> {
         let now_ms = get_epoch_ms();
         let descriptor = self.descriptor_at(context, now_ms)?;
-        let element = descriptor.to_element().map_err(Error::CoreError)?;
-        let prunes_observed_value = |observed: &Bytes| {
-            prunes_registry_element::<OnlineNodeDescriptor>(
-                observed,
-                context.did(),
-                now_ms,
-                context.network_id(),
-            )
-        };
         self.publisher
-            .publish_replacing(context, std::iter::once(element), prunes_observed_value)
+            .publish_replacing(context, now_ms, std::slice::from_ref(&descriptor))
             .await?;
         Ok(descriptor)
     }

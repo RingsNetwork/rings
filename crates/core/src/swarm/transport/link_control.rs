@@ -11,9 +11,10 @@
 //!   newer generation of the same peer, where it would confirm or disclaim what that generation's
 //!   tables never saw.
 //! - Detachment law: the sender never waits for the data channel. The frames are emitted from
-//!   the transport's inbound callback, which the read loop awaits; a send that waited there for
-//!   the peer's receive window would stall this end's reading, and so the peer's sending, on a
-//!   link both ends are still using. The send runs in a task of its own, refused when no
+//!   the transport's inbound callback, which the drainer of the frame's transport lane awaits
+//!   before handing over the lane's next frame; a send that waited there for the peer's receive
+//!   window would stall that lane at this end, and so the peer's sending on it, on a link both
+//!   ends are still using. The send runs in a task of its own, refused when no
 //!   runtime can carry one, bounded by the same accept timeout as every frame, and judged as
 //!   every frame is: a send that became irrevocable and timed out retires the connection
 //!   through the transport's termination path, never by dropping the send. Like every frame it
@@ -45,7 +46,6 @@ use super::delivery::ChunkSendPermit;
 use super::delivery::ChunkSendProgress;
 use super::delivery::FrameTarget;
 use super::delivery::TransferStop;
-use super::outbound::channel_lane;
 use super::outbound::LinkControlPermit;
 use super::outbound::TransferClass;
 use super::AdmittedConnection;
@@ -78,7 +78,7 @@ async fn deliver_link_control(
     let stop = TransferStop::new(StopToken::never());
     // Link control travels on the DHT-control lane. It needs no order against data frames:
     // a frame whose delegation reference is not yet announced waits in the session-link hold.
-    let lane = channel_lane(TransferClass::DhtControl);
+    let lane = TransferClass::DhtControl.channel_lane();
     // Law (bounded by its purpose): the frame holds its link-control permit while it waits for
     // credit, so the wait is bounded by `SESSION_HOLD_TIMEOUT`, by when the peer's hold has
     // dropped any frame this one answers and a later answer has no use. The frame is then
@@ -131,7 +131,7 @@ impl SwarmTransport {
     /// [`Error::ConnectionAttemptSuperseded`] for a generation no longer current,
     /// [`Error::SwarmMissDidInTable`] for a peer with no admitted connection,
     /// [`Error::LinkControlInFlightCapacity`] when the peer's budget is spent, and
-    /// [`Error::LinkControlRuntimeUnavailable`] when no runtime can carry the task.
+    /// [`Error::DetachedRuntimeUnavailable`] when no runtime can carry the task.
     pub(crate) async fn send_link_control(
         &self,
         attempt: PendingConnectionAttempt,
@@ -164,7 +164,7 @@ impl SwarmTransport {
             Some(Some(Some(permit))) => permit,
         };
         if spawn_detached(Box::pin(deliver_link_control(admitted, frame, permit))).is_err() {
-            return Err(Error::LinkControlRuntimeUnavailable);
+            return Err(Error::DetachedRuntimeUnavailable("a link-control send"));
         }
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         super::outbound::record_dispatched_link_control(peer, control);

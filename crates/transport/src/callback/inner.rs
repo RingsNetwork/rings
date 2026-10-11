@@ -60,7 +60,6 @@ use crate::core::credit::credit_index;
     all(target_family = "wasm", feature = "web-sys-webrtc")
 ))]
 use crate::core::credit::CreditIndex;
-use crate::core::credit::CreditWindow;
 #[cfg(any(
     all(not(target_family = "wasm"), feature = "tokio"),
     all(target_family = "wasm", feature = "web-sys-webrtc")
@@ -108,7 +107,6 @@ pub struct InnerTransportCallback {
         all(target_family = "wasm", feature = "web-sys-webrtc")
     ))]
     lanes: Mutex<PerLane<LaneQueue>>,
-    admission_identity: Arc<()>,
     #[cfg(any(
         test,
         all(not(target_family = "wasm"), feature = "tokio"),
@@ -218,26 +216,9 @@ impl InnerTransportCallback {
         data_channel_state_notifier: Notifier,
         load: NodeReceiveLoad,
     ) -> Self {
-        Self::with_window(
-            cid,
-            callback,
-            data_channel_state_notifier,
-            CreditWindow::PRODUCTION,
-            load,
-        )
-    }
-
-    /// Bind a callback to one connection identifier under the credit window `window`.
-    pub(crate) fn with_window(
-        cid: &str,
-        callback: BoxedTransportCallback,
-        data_channel_state_notifier: Notifier,
-        window: CreditWindow,
-        load: NodeReceiveLoad,
-    ) -> Self {
         let cid: Arc<str> = Arc::from(cid);
         Self {
-            link_credit: Arc::new(LinkCredit::new(Arc::clone(&cid), window, load)),
+            link_credit: Arc::new(LinkCredit::new(Arc::clone(&cid), load)),
             cid,
             callback,
             data_channel_state_notifier,
@@ -246,7 +227,6 @@ impl InnerTransportCallback {
                 all(target_family = "wasm", feature = "web-sys-webrtc")
             ))]
             lanes: Mutex::default(),
-            admission_identity: Arc::new(()),
             #[cfg(any(
                 test,
                 all(not(target_family = "wasm"), feature = "tokio"),
@@ -365,11 +345,7 @@ impl InnerTransportCallback {
             }
         };
         let payload = raw.slice_ref(payload);
-        InboundFrameAdmission::Admitted(AdmittedInboundFrame {
-            payload,
-            owner: Arc::clone(&self.admission_identity),
-            permit,
-        })
+        InboundFrameAdmission::Admitted(AdmittedInboundFrame { payload, permit })
     }
 
     #[cfg(all(not(target_family = "wasm"), feature = "tokio"))]
@@ -433,17 +409,15 @@ impl InnerTransportCallback {
 
     /// Dispatch one admitted frame and transfer its credit permit to the callback.
     pub async fn handle_admitted_frame(&self, frame: AdmittedInboundFrame) {
-        // Admission creates the owner identity and the credit permit together from this
-        // immutable callback. Matching the owner therefore also proves the connection.
-        if !Arc::ptr_eq(&self.admission_identity, &frame.owner) {
+        // Law (admission ownership). Admission draws the permit from this callback's link
+        // credit, which this callback alone creates and no other callback holds as its own, so
+        // a permit of that link proves the frame was admitted by this callback, on this
+        // connection.
+        if !frame.permit.is_of(&self.link_credit) {
             tracing::error!(peer = %self.cid, "rejected inbound frame admitted by another callback");
             return;
         }
-        let AdmittedInboundFrame {
-            payload,
-            owner: _,
-            permit,
-        } = frame;
+        let AdmittedInboundFrame { payload, permit } = frame;
         let lane = permit.lane();
         let message =
             AdmittedInboundMessage::new(&self.cid, payload, lane, InboundCreditLease::new(permit));

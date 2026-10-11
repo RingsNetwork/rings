@@ -1,8 +1,15 @@
 //! Outbound scheduler shutdown racing a send at each of its gates: before queue acceptance,
 //! at transport dispatch, and after the backend accepted the frame.
 
-use super::*;
+use rings_transport::connections::dummy_controlled;
 
+use super::super::super::delivery::SendCompletionOutcome;
+use crate::error::Result;
+use crate::swarm::transport::tests::test_lifecycle::transport_with_routable_peer;
+use crate::swarm::Arc;
+use crate::swarm::Error;
+use crate::swarm::Message;
+use crate::swarm::MessagePayload;
 #[tokio::test]
 async fn test_scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch() -> Result<()> {
     let (transport, peer, _attempt) = transport_with_routable_peer().await?;
@@ -15,11 +22,7 @@ async fn test_scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch()
     dummy_controlled::reset_sent_count();
     dummy_controlled::pause_send_message_at_dispatch();
     let sending_transport = Arc::clone(&transport);
-    let send = tokio::spawn(async move {
-        sending_transport
-            .send_payload_detached_with_outcome(payload)
-            .await
-    });
+    let send = tokio::spawn(async move { sending_transport.send_payload_admitted(payload).await });
 
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while !dummy_controlled::send_message_waiting_at_dispatch() {
@@ -53,11 +56,7 @@ async fn test_scheduler_shutdown_after_backend_acceptance_preserves_detached_suc
     dummy_controlled::set_drop_messages(true);
     dummy_controlled::pause_irrevocable_send();
     let sending_transport = Arc::clone(&transport);
-    let send = tokio::spawn(async move {
-        sending_transport
-            .send_payload_detached_with_outcome(payload)
-            .await
-    });
+    let send = tokio::spawn(async move { sending_transport.send_payload_admitted(payload).await });
 
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while !dummy_controlled::irrevocable_send_gate_waiting() {
@@ -96,11 +95,7 @@ async fn test_scheduler_shutdown_cancels_a_send_before_queue_acceptance() -> Res
     dummy_controlled::set_drop_messages(true);
     dummy_controlled::pause_send_message_after_permit();
     let sending_transport = Arc::clone(&transport);
-    let send = tokio::spawn(async move {
-        sending_transport
-            .send_payload_detached_with_outcome(payload)
-            .await
-    });
+    let send = tokio::spawn(async move { sending_transport.send_payload_admitted(payload).await });
 
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while !dummy_controlled::post_permit_send_gate_waiting() {

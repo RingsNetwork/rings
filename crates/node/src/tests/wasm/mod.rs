@@ -10,6 +10,7 @@ use futures::StreamExt;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
+use rings_core::lifecycle::StopToken;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::swarm::application::SwarmEvent;
 use rings_rpc::protos::rings_node::*;
@@ -213,7 +214,7 @@ pub async fn new_provider() -> ObservedProvider {
     let (recorder, transitions) = peer_transitions();
     let backend = Backend::new(Arc::new(provider.clone())).observed_by(Arc::new(recorder));
     let inbox = provider.application_inbox().unwrap();
-    wasm_bindgen_futures::spawn_local(backend.serve(inbox));
+    wasm_bindgen_futures::spawn_local(backend.serve(inbox, StopToken::never()));
     ObservedProvider {
         provider,
         transitions,

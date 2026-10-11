@@ -3,9 +3,13 @@
 use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::time::timeout;
 
-use super::*;
+use super::topology_view::connect_successor_hint;
+use crate::dht::TopoInfo;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
+use crate::error::Error;
+use crate::error::Result;
+use crate::message::types::Message;
 use crate::message::types::QueryFor;
 use crate::message::types::QueryForTopoInfoReport;
 use crate::tests::activity::activity_after;

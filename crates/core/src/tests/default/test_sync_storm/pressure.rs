@@ -269,6 +269,11 @@ async fn wait_for_optional_class(runtime: &SimulationRuntimeGuard, class: Schedu
     }
 }
 
+/// Hold the barrier with a reassembly backlog toward a peer, and probe that peer through the
+/// production stabilizer behind it: the probe is blocked by the barrier unless the exemption
+/// admits it, delivered within one hand-over either way, and answered, so the healthy peer is
+/// kept and no repair follows (before #924 the barrier starved the probe past its deadline,
+/// a false disconnect whose repair refed the storm).
 pub(super) async fn exercise_barrier_control_exemption(
     runtime: &SimulationRuntimeGuard,
     nodes: &[Node],
@@ -280,21 +285,10 @@ pub(super) async fn exercise_barrier_control_exemption(
     let (mut reassembly_deliveries, reassembly) =
         start_barrier_backlog(runtime, nodes, sender, peer, driver).await;
 
-    let mut control_send = nodes[sender]
-        .swarm
-        .send_direct_message(Message::ProbeRequest(test_probe_request(1)), peer)
-        .boxed_local();
-    let mut control_send_complete = false;
-    wait_for_class_while_sending(
-        runtime,
-        ScheduledDeliveryClass::Control,
-        control_send.as_mut(),
-        &mut control_send_complete,
-        "barrier control send must complete",
-    )
-    .await;
-    let control = delivery_for_class(runtime, ScheduledDeliveryClass::Control);
-    driver.observe_pending(runtime, std::slice::from_ref(&control));
+    let repairs_before = runtime
+        .repair_entries_observed()
+        .expect("repair observation must remain available");
+    let control = issue_stabilizer_probe(runtime, nodes, sender, receiver, driver).await;
     let deadline = control
         .deadline_virtual_ms
         .expect("control pressure must carry an explicit deadline");
@@ -322,13 +316,120 @@ pub(super) async fn exercise_barrier_control_exemption(
     }
     driver.observe_delivery(runtime, &control);
     driver.observe_production_handlers(runtime);
-    finish_send(control_send.as_mut(), control_send_complete).await;
+    drop(control_delivery);
     runtime
         .disable_reassembly_service()
         .expect("deterministic reassembly service must disable");
+    deliver_probe_answer(runtime, driver, &control).await;
     drain_bootstrap(runtime, nodes).await;
+    assert_peer_kept_by_its_answer(runtime, nodes, sender, receiver, repairs_before).await;
     dummy_controlled::set_max_message_size(CHUNK_MESSAGE_SIZE);
-    drop(control_delivery);
+}
+
+/// Make `sender`'s probe of `receiver` due, and no other of its probes, then run the production
+/// probe pass and return the one probe it queued; the probe's clock starts at its issue.
+async fn issue_stabilizer_probe(
+    runtime: &SimulationRuntimeGuard,
+    nodes: &[Node],
+    sender: usize,
+    receiver: usize,
+    driver: &mut TraceDriver,
+) -> ScheduledDelivery {
+    let transport = &nodes[sender].swarm.transport;
+    for (index, node) in nodes.iter().enumerate() {
+        if index != sender && index != receiver && transport.has_active_connection(node.did()) {
+            transport
+                .restart_peer_liveness_period_for_test(node.did())
+                .expect("non-target peer liveness must be restartable");
+        }
+    }
+    let peer = nodes[receiver].did();
+    transport
+        .force_peer_liveness_probe_due(peer)
+        .expect("target peer liveness must be forceable");
+    nodes[sender]
+        .swarm
+        .stabilizer()
+        .probe_peer_liveness_for_simulation()
+        .await
+        .expect("production stabilizer must send its real liveness probe");
+    let issued_at_ms =
+        i64::try_from(crate::utils::get_epoch_ms()).expect("simulated epoch must fit liveness");
+    assert_eq!(
+        transport
+            .peer_liveness_outstanding_since_for_test(peer)
+            .expect("active peer liveness state must remain readable"),
+        Some(issued_at_ms),
+        "the liveness clock must originate at the real stabilizer probe"
+    );
+    let new_deliveries = new_deliveries_with_controls(runtime, 1).await;
+    driver.observe_pending(runtime, &new_deliveries);
+    let probes = new_deliveries
+        .into_iter()
+        .filter(|delivery| delivery.class == ScheduledDeliveryClass::Control)
+        .collect::<Vec<_>>();
+    let [probe] = probes.as_slice() else {
+        panic!("the pass must queue exactly the target's probe: {probes:?}");
+    };
+    assert!(probe.transaction_id.is_some());
+    assert!(probe.deadline_virtual_ms.is_some());
+    probe.clone()
+}
+
+/// Deliver the peer's answer to `probe`, under the probe's transaction.
+async fn deliver_probe_answer(
+    runtime: &SimulationRuntimeGuard,
+    driver: &mut TraceDriver,
+    probe: &ScheduledDelivery,
+) {
+    let answer = runtime
+        .pending_deliveries()
+        .expect("probe answer must classify")
+        .into_iter()
+        .find(|delivery| {
+            delivery.class == ScheduledDeliveryClass::Control
+                && delivery.transaction_id == probe.transaction_id
+        })
+        .expect("the peer must answer the probe once the barrier released it");
+    assert!(runtime
+        .deliver(&answer)
+        .await
+        .expect("probe answer delivery must remain stable"));
+    driver.observe_delivery(runtime, &answer);
+}
+
+/// The probe was answered: none is left to expire into a false disconnect, `sender` keeps
+/// `receiver` through a liveness pass, and no repair entry followed.
+async fn assert_peer_kept_by_its_answer(
+    runtime: &SimulationRuntimeGuard,
+    nodes: &[Node],
+    sender: usize,
+    receiver: usize,
+    repairs_before: u64,
+) {
+    let peer = nodes[receiver].did();
+    let transport = &nodes[sender].swarm.transport;
+    assert_eq!(
+        transport
+            .peer_liveness_outstanding_since_for_test(peer)
+            .expect("active peer liveness state must remain readable"),
+        None,
+        "the probe must be answered once the barrier released it"
+    );
+    nodes[sender]
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await
+        .expect("liveness evidence must be processed");
+    assert!(transport.get_connection(peer).is_some());
+    assert_eq!(
+        runtime
+            .repair_entries_observed()
+            .expect("repair observation must remain available"),
+        repairs_before,
+        "no repair follows an answered probe"
+    );
 }
 
 async fn start_barrier_backlog<'a>(
@@ -384,7 +485,7 @@ where
             std::task::Poll::Ready(result) => {
                 assert!(
                     !blocked_control,
-                    "legacy barrier unexpectedly admitted control"
+                    "a barrier without the exemption unexpectedly admitted control"
                 );
                 assert!(result.expect("enabled control delivery must remain stable"));
                 return true;

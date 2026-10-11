@@ -1,6 +1,8 @@
+use futures::channel::oneshot;
 use futures::FutureExt;
 
 use super::ApplicationOutlet;
+use super::Delivered;
 use super::APPLICATION_INBOX_WEIGHT;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
@@ -22,17 +24,6 @@ fn message(len: usize) -> ApplicationMessage {
         tx_id: uuid::Uuid::new_v4(),
         from: peer(),
         data: ApplicationData::Custom(CustomMessage(vec![0; len])),
-    }
-}
-
-/// Queue `message` through a reservation if it fits now; returns whether room was found.
-fn try_queue(outlet: &ApplicationOutlet, message: ApplicationMessage) -> bool {
-    match outlet.try_reserve(&message) {
-        Some(room) => {
-            room.fill(message);
-            true
-        }
-        None => false,
     }
 }
 
@@ -81,11 +72,33 @@ fn test_a_read_admission_keeps_its_retirement_before_a_readmission() {
     ]);
 }
 
+/// One order: a peer fact never overtakes an earlier message.
 #[test]
-fn test_an_unclaimed_inbox_discards_messages_and_keeps_events() {
+fn test_messages_and_facts_are_read_in_the_order_they_were_produced() {
+    let outlet = ApplicationOutlet::new();
+    let inbox = outlet.claim().unwrap();
+    let earlier = message(1);
+    let peer = earlier.from;
+    assert_eq!(outlet.deliver(earlier.clone()), Delivered::Queued);
+    outlet.announce(SwarmEvent::PeerAdmitted { peer });
+    assert_eq!(
+        inbox.try_next(),
+        Some(ApplicationDelivery::Message(earlier))
+    );
+    assert_eq!(
+        inbox.try_next(),
+        Some(ApplicationDelivery::Event(SwarmEvent::PeerAdmitted {
+            peer
+        }))
+    );
+}
+
+#[test]
+fn test_an_unclaimed_inbox_discards_messages_reserves_nothing_and_keeps_facts() {
     let outlet = ApplicationOutlet::new();
     let peer = peer();
-    assert!(try_queue(&outlet, message(1)));
+    assert_eq!(outlet.deliver(message(1)), Delivered::Discarded);
+    assert!(outlet.try_reserve(&message(1)).is_none());
     outlet.announce(SwarmEvent::PeerAdmitted { peer });
     let inbox = outlet.claim().unwrap();
     assert_eq!(
@@ -97,41 +110,93 @@ fn test_an_unclaimed_inbox_discards_messages_and_keeps_events() {
     assert_eq!(inbox.try_next(), None);
 }
 
+/// A full inbox drops a live message at once and counts it; nothing waits, and reading makes
+/// room again.
 #[test]
-fn test_a_full_inbox_holds_deliver_until_the_application_reads() {
+fn test_a_full_inbox_drops_and_counts_a_live_message_without_waiting() {
     let outlet = ApplicationOutlet::new();
     let inbox = outlet.claim().unwrap();
-    assert!(try_queue(&outlet, message(APPLICATION_INBOX_WEIGHT)));
-    assert!(!try_queue(&outlet, message(1)));
-    let mut waiting = Box::pin(outlet.deliver(message(1)));
-    assert!(waiting.as_mut().now_or_never().is_none());
+    assert_eq!(
+        outlet.deliver(message(APPLICATION_INBOX_WEIGHT)),
+        Delivered::Queued
+    );
+    assert_eq!(outlet.deliver(message(1)), Delivered::Dropped);
+    assert_eq!(inbox.dropped(), 1);
     assert!(matches!(
         inbox.try_next(),
         Some(ApplicationDelivery::Message(_))
     ));
-    assert!(waiting.as_mut().now_or_never().is_some());
-    assert!(matches!(
-        inbox.try_next(),
-        Some(ApplicationDelivery::Message(_))
-    ));
+    assert_eq!(outlet.deliver(message(1)), Delivered::Queued);
+}
+
+/// An empty message still weighs its own size, so empty messages cannot fill memory unbounded
+/// (#913 R10 M1).
+#[test]
+fn test_an_empty_message_still_counts_against_the_bound() {
+    let outlet = ApplicationOutlet::new();
+    let inbox = outlet.claim().unwrap();
+    let mut queued = 0usize;
+    while outlet.deliver(message(0)) == Delivered::Queued {
+        queued += 1;
+    }
+    assert!(queued > 0 && queued <= APPLICATION_INBOX_WEIGHT);
+    assert_eq!(inbox.dropped(), 1);
 }
 
 #[test]
 fn test_an_empty_inbox_admits_a_message_heavier_than_its_bound() {
     let outlet = ApplicationOutlet::new();
     let _inbox = outlet.claim().unwrap();
-    assert!(try_queue(&outlet, message(APPLICATION_INBOX_WEIGHT + 1)));
+    assert_eq!(
+        outlet.deliver(message(APPLICATION_INBOX_WEIGHT + 1)),
+        Delivered::Queued
+    );
 }
 
 #[test]
-fn test_a_released_inbox_frees_a_waiting_deliver() {
+fn test_a_dropped_reservation_returns_its_room() {
     let outlet = ApplicationOutlet::new();
     let inbox = outlet.claim().unwrap();
-    assert!(try_queue(&outlet, message(APPLICATION_INBOX_WEIGHT)));
-    let mut waiting = Box::pin(outlet.deliver(message(1)));
-    assert!(waiting.as_mut().now_or_never().is_none());
+    assert_eq!(outlet.deliver(message(1)), Delivered::Queued);
+    let held = message(APPLICATION_INBOX_WEIGHT - 1024);
+    let room = outlet.try_reserve(&held).unwrap();
+    assert!(outlet.try_reserve(&message(1024)).is_none());
+    drop(room);
+    assert!(outlet.try_reserve(&held).is_some());
+    assert!(inbox.try_next().is_some());
+}
+
+/// A message filled into a room fires its consumption signal when the application takes it,
+/// and a released inbox drops the signal unfired (#913 R10 H3).
+#[test]
+fn test_consumption_fires_only_when_the_application_takes_the_message() {
+    let outlet = ApplicationOutlet::new();
+    let inbox = outlet.claim().unwrap();
+    let mail = message(1);
+    let (consumed, mut taken) = oneshot::channel();
+    assert!(outlet
+        .try_reserve(&mail)
+        .unwrap()
+        .fill(mail, Some(consumed)));
+    assert_eq!(taken.try_recv(), Ok(None));
+    assert!(inbox.try_next().is_some());
+    assert_eq!(taken.try_recv(), Ok(Some(())));
+
+    let mail = message(1);
+    let (consumed, mut taken) = oneshot::channel();
+    assert!(outlet
+        .try_reserve(&mail)
+        .unwrap()
+        .fill(mail, Some(consumed)));
     drop(inbox);
-    assert!(waiting.as_mut().now_or_never().is_some());
+    assert!(taken.try_recv().is_err());
+}
+
+#[test]
+fn test_a_released_inbox_cannot_be_claimed_again() {
+    let outlet = ApplicationOutlet::new();
+    drop(outlet.claim().unwrap());
+    assert_eq!(outlet.deliver(message(1)), Delivered::Discarded);
     assert!(matches!(
         outlet.claim(),
         Err(Error::ApplicationInboxClaimed)
@@ -142,34 +207,11 @@ fn test_a_released_inbox_frees_a_waiting_deliver() {
 fn test_the_inbox_ends_once_the_outlet_is_gone_and_drained() {
     let outlet = ApplicationOutlet::new();
     let inbox = outlet.claim().unwrap();
-    assert!(try_queue(&outlet, message(1)));
+    assert_eq!(outlet.deliver(message(1)), Delivered::Queued);
     drop(outlet);
     assert!(matches!(
         inbox.next().now_or_never(),
         Some(Some(ApplicationDelivery::Message(_)))
     ));
     assert_eq!(inbox.next().now_or_never(), Some(None));
-}
-
-#[test]
-fn test_a_dropped_reservation_returns_its_room() {
-    let outlet = ApplicationOutlet::new();
-    let inbox = outlet.claim().unwrap();
-    assert!(try_queue(&outlet, message(1)));
-    let held = message(APPLICATION_INBOX_WEIGHT - 1);
-    let room = outlet.try_reserve(&held).unwrap();
-    assert!(outlet.try_reserve(&message(1)).is_none());
-    drop(room);
-    assert!(outlet.try_reserve(&held).is_some());
-    assert!(inbox.try_next().is_some());
-}
-
-#[test]
-fn test_room_reserved_before_the_claim_discards_its_message() {
-    let outlet = ApplicationOutlet::new();
-    let unowed = message(1);
-    let room = outlet.try_reserve(&unowed).unwrap();
-    let inbox = outlet.claim().unwrap();
-    room.fill(unowed);
-    assert_eq!(inbox.try_next(), None);
 }

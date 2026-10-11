@@ -32,7 +32,7 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::swarm::transport::StorageSyncSend;
+use crate::swarm::transport::egress::Egress;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
 
@@ -65,7 +65,7 @@ async fn repair_observed_storage_misses(
         .dht
         .read_repair_entry(entry, &misses, redundancy)
         .await?;
-    run_storage_repair_transport_effects(transport, repair, StorageSyncSend::Enqueued).await
+    run_storage_repair_transport_effects(&transport, &transport.protocol_egress(), repair).await
 }
 
 /// Cache `entry`, a reply to the lookup round of `(resource, redundancy)`, and count it as the
@@ -90,19 +90,16 @@ async fn cache_lookup_reply(
 }
 
 /// Execute storage fetch actions for the Swarm-facing storage API, sending each remote
-/// lookup through `sender`, the application boundary's sender.
+/// lookup and each read repair through `sender`, the application boundary's egress.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
-pub(crate) async fn handle_storage_fetch_act<S>(
+pub(crate) async fn handle_storage_fetch_act(
     transport: Arc<SwarmTransport>,
-    sender: &S,
+    sender: &Egress<'_>,
     resource: Did,
     act: PeerRingAction,
     redundancy: u16,
-) -> Result<()>
-where
-    S: PayloadSender + rings_runtime::MaybeSendSync + ?Sized,
-{
+) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
             cache_lookup_reply(&transport, resource, redundancy, evidence.entry.clone()).await?;
@@ -111,12 +108,7 @@ where
                 .dht
                 .read_repair_entry(evidence.entry, &misses, redundancy)
                 .await?;
-            run_storage_repair_transport_effects(
-                transport.clone(),
-                repair,
-                StorageSyncSend::Admitted,
-            )
-            .await?;
+            run_storage_repair_transport_effects(&transport, sender, repair).await?;
         }
         PeerRingAction::RemoteAction(next, dht_act) => {
             if let PeerRingRemoteAction::FindEntry(query) = dht_act {
@@ -216,17 +208,17 @@ async fn handle_placed_entry_operation(
     }
 }
 
-/// Execute copy-only storage repair actions under the sender's discipline `send`: the Swarm
+/// Execute copy-only storage repair actions through `egress`, under its discipline: the Swarm
 /// storage API waits for each repair's admission, a handler only queues it.
 async fn run_storage_repair_transport_effects(
-    transport: Arc<SwarmTransport>,
+    transport: &SwarmTransport,
+    egress: &Egress<'_>,
     act: PeerRingAction,
-    send: StorageSyncSend,
 ) -> Result<()> {
     for (delivery, has_next) in core_actor_steps(act.coalesced_storage_sync_deliveries()?) {
         let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
         transport
-            .send_storage_sync_or_defer(msg, send, "storage_repair")
+            .send_storage_sync_or_defer(msg, egress, "storage_repair")
             .await?;
         if has_next {
             yield_core_actor_step().await;
@@ -293,7 +285,7 @@ async fn handle_storage_search_act(
 /// an accepted placement and by `OperateEntry`, sent through `sender`, toward every remote one.
 ///
 /// The Swarm storage API passes its application-boundary sender; the protocol context passes its
-/// [`ProtocolEgress`](crate::swarm::transport::egress::ProtocolEgress).
+/// protocol egress (`SwarmTransport::protocol_egress`).
 pub(crate) async fn operate_entry<S>(
     transport: &SwarmTransport,
     sender: &S,

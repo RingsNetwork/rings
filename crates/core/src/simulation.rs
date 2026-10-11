@@ -57,7 +57,9 @@ pub(crate) use spawn::spawn_storage_progress_observer;
 
 const UUID_VERSION_4: u8 = 0x40;
 const UUID_RFC4122_VARIANT: u8 = 0x80;
-pub(crate) const CONTROL_DEADLINE_MS: u64 = PEER_LIVENESS_PERIOD_MS as u64;
+/// The virtual deadline of a queued control send: one probe period, so a control frame the
+/// simulation holds longer is one a probe of its peer would also be waiting behind.
+pub(crate) const CONTROL_DEADLINE_MS: u64 = PEER_LIVENESS_PERIOD_MS.unsigned_abs();
 
 thread_local! {
     static RUNTIME: RefCell<Option<SimulationRuntimeState>> = const { RefCell::new(None) };

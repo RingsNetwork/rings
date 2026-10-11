@@ -6,17 +6,18 @@
 //! what core hands it through this boundary:
 //!
 //! ```text
-//!   core inbound lanes ──deliver (App, E2e lanes only)──┐
-//!   relay-inbox drain  ──try_deliver──────────────────┤
-//!   connection lifecycle ──announce (never waits)─────┼──▶ ApplicationInbox::next ──▶ app
+//!   core inbound lanes ──deliver (queued, or dropped)──┐
+//!   relay-inbox drain  ──try_reserve ▸ fill───────────┤
+//!   connection lifecycle ──announce───────────────────┼──▶ ApplicationInbox::next ──▶ app
 //!   successor lookups ──answer──▶ SuccessorReport ─────┘ (a handle the app awaited itself)
 //!   delegated namespaces ◀── registered in advance by the app, read by core as data
 //! ```
 //!
 //! Laws:
-//! - **L0.** Core never calls or awaits application code. A full inbox makes only the
-//!   application data lanes (`Application`, `E2e`) wait; no control lane and no lifecycle
-//!   transition depends on the application.
+//! - **L0.** Core never calls, awaits or waits for application code. A full inbox drops further
+//!   live application data, counted, as a best-effort network drops it; no lane and no
+//!   lifecycle transition ever waits for the application to read (#913 R10). Stored relay mail
+//!   is offered only when it fits, and is retired only once the application takes it.
 //! - Only [`ApplicationData`] crosses the boundary: no control message has a representation
 //!   here, and the projection `ApplicationData::project` is total over [`Message`] variants, so
 //!   a new variant fails to compile until it is classified.
@@ -26,16 +27,20 @@
 mod delegation;
 mod inbox;
 mod lookup;
+mod relay;
 
 use std::sync::Arc;
 
 use delegation::DelegatedNamespaces;
 pub use inbox::ApplicationInbox;
 use inbox::ApplicationOutlet;
+pub(crate) use inbox::Delivered;
 pub(crate) use inbox::InboxRoom;
 pub use inbox::APPLICATION_INBOX_WEIGHT;
 use lookup::ApplicationLookups;
 pub use lookup::SuccessorReport;
+pub(crate) use relay::RelayConsumption;
+use relay::RelayInFlight;
 
 use crate::dht::Did;
 use crate::message::e2e::E2eHandshakeRequest;
@@ -55,6 +60,8 @@ pub(crate) struct ApplicationPort {
     pub(crate) lookups: Arc<ApplicationLookups>,
     /// The namespaces whose admission the application delegated.
     pub(crate) delegations: DelegatedNamespaces,
+    /// Relay mail handed to the inbox and not yet retired from storage.
+    pub(crate) relay_in_flight: RelayInFlight,
 }
 
 impl ApplicationPort {
@@ -64,6 +71,7 @@ impl ApplicationPort {
             outlet: ApplicationOutlet::new(),
             lookups: Arc::new(ApplicationLookups::default()),
             delegations: DelegatedNamespaces::default(),
+            relay_in_flight: RelayInFlight::default(),
         }
     }
 }
@@ -113,16 +121,13 @@ impl ApplicationData {
         }
     }
 
-    /// The bytes this body retains while it waits in the inbox, the measure of
+    /// The heap bytes this body owns beyond its own size, part of the measure of
     /// [`APPLICATION_INBOX_WEIGHT`].
-    fn weight(&self) -> usize {
+    fn heap_bytes(&self) -> usize {
         match self {
-            Self::Custom(CustomMessage(bytes)) => bytes.len(),
-            Self::E2eHandshakeRequest(request) => std::mem::size_of_val(request),
-            Self::E2eHandshakeResponse(response) => std::mem::size_of_val(response),
-            Self::E2eStreamFrame(frame) => {
-                std::mem::size_of_val(frame) + std::mem::size_of_val(frame.ciphertext.as_slice())
-            }
+            Self::Custom(CustomMessage(bytes)) => bytes.capacity(),
+            Self::E2eHandshakeRequest(_) | Self::E2eHandshakeResponse(_) => 0,
+            Self::E2eStreamFrame(frame) => std::mem::size_of_val(frame.ciphertext.as_slice()),
         }
     }
 }
@@ -149,9 +154,10 @@ impl ApplicationMessage {
         })
     }
 
-    /// The bytes this message retains while it waits in the inbox.
+    /// The bytes this message retains while it waits in the inbox: its own size and the heap
+    /// bytes of its data, so an empty message still counts (#913 R10 M1).
     fn weight(&self) -> usize {
-        self.data.weight()
+        std::mem::size_of::<Self>().saturating_add(self.data.heap_bytes())
     }
 }
 

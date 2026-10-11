@@ -23,6 +23,7 @@ use cli::SendCommand;
 use cli::ServiceCommand;
 use futures::pin_mut;
 use futures::StreamExt;
+use rings_gateway::GatewayStatusHandle;
 use rings_node::extension::Backend;
 use rings_node::logging::init_logging;
 use rings_node::measure::EvidenceCollectorIdentity;
@@ -42,9 +43,13 @@ use rings_node::onion::proxy::http::OnionHttpProxyOptions;
 use rings_node::onion::tcp::NativeOnionTcpExitConfig;
 use rings_node::onion::OnionEntryGuardStorage;
 use rings_node::onion::OnionExitTarget;
+use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
 use rings_node::prelude::rings_core::storage::file::FileStorage;
 use rings_node::prelude::rings_core::storage::RecordAuthority;
+use rings_node::prelude::rings_core::swarm::application::ApplicationInbox;
 use rings_node::prelude::StopSource;
+use rings_node::prelude::StopToken;
+use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
@@ -104,15 +109,131 @@ fn provisional_evidence_storage_path(measure_storage_path: &str) -> String {
 /// The command line: the top-level parser, its subcommands and their arguments.
 mod cli;
 
-#[allow(clippy::too_many_arguments)]
-async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
+/// Serve the application inbox with `backend` until `stop`; the swarm going away first, which
+/// no running node reaches, is an error.
+async fn serve_application(
+    backend: Backend,
+    inbox: ApplicationInbox,
+    stop: StopToken,
+) -> anyhow::Result<()> {
+    backend.serve(inbox, stop.clone()).await;
+    if stop.should_stop() {
+        Ok(())
+    } else {
+        anyhow::bail!("application inbox closed unexpectedly")
+    }
+}
+
+/// Run the node in the foreground until a signal or a service stops it.
+async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
     let config_path = args.config_args.config.clone();
     let mut c = config::Config::read_fs(&config_path)?;
+    apply_run_overrides(&mut c, &mut args, &config_path).await?;
+    let pc = ProcessorConfig::try_from(c.clone())?;
+    let api_security = configure_api_security(
+        &config_path,
+        &mut c,
+        args.api_token_path,
+        args.api_allowed_origins,
+        args.allow_remote_external_api,
+    )?;
+    let onion_exit_config = onion_exit_config(&c)?;
+    let onion_http_proxy = onion_http_proxy_options(&c)?;
+    let (data_storage, measure_storage) =
+        run_storage_configs(args.storage_path, args.storage_capacity, &c);
+    let processor = build_processor(
+        &pc,
+        data_storage,
+        measure_storage,
+        args.reassembly_profile.limits(),
+    )
+    .await?;
+    println!("Did: {}", processor.swarm.did());
+    let provider = Arc::new(Provider::from_processor(processor.clone()));
+    // The relay is an opt-in extension owning its own engine; install it so the daemon can
+    // serve TCP/UDP tunnels. The handle is unused server-side — the engine lives on inside the
+    // registered interpreters.
+    let _relay =
+        rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
+    let onion = NativeOnionCircuitHandle::install(
+        &provider.extensions(),
+        pc.delegatee_key(),
+        pc.network_id(),
+        c.advertise_onion_relay,
+        onion_exit_config,
+    )?;
+    let gateway_runner = c
+        .enabled_gateway()
+        .cloned()
+        .map(|config| NativeGatewayRunner::new(processor.clone(), onion.clone(), config))
+        .transpose()?;
+    let gateway_status = gateway_runner
+        .as_ref()
+        .map(NativeGatewayRunner::status_handle);
+    // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
+    // with the other run-owned tasks below and its evidence is the backend's observer.
+    let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap, processor.did())?;
+    let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
+    // The Backend decodes inbound custom messages as namespaced envelopes and routes
+    // them to the protocol registry.
+    let backend = Backend::new(provider);
+    let backend = match bootstrap.as_ref() {
+        Some(supervisor) => backend.observed_by(supervisor.observer()),
+        None => backend,
+    };
+    // Claimed before the processor listens, so no application data is discarded unclaimed.
+    let application_inbox = processor.swarm.application_inbox()?;
 
-    if let Some(ice_servers) = args.ice_servers {
+    let stop = StopSource::new();
+    let gateway_configured = gateway_runner.is_some();
+    let gateway_task = start_gateway(gateway_runner, stop.token()).await?;
+
+    let mut tasks = JoinSet::new();
+    tasks.spawn(serve_application(backend, application_inbox, stop.token()));
+    let processor_task = spawn_processor(processor.clone(), stop.token());
+    spawn_apis(
+        &mut tasks,
+        c.internal_api_port,
+        c.external_api_addr,
+        processor.clone(),
+        gateway_status,
+        api_security,
+    );
+    if let Some(supervisor) = bootstrap {
+        let bootstrap_stop = stop.token();
+        tasks.spawn(async move {
+            // Returns only on stop, which the select below requests before aborting the set.
+            supervisor.run(bootstrap_stop).await;
+            Ok(())
+        });
+    }
+    if let Some(proxy_options) = onion_http_proxy {
+        tasks.spawn(async move {
+            run_onion_http_proxy(proxy_options, processor, onion)
+                .await
+                .context("Onion HTTP proxy stopped")
+        });
+    }
+    await_foreground_exit(
+        stop,
+        tasks,
+        gateway_task,
+        processor_task,
+        gateway_configured,
+    )
+    .await
+}
+
+/// Apply the run's command-line overrides to the configuration read from `config_path`.
+async fn apply_run_overrides(
+    c: &mut config::Config,
+    args: &mut RunCommand,
+    config_path: &str,
+) -> anyhow::Result<()> {
+    if let Some(ice_servers) = args.ice_servers.take() {
         c.ice_servers = ice_servers;
     }
-    if let Some(external_ip) = args.external_ip {
+    if let Some(external_ip) = args.external_ip.take() {
         c.external_ip = Some(external_ip);
     }
     if args.webrtc_udp_port_min.is_some() {
@@ -121,19 +242,19 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     if args.webrtc_udp_port_max.is_some() {
         c.webrtc_udp_port_max = args.webrtc_udp_port_max;
     }
-    if let Some(stabilize_interval) = args.stabilize_interval {
+    if let Some(stabilize_interval) = args.stabilize_interval.take() {
         c.stabilize_interval = stabilize_interval;
     }
-    if let Some(source) = args.bootstrap_seed {
+    if let Some(source) = args.bootstrap_seed.take() {
         let seed = Seed::load(source.as_str())
             .await
             .with_context(|| format!("loading bootstrap seed {source}"))?;
         c.bootstrap.peers.extend(seed.peers);
     }
-    if let Some(external_api_addr) = args.external_api_addr {
+    if let Some(external_api_addr) = args.external_api_addr.take() {
         c.external_api_addr = external_api_addr;
     }
-    if let Some(internal_api_port) = args.internal_api_port {
+    if let Some(internal_api_port) = args.internal_api_port.take() {
         c.internal_api_port = internal_api_port;
     }
     if args.advertise_onion_relay {
@@ -143,46 +264,47 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         c.advertise_onion_exit = true;
     }
     if !args.onion_exit_service.is_empty() {
-        c.onion_exit_services = args.onion_exit_service;
+        c.onion_exit_services = std::mem::take(&mut args.onion_exit_service);
     }
     if !args.onion_exit_allow_target.is_empty() {
         c.onion_exit_policy.allowed_targets =
-            parse_onion_exit_targets(args.onion_exit_allow_target)?;
+            parse_onion_exit_targets(std::mem::take(&mut args.onion_exit_allow_target))?;
     }
     if !args.onion_exit_deny_target.is_empty() {
-        c.onion_exit_policy.denied_targets = parse_onion_exit_targets(args.onion_exit_deny_target)?;
+        c.onion_exit_policy.denied_targets =
+            parse_onion_exit_targets(std::mem::take(&mut args.onion_exit_deny_target))?;
     }
-    if let Some(max_circuits) = args.onion_exit_max_circuits {
+    if let Some(max_circuits) = args.onion_exit_max_circuits.take() {
         c.onion_exit_policy.max_circuits = max_circuits;
     }
-    if let Some(max_streams_per_circuit) = args.onion_exit_max_streams_per_circuit {
+    if let Some(max_streams_per_circuit) = args.onion_exit_max_streams_per_circuit.take() {
         c.onion_exit_policy.max_streams_per_circuit = max_streams_per_circuit;
     }
-    if let Some(max_bytes_per_minute) = args.onion_exit_max_bytes_per_minute {
+    if let Some(max_bytes_per_minute) = args.onion_exit_max_bytes_per_minute.take() {
         c.onion_exit_policy.max_bytes_per_minute = max_bytes_per_minute;
     }
-    if let Some(interval_secs) = args.onion_exit_heartbeat_interval_secs {
+    if let Some(interval_secs) = args.onion_exit_heartbeat_interval_secs.take() {
         c.onion_exit_heartbeat_interval_secs = interval_secs;
     }
-    if let Some(ttl_secs) = args.onion_exit_ttl_secs {
+    if let Some(ttl_secs) = args.onion_exit_ttl_secs.take() {
         c.onion_exit_ttl_secs = ttl_secs;
     }
-    if let Some(addr) = args.onion_http_proxy_addr {
+    if let Some(addr) = args.onion_http_proxy_addr.take() {
         c.onion_http_proxy_addr = Some(addr);
     }
-    if let Some(service) = args.onion_http_proxy_service {
+    if let Some(service) = args.onion_http_proxy_service.take() {
         c.onion_http_proxy_service = service;
     }
-    if let Some(hop_count) = args.onion_http_proxy_hop_count {
+    if let Some(hop_count) = args.onion_http_proxy_hop_count.take() {
         c.onion_http_proxy_hop_count = hop_count;
     }
     if args.onion_http_proxy_allow_short_paths {
         c.onion_http_proxy_allow_short_paths = true;
     }
-    if let Some(timeout_secs) = args.onion_http_proxy_header_timeout_secs {
+    if let Some(timeout_secs) = args.onion_http_proxy_header_timeout_secs.take() {
         c.onion_http_proxy_header_timeout_secs = timeout_secs;
     }
-    if let Some(max_connections) = args.onion_http_proxy_max_connections {
+    if let Some(max_connections) = args.onion_http_proxy_max_connections.take() {
         c.onion_http_proxy_max_connections = max_connections;
     }
     if args.gateway {
@@ -195,43 +317,35 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         };
         gateway.enabled = true;
     }
-    let pc = ProcessorConfig::try_from(c.clone())?;
-    let api_security = configure_api_security(
-        &config_path,
-        &mut c,
-        args.api_token_path,
-        args.api_allowed_origins,
-        args.allow_remote_external_api,
-    )?;
+    Ok(())
+}
 
-    let onion_delegatee_key = pc.delegatee_key();
-    let advertise_onion_relay = c.advertise_onion_relay;
-    let advertise_onion_exit = c.advertise_onion_exit;
-    let onion_exit_services = c.onion_exit_services.clone();
-    let onion_exit_policy = c.onion_exit_policy.clone();
-    let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
-    let onion_http_proxy_service = c.onion_http_proxy_service.clone();
-    let onion_http_proxy_hop_count = c.onion_http_proxy_hop_count;
-    let onion_http_proxy_allow_short_paths = c.onion_http_proxy_allow_short_paths;
-    let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
-    let onion_http_proxy_max_connections = c.onion_http_proxy_max_connections;
-    let gateway_config = c.enabled_gateway().cloned();
-
-    let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
-        let storage_path = Path::new(&storage_path);
-        let data_path = storage_path.join("data").to_string_lossy().to_string();
-        let measure_path = storage_path.join("measure").to_string_lossy().to_string();
-        let capacity = args
-            .storage_capacity
-            .unwrap_or(config::DEFAULT_STORAGE_CAPACITY);
-        (
-            config::StorageConfig::new(&data_path, capacity),
-            config::StorageConfig::new(&measure_path, capacity),
-        )
-    } else {
-        (c.data_storage, c.measure_storage)
+/// The data and measure storage of the run: under `storage_path` when given, else as configured.
+fn run_storage_configs(
+    storage_path: Option<String>,
+    storage_capacity: Option<u32>,
+    c: &config::Config,
+) -> (config::StorageConfig, config::StorageConfig) {
+    let Some(storage_path) = storage_path else {
+        return (c.data_storage.clone(), c.measure_storage.clone());
     };
+    let storage_path = Path::new(&storage_path);
+    let data_path = storage_path.join("data").to_string_lossy().to_string();
+    let measure_path = storage_path.join("measure").to_string_lossy().to_string();
+    let capacity = storage_capacity.unwrap_or(config::DEFAULT_STORAGE_CAPACITY);
+    (
+        config::StorageConfig::new(&data_path, capacity),
+        config::StorageConfig::new(&measure_path, capacity),
+    )
+}
 
+/// Open the run's stores and build its processor over them.
+async fn build_processor(
+    pc: &ProcessorConfig,
+    data_storage: config::StorageConfig,
+    measure_storage: config::StorageConfig,
+    reassembly_limits: ReassemblyLimits,
+) -> anyhow::Result<Arc<Processor>> {
     let per_data_storage = Box::new(
         FileStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path.clone())
             .await?,
@@ -273,128 +387,111 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     )
     .await?;
 
-    let processor = Arc::new(
-        ProcessorBuilder::from_config(&pc)?
+    Ok(Arc::new(
+        ProcessorBuilder::from_config(pc)?
             .storage(per_data_storage)
             .onion_entry_guard_storage(per_onion_entry_guard_storage)
             .replay_storage(per_transaction_replay_storage)
             .measure(measure)
-            .reassembly_limits(args.reassembly_profile.limits())
+            .reassembly_limits(reassembly_limits)
             .build()?,
-    );
-    println!("Did: {}", processor.swarm.did());
-    let provider = Arc::new(Provider::from_processor(processor.clone()));
-    // The relay is an opt-in extension owning its own engine; install it so the daemon can
-    // serve TCP/UDP tunnels. The handle is unused server-side — the engine lives on inside the
-    // registered interpreters.
-    let _relay =
-        rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
-    let onion_exit_config = advertise_onion_exit
-        .then(|| NativeOnionTcpExitConfig::new(onion_exit_services, onion_exit_policy.clone()))
-        .transpose()?;
-    let onion = NativeOnionCircuitHandle::install(
-        &provider.extensions(),
-        onion_delegatee_key,
-        pc.network_id(),
-        advertise_onion_relay,
-        onion_exit_config,
-    )?;
-    let gateway_runner = gateway_config
-        .map(|config| NativeGatewayRunner::new(processor.clone(), onion.clone(), config))
-        .transpose()?;
-    let gateway_status = gateway_runner
-        .as_ref()
-        .map(NativeGatewayRunner::status_handle);
-    // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
-    // with the other run-owned tasks below and its evidence is the backend's observer.
-    let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap, processor.did())?;
-    let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
-    // The Backend decodes inbound custom messages as namespaced envelopes and routes
-    // them to the protocol registry.
-    let backend = Backend::new(provider);
-    let backend = match bootstrap.as_ref() {
-        Some(supervisor) => backend.observed_by(supervisor.observer()),
-        None => backend,
-    };
-    // Claimed before the processor listens, so no application data is discarded unclaimed.
-    let application_inbox = processor.swarm.application_inbox()?;
+    ))
+}
 
-    let stop = StopSource::new();
-    let gateway_configured = gateway_runner.is_some();
-    let gateway_stop = stop.token();
-    let (gateway_started, gateway_startup) = tokio::sync::oneshot::channel();
-    let mut gateway_task = tokio::spawn(async move {
-        match gateway_runner {
-            Some(runner) => {
-                runner
-                    .run_with_startup_barrier(gateway_stop, gateway_started)
-                    .await
-            }
+/// The onion exit the configuration advertises, if any.
+fn onion_exit_config(c: &config::Config) -> anyhow::Result<Option<NativeOnionTcpExitConfig>> {
+    c.advertise_onion_exit
+        .then(|| {
+            NativeOnionTcpExitConfig::new(
+                c.onion_exit_services.clone(),
+                c.onion_exit_policy.clone(),
+            )
+        })
+        .transpose()
+        .map_err(Into::into)
+}
+
+/// The onion HTTP proxy the configuration asks for, if any.
+fn onion_http_proxy_options(c: &config::Config) -> anyhow::Result<Option<OnionHttpProxyOptions>> {
+    let Some(addr) = c.onion_http_proxy_addr.as_deref() else {
+        return Ok(None);
+    };
+    Ok(Some(OnionHttpProxyOptions {
+        listen_addr: addr.parse::<SocketAddr>()?,
+        service: c.onion_http_proxy_service.clone(),
+        hop_count: c.onion_http_proxy_hop_count,
+        allow_short_paths: c.onion_http_proxy_allow_short_paths,
+        max_connections: c.onion_http_proxy_max_connections,
+        header_timeout: Duration::from_secs(c.onion_http_proxy_header_timeout_secs),
+    }))
+}
+
+/// Start the gateway task, if one is configured, and wait for its startup barrier.
+async fn start_gateway(
+    runner: Option<NativeGatewayRunner>,
+    stop: StopToken,
+) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
+    let configured = runner.is_some();
+    let (started, startup) = tokio::sync::oneshot::channel();
+    let mut task = tokio::spawn(async move {
+        match runner {
+            Some(runner) => runner.run_with_startup_barrier(stop, started).await,
             None => std::future::pending::<anyhow::Result<()>>().await,
         }
     });
-    await_gateway_startup(gateway_configured, gateway_startup, &mut gateway_task).await?;
+    await_gateway_startup(configured, startup, &mut task).await?;
+    Ok(task)
+}
 
-    let mut tasks = JoinSet::new();
-    tasks.spawn(async move {
-        // Returns only once the swarm is gone, which no running node reaches.
-        backend.serve(application_inbox).await;
-        anyhow::bail!("application inbox closed unexpectedly")
-    });
-    let processor_task = processor.clone();
-    let processor_stop = stop.token();
-    let mut processor_task = tokio::spawn(async move {
-        processor_task.listen_with(processor_stop.clone()).await;
-        if processor_stop.should_stop() {
-            Ok(())
-        } else {
-            anyhow::bail!("node processor listener stopped unexpectedly")
-        }
-    });
+/// Serve the internal API on port `internal` and the external API at `external`.
+fn spawn_apis(
+    tasks: &mut JoinSet<anyhow::Result<()>>,
+    internal: u16,
+    external: String,
+    processor: Arc<Processor>,
+    gateway_status: Option<GatewayStatusHandle>,
+    api_security: Arc<ApiSecurity>,
+) {
     let internal_processor = processor.clone();
-    let internal_gateway = gateway_status.clone();
     let internal_security = api_security.clone();
     tasks.spawn(async move {
         run_internal_api_with_gateway(
-            c.internal_api_port,
+            internal,
             internal_processor,
-            internal_gateway,
+            gateway_status,
             internal_security,
         )
         .await
         .context("internal API stopped")
     });
-    let external_processor = processor.clone();
     tasks.spawn(async move {
-        run_external_api(c.external_api_addr, external_processor, api_security)
+        run_external_api(external, processor, api_security)
             .await
             .context("external API stopped")
     });
-    if let Some(supervisor) = bootstrap {
-        let bootstrap_stop = stop.token();
-        tasks.spawn(async move {
-            // Returns only on stop, which the select below requests before aborting the set.
-            supervisor.run(bootstrap_stop).await;
-            Ok(())
-        });
-    }
-    if let Some(onion_http_proxy_addr) = onion_http_proxy_addr {
-        let onion_http_proxy_addr = onion_http_proxy_addr.parse::<SocketAddr>()?;
-        let proxy_options = OnionHttpProxyOptions {
-            listen_addr: onion_http_proxy_addr,
-            service: onion_http_proxy_service,
-            hop_count: onion_http_proxy_hop_count,
-            allow_short_paths: onion_http_proxy_allow_short_paths,
-            max_connections: onion_http_proxy_max_connections,
-            header_timeout: Duration::from_secs(onion_http_proxy_header_timeout_secs),
-        };
-        tasks.spawn(async move {
-            run_onion_http_proxy(proxy_options, processor, onion)
-                .await
-                .context("Onion HTTP proxy stopped")
-        });
-    }
+}
 
+/// Run the processor's listener until `stop`; stopping before it is an error.
+fn spawn_processor(processor: Arc<Processor>, stop: StopToken) -> JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move {
+        processor.listen_with(stop.clone()).await;
+        if stop.should_stop() {
+            Ok(())
+        } else {
+            anyhow::bail!("node processor listener stopped unexpectedly")
+        }
+    })
+}
+
+/// Wait for a signal or the first service to exit, then stop everything: the services at once,
+/// the gateway and the processor through their cleanup.
+async fn await_foreground_exit(
+    stop: StopSource,
+    mut tasks: JoinSet<anyhow::Result<()>>,
+    mut gateway_task: JoinHandle<anyhow::Result<()>>,
+    mut processor_task: JoinHandle<anyhow::Result<()>>,
+    gateway_configured: bool,
+) -> anyhow::Result<()> {
     enum ForegroundExit {
         Signal(anyhow::Result<()>),
         Service(Option<Result<anyhow::Result<()>, JoinError>>),

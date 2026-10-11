@@ -308,7 +308,8 @@ pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error
 /// that value.
 ///
 /// Post: returns only after `ready` held. Storage changes on a node follow a handled message,
-/// whose `on_inbound` records activity, so every change is probed.
+/// and the node's observer records activity once the handler returns (`Received`), so every
+/// change is probed.
 pub async fn wait_for_storage_state(
     node: &Node,
     key: StorageKey,

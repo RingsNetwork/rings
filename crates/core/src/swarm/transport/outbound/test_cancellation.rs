@@ -247,10 +247,9 @@ async fn test_a_class_credit_of_another_generation_is_not_spent() {
     };
     // A verdict and a pending reservation of the stale generation are both reset; a pending one
     // would otherwise gate the class until the stale link closed.
-    let stale_wait = worker.next_credit_wait();
     for slot in [
         ClassCredit::Unavailable(stale),
-        ClassCredit::Awaiting(stale, stale_wait),
+        ClassCredit::Awaiting(stale),
     ] {
         if let Some(credit) = worker.credits.get_mut(class.index()) {
             *credit = slot;
@@ -268,10 +267,10 @@ async fn test_a_class_credit_of_another_generation_is_not_spent() {
     }
 }
 
-/// Law (wait identity), #913 R8: a reservation the slot no longer awaits settles nothing. Once
-/// its slot is reset to idle, by a generation change or otherwise, the late outcome of the old
-/// wait is dropped, so it cannot leave the class gated on a verdict of a generation it no longer
-/// serves; only the outcome of the wait the slot holds is recorded.
+/// Law (wait settlement), #913 R8: a reservation's outcome settles its slot only while the slot
+/// awaits one on the same generation. The late outcome of a wait on a generation the slot no
+/// longer serves is dropped, so it cannot leave the class gated on that generation's verdict;
+/// an idle slot records nothing.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), tokio::test)]
 async fn test_a_late_credit_outcome_of_an_abandoned_wait_settles_nothing() {
@@ -296,19 +295,25 @@ async fn test_a_late_credit_outcome_of_an_abandoned_wait_settles_nothing() {
     let class = TransferClass::Application;
     let slot =
         |worker: &OutboundWorker| worker.credits.get(class.index()).map(ClassCredit::attempt);
-    let abandoned = worker.next_credit_wait();
-    let awaited = worker.next_credit_wait();
+    let abandoned = PendingConnectionAttempt {
+        peer,
+        generation: attempt.generation.wrapping_sub(1),
+    };
     let refusal = || Err(Error::ChannelSendMessageFailed);
 
-    worker.settle_credit(class, abandoned, attempt, refusal());
+    worker.settle_credit(class, attempt, refusal());
     assert_eq!(slot(&worker), Some(None), "an idle slot awaits no wait");
 
     if let Some(credit) = worker.credits.get_mut(class.index()) {
-        *credit = ClassCredit::Awaiting(attempt, awaited);
+        *credit = ClassCredit::Awaiting(attempt);
     }
-    worker.settle_credit(class, abandoned, attempt, refusal());
-    assert_eq!(slot(&worker), Some(None), "the slot awaits another wait");
-    worker.settle_credit(class, awaited, attempt, refusal());
+    worker.settle_credit(class, abandoned, refusal());
+    assert_eq!(
+        slot(&worker),
+        Some(None),
+        "the slot awaits another generation"
+    );
+    worker.settle_credit(class, attempt, refusal());
     assert_eq!(
         slot(&worker),
         Some(Some(attempt)),

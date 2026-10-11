@@ -5,7 +5,7 @@
 //! link-control frame, which asks about, confirms or answers such a reference. This module is
 //! the imperative shell around that pure state: it reads the inbound clock, interprets the
 //! effects the steps return (deliver, drop, ask, confirm), and hands every resolved frame to
-//! [`InnerSwarmCallback::verify_frame`] and then [`InnerSwarmCallback::gate_prepared_frame`],
+//! [`SwarmTransportCallback::verify_frame`] and then [`SwarmTransportCallback::gate_prepared_frame`],
 //! where verification and admission are what they were before references existed.
 //!
 //! Link law: a reference resolves only on a link, and this callback's link is the handshake it
@@ -22,9 +22,9 @@
 //! Learning law: what a verified frame teaches the link is confirmed to the peer, and the held
 //! frames that awaited it released, before the frame itself is gated: a held frame never
 //! waits on the fate of the frame that taught it. A release runs in a task of its own, so it
-//! does not pace the transport's read loop; only when no runtime is current does it run inline,
-//! since a release omitted would leave frames held for a session the link knows (see
-//! [`run_detached_or_inline`]).
+//! does not pace the transport lane that carried the teaching frame; only when no runtime is
+//! current does it run inline, since a release omitted would leave frames held for a session
+//! the link knows (see [`run_detached_or_inline`]).
 //!
 //! Charging law: a frame this stage drops because the peer did not back a session it
 //! referenced is charged to the peer as a receive failure, in the same way a frame that fails
@@ -44,9 +44,9 @@ use rings_transport::core::pool::ChannelLane;
 use super::processor::HeldFrameDrop;
 use super::FrameProvenance;
 use super::InboundFrameLease;
-use super::InnerSwarmCallback;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use super::OnMessageRecursionDepthGuard;
+use super::SwarmTransportCallback;
 use super::TransportCallbackError;
 use crate::delegation::DelegationDigest;
 use crate::dht::Did;
@@ -61,7 +61,7 @@ use crate::swarm::session_link::FrameArrival;
 use crate::swarm::session_link::ResolvedFrame;
 use crate::swarm::transport::PendingConnectionAttempt;
 
-impl InnerSwarmCallback {
+impl SwarmTransportCallback {
     /// Take one frame from the transport through the link stage.
     ///
     /// ```text

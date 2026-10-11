@@ -1,6 +1,4 @@
 #[cfg(feature = "dummy")]
-use rings_transport::connections::dummy_controlled;
-
 #[cfg(feature = "dummy")]
 use super::super::delivery::SendCompletionOutcome;
 use super::*;
@@ -19,7 +17,7 @@ async fn transport_with_routable_peer(
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
@@ -525,7 +523,7 @@ async fn test_pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
 
     let _offer = transport
         .prepare_connection_offer_with_attempt(peer, callback)
@@ -552,7 +550,7 @@ async fn test_incoming_offer_replaces_an_unroutable_admitted_generation() -> Res
     )?);
     let peer_did = peer.dht.did;
 
-    let old_callback = InnerSwarmCallback::new(Arc::clone(&local));
+    let old_callback = SwarmTransportCallback::new(Arc::clone(&local));
     let (old, _) = local
         .prepare_connection_offer_with_attempt(peer_did, old_callback)
         .await?;
@@ -564,11 +562,11 @@ async fn test_incoming_offer_replaces_an_unroutable_admitted_generation() -> Res
     )?;
     local.force_peer_data_channel_open_without_callback(peer_did, Some(true))?;
 
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&peer));
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&peer));
     let (_, offer) = peer
         .prepare_connection_offer_with_attempt(local.dht.did, offer_callback)
         .await?;
-    let answer_callback = InnerSwarmCallback::new(Arc::clone(&local));
+    let answer_callback = SwarmTransportCallback::new(Arc::clone(&local));
 
     local
         .answer_remote_connection(peer_did, answer_callback, &offer)
@@ -602,7 +600,7 @@ async fn test_incoming_offer_replaces_an_orphaned_physical_connection() -> Resul
     )?);
     let peer_did = peer.dht.did;
 
-    let orphan_callback = InnerSwarmCallback::new(Arc::clone(&local));
+    let orphan_callback = SwarmTransportCallback::new(Arc::clone(&local));
     let (orphan, _) = local
         .prepare_connection_offer_with_attempt(peer_did, orphan_callback)
         .await?;
@@ -612,11 +610,11 @@ async fn test_incoming_offer_replaces_an_orphaned_physical_connection() -> Resul
         RawConnectionOwner::Orphan
     );
 
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&peer));
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&peer));
     let (_, offer) = peer
         .prepare_connection_offer_with_attempt(local.dht.did, offer_callback)
         .await?;
-    let answer_callback = InnerSwarmCallback::new(Arc::clone(&local));
+    let answer_callback = SwarmTransportCallback::new(Arc::clone(&local));
     local
         .answer_remote_connection(peer_did, answer_callback, &offer)
         .await?;
@@ -642,19 +640,19 @@ async fn test_physical_connection_creation_serializes_replaced_generations() -> 
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let creation = transport.connection_creation.lock(peer);
-    let creation_guard = creation.lock().await;
+    let creation = transport.connection_creation.lease(peer);
+    let creation_guard = creation.acquire().await;
 
     let old = transport.reserve_pending_connection(peer).await?;
     let old_callback =
-        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(old);
+        SwarmTransportCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(old);
     let old_creation = transport.new_pending_connection(old, old_callback);
     futures::pin_mut!(old_creation);
     assert!(futures::poll!(old_creation.as_mut()).is_pending());
 
     assert!(transport.retire_pending_connection(old)?);
     let replacement = transport.reserve_pending_connection(peer).await?;
-    let replacement_callback = InnerSwarmCallback::new(Arc::clone(&transport))
+    let replacement_callback = SwarmTransportCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(replacement);
     let replacement_creation = transport.new_pending_connection(replacement, replacement_callback);
     futures::pin_mut!(replacement_creation);

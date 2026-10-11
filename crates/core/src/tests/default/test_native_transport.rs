@@ -22,8 +22,7 @@ use crate::message::TRANSACTION_REPLAY_WINDOW;
 use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationDelivery;
 use crate::swarm::application::ApplicationMessage;
-use crate::swarm::application::APPLICATION_INBOX_WEIGHT;
-use crate::swarm::transport::StorageSyncSend;
+use crate::swarm::callback::InboundLane;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
 use crate::tests::data_transfer_progressed;
@@ -60,7 +59,11 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
     assert!(node1
         .swarm
         .transport
-        .send_storage_sync_or_defer(storage, StorageSyncSend::Admitted, "test")
+        .send_storage_sync_or_defer(
+            storage,
+            &node1.swarm.transport.application_egress_for_test(),
+            "test",
+        )
         .await?
         .is_sent());
 
@@ -152,26 +155,6 @@ fn delivered_backlog_index(delivery: &ApplicationDelivery) -> Option<usize> {
     }
 }
 
-/// Stall `node`'s Application lane as an application that never reads would: queue one message
-/// of the whole inbox weight into its claimed inbox, so the next Application message entering
-/// the lane waits for room until the inbox is read.
-fn fill_application_inbox(node: &Node) -> Result<()> {
-    let filler = ApplicationMessage {
-        tx_id: uuid::Uuid::new_v4(),
-        from: node.did(),
-        data: ApplicationData::Custom(CustomMessage(vec![0; APPLICATION_INBOX_WEIGHT])),
-    };
-    let room = node
-        .swarm
-        .transport
-        .application()
-        .outlet
-        .try_reserve(&filler)
-        .ok_or_else(|| Error::InvalidMessage("an empty inbox has no room".to_string()))?;
-    room.fill(filler);
-    Ok(())
-}
-
 /// The next payload entering `node`'s logical inbound stage, within the hang guard.
 async fn next_inbound(node: &Node, waiting_for: &str) -> Result<MessagePayload> {
     timeout(TEST_HANG_GUARD, node.listen_once())
@@ -180,14 +163,14 @@ async fn next_inbound(node: &Node, waiting_for: &str) -> Result<MessagePayload> 
         .ok_or_else(|| Error::InvalidMessage("the inbound tap closed".to_string()))
 }
 
-/// Lane pinning (#906): with the receiver's application not reading its full inbox, the
-/// Application lane waits for room on its data channel, control keeps flowing on its own
-/// channel, and the held Application backlog, twice the replay window, arrives in the inbox
-/// afterwards in send order with no replay rejection.
+/// Lane pinning (#906): with the receiver's Application lane stalled, the lane waits on its data
+/// channel, control keeps flowing on its own channel, and the held Application backlog, twice
+/// the replay window, arrives in the inbox afterwards in send order with no replay rejection.
 ///
-/// The stalled application is a claimed inbox nobody reads, filled to its weight: core never
-/// waits on application code (#935), so the only way an application holds a lane is by leaving
-/// its inbox full, and that holds only the Application lane.
+/// The stall is the inbound tap's hold on the receiver's Application lane: its first frame
+/// waits at the logical stage until the hold is dropped. No application can stall a lane, since
+/// a full inbox drops live data instead of waiting (#913 R10), so the hold stands for any stall
+/// of one class.
 ///
 /// Under per-lane credit (#924) the stalled lane holds back its sender once the receiver holds
 /// a window of its frames, so the backlog is sent in order by a task of its own, whose sends
@@ -208,7 +191,11 @@ async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order()
     node2
         .swarm
         .set_admission_delegation(BACKLOG_PREFIX.to_vec(), true);
-    fill_application_inbox(&node2)?;
+    let lane_hold = node2
+        .swarm
+        .transport
+        .inbound_tap_for_test()
+        .hold_lane(InboundLane::Application);
     connect_native_nodes(&node1, &node2).await?;
     let peer = node2.did();
 
@@ -221,7 +208,7 @@ async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order()
         }
         Ok::<(), Error>(())
     });
-    // The first backlog message enters the lane, which then waits for inbox room.
+    // The first backlog message enters the lane, which then waits at the hold.
     let mut entered = 0;
     while entered == 0 {
         let payload = next_inbound(&node2, "the receiver's Application lane stall").await?;
@@ -247,7 +234,8 @@ async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order()
     // Control crossed while the Application lane stayed held at its first frame.
     assert_eq!(entered, 1);
 
-    // Reading the inbox releases the lane: the filler, then the backlog in send order.
+    // Releasing the lane delivers the backlog in send order.
+    drop(lane_hold);
     let mut arrived = Vec::with_capacity(backlog);
     while arrived.len() < backlog {
         let delivery = timeout(TEST_HANG_GUARD, inbox.next())

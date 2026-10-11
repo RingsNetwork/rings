@@ -28,7 +28,7 @@ use crate::dht::FingerFixRequest;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
-use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::utils::get_epoch_ms_i64;
 
 /// Maximum number of peers that may be handshaking before a data channel opens.
@@ -837,7 +837,7 @@ impl SwarmTransport {
     pub(super) async fn new_pending_connection(
         &self,
         attempt: PendingConnectionAttempt,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
     ) -> Result<PendingTransportConnection> {
         // The per-peer creation lease prevents two async backend calls from
         // racing to install different raw transports for one logical peer.
@@ -859,7 +859,7 @@ impl SwarmTransport {
     async fn create_pending_transport_connection(
         &self,
         attempt: PendingConnectionAttempt,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
     ) -> Result<PendingTransportConnection> {
         let cid = attempt.peer.to_string();
         tracing::trace!(

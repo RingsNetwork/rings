@@ -78,13 +78,6 @@ pub struct SuccessorReport {
     lookups: Weak<ApplicationLookups>,
 }
 
-impl SuccessorReport {
-    /// The transaction the lookup was routed under.
-    pub fn tx_id(&self) -> uuid::Uuid {
-        self.tx_id
-    }
-}
-
 impl std::fmt::Debug for SuccessorReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SuccessorReport")

@@ -2,9 +2,9 @@ use futures::FutureExt;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
 use super::*;
-use crate::message::MessageCategory;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-use crate::swarm::callback::CallbackError;
+use crate::error::CallbackError;
+use crate::message::MessageCategory;
 
 const DHT_CONTROL_LANE: InboundLane = InboundLane::from_class(MessageCategory::DhtControl);
 const STORAGE_LANE: InboundLane = InboundLane::from_class(MessageCategory::Storage);

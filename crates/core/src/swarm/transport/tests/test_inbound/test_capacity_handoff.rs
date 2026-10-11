@@ -10,8 +10,13 @@ use rings_transport::core::transport::TransportMessage;
 use rings_transport::notifier::Notifier;
 
 use super::*;
+use crate::message::MessageCategory;
 
-struct SharedCoreCallback(Arc<InnerSwarmCallback>);
+/// The connection lane this test's application frames travel on: the receiver refuses a frame
+/// on any lane but its category's (#913 R9 M3).
+const APPLICATION_CHANNEL: ChannelLane = MessageCategory::Application.channel_lane();
+
+struct SharedCoreCallback(Arc<SwarmTransportCallback>);
 
 #[async_trait]
 impl TransportCallback for SharedCoreCallback {
@@ -27,7 +32,7 @@ fn admit_raw_frame(
     callback: &InnerTransportCallback,
     raw: bytes::Bytes,
 ) -> Result<AdmittedInboundFrame> {
-    match callback.admit_inbound_frame(raw, ChannelLane::default()) {
+    match callback.admit_inbound_frame(raw, APPLICATION_CHANNEL) {
         InboundFrameAdmission::Admitted(frame) => Ok(frame),
         _ => Err(Error::InvalidMessage(
             "valid raw transport frame was not admitted".to_string(),
@@ -41,7 +46,7 @@ fn admit_raw_frame(
 /// dispatched frame's release was counted. The lease drop releases synchronously before the
 /// handoff is published, so no retry is needed.
 async fn wait_for_raw_capacity_release(
-    core_callback: &InnerSwarmCallback,
+    core_callback: &SwarmTransportCallback,
     callback: &InnerTransportCallback,
     raw: &bytes::Bytes,
     held: &mut Vec<AdmittedInboundFrame>,
@@ -52,7 +57,7 @@ async fn wait_for_raw_capacity_release(
     let batch = usize::try_from(LANE_CREDIT_WINDOW / 2)
         .map_err(|_| Error::InvalidMessage("the credit batch must fit usize".to_string()))?;
     held.truncate(held.len().saturating_sub(batch.saturating_sub(1)));
-    match callback.admit_inbound_frame(raw.clone(), ChannelLane::default()) {
+    match callback.admit_inbound_frame(raw.clone(), APPLICATION_CHANNEL) {
         InboundFrameAdmission::Admitted(frame) => Ok(frame),
         InboundFrameAdmission::CreditExceeded { .. } => Err(Error::InvalidMessage(
             "the lane's credit was not released at the core handoff".to_string(),
@@ -80,9 +85,11 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
         rings_codec::serialize(&TransportMessage::Custom(payload))
             .map_err(|error| Error::InvalidMessage(error.to_string()))?,
     );
-    let inbox = claim_full_application_inbox(&transport)?;
+    let lane_hold = transport
+        .inbound_tap_for_test()
+        .hold_lane(InboundLane::Application);
     let mut tap = transport.inbound_tap_for_test().subscribe();
-    let core_callback = Arc::new(InnerSwarmCallback::new(Arc::clone(&transport)));
+    let core_callback = Arc::new(SwarmTransportCallback::new(Arc::clone(&transport)));
     let admission_blocker = core_callback.hold_application_admission_for_test()?;
     let transport_callback = Arc::new(InnerTransportCallback::new(
         &peer.to_string(),
@@ -110,14 +117,14 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
     assert!(tap.try_recv().is_err());
     drop((released, window));
 
-    // Released, the frame is handled and then waits for inbox room, still holding its core
-    // permit: only the core permit outlives the handoff.
+    // Admitted, the frame enters the logical stage and waits at its held lane, still holding
+    // its core permit: only the core permit outlives the handoff.
     drop(admission_blocker);
     tap.next()
         .await
         .ok_or_else(|| Error::InvalidMessage("inbound tap closed".to_string()))?;
     assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
-    release_full_application_inbox(&inbox)?;
+    drop(lane_hold);
     dispatch
         .await
         .map_err(|_| Error::InvalidMessage("transport dispatch task panicked".to_string()))?;

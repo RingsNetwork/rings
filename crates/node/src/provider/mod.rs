@@ -9,7 +9,6 @@ use std::sync::Mutex;
 use rings_core::delegation::DelegationBuilder;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
-#[cfg(feature = "node")]
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::EvidenceCounters;
 use rings_core::measure::EvidenceDigest;
@@ -97,8 +96,8 @@ impl Provider {
         }
     }
 
-    /// The shared protocol registry. The inbound callback clones this so
-    /// registration (via the provider) and dispatch see the same table.
+    /// The shared protocol registry. The [`Backend`] serving core's application inbox clones
+    /// this, so registration (via the provider) and dispatch see the same table.
     pub fn extensions(&self) -> crate::extension::ext::Extensions {
         self.extensions.clone()
     }
@@ -296,11 +295,12 @@ impl Provider {
     /// Serve the swarm's application inbox with the extension [`Backend`] on a detached task,
     /// so inbound custom messages are decoded as
     /// [`Envelope`](crate::extension::ext::Envelope)s and routed to their namespace's protocol.
-    /// Call once after registering protocols; the inbox is claimed once, so a second call fails.
+    /// Call once, after registering protocols: the inbox is claimed once, so a second call
+    /// fails with `ApplicationInboxClaimed`.
     pub fn set_backend(&self) -> Result<()> {
         let backend = Backend::new(Arc::new(self.clone()));
         let inbox = self.application_inbox()?;
-        rings_runtime::spawn_detached(backend.serve(inbox)).map_err(|_| {
+        rings_runtime::spawn_detached(backend.serve(inbox, StopToken::never())).map_err(|_| {
             Error::ExtensionError("no runtime to serve the application inbox".to_owned())
         })
     }

@@ -17,7 +17,7 @@ use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
-use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -60,8 +60,8 @@ impl MessageHandler {
     }
 
     /// Build the callback handle passed into a newly created transport connection.
-    fn inner_callback(&self) -> InnerSwarmCallback {
-        InnerSwarmCallback::new(self.transport.clone())
+    fn inner_callback(&self) -> SwarmTransportCallback {
+        SwarmTransportCallback::new(self.transport.clone())
     }
 
     /// Interpret already-lowered core effects against this handler's transport.

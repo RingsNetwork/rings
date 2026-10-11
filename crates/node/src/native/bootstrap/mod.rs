@@ -17,9 +17,9 @@
 //! - [`BootstrapSupervisor`] — the shell: wakes on deadlines, target losses and finished turns;
 //!   runs at most one turn per target; exits on the run's stop token.
 //! - `evidence::ReachabilityEvidence` (crate-private) — what the swarm reports about the
-//!   targets: lookup reports for the probe, admissions the dial waits for, and retirements the
-//!   supervisor reads as losses; written by the [`Backend`] through [`BackendObserver`], which
-//!   the supervisor hands out as [`BootstrapSupervisor::observer`].
+//!   targets: admissions the dial waits for and retirements the supervisor reads as losses;
+//!   written by the [`Backend`] through [`BackendObserver`], which the supervisor hands out as
+//!   [`BootstrapSupervisor::observer`].
 //!
 //! ```text
 //!                    ┌────────────────────────── run loop ──────────────────────────┐

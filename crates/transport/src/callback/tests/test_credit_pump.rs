@@ -10,10 +10,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use super::admit_window;
+use super::callback;
 use super::link_credit::pump_lane_credits;
-use super::InboundFrameAdmission;
-use super::InnerTransportCallback;
-use super::NodeReceiveLoad;
+use super::wire;
 use crate::connection_ref::ConnectionRef;
 use crate::core::credit::credit_index;
 use crate::core::credit::LANE_CREDIT_WINDOW;
@@ -27,12 +27,6 @@ use crate::delivery::DeliveryFuture;
 use crate::delivery::SendCreditWait;
 use crate::error::Error;
 use crate::error::Result;
-
-/// A transport callback that ignores every event: the test never dispatches.
-struct IgnoredCallback;
-
-#[async_trait]
-impl crate::core::callback::TransportCallback for IgnoredCallback {}
 
 /// A connection whose first `failures` credit sends fail as a closed outbound channel does,
 /// and which records every credit it sends after that.
@@ -126,26 +120,10 @@ impl ConnectionInterface for FlakyCreditConnection {
 /// send; the timeout is a hang guard, not a pace.
 #[tokio::test]
 async fn test_the_pump_resends_a_credit_whose_send_failed() {
-    let callback = InnerTransportCallback::new(
-        "peer",
-        Box::new(IgnoredCallback),
-        crate::notifier::Notifier::default(),
-        NodeReceiveLoad::new(),
-    );
+    let callback = callback("peer");
     let lane = ChannelLane::new(2);
-    let custom = Bytes::from(
-        rings_codec::serialize(&TransportMessage::Custom(Bytes::from_static(b"data")))
-            .expect("a custom frame serializes"),
-    );
-    let held = (0..LANE_CREDIT_WINDOW)
-        .map(
-            |_| match callback.admit_inbound_frame(custom.clone(), lane) {
-                InboundFrameAdmission::Admitted(frame) => frame,
-                _ => panic!("a frame within the window is admitted"),
-            },
-        )
-        .collect::<Vec<_>>();
-    drop(held);
+    let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
+    drop(admit_window(&callback, &custom, lane));
     let connection = Arc::new(FlakyCreditConnection {
         failures: AtomicUsize::new(1),
         sent: Mutex::new(Vec::new()),

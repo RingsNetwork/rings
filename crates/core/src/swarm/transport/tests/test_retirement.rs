@@ -290,7 +290,7 @@ async fn test_stale_pending_close_cannot_remove_replacement_transport() -> Resul
     ))?);
     let peer = SecretKey::random().address().into();
     let old_attempt = transport.reserve_pending_connection(peer).await?;
-    let old_callback = InnerSwarmCallback::new(Arc::clone(&transport))
+    let old_callback = SwarmTransportCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(old_attempt);
     let old_connection = transport
         .new_pending_connection(old_attempt, old_callback)
@@ -300,7 +300,7 @@ async fn test_stale_pending_close_cannot_remove_replacement_transport() -> Resul
     assert!(transport.retire_pending_connection(old_attempt)?);
 
     let replacement = transport.reserve_pending_connection(peer).await?;
-    let replacement_callback = InnerSwarmCallback::new(Arc::clone(&transport))
+    let replacement_callback = SwarmTransportCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(replacement);
     transport
         .new_pending_connection(replacement, replacement_callback)
@@ -333,7 +333,7 @@ async fn test_stale_terminal_callback_cannot_retire_replacement() -> Result<()> 
 
     let terminal_transport = Arc::clone(&transport);
     let terminal = tokio::spawn(async move {
-        InnerSwarmCallback::new(terminal_transport)
+        SwarmTransportCallback::new(terminal_transport)
             .with_pending_connection_attempt(old_attempt)
             .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
             .await
@@ -382,7 +382,7 @@ async fn test_pending_replacement_does_not_suppress_retired_generation_announcem
 
     let terminal_transport = Arc::clone(&transport);
     let terminal = tokio::spawn(async move {
-        InnerSwarmCallback::new(terminal_transport)
+        SwarmTransportCallback::new(terminal_transport)
             .with_pending_connection_attempt(old_attempt)
             .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
             .await

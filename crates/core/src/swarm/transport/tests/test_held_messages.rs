@@ -31,7 +31,7 @@ async fn test_pending_callback_messages_are_held_until_admission() -> Result<()>
     pending.receive(&early).await?;
 
     assert_eq!(pending.callback.pre_admission_held_count_for_test(), 1);
-    assert_eq!(recorder.validates(), 0);
+    assert_eq!(recorder.observed(), 0);
     assert_eq!(recorder.inbounds(), 0);
     assert_eq!(measure.snapshot_counters()?, Vec::new());
     assert!(!transport.dht.successors().contains(&pending.peer)?);
@@ -40,7 +40,7 @@ async fn test_pending_callback_messages_are_held_until_admission() -> Result<()>
     recorder.wait_for_inbounds_at_least(1).await;
 
     assert_eq!(pending.callback.pre_admission_held_count_for_test(), 0);
-    assert_eq!(recorder.validates(), 1);
+    assert_eq!(recorder.observed(), 1);
     assert_eq!(recorder.inbounds(), 1);
     let counters = measure.snapshot_counters()?;
     assert!(counters.contains(&(pending.peer, MeasurementEvent::Connected)));

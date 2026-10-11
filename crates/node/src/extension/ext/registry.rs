@@ -339,7 +339,8 @@ where
 
 /// Registry of `(Protocol, Interpret)` pairs by namespace, plus the router-internal `Core`.
 /// Cheaply cloneable and shared (interior mutability) so the
-/// [`Provider`](crate::provider::Provider) and the inbound callback see the same table.
+/// [`Provider`](crate::provider::Provider) and the [`Backend`](crate::extension::Backend)
+/// serving the core's `ApplicationInbox` see the same table.
 #[derive(Clone)]
 pub struct Extensions {
     core: Core,

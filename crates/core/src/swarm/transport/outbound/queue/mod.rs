@@ -5,18 +5,17 @@ use super::model::TransferClass;
 /// Four control frames followed by one lower-class frame gives control at most
 /// 80% of frame admissions under sustained mixed load.
 pub(crate) const OUTBOUND_CONTROL_BURST: usize = 4;
+/// The classes below control, in their round-robin order.
 const LOWER_CLASSES: [TransferClass; 3] = [
     TransferClass::Storage,
     TransferClass::E2e,
     TransferClass::Application,
 ];
-/// Every class, control first.
-pub(super) const CLASSES: [TransferClass; TransferClass::COUNT] = [
-    TransferClass::DhtControl,
-    TransferClass::Storage,
-    TransferClass::E2e,
-    TransferClass::Application,
-];
+/// Every class, control first: `[DhtControl] ++ LOWER_CLASSES`.
+pub(super) const CLASSES: [TransferClass; TransferClass::COUNT] = {
+    let [storage, e2e, application] = LOWER_CLASSES;
+    [TransferClass::DhtControl, storage, e2e, application]
+};
 
 macro_rules! lane_for_class {
     ($lanes:expr, $class:expr) => {{

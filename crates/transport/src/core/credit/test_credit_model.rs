@@ -319,42 +319,24 @@ fn windows() -> [CreditWindow; 5] {
     ]
 }
 
-/// Safety and deadlock freedom with credits reordered and duplicated.
+/// Every property holds, for every window, in each of the three models:
+///
+/// - credits reordered and duplicated, honest sender: safety and deadlock freedom;
+/// - every credit delivered once, in any order, honest sender: safety, and every path ends
+///   with all work done. Liveness is checked on terminating paths; a path that reserves and
+///   cancels forever is a cycle, which the checker treats as fair;
+/// - a sender that floods frames without credit: it cannot push the receiver past its window,
+///   since every frame beyond the advertised credit is refused, and that refusal is reachable.
 #[test]
-fn test_credit_is_safe_and_deadlock_free_with_duplicated_credits() {
-    for window in windows() {
-        lane_model(window, true, true)
-            .checker()
-            .spawn_bfs()
-            .join()
-            .assert_properties();
-    }
-}
-
-/// With every credit delivered once, in any order, safety holds and every path ends with all
-/// work done. Liveness is checked on terminating paths; a path that reserves and cancels
-/// forever is a cycle, which the checker treats as fair.
-#[test]
-fn test_credit_completes_every_path_with_reordered_credits() {
-    for window in windows() {
-        lane_model(window, false, true)
-            .checker()
-            .spawn_bfs()
-            .join()
-            .assert_properties();
-    }
-}
-
-/// A sender that floods frames without credit cannot push the receiver past its window: every
-/// frame beyond the advertised credit is refused, and that refusal is reachable.
-#[test]
-fn test_receiver_refuses_a_flooding_sender_beyond_its_window() {
-    for window in windows() {
-        lane_model(window, false, false)
-            .checker()
-            .spawn_bfs()
-            .join()
-            .assert_properties();
+fn test_credit_laws_hold_in_every_model() {
+    for (duplicating, honest) in [(true, true), (false, true), (false, false)] {
+        for window in windows() {
+            lane_model(window, duplicating, honest)
+                .checker()
+                .spawn_bfs()
+                .join()
+                .assert_properties();
+        }
     }
 }
 

@@ -13,9 +13,9 @@
 //!    destructible handle that owns the Rust provider resources behind a raw C pointer. Callers
 //!    never receive raw `Arc` ownership tokens.
 //!
-//! 2. **Application inbox for FFI**: `FfiBackend` consumes the swarm's application inbox on the
-//!    provider runtime, routing custom messages to the extension [`Backend`] and retaining E2E
-//!    messages for `rings_node_take_e2e_events`.
+//! 2. **Application inbox for FFI**: the extension [`Backend`] consumes the swarm's application
+//!    inbox on the provider runtime; its observer retains E2E messages, bounded, for
+//!    `rings_node_take_e2e_events`.
 //!
 //! 3. **Functions for Provider Interaction**: The `rings_node_*` C ABI functions create providers,
 //!    start listeners, configure logging, and make internal requests. The prefix prevents symbol
@@ -40,13 +40,10 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use futures::FutureExt;
 use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopSource;
-use rings_core::lifecycle::StopToken;
 use rings_core::swarm::application::ApplicationData;
-use rings_core::swarm::application::ApplicationDelivery;
-use rings_core::swarm::application::ApplicationInbox;
+use rings_core::swarm::application::ApplicationMessage;
 use serde::Serialize;
 use tokio::runtime::Runtime;
 
@@ -55,8 +52,7 @@ use super::Signer;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::Backend;
-
-type FfiE2eInbox = Mutex<Vec<FfiE2eEvent>>;
+use crate::extension::BackendObserver;
 
 const FFI_SIGNATURE_LEN: usize = 65;
 
@@ -76,81 +72,84 @@ struct TakeFfiE2eEventsResponse {
     events: Vec<FfiE2eEvent>,
 }
 
-struct FfiBackend {
-    backend: Backend,
-    e2e_events: Arc<FfiE2eInbox>,
+/// E2E events retained for the C caller to take: bounded, so a caller that never takes them
+/// costs at most [`FFI_E2E_EVENT_CAPACITY`] events, and a further event is dropped, counted
+/// (#913 R10 M2).
+#[derive(Default)]
+struct FfiE2eInbox {
+    events: Mutex<Vec<FfiE2eEvent>>,
+    dropped: std::sync::atomic::AtomicU64,
 }
 
-impl FfiBackend {
-    fn new(backend: Backend, e2e_events: Arc<FfiE2eInbox>) -> Self {
-        Self {
-            backend,
-            e2e_events,
-        }
+/// E2E events an [`FfiE2eInbox`] retains before it drops further ones.
+const FFI_E2E_EVENT_CAPACITY: usize = 4096;
+
+impl FfiE2eInbox {
+    /// Take every retained event.
+    fn take(&self) -> Result<Vec<FfiE2eEvent>> {
+        let mut events = self.events.lock().map_err(|_| Error::Lock)?;
+        Ok(std::mem::take(&mut *events))
     }
 
-    fn push_e2e_event(&self, event: FfiE2eEvent) -> Result<()> {
-        self.e2e_events.lock().map_err(|_| Error::Lock)?.push(event);
+    /// Retain `event`, or drop it, counted, when full.
+    fn push(&self, event: FfiE2eEvent) -> Result<()> {
+        let mut events = self.events.lock().map_err(|_| Error::Lock)?;
+        if events.len() < FFI_E2E_EVENT_CAPACITY {
+            events.push(event);
+        } else {
+            let dropped = self
+                .dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .saturating_add(1);
+            tracing::warn!(dropped, "FFI E2E event inbox full; event dropped");
+        }
         Ok(())
     }
 }
 
-impl FfiBackend {
-    /// Consume `inbox` until `stop` is requested or the swarm is gone; a failed item is logged
-    /// and skipped.
-    async fn serve(self, inbox: ApplicationInbox, stop: StopToken) {
-        loop {
-            let delivery = futures::select_biased! {
-                () = stop.stopped().fuse() => return,
-                delivery = inbox.next().fuse() => delivery,
-            };
-            let Some(delivery) = delivery else {
-                return;
-            };
-            if let Err(error) = self.handle(delivery).await {
-                tracing::warn!(%error, "FFI application delivery failed");
-            }
+impl BackendObserver for FfiE2eInbox {
+    /// Retain an E2E message as an FFI event.
+    fn e2e_message(&self, message: &ApplicationMessage) {
+        match ffi_e2e_event(message).and_then(|event| event.map_or(Ok(()), |e| self.push(e))) {
+            Ok(()) => {}
+            Err(error) => tracing::warn!(%error, "FFI E2E event not retained"),
         }
     }
+}
 
-    /// Retain an E2E message as an FFI event; hand everything else to the extension backend.
-    async fn handle(&self, delivery: ApplicationDelivery) -> Result<()> {
-        let ApplicationDelivery::Message(message) = &delivery else {
-            return self.backend.handle(delivery).await;
-        };
-        let from = message.from.to_string();
-        let event = match &message.data {
-            ApplicationData::E2eHandshakeRequest(request) => FfiE2eEvent {
-                kind: "handshakeRequest",
-                from,
-                public_key: Some(public_key_json_string(request.requester_public_key)?),
-                stream_id: None,
-                sequence: None,
-                is_final: None,
-                ciphertext_blocks: None,
-            },
-            ApplicationData::E2eHandshakeResponse(response) => FfiE2eEvent {
-                kind: "handshakeResponse",
-                from,
-                public_key: Some(public_key_json_string(response.responder_public_key)?),
-                stream_id: None,
-                sequence: None,
-                is_final: None,
-                ciphertext_blocks: None,
-            },
-            ApplicationData::E2eStreamFrame(frame) => FfiE2eEvent {
-                kind: "streamFrame",
-                from,
-                public_key: Some(public_key_json_string(frame.sender_public_key)?),
-                stream_id: Some(frame.stream_id.to_string()),
-                sequence: Some(frame.sequence),
-                is_final: Some(frame.is_final),
-                ciphertext_blocks: Some(frame.ciphertext.len()),
-            },
-            _ => return self.backend.handle(delivery).await,
-        };
-        self.push_e2e_event(event)
-    }
+/// The FFI event of an E2E `message`; `None` for any other application data.
+fn ffi_e2e_event(message: &ApplicationMessage) -> Result<Option<FfiE2eEvent>> {
+    let from = message.from.to_string();
+    Ok(Some(match &message.data {
+        ApplicationData::E2eHandshakeRequest(request) => FfiE2eEvent {
+            kind: "handshakeRequest",
+            from,
+            public_key: Some(public_key_json_string(request.requester_public_key)?),
+            stream_id: None,
+            sequence: None,
+            is_final: None,
+            ciphertext_blocks: None,
+        },
+        ApplicationData::E2eHandshakeResponse(response) => FfiE2eEvent {
+            kind: "handshakeResponse",
+            from,
+            public_key: Some(public_key_json_string(response.responder_public_key)?),
+            stream_id: None,
+            sequence: None,
+            is_final: None,
+            ciphertext_blocks: None,
+        },
+        ApplicationData::E2eStreamFrame(frame) => FfiE2eEvent {
+            kind: "streamFrame",
+            from,
+            public_key: Some(public_key_json_string(frame.sender_public_key)?),
+            stream_id: Some(frame.stream_id.to_string()),
+            sequence: Some(frame.sequence),
+            is_final: Some(frame.is_final),
+            ciphertext_blocks: Some(frame.ciphertext.len()),
+        },
+        _ => return Ok(None),
+    }))
 }
 
 fn public_key_json_string(public_key: PublicKey<33>) -> Result<String> {
@@ -203,19 +202,17 @@ impl ProviderHandle {
         Ok(())
     }
 
-    /// Serve the swarm's application inbox with `backend` on the provider runtime until the
-    /// handle stops.
+    /// Serve the swarm's application inbox with `backend`, whose observer retains E2E events
+    /// for the caller, on the provider runtime until the handle stops.
     fn spawn_application(&self, backend: Backend) -> Result<()> {
         let inbox = self.provider.application_inbox()?;
-        let application = FfiBackend::new(backend, self.e2e_events.clone());
-        self.runtime
-            .spawn(application.serve(inbox, self.stop.token()));
+        let backend = backend.observed_by(self.e2e_events.clone());
+        self.runtime.spawn(backend.serve(inbox, self.stop.token()));
         Ok(())
     }
 
     fn take_e2e_events(&self) -> Result<Vec<FfiE2eEvent>> {
-        let mut events = self.e2e_events.lock().map_err(|_| Error::Lock)?;
-        Ok(std::mem::take(&mut *events))
+        self.e2e_events.take()
     }
 
     fn shutdown(self) {
@@ -459,7 +456,7 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
         })??;
         let provider = Arc::new(provider);
         let backend = Backend::new(provider.clone());
-        let e2e_events = Arc::new(Mutex::new(Vec::new()));
+        let e2e_events = Arc::new(FfiE2eInbox::default());
         let handle = ProviderHandle::new(provider, runtime, e2e_events);
         handle.spawn_application(backend)?;
         Ok(Box::into_raw(Box::new(handle)))
@@ -689,7 +686,7 @@ mod tests {
                     .record_authenticated_measurement_for_test(peer),
             )
             .expect("test mutation must be applied");
-        ProviderHandle::new(provider, runtime, Arc::new(Mutex::new(Vec::new()))).shutdown();
+        ProviderHandle::new(provider, runtime, Arc::default()).shutdown();
 
         let snapshot = storage
             .value

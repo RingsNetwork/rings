@@ -8,17 +8,6 @@ const MODEL_CAPACITY: usize = 8;
 const MODEL_WINDOW: usize = 2;
 const ACTION_CARDINALITY: usize = 13;
 const TRACE_LENGTH: u32 = 6;
-const CLASSES: [TransferClass; TransferClass::COUNT] = [
-    TransferClass::DhtControl,
-    TransferClass::Storage,
-    TransferClass::E2e,
-    TransferClass::Application,
-];
-const LOWER_CLASSES: [TransferClass; 3] = [
-    TransferClass::Storage,
-    TransferClass::E2e,
-    TransferClass::Application,
-];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ModelTransfer {

@@ -11,13 +11,14 @@ async fn test_retired_frame_queued_on_lane_is_not_delivered() -> Result<()> {
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let application = ApplicationRecorder::attach(&transport)?;
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt)?);
     let callback = Arc::new(
-        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt),
+        SwarmTransportCallback::new(Arc::clone(&transport))
+            .with_pending_connection_attempt(attempt),
     );
     let admission_turn = callback.hold_application_admission_for_test()?;
     let frame = local_wire(
@@ -51,7 +52,7 @@ async fn test_retired_frame_queued_on_lane_is_not_delivered() -> Result<()> {
         .await_inbound_admitted_count_for_test(|admitted| admitted == 0)
         .await;
     assert_eq!(successful_receive_count(&measure, peer)?, 1);
-    assert_eq!(application.validates(), 0);
+    assert_eq!(application.observed(), 0);
     assert_eq!(application.inbounds(), 0);
     Ok(())
 }

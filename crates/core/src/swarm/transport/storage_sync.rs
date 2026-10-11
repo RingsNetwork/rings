@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::mem;
 
 use super::delivery::SendCompletionOutcome;
+use super::egress::Egress;
 use super::SwarmTransport;
 use crate::dht::entry::inbox::relocates_from_predecessor;
 use crate::dht::entry::PlacedEntry;
@@ -33,16 +34,14 @@ pub(super) struct StorageSyncAckCapability {
     expected_acks: Vec<SyncedEntryAck>,
 }
 
-/// How a storage sync payload meets its next hop: the egress discipline of its sender (see
-/// `swarm::transport::egress`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StorageSyncSend {
-    /// The protocol discipline: return once queued; only a copy-only repair, since no
-    /// acknowledgement capability can be revoked after the queue.
-    Enqueued,
-    /// The application discipline: return once the first frame is admitted.
-    Admitted,
-    /// Return once every frame has completed or been cancelled.
+/// How a storage sync payload meets its next hop.
+#[derive(Clone, Copy)]
+enum StorageSyncSend<'s, 't> {
+    /// Through an egress, under its discipline (see `swarm::transport::egress`), which the
+    /// sender's context fixes: a handler holds only the protocol egress.
+    Egress(&'s Egress<'t>),
+    /// Return once every frame has completed or been cancelled: storage maintenance, inside its
+    /// own step deadline.
     Tracked,
 }
 
@@ -245,7 +244,7 @@ impl<'data> StorageSyncBatch<'data> {
         // Preservation: every input is validated before the first storage effect, so a
         // placement outside its entry's replica set, a protocol violation, leaves the entire
         // batch unwritten. An entry this receiver cannot admit now (the admission law,
-        // re-checked by `join_storage_entry` at persist time) is skipped without an ack, as a
+        // which persist relies on, unchecked again) is skipped without an ack, as a
         // relocation the law does not yet permit is: its owner keeps it and may offer it
         // again, and it holds back no other entry of the batch. Such an entry may be honest:
         // live on the sender's clock and not on this one, up to the skew tolerance apart, or
@@ -303,7 +302,7 @@ impl<'data> StorageSyncBatch<'data> {
 
         transport
             .dht
-            .join_storage_entry(self.now_ms, key, entry)
+            .join_admitted_storage_entry(self.now_ms, key, entry)
             .await?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         crate::simulation::record_storage_persisted(transport.dht.did);
@@ -505,7 +504,7 @@ impl SwarmTransport {
     async fn send_storage_sync_as(
         &self,
         msg: SyncEntriesWithSuccessor,
-        send: StorageSyncSend,
+        send: StorageSyncSend<'_, '_>,
     ) -> Result<StorageSyncOutcome> {
         let destination = msg.destination.did();
         match self
@@ -539,13 +538,8 @@ impl SwarmTransport {
                     )?;
                 }
                 let send_outcome = match send {
-                    StorageSyncSend::Enqueued => self
-                        .protocol_egress()
-                        .send_payload(payload)
-                        .await
-                        .map(|()| SendCompletionOutcome::Succeeded),
-                    StorageSyncSend::Admitted => {
-                        self.send_payload_detached_with_outcome(payload).await
+                    StorageSyncSend::Egress(egress) => {
+                        egress.send_payload_with_outcome(payload).await
                     }
                     StorageSyncSend::Tracked => self.send_payload_tracked(payload).await,
                 };
@@ -581,24 +575,27 @@ impl SwarmTransport {
             .await
     }
 
-    /// Send storage sync under `send` as a deferrable data-plane effect. A read repair a
-    /// handler starts is [`StorageSyncSend::Enqueued`], so it never waits on the replica it
-    /// repairs (the inbound-locality law of `swarm::transport::egress`).
+    /// Send storage sync through `egress` as a deferrable data-plane effect. A read repair a
+    /// handler starts goes through the protocol egress, the only one a handler holds, so it
+    /// never waits on the replica it repairs (the inbound-locality law of
+    /// `swarm::transport::egress`).
     ///
     /// Backpressure, connection replacement, transport readiness loss, or a
     /// vanished route means this anti-entropy payload was not accepted. These
-    /// are not DHT safety failures and may not bubble through message callbacks
-    /// as failed control-plane events.
+    /// are not DHT safety failures: they are reported as
+    /// [`StorageSyncOutcome::Deferred`], never as an error that would fail the
+    /// handler or maintenance step that started the sync.
     ///
-    /// Pre: an [`StorageSyncSend::Enqueued`] `msg` is copy-only. A hand-off registers a cleanup
-    /// acknowledgement that only a sender awaiting its outcome can revoke, so one is refused.
+    /// Pre: through an egress that returns once queued, `msg` is copy-only. A hand-off registers
+    /// a cleanup acknowledgement that only a sender awaiting its outcome can revoke, so one is
+    /// refused.
     pub(crate) async fn send_storage_sync_or_defer(
         &self,
         msg: SyncEntriesWithSuccessor,
-        send: StorageSyncSend,
+        egress: &Egress<'_>,
         context: &'static str,
     ) -> Result<StorageSyncOutcome> {
-        if send == StorageSyncSend::Enqueued && msg.purpose.permits_source_cleanup() {
+        if egress.returns_once_queued() && msg.purpose.permits_source_cleanup() {
             return Err(Error::InvalidMessage(format!(
                 "{context}: an ownership hand-off is not a copy-only repair"
             )));
@@ -616,7 +613,9 @@ impl SwarmTransport {
             .and_then(|did| self.get_connection(did))
             .map(|conn| conn.webrtc_connection_state());
 
-        let outcome = self.send_storage_sync_as(msg, send).await?;
+        let outcome = self
+            .send_storage_sync_as(msg, StorageSyncSend::Egress(egress))
+            .await?;
         if outcome.is_deferred() {
             tracing::warn!(
                 target: "rings_core::storage_sync",

@@ -1,12 +1,15 @@
 //! This module provide basic mechanism.
 
+mod dispatch;
 pub mod ext;
 pub mod protocols;
 #[cfg(rings_native)]
 pub mod transport;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use rings_core::dht::Did;
+use rings_core::lifecycle::StopToken;
 use rings_core::message::CustomMessage;
 use rings_core::swarm::application::ApplicationData;
 use rings_core::swarm::application::ApplicationDelivery;
@@ -19,28 +22,34 @@ use crate::extension::ext::Envelope;
 use crate::extension::ext::Extensions;
 use crate::provider::Provider;
 
-/// Observer of the peer facts the [`Backend`] reads from the application inbox but does not act
-/// on itself.
+/// Observer of what the [`Backend`] reads from the application inbox but does not act on
+/// itself: the peer facts, and the E2E messages it routes to no protocol.
 ///
-/// The backend hands the observer each fact in inbox order, before it reads the next item.
-/// Facts are the swarm's logical conclusions, never a physical connection state.
+/// The backend hands the observer each item in inbox order, before it reads the next. Facts are
+/// the swarm's logical conclusions, never a physical connection state. The observer must not
+/// block: it runs on the inbox's one reader.
 pub trait BackendObserver: Send + Sync {
     /// `peer` was admitted: its transport is ready and it joined the local DHT.
-    fn peer_admitted(&self, peer: Did);
+    fn peer_admitted(&self, _peer: Did) {}
 
     /// `peer` left the local DHT, whichever physical event or local decision caused it.
-    fn peer_retired(&self, peer: Did);
+    fn peer_retired(&self, _peer: Did) {}
+
+    /// An E2E message (handshake or stream frame) addressed to this node.
+    fn e2e_message(&self, _message: &ApplicationMessage) {}
 }
 
-/// Backend consumes the swarm's application inbox, routing each inbound custom message, decoded
-/// as an [`Envelope`], to its namespace's protocol via the [`Extensions`] registry. The registry
-/// is shared with the [`Provider`], so protocols registered there are visible to inbound dispatch
-/// here. Each protocol's interpreter does its IO through a namespace-scoped
-/// [`Scope`](ext::Scope); the underlying router capability is internal.
+/// Backend consumes the swarm's application inbox: it routes each inbound custom message,
+/// decoded as an [`Envelope`], to its namespace's protocol via the [`Extensions`] registry,
+/// and hands everything else to the optional [`BackendObserver`]. The registry is shared with
+/// the [`Provider`], so protocols registered there are visible to inbound dispatch here. Each
+/// protocol's interpreter does its IO through a namespace-scoped [`Scope`](ext::Scope).
 ///
-/// The swarm never waits on the backend: it reads at its own pace, and a slow protocol fills
-/// only the inbox, which backpressures only the application data lanes (#935). Admissions and
-/// retirements are handed to the optional [`BackendObserver`]; E2E messages are not routed.
+/// The swarm never waits on the backend (#935): it reads at its own pace, and a full inbox
+/// drops further live messages. Each registered namespace is dispatched by its own task, in the
+/// order its messages arrived, so a protocol waiting on a slow send holds back neither another
+/// namespace nor the peer facts (#913 R10 M3); a namespace whose queue is full drops further
+/// messages, counted, as the inbox does.
 pub struct Backend {
     extensions: Extensions,
     observer: Option<Arc<dyn BackendObserver>>,
@@ -55,32 +64,60 @@ impl Backend {
         }
     }
 
-    /// Attach the observer that receives admissions and retirements.
+    /// Attach the observer that receives peer facts and E2E messages.
     pub fn observed_by(mut self, observer: Arc<dyn BackendObserver>) -> Self {
         self.observer = Some(observer);
         self
     }
 
-    /// Consume `inbox` until the swarm is gone. Each item is handled to completion before the
-    /// next is read, so the protocols see the inbox order; a failed item is logged and skipped.
-    pub async fn serve(self, inbox: ApplicationInbox) {
-        while let Some(delivery) = inbox.next().await {
-            if let Err(error) = self.handle(delivery).await {
+    /// Consume `inbox` until the swarm is gone or `stop` is requested. A failed item is logged
+    /// and skipped.
+    pub async fn serve(self, inbox: ApplicationInbox, stop: StopToken) {
+        let mut namespaces = dispatch::NamespaceQueues::new(self.extensions.clone());
+        loop {
+            let delivery = futures::select_biased! {
+                () = stop.stopped().fuse() => return,
+                delivery = inbox.next().fuse() => delivery,
+            };
+            let Some(delivery) = delivery else {
+                return;
+            };
+            if let Err(error) = self.route(&mut namespaces, delivery) {
                 tracing::warn!(?error, "application delivery failed");
             }
         }
     }
 
-    /// Handle one item of the application inbox.
-    pub async fn handle(&self, delivery: ApplicationDelivery) -> Result<()> {
+    /// Test builds: route one item as [`Self::serve`] would, with fresh namespace queues.
+    #[cfg(all(test, rings_native))]
+    pub(crate) fn route_for_test(&self, delivery: ApplicationDelivery) -> Result<()> {
+        self.route(
+            &mut dispatch::NamespaceQueues::new(self.extensions.clone()),
+            delivery,
+        )
+    }
+
+    /// Route one item of the application inbox: a custom message to its namespace's queue,
+    /// everything else to the observer. Never waits.
+    fn route(
+        &self,
+        namespaces: &mut dispatch::NamespaceQueues,
+        delivery: ApplicationDelivery,
+    ) -> Result<()> {
         match delivery {
             ApplicationDelivery::Message(ApplicationMessage {
                 from,
                 data: ApplicationData::Custom(CustomMessage(bytes)),
                 ..
             }) => {
-                let envelope = Envelope::decode(&bytes)?;
-                self.extensions.dispatch(from, envelope).await
+                namespaces.submit(from, Envelope::decode(&bytes)?);
+                Ok(())
+            }
+            ApplicationDelivery::Message(message) => {
+                if let Some(observer) = self.observer.as_deref() {
+                    observer.e2e_message(&message);
+                }
+                Ok(())
             }
             ApplicationDelivery::Event(event) => {
                 if let Some(observer) = self.observer.as_deref() {

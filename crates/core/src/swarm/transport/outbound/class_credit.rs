@@ -8,7 +8,6 @@ use std::pin::Pin;
 use futures::FutureExt;
 use rings_transport::core::transport::LaneCreditReservation;
 
-use super::model;
 use super::OutboundWorker;
 use super::TransferClass;
 use super::CLASSES;
@@ -30,15 +29,17 @@ use crate::swarm::transport::PendingConnectionAttempt;
 /// generation settles only that generation's window. A slot whose generation is not that of the
 /// class's next transfer is reset, returning its credit, and the class reserves anew.
 ///
-/// Law (wait identity). A pending reservation settles only the slot that still awaits it: once
-/// the slot is reset, by a generation change or otherwise, the reservation's outcome is
-/// dropped, returning its credit, whatever the slot holds by then.
+/// Law (wait settlement). A pending reservation's outcome settles the slot only while the slot
+/// awaits a reservation on the same generation; otherwise it is dropped, returning its credit.
+/// Two pending reservations on one generation are interchangeable: each is a credit of the
+/// same window, or the same verdict that its connection is gone, so whichever settles first is
+/// held and the other is dropped.
 pub(super) enum ClassCredit {
     /// No credit is held or awaited.
     Idle,
-    /// The reservation `wait` on the generation `attempt` is pending in
+    /// A reservation on the generation `attempt` is pending in
     /// [`OutboundWorker::credit_waits`].
-    Awaiting(PendingConnectionAttempt, CreditWaitId),
+    Awaiting(PendingConnectionAttempt),
     /// A credit is held for the class's next frame on the generation `attempt`.
     Held(LaneCreditReservation, PendingConnectionAttempt),
     /// The lane of the generation `attempt` cannot grant credit (its connection is gone): the
@@ -50,7 +51,7 @@ impl ClassCredit {
     /// The generation the slot's credit, verdict or pending reservation belongs to.
     pub(super) const fn generation(&self) -> Option<PendingConnectionAttempt> {
         match self {
-            Self::Held(_, attempt) | Self::Unavailable(attempt) | Self::Awaiting(attempt, ..) => {
+            Self::Held(_, attempt) | Self::Unavailable(attempt) | Self::Awaiting(attempt) => {
                 Some(*attempt)
             }
             Self::Idle => None,
@@ -62,19 +63,14 @@ impl ClassCredit {
     pub(super) const fn attempt(&self) -> Option<PendingConnectionAttempt> {
         match self {
             Self::Held(_, attempt) | Self::Unavailable(attempt) => Some(*attempt),
-            Self::Idle | Self::Awaiting(..) => None,
+            Self::Idle | Self::Awaiting(_) => None,
         }
     }
 }
 
-/// The identity of one pending credit reservation, unique within its worker.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct CreditWaitId(u64);
-
-/// The outcome of one pending credit reservation, for the class and wait it was made for.
+/// The outcome of one pending credit reservation, for the class and generation it was made for.
 pub(super) type CreditWaitOutput = (
     TransferClass,
-    CreditWaitId,
     PendingConnectionAttempt,
     Result<LaneCreditReservation>,
 );
@@ -120,15 +116,14 @@ impl OutboundWorker {
             // The wait owns the lane's credit state only, so a long wait pins no connection.
             let credit = admitted
                 .connection()
-                .reserve_send_credit(model::channel_lane(class));
-            let id = self.next_credit_wait();
+                .reserve_send_credit(class.channel_lane());
             let mut wait: CreditWaitFuture =
-                Box::pin(async move { (class, id, attempt, credit.await) });
+                Box::pin(async move { (class, attempt, credit.await) });
             match (&mut wait).now_or_never() {
-                Some((_, _, attempt, credit)) => self.hold_credit(class, attempt, credit),
+                Some((_, attempt, credit)) => self.hold_credit(class, attempt, credit),
                 None => {
                     if let Some(slot) = self.credits.get_mut(index) {
-                        *slot = ClassCredit::Awaiting(attempt, id);
+                        *slot = ClassCredit::Awaiting(attempt);
                     }
                     self.credit_waits.push(wait);
                 }
@@ -136,26 +131,18 @@ impl OutboundWorker {
         }
     }
 
-    /// A fresh credit wait identity.
-    pub(super) fn next_credit_wait(&mut self) -> CreditWaitId {
-        let id = CreditWaitId(self.next_credit_wait);
-        self.next_credit_wait = self.next_credit_wait.wrapping_add(1);
-        id
-    }
-
-    /// Record the outcome of `class`'s pending credit reservation `wait` on the generation
-    /// `attempt`, if the slot still awaits it; otherwise (the wait identity law) the outcome is
-    /// dropped, returning its credit.
+    /// Record the outcome of a pending credit reservation for `class` on the generation
+    /// `attempt`, if the slot awaits one on that generation; otherwise (the wait settlement law)
+    /// the outcome is dropped, returning its credit.
     pub(super) fn settle_credit(
         &mut self,
         class: TransferClass,
-        wait: CreditWaitId,
         attempt: PendingConnectionAttempt,
         credit: Result<LaneCreditReservation>,
     ) {
         if matches!(
             self.credits.get(class.index()),
-            Some(ClassCredit::Awaiting(_, awaited)) if *awaited == wait
+            Some(ClassCredit::Awaiting(awaited)) if *awaited == attempt
         ) {
             self.hold_credit(class, attempt, credit);
         }
@@ -204,7 +191,7 @@ impl OutboundWorker {
         let slot = self.credits.get_mut(class.index())?;
         match std::mem::replace(slot, ClassCredit::Idle) {
             ClassCredit::Held(credit, _) => Some(credit),
-            ClassCredit::Idle | ClassCredit::Awaiting(..) | ClassCredit::Unavailable(_) => None,
+            ClassCredit::Idle | ClassCredit::Awaiting(_) | ClassCredit::Unavailable(_) => None,
         }
     }
 }

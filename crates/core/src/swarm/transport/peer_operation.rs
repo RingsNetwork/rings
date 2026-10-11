@@ -11,55 +11,17 @@ use async_lock::MutexGuard as AsyncMutexGuard;
 
 use crate::dht::Did;
 
-pub(super) type PeerOperationLock = Arc<AsyncMutex<()>>;
+/// One peer's operation lock, shared by the leases on it.
+type PeerOperationLock = Arc<AsyncMutex<()>>;
 
-struct PeerArcRegistry<T> {
-    entries: Mutex<BTreeMap<Did, Arc<T>>>,
-}
-
-impl<T> Default for PeerArcRegistry<T> {
-    fn default() -> Self {
-        Self {
-            entries: Mutex::new(BTreeMap::new()),
-        }
-    }
-}
-
-impl<T> PeerArcRegistry<T> {
-    fn lock_map(&self) -> MutexGuard<'_, BTreeMap<Did, Arc<T>>> {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn get_or_insert_with(&self, peer: Did, create: impl FnOnce() -> T) -> Arc<T> {
-        self.lock_map()
-            .entry(peer)
-            .or_insert_with(|| Arc::new(create()))
-            .clone()
-    }
-
-    fn prune(&self, peer: Did, value: &Arc<T>) {
-        let mut entries = self.lock_map();
-        if entries
-            .get(&peer)
-            .is_some_and(|current| Arc::ptr_eq(current, value) && Arc::strong_count(current) <= 2)
-        {
-            entries.remove(&peer);
-        }
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.lock_map().len()
-    }
-}
-
+/// The operation locks of the peers with a live lease. Law: a peer has an entry exactly while
+/// some lease on it lives, so the map is bounded by the peers with an operation in progress.
 #[derive(Default)]
 pub(super) struct PeerOperationLocks {
-    locks: PeerArcRegistry<AsyncMutex<()>>,
+    locks: Mutex<BTreeMap<Did, PeerOperationLock>>,
 }
 
+/// A claim on one peer's operation lock; dropping the last lease on a peer removes its lock.
 pub(super) struct PeerOperationLease<'locks> {
     locks: &'locks PeerOperationLocks,
     peer: Did,
@@ -67,6 +29,7 @@ pub(super) struct PeerOperationLease<'locks> {
 }
 
 impl PeerOperationLease<'_> {
+    /// Wait for the peer's operation lock.
     pub(super) async fn acquire(&self) -> AsyncMutexGuard<'_, ()> {
         self.operation.lock().await
     }
@@ -74,26 +37,30 @@ impl PeerOperationLease<'_> {
 
 impl Drop for PeerOperationLease<'_> {
     fn drop(&mut self) {
-        self.locks.prune_idle(self.peer, &self.operation);
+        self.locks.prune(self.peer, &self.operation);
     }
 }
 
 impl PeerOperationLocks {
+    /// No peer locked.
     pub(super) fn new() -> Self {
         Self::default()
     }
 
-    #[cfg(all(
-        test,
-        feature = "dummy",
-        not(all(feature = "wasm", target_family = "wasm"))
-    ))]
-    pub(super) fn lock(&self, peer: Did) -> PeerOperationLock {
-        self.locks.get_or_insert_with(peer, || AsyncMutex::new(()))
+    /// The map; every critical section leaves it consistent, so a poisoned lock is still valid.
+    fn lock_map(&self) -> MutexGuard<'_, BTreeMap<Did, PeerOperationLock>> {
+        self.locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// A lease on `peer`'s operation lock, created if no lease on it lives.
     pub(super) fn lease(&self, peer: Did) -> PeerOperationLease<'_> {
-        let operation = self.locks.get_or_insert_with(peer, || AsyncMutex::new(()));
+        let operation = self
+            .lock_map()
+            .entry(peer)
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone();
         PeerOperationLease {
             locks: self,
             peer,
@@ -101,19 +68,26 @@ impl PeerOperationLocks {
         }
     }
 
-    pub(super) fn prune_idle(&self, peer: Did, delivery: &PeerOperationLock) {
-        self.locks.prune(peer, delivery);
+    /// Remove `peer`'s lock if `operation` is it and only the map and the dropping lease hold it.
+    fn prune(&self, peer: Did, operation: &PeerOperationLock) {
+        let mut locks = self.lock_map();
+        if locks.get(&peer).is_some_and(|current| {
+            Arc::ptr_eq(current, operation) && Arc::strong_count(current) <= 2
+        }) {
+            locks.remove(&peer);
+        }
     }
 
+    /// How many peers hold a lock.
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.locks.len()
+        self.lock_map().len()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::PeerOperationLocks;
     use crate::ecc::SecretKey;
 
     #[test]

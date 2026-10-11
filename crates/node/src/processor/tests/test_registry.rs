@@ -164,7 +164,7 @@ async fn test_online_node_publish_replaces_observed_self_records() -> Result<()>
     assert!(expired_other.is_expired_at(now_ms));
 
     processor
-        .storage_store(Processor::online_node_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONLINE_NODES_TOPIC, vec![
             stale_self,
             other_descriptor.clone(),
             expired_other,
@@ -250,7 +250,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
     assert!(expired_other_https.is_expired_at(now_ms));
 
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
             stale_tcp,
             stale_https,
             stale_api,
@@ -343,7 +343,7 @@ async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Res
     .map_err(Error::CoreError)?;
 
     processor
-        .storage_store(Processor::online_node_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONLINE_NODES_TOPIC, vec![
             live.clone(),
             expired.clone(),
         ])?)
@@ -373,7 +373,7 @@ async fn test_online_node_lookup_filters_other_network_descriptors() -> Result<(
     let foreign_descriptor = foreign.online_node_descriptor_at(now_ms)?;
 
     processor
-        .storage_store(Processor::online_node_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONLINE_NODES_TOPIC, vec![
             local_descriptor.clone(),
             foreign_descriptor,
         ])?)
@@ -393,7 +393,7 @@ async fn test_online_node_lookup_filters_other_dht_virtual_node_modes() -> Resul
     let foreign_descriptor = foreign.online_node_descriptor_at(now_ms)?;
 
     processor
-        .storage_store(Processor::online_node_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONLINE_NODES_TOPIC, vec![
             local_descriptor.clone(),
             foreign_descriptor,
         ])?)
@@ -434,7 +434,7 @@ async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Res
     .map_err(Error::CoreError)?;
 
     processor
-        .storage_store(Processor::online_node_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONLINE_NODES_TOPIC, vec![
             local_descriptor.clone(),
             foreign_descriptor,
         ])?)

@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rings_core::ecc::SecretKey;
+use rings_core::lifecycle::StopToken;
 #[cfg(feature = "dummy")]
 use rings_core::swarm::SuccessorLookup;
 use tokio::sync::oneshot::error::TryRecvError;
@@ -17,6 +18,7 @@ use tokio::sync::oneshot::error::TryRecvError;
 use super::common::*;
 use super::*;
 use crate::extension::Backend;
+use crate::extension::BackendObserver;
 use crate::native::bootstrap::BootstrapPort;
 use crate::native::bootstrap::DialFailure;
 use crate::native::bootstrap::ProcessorPort;
@@ -33,22 +35,35 @@ const CHAIN_KEY_DRAWS: usize = 512;
 /// An endpoint that validates as public and is never dialed.
 const NEVER_DIALED: &str = "https://never-dialed.example.org:50001/";
 
-/// Serve `processor`'s application inbox through `backend`, exactly as `rings run` does, and
-/// record activity after each item, so probes waiting on an admission or retirement the backend
-/// reported wake on it.
-fn serve_with_activity(processor: &Processor, backend: Backend) {
+/// Reachability evidence that records activity after every fact it records, so probes waiting
+/// on an admission or retirement the backend reported wake on it.
+struct ActiveEvidence(Arc<ReachabilityEvidence>);
+
+impl BackendObserver for ActiveEvidence {
+    fn peer_admitted(&self, peer: Did) {
+        self.0.peer_admitted(peer);
+        record_activity();
+    }
+
+    fn peer_retired(&self, peer: Did) {
+        self.0.peer_retired(peer);
+        record_activity();
+    }
+}
+
+/// Serve `processor`'s application inbox through a backend observed by `evidence`, exactly as
+/// `rings run` does, recording activity on every fact.
+fn serve_with_activity(
+    processor: &Processor,
+    provider: Arc<Provider>,
+    evidence: Arc<ReachabilityEvidence>,
+) {
     let inbox = processor
         .swarm
         .application_inbox()
         .expect("the probe node's inbox is unclaimed");
-    tokio::spawn(async move {
-        while let Some(delivery) = inbox.next().await {
-            if let Err(error) = backend.handle(delivery).await {
-                tracing::warn!(?error, "application delivery failed");
-            }
-            record_activity();
-        }
-    });
+    let backend = Backend::new(provider).observed_by(Arc::new(ActiveEvidence(evidence)));
+    tokio::spawn(backend.serve(inbox, StopToken::never()));
 }
 
 /// One node of the probe topology.
@@ -64,8 +79,7 @@ impl ProbeNode {
         let processor = Arc::new(prepare_processor_with_identity_key(key).await);
         let evidence = Arc::new(ReachabilityEvidence::default());
         let provider = Arc::new(Provider::from_processor(processor.clone()));
-        let backend = Backend::new(provider).observed_by(evidence.clone());
-        serve_with_activity(&processor, backend);
+        serve_with_activity(&processor, provider, evidence.clone());
         Self {
             processor,
             evidence,
@@ -192,10 +206,9 @@ async fn test_backend_translates_admission_and_retirement() {
         "nothing admits before the admission is read"
     );
     backend
-        .handle(ApplicationDelivery::Event(SwarmEvent::PeerAdmitted {
+        .route_for_test(ApplicationDelivery::Event(SwarmEvent::PeerAdmitted {
             peer: managed,
         }))
-        .await
         .expect("events are accepted");
     assert_eq!(admitted.await, Ok(()));
     assert!(evidence
@@ -205,10 +218,9 @@ async fn test_backend_translates_admission_and_retirement() {
         .is_empty());
 
     backend
-        .handle(ApplicationDelivery::Event(SwarmEvent::PeerRetired {
+        .route_for_test(ApplicationDelivery::Event(SwarmEvent::PeerRetired {
             peer: managed,
         }))
-        .await
         .expect("events are accepted");
     assert_eq!(
         evidence.losses().take().expect("record readable"),

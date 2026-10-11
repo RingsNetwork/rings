@@ -149,12 +149,6 @@ impl std::fmt::Debug for SigningSecretKey {
 /// The length of a recoverable signature `r ‖ s ‖ v` (secp256k1, EIP-191, BIP-137).
 pub(crate) const RECOVERABLE_SIGNATURE_LEN: usize = 65;
 
-const _: () = {
-    assert!(SignatureAlgorithm::Secp256k1.signature_len() == RECOVERABLE_SIGNATURE_LEN);
-    assert!(SignatureAlgorithm::Eip191.signature_len() == RECOVERABLE_SIGNATURE_LEN);
-    assert!(SignatureAlgorithm::Bip137.signature_len() == RECOVERABLE_SIGNATURE_LEN);
-};
-
 impl SignatureAlgorithm {
     /// Stable lower-case algorithm name.
     pub fn as_str(self) -> &'static str {
@@ -175,17 +169,16 @@ impl SignatureAlgorithm {
     /// algorithm's length, at most 96 bytes, the bound the chunk envelope reserve assumes.
     pub const fn signature_len(self) -> usize {
         match self {
-            Self::Secp256k1 | Self::Eip191 | Self::Bip137 => 65,
+            Self::Secp256k1 | Self::Eip191 | Self::Bip137 => RECOVERABLE_SIGNATURE_LEN,
             Self::Secp256r1 | Self::Ed25519 => 64,
             Self::Bls12381 => 96,
         }
     }
 
-    /// `Ok` when `sig` has this algorithm's signature length: the length gate of the account
-    /// verifiers ([`AccountVerifier`], [`VerificationPublicKey`]), passed before a signer sees
-    /// the signature. (A delegatee signature is verified by secp256k1 recovery, which takes
-    /// exactly 65 bytes itself.)
-    pub(crate) fn check_signature_len(self, sig: &[u8]) -> Result<()> {
+    /// `Ok` when `sig` has this algorithm's signature length: the length gate of an explicit
+    /// public key, which no signer reads when only the key is returned. Every signer refuses
+    /// any other length itself (the recovering ones through [`Self::recoverable_signature`]).
+    fn check_signature_len(self, sig: &[u8]) -> Result<()> {
         if sig.len() == self.signature_len() {
             return Ok(());
         }
@@ -234,11 +227,8 @@ impl VerificationPublicKey {
     /// Verify a signature for this explicit public key.
     ///
     /// Post: `false` for a signature that is not its algorithm's length
-    /// ([`SignatureAlgorithm::signature_len`]), before any signer sees it.
+    /// ([`SignatureAlgorithm::signature_len`]): each signer refuses any other length.
     pub fn verify(&self, msg: &[u8], sig: impl AsRef<[u8]>) -> bool {
-        if self.algorithm().check_signature_len(sig.as_ref()).is_err() {
-            return false;
-        }
         match self {
             Self::Secp256k1(pk) => signers::secp256k1::verify(msg, &pk.address(), sig.as_ref()),
             Self::Eip191(pk) => signers::eip191::verify(msg, &pk.address(), sig.as_ref()),
@@ -334,16 +324,13 @@ impl AccountVerifier {
     /// Verify an account signature.
     ///
     /// Post: `false` for a signature that is not its algorithm's length
-    /// ([`SignatureAlgorithm::signature_len`]), before any signer sees it.
+    /// ([`SignatureAlgorithm::signature_len`]): each signer refuses any other length.
     pub fn verify(&self, msg: &[u8], sig: impl AsRef<[u8]>) -> bool {
         let sig = sig.as_ref();
         let (algorithm, did) = match self {
             Self::PublicKey(public_key) => return public_key.verify(msg, sig),
             Self::Recoverable { algorithm, did } => (*algorithm, (*did).into()),
         };
-        if algorithm.check_signature_len(sig).is_err() {
-            return false;
-        }
         match algorithm {
             SignatureAlgorithm::Secp256k1 => signers::secp256k1::verify(msg, &did, sig),
             SignatureAlgorithm::Eip191 => signers::eip191::verify(msg, &did, sig),
@@ -360,7 +347,6 @@ impl AccountVerifier {
         msg: &[u8],
         sig: impl AsRef<[u8]>,
     ) -> Result<VerificationPublicKey> {
-        self.algorithm().check_signature_len(sig.as_ref())?;
         match self {
             Self::Recoverable {
                 algorithm: SignatureAlgorithm::Secp256k1,
@@ -383,7 +369,10 @@ impl AccountVerifier {
                 sig.as_ref(),
             )?)),
             Self::Recoverable { .. } => Err(Error::UnknownAccount),
-            Self::PublicKey(public_key) => Ok(public_key.clone()),
+            Self::PublicKey(public_key) => {
+                public_key.algorithm().check_signature_len(sig.as_ref())?;
+                Ok(public_key.clone())
+            }
         }
     }
 }

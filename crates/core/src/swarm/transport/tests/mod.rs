@@ -48,7 +48,7 @@ use crate::swarm::application::SwarmEvent;
 use crate::swarm::callback::max_on_message_recursion_depth_for_test;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::callback::reset_on_message_recursion_depth_for_test;
-use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::SwarmBuilder;
 #[cfg(feature = "dummy")]
 use crate::tests::TEST_NETWORK_ID;
@@ -384,7 +384,7 @@ async fn test_successor_failover_considers_active_peer_outside_topology_hints() 
     let replacement = SecretKey::random().address().into();
 
     for peer in [removed, replacement] {
-        let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+        let callback = SwarmTransportCallback::new(Arc::clone(&transport));
         let (attempt, _offer) = transport
             .prepare_connection_offer_with_attempt(peer, callback)
             .await?;
@@ -412,14 +412,14 @@ async fn test_data_channel_open_admits_successor_before_ice_connected() -> Resul
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
     open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
 
-    let callback =
-        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt);
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(attempt);
     callback
         .on_data_channel_open(&peer.to_string())
         .await
@@ -441,7 +441,7 @@ async fn test_data_channel_open_admits_successor_before_ice_connected() -> Resul
 struct PendingPeer {
     peer: Did,
     session: DelegateeKey,
-    callback: InnerSwarmCallback,
+    callback: SwarmTransportCallback,
 }
 
 #[cfg(feature = "dummy")]
@@ -470,15 +470,15 @@ async fn pending_peer_with(
 ) -> Result<PendingPeer> {
     let peer: Did = peer_key.address().into();
     let session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(transport));
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     let callback = match clock {
         Some(clock) => {
-            InnerSwarmCallback::new_with_reassembly_clock_for_test(Arc::clone(transport), clock)
+            SwarmTransportCallback::new_with_reassembly_clock_for_test(Arc::clone(transport), clock)
         }
-        None => InnerSwarmCallback::new(Arc::clone(transport)),
+        None => SwarmTransportCallback::new(Arc::clone(transport)),
     }
     .with_pending_connection_attempt(attempt);
     Ok(PendingPeer {
@@ -527,13 +527,13 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
     let recorder = ApplicationRecorder::attach(&transport)?;
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    let callback =
-        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt);
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(attempt);
     let mut current: Bytes = MessagePayload::new_send(
         Message::custom(b"mailbox-drained")?,
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
@@ -563,7 +563,7 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
         .expect_err("nested chunks must be rejected");
 
     assert!(error.to_string().contains("Nested chunk"));
-    assert_eq!(recorder.validates(), 1);
+    assert_eq!(recorder.observed(), 1);
     assert_eq!(recorder.inbounds(), 0);
     assert_eq!(max_on_message_recursion_depth_for_test(), 1);
     assert_eq!(
@@ -604,7 +604,7 @@ async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Resul
     )?;
 
     let error = transport
-        .send_payload_detached_with_outcome(payload)
+        .send_payload_admitted(payload)
         .await
         .expect_err("missing route must be checked before capacity");
 
@@ -629,7 +629,7 @@ async fn test_invalid_inbound_log_omits_transaction_data() -> Result<()> {
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let mut payload = MessagePayload::new_send(
         Message::custom(PRIVATE_MARKER.as_bytes())?,
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
@@ -716,7 +716,7 @@ async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let recorder = ApplicationRecorder::attach(&transport)?;
     let peer = SecretKey::random().address().into();
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
@@ -725,7 +725,7 @@ async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -
     let opening_transport = Arc::clone(&transport);
     let opening = tokio::spawn(async move {
         let callback =
-            InnerSwarmCallback::new(opening_transport).with_pending_connection_attempt(attempt);
+            SwarmTransportCallback::new(opening_transport).with_pending_connection_attempt(attempt);
         callback
             .on_data_channel_open(&peer.to_string())
             .await
@@ -735,8 +735,8 @@ async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -
     measure.wait_for_connect_started().await;
     assert!(transport.is_active_connection_attempt(attempt));
 
-    let terminal_callback =
-        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt);
+    let terminal_callback = SwarmTransportCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(attempt);
     terminal_callback
         .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
         .await

@@ -292,7 +292,7 @@ async fn test_model_agrees_with_the_production_shell_on_an_unreferenced_close() 
 #[tokio::test]
 async fn test_model_agrees_with_the_production_shell_on_the_unavailable_path() -> Result<()> {
     use crate::dht::Stabilizer;
-    use crate::swarm::callback::InnerSwarmCallback;
+    use crate::swarm::callback::SwarmTransportCallback;
     use crate::swarm::inbox::SwarmInboxDelivery;
     use crate::swarm::transport::tests::open_dummy_data_channel_before_ice_connected;
 
@@ -301,7 +301,7 @@ async fn test_model_agrees_with_the_production_shell_on_the_unavailable_path() -
         transport: &Arc<SwarmTransport>,
         peer: Did,
     ) -> Result<PendingConnectionAttempt> {
-        let callback = InnerSwarmCallback::new(Arc::clone(transport));
+        let callback = SwarmTransportCallback::new(Arc::clone(transport));
         let (attempt, _offer) = transport
             .prepare_connection_offer_with_attempt(peer, callback)
             .await?;

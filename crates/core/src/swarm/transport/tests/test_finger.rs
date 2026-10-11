@@ -29,7 +29,7 @@ async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Res
     ))?);
     let peer = SecretKey::random().address().into();
     let finger_index = 0;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
@@ -54,8 +54,8 @@ async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Res
 
     // Reuse the original attempt token so the synthetic data-channel callback
     // can promote only the generation that queued the finger proof.
-    let callback =
-        InnerSwarmCallback::new(Arc::clone(&transport)).with_pending_connection_attempt(attempt);
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(attempt);
     callback
         .on_data_channel_open(&peer.to_string())
         .await
@@ -78,7 +78,7 @@ async fn test_pending_handshake_cancellation_releases_its_finger_proof() -> Resu
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
@@ -109,7 +109,7 @@ async fn test_admitting_finger_update_is_retained_until_atomic_commit() -> Resul
     ))?);
     let peer = SecretKey::random().address().into();
     let finger_index = 0;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
@@ -145,7 +145,7 @@ async fn test_pending_finger_update_applies_if_admission_wins_queue_race() -> Re
     ))?);
     let peer = SecretKey::random().address().into();
     let finger_index = 0;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
@@ -192,7 +192,7 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
     ));
 
     tokio::time::advance(std::time::Duration::from_millis(11_000)).await;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (missing_attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(missing, callback)
         .await?;
@@ -212,7 +212,7 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
         RecordingMeasure::default(),
     ))?);
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;

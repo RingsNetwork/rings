@@ -3,7 +3,7 @@
 /// A wrap `Result` contains custom errors.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Error of a transport callback (see [`crate::swarm::callback::InnerSwarmCallback`]).
+/// Error of a transport callback (see `swarm::callback::SwarmTransportCallback`).
 ///
 /// Native callbacks require `Send + Sync` because callback work is driven by Tokio tasks;
 /// browser callbacks may retain thread-local error values.

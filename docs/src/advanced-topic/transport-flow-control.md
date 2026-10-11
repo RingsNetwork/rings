@@ -40,20 +40,19 @@ What a node holds of received frames is bounded twice:
   (`NODE_RECEIVE_SOFT_LIMIT_BYTES`), no lane but the priority lane advertises new credit; a
   lane that releases a batch meanwhile defers its advertisement, and the release that brings
   the node below the limit makes every deferred one. The priority lane
-  (`ChannelLane::PRIORITY`), which core gives to DHT control, is never deferred; the receiver
+  (`ChannelLane::PRIORITY`), which core gives to DHT control, is never deferred. The receiver
   refuses as invalid a frame whose content belongs to another lane than the one it arrived on
-  (a chunked message by the lane every chunk shared), so the priority lane's credit carries DHT
-  control alone, so a peer's
-  control traffic, and with it every link's liveness, never waits for what other peers make
-  the node hold. Deferring narrows what senders may send next, never what they were granted,
-  so no honest frame is refused; the node exceeds the limit by at most the credit already
-  advertised and one priority window per connection. A hard node-wide bound needs credit that
-  can be taken back, a wire change (#934).
+  (a chunked message by the lane every chunk shared), so the priority lane's credit carries
+  DHT control alone. A peer's control traffic, and with it every link's liveness, therefore
+  never waits for what other peers make the node hold. Deferring narrows what senders may send
+  next, never what they were granted, so no honest frame is refused; the node exceeds the
+  limit by at most the credit already advertised and one priority window per connection. A
+  hard node-wide bound needs credit that can be taken back, a wire change (#934).
 
 A wait for credit is backpressure, not a verdict on the peer: it ends when credit arrives or
 when the connection generation ends (it fails or closes), and the wait itself never retires a
-link. A receiver may legitimately consume slowly (its application reads its inbox at its own
-pace), and whether a peer is alive is liveness's to judge. Liveness reads no credit state; it
+link. A receiver may legitimately consume slowly (its inbound mailbox is busy with other
+peers' work), and whether a peer is alive is liveness's to judge. Liveness reads no credit state; it
 judges every admitted peer by probes alone (`swarm::transport::liveness`):
 
 - every `PEER_LIVENESS_PERIOD_MS` (15 seconds) after its previous probe, a peer is due a probe,
@@ -67,17 +66,26 @@ judges every admitted peer by probes alone (`swarm::transport::liveness`):
 - the probe rides the control lane, so a peer slow only on a data lane answers it and is kept;
 - a probe takes no shared outbound capacity (one outstanding per peer bounds it), so other
   transfers waiting on the peer cannot refuse it, and no probe waits on its peer, so one starved
-  peer delays no other peer's probe.
+  peer delays no other peer's probe. Its transfer waits for credit until the probe's own answer
+  deadline, not the 25-second first-frame deadline of other protocol sends;
+- a probe that could not reach the queue (no ready connection, or a step cut short) stays
+  outstanding, with its deadline still counted from its first issue, and is sent again on the
+  next pass, never withdrawn, so a peer gains nothing by keeping its connection unready;
+- a probe's answer takes no shared capacity either while its next hop holds no other answer in
+  flight (one per next hop); a further answer to the same hop falls back to the shared
+  capacity, as any protocol send.
 
 The outbound worker holds a lane's credit only while a transfer of that lane awaits it, so no
 credit lingers at the sender after its transfer went away. A peer that does not progress this
-end's control traffic is therefore evicted within the period plus the deadline, and its eviction fails every wait on its credit. A composed model
-(`liveness::test_composed_model`) checks these laws over credit, lanes, the application inbox
-and a third peer, and refutes each design they replace. A wait that
-pins one of the sender's budgets is bounded by what that budget is for: a link-control frame,
-which holds a link-control permit, waits at most the session hold, after which the frame it
-would answer is gone, and is then dropped; a scheduled transfer is bounded by its own send
-deadline.
+end's control traffic is therefore evicted within the period plus the deadline, and its
+eviction fails every wait on its credit. A composed model (`liveness::test_composed_model`)
+checks these laws over credit, lanes, the application inbox and a third peer, and refutes each
+design they replace.
+
+A wait that pins one of the sender's budgets is bounded by what that budget is for: a
+link-control frame, which holds a link-control permit, waits at most the session hold, after
+which the frame it would answer is gone, and is then dropped; a scheduled transfer is bounded
+by its own send deadline.
 
 A remote-created data channel is admitted only by the lane its label names, and only once per
 lane.
@@ -98,22 +106,47 @@ lane.
   transport's acceptance, never for the receiver's consumption.
 - An inbound lane's progress depends only on local resources (`swarm::transport::egress`).
   Every send made in the protocol context (a handler's forward, report, query or
-  notification, a connection offer it starts, a read repair, a relay hold, a liveness probe,
-  and maintenance's queries) goes through the protocol egress, the only sender handlers and
-  maintenance can reach (the waiting discipline is constructible only at the Swarm API): it takes the connection's readiness and its outbound
-  capacity now (refused for either, it is dropped as local backpressure), returns once queued,
-  and so frees the inbound event and lane that carried its cause. The next peer's
-  backpressure never reaches upstream links, and neither does a liveness verdict. A
-  connection a handler starts or answers is reserved and created at once, and its offer or
+  notification, a connection offer it starts, a read repair, a relay hold, a liveness probe
+  or its answer, and maintenance's queries) goes through a protocol egress, the only senders
+  handlers and maintenance can reach; the waiting discipline is constructible only at the
+  Swarm API. A protocol send takes the connection's readiness and its outbound capacity now
+  (lacking either, it is dropped as local backpressure), returns once queued, and so frees
+  the inbound event and lane that carried its cause. The next peer's backpressure never
+  reaches upstream links, and neither does a liveness verdict.
+- A connection a handler starts or answers is reserved and created at once, and its offer or
   answer, whose ICE gathering waits on STUN or TURN, is negotiated and sent apart from the
-  event. Its first
-  frame's admission, credit included, is awaited apart from it, at most
-  the first-frame deadline (25 seconds), and a payload that waits longer is dropped, as
-  a best-effort relay may drop; the origin's own tracked send or retry covers it. A send
-  through the Swarm API, the application boundary, waits for its first frame's admission, so
-  its caller learns whether it left. No application code runs on a lane: the application
-  reads its data and peer facts from a bounded inbox at its own pace (#935), and a full inbox
-  holds only the application data lanes (`Application`, `E2e`).
+  event.
+- A protocol payload's first frame's admission, credit included, is awaited apart from the
+  event, at most the first-frame deadline (25 seconds; a liveness probe, its own answer
+  deadline), and a payload that waits longer is dropped, as a best-effort relay may drop; the
+  origin's own tracked send or retry covers it. A send through the Swarm API, the application
+  boundary, waits for its first frame's admission, so its caller learns whether it left.
+
+## Application inbox
+
+Core never calls, awaits or waits on application code (#935). The application reads its data
+and peer facts from one bounded inbox (`ApplicationInbox::next`, or `try_next` without
+waiting) at its own pace, and no inbound lane ever waits for it to read:
+
+- A live application message that does not fit the full inbox is dropped and counted
+  (`ApplicationInbox::dropped`), as a best-effort network drops it. The bound,
+  `APPLICATION_INBOX_WEIGHT` (64 MiB), weighs each message by its own size plus its heap
+  bytes, so empty messages are bounded too.
+- Before the application claims the inbox, live messages are discarded and peer facts are
+  kept, so a late reader still learns the peers already admitted. Once the inbox is dropped,
+  everything is discarded.
+- Messages and peer facts share one queue, in the order core produced them. An unread
+  `PeerAdmitted` is withdrawn by its `PeerRetired`, so facts are bounded by twice the peers.
+- Mail stored for this node in its relay inbox is offered only through a reservation of room
+  in the inbox, and retired from storage only once the application has taken it. Mail that
+  finds no room or no reader, or whose origin's quota is spent for now, stays stored for a
+  later pass; delivery is at least once.
+
+The node's `Backend` reads the inbox and dispatches each registered namespace on its own
+bounded queue (256 envelopes), in arrival order, so one slow protocol holds back neither
+another namespace nor the peer facts; a full namespace queue drops further envelopes, counted.
+The FFI provider's E2E event buffer is likewise bounded (4096 events) and drops further
+events, counted.
 
 Every such wait is logged at `warn`, with the peer and lane: a sender waiting for credit, and an
 arrival waiting for the mailbox.

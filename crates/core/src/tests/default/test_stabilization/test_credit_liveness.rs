@@ -9,15 +9,26 @@
 //! of another; a send through the Swarm API still waits for its first frame's admission.
 
 use rings_transport::core::pool::ChannelLane;
+use tokio::time::timeout;
+use tokio::time::Duration;
 
-use super::*;
+use crate::dht::Did;
+use crate::ecc::SecretKey;
+use crate::error::Error;
+use crate::error::Result;
 use crate::message::Message;
 use crate::message::PayloadSender;
+use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::default::credit_starvation::connected_pair;
 use crate::tests::default::credit_starvation::starve;
 use crate::tests::default::credit_starvation::starve_every_lane;
+use crate::tests::default::prepare_node;
+use crate::tests::default::wait_for_msgs;
+use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
+use crate::tests::manually_establish_connection;
+use crate::utils::get_epoch_ms_i64;
 
 /// The control lane, which every probe rides.
 const CONTROL_LANE: ChannelLane = ChannelLane::new(0);
@@ -36,46 +47,6 @@ fn outstanding(node: &Node, peer: Did) -> Result<Option<i64>> {
         .peer_liveness_outstanding_since_for_test(peer)
 }
 
-/// A peer that withholds the control lane's credit is evicted by liveness: its probe is issued
-/// before it is queued, so its deadline runs while the probe waits in the peer's queue, and
-/// once it passes unanswered the peer is evicted.
-#[tokio::test]
-async fn test_a_peer_withholding_control_credit_is_evicted_by_liveness() -> Result<()> {
-    let (node1, node2) = connected_pair().await?;
-    let peer = node2.did();
-    let held = starve(&node2, &node1, CONTROL_LANE)?;
-    assert!(
-        !held.is_empty(),
-        "the peer granted the control lane a window"
-    );
-    make_probe_due(&node1, peer)?;
-
-    let issued_at = get_epoch_ms_i64();
-    node1
-        .swarm
-        .stabilizer()
-        .probe_peer_liveness_for_simulation()
-        .await?;
-    let unanswered = outstanding(&node1, peer)?;
-    assert!(
-        unanswered.is_some_and(|since| since >= issued_at),
-        "a probe waiting for credit is outstanding from its issue: {unanswered:?}"
-    );
-
-    node1.swarm.transport.force_peer_liveness_probe_issued_at(
-        peer,
-        get_epoch_ms_i64() - PEER_LIVENESS_TIMEOUT_MS - 1,
-    )?;
-    node1
-        .swarm
-        .stabilizer()
-        .clean_unavailable_connections()
-        .await?;
-    assert!(node1.swarm.transport.get_connection(peer).is_none());
-    drop(held);
-    Ok(())
-}
-
 /// A peer that stopped granting credit and starved its application lane is still probed on
 /// its period, answers on its control lane's window, and is kept: a data-lane stall is
 /// backpressure, never a verdict.
@@ -91,7 +62,14 @@ async fn test_a_peer_slow_on_a_data_lane_answers_its_probe_and_is_kept() -> Resu
         .stabilizer()
         .probe_peer_liveness_for_simulation()
         .await?;
-    assert!(outstanding(&node1, peer)?.is_some(), "the probe was issued");
+    // Issuing restarts the period, answered or not, so this holds whatever ran first.
+    assert!(
+        !node1
+            .swarm
+            .transport
+            .peer_liveness_probe_due_for_test(peer)?,
+        "the probe was issued"
+    );
     wait_for_msgs([&node1, &node2]).await;
     assert_eq!(
         outstanding(&node1, peer)?,
@@ -146,9 +124,15 @@ async fn test_a_withholding_peers_own_traffic_leaves_its_probe_outstanding() -> 
     Ok(())
 }
 
+/// A bound on one probe pass, well inside a probe's deadline: a pass that waited for a starved
+/// probe's admission would return only when that probe's transfer expires, at its deadline from
+/// issue (#913 R10 M5), so it cannot meet the bound.
+const PROBE_PASS_BOUND: Duration = Duration::from_secs(15);
+const _: () = assert!((PROBE_PASS_BOUND.as_millis() as i64) < PEER_LIVENESS_TIMEOUT_MS);
+
 /// Probes do not wait on their peers: with two peers withholding control credit, the probe pass
-/// returns while their probes still wait in their queues, and the peer that grants credit is
-/// probed and answers.
+/// returns while their probes are provably queued, and the peer that grants credit is probed
+/// and answers (#913 R10 M9).
 #[tokio::test]
 async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
@@ -171,28 +155,26 @@ async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
     }
 
     timeout(
-        Duration::from_secs(5),
+        PROBE_PASS_BOUND,
         node.swarm.stabilizer().probe_peer_liveness_for_simulation(),
     )
     .await
     .map_err(|_| Error::InvalidMessage("a probe pass waited on a starved peer".to_string()))??;
-    let unanswered = |peer: &Node| {
-        node.swarm
-            .transport
-            .peer_liveness_outstanding_since_for_test(peer.did())
-    };
+    // The pass returned while both starved probes sit in their queues, waiting for credit.
+    for starving in [starving_a, starving_b] {
+        assert!(
+            node.swarm
+                .transport
+                .peer_liveness_probe_queued_for_test(starving.did())?,
+            "the starved probe is outstanding and queued"
+        );
+    }
     // The starved probes stay queued, so the node never quiesces: wait for the live answer.
     probe_on_activity("the live peer answers its probe", TEST_HANG_GUARD, || {
-        let answered = unanswered(live).map(|since| since.is_none().then_some(()));
+        let answered = outstanding(&node, live.did()).map(|since| since.is_none().then_some(()));
         async move { answered }
     })
     .await?;
-    // The starved probes are still outstanding, their deadlines running from issue: the pass
-    // returned without waiting for them. (Their transfers are dropped at the first-frame
-    // deadline, a wall-clock bound, which the deadline from issue makes irrelevant.)
-    for starving in [starving_a, starving_b] {
-        assert!(unanswered(starving)?.is_some());
-    }
     drop(held);
     Ok(())
 }

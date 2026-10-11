@@ -55,7 +55,7 @@ pub(crate) struct LocalDelivery {
     pipeline: LogicalInbound,
 }
 
-pub use crate::error::CallbackError;
+use crate::error::CallbackError;
 type TransportCallbackError = Box<dyn std::error::Error>;
 
 fn into_transport_callback_error(error: CallbackError) -> TransportCallbackError {
@@ -124,9 +124,11 @@ pub(super) struct InboundProcessor {
     reassembly_clock: ReassemblyClock,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
     /// Verified frames that arrived before this end admitted the connection; bounded by the
-    /// per-peer inbound capacity. With the session hold below, an unadmitted peer occupies at
-    /// most one and a half of an admitted peer's frame budgets, and a quarter of the transport's
-    /// per-peer frames stays free for the control frames that release either hold.
+    /// per-peer inbound capacity (32 frames). A held frame keeps its transport credit, so this
+    /// hold occupies at most half of the raw frames the transport admits from one peer
+    /// ([`INBOUND_PEER_FRAME_CAPACITY`](rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY));
+    /// a frame in the session hold below gives its credit back and is bounded by that hold's
+    /// own capacity and the node's session-hold budget instead.
     pre_admission: Arc<Mutex<PreAdmissionHold<HeldInboundFrame>>>,
     /// The receiving end of this connection's delegation references: the sessions the peer has
     /// announced on it and the frames waiting for one. It lives and dies with the connection;
@@ -172,11 +174,12 @@ pub(super) const SESSION_HOLD_CAPACITY: usize = inbound::peer_capacity() / 2;
 /// what its learning does.
 ///
 /// A frame the transport just handed over is awaited to its logical completion, so the
-/// transport's read loop paces this end, and what it teaches the link releases the held
-/// frames that awaited it. A frame released from a hold is waited for only until the inbound
-/// actor owns it, so releasing many frames at once does not stall the read loop behind each
-/// one's handlers, and what it teaches is confirmed but releases nothing itself: the release
-/// that freed it re-scans the hold.
+/// transport lane that carried it paces this end: the lane's drainer hands over the lane's
+/// next frame only after this one (the transport's read loop itself never waits on core), and
+/// what the frame teaches the link releases the held frames that awaited it. A frame released
+/// from a hold is waited for only until the inbound actor owns it, so releasing many frames at
+/// once does not stall the releasing task behind each one's handlers, and what it teaches is
+/// confirmed but releases nothing itself: the release that freed it re-scans the hold.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum FrameProvenance {
     /// Handed over by the transport just now.
@@ -212,7 +215,7 @@ enum InboundGate {
 }
 
 /// The transport callback of one connection: its inbound pipeline and lifecycle handling.
-pub struct InnerSwarmCallback {
+pub(crate) struct SwarmTransportCallback {
     processor: InboundProcessor,
     inbound: InboundMailbox,
 }

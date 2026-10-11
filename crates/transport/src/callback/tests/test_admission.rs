@@ -25,10 +25,9 @@ async fn test_admission_dispatches_decoded_payload_once() {
         Notifier::default(),
         NodeReceiveLoad::new(),
     );
-    let data = rings_codec::serialize(&TransportMessage::Custom(Bytes::from_static(b"data")))
-        .expect("data frame must serialize");
+    let data = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
 
-    let frame = match callback.admit_inbound_frame(Bytes::from(data), ChannelLane::default()) {
+    let frame = match callback.admit_inbound_frame(data, ChannelLane::default()) {
         InboundFrameAdmission::Admitted(frame) => frame,
         _ => panic!("data frame must be admitted"),
     };
@@ -64,10 +63,7 @@ async fn test_prepare_inbound_frame_reports_malformed_oversized_and_over_credit_
         Notifier::default(),
         NodeReceiveLoad::new(),
     ));
-    let valid = Bytes::from(
-        rings_codec::serialize(&TransportMessage::Custom(Bytes::from_static(b"data")))
-            .expect("valid frame must serialize"),
-    );
+    let valid = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
 
     let lane = ChannelLane::default();
     assert!(callback
@@ -120,9 +116,8 @@ async fn test_admitted_frame_cannot_cross_callback_instances() {
     for destination_id in ["source", "destination"] {
         let source = callback("source");
         let destination = callback(destination_id);
-        let raw = rings_codec::serialize(&TransportMessage::Custom(Bytes::from_static(b"data")))
-            .expect("data frame must serialize");
-        let frame = match source.admit_inbound_frame(Bytes::from(raw), ChannelLane::default()) {
+        let raw = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
+        let frame = match source.admit_inbound_frame(raw, ChannelLane::default()) {
             InboundFrameAdmission::Admitted(frame) => frame,
             _ => panic!("source callback must admit the frame"),
         };

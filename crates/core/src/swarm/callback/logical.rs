@@ -15,6 +15,7 @@ use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::OriginQuotaCharge;
 use crate::swarm::application::ApplicationMessage;
+use crate::swarm::application::Delivered;
 use crate::swarm::application::InboxRoom;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
@@ -58,6 +59,7 @@ pub(super) fn edge_relation(
 }
 
 impl LogicalInbound {
+    /// The logical stage over `transport`, with its message handler.
     pub(super) fn new(transport: Arc<SwarmTransport>) -> Self {
         let message_handler = MessageHandler::new(transport.clone());
         Self {
@@ -201,15 +203,35 @@ impl LogicalInbound {
         ApplicationMessage::project(payload, message)
     }
 
+    /// Test builds: show `payload`, about to enter the logical stage, to the inbound tap.
+    #[cfg(test)]
+    pub(super) fn observe_for_test(&self, payload: &MessagePayload) {
+        self.transport.inbound_tap_for_test().observe(payload);
+    }
+
+    /// Outside test builds there is no inbound tap: nothing to observe.
+    #[cfg(not(test))]
+    pub(super) fn observe_for_test(&self, _payload: &MessagePayload) {}
+
+    /// Test builds: wait while a test holds `lane` (see the inbound tap).
+    #[cfg(test)]
+    pub(super) async fn pass_lane_for_test(&self, lane: crate::swarm::callback::InboundLane) {
+        self.transport.inbound_tap_for_test().pass_lane(lane).await;
+    }
+
+    /// Outside test builds no lane is held.
+    #[cfg(not(test))]
+    pub(super) async fn pass_lane_for_test(&self, _lane: crate::swarm::callback::InboundLane) {}
+
     /// Room for `message` in the application inbox, if it has room now. Never waits.
     pub(super) fn reserve_room(&self, message: &ApplicationMessage) -> Option<InboxRoom> {
         self.transport.application().outlet.try_reserve(message)
     }
 
-    /// Queue `message` for the application, waiting only for room; only the caller's
-    /// application-data lane waits.
-    pub(super) async fn deliver(&self, message: ApplicationMessage) {
-        self.transport.application().outlet.deliver(message).await;
+    /// Hand `message` to the application inbox, queued or, when full, dropped and counted;
+    /// never waits (#913 R10).
+    pub(super) fn deliver(&self, message: ApplicationMessage) -> Delivered {
+        self.transport.application().outlet.deliver(message)
     }
 }
 
@@ -283,10 +305,10 @@ mod tests {
         let delivery = LocalDelivery::new(swarm.transport.clone());
         let payload = payload(swarm.did(), 0).expect("payload");
 
-        assert_eq!(
+        assert!(matches!(
             delivery.deliver(&payload).await.expect("first delivery"),
-            inbound::LocalDelivered::Delivered
-        );
+            inbound::LocalDelivered::Queued(_)
+        ));
         assert!(matches!(
             delivery.deliver(&payload).await,
             Err(Error::TransactionReplay { .. })
@@ -317,25 +339,19 @@ mod tests {
             ])),
         )
         .expect("application data");
-        let room = swarm
-            .transport
-            .application()
-            .outlet
-            .try_reserve(&fill)
-            .expect("room in an empty inbox");
-        room.fill(fill);
+        swarm.transport.application().outlet.deliver(fill);
         let first = payload_from(&sender, swarm.did(), 0).expect("first payload");
         let second = payload_from(&sender, swarm.did(), 1).expect("second payload");
 
-        assert_eq!(
+        assert!(matches!(
             delivery.deliver(&first).await.expect("deferred"),
             inbound::LocalDelivered::Deferred
-        );
+        ));
         assert!(inbox.try_next().is_some());
-        assert_eq!(
+        assert!(matches!(
             delivery.deliver(&first).await.expect("delivered"),
-            inbound::LocalDelivered::Delivered
-        );
+            inbound::LocalDelivered::Queued(_)
+        ));
         assert!(matches!(
             delivery.deliver(&second).await,
             Err(Error::OriginQuota(
@@ -345,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn intermediate_relay_does_not_create_origin_replay_state() {
+    async fn test_an_intermediate_relay_creates_no_origin_replay_state() {
         let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
         let swarm =
             SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local).build();

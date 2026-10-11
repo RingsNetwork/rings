@@ -18,6 +18,7 @@ use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
+use crate::message::PayloadSender;
 use crate::message::ProbeAcknowledgement;
 use crate::message::ProbeCompletion;
 use crate::message::ProbeOffer;
@@ -224,11 +225,12 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
             .await?
             .start();
         let offer = plan.build(completion_sequence, self.handler.transport.message_signer())?;
+        // The answer takes its next hop's answer slot, not the shared capacity, so peers that
+        // hold this node's control reserve cannot keep it from answering (#913 R10 M6).
         self.handler
-            .run_effects([CoreEffect::send_report_message(
-                ctx,
-                Message::ProbeOffer(Box::new(offer)),
-            )])
+            .transport
+            .probe_answer_egress()
+            .send_report_message(ctx, Message::ProbeOffer(Box::new(offer)))
             .await
     }
 

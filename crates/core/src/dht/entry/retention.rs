@@ -310,16 +310,12 @@ impl Entry {
         }
     }
 
-    /// Whether this carrier answers a lookup at `now_ms` as found: its retention bound has not
-    /// elapsed. A carrier held live past its bound by an unstable remove or register serves no
-    /// element, and answering it as found would shadow a replica that still holds data; it
-    /// answers as absent, and its remove side still spreads by join on hand-off and repair.
-    pub(crate) fn answers_lookups_at(&self, now_ms: u128) -> bool {
-        self.bound_live_at(now_ms)
-    }
-
-    /// Whether the retention bound itself has not elapsed at `now_ms`.
-    pub(super) fn bound_live_at(&self, now_ms: u128) -> bool {
+    /// Whether the retention bound itself has not elapsed at `now_ms`: exactly when this carrier
+    /// answers a lookup as found. A carrier held live past its bound by an unstable remove or
+    /// register serves no element, and answering it as found would shadow a replica that still
+    /// holds data; it answers as absent, and its remove side still spreads by join on hand-off
+    /// and repair.
+    pub(crate) fn bound_live_at(&self, now_ms: u128) -> bool {
         self.expires_at_ms
             .is_some_and(|expires_at_ms| now_ms < expires_at_ms)
     }

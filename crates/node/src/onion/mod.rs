@@ -26,7 +26,6 @@ use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::descriptor::prunes_registry_element;
 use crate::descriptor::sign_descriptor_body;
 use crate::descriptor::RegistryElement;
 use crate::descriptor::SignedDescriptor;
@@ -34,7 +33,6 @@ use crate::descriptor::SignedDescriptorBody;
 use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeType;
-use crate::registration::validate_registry_heartbeat;
 use crate::registration::DhtRegistrationPublisher;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
@@ -135,23 +133,6 @@ pub fn https_onion_exit_services() -> Vec<OnionServiceName> {
 /// Default exit policy. It is intentionally closed until the operator configures targets.
 pub fn default_onion_exit_policy() -> OnionExitPolicy {
     OnionExitPolicy::default()
-}
-
-/// Validate onion-exit registration scheduling.
-pub(crate) fn validate_onion_exit_registration_timing(
-    advertise_exit: bool,
-    heartbeat_interval: Duration,
-    ttl: Duration,
-) -> Result<()> {
-    if !advertise_exit {
-        return Ok(());
-    }
-    if heartbeat_interval >= ttl {
-        return Err(Error::InvalidConfig(format!(
-            "onion_exit_heartbeat_interval ({heartbeat_interval:?}) must be less than onion_exit_ttl ({ttl:?}) when advertise_onion_exit is enabled"
-        )));
-    }
-    validate_registry_heartbeat("onion_exit_heartbeat_interval", heartbeat_interval)
 }
 
 /// Canonical onion-exit service name.
@@ -734,19 +715,8 @@ impl OnionExitRegistration {
     ) -> Result<Vec<OnionExitDescriptor>> {
         let now_ms = get_epoch_ms();
         let descriptors = self.descriptors_at(context, now_ms)?;
-        let elements = descriptors
-            .iter()
-            .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
-            .collect::<Result<Vec<_>>>()?;
         self.publisher
-            .publish_replacing(context, elements, |observed| {
-                prunes_registry_element::<OnionExitDescriptor>(
-                    observed,
-                    context.did(),
-                    now_ms,
-                    context.network_id(),
-                )
-            })
+            .publish_replacing(context, now_ms, &descriptors)
             .await?;
         Ok(descriptors)
     }

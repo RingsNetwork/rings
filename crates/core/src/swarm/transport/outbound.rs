@@ -58,6 +58,7 @@ mod mailbox;
 mod measurement;
 mod model;
 mod queue;
+mod sender_bounded;
 mod session_encoding;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 mod simulation_pressure;
@@ -103,7 +104,6 @@ use mailbox::MailboxSender;
 use measurement::MeasurementReceiver;
 use measurement::MeasurementRecorder;
 use measurement::OutboundMeasurement;
-pub(super) use model::channel_lane;
 pub(super) use model::OutboundCompletion;
 pub(super) use model::OutboundMessageKind;
 pub(super) use model::TransferClass;
@@ -114,6 +114,8 @@ use queue::TransferQueues;
 pub(crate) use queue::OUTBOUND_CONTROL_BURST;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use queue::OUTBOUND_LANE_WINDOW;
+pub(super) use sender_bounded::SenderBound;
+use sender_bounded::SenderBounded;
 use session_encoding::SharedAnnouncedDelegations;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
@@ -295,9 +297,8 @@ pub(super) struct OutboundSchedulers {
     registry: Mutex<OutboundRegistry>,
     global_capacity: Arc<GlobalTransferCapacity>,
     measure: Option<MeasureImpl>,
-    /// Test builds: the sender-bounded transfers in flight, which hold no capacity.
-    #[cfg(test)]
-    sender_bounded: Arc<std::sync::atomic::AtomicUsize>,
+    /// Transfers their sender bounds, which hold no shared capacity.
+    sender_bounded: SenderBounded,
 }
 
 #[derive(Default)]
@@ -333,8 +334,7 @@ impl OutboundSchedulers {
             registry: Mutex::new(OutboundRegistry::default()),
             global_capacity: Arc::new(GlobalTransferCapacity::new()),
             measure,
-            #[cfg(test)]
-            sender_bounded: Arc::default(),
+            sender_bounded: SenderBounded::default(),
         }
     }
 
@@ -401,13 +401,15 @@ impl OutboundSchedulers {
         capacity.admit_now(peer, class, bytes)
     }
 
-    /// A permit for a transfer whose count its sender bounds (a liveness probe): it holds no
-    /// shared capacity; see [`TransferCapacityPermit::bounded_by_sender`].
-    pub(super) fn reserve_bounded_by_sender(&self) -> TransferCapacityPermit {
-        let permit = TransferCapacityPermit::bounded_by_sender();
-        #[cfg(test)]
-        let permit = permit.counted_in(&self.sender_bounded);
-        permit
+    /// A permit holding no shared capacity for a transfer `bound` admits, if it admits one now;
+    /// see `outbound::sender_bounded`.
+    pub(super) fn reserve_bounded_by_sender(
+        &self,
+        bound: SenderBound,
+    ) -> Option<TransferCapacityPermit> {
+        self.sender_bounded
+            .admit(bound)
+            .map(TransferCapacityPermit::bounded_by_sender)
     }
 
     pub(super) fn shutdown(&self, peer: Did) {
@@ -463,9 +465,7 @@ impl OutboundSchedulers {
             .filter_map(Weak::upgrade)
             .map(|capacity| capacity.admitted())
             .sum::<usize>()
-            + self
-                .sender_bounded
-                .load(std::sync::atomic::Ordering::Acquire)
+            + self.sender_bounded.in_flight_for_test()
     }
 
     fn lock_registry(&self) -> MutexGuard<'_, OutboundRegistry> {
@@ -502,11 +502,9 @@ struct OutboundWorker {
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     /// The transport credit of each class's lane.
     credits: [ClassCredit; TransferClass::COUNT],
-    /// Pending credit reservations: at most one live per class; one its slot abandoned when the
-    /// generation changed resolves into nothing.
+    /// Pending credit reservations; one whose slot no longer awaits its generation resolves
+    /// into nothing.
     credit_waits: FuturesUnordered<CreditWaitFuture>,
-    /// The identity of the next credit reservation.
-    next_credit_wait: u64,
     /// When a delivery to this peer last settled: the stall deadline's reference.
     delivery_progress: DeliveryProgress,
     measurements: MeasurementRecorder,
@@ -540,7 +538,6 @@ impl OutboundWorker {
             deliveries: FuturesUnordered::new(),
             credits: std::array::from_fn(|_| ClassCredit::Idle),
             credit_waits: FuturesUnordered::new(),
-            next_credit_wait: 0,
             delivery_progress: DeliveryProgress::default(),
             measurements,
             stop,
@@ -854,7 +851,7 @@ impl OutboundWorker {
                     transfer.detached_admission.as_ref(),
                     FrameTarget {
                         did: transfer.did,
-                        lane: model::channel_lane(class),
+                        lane: class.channel_lane(),
                         context,
                     },
                 )
