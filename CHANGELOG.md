@@ -26,8 +26,8 @@
     `check(now_ms)` reports a stream
     that made no progress for its stall deadline (`REORDER_DEADLINE`, or
     `with_stall_deadline`) as `Error::E2eStreamStalled`, whether the lost frame is the first, a
-    middle or the final one. `DEFAULT_E2E_REORDER_WINDOW_FRAMES` is `REORDER_WINDOW`, 32 (was
-    64). Node: `Processor::check_e2e_stream` polls a stream with the node's clock.
+    middle or the final one. The default reorder window is `REORDER_WINDOW`, 32, and
+    `DEFAULT_E2E_REORDER_WINDOW_FRAMES` (64) is removed. Node: `Processor::check_e2e_stream` polls a stream with the node's clock.
   - Core: `message::REORDER_WINDOW` (the replay window) bounds how many later frames of one
     stream may overtake a frame that still arrives, and `message::REORDER_DEADLINE` (twice
     `SESSION_HOLD_TIMEOUT`) how late it may arrive after a later one.

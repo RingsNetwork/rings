@@ -15,6 +15,22 @@ fn sender_key() -> SecretKey {
     SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54").unwrap()
 }
 
+/// A fresh stream of `payload` from [`sender_key`] to [`recipient_key`] in frames of at most
+/// `frame_len` plaintext bytes, encrypted with the randomness of `seed`: its id and frames.
+fn encrypted(payload: &[u8], frame_len: usize, seed: u64) -> (E2eStreamId, Vec<E2eStreamFrame>) {
+    let stream_id = uuid::Uuid::new_v4();
+    let frames = encrypt_stream_with_rng(
+        payload,
+        stream_id,
+        sender_key().pubkey(),
+        recipient_key().pubkey(),
+        frame_len,
+        &mut Hc128Rng::seed_from_u64(seed),
+    )
+    .unwrap();
+    (stream_id, frames)
+}
+
 /// A stream's public key is accepted only for the DID it hashes to: the key-ownership proof.
 #[test]
 fn test_public_key_must_match_did() {
@@ -104,18 +120,8 @@ fn test_round_trip_random_binary_payloads_and_frame_sizes() {
 fn test_empty_plaintext_sends_final_stream_frame() {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(7);
-    let stream_id = uuid::Uuid::new_v4();
 
-    let frames = encrypt_stream_with_rng(
-        &[],
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        8,
-        &mut rng,
-    )
-    .unwrap();
+    let (stream_id, frames) = encrypted(&[], 8, 7);
 
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].stream_id, stream_id);
@@ -154,18 +160,8 @@ fn test_streaming_decryptor_accepts_ordered_final_frame() {
 fn test_truncation_is_rejected_without_final_frame() {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(9);
-    let stream_id = uuid::Uuid::new_v4();
     let payload = vec![9u8; 96];
-    let mut frames = encrypt_stream_with_rng(
-        &payload,
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        16,
-        &mut rng,
-    )
-    .unwrap();
+    let (stream_id, mut frames) = encrypted(&payload, 16, 9);
 
     frames.pop();
 
@@ -180,18 +176,8 @@ fn test_truncation_is_rejected_without_final_frame() {
 fn test_reordered_frames_are_buffered_until_contiguous() {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(10);
-    let stream_id = uuid::Uuid::new_v4();
     let payload = vec![10u8; 96];
-    let mut frames = encrypt_stream_with_rng(
-        &payload,
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        16,
-        &mut rng,
-    )
-    .unwrap();
+    let (stream_id, mut frames) = encrypted(&payload, 16, 10);
 
     frames.swap(0, 1);
 
@@ -207,18 +193,8 @@ fn test_reordered_frames_are_buffered_until_contiguous() {
 fn test_replayed_consumed_frame_is_idempotent() {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(16);
-    let stream_id = uuid::Uuid::new_v4();
     let payload = vec![16u8; 96];
-    let frames = encrypt_stream_with_rng(
-        &payload,
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        16,
-        &mut rng,
-    )
-    .unwrap();
+    let (stream_id, frames) = encrypted(&payload, 16, 16);
     let final_frame = frames.last().unwrap().clone();
     let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0);
     let mut plaintext = Vec::new();
@@ -246,18 +222,8 @@ fn test_replayed_consumed_frame_is_idempotent() {
 fn test_replayed_buffered_frame_is_idempotent() {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(17);
-    let stream_id = uuid::Uuid::new_v4();
     let payload = vec![17u8; 96];
-    let frames = encrypt_stream_with_rng(
-        &payload,
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        16,
-        &mut rng,
-    )
-    .unwrap();
+    let (stream_id, frames) = encrypted(&payload, 16, 17);
     let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0);
     let mut plaintext = Vec::new();
 
@@ -283,17 +249,7 @@ fn test_replayed_buffered_frame_is_idempotent() {
 fn test_future_frame_outside_reorder_window_is_rejected() {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(18);
-    let stream_id = uuid::Uuid::new_v4();
-    let frames = encrypt_stream_with_rng(
-        &[18u8; 5],
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        1,
-        &mut rng,
-    )
-    .unwrap();
+    let (stream_id, frames) = encrypted(&[18u8; 5], 1, 18);
     let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0)
         .with_reorder_window(2);
 
@@ -312,18 +268,8 @@ fn test_future_frame_outside_reorder_window_is_rejected() {
 fn test_final_frame_can_arrive_before_gap_is_filled() {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(14);
-    let stream_id = uuid::Uuid::new_v4();
     let payload = vec![14u8; 96];
-    let mut frames = encrypt_stream_with_rng(
-        &payload,
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        16,
-        &mut rng,
-    )
-    .unwrap();
+    let (stream_id, mut frames) = encrypted(&payload, 16, 14);
     frames.rotate_right(1);
 
     let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0);
@@ -351,17 +297,7 @@ fn test_final_frame_can_arrive_before_gap_is_filled() {
 fn test_frame_after_buffered_final_is_rejected() {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(15);
-    let stream_id = uuid::Uuid::new_v4();
-    let frames = encrypt_stream_with_rng(
-        &[15u8; 96],
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        16,
-        &mut rng,
-    )
-    .unwrap();
+    let (stream_id, frames) = encrypted(&[15u8; 96], 16, 15);
     let final_frame = frames.last().unwrap();
     let mut frame_after_final = frames.first().unwrap().clone();
     frame_after_final.sequence = final_frame.sequence.checked_add(1).unwrap();
@@ -382,18 +318,8 @@ fn test_frame_after_buffered_final_is_rejected() {
 fn test_wrong_stream_id_is_rejected() {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(12);
-    let stream_id = uuid::Uuid::new_v4();
     let other_stream_id = uuid::Uuid::new_v4();
-    let frames = encrypt_stream_with_rng(
-        b"hello",
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        16,
-        &mut rng,
-    )
-    .unwrap();
+    let (_, frames) = encrypted(b"hello", 16, 12);
 
     assert!(matches!(
         decrypt_stream(&frames, other_stream_id, sender.address().into(), recipient),
@@ -406,18 +332,8 @@ fn test_wrong_stream_id_is_rejected() {
 fn test_wrong_sender_key_is_rejected() {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(11);
-    let stream_id = uuid::Uuid::new_v4();
     let payload = vec![11u8; 32];
-    let mut frames = encrypt_stream_with_rng(
-        &payload,
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        32,
-        &mut rng,
-    )
-    .unwrap();
+    let (stream_id, mut frames) = encrypted(&payload, 32, 11);
     frames[0].sender_public_key = recipient.pubkey();
 
     assert!(matches!(
@@ -434,17 +350,7 @@ const STALL_MS: u128 = 1_000;
 fn stalling_stream(payload: &[u8]) -> (Vec<E2eStreamFrame>, E2eStreamDecryptor) {
     let sender = sender_key();
     let recipient = recipient_key();
-    let mut rng = Hc128Rng::seed_from_u64(23);
-    let stream_id = uuid::Uuid::new_v4();
-    let frames = encrypt_stream_with_rng(
-        payload,
-        stream_id,
-        sender.pubkey(),
-        recipient.pubkey(),
-        16,
-        &mut rng,
-    )
-    .unwrap();
+    let (stream_id, frames) = encrypted(payload, 16, 23);
     assert_eq!(frames.len(), 5);
     let decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0)
         .with_stall_deadline(std::time::Duration::from_millis(STALL_MS as u64));

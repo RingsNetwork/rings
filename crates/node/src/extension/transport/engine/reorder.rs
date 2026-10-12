@@ -52,6 +52,12 @@ pub(super) enum StreamFault {
         /// The half-close's count.
         sent: u64,
     },
+    /// The segment `next` stayed missing past the gap deadline, which the session task, holding
+    /// the clock, judges.
+    Unfilled {
+        /// The segment still missing.
+        next: u64,
+    },
 }
 
 /// The segments that became writable, in order, and whether the direction is now complete.
@@ -129,14 +135,16 @@ impl StreamReorder {
     }
 }
 
+/// Test builds: the bytes of a stream's segment `seq`, its own number, so a misordered write
+/// shows.
+#[cfg(test)]
+pub(super) fn segment(seq: u64) -> Bytes {
+    Bytes::from(seq.to_be_bytes().to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The bytes of segment `seq`: its own number, so a misordered write shows.
-    fn segment(seq: u64) -> Bytes {
-        Bytes::from(seq.to_be_bytes().to_vec())
-    }
 
     /// The release of segments `seqs`, in that order, with the direction `finished` or not.
     fn ready(seqs: &[u64], finished: bool) -> Ready {

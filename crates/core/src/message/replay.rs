@@ -120,10 +120,10 @@ pub use self::store::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 
 /// Number of out-of-order sequence slots retained for one destination-scoped stream.
 pub const TRANSACTION_REPLAY_WINDOW: usize = 32;
-const TRANSACTION_REPLAY_WINDOW_U64: u64 = 32;
 /// How many later frames of one stream may overtake a frame that still arrives: the replay
 /// window, which refuses a frame further behind. A stream consumer reorders at most this far.
-pub const REORDER_WINDOW: u64 = TRANSACTION_REPLAY_WINDOW_U64;
+pub const REORDER_WINDOW: u64 = 32;
+const _: () = assert!(REORDER_WINDOW == TRANSACTION_REPLAY_WINDOW as u64);
 /// How long a frame of one stream may still arrive after a later frame of that stream did.
 ///
 /// A stream's frames reach their destination in order but for one exception: a frame held on
@@ -253,7 +253,7 @@ impl SequenceState {
 
     fn advance(&mut self, sequence: u64, digest: TransactionDigest) {
         let gap = sequence.saturating_sub(self.high);
-        if gap >= TRANSACTION_REPLAY_WINDOW_U64 {
+        if gap >= REORDER_WINDOW {
             self.accepted.fill(None);
         } else if let Ok(gap) = usize::try_from(gap) {
             self.accepted.rotate_left(gap);

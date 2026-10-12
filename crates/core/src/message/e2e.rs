@@ -53,10 +53,6 @@ pub const E2E_PLAINTEXT_BLOCK_LEN: usize = secp256k1::PLAINTEXT_BLOCK_SIZE;
 /// Default plaintext bytes per encrypted E2E stream frame.
 pub const DEFAULT_E2E_PLAINTEXT_FRAME_LEN: usize = E2E_PLAINTEXT_BLOCK_LEN * 16;
 
-/// Default maximum number of out-of-order future frames buffered per stream: the stream
-/// reorder window, beyond which a missing frame can no longer arrive.
-pub const DEFAULT_E2E_REORDER_WINDOW_FRAMES: u64 = REORDER_WINDOW;
-
 /// Identifier shared by all frames of one encrypted E2E stream.
 pub type E2eStreamId = uuid::Uuid;
 
@@ -322,7 +318,7 @@ impl E2eStreamDecryptor {
             next_sequence: 0,
             final_sequence: None,
             seen_final: false,
-            reorder_window: DEFAULT_E2E_REORDER_WINDOW_FRAMES,
+            reorder_window: REORDER_WINDOW,
             pending_frames: BTreeMap::new(),
             stall_deadline: REORDER_DEADLINE,
             progress_ms: now_ms,
@@ -330,7 +326,7 @@ impl E2eStreamDecryptor {
     }
 
     /// This decryptor with the future-frame reorder window `reorder_window` instead of
-    /// [`DEFAULT_E2E_REORDER_WINDOW_FRAMES`].
+    /// [`REORDER_WINDOW`], beyond which a missing frame can no longer arrive.
     pub fn with_reorder_window(mut self, reorder_window: u64) -> Self {
         self.reorder_window = reorder_window;
         self

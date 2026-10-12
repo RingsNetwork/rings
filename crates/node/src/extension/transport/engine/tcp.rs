@@ -14,8 +14,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use super::inject_accepted;
+use super::reorder::StreamFault;
 use super::reorder::StreamReorder;
 use super::send_frame;
 use super::Outbound;
@@ -25,6 +27,7 @@ use super::TransportSessions;
 use super::TCP_BUF;
 use crate::extension::ext::Scope;
 use crate::extension::transport::Frame;
+use crate::extension::transport::SessionKey;
 use crate::extension::transport::RELAY_IDLE_TIMEOUT;
 
 impl TransportSessions {
@@ -158,13 +161,7 @@ async fn relay_tcp_with_timeouts(
                 let ready = match arrival {
                     Ok(ready) => ready,
                     Err(fault) => {
-                        tracing::warn!(
-                            peer = %peer,
-                            session = session.0,
-                            fault = ?fault,
-                            "relay stream reset: the peer's segments contradict its stream"
-                        );
-                        cancel.cancel();
+                        reset(&key, fault, &cancel);
                         break;
                     }
                 };
@@ -186,13 +183,9 @@ async fn relay_tcp_with_timeouts(
                 gap = missing;
             }
             _ = &mut gap_deadline, if gap.is_some() => {
-                tracing::warn!(
-                    peer = %peer,
-                    session = session.0,
-                    missing = ?gap,
-                    "relay stream reset: a lost segment left a gap that cannot be filled"
-                );
-                cancel.cancel();
+                if let Some(next) = gap {
+                    reset(&key, StreamFault::Unfilled { next }, &cancel);
+                }
                 break;
             }
             _ = &mut idle => break,
@@ -218,6 +211,17 @@ async fn relay_tcp_with_timeouts(
     }
 }
 
+/// Reset the session `key` for `fault`: its stream cannot continue without a silent gap.
+fn reset(key: &SessionKey, fault: StreamFault, cancel: &CancellationToken) {
+    tracing::warn!(
+        peer = %key.peer,
+        session = key.session.0,
+        fault = ?fault,
+        "relay stream reset: the peer's stream cannot continue without a gap"
+    );
+    cancel.cancel();
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -228,8 +232,8 @@ mod tests {
     use crate::error::Error;
     use crate::error::Result;
     use crate::extension::transport::engine::relay_task_for_test;
+    use crate::extension::transport::engine::reorder::segment;
     use crate::extension::transport::EffectEnqueue;
-    use crate::extension::transport::SessionKey;
 
     #[tokio::test]
     async fn test_idle_native_tcp_relay_releases_its_session() -> Result<()> {
@@ -284,11 +288,6 @@ mod tests {
         relay
             .await
             .map_err(|error| Error::ExtensionError(format!("relay task failed: {error}")))
-    }
-
-    /// The bytes of the peer's segment `seq`.
-    fn segment(seq: u64) -> Bytes {
-        Bytes::from(format!("s{seq};"))
     }
 
     /// The peer's segments `seqs`, concatenated.
