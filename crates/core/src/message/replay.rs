@@ -81,6 +81,7 @@ use std::ops::RangeInclusive;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::lock::Mutex;
 use rings_runtime::MaybeSend;
@@ -100,6 +101,7 @@ use crate::message::OriginQuotaCounters;
 use crate::message::OriginQuotaInstant;
 use crate::message::OriginQuotaKey;
 use crate::storage::KvStorageScan;
+use crate::swarm::transport::SESSION_HOLD_TIMEOUT;
 use crate::utils::Instant;
 
 mod store;
@@ -119,6 +121,15 @@ pub use self::store::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 /// Number of out-of-order sequence slots retained for one destination-scoped stream.
 pub const TRANSACTION_REPLAY_WINDOW: usize = 32;
 const TRANSACTION_REPLAY_WINDOW_U64: u64 = 32;
+/// How long a frame of one stream may still arrive after a later frame of that stream did.
+///
+/// A stream's frames reach their destination in order but for one exception: a frame held on
+/// an unresolved delegation reference, for at most `SESSION_HOLD_TIMEOUT` on an edge, and then
+/// released or dropped (#908). The deadline allows such a hold on two edges. A stream consumer
+/// that still misses a frame this long after a later one arrived, or that has seen more than
+/// [`TRANSACTION_REPLAY_WINDOW`] later frames of it, has lost it: the replay window refuses a
+/// frame released that late.
+pub const REORDER_DEADLINE: Duration = SESSION_HOLD_TIMEOUT.saturating_add(SESSION_HOLD_TIMEOUT);
 const TRANSACTION_REPLAY_BACKTRACK: u64 = 31;
 /// Account-to-destination pairs whose four class streams one runtime retains in full.
 const TRANSACTION_REPLAY_PAIR_CAPACITY: usize = 4096;

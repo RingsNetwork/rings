@@ -3,16 +3,20 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_core::message::REORDER_DEADLINE;
 use rings_runtime::Spawner;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 
 use super::inject_accepted;
+use super::reorder::StreamReorder;
 use super::send_frame;
 use super::Outbound;
 use super::Pending;
@@ -72,13 +76,23 @@ impl TransportSessions {
 
 /// Bidirectional TCP relay with true half-close and abrupt-close handling.
 pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
-    relay_tcp_with_idle(task, stream, RELAY_IDLE_TIMEOUT).await;
+    relay_tcp_with_timeouts(task, stream, RELAY_IDLE_TIMEOUT, REORDER_DEADLINE).await;
 }
 
-async fn relay_tcp_with_idle(
+/// [`relay_tcp`] with its idle timeout and its gap deadline given.
+///
+/// Local reads go to the peer as `Data` segments numbered `0, 1, …`, and a local EOF as a
+/// `Shutdown` counting them. Peer segments reach the local socket through a
+/// [`StreamReorder`], so the local stream is always a prefix of the peer's. The session is
+/// reset when a gap stays open for `reorder_deadline` (measured from when its missing segment
+/// became the one awaited) or the peer's segments contradict its stream; a reset, like any end
+/// but both directions finishing, closes the local socket abortively, so the local client sees
+/// a reset rather than a clean end of a truncated stream.
+async fn relay_tcp_with_timeouts(
     task: RelayTask,
     stream: TcpStream,
-    idle_timeout: std::time::Duration,
+    idle_timeout: Duration,
+    reorder_deadline: Duration,
 ) {
     let RelayTask {
         sessions,
@@ -94,19 +108,25 @@ async fn relay_tcp_with_idle(
     let (mut local_read, mut local_write) = stream.into_split();
     let mut local_read_open = true;
     let mut local_write_open = true;
+    let mut sent: u64 = 0;
+    let mut inbound = StreamReorder::default();
+    let mut gap: Option<u64> = None;
     let mut buf = vec![0u8; TCP_BUF];
     let idle = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle);
-    while local_read_open || local_write_open {
+    let gap_deadline = tokio::time::sleep(reorder_deadline);
+    tokio::pin!(gap_deadline);
+    'relay: while local_read_open || local_write_open {
         tokio::select! {
             _ = cancel.cancelled() => break,
             read = local_read.read(buf.as_mut_slice()), if local_read_open => {
-                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                idle.as_mut().reset(Instant::now() + idle_timeout);
                 match read {
                     Ok(0) => {
                         let _ = send_frame(&scope, peer, Frame::Shutdown {
                             session,
                             from_opener,
+                            sent,
                         }).await;
                         local_read_open = false;
                     }
@@ -119,11 +139,13 @@ async fn relay_tcp_with_idle(
                         if send_frame(&scope, peer, Frame::Data {
                             session,
                             from_opener,
+                            seq: sent,
                             bytes,
                         }).await.is_err() {
                             cancel.cancel();
                             break;
                         }
+                        sent += 1;
                     }
                     Err(_) => {
                         cancel.cancel();
@@ -132,22 +154,60 @@ async fn relay_tcp_with_idle(
                 }
             }
             outbound = outbound_rx.recv(), if local_write_open => {
-                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
-                match outbound {
-                    Some(Outbound::Data(bytes)) => {
-                        if local_write.write_all(bytes.as_ref()).await.is_err() {
-                            cancel.cancel();
-                            break;
-                        }
+                idle.as_mut().reset(Instant::now() + idle_timeout);
+                let arrival = match outbound {
+                    Some(Outbound::Segment { seq, bytes }) => inbound.data(seq, bytes),
+                    Some(Outbound::Shutdown { sent }) => inbound.fin(sent),
+                    Some(Outbound::Datagram(_)) | None => break,
+                };
+                let ready = match arrival {
+                    Ok(ready) => ready,
+                    Err(fault) => {
+                        tracing::warn!(
+                            peer = %peer,
+                            session = session.0,
+                            fault = ?fault,
+                            "relay stream reset: the peer's segments contradict its stream"
+                        );
+                        cancel.cancel();
+                        break;
                     }
-                    Some(Outbound::Shutdown) => {
-                        let _ = local_write.shutdown().await;
-                        local_write_open = false;
+                };
+                for bytes in ready.segments {
+                    if local_write.write_all(bytes.as_ref()).await.is_err() {
+                        cancel.cancel();
+                        break 'relay;
                     }
-                    None => break,
                 }
+                if ready.finished {
+                    let _ = local_write.shutdown().await;
+                    local_write_open = false;
+                }
+                // The deadline runs from when the missing segment became the one awaited.
+                let missing = inbound.gap_open().then(|| inbound.missing());
+                if missing.is_some() && missing != gap {
+                    gap_deadline.as_mut().reset(Instant::now() + reorder_deadline);
+                }
+                gap = missing;
+            }
+            _ = &mut gap_deadline, if gap.is_some() => {
+                tracing::warn!(
+                    peer = %peer,
+                    session = session.0,
+                    missing = ?gap,
+                    "relay stream reset: a lost segment left a gap that cannot be filled"
+                );
+                cancel.cancel();
+                break;
             }
             _ = &mut idle => break,
+        }
+    }
+
+    // Only both directions finishing is a clean end; any other end aborts the local socket.
+    if local_read_open || local_write_open {
+        if let Ok(stream) = local_read.reunite(local_write) {
+            let _ = stream.set_zero_linger();
         }
     }
 
@@ -173,6 +233,8 @@ mod tests {
     use crate::error::Error;
     use crate::error::Result;
     use crate::extension::transport::engine::relay_task_for_test;
+    use crate::extension::transport::EffectEnqueue;
+    use crate::extension::transport::SessionKey;
 
     #[tokio::test]
     async fn test_idle_native_tcp_relay_releases_its_session() -> Result<()> {
@@ -184,12 +246,147 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_secs(1),
-            relay_tcp_with_idle(task, server, Duration::from_millis(20)),
+            relay_tcp_with_timeouts(
+                task,
+                server,
+                Duration::from_millis(20),
+                Duration::from_secs(60),
+            ),
         )
         .await
         .map_err(|_| Error::ExtensionError("idle TCP relay was not reclaimed".to_string()))?;
         drop(client);
         assert!(!sessions.is_live(&key));
+        Ok(())
+    }
+
+    /// A relay task over a connected local socket pair, running: the local client's end, the
+    /// task, and the engine with the session's key. The gap deadline is `deadline`.
+    async fn relayed(
+        deadline: Duration,
+    ) -> Result<(
+        TcpStream,
+        tokio::task::JoinHandle<()>,
+        Arc<TransportSessions>,
+        SessionKey,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_error)?;
+        let address = listener.local_addr().map_err(io_error)?;
+        let client = TcpStream::connect(address).await.map_err(io_error)?;
+        let (server, _) = listener.accept().await.map_err(io_error)?;
+        let (task, sessions, key) = relay_task_for_test("tcp")?;
+        let relay = tokio::spawn(relay_tcp_with_timeouts(
+            task,
+            server,
+            Duration::from_secs(60),
+            deadline,
+        ));
+        Ok((client, relay, sessions, key))
+    }
+
+    /// The bytes of the peer's segment `seq`.
+    fn segment(seq: u64) -> Bytes {
+        Bytes::from(format!("s{seq};"))
+    }
+
+    /// The peer's segments `seqs`, concatenated.
+    fn segments(seqs: impl IntoIterator<Item = u64>) -> Vec<u8> {
+        seqs.into_iter()
+            .flat_map(|seq| segment(seq).to_vec())
+            .collect()
+    }
+
+    /// Deliver the peer's segments `seqs` in that order, then (if any) its half-close.
+    fn deliver(sessions: &TransportSessions, key: &SessionKey, seqs: &[u64], fin: Option<u64>) {
+        for seq in seqs {
+            assert_eq!(
+                sessions.write(key, *seq, segment(*seq)),
+                EffectEnqueue::Enqueued
+            );
+        }
+        if let Some(sent) = fin {
+            assert_eq!(sessions.shutdown(key, sent), EffectEnqueue::Enqueued);
+        }
+    }
+
+    /// How the local client's stream ended.
+    #[derive(Debug, Eq, PartialEq)]
+    enum Ending {
+        /// A clean end of stream.
+        Eof,
+        /// An abortive close.
+        Reset,
+    }
+
+    /// Read the client's end until it ends: what it read, and how it ended.
+    async fn read_to_end(client: &mut TcpStream) -> Result<(Vec<u8>, Ending)> {
+        let mut read = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf))
+                .await
+                .map_err(|_| Error::ExtensionError("the relayed stream never ended".to_string()));
+            match n? {
+                Ok(0) => return Ok((read, Ending::Eof)),
+                Ok(n) => read.extend_from_slice(buf.get(..n).unwrap_or_default()),
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                    return Ok((read, Ending::Reset));
+                }
+                Err(error) => return Err(io_error(error)),
+            }
+        }
+    }
+
+    /// Segments that arrive out of order reach the local socket in order, and the half-close
+    /// that counted them ends the stream cleanly once both are written.
+    #[tokio::test]
+    async fn test_a_reordered_stream_reaches_the_local_socket_in_order() -> Result<()> {
+        let (mut client, relay, sessions, key) = relayed(Duration::from_secs(60)).await?;
+        deliver(&sessions, &key, &[1, 0], Some(2));
+        client.shutdown().await.map_err(io_error)?;
+        assert_eq!(
+            read_to_end(&mut client).await?,
+            (segments([0, 1]), Ending::Eof)
+        );
+        relay
+            .await
+            .map_err(|error| Error::ExtensionError(format!("relay task failed: {error}")))?;
+        assert!(!sessions.is_live(&key));
+        Ok(())
+    }
+
+    /// A lost first, middle or last segment never ends the local stream cleanly: the client reads
+    /// the prefix before the gap, and then a reset once the gap deadline passes.
+    #[tokio::test]
+    async fn test_a_lost_segment_resets_the_local_stream_after_its_prefix() -> Result<()> {
+        for lost in [0, 1, 2] {
+            let (mut client, relay, sessions, key) = relayed(Duration::from_millis(200)).await?;
+            let arrived: Vec<u64> = (0..3).filter(|seq| *seq != lost).collect();
+            deliver(&sessions, &key, &arrived, Some(3));
+            assert_eq!(
+                read_to_end(&mut client).await?,
+                (segments(0..lost), Ending::Reset),
+                "segment {lost} lost"
+            );
+            relay
+                .await
+                .map_err(|error| Error::ExtensionError(format!("relay task failed: {error}")))?;
+            assert!(!sessions.is_live(&key));
+        }
+        Ok(())
+    }
+
+    /// A segment beyond the reorder window shows the awaited one can no longer arrive: the
+    /// stream is reset at once, without waiting for the deadline.
+    #[tokio::test]
+    async fn test_a_segment_beyond_the_window_resets_the_stream_at_once() -> Result<()> {
+        let (mut client, relay, sessions, key) = relayed(Duration::from_secs(60)).await?;
+        let beyond = rings_core::message::TRANSACTION_REPLAY_WINDOW as u64;
+        deliver(&sessions, &key, &[beyond], None);
+        assert_eq!(read_to_end(&mut client).await?, (Vec::new(), Ending::Reset));
+        relay
+            .await
+            .map_err(|error| Error::ExtensionError(format!("relay task failed: {error}")))?;
         Ok(())
     }
 

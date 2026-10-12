@@ -10,20 +10,24 @@
 //! A TCP session is full-duplex; each direction ends independently:
 //!
 //! ```text
-//!   local read = Ok(0)   (clean EOF)  ─▶ Frame::Shutdown (FIN); reverse stays open
-//!   peer Frame::Shutdown               ─▶ shutdown local write; forward stays open
-//!   both directions done               ─▶ Frame::Close; drop session
+//!   local read = Ok(n)                 ─▶ Frame::Data(seq = segments sent so far)
+//!   local read = Ok(0)   (clean EOF)  ─▶ Frame::Shutdown(sent); reverse stays open
+//!   peer Data / Shutdown               ─▶ reorder by seq (`reorder`); write the prefix;
+//!                                         shut local write once all `sent` are written
+//!   both directions done               ─▶ Frame::Close; drop session (clean local close)
 //!
-//!   local read/write error, or overlay send failure (abrupt)
+//!   local read/write error, overlay send failure, a gap open past `REORDER_DEADLINE`,
+//!   peer segments that contradict the stream, or idle (abrupt)
 //!                                      ─▶ cancel the whole session ─▶ Frame::Close;
-//!                                         drop session  (RST-like)
-//!   peer Frame::Close                  ─▶ cancel + drop session
+//!                                         drop session; abortive local close (RST)
+//!   peer Frame::Close                  ─▶ cancel + drop session; abortive local close
 //! ```
 //!
-//! So a half-closing peer (request fully sent, awaiting response) does not deadlock,
-//! and an abrupt drop (RST / dead overlay) tears the whole session down on both ends
-//! rather than leaking it. UDP flows have no half-close; `Shutdown` is ignored and
-//! errors close the flow.
+//! So a half-closing peer (request fully sent, awaiting response) does not deadlock, an
+//! abrupt drop tears the whole session down on both ends rather than leaking it, and a local
+//! client sees a clean end of stream only when it received every byte the peer sent. UDP flows
+//! carry unsequenced `Datagram`s and have no half-close; `Shutdown` is ignored and errors close
+//! the flow.
 //!
 //! ## Module layout
 //!
@@ -32,13 +36,15 @@
 //! it (TCP/UDP are one abstraction at two points of the session-cardinality axis):
 //!
 //! - `tcp` — the TCP listener and the bidirectional byte-stream relay loop.
+//! - `reorder` — the pure receive side of one TCP direction: segments reordered by `seq`.
 //! - `udp` — the UDP listener and the per-flow datagram relay loop.
 //!
 //! ## v1 limits
 //!
 //! A relayed datagram must fit one overlay message (`UDP_BUF`; larger is truncated).
-//! Reliable-tunnelled UDP does not preserve native loss/reorder semantics.
+//! Datagrams travel unsequenced: one the overlay drops is lost, as on the native network.
 
+mod reorder;
 mod tcp;
 mod udp;
 
@@ -82,10 +88,21 @@ const MAX_PENDING_ACCEPTS: usize = 128;
 
 /// Something to deliver to a session's local socket (peer → local direction).
 enum Outbound {
-    /// Bytes to write/send locally.
-    Data(Bytes),
-    /// The peer half-closed (FIN): shut the local write side.
-    Shutdown,
+    /// A segment of the peer's TCP stream at its position `seq`, written in `seq` order.
+    Segment {
+        /// The segment's position in the peer's direction.
+        seq: u64,
+        /// The segment's bytes.
+        bytes: Bytes,
+    },
+    /// A datagram of the peer's UDP flow, sent as it arrives.
+    Datagram(Bytes),
+    /// The peer half-closed after `sent` segments (FIN): shut the local write side once all
+    /// of them are written.
+    Shutdown {
+        /// How many segments the peer sent this direction.
+        sent: u64,
+    },
 }
 
 /// A live relayed session: the peer→local channel plus a cancel token. `src` is the local
@@ -252,13 +269,19 @@ impl TransportSessions {
     /// pure relay must forget the session. A full channel is a terminal local resource failure:
     /// removing it bounds memory and prevents one stalled socket from holding the namespace's
     /// ordered transition gate.
-    pub fn write(&self, key: &SessionKey, bytes: Bytes) -> EffectEnqueue {
-        self.enqueue_for_effect(key, Outbound::Data(bytes))
+    pub fn write(&self, key: &SessionKey, seq: u64, bytes: Bytes) -> EffectEnqueue {
+        self.enqueue_for_effect(key, Outbound::Segment { seq, bytes })
     }
 
-    /// Half-close a session's local write side (peer sent FIN).
-    pub fn shutdown(&self, key: &SessionKey) -> EffectEnqueue {
-        self.enqueue_for_effect(key, Outbound::Shutdown)
+    /// Enqueue a peer datagram for a UDP flow; see [`Self::write`].
+    pub fn send_datagram(&self, key: &SessionKey, bytes: Bytes) -> EffectEnqueue {
+        self.enqueue_for_effect(key, Outbound::Datagram(bytes))
+    }
+
+    /// Half-close a session's local write side once the `sent` segments the peer counted are
+    /// written (peer sent FIN).
+    pub fn shutdown(&self, key: &SessionKey, sent: u64) -> EffectEnqueue {
+        self.enqueue_for_effect(key, Outbound::Shutdown { sent })
     }
 
     /// Release a session while applying a `Close` effect.
@@ -429,7 +452,7 @@ impl TransportSessions {
                     // Preserve local receive order: keep the fast path closed until both Open and
                     // the first datagram have been admitted to the peer connection.
                     let from_opener = opened_by_us(&key);
-                    if send_frame(&scope, key.peer, Frame::Data {
+                    if send_frame(&scope, key.peer, Frame::Datagram {
                         session: key.session,
                         from_opener,
                         bytes: first,
@@ -805,203 +828,4 @@ async fn inject_untrack(scope: &Scope, key: &SessionKey) {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-
-    use bytes::Bytes;
-    use rings_core::dht::Did;
-    use tokio::net::UdpSocket;
-
-    use super::Pending;
-    use super::TransportSessions;
-    use super::MAX_PENDING_ACCEPTS;
-    use crate::extension::transport::EffectEnqueue;
-    use crate::extension::transport::Initiator;
-    use crate::extension::transport::RelaySessionId;
-    use crate::extension::transport::SessionKey;
-    use crate::extension::transport::SlotRegistration;
-    use crate::extension::transport::TransportKind;
-
-    /// Without a current runtime the connect effect is refused before its slot is claimed, so
-    /// no session stays registered for relay work that never starts.
-    #[test]
-    fn test_connect_without_a_runtime_claims_no_slot() -> crate::error::Result<()> {
-        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
-        let (task, sessions, _) = runtime.block_on(async { super::relay_task_for_test("tcp") })?;
-        let key = SessionKey::new(
-            Did::from(8_u32),
-            "tcp",
-            RelaySessionId(12),
-            Initiator::Remote,
-        );
-        let effect = crate::test_support::without_runtime(|| {
-            Arc::clone(&sessions).connect(
-                task.scope.clone(),
-                key.clone(),
-                SocketAddr::from(([127, 0, 0, 1], 9)),
-                TransportKind::Tcp,
-            )
-        });
-
-        assert_eq!(effect, EffectEnqueue::Failed);
-        assert_eq!(sessions.current_generation(&key), None);
-        Ok(())
-    }
-
-    /// A repeated engine effect cannot cancel or replace the resource admitted first.
-    #[test]
-    fn test_duplicate_registration_preserves_live_owner() {
-        let sessions = TransportSessions::new();
-        let key = SessionKey::new(
-            Did::from(7_u32),
-            "tcp",
-            RelaySessionId(10),
-            Initiator::Remote,
-        );
-        let (original_cancel, original_generation) = match sessions.register(key.clone(), None) {
-            SlotRegistration::Registered((_receiver, cancel, generation)) => (cancel, generation),
-            SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
-                panic!("first registration must occupy a vacant slot");
-            }
-        };
-
-        assert!(matches!(
-            sessions.register(key.clone(), None),
-            SlotRegistration::AlreadyPresent
-        ));
-        assert!(!original_cancel.is_cancelled());
-        assert_eq!(sessions.current_generation(&key), Some(original_generation));
-    }
-
-    #[test]
-    fn test_saturated_local_queue_fails_closed_without_waiting() {
-        let sessions = TransportSessions::new();
-        let key = SessionKey::new(
-            Did::from(7_u32),
-            "tcp",
-            RelaySessionId(11),
-            Initiator::Remote,
-        );
-        let _registration = match sessions.register(key.clone(), None) {
-            SlotRegistration::Registered(registration) => registration,
-            SlotRegistration::AlreadyPresent | SlotRegistration::Failed => {
-                panic!("first registration must occupy a vacant slot");
-            }
-        };
-
-        for _ in 0..1024 {
-            assert_eq!(
-                sessions.write(&key, Bytes::from_static(b"x")),
-                EffectEnqueue::Enqueued
-            );
-        }
-        assert_eq!(
-            sessions.write(&key, Bytes::from_static(b"overflow")),
-            EffectEnqueue::Failed
-        );
-        assert!(!sessions.is_live(&key));
-        assert_eq!(
-            sessions.write(&key, Bytes::from_static(b"stale")),
-            EffectEnqueue::Missing
-        );
-    }
-
-    #[tokio::test]
-    async fn test_pending_accept_table_rejects_above_its_hard_bound() {
-        let sessions = TransportSessions::new();
-        let socket = Arc::new(
-            UdpSocket::bind("127.0.0.1:0")
-                .await
-                .expect("bind test UDP socket"),
-        );
-        for index in 0..MAX_PENDING_ACCEPTS {
-            let src = SocketAddr::from(([127, 0, 0, 1], 10_000 + index as u16));
-            assert!(sessions
-                .stash_pending(Pending::Udp {
-                    socket: Arc::clone(&socket),
-                    src,
-                    first: Bytes::new(),
-                })
-                .is_some());
-        }
-
-        assert!(sessions
-            .stash_pending(Pending::Udp {
-                socket,
-                src: SocketAddr::from(([127, 0, 0, 1], 20_000)),
-                first: Bytes::new(),
-            })
-            .is_none());
-        assert_eq!(
-            sessions
-                .pending
-                .lock()
-                .expect("pending table remains readable")
-                .len(),
-            MAX_PENDING_ACCEPTS
-        );
-    }
-
-    #[tokio::test]
-    async fn test_udp_source_is_unique_and_invisible_until_open_admission() {
-        let sessions = TransportSessions::new();
-        let socket = Arc::new(
-            UdpSocket::bind("127.0.0.1:0")
-                .await
-                .expect("bind test UDP socket"),
-        );
-        let src = SocketAddr::from(([127, 0, 0, 1], 12_345));
-        let token = sessions
-            .reserve_pending_udp(Arc::clone(&socket), src, Bytes::from_static(b"first"))
-            .expect("reserve first UDP source");
-
-        assert!(sessions
-            .reserve_pending_udp(socket, src, Bytes::from_static(b"overtaking"))
-            .is_none());
-        assert_eq!(sessions.pending.lock().expect("pending table").len(), 1);
-        assert_eq!(sessions.udp_flow(&src), None);
-
-        let pending = sessions
-            .pending
-            .lock()
-            .expect("pending table")
-            .remove(&token);
-        assert!(matches!(pending, Some(Pending::Udp { .. })));
-        let key = SessionKey::new(
-            Did::from(8_u32),
-            "udp",
-            RelaySessionId(12),
-            Initiator::Local,
-        );
-        assert!(sessions.promote_udp_flow(src, token, &key));
-        assert!(matches!(
-            sessions.register(key.clone(), Some(src)),
-            SlotRegistration::Registered(_)
-        ));
-        assert_eq!(sessions.udp_flow(&src), None);
-
-        assert!(sessions.activate_udp_flow(src, &key));
-        assert_eq!(sessions.udp_flow(&src), Some(key));
-    }
-
-    #[tokio::test]
-    async fn test_failed_udp_accept_releases_its_source_reservation() {
-        let sessions = TransportSessions::new();
-        let socket = Arc::new(
-            UdpSocket::bind("127.0.0.1:0")
-                .await
-                .expect("bind test UDP socket"),
-        );
-        let src = SocketAddr::from(([127, 0, 0, 1], 12_346));
-        let token = sessions
-            .reserve_pending_udp(Arc::clone(&socket), src, Bytes::new())
-            .expect("reserve first UDP source");
-
-        sessions.evict_pending(token);
-
-        assert!(sessions
-            .reserve_pending_udp(socket, src, Bytes::new())
-            .is_some());
-    }
-}
+mod tests;

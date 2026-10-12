@@ -63,6 +63,7 @@ pub use replay::StreamKey;
 pub use replay::TransactionDigest;
 pub use replay::TransactionForkEvidence;
 pub(crate) use replay::TransactionReplay;
+pub use replay::REORDER_DEADLINE;
 pub use replay::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
 pub use replay::TRANSACTION_REPLAY_STORE_MAX_BYTES;
 pub use replay::TRANSACTION_REPLAY_STORE_MAX_RECORDS;

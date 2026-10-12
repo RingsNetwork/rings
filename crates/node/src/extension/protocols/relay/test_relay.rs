@@ -38,19 +38,33 @@ fn web_addr() -> SocketAddr {
 fn rkey(peer: Did, session: u64) -> SessionKey {
     SessionKey::new(peer, super::TCP, RelaySessionId(session), Initiator::Remote)
 }
-/// Peer `Data` on a peer-opened session (`from_opener = true`).
+/// The peer's first `Data` segment on a peer-opened session (`from_opener = true`).
 fn data(session: u64, bytes: &'static [u8]) -> Frame {
+    segment(session, 0, bytes)
+}
+/// Peer `Data` segment `seq` on a peer-opened session (`from_opener = true`).
+fn segment(session: u64, seq: u64, bytes: &'static [u8]) -> Frame {
     Frame::Data {
+        session: RelaySessionId(session),
+        from_opener: true,
+        seq,
+        bytes: Bytes::from_static(bytes),
+    }
+}
+/// A peer `Datagram` on a peer-opened flow (`from_opener = true`).
+fn datagram(session: u64, bytes: &'static [u8]) -> Frame {
+    Frame::Datagram {
         session: RelaySessionId(session),
         from_opener: true,
         bytes: Bytes::from_static(bytes),
     }
 }
-/// Peer `Shutdown` on a peer-opened session (`from_opener = true`).
-fn shutdown(session: u64) -> Frame {
+/// Peer `Shutdown` counting `sent` segments on a peer-opened session (`from_opener = true`).
+fn shutdown(session: u64, sent: u64) -> Frame {
     Frame::Shutdown {
         session: RelaySessionId(session),
         from_opener: true,
+        sent,
     }
 }
 /// Peer `Close` on a peer-opened session (`from_opener = true`).
@@ -248,8 +262,9 @@ fn test_data_writes_to_a_live_keyed_session() {
     let opened = step_frame(&relay, &relay.init(), peer_a(), &open(7, "web"));
     let t = step_frame(&relay, &opened.state, peer_a(), &data(7, b"hello"));
     match t.effects.as_slice() {
-        [RelayEffect::Write { key, bytes }] => {
+        [RelayEffect::Write { key, seq, bytes }] => {
             assert_eq!(*key, rkey(peer_a(), 7));
+            assert_eq!(*seq, 0);
             assert_eq!(bytes.as_ref(), b"hello");
         }
         other => panic!("expected one Write, got {other:?}"),
@@ -429,30 +444,52 @@ fn test_close_after_close_is_idempotent() {
     assert!(c2.state.sessions.is_empty());
 }
 
+/// The FIN is affine and counts the peer's segments: a counted segment that the FIN overtook
+/// still reaches the backend, a segment past the count never does, and the reverse direction
+/// stays open until `Close`.
 #[test]
-fn test_tcp_shutdown_is_affine_and_blocks_late_peer_data_without_closing_reverse() {
+fn test_tcp_shutdown_is_affine_and_admits_only_the_segments_it_counted() {
     let relay = web_relay();
     let key = rkey(peer_a(), 9);
     let opened = step_frame(&relay, &relay.init(), peer_a(), &open(9, "web"));
 
-    let shutdown_once = step_frame(&relay, &opened.state, peer_a(), &shutdown(9));
+    let shutdown_once = step_frame(&relay, &opened.state, peer_a(), &shutdown(9, 1));
     assert!(matches!(shutdown_once.effects.as_slice(), [
-        RelayEffect::Shutdown { key: effect_key }
+        RelayEffect::Shutdown { key: effect_key, sent: 1 }
     ] if *effect_key == key));
     assert!(shutdown_once.state.sessions.contains(&key));
-    assert!(shutdown_once.state.peer_shutdown.contains(&key));
+    assert_eq!(shutdown_once.state.peer_shutdown.get(&key), Some(&1));
 
-    let shutdown_twice = step_frame(&relay, &shutdown_once.state, peer_a(), &shutdown(9));
+    let shutdown_twice = step_frame(&relay, &shutdown_once.state, peer_a(), &shutdown(9, 2));
     assert!(shutdown_twice.effects.is_empty());
-    let late_data = step_frame(&relay, &shutdown_twice.state, peer_a(), &data(9, b"late"));
-    assert!(late_data.effects.is_empty());
+    let counted = step_frame(
+        &relay,
+        &shutdown_twice.state,
+        peer_a(),
+        &segment(9, 0, b"held"),
+    );
+    assert!(matches!(counted.effects.as_slice(), [RelayEffect::Write {
+        seq: 0,
+        ..
+    }]));
+    let past = step_frame(&relay, &counted.state, peer_a(), &segment(9, 1, b"past"));
+    assert!(past.effects.is_empty());
 
-    let closed = step_frame(&relay, &late_data.state, peer_a(), &close(9));
+    let closed = step_frame(&relay, &past.state, peer_a(), &close(9));
     assert!(matches!(closed.effects.as_slice(), [
         RelayEffect::Close { .. }
     ]));
     assert!(!closed.state.sessions.contains(&key));
-    assert!(!closed.state.peer_shutdown.contains(&key));
+    assert!(!closed.state.peer_shutdown.contains_key(&key));
+}
+
+/// Each kind takes only its own frames: a TCP session ignores datagrams.
+#[test]
+fn test_a_tcp_session_ignores_datagrams() {
+    let relay = web_relay();
+    let opened = step_frame(&relay, &relay.init(), peer_a(), &open(3, "web"));
+    let datagram = step_frame(&relay, &opened.state, peer_a(), &datagram(3, b"x"));
+    assert!(datagram.effects.is_empty());
 }
 
 #[test]
@@ -464,12 +501,15 @@ fn test_udp_ignores_stream_shutdown_and_keeps_accepting_datagrams() {
     });
     let opened = step_frame(&relay, &registered.state, peer_a(), &open(4, "dns"));
 
-    let shutdown = step_frame(&relay, &opened.state, peer_a(), &shutdown(4));
+    let shutdown = step_frame(&relay, &opened.state, peer_a(), &shutdown(4, 0));
     assert!(shutdown.effects.is_empty());
-    let data = step_frame(&relay, &shutdown.state, peer_a(), &data(4, b"datagram"));
-    assert!(matches!(data.effects.as_slice(), [
-        RelayEffect::Write { .. }
+    let datagram = step_frame(&relay, &shutdown.state, peer_a(), &datagram(4, b"datagram"));
+    assert!(matches!(datagram.effects.as_slice(), [
+        RelayEffect::SendDatagram { .. }
     ]));
+    // A stream segment means nothing on a flow.
+    let segment = step_frame(&relay, &datagram.state, peer_a(), &data(4, b"segment"));
+    assert!(segment.effects.is_empty());
 }
 
 #[test]
@@ -628,7 +668,9 @@ fn apply_effects(
                     .register(key.clone())
                     .map(|generation| (key.clone(), generation));
             }
-            RelayEffect::Write { key, .. } | RelayEffect::Shutdown { key } => {
+            RelayEffect::Write { key, .. }
+            | RelayEffect::SendDatagram { key, .. }
+            | RelayEffect::Shutdown { key, .. } => {
                 assert!(
                     eng.map.contains_key(key),
                     "effect targeted a non-live session"

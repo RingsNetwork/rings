@@ -24,8 +24,10 @@
 //!   step (Frame(from, Open s n)) | k∈sessions   ↦ (S, ε)                  (live duplicate)
 //!                                | n∈services    ↦ (S∪{k}, [Connect k t kind])
 //!                                | otherwise     ↦ (S, [SendClose s])
-//!   step (Frame(from, Data s b)) | k∈sessions∖shutdown ↦ (S, [Write k b]) else (S, ε)
-//!   step (Frame(from, FIN s))    | TCP ∧ k∈sessions    ↦ (S∪shutdown(k), [Shutdown k])
+//!   step (Frame(from, Data s q b)) | TCP ∧ k∈sessions ∧ (k∉fin ∨ q < fin(k))
+//!                                                   ↦ (S, [Write k q b])   else (S, ε)
+//!   step (Frame(from, Datagram s b)) | UDP ∧ k∈sessions ↦ (S, [SendDatagram k b]) else (S, ε)
+//!   step (Frame(from, FIN s n))  | TCP ∧ k∈sessions∖fin ↦ (S[fin(k):=n], [Shutdown k n])
 //!                                                   repeated/UDP ↦ (S, ε)
 //!   step (Frame(from, Close s))  | k∈sessions          ↦ (S∖{k}, [Close k]) else (S, ε)
 //!   invariant                    |sessions| ≤ 1024 ∧ ∀peer. sessions(peer) ≤ 64
@@ -145,17 +147,29 @@ pub enum RelayEffect<T> {
         /// Stream (TCP) or datagram (UDP).
         kind: TransportKind,
     },
-    /// Write peer bytes to a session's local stream.
+    /// Write a peer segment to a session's local stream, in its `seq` order.
     Write {
         /// Target session.
         key: SessionKey,
+        /// The segment's position in the peer's direction.
+        seq: u64,
         /// Bytes.
         bytes: Bytes,
     },
-    /// Half-close a session's local write side (peer FIN).
+    /// Send a peer datagram on a flow's local socket.
+    SendDatagram {
+        /// Target flow.
+        key: SessionKey,
+        /// The datagram.
+        bytes: Bytes,
+    },
+    /// Half-close a session's local write side once the peer's `sent` segments are written
+    /// (peer FIN).
     Shutdown {
         /// Target session.
         key: SessionKey,
+        /// How many segments the peer sent this direction.
+        sent: u64,
     },
     /// Close a session (full teardown).
     Close {
@@ -206,11 +220,13 @@ pub struct RelayState<T> {
     /// absent. Keeping the projection in the pure state makes admission O(1) without giving the
     /// interpreter a second source of truth.
     session_quota: Arc<PeerQuota>,
-    /// TCP sessions whose peer-to-local direction consumed its affine FIN.
+    /// TCP sessions whose peer-to-local direction consumed its affine FIN, with the number of
+    /// segments it counted.
     ///
-    /// Invariant: `peer_shutdown` is a subset of `sessions`. The reverse direction remains live
-    /// until `Close`, but no later peer `Data` can escape the pure reducer into a backend writer.
-    peer_shutdown: Arc<HashSet<SessionKey>>,
+    /// Invariant: its keys are a subset of `sessions`. The reverse direction remains live until
+    /// `Close`. A segment the FIN counted may still arrive after it (the FIN overtook a held
+    /// frame), but no segment past the count can escape the pure reducer into a backend writer.
+    peer_shutdown: Arc<HashMap<SessionKey, u64>>,
     /// Monotonic allocator for client-side session ids. Lives in the **pure** state so the
     /// core (not the engine) mints session identities — `Event → step → Effect` is the sole
     /// authority for both the session set and its ids.
@@ -226,7 +242,7 @@ impl<T> Default for RelayState<T> {
                 MAX_RELAY_SESSIONS,
                 MAX_RELAY_SESSIONS_PER_PEER,
             )),
-            peer_shutdown: Arc::new(HashSet::new()),
+            peer_shutdown: Arc::new(HashMap::new()),
             next_session: 0,
         }
     }
@@ -271,16 +287,23 @@ impl<T> RelayState<T> {
         removed
     }
 
-    fn peer_can_send(&self, key: &SessionKey) -> bool {
-        self.sessions.contains(key) && !self.peer_shutdown.contains(key)
+    /// Whether the peer may still send segment `seq` on `key`: the session is live, and the
+    /// peer's FIN, if any, counted the segment.
+    fn peer_can_send(&self, key: &SessionKey, seq: u64) -> bool {
+        self.sessions.contains(key) && self.peer_shutdown.get(key).is_none_or(|sent| seq < *sent)
     }
 
-    /// Consume the peer-to-local FIN exactly once for a live TCP stream.
-    fn shutdown_peer(&mut self, key: &SessionKey, kind: TransportKind) -> bool {
-        kind == TransportKind::Tcp
-            && self.sessions.contains(key)
-            && !self.peer_shutdown.contains(key)
-            && Arc::make_mut(&mut self.peer_shutdown).insert(key.clone())
+    /// Consume the peer-to-local FIN, counting `sent` segments, exactly once for a live TCP
+    /// stream.
+    fn shutdown_peer(&mut self, key: &SessionKey, kind: TransportKind, sent: u64) -> bool {
+        if kind != TransportKind::Tcp
+            || !self.sessions.contains(key)
+            || self.peer_shutdown.contains_key(key)
+        {
+            return false;
+        }
+        Arc::make_mut(&mut self.peer_shutdown).insert(key.clone(), sent);
+        true
     }
 }
 
@@ -333,7 +356,7 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSendSync + 'static
                 MAX_RELAY_SESSIONS,
                 MAX_RELAY_SESSIONS_PER_PEER,
             )),
-            peer_shutdown: Arc::new(HashSet::new()),
+            peer_shutdown: Arc::new(HashMap::new()),
             next_session: 0,
         }
     }
@@ -476,11 +499,27 @@ fn step_frame<T: Clone>(
         Frame::Data {
             session,
             from_opener,
+            seq,
             bytes,
         } => {
             let key = SessionKey::new(from, namespace, session, opener_to_initiator(from_opener));
-            if state.peer_can_send(&key) {
-                Transition::with(state.clone(), vec![RelayEffect::Write { key, bytes }])
+            if kind == TransportKind::Tcp && state.peer_can_send(&key, seq) {
+                Transition::with(state.clone(), vec![RelayEffect::Write { key, seq, bytes }])
+            } else {
+                Transition::pure(state.clone())
+            }
+        }
+        Frame::Datagram {
+            session,
+            from_opener,
+            bytes,
+        } => {
+            let key = SessionKey::new(from, namespace, session, opener_to_initiator(from_opener));
+            if kind == TransportKind::Udp && state.sessions.contains(&key) {
+                Transition::with(state.clone(), vec![RelayEffect::SendDatagram {
+                    key,
+                    bytes,
+                }])
             } else {
                 Transition::pure(state.clone())
             }
@@ -488,11 +527,12 @@ fn step_frame<T: Clone>(
         Frame::Shutdown {
             session,
             from_opener,
+            sent,
         } => {
             let key = SessionKey::new(from, namespace, session, opener_to_initiator(from_opener));
             let mut next = state.clone();
-            if next.shutdown_peer(&key, kind) {
-                Transition::with(next, vec![RelayEffect::Shutdown { key }])
+            if next.shutdown_peer(&key, kind, sent) {
+                Transition::with(next, vec![RelayEffect::Shutdown { key, sent }])
             } else {
                 Transition::pure(next)
             }
@@ -598,12 +638,16 @@ impl Interpret for NativeRelay {
                         .connect(scope.lifecycle(), key.clone(), target, kind);
                 return enqueue_feedback::<std::net::SocketAddr>(key, admission);
             }
-            RelayEffect::Write { key, bytes } => {
-                let admission = self.engine.write(&key, bytes);
+            RelayEffect::Write { key, seq, bytes } => {
+                let admission = self.engine.write(&key, seq, bytes);
                 return enqueue_feedback::<std::net::SocketAddr>(key, admission);
             }
-            RelayEffect::Shutdown { key } => {
-                let admission = self.engine.shutdown(&key);
+            RelayEffect::SendDatagram { key, bytes } => {
+                let admission = self.engine.send_datagram(&key, bytes);
+                return enqueue_feedback::<std::net::SocketAddr>(key, admission);
+            }
+            RelayEffect::Shutdown { key, sent } => {
+                let admission = self.engine.shutdown(&key, sent);
                 return enqueue_feedback::<std::net::SocketAddr>(key, admission);
             }
             RelayEffect::Close { key } => {
