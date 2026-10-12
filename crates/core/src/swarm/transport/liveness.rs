@@ -3,10 +3,9 @@
 //! Each admitted generation carries a [`ProbeClock`], a pure state machine:
 //!
 //! ```text
-//!   Idle(last) ──issue(p, t)  [t − last ≥ PERIOD]──▶ Outstanding(p, t, unsent)
-//!   Outstanding(p, t, unsent) ──queued(p)─────────▶ Outstanding(p, t, queued)
-//!   Outstanding(p, t, _) ──answer(p)──────────────▶ Idle(t)
-//!   Outstanding(p, t, _) ──now − t ≥ TIMEOUT──────▶ expired: the peer is evicted
+//!   Idle(last) ──issue(p, t)  [t − last ≥ PERIOD]──▶ Outstanding(p, t)
+//!   Outstanding(p, t) ──answer(p)─────────────────▶ Idle(t)
+//!   Outstanding(p, t) ──now − t ≥ TIMEOUT─────────▶ expired: the peer is evicted
 //! ```
 //!
 //! Laws:
@@ -28,7 +27,8 @@
 //!   M5).
 //! - **Unsent is resent, never withdrawn.** A probe that did not reach the queue (no ready
 //!   connection, or a step cut short) stays outstanding with its deadline and is sent again, the
-//!   same probe, on the next pass. A peer that keeps its connection unready at each pass gains
+//!   same probe, on the next pass: its record keeps the signed payload until the probe reaches
+//!   the queue or is answered. A peer that keeps its connection unready at each pass gains
 //!   nothing: its deadline runs from the first issue (#913 R10 M7).
 
 use std::collections::BTreeMap;
@@ -63,8 +63,8 @@ pub(crate) struct ProbeIdentity {
 pub(crate) struct ProbeClock {
     /// When the latest probe was issued, or the generation was admitted before any probe.
     last_issued_ms: i64,
-    /// The outstanding probe, its issue instant, and whether it reached the queue.
-    outstanding: Option<(ProbeIdentity, i64, bool)>,
+    /// The outstanding probe and its issue instant.
+    outstanding: Option<(ProbeIdentity, i64)>,
 }
 
 impl ProbeClock {
@@ -89,21 +89,9 @@ impl ProbeClock {
         if self.outstanding.is_some() {
             return false;
         }
-        self.outstanding = Some((probe, now_ms, false));
+        self.outstanding = Some((probe, now_ms));
         self.last_issued_ms = now_ms;
         true
-    }
-
-    /// Record that the outstanding `probe` reached the peer's queue.
-    pub(crate) fn queued(&mut self, probe: ProbeIdentity) {
-        if let Some((outstanding, _, queued)) = self.outstanding.as_mut() {
-            *queued |= *outstanding == probe;
-        }
-    }
-
-    /// Whether the outstanding probe has yet to reach the queue: it is due to be sent again.
-    pub(crate) fn unsent(&self) -> bool {
-        self.outstanding.is_some_and(|(_, _, queued)| !queued)
     }
 
     /// How long the outstanding probe has left before its deadline, at `now_ms`.
@@ -118,7 +106,7 @@ impl ProbeClock {
 
     /// Clear the outstanding probe on its answer. Returns whether `probe` was outstanding.
     pub(crate) fn answer(&mut self, probe: ProbeIdentity) -> bool {
-        if self.outstanding.map(|(outstanding, ..)| outstanding) != Some(probe) {
+        if self.outstanding.map(|(outstanding, _)| outstanding) != Some(probe) {
             return false;
         }
         self.outstanding = None;
@@ -127,7 +115,7 @@ impl ProbeClock {
 
     /// When the outstanding probe was issued, if one is.
     pub(crate) fn outstanding_since_ms(&self) -> Option<i64> {
-        self.outstanding.map(|(_, issued_ms, _)| issued_ms)
+        self.outstanding.map(|(_, issued_ms)| issued_ms)
     }
 
     /// The expiry evidence at `now_ms`: the outstanding probe is `TIMEOUT` old.
@@ -192,7 +180,8 @@ struct PeerLiveness {
     /// The latest authenticated inbound payload, read by retention, never by liveness.
     last_inbound_ms: i64,
     clock: ProbeClock,
-    /// The signed payload of the outstanding probe while it has not reached the queue.
+    /// The signed payload of the outstanding probe while it has not reached the queue, to be
+    /// sent again. Invariant: `unsent.is_some() ⟹ clock` has a probe outstanding.
     unsent: Option<MessagePayload>,
 }
 
@@ -207,6 +196,16 @@ impl PeerLiveness {
             clock: ProbeClock::admitted_at(now_ms),
             unsent: None,
         }
+    }
+
+    /// Clear the outstanding probe on its answer, and its unsent payload with it. Returns
+    /// whether `probe` was outstanding.
+    fn answer(&mut self, probe: ProbeIdentity) -> bool {
+        let answered = self.clock.answer(probe);
+        if answered {
+            self.unsent = None;
+        }
+        answered
     }
 }
 
@@ -437,8 +436,7 @@ impl SwarmTransport {
                 .peer_liveness()?
                 .generation_mut(attempt.peer, attempt.generation)
             {
-                record.clock.queued(identity);
-                if !record.clock.unsent() {
+                if record.clock.outstanding.map(|(outstanding, _)| outstanding) == Some(identity) {
                     record.unsent = None;
                 }
             }
@@ -462,7 +460,7 @@ impl SwarmTransport {
             Ok(self
                 .peer_liveness()?
                 .generation_mut(provider, attempt.generation)
-                .is_some_and(|liveness| liveness.clock.answer(ProbeIdentity { tx_id, request })))
+                .is_some_and(|liveness| liveness.answer(ProbeIdentity { tx_id, request })))
         })
     }
 
@@ -546,7 +544,7 @@ impl SwarmTransport {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn peer_liveness_probe_queued_for_test(&self, peer: Did) -> Result<bool> {
         self.edit_peer_liveness_for_test(peer, |liveness| {
-            liveness.clock.outstanding_since_ms().is_some() && !liveness.clock.unsent()
+            liveness.clock.outstanding_since_ms().is_some() && liveness.unsent.is_none()
         })
     }
 
@@ -659,26 +657,19 @@ mod tests {
         assert!(clock.expiry(10 + PEER_LIVENESS_TIMEOUT_MS).is_none());
     }
 
-    /// Unsent is resent, never withdrawn: a probe that did not reach the queue stays
-    /// outstanding with its deadline from issue, and only reaching the queue marks it sent
-    /// (#913 R10 M7).
+    /// Unsent is resent, never withdrawn: until its answer, an issued probe stays outstanding
+    /// with its deadline from issue, however long it takes to reach the queue (#913 R10 M7).
     #[test]
-    fn test_an_unsent_probe_stays_outstanding_with_its_deadline() {
-        let unsent = probe();
+    fn test_an_unanswered_probe_keeps_its_deadline_from_issue() {
         let mut clock = ProbeClock::admitted_at(0);
-        assert!(clock.issue(unsent, PEER_LIVENESS_PERIOD_MS));
-        assert!(clock.unsent());
-        clock.queued(probe());
-        assert!(clock.unsent());
+        assert!(clock.issue(probe(), PEER_LIVENESS_PERIOD_MS));
         assert!(!clock.due(3 * PEER_LIVENESS_PERIOD_MS));
-        assert!(clock
-            .expiry(PEER_LIVENESS_PERIOD_MS + PEER_LIVENESS_TIMEOUT_MS)
-            .is_some());
-        clock.queued(unsent);
-        assert!(!clock.unsent());
         assert_eq!(
             clock.remaining_ms(PEER_LIVENESS_PERIOD_MS),
             Some(PEER_LIVENESS_TIMEOUT_MS)
         );
+        assert!(clock
+            .expiry(PEER_LIVENESS_PERIOD_MS + PEER_LIVENESS_TIMEOUT_MS)
+            .is_some());
     }
 }

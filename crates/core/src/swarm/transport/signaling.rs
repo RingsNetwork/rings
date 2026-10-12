@@ -198,42 +198,58 @@ impl SwarmTransport {
     /// Create the offer of `pending`, which waits on ICE gathering; a failure abandons the
     /// generation.
     async fn create_offer(&self, pending: &PendingTransportConnection) -> Result<ConnectNodeSend> {
+        let offer = pending.connection().connection.webrtc_create_offer();
+        Ok(ConnectNodeSend {
+            sdp: self.negotiate_sdp(pending, "offer", offer).await?,
+            dht_protocol_mode: self.dht_protocol_mode(),
+        })
+    }
+
+    /// Run `negotiate`, which produces the `side` ("offer" or "answer") of `pending` and waits on
+    /// ICE gathering, and serialize its description; a failure abandons the generation.
+    async fn negotiate_sdp<T, E>(
+        &self,
+        pending: &PendingTransportConnection,
+        side: &'static str,
+        negotiate: impl Future<Output = std::result::Result<T, E>>,
+    ) -> Result<String>
+    where
+        T: serde::Serialize,
+        E: std::fmt::Debug + Into<Error>,
+    {
         let attempt = pending.attempt();
-        let peer = attempt.peer;
-        let conn = pending.connection();
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
-            peer = %peer,
+            peer = %attempt.peer,
             generation = attempt.generation,
-            state = ?conn.webrtc_connection_state(),
-            "connection offer create start"
+            state = ?pending.connection().webrtc_connection_state(),
+            side,
+            "connection description create start"
         );
-        let offer = match conn.connection.webrtc_create_offer().await {
-            Ok(offer) => offer,
+        let description = match negotiate.await {
+            Ok(description) => description,
             Err(error) => {
                 tracing::warn!(
                     target: "rings_core::swarm::transport::handshake",
                     local = %self.dht.did,
-                    peer = %peer,
+                    peer = %attempt.peer,
                     generation = attempt.generation,
                     error = ?error,
-                    "connection offer create failed"
+                    side,
+                    "connection description create failed"
                 );
-                self.abandon_pending_connection(attempt, "creating connection offer")
+                self.abandon_pending_connection(attempt, &format!("creating connection {side}"))
                     .await;
-                return Err(Error::Transport(error));
+                return Err(error.into());
             }
         };
-        let Ok(offer_str) = serde_json::to_string(&offer) else {
-            self.abandon_pending_connection(attempt, "serializing connection offer")
+        let Ok(serialized) = serde_json::to_string(&description) else {
+            self.abandon_pending_connection(attempt, &format!("serializing connection {side}"))
                 .await;
             return Err(Error::SerializeToString);
         };
-        Ok(ConnectNodeSend {
-            sdp: offer_str,
-            dht_protocol_mode: self.dht_protocol_mode(),
-        })
+        Ok(serialized)
     }
 
     async fn reconcile_incoming_offer_peer(&self, peer: Did) -> Result<()> {
@@ -289,41 +305,9 @@ impl SwarmTransport {
         pending: &PendingTransportConnection,
         offer: String,
     ) -> Result<ConnectNodeReport> {
-        let attempt = pending.attempt();
-        let peer = attempt.peer;
-        let conn = pending.connection();
-        tracing::trace!(
-            target: "rings_core::swarm::transport::handshake",
-            local = %self.dht.did,
-            peer = %peer,
-            generation = attempt.generation,
-            offer_sdp_bytes = offer.len(),
-            state = ?conn.webrtc_connection_state(),
-            "connection answer create start"
-        );
-        let answer = match conn.connection.webrtc_answer_offer(offer).await {
-            Ok(answer) => answer,
-            Err(error) => {
-                tracing::warn!(
-                    target: "rings_core::swarm::transport::handshake",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    generation = attempt.generation,
-                    error = ?error,
-                    "connection answer create failed"
-                );
-                self.abandon_pending_connection(attempt, "creating connection answer")
-                    .await;
-                return Err(Error::Transport(error));
-            }
-        };
-        let Ok(answer_str) = serde_json::to_string(&answer) else {
-            self.abandon_pending_connection(attempt, "serializing connection answer")
-                .await;
-            return Err(Error::SerializeToString);
-        };
+        let answer = pending.connection().connection.webrtc_answer_offer(offer);
         Ok(ConnectNodeReport {
-            sdp: answer_str,
+            sdp: self.negotiate_sdp(pending, "answer", answer).await?,
             dht_protocol_mode: self.dht_protocol_mode(),
         })
     }

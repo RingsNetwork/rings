@@ -304,6 +304,32 @@ pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error
     .await
 }
 
+/// Connect `node1` to `node2` and await node1's admission of node2 (a `Connected` connection,
+/// and node2 among its successors), but not quiescence.
+#[cfg(feature = "dummy")]
+pub(crate) async fn admit_nodes(node1: Node, node2: Node) -> crate::error::Result<(Node, Node)> {
+    crate::tests::manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    Ok((node1, node2))
+}
+
+/// [`admit_nodes`], then await quiescence of the join traffic.
+#[cfg(feature = "dummy")]
+pub(crate) async fn connect_nodes(node1: Node, node2: Node) -> crate::error::Result<(Node, Node)> {
+    let (node1, node2) = admit_nodes(node1, node2).await?;
+    wait_for_msgs([&node1, &node2]).await;
+    Ok((node1, node2))
+}
+
+/// Two fresh nodes, connected by [`connect_nodes`].
+#[cfg(feature = "dummy")]
+pub(crate) async fn connected_nodes() -> crate::error::Result<(Node, Node)> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    connect_nodes(node1, node2).await
+}
+
 /// Wait until the value `node` stores at `key` (or its absence) satisfies `ready`, returning
 /// that value.
 ///

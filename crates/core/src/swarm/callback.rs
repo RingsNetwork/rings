@@ -28,7 +28,7 @@ mod processor;
 
 pub(crate) use inbound::InboundCapacity;
 pub(crate) use inbound::InboundLane;
-pub(crate) use inbound::LocalDelivered;
+pub(crate) use logical::LocalDelivered;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use processor::prepare_transport_frame_lane_for_test;
 
@@ -49,18 +49,15 @@ use pre_admission::PreAdmissionHold;
 /// Delivery of payloads addressed to this node that did not arrive over a connection (messages
 /// drained from this node's relay inbox), through the logical stage of the inbound pipeline:
 /// handler dispatch, then the application inbox if the body is application data, never waiting
-/// for room. A drained payload is already whole and admitted, so it needs nothing of the
-/// connection stage (reassembly, admission gates).
+/// for room. A drained payload is already whole and was verified by the inbox witness, so it
+/// needs nothing of the connection stage (reassembly, the connection's gates); its transaction
+/// is admitted by the delivery itself.
 pub(crate) struct LocalDelivery {
     pipeline: LogicalInbound,
 }
 
-use crate::error::CallbackError;
+/// The error the transport's callback trait returns.
 type TransportCallbackError = Box<dyn std::error::Error>;
-
-fn into_transport_callback_error(error: CallbackError) -> TransportCallbackError {
-    error
-}
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 thread_local! {

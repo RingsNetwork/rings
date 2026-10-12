@@ -3,20 +3,6 @@
 use super::*;
 use crate::dht::finger::FingerConvergencePhase;
 use crate::dht::finger::FingerReportRejection;
-use crate::dht::FingerFixRequest;
-
-/// Prepare the exact request token that production finger lookup would place in the DHT.
-///
-/// The helper mutates the test finger state into `AwaitingReport` for `slot` and
-/// returns an error when that slot cannot start a request, ensuring each test
-/// exercises the same correlation checks as the message handler.
-fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRequest> {
-    transport
-        .dht
-        .lock_finger()?
-        .prepare_request_for_test(slot)
-        .ok_or_else(|| Error::InvalidMessage("failed to prepare test finger request".to_owned()))
-}
 
 /// Prove that a proof queued by a pending generation is applied by its admission commit.
 ///
@@ -24,9 +10,7 @@ fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRe
 /// before commit and moves through the DHT's `AwaitingAdmission` phase.
 #[tokio::test(start_paused = true)]
 async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let finger_index = 0;
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
@@ -74,9 +58,7 @@ async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Res
 /// convergence state instead of merely deleting the transport-side queue.
 #[tokio::test]
 async fn test_pending_handshake_cancellation_releases_its_finger_proof() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
@@ -104,9 +86,7 @@ async fn test_pending_handshake_cancellation_releases_its_finger_proof() -> Resu
 /// progress and become visible only after the same generation commits.
 #[tokio::test]
 async fn test_admitting_finger_update_is_retained_until_atomic_commit() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let finger_index = 0;
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
@@ -140,9 +120,7 @@ async fn test_admitting_finger_update_is_retained_until_atomic_commit() -> Resul
 /// the report must bypass deferred storage and update the requested slot.
 #[tokio::test]
 async fn test_pending_finger_update_applies_if_admission_wins_queue_race() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let finger_index = 0;
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
@@ -170,9 +148,7 @@ async fn test_pending_finger_update_applies_if_admission_wins_queue_race() -> Re
 /// unroutable active peers retire the proof and increment convergence failure.
 #[tokio::test(start_paused = true)]
 async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let missing = SecretKey::random().address().into();
     // The same request is reused after the caller opens a missing connection;
     // this models the handler's second admission attempt after `connect_dht_peer`.
@@ -208,9 +184,7 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
 
     // Use a fresh DHT so the unroutable branch is not affected by the retained
     // proof and failure counter from the missing-connection branch above.
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
@@ -243,9 +217,7 @@ async fn test_finger_candidate_distinguishes_missing_and_unroutable_connections(
 /// first rejection consumed the expired in-flight request deterministically.
 #[tokio::test(start_paused = true)]
 async fn test_expired_finger_candidate_never_enters_connection_admission() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     // Created before time advances; after the timeout it should be rejected
     // without creating any pending transport state.
@@ -275,9 +247,7 @@ async fn test_expired_finger_candidate_never_enters_connection_admission() -> Re
 /// its consumed request token is classified as stale.
 #[tokio::test]
 async fn test_invalid_finger_candidate_never_enters_connection_admission() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     // Slot 1's threshold is not proved by the immediate slot-0 successor, so
     // the report is invalid even though it names a plausible ring position.
     let peer = transport.dht.did + crate::dht::Did::power_of_two(0);

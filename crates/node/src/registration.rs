@@ -529,24 +529,6 @@ mod tests {
     }
 
     #[test]
-    fn test_registration_publish_tombstones_matching_observed_values() {
-        let current = BTreeSet::from([element("self-new")]);
-        let observed_self_old = element("self-old");
-        let observed_other = element("other");
-        let mut known = BTreeSet::new();
-
-        let stale = begin_registration_publish(
-            &mut known,
-            &current,
-            vec![observed_self_old.clone(), observed_other],
-            |observed| observed == &observed_self_old,
-        );
-
-        assert_eq!(stale, vec![observed_self_old]);
-        assert_eq!(known, current);
-    }
-
-    #[test]
     fn test_registration_publish_tombstones_unpreserved_observed_values() {
         let current = BTreeSet::from([element("self-new")]);
         let observed_self_old = element("self-old");

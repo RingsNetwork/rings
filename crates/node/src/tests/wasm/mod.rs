@@ -18,7 +18,6 @@ use uuid;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
-use crate::extension::Backend;
 use crate::extension::BackendObserver;
 use crate::logging::browser::init_logging;
 use crate::prelude::rings_core::utils::js_value;
@@ -212,9 +211,10 @@ pub async fn new_provider() -> ObservedProvider {
     let processor = prepare_processor().await;
     let provider = Provider::from_processor(Arc::new(processor));
     let (recorder, transitions) = peer_transitions();
-    let backend = Backend::new(Arc::new(provider.clone())).observed_by(Arc::new(recorder));
-    let inbox = provider.application_inbox().unwrap();
-    wasm_bindgen_futures::spawn_local(backend.serve(inbox, StopToken::never()));
+    let service = provider
+        .application_service(Some(Arc::new(recorder)), StopToken::never())
+        .unwrap();
+    wasm_bindgen_futures::spawn_local(service);
     ObservedProvider {
         provider,
         transitions,

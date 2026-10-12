@@ -165,7 +165,7 @@ struct QueueState<L: AdmissionLedger> {
 }
 
 impl<L: AdmissionLedger> QueueState<L> {
-    /// Run one pass and collect the wakers of the waiters it granted.
+    /// Serve the queue to its fixpoint and collect the wakers of the waiters it granted.
     fn serve(&mut self, ledger: &L) -> Vec<Waker> {
         serve(ledger, self.entries.make_contiguous(), |entry| {
             &mut entry.waiting

@@ -88,15 +88,6 @@ impl Backend {
         }
     }
 
-    /// Test builds: route one item as [`Self::serve`] would, with fresh namespace queues.
-    #[cfg(all(test, rings_native))]
-    pub(crate) fn route_for_test(&self, delivery: ApplicationDelivery) -> Result<()> {
-        self.route(
-            &mut dispatch::NamespaceQueues::new(self.extensions.clone()),
-            delivery,
-        )
-    }
-
     /// Route one item of the application inbox: a custom message to its namespace's queue,
     /// everything else to the observer. Never waits.
     fn route(

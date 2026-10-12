@@ -126,13 +126,13 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
 /// The leading bytes of every Application message this test sends, registered as a delegating
 /// namespace: a streaming namespace paced per neighbour, whose backlog, over the per-origin
 /// message burst, is admitted by the byte floor alone.
-const BACKLOG_PREFIX: &[u8] = b"backlog-";
+const BACKLOG_PREFIX: &str = "backlog-";
 
 /// The index an Application payload of this test carries, if `bytes` is one.
 fn backlog_index_of(bytes: &[u8]) -> Option<usize> {
     std::str::from_utf8(bytes)
         .ok()
-        .and_then(|text| text.strip_prefix("backlog-"))
+        .and_then(|text| text.strip_prefix(BACKLOG_PREFIX))
         .and_then(|index| index.parse().ok())
 }
 
@@ -190,7 +190,7 @@ async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order()
     let inbox = node2.swarm.application_inbox()?;
     node2
         .swarm
-        .set_admission_delegation(BACKLOG_PREFIX.to_vec(), true);
+        .set_admission_delegation(BACKLOG_PREFIX.as_bytes().to_vec(), true);
     let lane_hold = node2
         .swarm
         .transport
@@ -203,7 +203,7 @@ async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order()
     let sender = node1.swarm.clone();
     let backlog_sends = tokio::spawn(async move {
         for index in 0..backlog {
-            let message = Message::custom(format!("backlog-{index}").as_bytes())?;
+            let message = Message::custom(format!("{BACKLOG_PREFIX}{index}").as_bytes())?;
             sender.send_direct_message(message, peer).await?;
         }
         Ok::<(), Error>(())

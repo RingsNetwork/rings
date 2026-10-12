@@ -62,10 +62,11 @@ impl SwarmInboxDelivery {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl InboxDelivery for SwarmInboxDelivery {
-    /// Post: a prefix of the deliverable elements of the locally stored inbox was handed to the
-    /// application inbox and then tombstoned at its owner, the whole of them unless the
-    /// application inbox ran out of room; an element held ahead of this clock is left for a
-    /// later pass.
+    /// Post: the deliverable elements of the locally stored inbox were taken in order until one
+    /// found no room, no reader or a spent origin quota: each was handled, and an application
+    /// message was queued, to be tombstoned at its owner by a later pass once the application
+    /// took it, while any other was tombstoned now; an element held ahead of this clock is left
+    /// for a later pass.
     async fn deliver_inbox(&self) -> Result<()> {
         let now_ms = get_epoch_ms();
         let key = StorageKey::inbox_of(self.transport.dht.did);

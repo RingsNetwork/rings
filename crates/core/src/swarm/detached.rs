@@ -1,7 +1,8 @@
 //! The one boundary at which the swarm hands a task to the runtime to run on its own: the
-//! inbound actor, the pre-admission drain, the session-hold release, and every link-control
-//! send go through it. Scheduling itself is [`rings_runtime::spawn_detached`]: native needs a
-//! current tokio runtime; the browser always has one.
+//! inbound actor, the pre-admission drain, the session-hold release, every link-control send,
+//! a protocol-context handshake, and the first-frame watch of a queued send go through it.
+//! Scheduling itself is [`rings_runtime::spawn_detached`]: native needs a current tokio
+//! runtime; the browser always has one.
 //!
 //! A task is boxed at the boundary: a task that can start another of its own kind (a release
 //! that admits a frame that could start a release) has a future of recursive type, and the

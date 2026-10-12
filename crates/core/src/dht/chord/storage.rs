@@ -118,18 +118,6 @@ async fn live_entry(
     }
 }
 
-/// Write `live` to `key`, or clear the slot when the value is no longer live, so a stored value
-/// is always live when written; returns what the slot holds.
-///
-/// Pre: the caller holds the ring's storage transition.
-async fn write_live(store: &EntryStorage, key: &str, live: Option<Entry>) -> Result<Option<Entry>> {
-    match &live {
-        Some(entry) => store.put(key, entry).await?,
-        None => store.remove(key).await?,
-    }
-    Ok(live)
-}
-
 /// The counts a projection can change: elements, element dots, removes, and whether a register
 /// is held. On a stored value, which is normalized, [`Entry::retired_at`] only drops, so a
 /// projection with the same shape is the same value.
@@ -365,13 +353,11 @@ impl PeerRing {
             Some(local) => local,
             None => op.gen_default_entry()?,
         };
-        write_live(
-            &self.storage,
-            &key,
-            local.operate(now_ms, op, self.did)?.live_at(now_ms),
-        )
-        .await
-        .map(|_| ())
+        // A stored value is always live when written: a result no longer live clears the slot.
+        match local.operate(now_ms, op, self.did)?.live_at(now_ms) {
+            Some(stored) => self.storage.put(&key, &stored).await,
+            None => self.storage.remove(&key).await,
+        }
     }
 
     async fn entry_lookup_inner(

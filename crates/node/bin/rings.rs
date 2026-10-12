@@ -5,6 +5,7 @@
 #[cfg(all(feature = "dummy", not(test)))]
 compile_error!("the `dummy` test transport cannot run a node; build `rings` without it");
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -24,7 +25,6 @@ use cli::ServiceCommand;
 use futures::pin_mut;
 use futures::StreamExt;
 use rings_gateway::GatewayStatusHandle;
-use rings_node::extension::Backend;
 use rings_node::logging::init_logging;
 use rings_node::measure::EvidenceCollectorIdentity;
 use rings_node::measure::PeriodicMeasure;
@@ -46,7 +46,6 @@ use rings_node::onion::OnionExitTarget;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
 use rings_node::prelude::rings_core::storage::file::FileStorage;
 use rings_node::prelude::rings_core::storage::RecordAuthority;
-use rings_node::prelude::rings_core::swarm::application::ApplicationInbox;
 use rings_node::prelude::StopSource;
 use rings_node::prelude::StopToken;
 use rings_node::processor::Processor;
@@ -109,14 +108,13 @@ fn provisional_evidence_storage_path(measure_storage_path: &str) -> String {
 /// The command line: the top-level parser, its subcommands and their arguments.
 mod cli;
 
-/// Serve the application inbox with `backend` until `stop`; the swarm going away first, which
-/// no running node reaches, is an error.
+/// Run `service`, the application inbox's server stopping on `stop`, to completion; the swarm
+/// going away first, which no running node reaches, is an error.
 async fn serve_application(
-    backend: Backend,
-    inbox: ApplicationInbox,
+    service: impl Future<Output = ()>,
     stop: StopToken,
 ) -> anyhow::Result<()> {
-    backend.serve(inbox, stop.clone()).await;
+    service.await;
     if stop.should_stop() {
         Ok(())
     } else {
@@ -174,22 +172,19 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
     // with the other run-owned tasks below and its evidence is the backend's observer.
     let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap, processor.did())?;
     let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
-    // The Backend decodes inbound custom messages as namespaced envelopes and routes
-    // them to the protocol registry.
-    let backend = Backend::new(provider);
-    let backend = match bootstrap.as_ref() {
-        Some(supervisor) => backend.observed_by(supervisor.observer()),
-        None => backend,
-    };
-    // Claimed before the processor listens, so no application data is discarded unclaimed.
-    let application_inbox = processor.swarm.application_inbox()?;
-
     let stop = StopSource::new();
+    // The Backend decodes inbound custom messages as namespaced envelopes and routes them to
+    // the protocol registry. Its inbox is claimed here, before the processor listens, so no
+    // application data is discarded unclaimed.
+    let application = provider.application_service(
+        bootstrap.as_ref().map(BootstrapSupervisor::observer),
+        stop.token(),
+    )?;
     let gateway_configured = gateway_runner.is_some();
     let gateway_task = start_gateway(gateway_runner, stop.token()).await?;
 
     let mut tasks = JoinSet::new();
-    tasks.spawn(serve_application(backend, application_inbox, stop.token()));
+    tasks.spawn(serve_application(application, stop.token()));
     let processor_task = spawn_processor(processor.clone(), stop.token());
     spawn_apis(
         &mut tasks,

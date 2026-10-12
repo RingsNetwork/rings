@@ -39,8 +39,8 @@ impl TransportCallback for PendingAfterCapacityHandoff {
         &self,
         message: AdmittedInboundMessage<'_>,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let (_, payload, capacity) = message.into_parts();
-        drop((payload, capacity));
+        let (_, payload, credit) = message.into_parts();
+        drop((payload, credit));
         std::future::pending().await
     }
 }

@@ -174,20 +174,14 @@ fn test_consumption_fires_only_when_the_application_takes_the_message() {
     let inbox = outlet.claim().unwrap();
     let mail = message(1);
     let (consumed, mut taken) = oneshot::channel();
-    assert!(outlet
-        .try_reserve(&mail)
-        .unwrap()
-        .fill(mail, Some(consumed)));
+    assert!(outlet.try_reserve(&mail).unwrap().fill(mail, consumed));
     assert_eq!(taken.try_recv(), Ok(None));
     assert!(inbox.try_next().is_some());
     assert_eq!(taken.try_recv(), Ok(Some(())));
 
     let mail = message(1);
     let (consumed, mut taken) = oneshot::channel();
-    assert!(outlet
-        .try_reserve(&mail)
-        .unwrap()
-        .fill(mail, Some(consumed)));
+    assert!(outlet.try_reserve(&mail).unwrap().fill(mail, consumed));
     drop(inbox);
     assert!(taken.try_recv().is_err());
 }

@@ -171,7 +171,7 @@ impl EntryTombstone {
     }
 }
 
-/// CRDT metadata carried beside the legacy entry payload.
+/// CRDT metadata carried beside the entry payload.
 ///
 /// `register` is the LWW reset floor used by overwrite. `dots` are per-element
 /// add witnesses used by data/topic and relay element sets. `tombstones` is the
@@ -180,8 +180,8 @@ impl EntryTombstone {
 pub struct EntryCrdt {
     /// Optional LWW reset floor for the entry payload.
     pub register: Option<EntryVersion>,
-    /// Per-element add dots. When absent, legacy entries synthesize dots from
-    /// their payload order and value digest.
+    /// Per-element add dots. An element without one is given the dot of its index above the
+    /// register floor (`EntryDot::for_index`).
     pub dots: Vec<EntryDot>,
     /// Covering removes, at most one per payload digest.
     pub tombstones: Vec<EntryTombstone>,

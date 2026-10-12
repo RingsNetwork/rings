@@ -1,15 +1,107 @@
 use super::*;
 
-async fn admitted_callback(
+/// Reassembly limits small enough to reach in a test: one pending message of at most four
+/// chunks of 1 KiB, a 4 KiB shared budget, and four remembered completions.
+fn small_reassembly_limits() -> ReassemblyLimits {
+    ReassemblyLimits {
+        max_pending_messages: 1,
+        max_chunk_data_len: 1_024,
+        max_message_bytes: 1_024,
+        max_chunks_per_message: 4,
+        max_total_buffered_cost: 4_096,
+        slot_overhead: 8,
+        max_completed_ids: 4,
+    }
+}
+
+/// A transport under [`small_reassembly_limits`], reporting to `measure`.
+fn small_reassembly_transport(measure: &Arc<RecordingMeasure>) -> Result<Arc<SwarmTransport>> {
+    TransportSpec {
+        measure: measure.clone(),
+        reassembly_limits: small_reassembly_limits(),
+        ..TransportSpec::default()
+    }
+    .build()
+    .map(Arc::new)
+}
+
+/// One authenticated partial reassembly: on a [`small_reassembly_transport`], an active peer
+/// whose callback reads the injected `clock` has buffered the first of two chunks.
+struct BufferedPartial {
+    measure: Arc<RecordingMeasure>,
     transport: Arc<SwarmTransport>,
-    peer: Did,
-) -> Result<SwarmTransportCallback> {
-    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    assert!(transport.activate_connection_for_test(attempt)?);
-    Ok(SwarmTransportCallback::new(transport).with_pending_connection_attempt(attempt))
+    pending: PendingPeer,
+    /// The clock the callback's admission and cleanup read, in epoch milliseconds.
+    clock: Arc<Mutex<u128>>,
+}
+
+impl BufferedPartial {
+    /// Buffer the first of two chunks of `data`; returns the fixture, and the chunk's frame and
+    /// expiry as [`Self::deliver_partial`] does.
+    async fn new(data: &'static [u8]) -> Result<(Self, Bytes, u128)> {
+        let measure = Arc::new(RecordingMeasure::default());
+        let transport = small_reassembly_transport(&measure)?;
+        let clock = Arc::new(Mutex::new(0));
+        let pending =
+            pending_peer_with(&transport, SecretKey::random(), Some(Arc::clone(&clock))).await?;
+        pending.activate(&transport)?;
+        let fixture = Self {
+            measure,
+            transport,
+            pending,
+            clock,
+        };
+        let (frame, expiry) = fixture.deliver_partial(data).await?;
+        Ok((fixture, frame, expiry))
+    }
+
+    /// Set the clock to `now_ms`: advancing it past an expiry is the whole expiry event, so no
+    /// wall time needs to pass.
+    fn set_clock(&self, now_ms: u128) {
+        *self
+            .clock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = now_ms;
+    }
+
+    /// Restart the clock at a fresh chunk's stamp, deliver that chunk as the first of two
+    /// chunks of `data`, with a time-to-live of 100 ms, and check it is buffered. Returns its
+    /// frame and its expiry on the clock.
+    async fn deliver_partial(&self, data: &'static [u8]) -> Result<(Bytes, u128)> {
+        let meta = ChunkMeta {
+            ttl_ms: 100,
+            ..Default::default()
+        };
+        self.set_clock(meta.ts_ms);
+        let expiry = meta.ts_ms.saturating_add(u128::from(meta.ttl_ms));
+        let frame = local_wire(
+            Message::Chunk(Chunk {
+                chunk: [0, 2],
+                data: Bytes::from_static(data),
+                meta,
+            }),
+            &self.pending.session,
+            self.transport.dht.did,
+        )?;
+        self.pending.receive(&frame).await?;
+        assert!(self.transport.reassembly_budget().buffered_cost_for_test() > 0);
+        Ok((frame, expiry))
+    }
+
+    /// Resolve once the shared reassembly budget is empty and `failures` receive failures are
+    /// charged to the peer.
+    async fn await_released_with_failures(&self, failures: usize) {
+        let peer = self.pending.peer;
+        self.transport
+            .reassembly_budget()
+            .await_buffered_cost_for_test(|cost| cost == 0)
+            .await;
+        self.measure
+            .await_recorded(|measure| {
+                failed_receive_count(measure, peer).is_ok_and(|count| count == failures)
+            })
+            .await;
+    }
 }
 
 #[tokio::test]
@@ -24,16 +116,7 @@ async fn test_malformed_unbound_transport_does_not_attribute_peer_failure() -> R
         .await
         .expect_err("truncated wire metadata must fail");
 
-    assert_eq!(
-        measure
-            .snapshot_counters()?
-            .into_iter()
-            .filter(|(did, counter)| {
-                *did == peer && *counter == MeasurementEvent::FailedToReceive
-            })
-            .count(),
-        0
-    );
+    assert_eq!(failed_receive_count(&measure, peer)?, 0);
     Ok(())
 }
 
@@ -41,22 +124,21 @@ async fn test_malformed_unbound_transport_does_not_attribute_peer_failure() -> R
 async fn test_invalid_chunk_shape_records_peer_receive_failure() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let callback = admitted_callback(Arc::clone(&transport), peer).await?;
+    let pending = pending_peer(&transport).await?;
+    pending.activate(&transport)?;
     let frame = local_wire(
         Message::Chunk(Chunk {
             chunk: [0, 0],
             data: Bytes::from_static(b"invalid"),
-            meta: crate::chunk::ChunkMeta::default(),
+            meta: ChunkMeta::default(),
         }),
-        &session,
+        &pending.session,
         transport.dht.did,
     )?;
 
-    let error = callback
-        .on_admitted_message_for_test(&peer.to_string(), &frame)
+    let error = pending
+        .callback
+        .on_admitted_message_for_test(&pending.peer.to_string(), &frame)
         .await
         .expect_err("invalid chunk shape must fail");
 
@@ -64,67 +146,46 @@ async fn test_invalid_chunk_shape_records_peer_receive_failure() -> Result<()> {
         error.downcast_ref::<Error>(),
         Some(Error::InvalidChunkMessage)
     ));
-    assert_eq!(failed_receive_count(&measure, peer)?, 1);
+    assert_eq!(failed_receive_count(&measure, pending.peer)?, 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn test_reassembly_rejections_score_only_invalid_input_and_release_resources() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
-    let limits = ReassemblyLimits {
-        max_pending_messages: 1,
-        max_chunk_data_len: 1_024,
-        max_message_bytes: 1_024,
-        max_chunks_per_message: 4,
-        max_total_buffered_cost: 4_096,
-        slot_overhead: 8,
-        max_completed_ids: 4,
-    };
-    let transport = Arc::new(transport_with_measure_and_reassembly_limits(
-        measure.clone(),
-        limits,
-    )?);
+    let transport = small_reassembly_transport(&measure)?;
     let budget = transport.reassembly_budget();
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let callback = admitted_callback(Arc::clone(&transport), peer).await?;
+    let pending = pending_peer(&transport).await?;
+    pending.activate(&transport)?;
+    let peer = pending.peer;
     let first = Chunk {
         chunk: [0, 2],
         data: Bytes::from_static(b"first"),
-        meta: crate::chunk::ChunkMeta::default(),
+        meta: ChunkMeta::default(),
     };
-    let deliver = |chunk: Chunk| local_wire(Message::Chunk(chunk), &session, transport.dht.did);
+    let deliver =
+        |chunk: Chunk| local_wire(Message::Chunk(chunk), &pending.session, transport.dht.did);
 
-    let first_frame = deliver(first.clone())?;
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &first_frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    pending.receive(&deliver(first.clone())?).await?;
     assert!(budget.buffered_cost_for_test() > 0);
 
-    let replay_frame = deliver(first.clone())?;
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &replay_frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    pending.receive(&deliver(first.clone())?).await?;
 
-    let capacity_frame = deliver(Chunk {
-        chunk: [0, 2],
-        data: Bytes::from_static(b"second"),
-        meta: crate::chunk::ChunkMeta::default(),
-    })?;
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &capacity_frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    pending
+        .receive(&deliver(Chunk {
+            chunk: [0, 2],
+            data: Bytes::from_static(b"second"),
+            meta: ChunkMeta::default(),
+        })?)
+        .await?;
     assert_eq!(failed_receive_count(&measure, peer)?, 0);
 
     let conflict_frame = deliver(Chunk {
         data: Bytes::from_static(b"conflict"),
         ..first
     })?;
-    let error = callback
+    let error = pending
+        .callback
         .on_admitted_message_for_test(&peer.to_string(), &conflict_frame)
         .await
         .expect_err("conflicting bytes at one position must fail");
@@ -134,20 +195,17 @@ async fn test_reassembly_rejections_score_only_invalid_input_and_release_resourc
     ));
     assert_eq!(failed_receive_count(&measure, peer)?, 1);
     assert_eq!(successful_receive_count(&measure, peer)?, 0);
-    assert_eq!(callback.inbound_admitted_count_for_test(), 0);
+    assert_eq!(pending.callback.inbound_admitted_count_for_test(), 0);
 
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &conflict_frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    pending.receive(&conflict_frame).await?;
     assert_eq!(
         failed_receive_count(&measure, peer)?,
         1,
         "repeated invalid evidence for one pending message must not double charge"
     );
 
-    callback.close_inbound_for_test();
-    drop(callback);
+    pending.callback.close_inbound_for_test();
+    drop(pending);
     budget.await_buffered_cost_for_test(|cost| cost == 0).await;
     Ok(())
 }
@@ -155,100 +213,20 @@ async fn test_reassembly_rejections_score_only_invalid_input_and_release_resourc
 #[tokio::test]
 async fn test_expired_partial_reassembly_releases_shared_budget_without_more_peer_traffic(
 ) -> Result<()> {
-    let limits = ReassemblyLimits {
-        max_pending_messages: 1,
-        max_chunk_data_len: 1_024,
-        max_message_bytes: 1_024,
-        max_chunks_per_message: 4,
-        max_total_buffered_cost: 4_096,
-        slot_overhead: 8,
-        max_completed_ids: 4,
-    };
-    let measure = Arc::new(RecordingMeasure::default());
-    let transport = Arc::new(transport_with_measure_and_reassembly_limits(
-        measure.clone(),
-        limits,
-    )?);
-    let budget = transport.reassembly_budget();
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let meta = crate::chunk::ChunkMeta {
-        ttl_ms: 100,
-        ..Default::default()
-    };
-    let expiry = meta.ts_ms.saturating_add(meta.ttl_ms as u128);
-    let cleanup_now_ms = Arc::new(Mutex::new(meta.ts_ms));
-    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    assert!(transport.activate_connection_for_test(attempt)?);
-    let callback = SwarmTransportCallback::new_with_reassembly_clock_for_test(
-        Arc::clone(&transport),
-        Arc::clone(&cleanup_now_ms),
-    )
-    .with_pending_connection_attempt(attempt);
-    let frame = local_wire(
-        Message::Chunk(Chunk {
-            chunk: [0, 2],
-            data: Bytes::from_static(b"partial"),
-            meta,
-        }),
-        &session,
-        transport.dht.did,
-    )?;
+    let (partial, frame, expiry) = BufferedPartial::new(b"partial").await?;
+    let peer = partial.pending.peer;
+    partial.set_clock(expiry);
+    partial.await_released_with_failures(1).await;
 
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert!(budget.buffered_cost_for_test() > 0);
-    // Admission and cleanup read the injected clock, so advancing it to the
-    // expiry is the whole expiry event; no wall time needs to pass.
-    *cleanup_now_ms
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = expiry;
-
-    budget.await_buffered_cost_for_test(|cost| cost == 0).await;
-    measure
-        .await_recorded(|measure| matches!(failed_receive_count(measure, peer), Ok(1)))
-        .await;
-
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    partial.pending.receive(&frame).await?;
     assert_eq!(
-        failed_receive_count(&measure, peer)?,
+        failed_receive_count(&partial.measure, peer)?,
         1,
         "a late chunk for an expired logical message must not charge it again"
     );
 
-    let closing_meta = crate::chunk::ChunkMeta {
-        ttl_ms: 100,
-        ..Default::default()
-    };
-    let closing_expiry = closing_meta
-        .ts_ms
-        .saturating_add(closing_meta.ttl_ms as u128);
-    *cleanup_now_ms
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = closing_meta.ts_ms;
-    let closing_frame = local_wire(
-        Message::Chunk(Chunk {
-            chunk: [0, 2],
-            data: Bytes::from_static(b"closing-partial"),
-            meta: closing_meta,
-        }),
-        &session,
-        transport.dht.did,
-    )?;
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &closing_frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert!(budget.buffered_cost_for_test() > 0);
+    let (_closing_frame, closing_expiry) = partial.deliver_partial(b"closing-partial").await?;
+    let callback = &partial.pending.callback;
     let passes_before_close = callback.reassembly_cleanup_passes_for_test();
     callback.close_inbound_for_test();
     // The close path runs one cleanup pass immediately under the pre-expiry
@@ -258,84 +236,29 @@ async fn test_expired_partial_reassembly_releases_shared_budget_without_more_pee
         .await_reassembly_cleanup_passes_for_test(|passes| passes > passes_before_close)
         .await;
     assert!(
-        budget.buffered_cost_for_test() > 0,
+        partial
+            .transport
+            .reassembly_budget()
+            .buffered_cost_for_test()
+            > 0,
         "closing before TTL must retain only bounded reassembly cleanup state"
     );
     assert_eq!(
-        failed_receive_count(&measure, peer)?,
+        failed_receive_count(&partial.measure, peer)?,
         1,
         "local close before TTL must not immediately penalize the peer"
     );
-    *cleanup_now_ms
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = closing_expiry;
-    budget.await_buffered_cost_for_test(|cost| cost == 0).await;
-    measure
-        .await_recorded(|measure| matches!(failed_receive_count(measure, peer), Ok(2)))
-        .await;
+    partial.set_clock(closing_expiry);
+    partial.await_released_with_failures(2).await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_authenticated_partial_expiry_remains_attributable_after_disconnect() -> Result<()> {
-    let limits = ReassemblyLimits {
-        max_pending_messages: 1,
-        max_chunk_data_len: 1_024,
-        max_message_bytes: 1_024,
-        max_chunks_per_message: 4,
-        max_total_buffered_cost: 4_096,
-        slot_overhead: 8,
-        max_completed_ids: 4,
-    };
-    let measure = Arc::new(RecordingMeasure::default());
-    let transport = Arc::new(transport_with_measure_and_reassembly_limits(
-        measure.clone(),
-        limits,
-    )?);
-    let budget = transport.reassembly_budget();
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let meta = crate::chunk::ChunkMeta {
-        ttl_ms: 100,
-        ..Default::default()
-    };
-    let expiry = meta.ts_ms.saturating_add(meta.ttl_ms as u128);
-    let cleanup_now_ms = Arc::new(Mutex::new(meta.ts_ms));
-    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    assert!(transport.activate_connection_for_test(attempt)?);
-    let callback = SwarmTransportCallback::new_with_reassembly_clock_for_test(
-        Arc::clone(&transport),
-        Arc::clone(&cleanup_now_ms),
-    )
-    .with_pending_connection_attempt(attempt);
-    let frame = local_wire(
-        Message::Chunk(Chunk {
-            chunk: [0, 2],
-            data: Bytes::from_static(b"authenticated-partial"),
-            meta,
-        }),
-        &session,
-        transport.dht.did,
-    )?;
-
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert!(budget.buffered_cost_for_test() > 0);
-    transport.disconnect(peer).await?;
-    *cleanup_now_ms
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = expiry;
-
-    budget.await_buffered_cost_for_test(|cost| cost == 0).await;
-    measure
-        .await_recorded(|measure| matches!(failed_receive_count(measure, peer), Ok(1)))
-        .await;
+    let (partial, _frame, expiry) = BufferedPartial::new(b"authenticated-partial").await?;
+    partial.transport.disconnect(partial.pending.peer).await?;
+    partial.set_clock(expiry);
+    partial.await_released_with_failures(1).await;
     Ok(())
 }
 
@@ -357,19 +280,12 @@ async fn test_invalid_unbound_transport_envelope_does_not_attribute_peer_failure
 
 #[test]
 fn test_inbound_mailbox_without_runtime_returns_typed_error() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer_key = SecretKey::random();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let wire = local_wire(
-        Message::custom(b"valid-message")?,
-        &peer_session,
-        transport.dht.did,
-    )?;
-    let callback = SwarmTransportCallback::new(transport);
+    let transport = default_transport()?;
+    let peer = unbound_peer(&transport, &SecretKey::random())?;
+    let wire = peer.custom_message_wire(&transport, b"valid-message")?;
     let is_runtime_error = futures::executor::block_on(async {
-        match callback
+        match peer
+            .callback
             .on_admitted_message_for_test("not-a-did", &wire)
             .await
         {

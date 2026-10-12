@@ -12,7 +12,6 @@ use rings_transport::core::pool::ChannelLane;
 use tokio::time::timeout;
 use tokio::time::Duration;
 
-use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -20,12 +19,11 @@ use crate::message::Message;
 use crate::message::PayloadSender;
 use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::tests::activity::probe_on_activity;
-use crate::tests::default::credit_starvation::connected_pair;
+use crate::tests::default::connected_nodes;
 use crate::tests::default::credit_starvation::starve;
 use crate::tests::default::credit_starvation::starve_every_lane;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
-use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::manually_establish_connection;
 use crate::utils::get_epoch_ms_i64;
@@ -35,27 +33,15 @@ const CONTROL_LANE: ChannelLane = ChannelLane::new(0);
 /// The application data lane.
 const APPLICATION_LANE: ChannelLane = ChannelLane::new(3);
 
-/// Make a probe of `peer` due at `node`.
-fn make_probe_due(node: &Node, peer: Did) -> Result<()> {
-    node.swarm.transport.force_peer_liveness_probe_due(peer)
-}
-
-/// When `node`'s outstanding probe of `peer` was issued, if one is.
-fn outstanding(node: &Node, peer: Did) -> Result<Option<i64>> {
-    node.swarm
-        .transport
-        .peer_liveness_outstanding_since_for_test(peer)
-}
-
 /// A peer that stopped granting credit and starved its application lane is still probed on
 /// its period, answers on its control lane's window, and is kept: a data-lane stall is
 /// backpressure, never a verdict.
 #[tokio::test]
 async fn test_a_peer_slow_on_a_data_lane_answers_its_probe_and_is_kept() -> Result<()> {
-    let (node1, node2) = connected_pair().await?;
+    let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let held = starve(&node2, &node1, APPLICATION_LANE)?;
-    make_probe_due(&node1, peer)?;
+    node1.swarm.transport.force_peer_liveness_probe_due(peer)?;
 
     node1
         .swarm
@@ -72,7 +58,10 @@ async fn test_a_peer_slow_on_a_data_lane_answers_its_probe_and_is_kept() -> Resu
     );
     wait_for_msgs([&node1, &node2]).await;
     assert_eq!(
-        outstanding(&node1, peer)?,
+        node1
+            .swarm
+            .transport
+            .peer_liveness_outstanding_since_for_test(peer)?,
         None,
         "the peer answered on its control lane"
     );
@@ -90,16 +79,19 @@ async fn test_a_peer_slow_on_a_data_lane_answers_its_probe_and_is_kept() -> Resu
 /// the probe's answer clears it.
 #[tokio::test]
 async fn test_a_withholding_peers_own_traffic_leaves_its_probe_outstanding() -> Result<()> {
-    let (node1, node2) = connected_pair().await?;
+    let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let held = starve(&node2, &node1, CONTROL_LANE)?;
-    make_probe_due(&node1, peer)?;
+    node1.swarm.transport.force_peer_liveness_probe_due(peer)?;
     node1
         .swarm
         .stabilizer()
         .probe_peer_liveness_for_simulation()
         .await?;
-    let issued = outstanding(&node1, peer)?;
+    let issued = node1
+        .swarm
+        .transport
+        .peer_liveness_outstanding_since_for_test(peer)?;
     assert!(issued.is_some(), "the probe was issued");
 
     node2
@@ -116,7 +108,10 @@ async fn test_a_withholding_peers_own_traffic_leaves_its_probe_outstanding() -> 
     .await
     .map_err(|_| Error::InvalidMessage("the peer's message never arrived".to_string()))?;
     assert_eq!(
-        outstanding(&node1, peer)?,
+        node1
+            .swarm
+            .transport
+            .peer_liveness_outstanding_since_for_test(peer)?,
         issued,
         "traffic cleared nothing"
     );
@@ -151,7 +146,9 @@ async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
         held.extend(starve(starving, &node, CONTROL_LANE)?);
     }
     for peer in &peers {
-        make_probe_due(&node, peer.did())?;
+        node.swarm
+            .transport
+            .force_peer_liveness_probe_due(peer.did())?;
     }
 
     timeout(
@@ -171,7 +168,11 @@ async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
     }
     // The starved probes stay queued, so the node never quiesces: wait for the live answer.
     probe_on_activity("the live peer answers its probe", TEST_HANG_GUARD, || {
-        let answered = outstanding(&node, live.did()).map(|since| since.is_none().then_some(()));
+        let answered = node
+            .swarm
+            .transport
+            .peer_liveness_outstanding_since_for_test(live.did())
+            .map(|since| since.is_none().then_some(()));
         async move { answered }
     })
     .await?;
@@ -184,11 +185,11 @@ async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
 /// and its deadline runs.
 #[tokio::test]
 async fn test_a_probe_is_queued_although_the_peers_outbound_capacity_is_full() -> Result<()> {
-    let (node1, node2) = connected_pair().await?;
+    let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let credit = starve(&node2, &node1, CONTROL_LANE)?;
     let capacity = node1.swarm.transport.hold_control_capacity_for_test(peer)?;
-    make_probe_due(&node1, peer)?;
+    node1.swarm.transport.force_peer_liveness_probe_due(peer)?;
 
     let issued_at = get_epoch_ms_i64();
     node1
@@ -197,7 +198,11 @@ async fn test_a_probe_is_queued_although_the_peers_outbound_capacity_is_full() -
         .probe_peer_liveness_for_simulation()
         .await?;
     assert!(
-        outstanding(&node1, peer)?.is_some_and(|since| since >= issued_at),
+        node1
+            .swarm
+            .transport
+            .peer_liveness_outstanding_since_for_test(peer)?
+            .is_some_and(|since| since >= issued_at),
         "the probe was issued and queued despite the full capacity"
     );
     drop((capacity, credit));
@@ -210,7 +215,7 @@ async fn test_a_probe_is_queued_although_the_peers_outbound_capacity_is_full() -
 #[tokio::test]
 async fn test_an_application_send_waits_for_its_first_frame_while_the_peer_withholds_credit(
 ) -> Result<()> {
-    let (node1, node2) = connected_pair().await?;
+    let (node1, node2) = connected_nodes().await?;
     let held = starve_every_lane(&node2, &node1)?;
 
     let sent = timeout(
@@ -234,7 +239,7 @@ async fn test_an_application_send_waits_for_its_first_frame_while_the_peer_withh
 /// stops this end's control traffic outright.
 #[tokio::test]
 async fn test_a_quiet_link_holds_no_credit_at_its_sender() -> Result<()> {
-    let (node1, node2) = connected_pair().await?;
+    let (node1, node2) = connected_nodes().await?;
     let free = node1
         .swarm
         .transport
@@ -253,7 +258,7 @@ async fn test_a_quiet_link_holds_no_credit_at_its_sender() -> Result<()> {
 #[tokio::test]
 async fn test_a_peer_withholding_credit_from_a_relay_never_costs_the_relay_its_other_links(
 ) -> Result<()> {
-    let (x, b) = connected_pair().await?;
+    let (x, b) = connected_nodes().await?;
     let m = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&b.swarm, &m.swarm).await;
     wait_for_msgs([&x, &b, &m]).await;
@@ -272,14 +277,18 @@ async fn test_a_peer_withholding_credit_from_a_relay_never_costs_the_relay_its_o
         .protocol_egress()
         .send_message_by_hop(relayed, m.did(), b.did())
         .await?;
-    make_probe_due(&x, b.did())?;
+    x.swarm.transport.force_peer_liveness_probe_due(b.did())?;
     x.swarm
         .stabilizer()
         .probe_peer_liveness_for_simulation()
         .await?;
     // M's starved queue keeps B from quiescing: wait for X's answer itself.
     probe_on_activity("B answers X's probe", TEST_HANG_GUARD, || {
-        let answered = outstanding(&x, b.did()).map(|since| since.is_none().then_some(()));
+        let answered = x
+            .swarm
+            .transport
+            .peer_liveness_outstanding_since_for_test(b.did())
+            .map(|since| since.is_none().then_some(()));
         async move { answered }
     })
     .await?;

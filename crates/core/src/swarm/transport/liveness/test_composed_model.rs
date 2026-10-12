@@ -31,7 +31,8 @@
 //!   - Probe and answer slots: a probe, and an answer, take no shared outbound capacity
 //!     (`outbound::sender_bounded`), so frames that other traffic holds cannot refuse them.
 //!   - The probe waits for credit until its own deadline, never the shorter first-frame one.
-//!   - An unsent probe stays outstanding, charged from its issue (`ProbeClock::unsent`).
+//!   - An unsent probe stays outstanding, charged from its issue, and is resent
+//!     (`PeerLiveness::unsent`).
 //!
 //! An urgent action (a due arrival, lane-0 service, a due probe, an expiry, a due drop) is
 //! taken before time may pass. A frame takes 0 or [`SLOW_HOP`] ticks per hop, chosen by the
@@ -399,7 +400,7 @@ impl LivenessModel {
             }
             Discipline::ReissueOverOutstanding => {
                 let first = state.clock.outstanding_since_ms().unwrap_or(now);
-                state.clock.outstanding = Some((identity(n), first, true));
+                state.clock.outstanding = Some((identity(n), first));
                 state.clock.last_issued_ms = now;
             }
             _ => {
@@ -419,7 +420,6 @@ impl LivenessModel {
             state.clock.outstanding = None;
             return;
         }
-        state.clock.queued(identity(n));
         self.send_to_b(state, Frame::Probe(n), hop);
     }
 

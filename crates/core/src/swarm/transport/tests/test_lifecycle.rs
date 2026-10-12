@@ -3,8 +3,6 @@
 use super::super::delivery::SendCompletionOutcome;
 use super::*;
 #[cfg(feature = "dummy")]
-use crate::dht::FingerFixRequest;
-#[cfg(feature = "dummy")]
 use crate::dht::StorageSyncDestination;
 #[cfg(feature = "dummy")]
 use crate::dht::TopoInfo;
@@ -13,9 +11,7 @@ use crate::dht::TopoInfo;
 /// Build a transport whose peer is active, connected, and data-channel ready.
 async fn transport_with_routable_peer(
 ) -> Result<(Arc<SwarmTransport>, Did, PendingConnectionAttempt)> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
@@ -26,20 +22,6 @@ async fn transport_with_routable_peer(
         .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connected)?;
     transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
     Ok((transport, peer, attempt))
-}
-
-#[cfg(feature = "dummy")]
-/// Prepare a live finger-fix request for lifecycle/transport admission tests.
-///
-/// The helper enters the same `AwaitingReport` state used by production and
-/// fails explicitly if `slot` cannot begin a request, preventing a test from
-/// manufacturing an uncorrelated token.
-fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRequest> {
-    transport
-        .dht
-        .lock_finger()?
-        .prepare_request_for_test(slot)
-        .ok_or_else(|| Error::InvalidMessage("failed to prepare test finger request".to_owned()))
 }
 
 #[cfg(feature = "dummy")]
@@ -397,7 +379,7 @@ async fn test_terminal_send_generation_cannot_reenter_topology() -> Result<()> {
 
 #[tokio::test]
 async fn test_admitted_peer_cannot_be_replaced_by_a_pending_handshake() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
 
@@ -411,9 +393,7 @@ async fn test_admitted_peer_cannot_be_replaced_by_a_pending_handshake() -> Resul
 
 #[tokio::test]
 async fn test_pending_promotion_is_atomic_under_lifecycle_lock() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     let promotion_entered = Arc::new(std::sync::Barrier::new(2));
@@ -486,7 +466,7 @@ async fn test_pending_promotion_is_atomic_under_lifecycle_lock() -> Result<()> {
 
 #[tokio::test]
 async fn test_admitting_peer_remains_unroutable_until_commit() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     let mut observed_transition = false;
@@ -519,9 +499,7 @@ async fn test_admitting_peer_remains_unroutable_until_commit() -> Result<()> {
 
 #[tokio::test]
 async fn test_pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
 
@@ -540,14 +518,8 @@ async fn test_pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_incoming_offer_replaces_an_unroutable_admitted_generation() -> Result<()> {
-    let local = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer_key = SecretKey::random();
-    let peer = Arc::new(transport_with_key_and_measure(
-        &peer_key,
-        Arc::new(RecordingMeasure::default()),
-    )?);
+    let local = default_transport()?;
+    let peer = default_transport()?;
     let peer_did = peer.dht.did;
 
     let old_callback = SwarmTransportCallback::new(Arc::clone(&local));
@@ -590,14 +562,8 @@ async fn test_incoming_offer_replaces_an_unroutable_admitted_generation() -> Res
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_incoming_offer_replaces_an_orphaned_physical_connection() -> Result<()> {
-    let local = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer_key = SecretKey::random();
-    let peer = Arc::new(transport_with_key_and_measure(
-        &peer_key,
-        Arc::new(RecordingMeasure::default()),
-    )?);
+    let local = default_transport()?;
+    let peer = default_transport()?;
     let peer_did = peer.dht.did;
 
     let orphan_callback = SwarmTransportCallback::new(Arc::clone(&local));
@@ -636,9 +602,7 @@ async fn test_incoming_offer_replaces_an_orphaned_physical_connection() -> Resul
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_physical_connection_creation_serializes_replaced_generations() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let creation = transport.connection_creation.lease(peer);
     let creation_guard = creation.acquire().await;

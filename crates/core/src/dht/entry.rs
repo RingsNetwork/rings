@@ -85,15 +85,6 @@ enum EntryStampKind {
     Delta,
 }
 
-/// The write witness an [`EntryOperation`] must carry after stamping.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EntryWitness {
-    /// Per-element dots, plus a reset register for overwrites.
-    Elements(EntryStampKind),
-    /// A reference witness: the operation names existing dots or values and issues none.
-    Reference,
-}
-
 // Canonical stamp input for EntryVersion.operation.
 //
 // This digest is an unreleased CRDT tie-break witness between nodes running the
@@ -378,22 +369,24 @@ impl EntryOperation {
     /// Post: every carried entry has `expires_at_ms = Some(_)`; an absent bound becomes
     /// `now_ms + kind.default_lifetime_ms()`.
     pub fn stamped(self, now_ms: u128, actor: Did) -> Result<Self> {
-        let witness = self.witness();
+        let stamp = self.stamp_kind();
         self.try_map_entry(|entry| {
             let entry = entry.ensure_lifetime_from(now_ms);
-            match witness {
-                EntryWitness::Elements(kind) => entry.ensure_stamp_after(now_ms, actor, None, kind),
-                EntryWitness::Reference => Ok(entry),
+            match stamp {
+                Some(kind) => entry.ensure_stamp_after(now_ms, actor, None, kind),
+                None => Ok(entry),
             }
         })
     }
 
-    /// The write witness each operation kind must carry.
-    const fn witness(&self) -> EntryWitness {
+    /// The write witness each operation kind must carry: per-element dots of `kind` (plus a
+    /// reset register for an overwrite), or `None` for a reference operation, which names
+    /// existing dots or values and issues none.
+    const fn stamp_kind(&self) -> Option<EntryStampKind> {
         match self {
-            EntryOperation::Overwrite(_) => EntryWitness::Elements(EntryStampKind::Overwrite),
-            EntryOperation::Extend(_) => EntryWitness::Elements(EntryStampKind::Delta),
-            EntryOperation::Tombstone(_) => EntryWitness::Reference,
+            EntryOperation::Overwrite(_) => Some(EntryStampKind::Overwrite),
+            EntryOperation::Extend(_) => Some(EntryStampKind::Delta),
+            EntryOperation::Tombstone(_) => None,
         }
     }
 

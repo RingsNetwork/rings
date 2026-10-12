@@ -14,7 +14,7 @@
 //!
 //! Actions are the arrival of any request not yet arrived, a waiter claiming its grant, the
 //! release of a claimed grant, and (once) the cancellation of a waiter, granted or not. Every
-//! arrival, release and cancellation runs one pass of the discipline under check.
+//! arrival, release and cancellation serves the discipline under check to its fixpoint.
 //!
 //! Properties:
 //!

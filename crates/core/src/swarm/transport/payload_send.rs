@@ -298,16 +298,13 @@ impl SwarmTransport {
         bytes: usize,
         admission: QueueAdmission,
     ) -> Result<TransferCapacityPermit> {
-        let reserve = match admission {
-            QueueAdmission::Bounded(bound) => {
-                if let Some(permit) = self.outbound_schedulers.reserve_bounded_by_sender(bound) {
-                    return Ok(permit);
-                }
-                return self
-                    .outbound_schedulers
-                    .reserve_now(peer, kind.class(), bytes);
+        if let QueueAdmission::Bounded(bound) = admission {
+            if let Some(permit) = self.outbound_schedulers.reserve_bounded_by_sender(bound) {
+                return Ok(permit);
             }
-            QueueAdmission::Immediate => {
+        }
+        let reserve = match admission {
+            QueueAdmission::Immediate | QueueAdmission::Bounded(_) => {
                 return self
                     .outbound_schedulers
                     .reserve_now(peer, kind.class(), bytes);
@@ -484,38 +481,37 @@ impl SwarmTransport {
         admission: QueueAdmission,
         records_missing_connection_failure: bool,
     ) -> Result<AdmittedConnection> {
-        match admission {
-            QueueAdmission::Waiting => {
-                let Some(connection) = self.get_and_check_send_connection(did).await else {
-                    if records_missing_connection_failure {
-                        self.record_peer_message_send_failed(
-                            did,
-                            crate::measure::Authentication::LocallyAddressed,
-                        )
-                        .await;
-                    }
-                    return Err(Error::SwarmMissDidInTable(did));
-                };
-                Ok(connection)
-            }
+        let connection = match admission {
+            QueueAdmission::Waiting => self.get_and_check_send_connection(did).await,
             QueueAdmission::Immediate | QueueAdmission::Bounded(_) | QueueAdmission::Tracked => {
-                let Some(connection) = self.admitted_send_connection(did)? else {
-                    if records_missing_connection_failure {
-                        self.record_peer_message_send_failed(
-                            did,
-                            crate::measure::Authentication::LocallyAddressed,
-                        )
-                        .await;
-                    }
-                    return Err(Error::SwarmMissDidInTable(did));
-                };
-                connection
-                    .connection()
-                    .readiness()
-                    .ensure_can_make_progress()?;
-                Ok(connection)
+                self.admitted_send_connection(did)?
             }
+        };
+        let Some(connection) = connection else {
+            return Err(self
+                .missing_connection(did, records_missing_connection_failure)
+                .await);
+        };
+        if admission != QueueAdmission::Waiting {
+            connection
+                .connection()
+                .readiness()
+                .ensure_can_make_progress()?;
         }
+        Ok(connection)
+    }
+
+    /// The refusal of a send to `did`, which has no admitted connection, recorded against `did`
+    /// as a failed send when `records` says the message kind counts one.
+    async fn missing_connection(&self, did: Did, records: bool) -> Error {
+        if records {
+            self.record_peer_message_send_failed(
+                did,
+                crate::measure::Authentication::LocallyAddressed,
+            )
+            .await;
+        }
+        Error::SwarmMissDidInTable(did)
     }
 
     async fn do_send_payload_detached_until(
@@ -759,14 +755,9 @@ impl SwarmTransport {
             return Err(Error::MessageTooLarge(wire_bytes));
         }
         if self.admitted_send_connection(did)?.is_none() {
-            if preparation.records_missing_connection_failure {
-                self.record_peer_message_send_failed(
-                    did,
-                    crate::measure::Authentication::LocallyAddressed,
-                )
-                .await;
-            }
-            return Err(Error::SwarmMissDidInTable(did));
+            return Err(self
+                .missing_connection(did, preparation.records_missing_connection_failure)
+                .await);
         }
         Ok(preparation)
     }

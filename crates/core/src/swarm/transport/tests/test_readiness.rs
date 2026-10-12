@@ -5,9 +5,7 @@ use crate::message::PayloadSender;
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 async fn admitted_dummy_transport() -> Result<(Arc<SwarmTransport>, Did)> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
@@ -21,9 +19,7 @@ async fn admitted_dummy_transport() -> Result<(Arc<SwarmTransport>, Did)> {
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
 async fn test_disconnected_open_transport_cannot_commit_admission() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
@@ -53,9 +49,7 @@ async fn test_disconnected_open_transport_cannot_commit_admission() -> Result<()
 #[tokio::test]
 async fn test_data_channel_open_before_peer_state_converges_preserves_pending_admission(
 ) -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport

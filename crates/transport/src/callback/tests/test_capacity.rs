@@ -16,10 +16,6 @@ use crate::core::transport::TransportMessage;
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
 #[test]
 fn test_a_loaded_node_defers_credit_until_any_release_relieves_it() {
-    use futures::FutureExt;
-
-    use crate::core::credit::credit_index;
-
     let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
     let frame = u64::try_from(custom.len()).expect("a frame length fits u64");
     // The production batch: half a window.
@@ -31,13 +27,7 @@ fn test_a_loaded_node_defers_credit_until_any_release_relieves_it() {
         loaded_callback("relieving", load.clone()),
     );
     let lane = ChannelLane::new(1);
-    let credit = |callback: &InnerTransportCallback| {
-        callback
-            .link_credit()
-            .next_credit(credit_index(lane))
-            .now_or_never()
-            .flatten()
-    };
+    let credit = |callback: &InnerTransportCallback| take_due_credit(callback, lane);
     let (mut held, mut other) = (
         admit_window(&deferred, &custom, lane),
         admit_window(&relieving, &custom, lane),
@@ -67,23 +57,13 @@ fn test_a_loaded_node_defers_credit_until_any_release_relieves_it() {
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
 #[test]
 fn test_a_loaded_node_still_advertises_the_priority_lane() {
-    use futures::FutureExt;
-
-    use crate::core::credit::credit_index;
-
     let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
     let frame = u64::try_from(custom.len()).expect("a frame length fits u64");
     let batch = usize::try_from(LANE_CREDIT_WINDOW / 2).expect("the batch fits usize");
     // One full window loads the node.
     let load = NodeReceiveLoad::with_limit(LANE_CREDIT_WINDOW * frame);
     let callback = loaded_callback("loaded", load.clone());
-    let credit = |lane| {
-        callback
-            .link_credit()
-            .next_credit(credit_index(lane))
-            .now_or_never()
-            .flatten()
-    };
+    let credit = |lane| take_due_credit(&callback, lane);
     let bulk_lane = ChannelLane::new(1);
     let (mut control, mut bulk) = (
         admit_window(&callback, &custom, ChannelLane::PRIORITY),
@@ -180,16 +160,7 @@ fn test_a_terminal_state_fails_a_sender_waiting_for_credit() {
 
     let callback = callback("peer");
     let lane = ChannelLane::new(3);
-    let held = (0..LANE_CREDIT_WINDOW)
-        .map(|_| {
-            callback
-                .link_credit()
-                .reserve(lane)
-                .now_or_never()
-                .expect("a fresh lane has a window of credit")
-                .expect("a fresh lane is open")
-        })
-        .collect::<Vec<_>>();
+    let held = reserve_window(&callback, lane);
     let mut waiting = Box::pin(callback.link_credit().reserve(lane));
     assert!(waiting.as_mut().now_or_never().is_none());
 
@@ -215,9 +186,7 @@ fn test_an_abandoned_credit_wait_leaves_no_waker() {
 
     let callback = callback("peer");
     let lane = ChannelLane::new(0);
-    let held = (0..LANE_CREDIT_WINDOW)
-        .map(|_| callback.link_credit().reserve(lane).now_or_never())
-        .collect::<Vec<_>>();
+    let held = reserve_window(&callback, lane);
     let mut kept = Box::pin(callback.link_credit().reserve(lane));
     assert!(kept.as_mut().now_or_never().is_none());
     let mut abandoned = Box::pin(callback.link_credit().reserve(lane));
@@ -376,18 +345,11 @@ fn test_a_credit_whose_send_failed_is_queued_again() {
     let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
     drop(admit_window(&callback, &custom, lane));
     let link = callback.link_credit();
-    let advertised = link
-        .next_credit(index)
-        .now_or_never()
-        .flatten()
-        .expect("a released window advertises");
+    let advertised = take_due_credit(&callback, lane).expect("a released window advertises");
 
     assert!(link.requeue(index, advertised - 1));
     assert!(link.requeue(index, advertised));
-    assert_eq!(
-        link.next_credit(index).now_or_never().flatten(),
-        Some(advertised)
-    );
+    assert_eq!(take_due_credit(&callback, lane), Some(advertised));
     assert!(link.next_credit(index).now_or_never().is_none());
 
     link.close();

@@ -262,11 +262,11 @@ impl InboxRoom {
     pub(crate) fn fill(
         mut self,
         message: ApplicationMessage,
-        consumed: Option<oneshot::Sender<()>>,
+        consumed: oneshot::Sender<()>,
     ) -> bool {
-        let Some(held) = self.held.take() else {
-            return false;
-        };
+        // `held` is `Some` from the reservation until here; taking it tells `Drop` the room was
+        // filled.
+        let held = self.held.take().unwrap_or_default();
         let mut queue = self.shared.lock();
         if queue.claim != Claim::Claimed {
             return false;
@@ -277,7 +277,7 @@ impl InboxRoom {
             .saturating_add(message.weight());
         queue.items.push_back(Queued {
             delivery: ApplicationDelivery::Message(message),
-            consumed,
+            consumed: Some(consumed),
         });
         drop(queue);
         self.shared.ready.notify(1);

@@ -4,7 +4,7 @@ use super::*;
 use crate::utils::get_epoch_ms_i64;
 
 fn bounded_transport(pending: usize, total: usize) -> Result<SwarmTransport> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     transport.set_lifecycle_bounds_for_test(LifecycleBounds::new(pending, total))?;
     Ok(transport)
 }

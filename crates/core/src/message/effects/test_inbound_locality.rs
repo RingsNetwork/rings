@@ -16,7 +16,7 @@ use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
 use crate::tests::activity::probe_on_activity;
-use crate::tests::default::credit_starvation::connected_pair;
+use crate::tests::default::connected_nodes;
 use crate::tests::default::credit_starvation::starve_every_lane;
 use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::TEST_NETWORK_ID;
@@ -50,7 +50,7 @@ fn variant(effect: &CoreEffect<'_>) -> usize {
 #[tokio::test]
 async fn test_every_effect_returns_without_waiting_while_its_next_hop_withholds_credit(
 ) -> Result<()> {
-    let (node1, node2) = connected_pair().await?;
+    let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let held = starve_every_lane(&node2, &node1)?;
     let interpreter = CoreEffectInterpreter::new(&node1.swarm.transport);
@@ -112,7 +112,7 @@ async fn test_every_effect_returns_without_waiting_while_its_next_hop_withholds_
 /// idle credit, so the starved lane admits nothing and the one send is the witness.
 #[tokio::test]
 async fn test_a_starved_protocol_send_returns_its_capacity_at_its_deadline() -> Result<()> {
-    let (node1, node2) = connected_pair().await?;
+    let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let held = starve_every_lane(&node2, &node1)?;
     let transport = &node1.swarm.transport;

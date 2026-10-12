@@ -7,33 +7,23 @@ use tokio::time::Duration;
 
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
-use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
+use crate::tests::default::connected_nodes;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
 use crate::tests::default::dummy_hooks::PendingAfterSentCountGuard;
 use crate::tests::default::dummy_hooks::PendingCloseGuard;
 use crate::tests::default::dummy_hooks::PendingDeliveryGuard;
-use crate::tests::default::prepare_node;
 use crate::tests::default::test_chunk_e2e::large_storage_sync_entries;
 use crate::tests::default::test_chunk_e2e::wait_for_test_condition;
-use crate::tests::default::wait_for_connection_state;
-use crate::tests::default::wait_for_msgs;
-use crate::tests::default::wait_for_successor;
-use crate::tests::manually_establish_connection;
 use crate::tests::outbound_capacity_released;
 #[tokio::test]
 async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() -> Result<()> {
-    let node1 = prepare_node(SecretKey::random()).await;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connected_nodes().await?;
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     dummy_controlled::reset_sent_count();
@@ -50,11 +40,6 @@ async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending
         dummy_controlled::sent_count() == 1
     })
     .await;
-    assert_eq!(
-        dummy_controlled::sent_count(),
-        1,
-        "the tracked path must enter the real chunk tail"
-    );
     assert!(
         !send.is_finished(),
         "tracked storage sync must not report completion after first-chunk admission"
@@ -76,12 +61,7 @@ async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending
 
 #[tokio::test]
 async fn test_tracked_storage_sync_timeout_closes_stalled_delivery_generation() -> Result<()> {
-    let node1 = prepare_node(SecretKey::random()).await;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connected_nodes().await?;
 
     dummy_controlled::reset_sent_count();
     let pending_delivery = PendingDeliveryGuard::new();
@@ -112,12 +92,7 @@ async fn test_tracked_storage_sync_timeout_closes_stalled_delivery_generation() 
 
 #[tokio::test]
 async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() -> Result<()> {
-    let node1 = prepare_node(SecretKey::random()).await;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connected_nodes().await?;
 
     let peer = node2.did();
     let attempt = node1
@@ -161,24 +136,17 @@ async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() ->
         connection.webrtc_connection_state(),
         WebrtcConnectionState::Closed
     );
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !outbound_capacity_released(&node1.swarm.transport, peer) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("terminal cleanup must release retained transfer capacity");
+    wait_for_test_condition(
+        "terminal cleanup must release retained transfer capacity",
+        || outbound_capacity_released(&node1.swarm.transport, peer),
+    )
+    .await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_dropping_tracked_storage_sync_requests_transfer_stop() -> Result<()> {
-    let node1 = prepare_node(SecretKey::random()).await;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connected_nodes().await?;
 
     dummy_controlled::reset_sent_count();
     let pending_delivery = PendingDeliveryGuard::new();
@@ -190,37 +158,26 @@ async fn test_dropping_tracked_storage_sync_requests_transfer_stop() -> Result<(
     let transport = node1.swarm.transport.clone();
     let send = tokio::spawn(async move { transport.send_storage_sync_tracked(msg).await });
 
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if dummy_controlled::sent_count() == 1
-                && node1
-                    .swarm
-                    .transport
-                    .outbound_admitted_transfer_count_for_test(node2.did())
-                    == Some(1)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+    wait_for_test_condition("tracked send must reach the stalled delivery", || {
+        dummy_controlled::sent_count() == 1
+            && node1
+                .swarm
+                .transport
+                .outbound_admitted_transfer_count_for_test(node2.did())
+                == Some(1)
     })
-    .await
-    .expect("tracked send must reach the stalled delivery");
+    .await;
 
     send.abort();
     let _ = send.await;
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if node1.swarm.transport.get_connection(node2.did()).is_none()
+    wait_for_test_condition(
+        "dropping a tracked send must stop and release its transfer",
+        || {
+            node1.swarm.transport.get_connection(node2.did()).is_none()
                 && outbound_capacity_released(&node1.swarm.transport, node2.did())
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("dropping a tracked send must stop and release its transfer");
+        },
+    )
+    .await;
 
     drop(pending_delivery);
     assert_eq!(dummy_controlled::sent_count(), 1);

@@ -16,24 +16,14 @@
 //! this end's protocol handlers. The FIFO of a lane holds at most its credit window, since
 //! every queued frame holds a [`CreditPermit`].
 
-#[cfg(any(
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
+#[cfg(rings_transport_runtime)]
 use std::collections::VecDeque;
 #[cfg(all(target_family = "wasm", feature = "web-sys-webrtc"))]
 use std::rc::Rc;
-#[cfg(any(
-    test,
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
+#[cfg(any(test, rings_transport_runtime))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-#[cfg(any(
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
+#[cfg(rings_transport_runtime)]
 use std::sync::Mutex;
 
 use bytes::Bytes;
@@ -50,20 +40,11 @@ use super::InboundFrameAdmission;
 use crate::core::callback::AdmittedInboundMessage;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::callback::InboundCreditLease;
-#[cfg(any(
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
+#[cfg(rings_transport_runtime)]
 use crate::core::credit::credit_index;
-#[cfg(any(
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
+#[cfg(rings_transport_runtime)]
 use crate::core::credit::CreditIndex;
-#[cfg(any(
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
+#[cfg(rings_transport_runtime)]
 use crate::core::credit::PerLane;
 use crate::core::pool::ChannelLane;
 use crate::core::transport::BorrowedTransportMessage;
@@ -75,17 +56,11 @@ use crate::core::transport::WebrtcConnectionState;
 #[cfg(rings_transport_backend)]
 use crate::error::Result;
 use crate::notifier::Notifier;
-#[cfg(any(
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
+#[cfg(rings_transport_runtime)]
 use crate::sync_utils::lock_recover;
 
 /// The frames of one lane admitted and not yet handed to the protocol callback.
-#[cfg(any(
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
+#[cfg(rings_transport_runtime)]
 #[derive(Default)]
 struct LaneQueue {
     /// Admitted frames in arrival order.
@@ -102,23 +77,13 @@ pub struct InnerTransportCallback {
     /// Per-lane credit flow control of this connection.
     link_credit: Arc<LinkCredit>,
     /// The per-lane FIFOs between admission and the protocol callback.
-    #[cfg(any(
-        all(not(target_family = "wasm"), feature = "tokio"),
-        all(target_family = "wasm", feature = "web-sys-webrtc")
-    ))]
+    #[cfg(rings_transport_runtime)]
     lanes: Mutex<PerLane<LaneQueue>>,
-    #[cfg(any(
-        test,
-        all(not(target_family = "wasm"), feature = "tokio"),
-        all(target_family = "wasm", feature = "web-sys-webrtc")
-    ))]
+    #[cfg(any(test, rings_transport_runtime))]
     pub(super) invalid_frame_report_state: AtomicUsize,
 }
 
-#[cfg(any(
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
+#[cfg(rings_transport_runtime)]
 macro_rules! define_shared_inbound_frame_paths {
     ($shared:ident) => {
         /// Decode, credit-admit, and report one raw frame from a transport adapter.
@@ -222,16 +187,9 @@ impl InnerTransportCallback {
             cid,
             callback,
             data_channel_state_notifier,
-            #[cfg(any(
-                all(not(target_family = "wasm"), feature = "tokio"),
-                all(target_family = "wasm", feature = "web-sys-webrtc")
-            ))]
+            #[cfg(rings_transport_runtime)]
             lanes: Mutex::default(),
-            #[cfg(any(
-                test,
-                all(not(target_family = "wasm"), feature = "tokio"),
-                all(target_family = "wasm", feature = "web-sys-webrtc")
-            ))]
+            #[cfg(any(test, rings_transport_runtime))]
             invalid_frame_report_state: AtomicUsize::new(0),
         }
     }
@@ -374,10 +332,7 @@ impl InnerTransportCallback {
 
     /// Queue `frame` on credit index `index`; `true` when the caller claimed the lane's drainer,
     /// which no task held, and must now drain the lane.
-    #[cfg(any(
-        all(not(target_family = "wasm"), feature = "tokio"),
-        all(target_family = "wasm", feature = "web-sys-webrtc")
-    ))]
+    #[cfg(rings_transport_runtime)]
     fn enqueue_frame(&self, frame: AdmittedInboundFrame, index: CreditIndex) -> bool {
         let queue = &mut lock_recover(&self.lanes)[index];
         queue.frames.push_back(frame);
@@ -386,10 +341,7 @@ impl InnerTransportCallback {
 
     /// Hand the queued frames of credit index `index` to the protocol callback, in order, until
     /// the queue is empty; the drainer then gives the queue up.
-    #[cfg(any(
-        all(not(target_family = "wasm"), feature = "tokio"),
-        all(target_family = "wasm", feature = "web-sys-webrtc")
-    ))]
+    #[cfg(rings_transport_runtime)]
     async fn drain_lane(&self, index: CreditIndex) {
         loop {
             let next = {

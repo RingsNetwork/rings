@@ -13,10 +13,8 @@ use rings_transport::core::transport::WebrtcConnectionState;
 use super::inbound::InboundMailbox;
 use super::inbound::InboundSubmission;
 use super::inbound::ReassemblyClock;
-use super::into_transport_callback_error;
 use super::pre_admission::Arrival;
 use super::processor::prepare_resolved_frame;
-use super::CallbackError;
 use super::FrameProvenance;
 use super::HeldInboundFrame;
 use super::InboundFrameLease;
@@ -152,29 +150,22 @@ impl SwarmTransportCallback {
         self.inbound.close_for_test();
     }
 
-    async fn admit_pending_connection(&self, did: Did) -> Result<bool, CallbackError> {
+    /// Admit the pending connection to `did` once its data channel is open: the DHT admission,
+    /// then its liveness record, then the release of what was held before admission.
+    ///
+    /// Pre: the caller's `connection_event_peer` found no pending attempt bound to another
+    /// peer, so a bound attempt is with `did`.
+    async fn admit_pending_connection(&self, did: Did) -> crate::error::Result<()> {
         let Some(attempt) = self.pending_attempt() else {
-            return Ok(false);
+            return Ok(());
         };
-        if !attempt.is_with(did) {
-            tracing::warn!(
-                "ignoring data-channel open for {did}; pending attempt belongs to {}",
-                attempt.peer()
-            );
-            self.processor
-                .logical
-                .transport
-                .cancel_unadmitted_connection(attempt)
-                .await?;
-            return Ok(false);
-        }
         if !self
             .processor
             .logical
             .transport
             .begin_ready_connection_admission(attempt)?
         {
-            return Ok(false);
+            return Ok(());
         }
 
         match self
@@ -185,7 +176,7 @@ impl SwarmTransportCallback {
             .await
         {
             Ok(true) => {}
-            Ok(false) => return Ok(false),
+            Ok(false) => return Ok(()),
             Err(error) => {
                 if let Err(cleanup_error) = self
                     .processor
@@ -201,7 +192,7 @@ impl SwarmTransportCallback {
                         "failed to close connection after admission error"
                     );
                 }
-                return Err(error.into());
+                return Err(error);
             }
         }
 
@@ -210,16 +201,67 @@ impl SwarmTransportCallback {
             .transport
             .record_peer_connected(attempt)
             .await;
+        if self
+            .processor
+            .logical
+            .transport
+            .is_active_connection_attempt(attempt)
+        {
+            self.start_pre_admission_drain().await;
+        }
+        Ok(())
+    }
+
+    /// The peer a connection event on `cid` concerns, if the event is this callback's to act
+    /// on: `None` for an unparsable identifier, for an event about another peer than the bound
+    /// attempt's (whose unadmitted attempt is cancelled), and for an event about this node.
+    async fn connection_event_peer(
+        &self,
+        cid: &str,
+        operation: &str,
+    ) -> crate::error::Result<Option<Did>> {
+        let Ok(did) = Did::from_str(cid) else {
+            tracing::warn!("{operation}: unparsable peer {cid}");
+            return Ok(None);
+        };
+        if self
+            .cancel_mismatched_pending_connection(did, operation)
+            .await?
+            || self.is_local_did_event(did, operation)
+        {
+            return Ok(None);
+        }
+        Ok(Some(did))
+    }
+
+    /// Tear down the connection to `did` on a terminal `operation`: a pending handshake is
+    /// discarded without touching the DHT, an active peer leaves it.
+    async fn retire_on_terminal(&self, did: Did, operation: &str) -> crate::error::Result<()> {
+        if self.handle_pending_terminal_event(did, operation).await? {
+            return Ok(());
+        }
+        let Some(attempt) = self.pending_attempt() else {
+            tracing::warn!("ignoring unbound {operation} for {did}");
+            return Ok(());
+        };
         if !self
             .processor
             .logical
             .transport
             .is_active_connection_attempt(attempt)
         {
-            return Ok(false);
+            return Ok(());
         }
-        self.start_pre_admission_drain().await;
-        Ok(true)
+        self.processor
+            .logical
+            .transport
+            .record_peer_disconnected(attempt)
+            .await;
+        self.processor
+            .logical
+            .message_handler
+            .leave_dht_attempt(attempt)
+            .await
     }
 
     fn pending_disconnected_before_admission(&self, did: Did) -> bool {
@@ -246,7 +288,7 @@ impl SwarmTransportCallback {
         &self,
         did: Did,
         operation: &str,
-    ) -> Result<bool, CallbackError> {
+    ) -> crate::error::Result<bool> {
         let Some(attempt) = self.pending_attempt() else {
             return Ok(false);
         };
@@ -278,7 +320,7 @@ impl SwarmTransportCallback {
         &self,
         did: Did,
         operation: &str,
-    ) -> Result<bool, CallbackError> {
+    ) -> crate::error::Result<bool> {
         let Some(attempt) = self.pending_attempt() else {
             return Ok(false);
         };
@@ -510,20 +552,12 @@ impl TransportCallback for SwarmTransportCallback {
         cid: &str,
         s: WebrtcConnectionState,
     ) -> Result<(), TransportCallbackError> {
-        let Ok(did) = Did::from_str(cid) else {
-            tracing::warn!("on_peer_connection_state_change parse did failed: {}", cid);
+        let Some(did) = self
+            .connection_event_peer(cid, "connection state change")
+            .await?
+        else {
             return Ok(());
         };
-        if self
-            .cancel_mismatched_pending_connection(did, "connection state change")
-            .await
-            .map_err(into_transport_callback_error)?
-        {
-            return Ok(());
-        }
-        if self.is_local_did_event(did, "connection state change") {
-            return Ok(());
-        }
 
         // Admission announces `PeerAdmitted` and retirement `PeerRetired`; a physical state is
         // never the application's, so nothing here is announced as such.
@@ -532,41 +566,12 @@ impl TransportCallback for SwarmTransportCallback {
             // product snapshot also observes an open data channel. This makes
             // either browser callback order converge on the same transition.
             WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected => {
-                self.admit_pending_connection(did)
-                    .await
-                    .map_err(into_transport_callback_error)?;
+                self.admit_pending_connection(did).await?;
             }
             // `Failed` and `Closed` are terminal states. Pending handshakes are
             // discarded without touching the DHT; active peers leave it.
             WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
-                if self
-                    .handle_pending_terminal_event(did, "connection terminal state")
-                    .await
-                    .map_err(into_transport_callback_error)?
-                {
-                    return Ok(());
-                }
-                let Some(attempt) = self.pending_attempt() else {
-                    tracing::warn!("ignoring unbound terminal connection event for {did}");
-                    return Ok(());
-                };
-                if !self
-                    .processor
-                    .logical
-                    .transport
-                    .is_active_connection_attempt(attempt)
-                {
-                    return Ok(());
-                }
-                self.processor
-                    .logical
-                    .transport
-                    .record_peer_disconnected(attempt)
-                    .await;
-                self.processor
-                    .logical
-                    .message_handler
-                    .leave_dht_attempt(attempt)
+                self.retire_on_terminal(did, "connection terminal state")
                     .await?;
             }
             // `Disconnected` is a transient ICE state that frequently recovers
@@ -599,82 +604,30 @@ impl TransportCallback for SwarmTransportCallback {
     }
 
     async fn on_data_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
-        let Ok(did) = Did::from_str(cid) else {
-            tracing::warn!("on_data_channel_open parse did failed: {}", cid);
+        let Some(did) = self.connection_event_peer(cid, "data-channel open").await? else {
             return Ok(());
         };
-        if self
-            .cancel_mismatched_pending_connection(did, "data-channel open")
-            .await
-            .map_err(into_transport_callback_error)?
-        {
-            return Ok(());
-        }
-        if self.is_local_did_event(did, "data-channel open") {
-            return Ok(());
-        }
-
-        if !self
-            .admit_pending_connection(did)
-            .await
-            .map_err(into_transport_callback_error)?
-            && !self.processor.logical.transport.has_active_connection(did)
-        {
+        self.admit_pending_connection(did).await?;
+        if !self.processor.logical.transport.has_active_connection(did) {
             tracing::debug!("ignoring late data-channel open for {did}");
         }
         Ok(())
     }
 
     async fn on_data_channel_close(&self, cid: &str) -> Result<(), TransportCallbackError> {
-        let Ok(did) = Did::from_str(cid) else {
-            tracing::warn!("on_data_channel_close parse did failed: {}", cid);
+        let Some(did) = self
+            .connection_event_peer(cid, "data-channel close")
+            .await?
+        else {
             return Ok(());
         };
-        if self
-            .cancel_mismatched_pending_connection(did, "data-channel close")
-            .await
-            .map_err(into_transport_callback_error)?
-        {
-            return Ok(());
-        }
-        if self.is_local_did_event(did, "data-channel close") {
-            return Ok(());
-        }
 
         // The data channel closing is a reliable signal that the peer is gone
         // (e.g. it closed the connection), so tear the connection down now
         // instead of waiting for the ICE state to reach `Failed`. This is the
         // graceful counterpart to a local `disconnect()`: the remote learns of
         // it promptly without relying on the transient `Disconnected` state.
-        if self
-            .handle_pending_terminal_event(did, "data-channel close")
-            .await
-            .map_err(into_transport_callback_error)?
-        {
-            return Ok(());
-        }
-        let Some(attempt) = self.pending_attempt() else {
-            tracing::warn!("ignoring unbound data-channel close for {did}");
-            return Ok(());
-        };
-        if !self
-            .processor
-            .logical
-            .transport
-            .is_active_connection_attempt(attempt)
-        {
-            return Ok(());
-        }
-        self.processor
-            .logical
-            .transport
-            .record_peer_disconnected(attempt)
-            .await;
-        self.processor
-            .logical
-            .message_handler
-            .leave_dht_attempt(attempt)
-            .await?;
+        self.retire_on_terminal(did, "data-channel close").await?;
         Ok(())
     }
 }

@@ -2,8 +2,6 @@ use futures::FutureExt;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
 use super::*;
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-use crate::error::CallbackError;
 use crate::message::MessageCategory;
 
 const DHT_CONTROL_LANE: InboundLane = InboundLane::from_class(MessageCategory::DhtControl);
@@ -301,13 +299,4 @@ fn test_one_peer_cannot_exhaust_another_peers_inbound_allowance() {
         .try_acquire(control_peer, DHT_CONTROL_LANE, 1)
         .is_ok());
     drop(permits);
-}
-
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-#[test]
-fn test_native_callback_error_contract_is_send_and_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    assert_send_sync::<CallbackError>();
-    let _: CallbackError = Box::new(std::io::Error::other("native callback error"));
 }

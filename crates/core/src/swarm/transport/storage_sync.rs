@@ -586,20 +586,16 @@ impl SwarmTransport {
     /// [`StorageSyncOutcome::Deferred`], never as an error that would fail the
     /// handler or maintenance step that started the sync.
     ///
-    /// Pre: through an egress that returns once queued, `msg` is copy-only. A hand-off registers
-    /// a cleanup acknowledgement that only a sender awaiting its outcome can revoke, so one is
-    /// refused.
+    /// Pre: through an egress that returns once queued, `msg` is copy-only: a hand-off registers
+    /// a cleanup acknowledgement that only a sender awaiting its outcome can revoke. Every such
+    /// caller sends read repair, which `PeerRingAction::sync_entries_for_repair` builds as
+    /// `AdditiveRepair`.
     pub(crate) async fn send_storage_sync_or_defer(
         &self,
         msg: SyncEntriesWithSuccessor,
         egress: &Egress<'_>,
         context: &'static str,
     ) -> Result<StorageSyncOutcome> {
-        if egress.returns_once_queued() && msg.purpose.permits_source_cleanup() {
-            return Err(Error::InvalidMessage(format!(
-                "{context}: an ownership hand-off is not a copy-only repair"
-            )));
-        }
         let purpose = msg.purpose;
         let destination = msg.destination;
         let destination_did = destination.did();

@@ -37,9 +37,9 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::Authentication;
-use crate::message::EdgeRelation;
 use crate::message::MessagePayload;
 use crate::swarm::application::Delivered;
+use crate::swarm::detached::spawn_detached;
 use crate::utils::try_sleep;
 use crate::utils::GenerationWitness;
 use crate::utils::Instant;
@@ -49,7 +49,6 @@ mod capacity;
 mod lane;
 mod reassembly;
 mod reassembly_clock;
-mod spawn;
 mod ticket;
 
 use self::barrier::lane_waits_for_reassembly;
@@ -61,7 +60,6 @@ pub(crate) use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
 pub(super) use self::reassembly_clock::ReassemblyClock;
-use self::spawn::spawn_actor;
 use self::ticket::InboundCommand;
 use self::ticket::InboundSender;
 use self::ticket::InboundTicket;
@@ -206,7 +204,7 @@ impl InboundMailbox {
             reassembly_clock,
             Arc::clone(&cleanup_passes),
         );
-        let actor_available = spawn_actor(actor);
+        let actor_available = spawn_detached(Box::pin(actor.run())).is_ok();
         Self {
             sender: Arc::new(Mutex::new(InboundSender::new(sender))),
             capacity,
@@ -801,57 +799,6 @@ async fn process_event(
     }
 }
 
-/// Deliver a locally sourced payload: dispatch, then the application inbox, exactly as for a
-/// verified frame from a connection, but with no connection to gate on and never waiting.
-///
-/// Room for application data is reserved before the transaction is admitted, so a payload this
-/// pass cannot hand over (no room, or no application reading) is left unadmitted for a later
-/// pass instead of being admitted, handled and lost to the replay window. A payload carrying
-/// application data is queued with a consumption signal, so its stored copy is retired only once
-/// the application takes it (#913 R10 H3).
-pub(super) async fn deliver_local(
-    pipeline: &LogicalInbound,
-    payload: &MessagePayload,
-) -> Result<LocalDelivered> {
-    let message = payload.transaction.data::<crate::message::Message>()?;
-    let lane = InboundLane::from_kind(crate::message::MessageKind::from_message(&message));
-    let application = pipeline.application_message(payload, message.clone());
-    let room = match &application {
-        Some(application) => match pipeline.reserve_room(application) {
-            Some(room) => Some(room),
-            None => return Ok(LocalDelivered::Deferred),
-        },
-        None => None,
-    };
-    pipeline.observe_for_test(payload);
-    // A local payload crossed no connection, so no neighbour can have its admission delegated.
-    pipeline
-        .admit_final_transaction(payload, &message, lane, EdgeRelation::Remote)
-        .await?;
-    pipeline.handle_payload(payload, Some(message)).await?;
-    let (Some(room), Some(application)) = (room, application) else {
-        return Ok(LocalDelivered::Handled);
-    };
-    let (consumed, taken) = futures::channel::oneshot::channel();
-    if room.fill(application, Some(consumed)) {
-        Ok(LocalDelivered::Queued(taken))
-    } else {
-        Ok(LocalDelivered::Deferred)
-    }
-}
-
-/// What [`deliver_local`] did with a payload.
-#[derive(Debug)]
-pub(crate) enum LocalDelivered {
-    /// Admitted and handled, with no application data to hand over.
-    Handled,
-    /// Admitted, handled, and its application data queued: the receiver resolves once the
-    /// application takes it, and is cancelled if the inbox discards it first.
-    Queued(futures::channel::oneshot::Receiver<()>),
-    /// No application inbox had room, or none reads: nothing was admitted or handled.
-    Deferred,
-}
-
 /// Dispatch `payload`, then hand its application data, if any, to the application inbox,
 /// queued or, when full, dropped and counted. Never waits on the application (#913 R10).
 async fn process_logical_message(
@@ -862,7 +809,7 @@ async fn process_logical_message(
     let message = pipeline.handle_payload(payload, prepared_message).await?;
     if let Some(application) = pipeline.application_message(payload, message) {
         let tx_id = application.tx_id;
-        if pipeline.deliver(application) == Delivered::Dropped {
+        if pipeline.transport.application().outlet.deliver(application) == Delivered::Dropped {
             tracing::debug!(%tx_id, "application inbox full: live message dropped");
         }
     }

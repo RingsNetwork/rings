@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::inbound;
+use super::InboundLane;
 use super::LocalDelivery;
 use super::LogicalInbound;
 use crate::dht::Did;
@@ -15,8 +15,6 @@ use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::OriginQuotaCharge;
 use crate::swarm::application::ApplicationMessage;
-use crate::swarm::application::Delivered;
-use crate::swarm::application::InboxRoom;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
 use crate::swarm::observer::LookupOutcome;
@@ -33,16 +31,66 @@ impl LocalDelivery {
         }
     }
 
-    /// Deliver one payload.
+    /// Deliver one locally sourced payload: dispatch, then the application inbox, exactly as for
+    /// a verified frame from a connection, but with no connection to gate on and never waiting.
+    ///
+    /// Room for application data is reserved before the transaction is admitted, so a payload
+    /// this pass cannot hand over (no room, or no application reading) is left unadmitted for a
+    /// later pass instead of being admitted, handled and lost to the replay window. A payload
+    /// carrying application data is queued with a consumption signal, so its stored copy is
+    /// retired only once the application takes it (#913 R10 H3).
     ///
     /// Pre: `payload.transaction.destination` is this node and the payload was verified by the
     /// caller (the inbox witness verifies it as of its hold instant).
     pub(crate) async fn deliver(
         &self,
         payload: &MessagePayload,
-    ) -> crate::error::Result<inbound::LocalDelivered> {
-        inbound::deliver_local(&self.pipeline, payload).await
+    ) -> crate::error::Result<LocalDelivered> {
+        let pipeline = &self.pipeline;
+        let message = payload.transaction.data::<Message>()?;
+        let lane = InboundLane::from_kind(MessageKind::from_message(&message));
+        let application = pipeline.application_message(payload, message.clone());
+        let room = match &application {
+            Some(application) => {
+                let outlet = &pipeline.transport.application().outlet;
+                match outlet.try_reserve(application) {
+                    Some(room) => Some(room),
+                    None => return Ok(LocalDelivered::Deferred),
+                }
+            }
+            None => None,
+        };
+        pipeline.observe_for_test(payload);
+        // A local payload crossed no connection, so no neighbour can have its admission
+        // delegated.
+        pipeline
+            .admit_final_transaction(payload, &message, lane, EdgeRelation::Remote)
+            .await?;
+        pipeline.handle_payload(payload, Some(message)).await?;
+        let (Some(room), Some(application)) = (room, application) else {
+            return Ok(LocalDelivered::Handled);
+        };
+        let (consumed, taken) = futures::channel::oneshot::channel();
+        if room.fill(application, consumed) {
+            Ok(LocalDelivered::Queued(taken))
+        } else {
+            Ok(LocalDelivered::Deferred)
+        }
     }
+}
+
+/// What [`LocalDelivery::deliver`] did with a payload.
+#[derive(Debug)]
+pub(crate) enum LocalDelivered {
+    /// Admitted and handled, with no application data to hand over.
+    Handled,
+    /// Admitted, handled, and its application data queued: the receiver resolves once the
+    /// application takes it, and is cancelled if the inbox discards it first.
+    Queued(futures::channel::oneshot::Receiver<()>),
+    /// Its application data reached no application: the inbox had no room or no reader (then
+    /// nothing was admitted or handled), or it was released after the reservation (then the
+    /// payload was admitted and handled). Either way its stored copy stays.
+    Deferred,
 }
 
 /// Relate the connection that delivered `payload` to its origin account.
@@ -222,17 +270,6 @@ impl LogicalInbound {
     /// Outside test builds no lane is held.
     #[cfg(not(test))]
     pub(super) async fn pass_lane_for_test(&self, _lane: crate::swarm::callback::InboundLane) {}
-
-    /// Room for `message` in the application inbox, if it has room now. Never waits.
-    pub(super) fn reserve_room(&self, message: &ApplicationMessage) -> Option<InboxRoom> {
-        self.transport.application().outlet.try_reserve(message)
-    }
-
-    /// Hand `message` to the application inbox, queued or, when full, dropped and counted;
-    /// never waits (#913 R10).
-    pub(super) fn deliver(&self, message: ApplicationMessage) -> Delivered {
-        self.transport.application().outlet.deliver(message)
-    }
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -307,7 +344,7 @@ mod tests {
 
         assert!(matches!(
             delivery.deliver(&payload).await.expect("first delivery"),
-            inbound::LocalDelivered::Queued(_)
+            LocalDelivered::Queued(_)
         ));
         assert!(matches!(
             delivery.deliver(&payload).await,
@@ -345,12 +382,12 @@ mod tests {
 
         assert!(matches!(
             delivery.deliver(&first).await.expect("deferred"),
-            inbound::LocalDelivered::Deferred
+            LocalDelivered::Deferred
         ));
         assert!(inbox.try_next().is_some());
         assert!(matches!(
             delivery.deliver(&first).await.expect("delivered"),
-            inbound::LocalDelivered::Queued(_)
+            LocalDelivered::Queued(_)
         ));
         assert!(matches!(
             delivery.deliver(&second).await,

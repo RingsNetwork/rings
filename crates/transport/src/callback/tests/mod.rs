@@ -61,6 +61,45 @@ fn admit_window(
         .collect()
 }
 
+/// The credit `lane`'s pump at `callback` would send now, taken from its outbox; `None` when
+/// none is due.
+#[cfg(any(feature = "dummy", feature = "native-webrtc"))]
+fn take_due_credit(callback: &InnerTransportCallback, lane: ChannelLane) -> Option<u64> {
+    use futures::FutureExt;
+
+    use crate::core::credit::credit_index;
+
+    callback
+        .link_credit()
+        .next_credit(credit_index(lane))
+        .now_or_never()
+        .flatten()
+}
+
+/// Reserve a full [`LANE_CREDIT_WINDOW`] of send credit on `lane` at `callback`, holding every
+/// reservation.
+///
+/// Pre: `lane` holds a whole window of unreserved credit and the link is open. Post: the next
+/// reservation on `lane` waits until one of the returned reservations drops or credit arrives.
+#[cfg(any(feature = "dummy", feature = "native-webrtc"))]
+fn reserve_window(
+    callback: &InnerTransportCallback,
+    lane: ChannelLane,
+) -> Vec<crate::callback::link_credit::CreditReservation> {
+    use futures::FutureExt;
+
+    (0..LANE_CREDIT_WINDOW)
+        .map(|_| {
+            callback
+                .link_credit()
+                .reserve(lane)
+                .now_or_never()
+                .expect("a fresh lane has a window of credit")
+                .expect("a fresh lane is open")
+        })
+        .collect()
+}
+
 #[cfg(not(target_family = "wasm"))]
 type AdmittedPayloads = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
@@ -84,12 +123,12 @@ impl TransportCallback for RecordingCallback {
         &self,
         message: AdmittedInboundMessage<'_>,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let (cid, payload, capacity) = message.into_parts();
+        let (cid, payload, credit) = message.into_parts();
         self.admitted
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((cid.to_owned(), payload.to_vec()));
-        drop((payload, capacity));
+        drop((payload, credit));
         Ok(())
     }
 }

@@ -1,4 +1,3 @@
-use futures::StreamExt;
 use rings_transport::callback::AdmittedInboundFrame;
 use rings_transport::callback::InboundFrameAdmission;
 use rings_transport::callback::InnerTransportCallback;
@@ -70,29 +69,19 @@ async fn wait_for_raw_capacity_release(
 
 #[tokio::test]
 async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let payload = local_wire(
-        Message::custom(b"transport-capacity-handoff")?,
-        &session,
-        transport.dht.did,
-    )?;
+    let transport = default_transport()?;
+    let peer = unbound_peer(&transport, &SecretKey::random())?;
+    let payload = peer.custom_message_wire(&transport, b"transport-capacity-handoff")?;
     let raw = bytes::Bytes::from(
         rings_codec::serialize(&TransportMessage::Custom(payload))
             .map_err(|error| Error::InvalidMessage(error.to_string()))?,
     );
-    let lane_hold = transport
-        .inbound_tap_for_test()
-        .hold_lane(InboundLane::Application);
-    let mut tap = transport.inbound_tap_for_test().subscribe();
-    let core_callback = Arc::new(SwarmTransportCallback::new(Arc::clone(&transport)));
+    let (application, lane_hold) =
+        ApplicationRecorder::attach_holding_application_lane(&transport)?;
+    let core_callback = Arc::clone(&peer.callback);
     let admission_blocker = core_callback.hold_application_admission_for_test()?;
     let transport_callback = Arc::new(InnerTransportCallback::new(
-        &peer.to_string(),
+        &peer.peer.to_string(),
         Box::new(SharedCoreCallback(Arc::clone(&core_callback))),
         Notifier::default(),
         NodeReceiveLoad::new(),
@@ -114,15 +103,13 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
         wait_for_raw_capacity_release(&core_callback, &transport_callback, &raw, &mut window)
             .await?;
     assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
-    assert!(tap.try_recv().is_err());
+    assert_eq!(application.observed(), 0);
     drop((released, window));
 
     // Admitted, the frame enters the logical stage and waits at its held lane, still holding
     // its core permit: only the core permit outlives the handoff.
     drop(admission_blocker);
-    tap.next()
-        .await
-        .ok_or_else(|| Error::InvalidMessage("inbound tap closed".to_string()))?;
+    application.next_tapped().await?;
     assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
     drop(lane_hold);
     dispatch

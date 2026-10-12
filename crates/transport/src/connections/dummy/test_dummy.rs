@@ -109,6 +109,40 @@ impl TransportCallback for InvalidFrameCallback {
     }
 }
 
+/// A receiver that ignores what it is handed, the connected state of a sender's connection to
+/// it, and one encoded custom frame to send.
+struct ConnectedReceiver {
+    /// The receiving connection.
+    remote: Arc<DummyConnection>,
+    /// The sending connection's state, connected.
+    connection_state: Arc<Mutex<DummyConnectionState>>,
+    /// One encoded one-byte custom frame.
+    data: Bytes,
+}
+
+impl ConnectedReceiver {
+    /// The fixture: a fresh [`NoopCallback`] receiver on its own node load.
+    fn new() -> Self {
+        let callback = InnerTransportCallback::new(
+            "remote-peer",
+            Box::new(NoopCallback),
+            Notifier::default(),
+            NodeReceiveLoad::new(),
+        );
+        let data = rings_codec::serialize(&TransportMessage::Custom(Bytes::from_static(&[1])))
+            .map(Bytes::from)
+            .expect("dummy transport frame must serialize");
+        Self {
+            remote: Arc::new(DummyConnection::new(callback)),
+            connection_state: Arc::new(Mutex::new(DummyConnectionState {
+                webrtc: WebrtcConnectionState::Connected,
+                data_channel_open_override: None,
+            })),
+            data,
+        }
+    }
+}
+
 #[test]
 fn test_snapshot_generation_witnesses_transient_queue_activity() {
     let mut state = ControlledDeliveryState::new();
@@ -230,20 +264,11 @@ fn test_close_waits_for_claimed_dummy_dispatch_commit() {
 #[tokio::test]
 async fn test_queued_dummy_message_holds_its_place_in_the_receiver_window() {
     controlled::enable(true);
-    let callback = InnerTransportCallback::new(
-        "remote-peer",
-        Box::new(NoopCallback),
-        Notifier::default(),
-        NodeReceiveLoad::new(),
-    );
-    let remote = Arc::new(DummyConnection::new(callback));
-    let connection_state = Arc::new(Mutex::new(DummyConnectionState {
-        webrtc: WebrtcConnectionState::Connected,
-        data_channel_open_override: None,
-    }));
-    let data = rings_codec::serialize(&TransportMessage::Custom(Bytes::from_static(&[1])))
-        .map(Bytes::from)
-        .expect("dummy transport frame must serialize");
+    let ConnectedReceiver {
+        remote,
+        connection_state,
+        data,
+    } = ConnectedReceiver::new();
 
     let _delivery = complete_irrevocable_send(
         &connection_state,
@@ -267,20 +292,11 @@ async fn test_queued_dummy_message_holds_its_place_in_the_receiver_window() {
 async fn test_receiver_credit_refusal_does_not_fail_irrevocable_dummy_send() {
     controlled::enable(true);
     controlled::reset_sent_count();
-    let callback = InnerTransportCallback::new(
-        "remote-peer",
-        Box::new(NoopCallback),
-        Notifier::default(),
-        NodeReceiveLoad::new(),
-    );
-    let remote = Arc::new(DummyConnection::new(callback));
-    let connection_state = Arc::new(Mutex::new(DummyConnectionState {
-        webrtc: WebrtcConnectionState::Connected,
-        data_channel_open_override: None,
-    }));
-    let data = rings_codec::serialize(&TransportMessage::Custom(Bytes::from_static(&[1])))
-        .map(Bytes::from)
-        .expect("dummy transport frame must serialize");
+    let ConnectedReceiver {
+        remote,
+        connection_state,
+        data,
+    } = ConnectedReceiver::new();
     let held = (0..LANE_CREDIT_WINDOW)
         .map(|_| {
             match remote

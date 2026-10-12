@@ -218,12 +218,6 @@ impl Egress<'_> {
                 .map(|()| SendCompletionOutcome::Succeeded),
         }
     }
-
-    /// Whether this sender returns once a payload is queued, before its first frame leaves: no
-    /// outcome after the queue can reach it.
-    pub(crate) fn returns_once_queued(&self) -> bool {
-        self.discipline != Discipline::Application
-    }
 }
 
 impl SwarmTransport {

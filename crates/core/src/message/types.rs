@@ -514,6 +514,9 @@ pub enum MessageCategory {
     Application,
 }
 
+const _: () =
+    assert!(MessageCategory::DhtControl.channel_lane().index() == ChannelLane::PRIORITY.index());
+
 impl MessageCategory {
     /// Number of disjoint traffic categories used to size lane tables.
     pub(crate) const COUNT: usize = 4;
@@ -526,13 +529,10 @@ impl MessageCategory {
     /// whatever the other categories' channels do. With at most `OUTBOUND_LANE_WINDOW` of them
     /// in flight, fewer than the replay window, a category stream never arrives reordered beyond
     /// it.
+    /// The lane is the category's [`Self::index`], so DHT control, index 0, rides
+    /// [`ChannelLane::PRIORITY`].
     pub(crate) const fn channel_lane(self) -> ChannelLane {
-        match self {
-            Self::DhtControl => ChannelLane::PRIORITY,
-            Self::Storage => ChannelLane::new(1),
-            Self::E2e => ChannelLane::new(2),
-            Self::Application => ChannelLane::new(3),
-        }
+        ChannelLane::new(self.index() as u8)
     }
 
     /// Stable local lane index shared by scheduling and quota tables.

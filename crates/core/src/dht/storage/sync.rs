@@ -124,11 +124,11 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         let (relay, data): (Vec<_>, Vec<_>) = all_items
             .into_iter()
             .partition(|(_, entry)| entry.kind.is_relay_inbox());
-        let mut actions = vec![self.hand_off_to(new_successor, self.beyond(new_successor, relay))?];
+        let mut actions = vec![self.hand_off_beyond(new_successor, relay)?];
         actions.push(if self.storage_virtual_nodes_enabled()? {
             self.copy_entries_to_observed_virtual_storage_owners(data)?
         } else {
-            self.hand_off_to(new_successor, self.beyond(new_successor, data))?
+            self.hand_off_beyond(new_successor, data)?
         });
         Ok(actions.into())
     }
@@ -158,21 +158,8 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
 }
 
 impl PeerRing {
-    /// The items of `items` placed beyond `(self, new_successor]`: what a hand-off to
-    /// `new_successor` offers.
-    fn beyond(
-        &self,
-        new_successor: Did,
-        items: Vec<(StorageKey, Entry)>,
-    ) -> Vec<(StorageKey, Entry)> {
-        items
-            .into_iter()
-            .filter(|(key, _)| self.placed_beyond(key.placement(), new_successor))
-            .collect()
-    }
-
-    /// Offer `items`, each placed beyond `(self, new_successor]` ([`Self::beyond`]), to
-    /// `new_successor` as an ownership hand-off.
+    /// Offer the items of `items` placed beyond `(self, new_successor]` to `new_successor` as
+    /// an ownership hand-off.
     ///
     /// Pre: new_successor is the current successor head, whichever input
     /// moved it. The storage repair pass runs this, so a delivery deferred
@@ -186,13 +173,14 @@ impl PeerRing {
     /// cleanup. acknowledge_synced_entries is the only value-dependent local
     /// cleanup transition and does not define storage convergence; retention
     /// expiry retires values independently of their content.
-    fn hand_off_to(
+    fn hand_off_beyond(
         &self,
         new_successor: Did,
         items: Vec<(StorageKey, Entry)>,
     ) -> Result<PeerRingAction> {
         let data = items
             .into_iter()
+            .filter(|(key, _)| self.placed_beyond(key.placement(), new_successor))
             .map(|(key, entry)| PlacedEntry::new(key.placement(), entry))
             .collect::<Vec<_>>();
 

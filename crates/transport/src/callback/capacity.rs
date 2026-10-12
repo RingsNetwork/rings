@@ -2,12 +2,9 @@
 //! admission is held until the protocol callback takes the frame over.
 //!
 //! There is no node-wide frame budget to refuse an honest frame against: each connection holds
-//! at most [`INBOUND_PEER_FRAME_CAPACITY`] frames of at most `MAX_DATA_CHANNEL_MESSAGE_SIZE`
-//! bytes (4 MiB), by the credit law of [`crate::core::credit`]. Across connections the bound is
-//! soft: above [`NODE_RECEIVE_SOFT_LIMIT_BYTES`](crate::callback::NODE_RECEIVE_SOFT_LIMIT_BYTES)
-//! no lane advertises new credit, so a node exceeds that limit by at most the credit already
-//! advertised; at the protocol's connection cap (core's connection admission:
-//! `2 × (160 + successors + 1)`, 328 by default) that is about 1.3 GiB in the worst case (#934).
+//! at most [`INBOUND_PEER_FRAME_CAPACITY`] frames, by the credit laws of [`crate::core::credit`],
+//! and across connections the bound is the soft bound of
+//! [`NodeReceiveLoad`](crate::callback::NodeReceiveLoad).
 
 #[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::atomic::AtomicU8;
@@ -23,7 +20,8 @@ use crate::core::pool::ChannelLane;
 use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 
 /// Raw frames one peer may have admitted at this end and not yet taken over by the protocol
-/// callback: one credit window per lane.
+/// callback: one credit window per lane, 64 frames of at most `MAX_DATA_CHANNEL_MESSAGE_SIZE`
+/// bytes each, 4 MiB in all.
 pub const INBOUND_PEER_FRAME_CAPACITY: usize =
     DATA_CHANNEL_POOL_SIZE as usize * LANE_CREDIT_WINDOW as usize;
 

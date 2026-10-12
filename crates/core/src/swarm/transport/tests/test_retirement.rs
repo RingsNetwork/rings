@@ -7,80 +7,9 @@ use crate::dht::FingerFixRequest;
 use crate::swarm::application::SwarmEvent;
 
 #[cfg(feature = "dummy")]
-#[derive(Default)]
-struct BlockingDisconnectMeasure {
-    inner: RecordingMeasure,
-    disconnect_started: TestLatch,
-    release_disconnect: TestLatch,
-}
-
-#[cfg(feature = "dummy")]
-impl BlockingDisconnectMeasure {
-    async fn wait_for_disconnect_started(&self) {
-        self.disconnect_started.wait().await;
-    }
-
-    fn release_disconnect(&self) {
-        self.release_disconnect.set();
-    }
-}
-
-#[cfg(feature = "dummy")]
-#[async_trait]
-impl Measure for BlockingDisconnectMeasure {
-    /// Apply one explicitly attributed observation in this test double.
-    async fn record(
-        &self,
-        did: crate::dht::Did,
-        authentication: crate::measure::Authentication,
-        event: MeasurementEvent,
-    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
-        if !authentication.permits(event) {
-            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
-        }
-        self.wait_for_event(event).await;
-        self.inner.record(did, authentication, event).await
-    }
-
-    /// Gate once, then delegate the complete batch without splitting its transition.
-    async fn record_batch(
-        &self,
-        did: crate::dht::Did,
-        authentication: crate::measure::Authentication,
-        batch: crate::measure::MeasurementBatch,
-    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
-        if !authentication.permits(batch.event()) {
-            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
-        }
-        self.wait_for_event(batch.event()).await;
-        self.inner.record_batch(did, authentication, batch).await
-    }
-}
-#[cfg(feature = "dummy")]
-impl BlockingDisconnectMeasure {
-    /// Pause the target lifecycle event before publishing any observation.
-    async fn wait_for_event(&self, event: MeasurementEvent) {
-        if event == MeasurementEvent::Disconnected {
-            self.disconnect_started.set();
-            self.release_disconnect.wait().await;
-        }
-    }
-}
-
-#[cfg(feature = "dummy")]
-#[async_trait]
-impl BehaviourJudgement for BlockingDisconnectMeasure {
-    async fn quality(&self, did: Did) -> PeerQuality {
-        self.inner.quality(did).await
-    }
-}
-
-#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_retirement_serializes_with_liveness_generation_updates() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
@@ -150,7 +79,7 @@ async fn test_retirement_serializes_with_liveness_generation_updates() -> Result
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_retirement_clears_disconnect_epoch_for_departed_peer() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
@@ -167,7 +96,7 @@ async fn test_retirement_clears_disconnect_epoch_for_departed_peer() -> Result<(
 
 #[tokio::test]
 async fn test_retirement_shuts_down_outbound_scheduler_for_departed_peer() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
@@ -190,7 +119,7 @@ async fn test_retirement_shuts_down_outbound_scheduler_for_departed_peer() -> Re
 /// record, and its pending finger request so the operation is transaction-like.
 #[tokio::test]
 async fn test_failed_dht_retirement_preserves_active_peer_state() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
@@ -227,7 +156,7 @@ async fn test_failed_dht_retirement_preserves_active_peer_state() -> Result<()> 
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_stale_active_evidence_cannot_retire_replacement_generation() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let peer = SecretKey::random().address().into();
     let old_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(old_attempt)?);
@@ -257,7 +186,7 @@ async fn test_stale_active_evidence_cannot_retire_replacement_generation() -> Re
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_stale_inbound_observation_cannot_refresh_replacement_liveness() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let peer = SecretKey::random().address().into();
     let old_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(old_attempt)?);
@@ -287,9 +216,7 @@ async fn test_stale_inbound_observation_cannot_refresh_replacement_liveness() ->
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_stale_pending_close_cannot_remove_replacement_transport() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let old_attempt = transport.reserve_pending_connection(peer).await?;
     let old_callback = SwarmTransportCallback::new(Arc::clone(&transport))
@@ -325,7 +252,7 @@ async fn test_stale_pending_close_cannot_remove_replacement_transport() -> Resul
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_stale_terminal_callback_cannot_retire_replacement() -> Result<()> {
-    let measure = Arc::new(BlockingDisconnectMeasure::default());
+    let measure = Arc::new(BlockingEventMeasure::gating(MeasurementEvent::Disconnected));
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let recorder = ApplicationRecorder::attach(&transport)?;
     let peer = SecretKey::random().address().into();
@@ -342,7 +269,7 @@ async fn test_stale_terminal_callback_cannot_retire_replacement() -> Result<()> 
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
 
-    measure.wait_for_disconnect_started().await;
+    measure.wait_for_started().await;
     assert_eq!(
         transport.retire_active_connection_for_test(old_attempt, |_| {
             transport.dht.remove(peer)?;
@@ -354,7 +281,7 @@ async fn test_stale_terminal_callback_cannot_retire_replacement() -> Result<()> 
     assert!(transport.activate_connection_for_test(replacement)?);
     assert_eq!(recorder.events(), vec![SwarmEvent::PeerAdmitted { peer }]);
     transport.dht.admit_connected(peer, None)?;
-    measure.release_disconnect();
+    measure.release();
 
     terminal
         .await
@@ -373,7 +300,7 @@ async fn test_stale_terminal_callback_cannot_retire_replacement() -> Result<()> 
 #[tokio::test]
 async fn test_pending_replacement_does_not_suppress_retired_generation_announcement() -> Result<()>
 {
-    let measure = Arc::new(BlockingDisconnectMeasure::default());
+    let measure = Arc::new(BlockingEventMeasure::gating(MeasurementEvent::Disconnected));
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let recorder = ApplicationRecorder::attach(&transport)?;
     let peer = SecretKey::random().address().into();
@@ -391,10 +318,10 @@ async fn test_pending_replacement_does_not_suppress_retired_generation_announcem
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
 
-    measure.wait_for_disconnect_started().await;
+    measure.wait_for_started().await;
     assert!(transport.disconnect_attempt(old_attempt).await?.is_some());
     let replacement = transport.reserve_pending_connection(peer).await?;
-    measure.release_disconnect();
+    measure.release();
 
     terminal
         .await

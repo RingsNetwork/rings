@@ -6,8 +6,10 @@
 //!                Pending ──inbox discards it────▶ Discarded (the element stays stored)
 //! ```
 //!
-//! Law (at least once): a stored element is retired only after the application took its
-//! message from the inbox, so a pass, a restart or a released inbox before that never loses it.
+//! Law (at least once within a run): a stored element is retired only after the application
+//! took its message from the inbox, so a later pass or a released inbox before that never
+//! loses it; a restart in between still can, as the replay window refuses the redelivery
+//! (#936).
 //! The table holds only elements still stored: each pass keeps the entries of the elements it
 //! saw, so it is bounded by the inbox.
 

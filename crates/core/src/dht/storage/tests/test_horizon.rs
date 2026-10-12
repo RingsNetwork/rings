@@ -93,43 +93,6 @@ fn drained_carrier(did: Did, now_ms: u128, expires_at_ms: u128) -> Entry {
     entry
 }
 
-/// A carrier past its retention bound, held live only by an unstable remove,
-/// answers a lookup as a miss, and is kept; a drained carrier inside its bound still answers as
-/// found, so its removes reach the reader's cache.
-#[tokio::test]
-async fn test_carrier_past_its_bound_answers_lookups_as_absent() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let now_ms = get_epoch_ms();
-    let expired_key = Did::from(100u32);
-    let live_key = Did::from(200u32);
-    node.storage
-        .put(
-            &expired_key.to_string(),
-            &drained_carrier(expired_key, now_ms, now_ms - 1),
-        )
-        .await?;
-    node.storage
-        .put(
-            &live_key.to_string(),
-            &drained_carrier(live_key, now_ms, now_ms + 60_000),
-        )
-        .await?;
-
-    assert_eq!(
-        node.entry_lookup(expired_key, 1).await?,
-        PeerRingAction::MultiActions(vec![PeerRingAction::EntryMisses(vec![PlacementMiss::new(
-            expired_key,
-            node.did
-        )])])
-    );
-    assert!(node.storage.get(&expired_key.to_string()).await?.is_some());
-    assert!(matches!(
-        node.entry_lookup(live_key, 1).await?,
-        PeerRingAction::SomeEntry(evidence) if evidence.entry.data.is_empty()
-    ));
-    Ok(())
-}
-
 /// A read that retires part of a stored carrier writes the projection back, so
 /// retired payload bytes stop occupying storage while the carrier's remove side holds it live.
 #[tokio::test]
@@ -183,9 +146,11 @@ async fn test_cache_serves_a_carrier_past_its_bound_as_absent() -> Result<()> {
     Ok(())
 }
 
-/// When the first placement holds a carrier past its bound, the
-/// lookup does not stop there but asks the next placement, which answers with its data, and the
-/// first placement is reported missed for read-repair.
+/// When the first placement holds a carrier past its bound, held live only by an unstable
+/// remove, the lookup does not stop there but asks the next placement, which answers with its
+/// data; the first placement is reported missed for read-repair, and its carrier is kept. A
+/// drained carrier inside its bound still answers as found, so its removes reach the reader's
+/// cache.
 #[tokio::test]
 async fn test_lookup_moves_past_an_expired_placement_to_the_next() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
@@ -216,5 +181,18 @@ async fn test_lookup_moves_past_an_expired_placement_to_the_next() -> Result<()>
     };
     assert_eq!(evidence.entry.data, vec![Bytes::from("descriptor")]);
     assert_eq!(evidence.misses, vec![PlacementMiss::new(expired, node.did)]);
+    assert!(node.storage.get(&expired.to_string()).await?.is_some());
+
+    let in_bound = Did::from(200u32);
+    node.storage
+        .put(
+            &in_bound.to_string(),
+            &drained_carrier(in_bound, now_ms, now_ms + 60_000),
+        )
+        .await?;
+    assert!(matches!(
+        node.entry_lookup(in_bound, 1).await?,
+        PeerRingAction::SomeEntry(evidence) if evidence.entry.data.is_empty()
+    ));
     Ok(())
 }

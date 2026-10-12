@@ -17,12 +17,12 @@ use rings_core::measure::EvidencePage;
 use rings_core::measure::PeerMeasurement;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::MemStorage;
-use rings_core::swarm::application::ApplicationInbox;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::Backend;
+use crate::extension::BackendObserver;
 use crate::measure::EvidenceCollectorIdentity;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
@@ -298,20 +298,42 @@ impl Provider {
     /// Call once, after registering protocols: the inbox is claimed once, so a second call
     /// fails with `ApplicationInboxClaimed`.
     pub fn set_backend(&self) -> Result<()> {
-        let backend = Backend::new(Arc::new(self.clone()));
-        let inbox = self.application_inbox()?;
-        rings_runtime::spawn_detached(backend.serve(inbox, StopToken::never())).map_err(|_| {
+        let service = self.application_service(None, StopToken::never())?;
+        rings_runtime::spawn_detached(service).map_err(|_| {
             Error::ExtensionError("no runtime to serve the application inbox".to_owned())
         })
     }
 
-    /// Claim the swarm's application inbox, once (see
-    /// [`Swarm::application_inbox`](rings_core::swarm::Swarm::application_inbox)).
-    pub(crate) fn application_inbox(&self) -> Result<ApplicationInbox> {
-        self.processor
+    /// Claim the swarm's application inbox now and return the future that serves it with the
+    /// extension [`Backend`] over this provider's protocol registry, handing peer facts and
+    /// unrouted E2E messages to `observer`, until the swarm is gone or `stop` is requested.
+    ///
+    /// ```text
+    ///   application_service(o, s) = claim inbox  ;  pure (serve_o(inbox, s))
+    ///   serve_o                    = Backend::new(self).observed_by(o).serve
+    /// ```
+    ///
+    /// The claim is eager, so data that arrives before the caller spawns the future waits in
+    /// the inbox instead of being discarded unclaimed; the caller owns only the spawner and the
+    /// stop token. The inbox is claimed once (see
+    /// [`Swarm::application_inbox`](rings_core::swarm::Swarm::application_inbox)), so a second
+    /// call fails.
+    pub fn application_service(
+        &self,
+        observer: Option<Arc<dyn BackendObserver>>,
+        stop: StopToken,
+    ) -> Result<impl Future<Output = ()> + 'static> {
+        let inbox = self
+            .processor
             .swarm
             .application_inbox()
-            .map_err(Error::InternalError)
+            .map_err(Error::InternalError)?;
+        let backend = Backend::new(Arc::new(self.clone()));
+        let backend = match observer {
+            Some(observer) => backend.observed_by(observer),
+            None => backend,
+        };
+        Ok(backend.serve(inbox, stop))
     }
 
     /// Request local rpc interface

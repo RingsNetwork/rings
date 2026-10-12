@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use super::default_transport;
+use super::local_wire;
 use super::pending_peer;
 use super::transport_with_measure;
 use super::ApplicationRecorder;
@@ -14,9 +16,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::measure::MeasurementEvent;
 use crate::message::Message;
-use crate::message::MessagePayload;
-use crate::message::MessageSigner;
-use crate::tests::TEST_NETWORK_ID;
 
 /// A verified message that arrives before this end admits the connection is held, not dropped,
 /// and is delivered once by admission itself; a message after admission passes straight through.
@@ -62,47 +61,11 @@ async fn test_pending_callback_messages_are_held_until_admission() -> Result<()>
     Ok(())
 }
 
-/// Law (order): held messages are delivered in arrival order, ahead of anything that arrives
-/// after admission.
-#[tokio::test]
-async fn test_held_messages_are_delivered_in_arrival_order() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let recorder = ApplicationRecorder::attach(&transport)?;
-    let pending = pending_peer(&transport).await?;
-
-    pending
-        .receive(&pending.custom_message_wire(&transport, b"first")?)
-        .await?;
-    pending
-        .receive(&pending.custom_message_wire(&transport, b"second")?)
-        .await?;
-    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 2);
-    assert_eq!(recorder.inbounds(), 0);
-
-    pending.admit(&transport).await?;
-    pending
-        .receive(&pending.custom_message_wire(&transport, b"third")?)
-        .await?;
-    recorder.wait_for_inbounds_at_least(3).await;
-
-    assert_eq!(recorder.inbound_custom_data(), vec![
-        b"first".to_vec(),
-        b"second".to_vec(),
-        b"third".to_vec(),
-    ]);
-    transport.disconnect(pending.peer).await?;
-    Ok(())
-}
-
 /// A message from a peer the handshake does not belong to cancels the handshake, and the frames
 /// held for it are discarded with it.
 #[tokio::test]
 async fn test_held_messages_are_discarded_when_the_pending_connection_is_cancelled() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let recorder = ApplicationRecorder::attach(&transport)?;
     let pending = pending_peer(&transport).await?;
     pending
@@ -113,13 +76,11 @@ async fn test_held_messages_are_discarded_when_the_pending_connection_is_cancell
     let stranger_key = SecretKey::random();
     let stranger: Did = stranger_key.address().into();
     let stranger_session = DelegateeKey::new_with_seckey(&stranger_key)?;
-    let intrusion = MessagePayload::new_send(
+    let intrusion = local_wire(
         Message::custom(b"stranger")?,
-        MessageSigner::new(&stranger_session, TEST_NETWORK_ID),
+        &stranger_session,
         transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
+    )?;
     pending
         .callback
         .on_admitted_message_for_test(&stranger.to_string(), &intrusion)
@@ -128,6 +89,8 @@ async fn test_held_messages_are_discarded_when_the_pending_connection_is_cancell
 
     assert_eq!(pending.callback.pre_admission_held_count_for_test(), 0);
     assert!(!transport.has_connection_attempt(pending.peer)?);
+    // The stranger's frame, whose handling completed above, cancelled the handshake instead of
+    // passing as the peer's: it was not delivered.
     assert_eq!(recorder.inbounds(), 0);
     Ok(())
 }

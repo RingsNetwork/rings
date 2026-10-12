@@ -61,7 +61,10 @@ pub const NODE_RECEIVE_SOFT_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 ///
 /// Law (soft bound). Above the limit no lane but [`ChannelLane::PRIORITY`] advertises new
 /// credit, so the frames a node holds exceed the limit by at most the credit already advertised
-/// and the priority lane's window per connection; the hard bound remains the windows themselves.
+/// and the priority lane's window per connection; the hard bound remains the windows themselves,
+/// [`INBOUND_PEER_FRAME_CAPACITY`](crate::callback::INBOUND_PEER_FRAME_CAPACITY) per connection:
+/// at the protocol's connection cap (core's connection admission: `2 × (160 + successors + 1)`,
+/// 328 by default) about 1.3 GiB in the worst case (#934).
 /// Deferring narrows what senders may send next, never what they were granted, so no honest
 /// frame is refused; and the priority lane never waits for the node's load, so a peer's control
 /// traffic (and with it the liveness of every link) never depends on how much other peers make
@@ -147,6 +150,12 @@ impl Default for NodeReceiveLoad {
         Self::new()
     }
 }
+/// Queue `credit` in a lane's `outbox`: `outbox ⊔= credit` in `(ℕ, max)` lifted to `Option`,
+/// with `None` the bottom. Idempotent, commutative and associative, so credits queued faster
+/// than the pump sends them coalesce into their greatest.
+fn join_outbox(outbox: &mut Option<u64>, credit: u64) {
+    *outbox = Some(outbox.map_or(credit, |queued| queued.max(credit)));
+}
 
 /// One sender waiting for a lane's credit: its waker, under the identity of its wait, so the
 /// wait removes exactly its own entry when it ends.
@@ -230,7 +239,7 @@ impl LinkCredit {
             index: credit_index(lane),
             id: None,
         };
-        poll_fn(|context| wait.poll(context)).await
+        poll_fn(|context| self.poll_reserve(wait.index, &mut wait.id, context)).await
     }
 
     #[cfg(rings_transport_backend)]
@@ -356,8 +365,7 @@ impl LinkCredit {
                 let Some(limit) = state.receive[index].advertise(CreditWindow::PRODUCTION) else {
                     continue;
                 };
-                let pending = &mut state.outbox[index];
-                *pending = Some(pending.map_or(limit, |queued| queued.max(limit)));
+                join_outbox(&mut state.outbox[index], limit);
                 pumps.extend(state.pump[index].take());
             }
             pumps
@@ -396,8 +404,7 @@ impl LinkCredit {
         if state.closed {
             return false;
         }
-        let pending = &mut state.outbox[index];
-        *pending = Some(pending.map_or(credit, |queued| queued.max(credit)));
+        join_outbox(&mut state.outbox[index], credit);
         true
     }
 
@@ -453,14 +460,6 @@ struct CreditWait<'a> {
     index: CreditIndex,
     /// The wait's identity, once it has registered.
     id: Option<u64>,
-}
-
-#[cfg(rings_transport_backend)]
-impl CreditWait<'_> {
-    /// One attempt to reserve; see [`LinkCredit::poll_reserve`].
-    fn poll(&mut self, context: &mut std::task::Context<'_>) -> Poll<Result<CreditReservation>> {
-        self.link.poll_reserve(self.index, &mut self.id, context)
-    }
 }
 
 #[cfg(rings_transport_backend)]

@@ -1,5 +1,5 @@
 //! Delegation references between real swarms over the dummy transport's immediate delivery.
-//! Every wait is the arrival of a message at a node's callback.
+//! Every wait is the arrival of a message at a node's inbound tap.
 
 use crate::delegation::DelegationDigest;
 use crate::dht::Did;

@@ -463,29 +463,40 @@ impl TransferCapacity {
     }
 }
 
-/// The outbound capacity one transfer holds until it ends: a share of its peer's and of the
-/// node's, or none for a transfer its sender's own law bounds.
+/// The outbound capacity one transfer holds until it ends, released when it drops.
 pub(in crate::swarm::transport) struct TransferCapacityPermit {
-    _held: Option<(PeerCapacityPermit, GlobalCapacityPermit)>,
-    /// The sender-bounded transfer this permit stands for, instead of a share.
-    _bound: Option<SenderBoundedTransfer>,
+    _share: PermitShare,
+}
+
+/// What a [`TransferCapacityPermit`] holds.
+enum PermitShare {
+    /// A share of its peer's capacity and of the node's.
+    Held {
+        _peer: PeerCapacityPermit,
+        _global: GlobalCapacityPermit,
+    },
+    /// No shared capacity: a transfer its sender's own law bounds (see
+    /// `outbound::sender_bounded`).
+    BoundedBySender { _transfer: SenderBoundedTransfer },
 }
 
 impl TransferCapacityPermit {
     /// A permit holding the peer's and the node's shares.
     fn held(peer: PeerCapacityPermit, global: GlobalCapacityPermit) -> Self {
         Self {
-            _held: Some((peer, global)),
-            _bound: None,
+            _share: PermitShare::Held {
+                _peer: peer,
+                _global: global,
+            },
         }
     }
 
-    /// A permit holding no shared capacity, for a transfer its sender's own law bounds (see
-    /// `outbound::sender_bounded`).
+    /// A permit holding no shared capacity, for a transfer its sender's own law bounds.
     pub(in crate::swarm::transport) fn bounded_by_sender(transfer: SenderBoundedTransfer) -> Self {
         Self {
-            _held: None,
-            _bound: Some(transfer),
+            _share: PermitShare::BoundedBySender {
+                _transfer: transfer,
+            },
         }
     }
 }

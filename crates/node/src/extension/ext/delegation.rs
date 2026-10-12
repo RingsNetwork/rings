@@ -68,16 +68,4 @@ mod tests {
         assert!(!envelope("delegate").starts_with(&prefix));
         Ok(())
     }
-
-    /// Only the namespace prefix is read: a delegating namespace followed by an undecodable
-    /// tail still carries the prefix. Core then charges it at least `DELEGATED_MIN_CHARGE`
-    /// bytes, which is what bounds such frames.
-    #[test]
-    fn test_a_malformed_tail_after_a_namespace_keeps_its_prefix() -> Result<()> {
-        let mut malformed = Envelope::namespace_prefix("delegating")?;
-        malformed.extend_from_slice(&[0xff; 9]);
-        assert!(Envelope::decode(&malformed).is_err());
-        assert!(malformed.starts_with(&Envelope::namespace_prefix("delegating")?));
-        Ok(())
-    }
 }

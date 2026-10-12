@@ -35,6 +35,8 @@ use crate::message::MessageCategory;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::tests::assert_control_interleaves_transfer;
+use crate::tests::default::connect_nodes;
+use crate::tests::default::connected_nodes;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
 use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
 use crate::tests::default::dummy_hooks::PausedDispatchGuard;
@@ -44,7 +46,6 @@ use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_with_measure;
 use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_msgs;
-use crate::tests::default::wait_for_successor;
 use crate::tests::default::wait_until_result;
 use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
@@ -318,11 +319,7 @@ async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_de
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connect_nodes(node1, prepare_node(SecretKey::random()).await).await?;
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     dummy_controlled::reset_sent_count();
@@ -369,11 +366,7 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connect_nodes(node1, prepare_node(SecretKey::random()).await).await?;
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     dummy_controlled::reset_sent_count();
@@ -435,11 +428,7 @@ async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Resul
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connect_nodes(node1, prepare_node(SecretKey::random()).await).await?;
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     dummy_controlled::reset_sent_count();
@@ -550,11 +539,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_its_route_disappears(
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connect_nodes(node1, prepare_node(SecretKey::random()).await).await?;
 
     dummy_controlled::reset_sent_count();
     let dispatch = PausedDispatchGuard::new();
@@ -602,11 +587,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_transport_loses_readi
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connect_nodes(node1, prepare_node(SecretKey::random()).await).await?;
 
     dummy_controlled::reset_sent_count();
     let dispatch = PausedDispatchGuard::new();
@@ -657,11 +638,7 @@ async fn test_detached_storage_sync_missing_routable_transport_does_not_degrade_
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connect_nodes(node1, prepare_node(SecretKey::random()).await).await?;
 
     let peer = node2.did();
     let failed_before = measure.count(peer, MeasurementEvent::FailedToSend);
@@ -697,12 +674,7 @@ async fn test_detached_storage_sync_missing_routable_transport_does_not_degrade_
 
 #[tokio::test]
 async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery() -> Result<()> {
-    let node1 = prepare_node(SecretKey::random()).await;
-    let node2 = prepare_node(SecretKey::random()).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
+    let (node1, node2) = connected_nodes().await?;
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     let _paused_delivery = PausedDeliveryGuard::new();

@@ -19,9 +19,7 @@ async fn close(pending: &PendingPeer) -> Result<()> {
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_peer_facts_are_read_in_decision_order_across_generations() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let recorder = ApplicationRecorder::attach(&transport)?;
     let peer_key = SecretKey::random();
     let first = pending_peer_with_key(&transport, peer_key.clone()).await?;
@@ -49,9 +47,7 @@ async fn test_peer_facts_are_read_in_decision_order_across_generations() -> Resu
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_admission_retired_before_it_is_read_is_withdrawn() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let recorder = ApplicationRecorder::attach(&transport)?;
     let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
@@ -66,9 +62,7 @@ async fn test_admission_retired_before_it_is_read_is_withdrawn() -> Result<()> {
 
 #[tokio::test]
 async fn test_local_did_lifecycle_callbacks_are_ignored() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let local_cid = transport.dht.did.to_string();
 
@@ -92,9 +86,7 @@ async fn test_local_did_lifecycle_callbacks_are_ignored() -> Result<()> {
 
 #[tokio::test]
 async fn test_mismatched_pending_callback_cancels_attempt_without_admission() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
@@ -117,9 +109,7 @@ async fn test_mismatched_pending_callback_cancels_attempt_without_admission() ->
 
 #[tokio::test]
 async fn test_late_terminal_callback_cannot_remove_replacement_active_slot() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let old_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.cancel_pending_connection(old_attempt).await?);
@@ -140,7 +130,7 @@ async fn test_late_terminal_callback_cannot_remove_replacement_active_slot() -> 
 
 #[test]
 fn test_connection_offer_protocol_mode_includes_storage_redundancy() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let matching = ConnectNodeSend {
         sdp: String::new(),
         dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
@@ -157,7 +147,7 @@ fn test_connection_offer_protocol_mode_includes_storage_redundancy() -> Result<(
 
 #[test]
 fn test_connection_answer_protocol_mode_includes_storage_redundancy() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let matching = ConnectNodeReport {
         sdp: String::new(),
         dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
@@ -218,7 +208,7 @@ async fn test_dht_candidate_order_uses_peer_quality_without_dropping_candidates(
 
 #[tokio::test]
 async fn test_malformed_outbound_payload_is_rejected_before_connection_admission() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let peer = SecretKey::random().address().into();
     let mut payload = MessagePayload::new_send(
         Message::custom(b"malformed outbound payload")?,

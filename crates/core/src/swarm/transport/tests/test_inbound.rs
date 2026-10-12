@@ -1,19 +1,14 @@
 use std::time::Duration;
 
-use futures::channel::mpsc;
-use futures::StreamExt;
-
 use super::*;
-use crate::message::CustomMessage;
-use crate::message::MessageSigner;
-use crate::swarm::application::ApplicationData;
-use crate::swarm::application::ApplicationDelivery;
-use crate::swarm::application::ApplicationInbox;
-use crate::swarm::application::ApplicationMessage;
+use crate::dht::entry::EntryKind;
+use crate::dht::entry::PlacedEntry;
+use crate::dht::StorageSyncDestination;
+use crate::dht::StorageSyncPurpose;
+use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::callback::inbound_application_capacity_for_test;
 use crate::swarm::callback::inbound_peer_capacity_for_test;
-use crate::swarm::callback::InboundLane;
-use crate::tests::TEST_NETWORK_ID;
+use crate::tests::live_entry;
 
 mod test_admission_delegation;
 mod test_application_backpressure;
@@ -24,44 +19,38 @@ mod test_pre_admission;
 mod test_reassembly;
 mod test_storage_interleave;
 
-/// The body of the next custom message `inbox` yields, waiting for it. Peer facts, which share
-/// the inbox's one order with messages, are read past.
-async fn next_custom_data(inbox: &ApplicationInbox) -> Result<Vec<u8>> {
-    loop {
-        match inbox.next().await {
-            Some(ApplicationDelivery::Event(_)) => continue,
-            Some(ApplicationDelivery::Message(ApplicationMessage {
-                data: ApplicationData::Custom(CustomMessage(body)),
-                ..
-            })) => return Ok(body),
-            other => {
-                return Err(Error::InvalidMessage(format!(
-                    "expected a custom message, found {other:?}"
-                )))
-            }
-        }
-    }
-}
+/// Deliver `early` from `pending`'s peer before this end admits the handshake, where it is held
+/// unobserved, then admit the handshake on a data channel that opens while ICE still connects.
+/// Fails if the open waits on the delivery of the held frame.
+async fn admit_after_one_held_frame(
+    transport: &SwarmTransport,
+    pending: &PendingPeer,
+    recorder: &ApplicationRecorder,
+    early: &[u8],
+) -> Result<()> {
+    pending
+        .receive(&pending.custom_message_wire(transport, early)?)
+        .await?;
+    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 1);
+    assert_eq!(recorder.observed(), 0);
 
-/// The message of the next payload the inbound tap observed entering the logical stage,
-/// waiting for it.
-async fn next_tapped(tap: &mut mpsc::UnboundedReceiver<MessagePayload>) -> Result<Message> {
-    tap.next()
+    transport.force_peer_connection_state_without_callback(
+        pending.peer,
+        WebrtcConnectionState::Connecting,
+    )?;
+    transport.force_peer_data_channel_open_without_callback(pending.peer, Some(true))?;
+    let callback = Arc::clone(&pending.callback);
+    let cid = pending.peer.to_string();
+    let open = tokio::spawn(async move {
+        callback
+            .on_data_channel_open(&cid)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))
+    });
+    tokio::time::timeout(Duration::from_secs(1), open)
         .await
-        .ok_or_else(|| Error::InvalidMessage("inbound tap closed".to_string()))?
-        .transaction
-        .data()
-}
-
-/// The body of the next payload the inbound tap observed, which must be a custom message,
-/// waiting for it.
-async fn next_tapped_custom(tap: &mut mpsc::UnboundedReceiver<MessagePayload>) -> Result<Vec<u8>> {
-    match next_tapped(tap).await? {
-        Message::CustomMessage(CustomMessage(body)) => Ok(body),
-        other => Err(Error::InvalidMessage(format!(
-            "expected a custom message, found {other:?}"
-        ))),
-    }
+        .map_err(|_| Error::InvalidMessage("data-channel open waited on the held frame".into()))?
+        .map_err(|_| Error::InvalidMessage("data-channel-open task panicked".to_string()))?
 }
 
 /// The drain of pre-admission frames must not block the data-channel open, and an
@@ -69,68 +58,25 @@ async fn next_tapped_custom(tap: &mut mpsc::UnboundedReceiver<MessagePayload>) -
 /// the application once the lane is released.
 #[tokio::test]
 async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arrivals() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
+    let transport = default_transport()?;
     let application = ApplicationRecorder::attach(&transport)?;
-    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    let callback = Arc::new(
-        SwarmTransportCallback::new(Arc::clone(&transport))
-            .with_pending_connection_attempt(attempt),
+    let pending = pending_peer(&transport).await?;
+    let application_admission = pending.callback.hold_application_admission_for_test()?;
+    admit_after_one_held_frame(
+        &transport,
+        &pending,
+        &application,
+        b"early-drain-must-not-block-open",
+    )
+    .await?;
+
+    let late =
+        pending.custom_message_wire(&transport, b"late-admitted-arrival-queues-behind-drain")?;
+    let late_delivery = spawn_inbound_delivery(
+        Arc::clone(&pending.callback),
+        pending.peer.to_string(),
+        late,
     );
-    let early = MessagePayload::new_send(
-        Message::custom(b"early-drain-must-not-block-open")?,
-        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
-        transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
-    let late = MessagePayload::new_send(
-        Message::custom(b"late-admitted-arrival-queues-behind-drain")?,
-        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
-        transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
-    let cid = peer.to_string();
-
-    callback
-        .on_admitted_message_for_test(&cid, &early)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert_eq!(callback.pre_admission_held_count_for_test(), 1);
-    let application_admission = callback.hold_application_admission_for_test()?;
-
-    transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connecting)?;
-    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
-    let open_callback = Arc::clone(&callback);
-    let open_cid = cid.clone();
-    let open = tokio::spawn(async move {
-        open_callback
-            .on_data_channel_open(&open_cid)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
-    tokio::time::timeout(Duration::from_secs(1), open)
-        .await
-        .map_err(|_| Error::InvalidMessage("data-channel open waited on drain".to_string()))?
-        .map_err(|_| Error::InvalidMessage("data-channel-open task panicked".to_string()))??;
-
-    let late_callback = Arc::clone(&callback);
-    let late_cid = cid.clone();
-    let late_delivery = tokio::spawn(async move {
-        late_callback
-            .on_admitted_message_for_test(&late_cid, &late)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
     // The late arrival's completion is the actor's dispatch, which the held
     // lane defers: nothing reaches the application until the lane is released.
     assert_eq!(application.inbounds(), 0);
@@ -143,13 +89,13 @@ async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arriva
         })?
         .map_err(|_| Error::InvalidMessage("admitted-arrival task panicked".to_string()))??;
     application.wait_for_inbounds_at_least(2).await;
-    assert_eq!(callback.pre_admission_held_count_for_test(), 0);
+    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 0);
     assert_eq!(application.inbound_custom_data(), vec![
         b"early-drain-must-not-block-open".to_vec(),
         b"late-admitted-arrival-queues-behind-drain".to_vec(),
     ]);
 
-    transport.disconnect(peer).await?;
+    transport.disconnect(pending.peer).await?;
     Ok(())
 }
 
@@ -159,71 +105,27 @@ async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arriva
 /// delivers it.
 #[tokio::test]
 async fn test_pre_admission_drain_returns_before_application_delivery_completes() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let inbox = transport.application().outlet.claim()?;
-    let lane_hold = transport
-        .inbound_tap_for_test()
-        .hold_lane(InboundLane::Application);
-    let mut tap = transport.inbound_tap_for_test().subscribe();
-    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    let callback = Arc::new(
-        SwarmTransportCallback::new(Arc::clone(&transport))
-            .with_pending_connection_attempt(attempt),
-    );
+    let transport = default_transport()?;
+    let (application, lane_hold) =
+        ApplicationRecorder::attach_holding_application_lane(&transport)?;
+    let pending = pending_peer(&transport).await?;
     let body = b"early-delivery-must-not-block-admission";
-    let message = MessagePayload::new_send(
-        Message::custom(body)?,
-        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
-        transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
-    let cid = peer.to_string();
+    admit_after_one_held_frame(&transport, &pending, &application, body).await?;
 
-    callback
-        .on_admitted_message_for_test(&cid, &message)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert_eq!(callback.pre_admission_held_count_for_test(), 1);
-    assert!(tap.try_recv().is_err());
-
-    transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connecting)?;
-    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
-    let open_callback = Arc::clone(&callback);
-    let open_cid = cid.clone();
-    let open = tokio::spawn(async move {
-        open_callback
-            .on_data_channel_open(&open_cid)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
-    tokio::time::timeout(Duration::from_secs(1), open)
-        .await
-        .map_err(|_| Error::InvalidMessage("data-channel open waited on delivery".to_string()))?
-        .map_err(|_| Error::InvalidMessage("data-channel-open task panicked".to_string()))??;
-
-    assert!(transport.has_active_connection(peer));
-    assert!(transport.is_active_connection_attempt(attempt));
-    let drained = tokio::time::timeout(Duration::from_secs(1), next_tapped_custom(&mut tap))
+    assert!(transport.has_active_connection(pending.peer));
+    assert!(transport.is_active_connection_attempt(pending.attempt()?));
+    let drained = tokio::time::timeout(Duration::from_secs(1), application.next_tapped_custom())
         .await
         .map_err(|_| {
             Error::InvalidMessage("held frame was not submitted to inbound actor".to_string())
         })??;
     assert_eq!(drained, body.to_vec());
-    assert_eq!(callback.pre_admission_held_count_for_test(), 0);
+    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 0);
     drop(lane_hold);
-    assert_eq!(next_custom_data(&inbox).await?, body.to_vec());
+    application.wait_for_inbounds_at_least(1).await;
+    assert_eq!(application.inbound_custom_data(), vec![body.to_vec()]);
 
-    transport.disconnect(peer).await?;
+    transport.disconnect(pending.peer).await?;
     Ok(())
 }
 
@@ -234,9 +136,7 @@ async fn test_pre_admission_drain_returns_before_application_delivery_completes(
 #[tokio::test]
 async fn test_inbound_mailbox_reserves_control_capacity_under_application_saturation() -> Result<()>
 {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let application = ApplicationRecorder::attach(&transport)?;
     let callback = Arc::new(SwarmTransportCallback::new(Arc::clone(&transport)));
     // Held for the whole saturation: the lane's front sequence never becomes
@@ -244,20 +144,18 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     // released while the capacity laws are observed.
     let application_hold = callback.hold_application_admission_for_test()?;
     let application_inputs = saturating_application_inputs(transport.dht.did)?;
-    let control_key = SecretKey::random();
-    let control_peer: Did = control_key.address().into();
-    let control_session = DelegateeKey::new_with_seckey(&control_key)?;
+    let control_peer = unbound_peer(&transport, &SecretKey::random())?;
     let overflow_message = local_wire(
         Message::custom(b"global-application-overflow")?,
-        &control_session,
+        &control_peer.session,
         transport.dht.did,
     )?;
     let control = local_wire(
         noop_control_message(transport.dht.did),
-        &control_session,
+        &control_peer.session,
         transport.dht.did,
     )?;
-    let control_cid = control_peer.to_string();
+    let control_cid = control_peer.peer.to_string();
     let mut deliveries = Vec::new();
 
     for (cid, messages) in application_inputs {
@@ -298,14 +196,8 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     assert!(!overflow.is_finished());
 
     drop(application_hold);
-    for delivery in deliveries {
-        delivery
-            .await
-            .map_err(|_| Error::InvalidMessage("inbound mailbox task panicked".to_string()))??;
-    }
-    overflow
-        .await
-        .map_err(|_| Error::InvalidMessage("inbound overflow task panicked".to_string()))??;
+    deliveries.push(overflow);
+    await_deliveries(deliveries).await?;
     assert_eq!(callback.inbound_admitted_count_for_test(), 0);
     Ok(())
 }
@@ -314,27 +206,13 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
 /// its held lane fails with the closed mailbox, releases its permit, and queues nothing.
 #[tokio::test]
 async fn test_closing_inbound_mailbox_cancels_waiting_application_delivery() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let inbox = transport.application().outlet.claim()?;
-    let lane_hold = transport
-        .inbound_tap_for_test()
-        .hold_lane(InboundLane::Application);
-    let mut tap = transport.inbound_tap_for_test().subscribe();
-    let callback = Arc::new(SwarmTransportCallback::new(Arc::clone(&transport)));
-    let message = MessagePayload::new_send(
-        Message::custom(b"waiting-application-delivery")?,
-        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
-        transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
-    let cid = peer.to_string();
-    let task_callback = Arc::clone(&callback);
+    let transport = default_transport()?;
+    let (application, lane_hold) =
+        ApplicationRecorder::attach_holding_application_lane(&transport)?;
+    let peer = unbound_peer(&transport, &SecretKey::random())?;
+    let message = peer.custom_message_wire(&transport, b"waiting-application-delivery")?;
+    let cid = peer.peer.to_string();
+    let task_callback = Arc::clone(&peer.callback);
     let delivery = tokio::spawn(async move {
         match task_callback
             .on_admitted_message_for_test(&cid, &message)
@@ -349,25 +227,15 @@ async fn test_closing_inbound_mailbox_cancels_waiting_application_delivery() -> 
     });
 
     // Observed, the frame waits at its held lane, just before dispatch.
-    next_tapped(&mut tap).await?;
-    callback.close_inbound_for_test();
+    application.next_tapped().await?;
+    peer.callback.close_inbound_for_test();
     assert!(delivery
         .await
         .map_err(|_| Error::InvalidMessage("inbound mailbox task panicked".to_string()))?);
-    assert_eq!(callback.inbound_admitted_count_for_test(), 0);
+    assert_eq!(peer.callback.inbound_admitted_count_for_test(), 0);
     drop(lane_hold);
-    assert!(inbox.try_next().is_none());
+    assert_eq!(application.inbounds(), 0);
     Ok(())
-}
-
-fn local_wire(message: Message, session: &DelegateeKey, local: Did) -> Result<bytes::Bytes> {
-    MessagePayload::new_send(
-        message,
-        MessageSigner::new(session, TEST_NETWORK_ID),
-        local,
-        local,
-    )?
-    .to_wire()
 }
 
 /// One full peer budget of application frames from each of the peers that together fill the
@@ -397,6 +265,24 @@ fn saturating_application_inputs(local: Did) -> Result<Vec<(String, Vec<bytes::B
         .collect()
 }
 
+/// A storage frame placing one live entry at each of `positions` on `local`.
+fn storage_message(local: Did, positions: [u32; 2]) -> Message {
+    let entries = positions
+        .into_iter()
+        .map(|position| {
+            let entry = live_entry(Did::from(position), Vec::new(), EntryKind::Data);
+            PlacedEntry::new(entry.did, entry)
+        })
+        .collect();
+    Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::AdditiveRepair,
+        destination: StorageSyncDestination::PhysicalOwner(local),
+        data: entries,
+    })
+}
+
+/// A DHT control message reporting `did` as a successor to no handler: handled, it changes
+/// nothing.
 fn noop_control_message(did: Did) -> Message {
     Message::FindSuccessorReport(crate::message::FindSuccessorReport {
         did,
@@ -404,20 +290,26 @@ fn noop_control_message(did: Did) -> Message {
     })
 }
 
-fn failed_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> {
-    Ok(measure
-        .snapshot_counters()?
-        .into_iter()
-        .filter(|(did, counter)| *did == peer && *counter == MeasurementEvent::FailedToReceive)
-        .count())
-}
-
-fn successful_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> {
-    Ok(measure
-        .snapshot_measurements()?
-        .into_iter()
-        .filter(|(did, event)| *did == peer && matches!(event, MeasurementEvent::Received { .. }))
-        .count())
+/// Deliver `wire` to `local` as chunks of 32 bytes, each signed by `session`: every chunk but
+/// the last in turn. Returns the last chunk's frame, undelivered, and the number of chunks.
+async fn deliver_leading_chunks(
+    callback: &SwarmTransportCallback,
+    cid: &str,
+    session: &DelegateeKey,
+    local: Did,
+    wire: Bytes,
+) -> Result<(Bytes, usize)> {
+    let mut chunks: Vec<Chunk> = Chunk::stream(wire, 32).collect();
+    let count = chunks.len();
+    let last = chunks.pop().ok_or(Error::InboundActorInvariantViolation)?;
+    assert!(!chunks.is_empty(), "the message spans several chunks");
+    for chunk in chunks {
+        callback
+            .on_admitted_message_for_test(cid, &local_wire(Message::Chunk(chunk), session, local)?)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    }
+    Ok((local_wire(Message::Chunk(last), session, local)?, count))
 }
 
 /// Deliver `message`, signed by `session` and addressed to `local`, as chunks of 32 bytes:
@@ -430,21 +322,22 @@ async fn deliver_chunked(
     local: Did,
     message: Message,
 ) -> Result<(tokio::task::JoinHandle<Result<()>>, usize)> {
-    let mut chunks: Vec<Chunk> = Chunk::stream(local_wire(message, session, local)?, 32).collect();
-    let count = chunks.len();
-    let last = chunks.pop().ok_or(Error::InboundActorInvariantViolation)?;
-    assert!(!chunks.is_empty(), "the message spans several chunks");
-    for chunk in chunks {
-        callback
-            .on_admitted_message_for_test(cid, &local_wire(Message::Chunk(chunk), session, local)?)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    }
-    let last = local_wire(Message::Chunk(last), session, local)?;
+    let wire = local_wire(message, session, local)?;
+    let (last, count) = deliver_leading_chunks(callback, cid, session, local, wire).await?;
     Ok((
         spawn_inbound_delivery(Arc::clone(callback), cid.to_string(), last),
         count,
     ))
+}
+
+/// Await every spawned inbound delivery, each of which must succeed.
+async fn await_deliveries(deliveries: Vec<tokio::task::JoinHandle<Result<()>>>) -> Result<()> {
+    for delivery in deliveries {
+        delivery
+            .await
+            .map_err(|_| Error::InvalidMessage("inbound delivery task panicked".to_string()))??;
+    }
+    Ok(())
 }
 
 fn spawn_inbound_delivery(

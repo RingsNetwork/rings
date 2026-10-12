@@ -10,29 +10,26 @@
 
 use std::sync::Arc;
 
+use super::super::pending_peer_with_key;
+use super::super::relayed_payload;
+use super::super::unbound_peer;
+use super::super::PendingPeer;
 use super::local_wire;
 use crate::chunk::Chunk;
 use crate::delegation::DelegateeKey;
-use crate::dht::delivery::NextHop;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::HopBudget;
 use crate::message::Message;
 use crate::message::MessageCategory;
-use crate::message::MessagePayload;
-use crate::message::MessageRelay;
-use crate::message::MessageSigner;
 use crate::message::OriginQuotaConfig;
 use crate::message::OriginQuotaError;
 use crate::message::OriginQuotaLaneConfig;
-use crate::message::Transaction;
 use crate::message::DEFAULT_ORIGIN_QUOTA_BYTE_BURST;
 use crate::message::DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST;
 use crate::message::DELEGATED_MIN_CHARGE;
 use crate::storage::MemStorage;
-use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
@@ -50,16 +47,6 @@ fn messages_skipped() -> u128 {
 /// The message bucket of a record charged one message.
 fn messages_charged() -> u128 {
     messages_skipped() - 1
-}
-
-/// One connected peer: its account, its session key, and the callback of its connection.
-struct Peer {
-    /// Account DID, the connection's peer identity.
-    did: Did,
-    /// Session key signing on the peer's behalf.
-    session: DelegateeKey,
-    /// Inbound callback of the connection to this peer.
-    callback: SwarmTransportCallback,
 }
 
 /// A local swarm whose application delegated the admission of [`DELEGATED_PREFIX`]: payloads
@@ -88,34 +75,22 @@ impl Harness {
         Self::new(key, OriginQuotaConfig::default())
     }
 
-    /// A peer owned by `key` whose connection is authenticated when `authenticated` holds.
-    async fn peer(&self, key: &SecretKey, authenticated: bool) -> Result<Peer> {
-        let did: Did = key.address().into();
-        let session = DelegateeKey::new_with_seckey(key)?;
-        let callback = if authenticated {
-            let offer = SwarmTransportCallback::new(Arc::clone(&self.transport));
-            let (attempt, _offer) = self
-                .transport
-                .prepare_connection_offer_with_attempt(did, offer)
-                .await?;
-            assert!(self.transport.activate_connection_for_test(attempt)?);
-            SwarmTransportCallback::new(Arc::clone(&self.transport))
-                .with_pending_connection_attempt(attempt)
-        } else {
-            SwarmTransportCallback::new(Arc::clone(&self.transport))
-        };
-        Ok(Peer {
-            did,
-            session,
-            callback,
-        })
+    /// A peer owned by `key` whose connection is authenticated when `authenticated` holds:
+    /// otherwise its frames arrive on a callback bound to no connection.
+    async fn peer(&self, key: &SecretKey, authenticated: bool) -> Result<PendingPeer> {
+        if !authenticated {
+            return unbound_peer(&self.transport, key);
+        }
+        let peer = pending_peer_with_key(&self.transport, key.clone()).await?;
+        peer.activate(&self.transport)?;
+        Ok(peer)
     }
 
     /// Deliver `frame` over `carrier`'s connection.
-    async fn deliver(&self, carrier: &Peer, frame: &bytes::Bytes) -> Result<()> {
+    async fn deliver(&self, carrier: &PendingPeer, frame: &bytes::Bytes) -> Result<()> {
         carrier
             .callback
-            .on_admitted_message_for_test(&carrier.did.to_string(), frame)
+            .on_admitted_message_for_test(&carrier.peer.to_string(), frame)
             .await
             .map_err(|error| match error.downcast::<Error>() {
                 Ok(error) => *error,
@@ -140,22 +115,10 @@ fn wire(
     local: Did,
     sequence: u64,
 ) -> Result<(bytes::Bytes, u128)> {
-    let transaction = Transaction::new(
-        local,
-        uuid::Uuid::new_v4(),
-        sequence,
-        None,
-        Message::custom(payload)?,
-        MessageSigner::new(origin, TEST_NETWORK_ID),
-    )?;
-    let cost = u128::try_from(transaction.data.len()).map_err(|_| Error::MessageSizeOverflow)?;
-    let frame = MessagePayload::new(
-        transaction,
-        MessageSigner::new(carrier, TEST_NETWORK_ID),
-        MessageRelay::new(NextHop::toward(local), local, HopBudget::MAX),
-    )?
-    .to_wire()?;
-    Ok((frame, cost))
+    let frame = relayed_payload(Message::custom(payload)?, origin, carrier, local, sequence)?;
+    let cost =
+        u128::try_from(frame.transaction.data.len()).map_err(|_| Error::MessageSizeOverflow)?;
+    Ok((frame.to_wire()?, cost))
 }
 
 /// The byte bucket after one enforced admission of `cost` from a full default bucket.
@@ -183,7 +146,7 @@ async fn test_neighbours_own_delegated_traffic_skips_only_the_message_limit() ->
     )?;
     harness.deliver(&neighbour, &frame).await?;
     assert_eq!(
-        harness.tokens(neighbour.did).await,
+        harness.tokens(neighbour.peer).await,
         Some((messages_skipped(), bytes_after_delegated(cost)))
     );
     Ok(())
@@ -203,7 +166,7 @@ async fn test_neighbours_other_namespace_keeps_the_message_limit() -> Result<()>
     )?;
     harness.deliver(&neighbour, &frame).await?;
     assert_eq!(
-        harness.tokens(neighbour.did).await,
+        harness.tokens(neighbour.peer).await,
         Some((messages_charged(), bytes_after(cost)))
     );
     Ok(())
@@ -245,7 +208,7 @@ async fn test_neighbours_origin_over_another_neighbour_keeps_the_message_limit()
     )?;
     harness.deliver(&carrier, &frame).await?;
     assert_eq!(
-        harness.tokens(origin.did).await,
+        harness.tokens(origin.peer).await,
         Some((messages_charged(), bytes_after(cost)))
     );
     Ok(())
@@ -265,7 +228,7 @@ async fn test_unauthenticated_peer_claiming_its_origin_keeps_the_message_limit()
     )?;
     harness.deliver(&stranger, &frame).await?;
     assert_eq!(
-        harness.tokens(stranger.did).await,
+        harness.tokens(stranger.peer).await,
         Some((messages_charged(), bytes_after(cost)))
     );
     Ok(())
@@ -277,12 +240,8 @@ async fn test_reassembled_neighbour_traffic_skips_only_the_message_limit() -> Re
     let harness = Harness::with_defaults(&local)?;
     let neighbour = harness.peer(&neighbour, true).await?;
     let local = harness.swarm.did();
-    let original = MessagePayload::new_send(
-        Message::custom(&[DELEGATED_PREFIX, &[7; 512]].concat())?,
-        MessageSigner::new(&neighbour.session, TEST_NETWORK_ID),
-        local,
-        local,
-    )?;
+    let original =
+        neighbour.custom_payload(&harness.transport, &[DELEGATED_PREFIX, &[7; 512]].concat())?;
     let cost =
         u128::try_from(original.transaction.data.len()).map_err(|_| Error::MessageSizeOverflow)?;
     let chunks: Vec<Chunk> = Chunk::stream(original.to_wire()?, 64).collect();
@@ -292,7 +251,7 @@ async fn test_reassembled_neighbour_traffic_skips_only_the_message_limit() -> Re
         harness.deliver(&neighbour, &frame).await?;
     }
     assert_eq!(
-        harness.tokens(neighbour.did).await,
+        harness.tokens(neighbour.peer).await,
         Some((messages_skipped(), bytes_after_delegated(cost)))
     );
     Ok(())

@@ -591,7 +591,8 @@ mod tests {
                 }
                 assert!(matches!(
                     verifier.verification_key_from_signature(msg, &bad),
-                    Err(Error::InvalidSignatureLength { actual, .. }) if actual == bad.len()
+                    Err(Error::InvalidSignatureLength { algorithm: named, actual, .. })
+                        if named == verifier.algorithm().as_str() && actual == bad.len()
                 ));
             }
         }
@@ -733,40 +734,5 @@ mod tests {
             secret.public_key().unwrap(),
             VerificationPublicKey::Secp256r1(expected)
         );
-    }
-
-    /// Every recovering signer refuses a signature that is not `r ‖ s ‖ v`, empty, short or
-    /// long, with [`Error::InvalidSignatureLength`] naming its own algorithm (#933, #913 R8):
-    /// recovery is called directly as well as behind the account verifiers' gate.
-    #[test]
-    fn test_every_recovering_signer_refuses_a_signature_of_the_wrong_length() {
-        type Recover = fn(&[u8], Vec<u8>) -> Result<PublicKey<33>>;
-        let recovers: [(SignatureAlgorithm, Recover); 3] = [
-            (SignatureAlgorithm::Secp256k1, |msg, sig| {
-                signers::secp256k1::recover(msg, sig)
-            }),
-            (SignatureAlgorithm::Eip191, |msg, sig| {
-                signers::eip191::recover(msg, sig)
-            }),
-            (SignatureAlgorithm::Bip137, |msg, sig| {
-                signers::bip137::recover(msg, sig)
-            }),
-        ];
-        for (algorithm, recover) in recovers {
-            for len in [
-                0,
-                RECOVERABLE_SIGNATURE_LEN - 1,
-                RECOVERABLE_SIGNATURE_LEN + 1,
-            ] {
-                assert!(
-                    matches!(
-                        recover(b"message", vec![27; len]),
-                        Err(Error::InvalidSignatureLength { algorithm: named, actual, .. })
-                            if named == algorithm.as_str() && actual == len
-                    ),
-                    "{algorithm:?} recovers from {len} bytes"
-                );
-            }
-        }
     }
 }

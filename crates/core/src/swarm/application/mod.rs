@@ -35,7 +35,6 @@ use delegation::DelegatedNamespaces;
 pub use inbox::ApplicationInbox;
 use inbox::ApplicationOutlet;
 pub(crate) use inbox::Delivered;
-pub(crate) use inbox::InboxRoom;
 pub use inbox::APPLICATION_INBOX_WEIGHT;
 use lookup::ApplicationLookups;
 pub use lookup::SuccessorReport;

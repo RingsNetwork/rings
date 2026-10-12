@@ -209,10 +209,7 @@ async fn wait_for_worker_submissions(
 ) {
     let minimum_submissions = OUTBOUND_CONTROL_BURST + 2;
     for _ in 0..64 {
-        while matches!(
-            futures::poll!(sends.next()),
-            std::task::Poll::Ready(Some(()))
-        ) {}
+        poll_completed_sends(sends).await;
         if transport.outbound_submitted_transfers_for_test(peer) >= minimum_submissions {
             return;
         }
@@ -223,16 +220,9 @@ async fn wait_for_worker_submissions(
 
 async fn wait_for_mixed_frames(runtime: &SimulationRuntimeGuard) {
     for _ in 0..64 {
-        let pending = runtime
-            .pending_deliveries()
-            .expect("mixed-load frames must classify");
-        let has_control = pending
-            .iter()
-            .any(|delivery| delivery.class == ScheduledDeliveryClass::Control);
-        let has_application = pending
-            .iter()
-            .any(|delivery| delivery.class == ScheduledDeliveryClass::Application);
-        if has_control && has_application {
+        if has_pending_class(runtime, ScheduledDeliveryClass::Control)
+            && has_pending_class(runtime, ScheduledDeliveryClass::Application)
+        {
             return;
         }
         settle_one_poll().await;
@@ -243,12 +233,7 @@ async fn wait_for_mixed_frames(runtime: &SimulationRuntimeGuard) {
 async fn drain_control_burst(runtime: &SimulationRuntimeGuard) {
     for _ in 0..=OUTBOUND_CONTROL_BURST {
         wait_for_optional_class(runtime, ScheduledDeliveryClass::Control).await;
-        let has_control = runtime
-            .pending_deliveries()
-            .expect("control-pressure frames must classify")
-            .iter()
-            .any(|delivery| delivery.class == ScheduledDeliveryClass::Control);
-        if has_control {
+        if has_pending_class(runtime, ScheduledDeliveryClass::Control) {
             deliver_one_class(runtime, ScheduledDeliveryClass::Control).await;
             settle_one_poll().await;
         }
@@ -257,12 +242,7 @@ async fn drain_control_burst(runtime: &SimulationRuntimeGuard) {
 
 async fn wait_for_optional_class(runtime: &SimulationRuntimeGuard, class: ScheduledDeliveryClass) {
     for _ in 0..64 {
-        if runtime
-            .pending_deliveries()
-            .expect("pressure frames must classify")
-            .iter()
-            .any(|delivery| delivery.class == class)
-        {
+        if has_pending_class(runtime, class) {
             return;
         }
         settle_one_poll().await;
@@ -661,12 +641,7 @@ async fn wait_for_class_while_sending<F, T, E>(
                 *send_complete = true;
             }
         }
-        if runtime
-            .pending_deliveries()
-            .expect("barrier workload must classify")
-            .iter()
-            .any(|delivery| delivery.class == class)
-        {
+        if has_pending_class(runtime, class) {
             return;
         }
         settle_one_poll().await;
@@ -684,6 +659,25 @@ where
             .await
             .expect("pressure send must complete after the barrier releases");
     }
+}
+
+/// Whether a frame of `class` waits in the controlled delivery queue.
+fn has_pending_class(runtime: &SimulationRuntimeGuard, class: ScheduledDeliveryClass) -> bool {
+    runtime
+        .pending_deliveries()
+        .expect("pressure frames must classify")
+        .iter()
+        .any(|delivery| delivery.class == class)
+}
+
+/// Poll `sends` until none is ready, dropping every completed send.
+async fn poll_completed_sends(
+    sends: &mut FuturesUnordered<futures::future::LocalBoxFuture<'_, ()>>,
+) {
+    while matches!(
+        futures::poll!(sends.next()),
+        std::task::Poll::Ready(Some(()))
+    ) {}
 }
 
 async fn deliver_one_class(runtime: &SimulationRuntimeGuard, class: ScheduledDeliveryClass) {
@@ -721,10 +715,7 @@ async fn drain_pressure_futures(
                 .await
                 .expect("pressure cleanup delivery must remain stable"));
         }
-        while matches!(
-            futures::poll!(sends.next()),
-            std::task::Poll::Ready(Some(()))
-        ) {}
+        poll_completed_sends(sends).await;
         if sends.is_empty() && dummy_controlled::pending() == 0 && !network_busy(nodes) {
             return;
         }

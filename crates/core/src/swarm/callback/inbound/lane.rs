@@ -56,7 +56,13 @@ impl InboundLane {
     /// The message class this lane carries; the reassembly lane's class is
     /// unknown until the reassembled message is decoded.
     pub(in crate::swarm::callback) const fn class(self) -> Option<MessageCategory> {
-        self.class_of()
+        match self {
+            Self::DhtControl => Some(MessageCategory::DhtControl),
+            Self::Storage => Some(MessageCategory::Storage),
+            Self::E2e => Some(MessageCategory::E2e),
+            Self::Application => Some(MessageCategory::Application),
+            Self::Reassembly => None,
+        }
     }
 
     /// Whether a frame of this lane may have arrived on `carrier`, the transport lane whose
@@ -65,20 +71,9 @@ impl InboundLane {
     /// judged once its message is reassembled; no carrier (a frame handed in without a
     /// transport) is judged by nothing.
     pub(in crate::swarm::callback) fn admits_carrier(self, carrier: Option<ChannelLane>) -> bool {
-        match (self.class_of(), carrier) {
+        match (self.class(), carrier) {
             (Some(class), Some(carrier)) => class.channel_lane() == carrier,
             (None, _) | (_, None) => true,
-        }
-    }
-
-    /// [`Self::class`], callable in a const context.
-    const fn class_of(self) -> Option<MessageCategory> {
-        match self {
-            Self::DhtControl => Some(MessageCategory::DhtControl),
-            Self::Storage => Some(MessageCategory::Storage),
-            Self::E2e => Some(MessageCategory::E2e),
-            Self::Application => Some(MessageCategory::Application),
-            Self::Reassembly => None,
         }
     }
 }

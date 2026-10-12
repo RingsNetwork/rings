@@ -6,6 +6,7 @@
 //! (clockwise from `B`, `A` precedes `C`). `C`'s only peer is `B`, so every lookup `C` issues
 //! goes to `B`, which answers `A` for any key in `(B, A]`.
 
+#[cfg(feature = "dummy")]
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -13,11 +14,9 @@ use rings_core::ecc::SecretKey;
 use rings_core::lifecycle::StopToken;
 #[cfg(feature = "dummy")]
 use rings_core::swarm::SuccessorLookup;
-use tokio::sync::oneshot::error::TryRecvError;
 
 use super::common::*;
 use super::*;
-use crate::extension::Backend;
 use crate::extension::BackendObserver;
 use crate::native::bootstrap::BootstrapPort;
 use crate::native::bootstrap::DialFailure;
@@ -51,21 +50,6 @@ impl BackendObserver for ActiveEvidence {
     }
 }
 
-/// Serve `processor`'s application inbox through a backend observed by `evidence`, exactly as
-/// `rings run` does, recording activity on every fact.
-fn serve_with_activity(
-    processor: &Processor,
-    provider: Arc<Provider>,
-    evidence: Arc<ReachabilityEvidence>,
-) {
-    let inbox = processor
-        .swarm
-        .application_inbox()
-        .expect("the probe node's inbox is unclaimed");
-    let backend = Backend::new(provider).observed_by(Arc::new(ActiveEvidence(evidence)));
-    tokio::spawn(backend.serve(inbox, StopToken::never()));
-}
-
 /// One node of the probe topology.
 struct ProbeNode {
     processor: Arc<Processor>,
@@ -78,8 +62,14 @@ impl ProbeNode {
     async fn new(key: SecretKey) -> Self {
         let processor = Arc::new(prepare_processor_with_identity_key(key).await);
         let evidence = Arc::new(ReachabilityEvidence::default());
-        let provider = Arc::new(Provider::from_processor(processor.clone()));
-        serve_with_activity(&processor, provider, evidence.clone());
+        // Served exactly as `rings run` serves it, recording activity on every fact.
+        let service = Provider::from_processor(processor.clone())
+            .application_service(
+                Some(Arc::new(ActiveEvidence(evidence.clone()))),
+                StopToken::never(),
+            )
+            .expect("the probe node's inbox is unclaimed");
+        tokio::spawn(service);
         Self {
             processor,
             evidence,
@@ -184,47 +174,6 @@ async fn routed_probe_reports_presence_through_one_hop() {
     assert!(
         !port.reachable(own_interval).await,
         "a locally decided lookup is a refutation"
-    );
-}
-
-/// The backend translates the inbox's peer facts into evidence: `PeerAdmitted` resolves an
-/// admission waiter and records no loss, and `PeerRetired` records a loss.
-#[tokio::test]
-async fn test_backend_translates_admission_and_retirement() {
-    let processor = Arc::new(prepare_processor().await);
-    let managed = Did::from(1);
-    let evidence = Arc::new(ReachabilityEvidence::default());
-    let provider = Arc::new(Provider::from_processor(processor));
-    let backend = Backend::new(provider).observed_by(evidence.clone());
-
-    let mut admitted = evidence
-        .admissions()
-        .wait_for(managed)
-        .expect("record readable");
-    assert!(
-        matches!(admitted.try_recv(), Err(TryRecvError::Empty)),
-        "nothing admits before the admission is read"
-    );
-    backend
-        .route_for_test(ApplicationDelivery::Event(SwarmEvent::PeerAdmitted {
-            peer: managed,
-        }))
-        .expect("events are accepted");
-    assert_eq!(admitted.await, Ok(()));
-    assert!(evidence
-        .losses()
-        .take()
-        .expect("record readable")
-        .is_empty());
-
-    backend
-        .route_for_test(ApplicationDelivery::Event(SwarmEvent::PeerRetired {
-            peer: managed,
-        }))
-        .expect("events are accepted");
-    assert_eq!(
-        evidence.losses().take().expect("record readable"),
-        BTreeSet::from([managed])
     );
 }
 

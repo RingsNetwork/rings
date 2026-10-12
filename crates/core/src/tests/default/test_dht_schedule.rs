@@ -440,10 +440,6 @@ mod tests {
         for (i, (act, exp)) in actual.iter().zip(&expected).enumerate() {
             pretty_assertions::assert_eq!(act, exp, "node{i}");
         }
-
-        // Keep the monitoring receivers alive to the end (dropping a Node makes
-        // its recording callback panic on the next message).
-        drop(nodes);
     }
 
     /// Front of the queue (FIFO / oldest pending first).

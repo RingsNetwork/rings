@@ -50,9 +50,8 @@
 use crate::core::pool::ChannelLane;
 use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 
-/// Frames of one lane a receiver holds at most. A connection therefore holds at most
-/// `DATA_CHANNEL_POOL_SIZE × LANE_CREDIT_WINDOW` frames (64), each of at most
-/// `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes (4 MiB in all).
+/// Frames of one lane a receiver holds at most; a connection's bound, one window per lane, is
+/// [`INBOUND_PEER_FRAME_CAPACITY`](crate::callback::INBOUND_PEER_FRAME_CAPACITY).
 pub const LANE_CREDIT_WINDOW: u64 = 16;
 
 /// Released frames a receiver accumulates before it advertises more credit: half a window, so

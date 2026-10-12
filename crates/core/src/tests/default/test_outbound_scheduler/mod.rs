@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rings_transport::connections::dummy_controlled;
-use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio::time::Duration;
@@ -35,6 +34,9 @@ use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::SendCompletionOutcome;
 use crate::swarm::transport::OUTBOUND_LANE_WINDOW;
+use crate::tests::default::admit_nodes;
+use crate::tests::default::connect_nodes;
+use crate::tests::default::connected_nodes;
 use crate::tests::default::dummy_hooks::HeldDeliveryGuard;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
 use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
@@ -46,22 +48,13 @@ use crate::tests::default::dummy_hooks::PendingDataChannelOpenGuard;
 use crate::tests::default::dummy_hooks::PendingDeliveryGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_with_measure;
-use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_msgs;
-use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
-use crate::tests::manually_establish_connection;
 use crate::tests::outbound_capacity_released;
 
 fn invalid_test_state(message: impl Into<String>) -> Error {
     Error::InvalidMessage(message.into())
-}
-
-async fn connected_nodes() -> Result<(Node, Node)> {
-    let node1 = prepare_node(SecretKey::random()).await;
-    let node2 = prepare_node(SecretKey::random()).await;
-    connect_nodes(node1, node2).await
 }
 
 /// Fill `peer`'s Application lane window in one scheduler pass (#899): with the worker paused,
@@ -567,21 +560,6 @@ async fn test_shutdown_releases_batch_before_first_tracked_completion() -> Resul
         .await;
     assert!(matches!(rejected, Err(Error::SwarmMissDidInTable(missing)) if missing == peer));
     Ok(())
-}
-
-/// Connect the nodes and await node1's admission of node2, but not quiescence.
-async fn admit_nodes(node1: Node, node2: Node) -> Result<(Node, Node)> {
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    Ok((node1, node2))
-}
-
-/// Connect the nodes, await admission, and then await quiescence of the join traffic.
-async fn connect_nodes(node1: Node, node2: Node) -> Result<(Node, Node)> {
-    let (node1, node2) = admit_nodes(node1, node2).await?;
-    wait_for_msgs([&node1, &node2]).await;
-    Ok((node1, node2))
 }
 
 struct PendingMeasure {

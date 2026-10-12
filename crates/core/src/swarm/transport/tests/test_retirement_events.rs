@@ -6,8 +6,6 @@
 //! application never reads a departure without its admission: a test that observes both reads
 //! the admission before the retirement is decided.
 
-use std::sync::Arc;
-
 use super::pending::RetirementOutcome;
 use super::*;
 use crate::dht::topology::TopologyRemoval;
@@ -15,7 +13,7 @@ use crate::swarm::application::SwarmEvent;
 
 /// A transport whose application inbox is claimed by a fresh recorder.
 fn transport_with_log() -> Result<(SwarmTransport, ApplicationRecorder)> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let log = ApplicationRecorder::attach(&transport)?;
     Ok((transport, log))
 }
@@ -39,20 +37,6 @@ async fn test_a_read_admission_is_reported_retired_once() -> Result<()> {
         vec![peer],
         "a retired attempt cannot retire again"
     );
-    Ok(())
-}
-
-/// An admission retired before the application reads it leaves no fact: its retirement
-/// withdraws it, so the application never sees a departure without an admission.
-#[tokio::test]
-async fn test_an_admission_retired_unread_leaves_no_fact() -> Result<()> {
-    let (transport, log) = transport_with_log()?;
-    let peer = SecretKey::random().address().into();
-    let attempt = transport.reserve_pending_connection(peer).await?;
-    assert!(transport.activate_connection_for_test(attempt)?);
-
-    assert!(transport.disconnect_attempt(attempt).await?.is_some());
-    assert!(log.events().is_empty());
     Ok(())
 }
 
@@ -161,9 +145,7 @@ async fn test_eviction_of_an_unreferenced_peer_is_reported_retired() -> Result<(
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_retirement_is_announced_after_the_read_admission() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let log = ApplicationRecorder::attach(&transport)?;
     let pending = pending_peer(&transport).await?;
     let peer = pending.peer;

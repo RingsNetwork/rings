@@ -319,14 +319,10 @@ fn windows() -> [CreditWindow; 5] {
     ]
 }
 
-/// Every property holds, for every window, in each of the three models:
-///
-/// - credits reordered and duplicated, honest sender: safety and deadlock freedom;
-/// - every credit delivered once, in any order, honest sender: safety, and every path ends
-///   with all work done. Liveness is checked on terminating paths; a path that reserves and
-///   cancels forever is a cycle, which the checker treats as fair;
-/// - a sender that floods frames without credit: it cannot push the receiver past its window,
-///   since every frame beyond the advertised credit is refused, and that refusal is reachable.
+/// Every property of the module documentation holds, for every window, in each of the three
+/// models: credits reordered and duplicated, credits each delivered once, and a sender that
+/// floods frames without credit; each property names the models it binds. A path that reserves
+/// and cancels forever is a cycle, which the checker treats as fair.
 #[test]
 fn test_credit_laws_hold_in_every_model() {
     for (duplicating, honest) in [(true, true), (false, true), (false, false)] {

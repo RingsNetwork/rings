@@ -32,6 +32,8 @@
 //! # Examples
 //!
 //! Please check python example at examples/ffi/rings.py
+//!
+//! [`Backend`]: crate::extension::Backend
 
 use std::ffi::c_char;
 use std::ffi::CStr;
@@ -51,7 +53,6 @@ use super::Provider;
 use super::Signer;
 use crate::error::Error;
 use crate::error::Result;
-use crate::extension::Backend;
 use crate::extension::BackendObserver;
 
 const FFI_SIGNATURE_LEN: usize = 65;
@@ -202,12 +203,15 @@ impl ProviderHandle {
         Ok(())
     }
 
-    /// Serve the swarm's application inbox with `backend`, whose observer retains E2E events
-    /// for the caller, on the provider runtime until the handle stops.
-    fn spawn_application(&self, backend: Backend) -> Result<()> {
-        let inbox = self.provider.application_inbox()?;
-        let backend = backend.observed_by(self.e2e_events.clone());
-        self.runtime.spawn(backend.serve(inbox, self.stop.token()));
+    /// Serve the swarm's application inbox with the extension [`Backend`], whose observer
+    /// retains E2E events for the caller, on the provider runtime until the handle stops.
+    ///
+    /// [`Backend`]: crate::extension::Backend
+    fn spawn_application(&self) -> Result<()> {
+        let service = self
+            .provider
+            .application_service(Some(self.e2e_events.clone()), self.stop.token())?;
+        self.runtime.spawn(service);
         Ok(())
     }
 
@@ -392,6 +396,8 @@ pub unsafe extern "C" fn rings_node_provider_destroy(provider_ptr: *mut Provider
 /// message callback is gone with `BackendMessage`; an FFI protocol-registration path
 /// would replace it.)
 ///
+/// [`Backend`]: crate::extension::Backend
+///
 /// # Safety
 ///
 /// * This function cast CStr into Str
@@ -455,10 +461,9 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
             Error::ExtensionError("FFI provider initialization thread panicked".to_owned())
         })??;
         let provider = Arc::new(provider);
-        let backend = Backend::new(provider.clone());
         let e2e_events = Arc::new(FfiE2eInbox::default());
         let handle = ProviderHandle::new(provider, runtime, e2e_events);
-        handle.spawn_application(backend)?;
+        handle.spawn_application()?;
         Ok(Box::into_raw(Box::new(handle)))
     })() {
         Ok(provider_ptr) => provider_ptr,

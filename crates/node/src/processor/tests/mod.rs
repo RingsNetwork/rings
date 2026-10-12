@@ -15,7 +15,6 @@ use rings_core::message::e2e::E2eStreamFrame;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::application::ApplicationData;
 use rings_core::swarm::application::ApplicationDelivery;
-use rings_core::swarm::application::SwarmEvent;
 #[cfg(feature = "dummy")]
 use rings_rpc::method::Method;
 use tokio::sync::Mutex as AsyncTestMutex;

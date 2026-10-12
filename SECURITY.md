@@ -97,12 +97,11 @@ and expire, but a party with many identities can try to hold several positions o
   buckets keyed by the account DID, committed together with replay and before the application
   sees the message. Rotating keys or relays does not reset them, and a drop never disconnects
   the relay.
-- **Application boundary.** Core never calls, awaits or consults application code: the
-  application cannot see, validate or veto a protocol message. It reads its own data and peer
-  facts from a bounded inbox (#935), and no inbound lane waits for it: a live message that
-  does not fit is dropped and counted, as the network may drop it, while relay-inbox mail
-  stays stored until the application has taken it. A slow application therefore costs only
-  its own messages, never a peer's credit or another link's liveness.
+- **Application boundary.** Core never calls, awaits or consults application code (#935): the
+  application cannot see, validate or veto a protocol message, and no inbound lane waits for it.
+  A slow application therefore costs only its own messages, never a peer's credit or another
+  link's liveness.
+  [Details](docs/src/advanced-topic/transport-flow-control.md#application-inbox).
 - **Measurement and credit.** Local and advisory: they may reorder eligible candidates but
   never add one or change DHT placement. Service receipts affect neither.
 - **Connection admission.** Connection records are bounded at twice the topology's
@@ -116,18 +115,12 @@ and expire, but a party with many identities can try to hold several positions o
   expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
   while the carrier is retained. A relay inbox is verified by its owner, readable and
   removable only by its recipient, and capped at 64 messages. Values are stored in the clear.
+  [Details](docs/src/advanced-topic/chord.md#data-topic-storage).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
-  holds at most 16 frames per lane, refuses and reports a frame beyond its advertised credit,
-  and refuses no honest frame for want of credit. Overload is pushed back to the sender and
-  every wait is logged. Above 16 MiB of received frames a node defers new credit on every
-  lane but the control lane, a soft bound; the hard bound is per connection (4 MiB), so a
-  node's worst case grows with its admitted connections (#934). Liveness reads no credit
-  state: a periodic probe with a deadline from its issue evicts a peer that withholds the
-  control lane's credit within the period plus the deadline, whether or not it keeps sending
-  or keeps its connection unready (an unsent probe is resent under its first deadline).
-  Probes, and one probe answer in flight per next hop, take no shared outbound capacity, and
-  one peer's backpressure never holds another's link: every send a handler makes (a forward,
-  a report, a query) returns once queued.
+  refuses no honest frame, refuses and reports a frame beyond its credit, and pushes overload
+  back to the sender. One peer's backpressure never holds another's link, and liveness reads no
+  credit state, so a peer that withholds the control lane's credit is evicted whatever else it
+  sends. The node-wide receive bound is soft (#934).
   [Details](docs/src/advanced-topic/transport-flow-control.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.
@@ -150,7 +143,8 @@ and expire, but a party with many identities can try to hold several positions o
 - #912: the browser replay store uses IndexedDB's default durability hint.
 - #915: a missing replay record restarts its stream from the first sequence.
 - #916: durable replay writes cap a node near 50 transitions per second on macOS.
-- #918: a registry holds about 25 KB of tombstones per registrant at the default heartbeat.
+- #918: registry tombstones are bounded by the heartbeat rate per registrant, not by count
+  ([bounds](docs/src/advanced-topic/chord.md#data-topic-storage)).
 - #920: storage byte-budget eviction can drop a removal before it is collected, resurrecting
   the values it covered.
 - #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal
