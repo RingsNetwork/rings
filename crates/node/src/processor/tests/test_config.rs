@@ -228,7 +228,7 @@ advertise_presence: true
         delegatee_key.dump().unwrap()
     );
 
-    let serialized = serde_yaml::from_str::<ProcessorConfigSerialized>(&yaml).unwrap();
+    let serialized = serde_saphyr::from_str::<ProcessorConfigSerialized>(&yaml).unwrap();
     let config = ProcessorConfig::try_from(serialized).unwrap();
     let builder = ProcessorBuilder::from_config(&config).unwrap();
 

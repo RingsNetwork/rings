@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Read and write the node's YAML configuration with `serde-saphyr` instead of the deprecated
+  `serde_yaml`, whose `unsafe-libyaml` RustSec now lists as unmaintained (RUSTSEC-2024-0449).
+  Configuration documents are unchanged. `Error::SerdeYamlError` wraps a boxed `serde_saphyr::Error`.
+
 - The built-in stream consumers detect a lost message instead of passing on a stream with a
   silent gap (#939). Since #935 application delivery is lossy by design, so the TCP relay
   wrote a byte stream with a hole in it and an E2E stream waited forever for a lost frame.
