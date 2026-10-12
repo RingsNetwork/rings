@@ -411,10 +411,15 @@ impl InboundRefusal {
     }
 }
 
+/// The inbound capacity one admitted frame holds, returned to its ledger when dropped.
 pub(crate) struct InboundCapacityPermit {
+    /// The ledger the capacity is held in.
     capacity: Arc<InboundCapacity>,
+    /// The sending peer, if known, whose share the frame draws on.
     peer: Option<Did>,
+    /// The logical lane the frame is admitted on.
     pub(super) lane: InboundLane,
+    /// The bytes the frame holds.
     pub(super) bytes: usize,
 }
 

@@ -12,7 +12,8 @@ use tokio::sync::Notify;
 
 use super::admit_window;
 use super::callback;
-use super::link_credit::pump_lane_credits;
+use super::credit_pump::pump_lane_credits_pausing;
+use super::link_send::FrameSink;
 use super::wire;
 use crate::connection_ref::ConnectionRef;
 use crate::core::credit::credit_index;
@@ -40,17 +41,14 @@ struct FlakyCreditConnection {
 }
 
 #[async_trait]
-impl ConnectionInterface for FlakyCreditConnection {
-    type Sdp = String;
-    type Error = Error;
-
-    async fn send_message_with_permit(
+impl FrameSink for FlakyCreditConnection {
+    async fn send_frame(
         &self,
-        message: TransportMessage,
+        frame: TransportMessage,
         _: ChannelLane,
         _: SendPermit,
     ) -> Result<DeliveryFuture> {
-        let TransportMessage::Credit(credit) = message else {
+        let TransportMessage::Credit(credit) = frame else {
             return Err(Error::DataChannelOpen("only credit frames are sent".into()));
         };
         let failed = self
@@ -70,6 +68,23 @@ impl ConnectionInterface for FlakyCreditConnection {
             .push(credit);
         self.notify.notify_waiters();
         Ok(Box::pin(std::future::ready(Ok(()))))
+    }
+}
+
+/// The pump reaches the connection through [`FrameSink`] alone; the custom send path is
+/// unreachable here.
+#[async_trait]
+impl ConnectionInterface for FlakyCreditConnection {
+    type Sdp = String;
+    type Error = Error;
+
+    async fn send_message_with_permit(
+        &self,
+        _: Bytes,
+        _: ChannelLane,
+        _: SendPermit,
+    ) -> Result<DeliveryFuture> {
+        Err(Error::DataChannelOpen("only credit frames are sent".into()))
     }
 
     fn reserve_send_credit(&self, _: ChannelLane) -> SendCreditWait<Error> {
@@ -116,8 +131,8 @@ impl ConnectionInterface for FlakyCreditConnection {
 }
 
 /// A credit whose send fails transiently is sent again by the lane's pump after its pause, so
-/// a lost last raise never leaves the peer's sender waiting for good. The wait is woken by the
-/// send; the timeout is a hang guard, not a pace.
+/// a lost last raise never leaves the peer's sender waiting for good. The pause is injected as
+/// zero and the wait is woken by the send; the timeout is a hang guard, not a pace.
 #[tokio::test]
 async fn test_the_pump_resends_a_credit_whose_send_failed() {
     let callback = callback("peer");
@@ -129,10 +144,11 @@ async fn test_the_pump_resends_a_credit_whose_send_failed() {
         sent: Mutex::new(Vec::new()),
         notify: Notify::new(),
     });
-    let pump = tokio::spawn(pump_lane_credits(
+    let pump = tokio::spawn(pump_lane_credits_pausing(
         Arc::clone(callback.link_credit()),
         ConnectionRef::new("peer", &connection),
         credit_index(lane),
+        Duration::ZERO,
     ));
 
     let resent = async {

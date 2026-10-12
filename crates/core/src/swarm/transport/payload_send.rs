@@ -20,6 +20,7 @@ use super::outbound::OutboundMessageKind;
 use super::outbound::OutboundPeerHandle;
 use super::outbound::OutboundTransfer;
 use super::outbound::OutboundTransferRoute;
+use super::outbound::SenderBound;
 use super::outbound::TransferCapacityPermit;
 use super::timeouts::OUTBOUND_PAYLOAD_CLEANUP_GRACE;
 use super::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
@@ -266,7 +267,7 @@ fn log_oversized_payload(metadata: OversizedPayloadLog) {
 
 fn outbound_memory_reservation(wire_bytes: usize) -> usize {
     // Preparation owns the payload bytes plus the serialized transport frame.
-    // TransportMessage shares the payload's Bytes allocation, so weighting by
+    // The custom frame shares the payload's Bytes allocation, so weighting by
     // two covers the whole-message peak without another wire-sized body copy.
     crate::fair_admission::retained_wire_bytes(wire_bytes).max(1)
 }
@@ -299,7 +300,10 @@ impl SwarmTransport {
         admission: QueueAdmission,
     ) -> Result<TransferCapacityPermit> {
         if let QueueAdmission::Bounded(bound) = admission {
-            if let Some(permit) = self.outbound_schedulers.reserve_bounded_by_sender(bound) {
+            if let Some(permit) = self
+                .outbound_schedulers
+                .reserve_bounded_by_sender(bound, peer)
+            {
                 return Ok(permit);
             }
         }
@@ -498,6 +502,16 @@ impl SwarmTransport {
                 .readiness()
                 .ensure_can_make_progress()?;
         }
+        // A probe judges one generation: it never rides a successor's connection, whose clock
+        // would not know its answer.
+        if let QueueAdmission::Bounded(SenderBound::Probe { generation }) = admission {
+            if connection.attempt().generation != generation {
+                return Err(Error::ConnectionAttemptSuperseded {
+                    peer: did,
+                    generation,
+                });
+            }
+        }
         Ok(connection)
     }
 
@@ -514,13 +528,15 @@ impl SwarmTransport {
         Error::SwarmMissDidInTable(did)
     }
 
+    /// Queue `payload` to its next hop under the waiting discipline and await its first frame's
+    /// admission until `deadline` (of `timeout_budget`).
     async fn do_send_payload_detached_until(
         &self,
-        did: Did,
         payload: MessagePayload,
         timeout_budget: Duration,
         deadline: impl Future<Output = ()>,
     ) -> Result<SendCompletionOutcome> {
+        let did = payload.relay.next_hop;
         let deadline = deadline.fuse();
         pin_mut!(deadline);
         match self
@@ -852,13 +868,8 @@ impl SwarmTransport {
         timeout_budget: Duration,
         deadline: impl Future<Output = ()>,
     ) -> Result<SendCompletionOutcome> {
-        self.do_send_payload_detached_until(
-            payload.relay.next_hop,
-            payload,
-            timeout_budget,
-            deadline,
-        )
-        .await
+        self.do_send_payload_detached_until(payload, timeout_budget, deadline)
+            .await
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -917,7 +928,6 @@ impl SwarmTransport {
         payload: MessagePayload,
     ) -> Result<SendCompletionOutcome> {
         self.do_send_payload_detached_until(
-            payload.relay.next_hop,
             payload,
             first_frame_deadline(),
             sleep(first_frame_deadline()),

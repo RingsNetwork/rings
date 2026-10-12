@@ -77,11 +77,7 @@ impl SwarmTransportCallback {
         self
     }
 
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
-        self.inbound.admitted_count_for_test()
-    }
-
+    /// The frames held until their connection is admitted.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn pre_admission_held_count_for_test(&self) -> usize {
         self.processor.pre_admission().len()
@@ -93,61 +89,11 @@ impl SwarmTransportCallback {
         self.processor.session_link().held_len()
     }
 
-    /// Resolve once `predicate` holds over the admitted inbound count,
-    /// re-checked on every capacity reservation, transition, or release.
+    /// Test builds: the inbound mailbox, whose probes witness admission, waiting, hand-off and
+    /// reassembly cleanup, and whose holds pin its capacity.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn await_inbound_admitted_count_for_test(
-        &self,
-        predicate: impl Fn(usize) -> bool,
-    ) {
-        self.inbound.await_admitted_count_for_test(predicate).await;
-    }
-
-    /// Resolve once `predicate` holds over the number of inbound arrivals waiting for mailbox
-    /// capacity, re-checked whenever an arrival starts to wait or capacity changes.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn await_inbound_waiting_for_test(&self, predicate: impl Fn(usize) -> bool) {
-        self.inbound.await_waiting_for_test(predicate).await;
-    }
-
-    /// Resolve once `predicate` holds over the number of frames whose raw
-    /// transport lease this mailbox has released after core admission.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn await_inbound_handoffs_for_test(&self, predicate: impl Fn(u64) -> bool) {
-        self.inbound.await_handoffs_for_test(predicate).await;
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn reassembly_cleanup_passes_for_test(&self) -> u64 {
-        self.inbound.cleanup_passes_for_test()
-    }
-
-    /// Resolve once `predicate` holds over the number of completed reassembly
-    /// cleanup passes, periodic or close-time.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn await_reassembly_cleanup_passes_for_test(
-        &self,
-        predicate: impl Fn(u64) -> bool,
-    ) {
-        self.inbound.await_cleanup_passes_for_test(predicate).await;
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn hold_application_admission_for_test(&self) -> crate::error::Result<impl Drop> {
-        self.inbound.hold_application_admission_for_test()
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn hold_application_capacity_for_test(
-        &self,
-        peer: Did,
-    ) -> crate::error::Result<impl Drop> {
-        self.inbound.hold_application_capacity_for_test(peer)
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn close_inbound_for_test(&self) {
-        self.inbound.close_for_test();
+    pub(crate) fn inbound_for_test(&self) -> &InboundMailbox {
+        &self.inbound
     }
 
     /// Admit the pending connection to `did` once its data channel is open: the DHT admission,
@@ -608,7 +554,13 @@ impl TransportCallback for SwarmTransportCallback {
             return Ok(());
         };
         self.admit_pending_connection(did).await?;
-        if !self.processor.logical.transport.has_active_connection(did) {
+        if self
+            .processor
+            .logical
+            .transport
+            .active_attempt(did)?
+            .is_none()
+        {
             tracing::debug!("ignoring late data-channel open for {did}");
         }
         Ok(())

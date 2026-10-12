@@ -42,7 +42,7 @@ pub const DEFAULT_DELEGATION_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 /// and the chunk layer sizes frames to that.
 pub const TRANSPORT_MAX_SIZE: usize = 60_000_000;
 /// Bytes the transport adds when it serializes the data-channel frame: every send is wrapped in
-/// `rings_codec::serialize(TransportMessage::Custom(bytes))` before it reaches SCTP, and the
+/// the custom frame (`rings_transport::core::transport::custom_frame_wire`) before it reaches SCTP, and the
 /// framing decision accounts for this outer wrapper so a payload sized at the limit still fits
 /// once wrapped.
 ///

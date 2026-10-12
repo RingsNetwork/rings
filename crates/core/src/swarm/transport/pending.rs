@@ -60,6 +60,15 @@ type PendingFingerUpdatesGuard<'transport> =
 ///
 /// Clone law: every clone refers to the same mutex. Holding the boundary
 /// prevents admission, retirement, and final send admission from crossing.
+///
+/// Lock order: under the boundary, locks are taken in this order and never the reverse, each
+/// optional:
+///
+/// ```text
+///   boundary ─▶ peer_lifecycles ─▶ pending_finger_updates ─▶ peer_liveness
+///            ─▶ measured_disconnects ─▶ DHT (an admission's or retirement's action)
+///            ─▶ outbound registry ─▶ application inbox (a leaf: nothing is taken under it)
+/// ```
 #[derive(Clone)]
 pub(super) struct ConnectionLifecycleBoundary {
     /// Mutex that serializes admission, retirement, and final send checks.
@@ -215,6 +224,9 @@ impl SwarmTransport {
         self.connection_lifecycle.lock()
     }
 
+    /// Run `action` inside the lifecycle boundary. The evidence is not passed on: no action run
+    /// here takes a transition that requires it; one that does (an announcement, a retirement)
+    /// holds the boundary through [`Self::connection_lifecycle`] and passes it explicitly.
     pub(super) fn with_connection_lifecycle<T>(
         &self,
         action: impl FnOnce() -> Result<T>,
@@ -223,6 +235,7 @@ impl SwarmTransport {
         action()
     }
 
+    /// Run `action` inside the lifecycle boundary iff `attempt` owns its peer's active slot.
     pub(super) fn with_active_slot<T>(
         &self,
         attempt: PendingConnectionAttempt,
@@ -293,11 +306,13 @@ impl SwarmTransport {
         })
     }
 
-    /// Return whether `peer` completed a handshake and still owns a logical slot.
+    /// Test builds: whether `peer` completed a handshake and still owns a logical slot, a lock
+    /// failure read as `false`. Production reads [`Self::active_attempt`], which reports it.
     ///
     /// This remains true while a terminal callback removes the peer, so
     /// lifecycle cleanup can evict it from the DHT even after WebRTC reports
     /// `Closed`.
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(crate) fn has_active_connection(&self, peer: Did) -> bool {
         self.peer_lifecycles()
             .map(|lifecycles| lifecycles.active_attempt(peer).is_some())
@@ -315,7 +330,7 @@ impl SwarmTransport {
     /// Return whether `attempt` is the unique owner of its peer's active slot.
     pub(super) fn owns_active_slot(&self, attempt: PendingConnectionAttempt) -> Result<bool> {
         self.peer_lifecycles()
-            .map(|lifecycles| lifecycles.active_attempt(attempt.peer) == Some(attempt))
+            .map(|lifecycles| lifecycles.owns_active_slot(attempt))
     }
 
     pub(super) async fn reserve_pending_connection(
@@ -634,8 +649,9 @@ impl SwarmTransport {
     /// whose transition (an activation or a retirement) `event` concludes. Never waits.
     ///
     /// Every peer fact is announced there, so for every peer the inbox reads its facts in the
-    /// order they were decided, with no other lock: the boundary serializes the transitions,
-    /// and the inbox is the one lock taken under it.
+    /// order they were decided: the boundary serializes the transitions, and the inbox is a
+    /// leaf of its lock order (see [`ConnectionLifecycleBoundary`]), so announcing under it
+    /// cannot deadlock.
     fn announce(&self, _held: &LifecycleHeld<'_>, event: SwarmEvent) {
         #[cfg(test)]
         crate::tests::activity::record_activity();

@@ -85,7 +85,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 "CONNECT_NODE offer answer start"
             );
             // The answer waits on ICE gathering, so it is negotiated and reported apart from
-            // this inbound event (#913 R9 M4).
+            // this inbound event (inbound locality).
             if let Err(error) = self
                 .transport
                 .answer_remote_connection_detached(self.inner_callback(), ctx, msg)

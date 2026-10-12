@@ -37,7 +37,6 @@ use crate::swarm::application::ApplicationDelivery;
 use crate::swarm::application::ApplicationInbox;
 use crate::swarm::application::SwarmEvent;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::swarm::callback::InboundLane;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::inbound_tap::LaneHold;
 use crate::swarm::transport::SwarmTransport;
@@ -83,9 +82,7 @@ impl ApplicationRecorder {
     pub(super) fn attach_holding_application_lane(
         transport: &SwarmTransport,
     ) -> crate::error::Result<(Self, LaneHold)> {
-        let hold = transport
-            .inbound_tap_for_test()
-            .hold_lane(InboundLane::Application);
+        let hold = transport.inbound_tap_for_test().hold_application_lane();
         Ok((Self::attach(transport)?, hold))
     }
 

@@ -704,7 +704,7 @@ mod tests {
     /// [`TRANSPORT_CUSTOM_OVERHEAD`]: crate::consts::TRANSPORT_CUSTOM_OVERHEAD
     #[test]
     fn test_chunk_envelope_reserves_are_the_widest_framed_chunk() -> Result<()> {
-        use rings_transport::core::transport::TransportMessage;
+        use rings_transport::core::transport::custom_frame_wire;
         use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
         use crate::chunk::ChunkMeta;
@@ -740,8 +740,7 @@ mod tests {
         }
 
         let frame = payload.to_wire()?;
-        let wire = rings_codec::serialize(&TransportMessage::Custom(frame.clone()))
-            .map_err(Error::CodecSerialize)?;
+        let wire = custom_frame_wire(frame.clone()).map_err(Error::CodecSerialize)?;
         assert_eq!(
             frame.len(),
             MAX_DATA_CHANNEL_MESSAGE_SIZE + MAX_CHUNK_ENVELOPE_OVERHEAD

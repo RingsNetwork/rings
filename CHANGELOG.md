@@ -17,16 +17,30 @@
     (`ApplicationData::{Custom, E2eHandshakeRequest, E2eHandshakeResponse, E2eStreamFrame}`),
     and `Event(SwarmEvent)`. No control message has a representation there. The application
     reads it with `ApplicationInbox::next`, or `try_next` without waiting.
-  - Core never waits on the application, not even through a full inbox: a live application
-    message that does not fit is dropped and counted (`ApplicationInbox::dropped`), as a
-    best-effort network drops it, and no inbound lane waits for the application to read. The
-    bound, `APPLICATION_INBOX_WEIGHT` (64 MiB), weighs each message by its own size plus its
-    heap bytes, so empty messages are bounded too. Before the application claims the inbox,
-    live messages are discarded and peer facts kept.
+  - Application delivery is lossy by design. Core never waits on the application, not even
+    through a full inbox: a live application message that does not fit is dropped, counted
+    (`ApplicationInbox::dropped`) and logged at `warn`, as a best-effort network drops it, and
+    no inbound lane waits for the application to read. Nothing tells the sender: a protocol
+    that needs a reliable stream must detect and recover loss end to end (#939). The bound,
+    `APPLICATION_INBOX_WEIGHT` (64 MiB), weighs each message by its own size plus the byte
+    length of its data, one rule for every kind, so empty messages are bounded too. Before the
+    application claims the inbox, live messages are discarded and peer facts kept.
   - Relay-inbox mail is offered to the application only through a reservation of room in the
-    inbox, and retired from storage only once the application has taken it. Mail that finds no
-    room or no reader stays stored for a later pass, as does mail whose origin's quota is spent
-    for now (deferred, no longer discarded).
+    inbox, and retired from storage once the application has taken it from the inbox. Taking
+    ends core's custody: what the application does with the message afterwards is its own,
+    and the node `Backend` may drop it beyond its own namespace queues, counted. Delivery is at
+    least once within a run; a restart between the taking and the retirement loses the mail,
+    as the replay window refuses its redelivery (#936). Mail that finds no room or no reader
+    stays stored for a later pass, as does mail whose origin's quota is spent for now (that
+    origin's later mail is skipped and other origins' still offered) and mail whose admission
+    failed in the local replay store. A drain pass verifies only the elements it has not
+    handed over yet and retires every element it is done with by one removal. An element
+    whose witness fails for any reason but the clock gate is logged at `warn` and left
+    stored.
+  - `Swarm::send_message` and `Swarm::send_direct_message` take `ApplicationData` instead of
+    any `Message`, so the application cannot originate core's protocol messages; `Message`
+    implements `From<ApplicationData>`, the inverse of the inbound projection, and
+    `ApplicationData::custom` builds a custom message.
   - `SwarmEvent` carries only logical facts, `PeerAdmitted` and `PeerRetired`;
     `ConnectionStateChange`, `PeerTransition` and `peer_transition` are removed. Messages and
     facts share the inbox's one queue, in the order core produced them, and an unread
@@ -38,26 +52,36 @@
     resolves to the reported successor; a report no live handle awaits is dropped by core.
     `SuccessorReport::tx_id`, `FindSuccessorReport::is_application_lookup` and the unused
     `FindSuccessorReportHandler::CustomCallback` are removed.
-  - Delegated admission is data: `Swarm::set_admission_delegation(prefix, delegates)` registers
-    an encoded namespace prefix, which core matches on admission; the node publishes each
-    protocol's declaration when it installs the protocol.
-  - Node: `Backend::serve(inbox, stop)` consumes the inbox until the swarm is gone or `stop`
-    is requested; `Backend::handle` is removed. The backend dispatches each registered
-    namespace on its own bounded queue (256 envelopes), in arrival order, so one slow protocol
-    holds back neither another namespace nor the peer facts; a full namespace queue drops
-    further envelopes, counted. `Provider::application_service(observer, stop)` claims the
-    inbox and returns the future that serves it with the `Backend`; `Provider::set_backend`
-    runs that future on a detached task. `BackendObserver`'s methods have default bodies; it loses `lookup_report`
-    (the bootstrap probe awaits its `SuccessorReport`) and gains `e2e_message`. The FFI
-    provider serves the inbox with the extension `Backend` on its runtime until the handle is
-    destroyed, and retains at most 4096 E2E events for its caller, dropping further ones,
-    counted.
+  - Delegated admission is data: `Swarm::set_admission_delegation(prefix, MessageLimit)`
+    registers an encoded namespace prefix as `Delegated` (or `Enforced` again), which core
+    matches on admission; the node publishes each protocol's declaration when it installs the
+    protocol.
+  - Node: `Backend::serve(inbox, stop)` consumes the inbox until the swarm is gone or `stop` is
+    requested; `Backend::handle` is removed. The backend dispatches each registered namespace on
+    its own queue, bounded by 256 envelopes and by 16 MiB of encoded envelopes (an empty queue
+    admits any one envelope), in arrival order, so one slow protocol holds back neither another
+    namespace nor the peer facts. An envelope that cannot be decoded, names no registered
+    namespace, finds its queue full or its namespace unserved is dropped, logged at `warn` and
+    counted by reason: `Provider::dispatch_drop_counters` and the FFI request
+    `dispatchDropCounters` read the counts. Facts and E2E messages reach the `BackendObserver`
+    at once, so they may overtake custom messages still queued for a namespace. Register
+    protocols before claiming the inbox: from the claim on, an envelope of a namespace not yet
+    registered is dropped. `Provider::application_service(observer, stop)` claims the inbox and
+    returns the future that serves it with the `Backend`; `Provider::set_backend` runs that
+    future on a detached task, never stopped. `BackendObserver`'s methods have default bodies;
+    it loses `lookup_report` (the bootstrap probe awaits its `SuccessorReport`) and gains
+    `e2e_message`. The FFI provider serves the inbox with the extension `Backend` on its runtime
+    until the handle is destroyed, and retains at most 4096 E2E events for its caller, dropping
+    further ones, counted (`takeE2eEvents` reports the cumulative `dropped`).
 
 - Refuse a delegation signature that is not its algorithm's exact length (#933). BIP-137
   recovery sliced the first 65 bytes of a peer-supplied signature and panicked on a shorter one;
-  it now converts exactly, and every signer refuses any length but its algorithm's
-  (`SignatureAlgorithm::signature_len`, new error `InvalidSignatureLength`), so a verified
-  delegation's signature is at most 96 bytes.
+  it now converts exactly. Every signer refuses any length but its algorithm's
+  (`SignatureAlgorithm::signature_len`) by one gate: recovering a key from a recoverable
+  signature (Secp256k1, EIP-191, BIP-137), and taking an explicit key from a signature, fail
+  with the new error `InvalidSignatureLength`, while verifying a Secp256r1, Ed25519 or
+  BLS12-381 signature returns `false`. So a verified delegation's signature is at most
+  96 bytes.
 
 - Remove the WebTransport-backed browser relay (#805). The browser `RelayHandle` with
   `register_wt_service` and `register_wt_udp_service`, its interpreter, and its session engine are
@@ -208,8 +232,8 @@
   instead of by a compaction. The rule is stated once, in the DHT chapter's
   [data-topic storage](docs/src/advanced-topic/chord.md#data-topic-storage) section, and in
   `dht::entry::retention`.
-  - `Entry::retired_at` applies the rule on every read and stored value, `Entry::live_at` is a
-    read's projection when live, and `SyncedEntryAck::confirms_local_value` takes the clock it
+  - `Entry::retired_at` applies the rule on every read and stored value, a read serves that
+    projection while it is live, and `SyncedEntryAck::confirms_local_value` takes the clock it
     compares at.
   - `EntryOperation::CompactData`, `Entry::compact_data` and `storage_compact_data` (core and
     node) are removed: a compaction floor erased concurrent adds its owner never received (#867).
@@ -238,8 +262,12 @@
       `fetchTopicMessages` included. A relay inbox's held messages fail its witness: they are
       never delivered, and their carrier is never accepted by a hand-off. Core keeps no code
       for stores from before the cutover, so **operators clear each native node's DHT data
-      store (the `data_storage` path) before upgrading**; data topics and registries are
-      repopulated by their next writes, and every message held at the upgrade is lost.
+      store before upgrading**: the `data_storage` path of the configuration, or the `data`
+      directory under `rings run --storage-path` when that flag overrides it. Data topics and
+      registries are repopulated by their next writes, and every message held at the upgrade
+      is lost. The same clear is due on every later change of the codec of `HeldMessage`,
+      `MessagePayload` or `Message`: core keeps no compatibility code, and a held message
+      under another codec fails its witness for good.
     - Browser: every non-empty old carrier is refused and retired on first read.
     - A storage hand-off now skips an entry the receiver cannot admit, without acknowledging
       it, instead of rejecting its batch; only a placement outside the entry's replica set
@@ -266,8 +294,12 @@
     `SendCreditWait` let a caller wait for credit apart from a send; a wait fails with
     `LinkCreditClosed` when the connection generation ends, a send carrying another connection's
     credit with `ForeignCredit`, and a native connection that cannot spawn its credit pump with
-    `CreditPumpUnavailable`. `LANE_CREDIT_WINDOW`, `NODE_RECEIVE_SOFT_LIMIT_BYTES`,
-    `NodeReceiveLoad` and `ChannelLane::PRIORITY` are new. `InboundFrameCapacity`, its
+    `CreditPumpUnavailable`. `LANE_CREDIT_WINDOW`, `NodeReceiveLoad` and
+    `ChannelLane::PRIORITY` are new. `TransportMessage` is no longer public, so only the
+    transport builds a credit frame: `ConnectionInterface::send_message` and
+    `send_message_with_permit` take the payload `Bytes`, and `custom_frame_wire` encodes the
+    frame a custom send puts on the channel, for callers that size or replay frames.
+    `InboundFrameCapacity`, its
     node-wide bounds and `TransportInterface::inbound_frame_capacity` are removed;
     `InboundFrameAdmission::CapacityExceeded` becomes `CreditExceeded` and gains a `Credit`
     variant; `admit_inbound_frame` and `prepare_inbound_frame` take the frame's lane;
@@ -283,11 +315,10 @@
     through the Swarm API still returns once its first frame is admitted. `fix_fingers` and
     `correct_stabilize` now queue their queries, and a connection a handler starts
     (`connect_detached`) or answers is negotiated and sent on a detached task.
-  - Tests: the sync-storm scenarios derive their backlogs from the credit law, the legacy
-    witness shows the feedback loop broken at the reassembly barrier, the barrier-exemption
-    ablation no longer violates its proposition (#927 evaluates removing the layer), and new
-    boundary and effect witnesses cover a saturated lane and a peer withholding credit from a
-    relay.
+  - Tests: the sync-storm scenarios derive their backlogs from the credit law, the
+    barrier-exemption ablation no longer violates its proposition (#927 evaluates removing the
+    layer), and new boundary and effect witnesses cover a saturated lane and a peer withholding
+    credit from a relay.
   - Cutover: a wire change and part of the storage-entry cutover above: incompatible with
     0.32.x, targeting 0.33.0.
 

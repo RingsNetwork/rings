@@ -9,7 +9,8 @@
 //! (#935):
 //!
 //! ```text
-//!   publish   : (namespace, 𝔹) → Swarm::set_admission_delegation(prefix(namespace), 𝔹)
+//!   publish   : (namespace, 𝔹) → Swarm::set_admission_delegation(prefix(namespace), limit(𝔹))
+//!   limit     : true ↦ MessageLimit::Delegated, false ↦ MessageLimit::Enforced
 //!   prefix    : namespace → encoded namespace   -- a prefix of every envelope of it
 //! ```
 //!
@@ -26,6 +27,7 @@
 //! The exposure is bounded by the inbound mailbox depth, and every delegated frame was charged
 //! at least `DELEGATED_MIN_CHARGE` bytes.
 
+use rings_core::message::MessageLimit;
 use rings_core::swarm::Swarm;
 
 use super::Envelope;
@@ -41,7 +43,12 @@ pub(crate) fn publish<'a>(
     declarations: impl IntoIterator<Item = (&'a str, bool)>,
 ) -> Result<()> {
     for (namespace, delegates) in declarations {
-        swarm.set_admission_delegation(Envelope::namespace_prefix(namespace)?, delegates);
+        let limit = if delegates {
+            MessageLimit::Delegated
+        } else {
+            MessageLimit::Enforced
+        };
+        swarm.set_admission_delegation(Envelope::namespace_prefix(namespace)?, limit);
     }
     Ok(())
 }

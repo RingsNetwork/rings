@@ -4,6 +4,7 @@ use futures::future::select;
 use futures::future::Either;
 
 use super::*;
+use crate::swarm::application::ApplicationData;
 
 /// Each single-layer ablation at N=10 exposes exactly the proposition its layer protects, except
 /// the layers per-lane credit subsumes.
@@ -333,7 +334,7 @@ async fn test_saturated_lane_holds_one_window_and_conserves_every_frame() {
         .map(|index| {
             let swarm = nodes[0].swarm.clone();
             async move {
-                let message = Message::custom(format!("saturate-{index}").as_bytes())?;
+                let message = ApplicationData::custom(format!("saturate-{index}").as_bytes());
                 swarm.send_direct_message(message, peer).await
             }
             .boxed_local()

@@ -15,9 +15,10 @@
 //!
 //! The outbox holds, per lane, the greatest credit not yet sent, so it is itself a join of
 //! `(ℕ, max)`: credits released faster than the pump sends them coalesce into one frame. Each
-//! lane has its own pump, so a credit held up behind one lane's channel delays no other lane. A
-//! sender that finds no credit waits, and that wait is logged at `warn`, once per wait, as
-//! backpressure; a frame beyond the advertised credit is a protocol violation of the peer.
+//! lane has its own pump (see `credit_pump`), so a credit held up behind one lane's channel
+//! delays no other lane. A sender that finds no credit waits, and that wait is logged at `warn`,
+//! once per wait, as backpressure; a frame beyond the advertised credit is a protocol violation
+//! of the peer.
 //!
 //! Lock law: every transition takes the lock once, never across a suspension point, and wakes
 //! the tasks it unblocked after committing its state. The node's load is locked on its own, never
@@ -27,10 +28,16 @@
 use std::future::poll_fn;
 #[cfg(rings_transport_backend)]
 use std::future::Future;
+#[cfg(not(rings_transport_backend))]
+use std::marker::PhantomData;
+use std::mem;
+use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::Weak;
+#[cfg(rings_transport_backend)]
+use std::task::Context;
 #[cfg(rings_transport_backend)]
 use std::task::Poll;
 use std::task::Waker;
@@ -43,6 +50,8 @@ use crate::core::credit::PerLane;
 use crate::core::credit::ReceiveWindow;
 use crate::core::credit::SendCredit;
 use crate::core::pool::ChannelLane;
+#[cfg(test)]
+use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 #[cfg(rings_transport_backend)]
 use crate::core::transport::SendAcceptance;
 #[cfg(rings_transport_backend)]
@@ -53,11 +62,11 @@ use crate::sync_utils::lock_recover;
 
 /// The bytes of received frames a node holds above which its lanes defer their credit
 /// advertisements: 16 MiB, the node-wide frame budget the transport held before per-lane credit.
-pub const NODE_RECEIVE_SOFT_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const NODE_RECEIVE_SOFT_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The bytes of frames a node's connections have admitted and not yet released, and the links
-/// whose credit advertisements wait for that load to fall below
-/// [`NODE_RECEIVE_SOFT_LIMIT_BYTES`]: one per transport, shared by its connections.
+/// whose credit advertisements wait for that load to fall below the node's soft limit
+/// (`NODE_RECEIVE_SOFT_LIMIT_BYTES`, 16 MiB): one per transport, shared by its connections.
 ///
 /// Law (soft bound). Above the limit no lane but [`ChannelLane::PRIORITY`] advertises new
 /// credit, so the frames a node holds exceed the limit by at most the credit already advertised
@@ -126,12 +135,12 @@ impl NodeReceiveLoad {
         let mut state = self.lock();
         state.held = state.held.saturating_sub(bytes);
         if state.held < state.limit {
-            return LoadVerdict::Open(std::mem::take(&mut state.deferred));
+            return LoadVerdict::Open(mem::take(&mut state.deferred));
         }
         if !state
             .deferred
             .iter()
-            .any(|deferred| std::ptr::eq(deferred.as_ptr(), Arc::as_ptr(link)))
+            .any(|deferred| ptr::eq(deferred.as_ptr(), Arc::as_ptr(link)))
         {
             state.deferred.push(Arc::downgrade(link));
         }
@@ -189,7 +198,7 @@ struct LinkCreditState {
 /// Per-lane credit flow control of one connection; see the module documentation.
 pub(crate) struct LinkCredit {
     /// The peer, for logs.
-    peer: Arc<str>,
+    pub(super) peer: Arc<str>,
     /// The node's receive load, which every admission and release counts.
     load: NodeReceiveLoad,
     /// All lanes, under one lock.
@@ -249,7 +258,7 @@ impl LinkCredit {
         self: &Arc<Self>,
         index: CreditIndex,
         id: &mut Option<u64>,
-        context: &mut std::task::Context<'_>,
+        context: &mut Context<'_>,
     ) -> Poll<Result<CreditReservation>> {
         let mut state = self.lock();
         if state.closed {
@@ -299,7 +308,7 @@ impl LinkCredit {
     /// Wake every sender waiting on credit index `index`, after the lock is released. A woken
     /// wait registers again if it still finds no credit.
     fn wake_senders(&self, index: CreditIndex) {
-        let waiters = std::mem::take(&mut self.lock().send_waiters[index]);
+        let waiters = mem::take(&mut self.lock().send_waiters[index]);
         waiters.into_iter().for_each(|waiter| waiter.waker.wake());
     }
 
@@ -392,10 +401,7 @@ impl LinkCredit {
         })
     }
 
-    #[cfg(any(
-        feature = "native-webrtc",
-        all(feature = "web-sys-webrtc", target_family = "wasm")
-    ))]
+    #[cfg(rings_transport_webrtc)]
     /// Queue `credit` on the lane of `index` again after its send failed: `outbox ⊔= credit`,
     /// idempotent as every credit is. Post: `false`, queuing nothing, once the connection is
     /// gone, when no send can succeed.
@@ -419,7 +425,7 @@ impl LinkCredit {
             let waiters = state
                 .send_waiters
                 .iter_mut()
-                .flat_map(|(_, waiters)| std::mem::take(waiters))
+                .flat_map(|(_, waiters)| mem::take(waiters))
                 .collect::<Vec<_>>();
             let pumps = state
                 .pump
@@ -440,9 +446,9 @@ impl LinkCredit {
 
     /// Frames of each lane admitted and not yet released.
     #[cfg(test)]
-    pub(crate) fn occupancy(&self) -> [u64; crate::core::pool::DATA_CHANNEL_POOL_SIZE as usize] {
+    pub(crate) fn occupancy(&self) -> [u64; DATA_CHANNEL_POOL_SIZE as usize] {
         let mut receive = self.lock().receive;
-        let mut occupancy = [0; crate::core::pool::DATA_CHANNEL_POOL_SIZE as usize];
+        let mut occupancy = [0; DATA_CHANNEL_POOL_SIZE as usize];
         for ((_, window), slot) in receive.iter_mut().zip(occupancy.iter_mut()) {
             *slot = window.occupancy();
         }
@@ -481,7 +487,7 @@ impl Drop for CreditWait<'_> {
 /// [`SendPermit::with_credit`]: crate::core::transport::SendPermit::with_credit
 pub struct LaneCreditReservation(
     #[cfg(rings_transport_backend)] pub(crate) CreditReservation,
-    #[cfg(not(rings_transport_backend))] std::marker::PhantomData<()>,
+    #[cfg(not(rings_transport_backend))] PhantomData<()>,
 );
 
 #[cfg(rings_transport_backend)]
@@ -566,63 +572,5 @@ impl CreditPermit {
 impl Drop for CreditPermit {
     fn drop(&mut self) {
         self.link.release(self.index, self.bytes);
-    }
-}
-
-/// How long a lane's credit pump pauses after a failed send before it sends the credit again:
-/// a send fails transiently when one of the connection's outbound channels is closed or not yet
-/// open, and the pause keeps a send that fails at once from spinning the pump.
-#[cfg(any(
-    feature = "native-webrtc",
-    all(feature = "web-sys-webrtc", target_family = "wasm")
-))]
-const CREDIT_RESEND_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Run the credit pump of the lane of `index`: send every credit `link` queues on the lane as a
-/// [`TransportMessage::Credit`] frame, until the connection is gone.
-///
-/// A credit frame is never charged against credit, so the pump never waits on the peer. A
-/// credit is cumulative, so losing one can leave the peer's sender waiting for good: a credit
-/// whose send fails is queued again and sent after [`CREDIT_RESEND_PAUSE`] (a send fails
-/// transiently while any of this end's outbound channels is closed or not yet open; credits
-/// leave on the outbound channel, frames arrive on the remote-created one), until the
-/// connection is gone, which a send failing with the connection released also says. One pump
-/// runs per lane, so a credit held up behind one lane's channel delays no other lane's.
-#[cfg(any(
-    feature = "native-webrtc",
-    all(feature = "web-sys-webrtc", target_family = "wasm")
-))]
-pub(crate) async fn pump_lane_credits<C>(
-    link: Arc<LinkCredit>,
-    connection: crate::connection_ref::ConnectionRef<C>,
-    index: CreditIndex,
-) where
-    C: crate::core::transport::ConnectionInterface<Error = Error, Sdp = String>
-        + rings_runtime::MaybeSendSync,
-{
-    use crate::core::transport::ConnectionInterface;
-    use crate::core::transport::SendPermit;
-    use crate::core::transport::TransportMessage;
-
-    while let Some(credit) = link.next_credit(index).await {
-        let sent = connection
-            .send_message_with_permit(
-                TransportMessage::Credit(credit),
-                index.lane(),
-                SendPermit::always(),
-            )
-            .await;
-        if let Err(error) = sent {
-            // The connection is gone for good: no send of it can succeed again.
-            if matches!(error, Error::ConnectionReleased(_)) {
-                return;
-            }
-            tracing::debug!(peer = %link.peer, %error, "failed to send a credit frame; resending");
-            if rings_runtime::sleep(CREDIT_RESEND_PAUSE).await.is_err()
-                || !link.requeue(index, credit)
-            {
-                return;
-            }
-        }
     }
 }

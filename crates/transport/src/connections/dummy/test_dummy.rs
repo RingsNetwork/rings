@@ -399,7 +399,7 @@ async fn test_pending_dummy_close_fences_an_irrevocable_dispatch_synchronously()
         tokio::spawn(async move {
             connection
                 .send_message_with_permit(
-                    TransportMessage::Custom(Bytes::from_static(b"payload")),
+                    Bytes::from_static(b"payload"),
                     ChannelLane::default(),
                     SendPermit::always(),
                 )
@@ -556,7 +556,7 @@ async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_l
     let acceptance = permit.acceptance();
     let result = local
         .send_message_with_permit(
-            TransportMessage::Custom(Bytes::from_static(b"payload")),
+            Bytes::from_static(b"payload"),
             ChannelLane::default(),
             permit,
         )
@@ -575,7 +575,7 @@ async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_l
     assert!(matches!(
         local
             .send_message_with_permit(
-                TransportMessage::Custom(Bytes::from_static(b"later")),
+                Bytes::from_static(b"later"),
                 ChannelLane::default(),
                 SendPermit::always(),
             )

@@ -5,10 +5,10 @@
 //! own namespace) — *not* the router-internal `Core`. Protocols that authenticate and select an
 //! exact physical next hop may additionally use crate-private `send_direct`; it preserves the
 //! namespace envelope while bypassing Chord route selection. `Core` is the crate-private capability
-//! that also routes an inbound [`Envelope`] to its protocol and drives the bounded re-injection
-//! fixpoint; the registry stays uniform (everything erased to the internal `Handler`) while each
-//! extension's shell is its own. Extension authors see only `Protocol` / `Interpret` / `Scope` /
-//! `Transition` / `Extensions`.
+//! that resolves a namespace's [`Route`], through which an inbound [`Envelope`] reaches its
+//! protocol, and drives the bounded re-injection fixpoint; the registry stays uniform (everything
+//! erased to the internal `Handler`) while each extension's shell is its own. Extension authors
+//! see only `Protocol` / `Interpret` / `Scope` / `Transition` / `Extensions`.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -96,31 +96,57 @@ impl Core {
             .await
     }
 
-    /// Route one inbound [`Envelope`] to its protocol. Unknown namespaces are logged and
-    /// dropped (non-fatal). Same-turn feedback is reduced inside the selected handler; later
-    /// lifecycle injection starts a new dispatch.
+    /// Route one [`Envelope`] to its protocol. An unknown namespace is logged and dropped
+    /// (non-fatal). Same-turn feedback is reduced inside the selected handler; later lifecycle
+    /// injection starts a new dispatch.
     ///
-    /// This is the **authenticated ingress** capability: the caller chooses `from`, so a
-    /// protocol's `decode` will attribute the resulting event to that DID (for the relay, a
-    /// `from != me` envelope becomes a peer `Frame`). It is therefore `pub(crate)` — only the
-    /// router path may call it, and only [`Backend`](crate::extension::Backend) does, with
-    /// `from` taken from the message's verified signer. Extension code reaches the router only
-    /// through [`inject`](Core::inject) (self-addressed, `from = self.did()`); it can never
-    /// forge a remote `from`.
+    /// The caller chooses `from`, so a protocol's `decode` attributes the resulting event to that
+    /// DID (for the relay, a `from != me` envelope becomes a peer `Frame`). It is therefore
+    /// crate-private: production reaches it only through [`inject`](Core::inject), with
+    /// `from = self.did()`; inbound envelopes from peers take a [`Route`] instead, resolved by
+    /// the [`Backend`](crate::extension::Backend)'s router.
+    #[cfg(rings_native)]
     pub(crate) async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
-        let namespace = envelope.namespace;
-        match self.handler(namespace.as_str()) {
-            Some(handler) => handler.handle(self, from, envelope.payload).await?,
-            None => tracing::debug!(
-                "no protocol registered for namespace {:?}, dropping",
-                namespace
-            ),
+        match self.route(envelope.namespace.as_str()) {
+            Some(route) => route.dispatch(from, envelope.payload).await,
+            None => {
+                tracing::warn!(namespace = %envelope.namespace, "no protocol registered, dropping");
+                Ok(())
+            }
         }
-        Ok(())
     }
 
-    fn handler(&self, namespace: &str) -> Option<Arc<DynHandler>> {
-        self.handlers.read().ok()?.get(namespace).map(Arc::clone)
+    /// The route to `namespace`'s protocol, or `None` when no protocol is registered under it.
+    pub(crate) fn route(&self, namespace: &str) -> Option<Route> {
+        let handler = self.handlers.read().ok()?.get(namespace).map(Arc::clone)?;
+        Some(Route {
+            core: self.clone(),
+            handler,
+        })
+    }
+}
+
+/// A registered namespace's protocol, resolved from the registry. Holding one witnesses that the
+/// namespace was registered when it was resolved, so its [`dispatch`](Route::dispatch) never
+/// re-checks the registration:
+///
+/// ```text
+///   route(ns) = Some(r)  ⇒  r.dispatch(from, p) runs ns's handler on (from, p)
+/// ```
+///
+/// A later [`replace`](Extensions::replace) does not reach a route resolved before it.
+#[derive(Clone)]
+pub(crate) struct Route {
+    core: Core,
+    handler: Arc<DynHandler>,
+}
+
+impl Route {
+    /// Run the resolved protocol on `payload` from `from`: decode, step, then its effects and
+    /// synchronous feedback. This is the **authenticated ingress**: `from` must be the
+    /// message's verified signer, which only the [`Backend`](crate::extension::Backend) has.
+    pub(crate) async fn dispatch(&self, from: Did, payload: Bytes) -> Result<()> {
+        self.handler.handle(&self.core, from, payload).await
     }
 }
 
@@ -503,15 +529,6 @@ impl Extensions {
     #[cfg(all(test, rings_native))]
     pub(crate) fn delegates_admission(&self, envelope: &[u8]) -> bool {
         self.core.processor.swarm.delegates_admission(envelope)
-    }
-
-    /// Route a decoded envelope (inbound entry point). `pub(crate)`: the authenticated ingress
-    /// belongs to the router path ([`Backend`](crate::extension::Backend)), not to public
-    /// holders of an `Extensions` value (which get registration + a self-addressed
-    /// [`Core`](Core::inject), never the ability to forge a remote `from`). See
-    /// [`Core::dispatch`].
-    pub(crate) async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
-        self.core.dispatch(from, envelope).await
     }
 }
 

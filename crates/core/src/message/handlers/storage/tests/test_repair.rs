@@ -662,7 +662,7 @@ async fn test_storage_fetch_starts_fresh_observation_round() -> Result<()> {
     Ok(())
 }
 
-/// A fetch's reply marker (#913 R8): a reply that caches an entry answers the key since every
+/// A fetch's reply marker: a reply that caches an entry answers the key since every
 /// mark read before it, a found-empty one does not, and neither a new round of the key nor the
 /// eviction of its bucket makes an answer read as earlier than a mark. A reader polls the marker
 /// instead of comparing cached values, which change with no reply as elements cross their

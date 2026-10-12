@@ -114,7 +114,7 @@ async fn test_online_node_descriptor_refresh_replaces_previous_self_record() -> 
         .storage_check_cache(entry_key)
         .await
         .expect("online node registry entry should be cached after publish");
-    let stored = Processor::online_node_descriptors_from_entry(&entry);
+    let stored = OnlineNodeRegistration::descriptors_from_entry(&entry);
     let nodes = processor.lookup_online_nodes(false).await?;
 
     assert_eq!(stored.len(), 1);
@@ -140,7 +140,7 @@ async fn test_online_node_concurrent_publish_keeps_one_self_record() -> Result<(
         .storage_check_cache(entry_key)
         .await
         .expect("online node registry entry should be cached after publish");
-    let stored = Processor::online_node_descriptors_from_entry(&entry);
+    let stored = OnlineNodeRegistration::descriptors_from_entry(&entry);
     let nodes = processor.lookup_online_nodes(false).await?;
 
     assert_eq!(stored.len(), 1);
@@ -186,7 +186,7 @@ async fn test_online_node_publish_replaces_observed_self_records() -> Result<()>
         .storage_check_cache(entry_key)
         .await
         .expect("online node registry entry should be cached after publish");
-    let stored = Processor::online_node_descriptors_from_entry(&entry);
+    let stored = OnlineNodeRegistration::descriptors_from_entry(&entry);
 
     assert_eq!(stored.len(), 2);
     // Publishing issues no reset floor: the register is still the fixture's overwrite, and the
@@ -284,7 +284,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .storage_check_cache(entry_key)
         .await
         .expect("onion exit registry entry should be cached after publish");
-    let stored = Processor::onion_exit_descriptors_from_entry(&entry);
+    let stored = OnionExitRegistration::descriptors_from_entry(&entry);
 
     assert_eq!(stored.len(), 2);
     assert_eq!(

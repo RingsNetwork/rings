@@ -38,7 +38,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::measure::Authentication;
 use crate::message::MessagePayload;
-use crate::swarm::application::Delivered;
 use crate::swarm::detached::spawn_detached;
 use crate::utils::try_sleep;
 use crate::utils::GenerationWitness;
@@ -119,7 +118,7 @@ type InboundReply = oneshot::Sender<Result<()>>;
 /// (`INBOUND_PEER_CAPACITY`), so arrived frames never contend for those events, which the share
 /// reserves for no lane; its bytes hold at most one data-channel message per lane, the peer's
 /// own. A lane slow to process holds its own frames, and their transport credit, in its FIFO,
-/// and backpressure reaches the peer through that lane's credit alone (#913 R10 L4). Without
+/// and backpressure reaches the peer through that lane's credit alone (per-lane isolation). Without
 /// it, credit returned at hand-off would let one lane fill the shared per-peer capacity and
 /// stall the others, lane 0 included; the composed liveness model refutes that design
 /// (`HandOffWithoutAwait`). The dummy transport's "delivered = processed" rests on it too.
@@ -178,7 +177,7 @@ impl InboundEvent {
 }
 
 #[derive(Clone)]
-pub(super) struct InboundMailbox {
+pub(crate) struct InboundMailbox {
     sender: Arc<Mutex<InboundSender>>,
     capacity: Arc<InboundCapacity>,
     actor_available: bool,
@@ -348,43 +347,43 @@ impl InboundMailbox {
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn admitted_count_for_test(&self) -> usize {
+    pub(crate) fn admitted_count_for_test(&self) -> usize {
         self.capacity.admitted_count_for_test()
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) async fn await_admitted_count_for_test(&self, predicate: impl Fn(usize) -> bool) {
+    pub(crate) async fn await_admitted_count_for_test(&self, predicate: impl Fn(usize) -> bool) {
         self.capacity.await_admitted_count_for_test(predicate).await;
     }
 
     /// Wait until the number of arrivals waiting for the mailbox satisfies `predicate`.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) async fn await_waiting_for_test(&self, predicate: impl Fn(usize) -> bool) {
+    pub(crate) async fn await_waiting_for_test(&self, predicate: impl Fn(usize) -> bool) {
         self.capacity.await_waiting_for_test(predicate).await;
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) async fn await_handoffs_for_test(&self, predicate: impl Fn(u64) -> bool) {
+    pub(crate) async fn await_handoffs_for_test(&self, predicate: impl Fn(u64) -> bool) {
         self.handoffs.await_until(predicate).await;
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn cleanup_passes_for_test(&self) -> u64 {
+    pub(crate) fn cleanup_passes_for_test(&self) -> u64 {
         self.cleanup_passes.get()
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) async fn await_cleanup_passes_for_test(&self, predicate: impl Fn(u64) -> bool) {
+    pub(crate) async fn await_cleanup_passes_for_test(&self, predicate: impl Fn(u64) -> bool) {
         self.cleanup_passes.await_until(predicate).await;
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn hold_application_admission_for_test(&self) -> Result<impl Drop> {
+    pub(crate) fn hold_application_admission_for_test(&self) -> Result<impl Drop> {
         self.reserve_ticket(InboundLane::Application)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn hold_application_capacity_for_test(
+    pub(crate) fn hold_application_capacity_for_test(
         &self,
         peer: crate::dht::Did,
     ) -> Result<impl Drop> {
@@ -393,7 +392,7 @@ impl InboundMailbox {
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn close_for_test(&self) {
+    pub(crate) fn close_for_test(&self) {
         self.sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -759,7 +758,7 @@ async fn process_event(
     let lane = event.lane();
     let sequence = event.sequence;
     match processor.pending_connection_admits(event.peer).await {
-        Ok(true) => processor.logical.observe_for_test(&event.payload),
+        Ok(true) => processor.logical.tap_inbound(&event.payload),
         Ok(false) => {
             finish_completion(event.completion, Ok(()));
             return InboundTaskCompletion {
@@ -788,7 +787,7 @@ async fn process_event(
         };
     }
 
-    processor.logical.pass_lane_for_test(lane).await;
+    processor.logical.pass_tapped_lane(lane).await;
     let result =
         process_logical_message(&processor.logical, &event.payload, event.prepared_message).await;
     finish_completion(event.completion, result);
@@ -799,8 +798,9 @@ async fn process_event(
     }
 }
 
-/// Dispatch `payload`, then hand its application data, if any, to the application inbox,
-/// queued or, when full, dropped and counted. Never waits on the application (#913 R10).
+/// Dispatch `payload`, then hand its application data, if any, to the application inbox:
+/// queued or, when full, dropped, counted and logged by the inbox. Never waits on the
+/// application.
 async fn process_logical_message(
     pipeline: &LogicalInbound,
     payload: &MessagePayload,
@@ -808,10 +808,7 @@ async fn process_logical_message(
 ) -> Result<()> {
     let message = pipeline.handle_payload(payload, prepared_message).await?;
     if let Some(application) = pipeline.application_message(payload, message) {
-        let tx_id = application.tx_id;
-        if pipeline.transport.application().outlet.deliver(application) == Delivered::Dropped {
-            tracing::debug!(%tx_id, "application inbox full: live message dropped");
-        }
+        pipeline.transport.application().outlet.deliver(application);
     }
     Ok(())
 }

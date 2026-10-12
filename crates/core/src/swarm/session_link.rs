@@ -510,6 +510,11 @@ impl<F> ReferencedDelegations<F> {
         }))
     }
 
+    /// Whether this link's hold is at its capacity.
+    fn hold_is_full(&self) -> bool {
+        self.held.len() >= self.hold_capacity
+    }
+
     /// Judge one arriving frame at `now_ms`; an unresolved frame is held only while the hold
     /// is below its capacity and `room` says the node's holds together have room for it.
     pub(crate) fn arrive(
@@ -525,7 +530,7 @@ impl<F> ReferencedDelegations<F> {
                 .resolve(frame, carrier, now_ms)
                 .map(FrameArrival::Resolved);
         }
-        if !room || self.held.len() >= self.hold_capacity {
+        if !room || self.hold_is_full() {
             let request = self
                 .held
                 .front()

@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::net::IpAddr;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -28,8 +27,9 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::callback::admit_inbound_data_channel;
+use crate::callback::credit_pump::pump_lane_credits;
 use crate::callback::data_channel_label;
-use crate::callback::link_credit::pump_lane_credits;
+use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
 use crate::callback::NodeReceiveLoad;
 use crate::connection_ref::ConnectionRef;
@@ -65,6 +65,7 @@ use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
 
 mod close_actor;
+mod host_candidates;
 mod send_lifecycle;
 #[cfg(test)]
 use crate::core::send::model as send_model;
@@ -75,6 +76,11 @@ mod test_close_actor;
 #[cfg(test)]
 mod test_send_lifecycle;
 
+use host_candidates::append_sdp_extra_host_candidates;
+use host_candidates::external_address_candidates;
+use host_candidates::nat_1to1_host_candidates;
+use host_candidates::sdp_candidate_count;
+use host_candidates::sdp_extra_host_candidates;
 #[cfg(test)]
 use send_lifecycle::OwnedSend;
 use send_lifecycle::SendLifecycle;
@@ -146,111 +152,6 @@ fn spawn_delivery_round(lease: Option<RoundLease>, channel: Arc<RTCDataChannel>)
     }
 }
 
-fn sdp_candidate_count(sdp: &str) -> usize {
-    sdp.lines()
-        .filter(|line| line.starts_with("a=candidate:"))
-        .count()
-}
-
-fn external_address_candidates(external_address: Option<&str>) -> Vec<String> {
-    let Some(external_address) = external_address else {
-        return Vec::new();
-    };
-
-    let mut candidates = Vec::new();
-    for candidate in external_address.split(',') {
-        let candidate = candidate.trim();
-        if candidate.is_empty() || candidates.iter().any(|seen| seen == candidate) {
-            continue;
-        }
-        candidates.push(candidate.to_string());
-    }
-    candidates
-}
-
-fn is_loopback_address(candidate: &str) -> bool {
-    candidate
-        .parse::<IpAddr>()
-        .map(|addr| addr.is_loopback())
-        .unwrap_or(false)
-}
-
-fn nat_1to1_host_candidates(candidates: &[String]) -> Vec<String> {
-    candidates
-        .iter()
-        .filter(|candidate| !is_loopback_address(candidate))
-        .cloned()
-        .collect()
-}
-
-fn sdp_extra_host_candidates(candidates: &[String]) -> Vec<String> {
-    candidates
-        .iter()
-        .filter(|candidate| is_loopback_address(candidate))
-        .cloned()
-        .collect()
-}
-
-fn duplicate_host_candidate_line(line: &str, extra_addresses: &[String]) -> Vec<String> {
-    if !line.starts_with("a=candidate:") {
-        return Vec::new();
-    }
-
-    let fields = line.split_whitespace().collect::<Vec<_>>();
-    let Some(address) = fields.get(4) else {
-        return Vec::new();
-    };
-    let Some(candidate_type_marker) = fields.get(6) else {
-        return Vec::new();
-    };
-    let Some(candidate_type) = fields.get(7) else {
-        return Vec::new();
-    };
-    if *candidate_type_marker != "typ" || *candidate_type != "host" {
-        return Vec::new();
-    }
-
-    extra_addresses
-        .iter()
-        .filter(|candidate| candidate.as_str() != *address)
-        .filter_map(|candidate| {
-            let mut duplicate = fields
-                .iter()
-                .map(|field| field.to_string())
-                .collect::<Vec<_>>();
-            let address_slot = duplicate.get_mut(4)?;
-            *address_slot = candidate.clone();
-            Some(duplicate.join(" "))
-        })
-        .collect()
-}
-
-fn append_sdp_extra_host_candidates(sdp: String, extra_addresses: &[String]) -> String {
-    if extra_addresses.is_empty() {
-        return sdp;
-    }
-
-    let mut output = String::with_capacity(sdp.len());
-    for segment in sdp.split_inclusive('\n') {
-        output.push_str(segment);
-
-        let line = segment.trim_end_matches(['\r', '\n']);
-        let line_ending = if segment.ends_with("\r\n") {
-            "\r\n"
-        } else if segment.ends_with('\n') {
-            "\n"
-        } else {
-            ""
-        };
-        for duplicate in duplicate_host_candidate_line(line, extra_addresses) {
-            output.push_str(&duplicate);
-            output.push_str(line_ending);
-        }
-    }
-
-    output
-}
-
 /// Build the future that resolves once the message ending at `end_offset` on
 /// this channel has been flushed to the wire, or errors if the channel closes
 /// first. Registering it re-arms the channel's low-water threshold.
@@ -268,7 +169,7 @@ impl ChannelPool<TrackedChannel> {
     /// Serialize one channel operation and hand its resource owner to the bounded executor.
     async fn send_with_retirement_fence(
         &self,
-        msg: TransportMessage,
+        frame: TransportMessage,
         lane: ChannelLane,
         permit: SendPermit,
         retirement_fence: NativeRetirementFence,
@@ -279,7 +180,7 @@ impl ChannelPool<TrackedChannel> {
             delivery,
             send_lock,
         } = self.select(lane)?;
-        let data = rings_codec::serialize(&msg).map(Bytes::from)?;
+        let data = rings_codec::serialize(&frame).map(Bytes::from)?;
         let runtime = native_send_runtime()?;
         // Hold the per-channel lock across send + counter advance so the bytes
         // are enqueued and accounted in the same (FIFO) order: concurrent senders
@@ -586,21 +487,13 @@ async fn create_peer_connection(
 }
 
 #[async_trait]
-impl ConnectionInterface for WebrtcConnection {
-    type Sdp = String;
-    type Error = Error;
-
-    async fn send_message_with_permit(
+impl FrameSink for WebrtcConnection {
+    async fn send_frame(
         &self,
-        msg: TransportMessage,
+        frame: TransportMessage,
         lane: ChannelLane,
-        mut permit: SendPermit,
+        permit: SendPermit,
     ) -> Result<DeliveryFuture> {
-        self.webrtc_wait_for_data_channel_open().await?;
-        let _credit = self
-            .callback
-            .credit_for_send(&msg, lane, &mut permit)
-            .await?;
         let runtime = native_send_runtime()?;
         let acceptance = permit.acceptance();
         let pool = self.webrtc_data_channel.clone();
@@ -612,16 +505,31 @@ impl ConnectionInterface for WebrtcConnection {
             acceptance,
             retirement_fence.clone(),
             move |lifecycle| async move {
-                pool.send_with_retirement_fence(msg, lane, permit, retirement_fence, lifecycle)
+                pool.send_with_retirement_fence(frame, lane, permit, retirement_fence, lifecycle)
                     .await
             },
             close_failed_native_send(connection, physical_close_completed),
         )
         .await
     }
+}
+
+#[async_trait]
+impl ConnectionInterface for WebrtcConnection {
+    type Sdp = String;
+    type Error = Error;
+
+    async fn send_message_with_permit(
+        &self,
+        payload: Bytes,
+        lane: ChannelLane,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
+        self.callback.send_custom(self, payload, lane, permit).await
+    }
 
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
-        Box::pin(self.callback.reserve_credit(lane))
+        self.callback.reserve_send_credit(lane)
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -762,7 +670,7 @@ fn wire_received_data_channels(
             );
             return Box::pin(async move {
                 if let Err(error) = channel.close().await {
-                    tracing::debug!(%error, "failed to close rejected inbound data channel");
+                    tracing::debug!(error = ?error, "failed to close rejected inbound data channel");
                 }
             });
         };

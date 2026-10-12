@@ -263,7 +263,7 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
         }
         let controls_before = frame_count(&trace, MessageCategory::DhtControl);
         node1
-            .send_direct_message(
+            .send_direct_core_message_for_test(
                 Message::NotifyPredecessorSend(NotifyPredecessorSend { did: node1.did() }),
                 node2.did(),
             )

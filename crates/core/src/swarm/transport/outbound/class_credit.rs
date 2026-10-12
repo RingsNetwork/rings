@@ -3,6 +3,7 @@
 //! frame.
 
 use std::future::Future;
+use std::mem::replace;
 use std::pin::Pin;
 
 use futures::FutureExt;
@@ -75,8 +76,11 @@ pub(super) type CreditWaitOutput = (
     Result<LaneCreditReservation>,
 );
 
+/// A pending credit reservation: `Send` for the native executor, unconstrained on the
+/// single-threaded browser event loop.
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(super) type CreditWaitFuture = Pin<Box<dyn Future<Output = CreditWaitOutput> + Send>>;
+/// A pending credit reservation; see the native definition.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub(super) type CreditWaitFuture = Pin<Box<dyn Future<Output = CreditWaitOutput>>>;
 
@@ -92,25 +96,22 @@ impl OutboundWorker {
     /// lane, with no credit left behind by a transfer that went away.
     pub(super) fn acquire_credits(&mut self) {
         for class in CLASSES {
-            let index = class.index();
             let Some(next) = self.ready.next_of(class) else {
-                if let Some(slot) = self.credits.get_mut(index) {
-                    if matches!(slot, ClassCredit::Held(..)) {
-                        *slot = ClassCredit::Idle;
-                    }
+                let slot = &mut self.credits[class];
+                if matches!(slot, ClassCredit::Held(..)) {
+                    *slot = ClassCredit::Idle;
                 }
                 continue;
             };
             let admitted = next.scheduled.transfer.admitted.clone();
             let attempt = admitted.attempt();
-            if let Some(slot) = self.credits.get_mut(index) {
-                if slot.generation().is_some_and(|held| held != attempt) {
-                    // Another generation's credit settles only its own window: return it, and
-                    // abandon a reservation still pending on it (its outcome is then ignored).
-                    *slot = ClassCredit::Idle;
-                }
+            let slot = &mut self.credits[class];
+            if slot.generation().is_some_and(|held| held != attempt) {
+                // Another generation's credit settles only its own window: return it, and
+                // abandon a reservation still pending on it (its outcome is then ignored).
+                *slot = ClassCredit::Idle;
             }
-            if !matches!(self.credits.get(index), Some(ClassCredit::Idle)) {
+            if !matches!(slot, ClassCredit::Idle) {
                 continue;
             }
             // The wait owns the lane's credit state only, so a long wait pins no connection.
@@ -122,9 +123,7 @@ impl OutboundWorker {
             match (&mut wait).now_or_never() {
                 Some((_, attempt, credit)) => self.hold_credit(class, attempt, credit),
                 None => {
-                    if let Some(slot) = self.credits.get_mut(index) {
-                        *slot = ClassCredit::Awaiting(attempt);
-                    }
+                    self.credits[class] = ClassCredit::Awaiting(attempt);
                     self.credit_waits.push(wait);
                 }
             }
@@ -141,8 +140,8 @@ impl OutboundWorker {
         credit: Result<LaneCreditReservation>,
     ) {
         if matches!(
-            self.credits.get(class.index()),
-            Some(ClassCredit::Awaiting(awaited)) if *awaited == attempt
+            self.credits[class],
+            ClassCredit::Awaiting(awaited) if awaited == attempt
         ) {
             self.hold_credit(class, attempt, credit);
         }
@@ -158,13 +157,11 @@ impl OutboundWorker {
         let settled = match credit {
             Ok(credit) => ClassCredit::Held(credit, attempt),
             Err(error) => {
-                tracing::debug!(class = ?class, ?error, "outbound lane cannot reserve credit");
+                tracing::debug!(class = ?class, error = ?error, "outbound lane cannot reserve credit");
                 ClassCredit::Unavailable(attempt)
             }
         };
-        if let Some(slot) = self.credits.get_mut(class.index()) {
-            *slot = settled;
-        }
+        self.credits[class] = settled;
     }
 
     /// Whether `class` may admit its next frame: its slot holds a credit, or the verdict that
@@ -175,10 +172,7 @@ impl OutboundWorker {
             .ready
             .next_of(class)
             .map(|next| next.scheduled.transfer.admitted.attempt());
-        let held = self
-            .credits
-            .get(class.index())
-            .and_then(ClassCredit::attempt);
+        let held = self.credits[class].attempt();
         next.is_some() && held == next
     }
 
@@ -188,8 +182,7 @@ impl OutboundWorker {
     /// generation of the class's next transfer: the generation law is enforced by that gate,
     /// which a slot of another generation never passes.
     pub(super) fn take_credit(&mut self, class: TransferClass) -> Option<LaneCreditReservation> {
-        let slot = self.credits.get_mut(class.index())?;
-        match std::mem::replace(slot, ClassCredit::Idle) {
+        match replace(&mut self.credits[class], ClassCredit::Idle) {
             ClassCredit::Held(credit, _) => Some(credit),
             ClassCredit::Idle | ClassCredit::Awaiting(_) | ClassCredit::Unavailable(_) => None,
         }

@@ -174,7 +174,7 @@ async fn test_sync_successor_report_requires_token_before_connecting_successor()
 
     node2
         .swarm
-        .send_direct_message(
+        .send_direct_core_message_for_test(
             Message::QueryForTopoInfoReport(QueryForTopoInfoReport {
                 info: TopoInfo {
                     successors: vec![node3.did()],
@@ -193,7 +193,7 @@ async fn test_sync_successor_report_requires_token_before_connecting_successor()
     assert!(node1.dht().begin_successor_sync(node2.did(), request_id)?);
     node2
         .swarm
-        .send_direct_message(
+        .send_direct_core_message_for_test(
             Message::QueryForTopoInfoReport(QueryForTopoInfoReport {
                 info: TopoInfo {
                     successors: vec![node3.did()],
@@ -236,7 +236,7 @@ async fn test_stale_stabilization_report_does_not_start_advertised_connections()
 
     node2
         .swarm
-        .send_direct_message(
+        .send_direct_core_message_for_test(
             Message::QueryForTopoInfoReport(QueryForTopoInfoReport {
                 info: TopoInfo {
                     successors: vec![node3.did()],

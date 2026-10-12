@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use bytes::Bytes;
+use futures::lock::Mutex as FuturesMutex;
 use rings_transport::connection_ref::ConnectionRef;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use rings_transport::connections::DummyConnection as ConnectionOwner;
@@ -29,7 +30,6 @@ use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::LaneCreditReservation;
 use rings_transport::core::transport::SendPermit;
-use rings_transport::core::transport::TransportMessage;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
@@ -99,6 +99,7 @@ pub(crate) use self::hold_budget::SessionHoldPermit;
 pub(crate) use self::inbound_tap::InboundTap;
 pub(crate) use self::liveness::IssuedProbe;
 use self::liveness::PeerLivenessMap;
+pub(crate) use self::liveness::ProbePass;
 pub(crate) use self::liveness::ProbeWork;
 #[cfg(all(test, feature = "dummy"))]
 pub(crate) use self::liveness::PEER_LIVENESS_PERIOD_MS;
@@ -191,6 +192,8 @@ pub struct SwarmTransport {
     peer_lifecycles: SharedConnectionLifecycles,
     pending_finger_updates: Mutex<PendingFingerUpdates>,
     peer_liveness: Mutex<PeerLivenessMap>,
+    /// The exclusive right to run a probe pass; see [`ProbePass`].
+    probe_pass: FuturesMutex<()>,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     /// The reply marker of storage lookups; see [`StorageAnswerClock`].
     storage_answer_clock: StorageAnswerClock,
@@ -332,6 +335,7 @@ impl SwarmTransport {
             ))),
             pending_finger_updates: Mutex::new(BTreeMap::new()),
             peer_liveness: Mutex::new(PeerLivenessMap::new()),
+            probe_pass: FuturesMutex::new(()),
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             storage_answer_clock: StorageAnswerClock::default(),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
@@ -689,7 +693,7 @@ impl SwarmConnection {
         let frame_send = self.frames.begin_send(permit.acceptance());
         let delivery: Result<DeliveryFuture> = self
             .connection
-            .send_message_with_permit(TransportMessage::Custom(data), lane, permit)
+            .send_message_with_permit(data, lane, permit)
             .await
             .map_err(Into::into);
         #[cfg(test)]

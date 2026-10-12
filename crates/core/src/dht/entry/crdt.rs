@@ -201,8 +201,11 @@ impl EntryCrdt {
 /// Bounded LWW element set used by data topic buffers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DataTopicBuffer {
+    /// The reset floor of the latest overwrite: every add and remove below it is dropped.
     pub(super) register: Option<EntryVersion>,
+    /// Every element held and not covered by a remove, with the greatest dot that added it.
     pub(super) values: BTreeMap<Bytes, EntryDot>,
+    /// Every remove, by the digest of its element, with the greatest add dot it covers.
     pub(super) removes: BTreeMap<ElementDigest, EntryDot>,
 }
 

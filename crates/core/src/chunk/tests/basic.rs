@@ -597,7 +597,7 @@ fn test_future_timestamp_is_dropped() {
     assert!(out.is_none());
 }
 
-/// A message's chunks travel one lane (#913 R9 M3): a chunk that arrives on another lane than
+/// A message's chunks travel one lane (one lane per class): a chunk that arrives on another lane than
 /// the message's first chunk is refused as invalid, and the message completes on its own lane,
 /// reporting it as its carrier.
 #[test]

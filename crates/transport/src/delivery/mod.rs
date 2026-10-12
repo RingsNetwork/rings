@@ -29,6 +29,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::core::transport::LaneCreditReservation;
 use crate::error::Result;
 
 #[cfg(any(
@@ -83,18 +84,13 @@ pub type DeliveryFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 /// owning what it waits on: `Send` on native targets and `!Send` on wasm, as
 /// [`DeliveryFuture`].
 #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
-pub type SendCreditWait<E> = Pin<
-    Box<dyn Future<Output = std::result::Result<crate::core::transport::LaneCreditReservation, E>>>,
->;
+pub type SendCreditWait<E> =
+    Pin<Box<dyn Future<Output = std::result::Result<LaneCreditReservation, E>>>>;
 
 /// A wait for one lane credit, owning what it waits on.
 #[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
-pub type SendCreditWait<E> = Pin<
-    Box<
-        dyn Future<Output = std::result::Result<crate::core::transport::LaneCreditReservation, E>>
-            + Send,
-    >,
->;
+pub type SendCreditWait<E> =
+    Pin<Box<dyn Future<Output = std::result::Result<LaneCreditReservation, E>> + Send>>;
 
 #[cfg(all(
     test,

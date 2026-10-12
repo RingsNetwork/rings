@@ -314,13 +314,17 @@ async fn test_frames_held_past_the_timeout_are_swept_and_charged() -> Result<()>
     let missed = pending.relayed_custom_payload(&transport, &stranger, b"never-answered")?;
     pending.receive(&referenced_wire(&missed, true)?).await?;
     assert_eq!(pending.callback.session_hold_count_for_test(), 1);
-    let passes_before = pending.callback.reassembly_cleanup_passes_for_test();
+    let passes_before = pending
+        .callback
+        .inbound_for_test()
+        .cleanup_passes_for_test();
 
     *now_ms.lock().map_err(|_| Error::LockPoisoned)? +=
         crate::swarm::transport::SESSION_HOLD_TIMEOUT.as_millis() + 1;
     pending
         .callback
-        .await_reassembly_cleanup_passes_for_test(|passes| passes >= passes_before + 2)
+        .inbound_for_test()
+        .await_cleanup_passes_for_test(|passes| passes >= passes_before + 2)
         .await;
 
     assert_eq!(pending.callback.session_hold_count_for_test(), 0);
@@ -639,7 +643,7 @@ impl TransportCallback for CreditedPeer {
     }
 }
 
-/// Law (no self-held answer, #913 R5 H1): a frame the session-link hold keeps gives its
+/// Law (no self-held answer): a frame the session-link hold keeps gives its
 /// transport credit back. A full hold on one lane, at least the lane's whole credit window,
 /// still leaves that lane able to admit the next frame, so the link-control answer that would
 /// release them is never shut out by the frames waiting for it.
@@ -649,7 +653,7 @@ async fn test_held_frames_give_their_transport_credit_back() -> Result<()> {
     use rings_transport::callback::InnerTransportCallback;
     use rings_transport::core::credit::LANE_CREDIT_WINDOW;
     use rings_transport::core::pool::ChannelLane;
-    use rings_transport::core::transport::TransportMessage;
+    use rings_transport::core::transport::custom_frame_wire;
 
     let transport = default_transport()?;
     let pending = Arc::new(pending_peer(&transport).await?);
@@ -667,11 +671,9 @@ async fn test_held_frames_give_their_transport_credit_back() -> Result<()> {
     );
     let lane = ChannelLane::new(0);
     let raw = |payload: &MessagePayload| -> Result<bytes::Bytes> {
-        rings_codec::serialize(&TransportMessage::Custom(
-            referenced_wire(payload, true)?.into(),
-        ))
-        .map(bytes::Bytes::from)
-        .map_err(Error::CodecSerialize)
+        custom_frame_wire(referenced_wire(payload, true)?.into())
+            .map(bytes::Bytes::from)
+            .map_err(Error::CodecSerialize)
     };
 
     let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
@@ -700,7 +702,7 @@ async fn test_held_frames_give_their_transport_credit_back() -> Result<()> {
     Ok(())
 }
 
-/// Law (bounded by its purpose, #913 R6 H1): a link-control frame whose lane holds no credit
+/// Law (bounded by its purpose): a link-control frame whose lane holds no credit
 /// waits at most the session hold, then is dropped and gives its permit back; the connection
 /// is not retired, since a receiver that grants no credit is backpressure, not a dead peer.
 #[tokio::test]

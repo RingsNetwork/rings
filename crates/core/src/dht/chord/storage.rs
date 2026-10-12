@@ -8,6 +8,7 @@ use super::PeerRingAction;
 use super::RemoteAction;
 use crate::dht::entry::inbox::inbox_destination;
 use crate::dht::entry::inbox::inbox_key;
+use crate::dht::entry::AdmittedEntry;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryLookupEvidence;
@@ -96,6 +97,13 @@ enum Projection {
     ReturnedOnly,
 }
 
+impl Projection {
+    /// Whether the read writes its projection back to the store.
+    fn writes_back(self) -> bool {
+        self == Self::WrittenBack
+    }
+}
+
 /// Read `key` from `store`, retiring a value that is no longer live.
 ///
 /// Pre: the caller holds the ring's storage transition when `projection` is
@@ -148,12 +156,12 @@ async fn retire_unless_live(
 ) -> Result<Option<Entry>> {
     let stored_shape = projection_shape(&entry);
     let Some(entry) = entry.live_at(now_ms) else {
-        if projection == Projection::WrittenBack {
+        if projection.writes_back() {
             store.remove(key).await?;
         }
         return Ok(None);
     };
-    if projection == Projection::WrittenBack && projection_shape(&entry) != stored_shape {
+    if projection.writes_back() && projection_shape(&entry) != stored_shape {
         store.put(key, &entry).await?;
     }
     Ok(Some(entry))
@@ -254,8 +262,9 @@ impl PeerRing {
 
     /// Join a peer-supplied replicated value into local storage at time `now_ms`.
     ///
-    /// Pre: `incoming` is the value a peer supplied, not a local join result; it is admitted
-    /// by [`Entry::validate_admissible_at`] here so every replication path shares one rule.
+    /// Pre: `incoming` is the value a peer supplied, not a local join result; it is judged by
+    /// the admission law of [`Entry::validate_admissible_at`] here, so every replication path
+    /// shares one rule.
     /// Post: the stored value is the least upper bound of the previous live local
     /// value and `incoming` when a previous value exists; otherwise it is
     /// `incoming` normalized for storage. Either is projected to its element horizon at
@@ -266,7 +275,7 @@ impl PeerRing {
         key: Did,
         incoming: Entry,
     ) -> Result<Entry> {
-        incoming.validate_admissible_at(now_ms, self.network_id())?;
+        incoming.check_admissible_at(now_ms, self.network_id())?;
         let kind = incoming.kind;
         // The join normalizes the union once, so the incoming value is normalized on its own
         // only when there is nothing to join it with.
@@ -277,17 +286,21 @@ impl PeerRing {
         .await
     }
 
-    /// [`Self::join_storage_entry`] for a value a storage sync batch already admitted, so its
-    /// admission (signatures included) runs once.
+    /// [`Self::join_storage_entry`] for a value already admitted, so its admission (signatures
+    /// included) runs once, where the value entered: a peer's storage sync batch, or this node's
+    /// own storage.
     ///
-    /// Pre: `admitted` passed [`Entry::validate_admissible_at`] at `now_ms` and is normalized
-    /// for storage ([`Entry::try_into_storage_entry`]).
+    /// Post: the stored value is the least upper bound of the previous live local value and
+    /// `admitted` when a previous value exists; otherwise it is `admitted`, normalized by its
+    /// admission. Either is projected to its element horizon at `now_ms`, which commutes with
+    /// the join.
     pub(crate) async fn join_admitted_storage_entry(
         &self,
         now_ms: u128,
         key: Did,
-        admitted: Entry,
+        admitted: AdmittedEntry,
     ) -> Result<Entry> {
+        let admitted = admitted.into_entry();
         let kind = admitted.kind;
         self.join_into_slot(now_ms, kind, key, |local| match local {
             Some(local) => local.join(admitted),
@@ -556,8 +569,10 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
             return Err(Error::RelayInboxOperationNotAllowed);
         }
         let now_ms = get_epoch_ms();
-        entry.validate_admissible_at(now_ms, self.network_id())?;
-        let entry = entry.try_into_storage_entry()?.retired_at(now_ms);
+        let entry = entry
+            .validate_admissible_at(now_ms, self.network_id())?
+            .into_entry()
+            .retired_at(now_ms);
         self.cache.put(&entry.did.to_string(), &entry).await
     }
 

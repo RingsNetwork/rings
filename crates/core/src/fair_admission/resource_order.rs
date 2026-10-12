@@ -39,6 +39,7 @@
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::future::poll_fn;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::Context;
 use std::task::Poll;
@@ -146,51 +147,102 @@ where L: AdmissionLedger + 'a {
     granted
 }
 
+/// Where one request of a [`ResourceOrderedQueue`] stands, in the slot its waiter owns.
+enum SlotState<G> {
+    /// Queued: the waker to wake once a pass grants it.
+    Queued(Option<Waker>),
+    /// Granted by a pass and left the queue; its waiter has not claimed it yet.
+    Granted(G),
+    /// Claimed by its waiter.
+    Claimed,
+}
+
+/// The slot of one request, shared by its queue entry and its waiter: a pass moves the grant
+/// into it, so the waiter claims it without searching the queue.
+struct GrantSlot<G>(Mutex<SlotState<G>>);
+
+impl<G> GrantSlot<G> {
+    /// The slot's state; every critical section leaves it consistent.
+    fn lock(&self) -> std::sync::MutexGuard<'_, SlotState<G>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Move `grant` in, returning the waker of the waiter to wake.
+    fn grant(&self, grant: G) -> Option<Waker> {
+        match std::mem::replace(&mut *self.lock(), SlotState::Granted(grant)) {
+            SlotState::Queued(waker) => waker,
+            SlotState::Granted(_) | SlotState::Claimed => None,
+        }
+    }
+
+    /// Claim the grant, if a pass moved one in; otherwise register `waker`, if any, while the
+    /// request is queued.
+    fn claim(&self, waker: Option<&Waker>) -> Option<G> {
+        let mut state = self.lock();
+        match std::mem::replace(&mut *state, SlotState::Claimed) {
+            SlotState::Granted(grant) => Some(grant),
+            SlotState::Queued(registered) => {
+                *state = SlotState::Queued(waker.cloned().or(registered));
+                None
+            }
+            SlotState::Claimed => None,
+        }
+    }
+}
+
 /// A waiting request of a [`ResourceOrderedQueue`].
 struct Entry<L: AdmissionLedger> {
-    /// Identity of the waiter that owns the entry.
-    id: u64,
-    /// The request and its grant.
+    /// The request; its grant, once a pass admits it, moves to the slot.
     waiting: Waiting<L>,
-    /// The waiter to wake once a pass grants the request.
-    waker: Option<Waker>,
+    /// The slot the request's waiter owns.
+    slot: Arc<GrantSlot<L::Grant>>,
 }
 
 /// The waiting requests, in arrival order.
 struct QueueState<L: AdmissionLedger> {
-    /// The identity of the next entry.
-    next_id: u64,
-    /// The waiting requests, oldest first.
+    /// The ungranted requests, oldest first.
     entries: VecDeque<Entry<L>>,
 }
 
 impl<L: AdmissionLedger> QueueState<L> {
-    /// Serve the queue to its fixpoint and collect the wakers of the waiters it granted.
+    /// Serve the queue to its fixpoint, move every grant into its slot, and collect the wakers
+    /// of the waiters it granted. Post: every queued entry is ungranted.
     fn serve(&mut self, ledger: &L) -> Vec<Waker> {
         serve(ledger, self.entries.make_contiguous(), |entry| {
             &mut entry.waiting
         });
+        let mut wakers = Vec::new();
         self.entries
-            .iter_mut()
-            .filter(|entry| entry.waiting.grant.is_some())
-            .filter_map(|entry| entry.waker.take())
-            .collect()
+            .retain_mut(|entry| match entry.waiting.grant.take() {
+                Some(grant) => {
+                    wakers.extend(entry.slot.grant(grant));
+                    false
+                }
+                None => true,
+            });
+        wakers
     }
 
-    /// Remove the entry `id`, returning its grant, if any.
-    fn remove(&mut self, id: u64) -> Option<Option<L::Grant>> {
-        let position = self.entries.iter().position(|entry| entry.id == id)?;
-        self.entries
-            .remove(position)
-            .map(|entry| entry.waiting.grant)
+    /// Withdraw the request of `slot` if it is still queued: whether it was. A request that
+    /// left the queue was granted, and its grant is in its slot.
+    fn withdraw_queued(&mut self, slot: &Arc<GrantSlot<L::Grant>>) -> bool {
+        let position = self
+            .entries
+            .iter()
+            .position(|entry| Arc::ptr_eq(&entry.slot, slot));
+        position
+            .and_then(|position| self.entries.remove(position))
+            .is_some()
     }
 }
 
 /// Requests waiting for a ledger's capacity, admitted by resource order (module docs).
 ///
-/// Lock order: the queue's lock is taken before the ledger's, so a ledger must never call
-/// back into its queue while it holds its own lock; a release calls [`Self::serve`] only after
-/// the ledger's lock is dropped.
+/// Lock order: the queue's lock is taken before the ledger's and before a slot's, so a ledger
+/// must never call back into its queue while it holds its own lock; a release calls
+/// [`Self::serve`] only after the ledger's lock is dropped.
 pub(crate) struct ResourceOrderedQueue<L: AdmissionLedger> {
     /// The waiting requests.
     state: Mutex<QueueState<L>>,
@@ -201,7 +253,6 @@ impl<L: AdmissionLedger> ResourceOrderedQueue<L> {
     pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(QueueState {
-                next_id: 0,
                 entries: VecDeque::new(),
             }),
         }
@@ -223,11 +274,7 @@ impl<L: AdmissionLedger> ResourceOrderedQueue<L> {
     /// The number of requests waiting ungranted.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn waiting_for_test(&self) -> usize {
-        self.lock()
-            .entries
-            .iter()
-            .filter(|entry| entry.waiting.grant.is_none())
-            .count()
+        self.lock().entries.len()
     }
 
     /// Admit `request`, waiting in resource order while it is refused or blocked; `on_wait`
@@ -242,37 +289,27 @@ impl<L: AdmissionLedger> ResourceOrderedQueue<L> {
         request: L::Request,
         on_wait: impl FnOnce(),
     ) -> L::Grant {
-        let (id, ready, wakers) = {
+        let slot = Arc::new(GrantSlot(Mutex::new(SlotState::Queued(None))));
+        let wakers = {
             let mut state = self.lock();
-            let id = state.next_id;
-            state.next_id = state.next_id.wrapping_add(1);
             state.entries.push_back(Entry {
-                id,
                 waiting: Waiting {
                     request,
                     grant: None,
                 },
-                waker: None,
+                slot: Arc::clone(&slot),
             });
-            let wakers = state.serve(ledger);
-            let ready = match state.entries.back() {
-                Some(entry) if entry.id == id && entry.waiting.grant.is_some() => {
-                    state.remove(id).flatten()
-                }
-                _ => None,
-            };
-            (id, ready, wakers)
+            state.serve(ledger)
         };
         wakers.into_iter().for_each(Waker::wake);
-        if let Some(grant) = ready {
+        if let Some(grant) = slot.claim(None) {
             return grant;
         }
         on_wait();
-        let mut waiter = Waiter {
+        let waiter = Waiter {
             queue: self,
             ledger,
-            id,
-            active: true,
+            slot,
         };
         poll_fn(|context| waiter.poll_grant(context)).await
     }
@@ -284,50 +321,30 @@ struct Waiter<'a, L: AdmissionLedger> {
     queue: &'a ResourceOrderedQueue<L>,
     /// The ledger a withdrawal serves.
     ledger: &'a L,
-    /// The request's entry.
-    id: u64,
-    /// Whether the entry is still queued.
-    active: bool,
+    /// The slot a pass moves the request's grant into.
+    slot: Arc<GrantSlot<L::Grant>>,
 }
 
 impl<L: AdmissionLedger> Waiter<'_, L> {
-    /// Claim the grant once a pass has admitted the request; otherwise register to be woken.
-    fn poll_grant(&mut self, context: &mut Context<'_>) -> Poll<L::Grant> {
-        let mut state = self.queue.lock();
-        let Some(position) = state.entries.iter().position(|entry| entry.id == self.id) else {
-            unreachable!("an active waiter's entry is removed only by the waiter itself");
-        };
-        let grant =
-            state
-                .entries
-                .get_mut(position)
-                .and_then(|entry| match entry.waiting.grant.take() {
-                    Some(grant) => Some(grant),
-                    None => {
-                        entry.waker = Some(context.waker().clone());
-                        None
-                    }
-                });
-        let Some(grant) = grant else {
-            return Poll::Pending;
-        };
-        state.entries.remove(position);
-        self.active = false;
-        Poll::Ready(grant)
+    /// Claim the grant once a pass has moved it into the slot; otherwise stay registered to be
+    /// woken. Polled again after it was ready, it stays pending.
+    fn poll_grant(&self, context: &mut Context<'_>) -> Poll<L::Grant> {
+        match self.slot.claim(Some(context.waker())) {
+            Some(grant) => Poll::Ready(grant),
+            None => Poll::Pending,
+        }
     }
 }
 
 impl<L: AdmissionLedger> Drop for Waiter<'_, L> {
     fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        // Bound first, so the queue's lock is released before the grant is: a grant's release
+        // Withdrawn under the queue's lock, released before the grant is: a grant's release
         // serves the queue itself, while a withdrawn refusal releases nothing and is served here.
-        let grant = self.queue.lock().remove(self.id).flatten();
-        match grant {
-            Some(grant) => drop(grant),
-            None => self.queue.serve(self.ledger),
+        let withdrawn = self.queue.lock().withdraw_queued(&self.slot);
+        if withdrawn {
+            self.queue.serve(self.ledger);
+        } else if let Some(grant) = self.slot.claim(None) {
+            drop(grant);
         }
     }
 }

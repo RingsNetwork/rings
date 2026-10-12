@@ -96,16 +96,17 @@ async fn hold_message_for_offline_peer(
 
     node1
         .swarm
-        .send_message(Message::custom(HELD_MESSAGE)?, offline)
+        .send_message(ApplicationData::custom(HELD_MESSAGE), offline)
         .await?;
     let held = wait_for_storage_entry(node1, StorageKey::inbox_of(offline)).await?;
     assert_eq!(held.kind, EntryKind::RelayMessage);
     assert_eq!(held.data.len(), 1);
-    let deliverable = held.deliverable_inbox_elements(get_epoch_ms(), node1.swarm.network_id());
+    let deliverable = held.stored_inbox_elements();
     assert_eq!(deliverable.len(), 1);
-    assert!(deliverable
-        .iter()
-        .all(|element| is_held_message(&element.payload)));
+    assert!(deliverable.iter().all(|element| {
+        element.is_deliverable_at(get_epoch_ms(), node1.swarm.network_id())
+            && is_held_message(&element.held.payload)
+    }));
     Ok(())
 }
 

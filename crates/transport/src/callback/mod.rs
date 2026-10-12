@@ -1,13 +1,17 @@
 //! Credit-bounded dispatch from transport backends to protocol callbacks.
 
 mod capacity;
+#[cfg(rings_transport_webrtc)]
+pub(crate) mod credit_pump;
 mod inner;
 mod invalid_report;
 pub(crate) mod link_credit;
+#[cfg(rings_transport_backend)]
+pub(crate) mod link_send;
 
-#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+#[cfg(any(test, rings_transport_webrtc))]
 pub(crate) use capacity::admit_inbound_data_channel;
-#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+#[cfg(any(test, rings_transport_webrtc))]
 pub(crate) use capacity::data_channel_label;
 pub(crate) use capacity::inbound_frame_exceeds_protocol_ceiling;
 pub use capacity::AdmittedInboundFrame;
@@ -19,7 +23,6 @@ use invalid_report::INVALID_FRAME_REPORT_BACKLOG_CAPACITY;
 #[cfg(all(test, not(target_family = "wasm")))]
 use invalid_report::INVALID_FRAME_REPORT_QUANTUM;
 pub use link_credit::NodeReceiveLoad;
-pub use link_credit::NODE_RECEIVE_SOFT_LIMIT_BYTES;
 
 #[cfg(test)]
 mod tests;

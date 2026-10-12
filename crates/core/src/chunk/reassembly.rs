@@ -76,6 +76,36 @@ impl Pending {
             .saturating_add(self.data_bytes)
     }
 
+    /// Whether `chunk`, carried on `carrier`, joins this in-flight message: it agrees on the
+    /// message's shape and provenance and fills a position still free. Returns the data bytes
+    /// already buffered, for the per-message cap.
+    fn admits(
+        &self,
+        chunk: &Chunk,
+        carrier: Option<ChannelLane>,
+    ) -> std::result::Result<usize, Rejected> {
+        let [position, total] = chunk.chunk;
+        if self.total != total {
+            return Err(Rejected::TotalMismatch);
+        }
+        // Chunks of one message share id+ts+ttl; a same-id chunk from a different transmission
+        // must not be merged in (it would skew expiry/tombstone behaviour).
+        if self.ts_ms != chunk.meta.ts_ms || self.ttl_ms != chunk.meta.ttl_ms {
+            return Err(Rejected::MetadataMismatch);
+        }
+        // A message's chunks travel one lane; one that changes lanes would take credit on a lane
+        // its content does not belong to.
+        if self.carrier != carrier {
+            return Err(Rejected::CarrierMismatch);
+        }
+        // First write per position wins; a duplicate position is a no-op, not an error.
+        match self.slots.get(&position) {
+            Some(existing) if existing == &chunk.data => Err(Rejected::DuplicatePosition),
+            Some(_) => Err(Rejected::ConflictingPosition),
+            None => Ok(self.data_bytes),
+        }
+    }
+
     fn assemble(self) -> Bytes {
         self.slots.into_values().flatten().collect()
     }
@@ -610,31 +640,7 @@ impl MessageReassembler {
                 return Err(Rejected::PendingFull);
             }
             None => 0,
-            Some(p) => {
-                // A chunk of an in-flight message must agree on its shape and provenance.
-                if p.total != total {
-                    return Err(Rejected::TotalMismatch);
-                }
-                // Chunks of one message share id+ts+ttl; a same-id chunk from a different
-                // transmission must not be merged in (it would skew expiry/tombstone behaviour).
-                if p.ts_ms != meta.ts_ms || p.ttl_ms != meta.ttl_ms {
-                    return Err(Rejected::MetadataMismatch);
-                }
-                // A message's chunks travel one lane; one that changes lanes would take credit
-                // on a lane its content does not belong to.
-                if p.carrier != carrier {
-                    return Err(Rejected::CarrierMismatch);
-                }
-                // First write per position wins; a duplicate position is a no-op, not an error.
-                if let Some(existing) = p.slots.get(&position) {
-                    return if existing == &chunk.data {
-                        Err(Rejected::DuplicatePosition)
-                    } else {
-                        Err(Rejected::ConflictingPosition)
-                    };
-                }
-                p.data_bytes
-            }
+            Some(pending) => pending.admits(chunk, carrier)?,
         };
         // Per-message data cap, enforced uniformly across the first and subsequent chunks.
         if buffered_for_id.saturating_add(chunk.data.len()) > self.limits.max_message_bytes {

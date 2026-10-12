@@ -401,7 +401,7 @@ async fn test_handle_notify_predecessor() -> Result<()> {
     wait_for_successor(&node2, node1.did()).await?;
     node1
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::NotifyPredecessorSend(message::NotifyPredecessorSend { did: node1.did() }),
             node2.did(),
         )
@@ -429,7 +429,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     wait_for_successor(&node2, node1.did()).await?;
     node1
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::NotifyPredecessorSend(message::NotifyPredecessorSend { did: node1.did() }),
             node2.did(),
         )
@@ -441,7 +441,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     println!("node1: {:?}, node2: {:?}", node1.did(), node2.did());
     node2
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::FindSuccessorSend(message::FindSuccessorSend {
                 did: node2.did(),
                 then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
@@ -477,7 +477,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     wait_for_finger(&node2, node1.did()).await?;
     node1
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::NotifyPredecessorSend(message::NotifyPredecessorSend { did: node1.did() }),
             node2.did(),
         )
@@ -488,7 +488,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     println!("node1: {:?}, node2: {:?}", node1.did(), node2.did());
     node2
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::FindSuccessorSend(message::FindSuccessorSend {
                 did: node2.did(),
                 then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
@@ -533,7 +533,7 @@ async fn test_handle_storage() -> Result<()> {
     wait_for_successor(&node2, node1.did()).await?;
     node1
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::NotifyPredecessorSend(message::NotifyPredecessorSend { did: node1.did() }),
             node2.did(),
         )
@@ -548,7 +548,7 @@ async fn test_handle_storage() -> Result<()> {
     let entry: Entry = (message.clone(), message.clone()).try_into().unwrap();
     node1
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::OperateEntry(PlacedEntryOperation {
                 placement: entry.did,
                 op: EntryOperation::Overwrite(entry.clone()),

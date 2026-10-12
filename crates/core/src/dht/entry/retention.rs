@@ -235,7 +235,7 @@ impl Entry {
     /// ([`Self::is_live_at`]), else `None`.
     ///
     /// Pre: `self` is normalized.
-    pub fn live_at(self, now_ms: u128) -> Option<Self> {
+    pub(crate) fn live_at(self, now_ms: u128) -> Option<Self> {
         let projected = self.retired_at(now_ms);
         projected.is_live_at(now_ms).then_some(projected)
     }
@@ -355,7 +355,8 @@ impl Entry {
             .max()
     }
 
-    /// Admission law for a delta supplied by a peer (see the module documentation).
+    /// Admission law for a delta supplied by a peer (see the module documentation): the value
+    /// admitted and normalized for storage, as the proof [`AdmittedEntry`].
     ///
     /// Pre: `now_ms` is the receiver's clock, `network_id` its overlay, and `self` is the
     /// peer-supplied value, not a join result.
@@ -364,7 +365,18 @@ impl Entry {
     /// kind's witness holds. The version bound keeps a peer-supplied hybrid clock from pinning
     /// a key: an accepted floor can exceed the receiver's clock only by the message skew
     /// tolerance, so honest writers issued after that tolerance elapses dominate it again.
-    pub fn validate_admissible_at(&self, now_ms: u128, network_id: u32) -> Result<()> {
+    pub(crate) fn validate_admissible_at(
+        self,
+        now_ms: u128,
+        network_id: u32,
+    ) -> Result<AdmittedEntry> {
+        self.check_admissible_at(now_ms, network_id)?;
+        self.try_into_storage_entry().map(AdmittedEntry)
+    }
+
+    /// The admission law of [`Self::validate_admissible_at`] as a check on a borrowed value,
+    /// for a path that joins the value at once and so needs no proof.
+    pub(crate) fn check_admissible_at(&self, now_ms: u128, network_id: u32) -> Result<()> {
         self.validate_bounds_at(now_ms)?;
         match self.kind {
             EntryKind::Data => Ok(()),
@@ -401,6 +413,31 @@ impl Entry {
 impl EntryOperation {
     /// Admission law for the delta this operation carries.
     pub fn validate_admissible_at(&self, now_ms: u128, network_id: u32) -> Result<()> {
-        self.entry().validate_admissible_at(now_ms, network_id)
+        self.entry().check_admissible_at(now_ms, network_id)
+    }
+}
+
+/// A replicated value that passed the admission law at a receiver's clock and is normalized
+/// for storage ([`Entry::try_into_storage_entry`]): the proof a storage join of a value that
+/// did not come from local storage takes. Constructed only by [`Entry::validate_admissible_at`],
+/// or by [`AdmittedEntry::stored`] for a value this node itself stores.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AdmittedEntry(Entry);
+
+impl AdmittedEntry {
+    /// A value read from this node's own storage: admitted when it was written (a peer's value
+    /// through [`Entry::validate_admissible_at`], a local one by the operation that produced it,
+    /// which admission must not judge, as its derived versions may run ahead of the clock) and
+    /// normalized, as every stored value is. Admitted by construction, so it is not judged
+    /// again.
+    ///
+    /// Pre: `entry` was read from this node's storage.
+    pub(crate) fn stored(entry: Entry) -> Self {
+        Self(entry)
+    }
+
+    /// The admitted value, owned.
+    pub(crate) fn into_entry(self) -> Entry {
+        self.0
     }
 }

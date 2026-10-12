@@ -195,7 +195,13 @@ async fn test_reassembly_rejections_score_only_invalid_input_and_release_resourc
     ));
     assert_eq!(failed_receive_count(&measure, peer)?, 1);
     assert_eq!(successful_receive_count(&measure, peer)?, 0);
-    assert_eq!(pending.callback.inbound_admitted_count_for_test(), 0);
+    assert_eq!(
+        pending
+            .callback
+            .inbound_for_test()
+            .admitted_count_for_test(),
+        0
+    );
 
     pending.receive(&conflict_frame).await?;
     assert_eq!(
@@ -204,7 +210,7 @@ async fn test_reassembly_rejections_score_only_invalid_input_and_release_resourc
         "repeated invalid evidence for one pending message must not double charge"
     );
 
-    pending.callback.close_inbound_for_test();
+    pending.callback.inbound_for_test().close_for_test();
     drop(pending);
     budget.await_buffered_cost_for_test(|cost| cost == 0).await;
     Ok(())
@@ -227,13 +233,14 @@ async fn test_expired_partial_reassembly_releases_shared_budget_without_more_pee
 
     let (_closing_frame, closing_expiry) = partial.deliver_partial(b"closing-partial").await?;
     let callback = &partial.pending.callback;
-    let passes_before_close = callback.reassembly_cleanup_passes_for_test();
-    callback.close_inbound_for_test();
+    let passes_before_close = callback.inbound_for_test().cleanup_passes_for_test();
+    callback.inbound_for_test().close_for_test();
     // The close path runs one cleanup pass immediately under the pre-expiry
     // clock. Awaiting that pass, rather than a wall-clock window, proves the
     // retention decision was taken and not merely not yet reached.
     callback
-        .await_reassembly_cleanup_passes_for_test(|passes| passes > passes_before_close)
+        .inbound_for_test()
+        .await_cleanup_passes_for_test(|passes| passes > passes_before_close)
         .await;
     assert!(
         partial

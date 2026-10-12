@@ -42,11 +42,17 @@ pub(super) enum TransferReceipt {
 /// against. It owns everything it reports to, so its completion can be awaited apart from the
 /// sender that queued it.
 pub(super) struct SubmittedTransfer {
+    /// This node, for the completion log.
     pub(super) local: Did,
+    /// The sink the completion is recorded with.
     pub(super) observer: SharedSwarmObserver,
+    /// The connection generation the transfer was queued on.
     pub(super) admitted: AdmittedConnection,
+    /// The receipt that resolves with the transfer's completion.
     pub(super) receipt: TransferReceipt,
+    /// The successor lookup the transfer carries, whose outcome the observer correlates.
     pub(super) successor_lookup: Option<LookupCorrelation>,
+    /// What the acceptance log reports.
     pub(super) log: OutboundSendLog,
 }
 
@@ -112,9 +118,13 @@ impl SubmittedTransfer {
 /// A detached payload in its peer's outbound queue whose first frame is not yet admitted, with
 /// the guard that cancels it if it is abandoned before admission.
 pub(super) struct EnqueuedDetached {
+    /// The peer the payload is queued toward.
     pub(super) peer: Did,
+    /// How long its first frame may wait for admission.
     pub(super) timeout_budget: Duration,
+    /// The queued transfer.
     pub(super) submitted: SubmittedTransfer,
+    /// Cancels the transfer if this value is dropped before its first frame is admitted.
     pub(super) cancel_on_drop: DetachedAdmissionOnDrop,
 }
 

@@ -178,6 +178,22 @@ impl HeldMessage {
     }
 }
 
+/// Whether `error`, from the element witness, refuses an element for good: it does not decode,
+/// or its witness fails on anything but the clock gate, which an element passes once the
+/// judging clock catches up. Such an element exists only in a store written under another
+/// codec or witness of [`HeldMessage`], [`MessagePayload`] or [`Message`], which the operator
+/// clears on such a cutover; it is logged at `warn`, never retired or repaired.
+pub(crate) fn is_lasting_witness_failure(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::CodecDeserialize(_)
+            | Error::RelayMessageNotAddressedToInbox
+            | Error::RelayMessageNotCustom
+            | Error::RelayMessageUnverifiable
+            | Error::RelayMessageHeldOutsideSenderProof
+    )
+}
+
 /// Decode one inbox element and check its witness.
 fn verified_element(
     element: &Bytes,
@@ -234,32 +250,34 @@ impl Entry {
         self.witnessed_inbox_elements(now_ms, network_id).map(drop)
     }
 
-    /// The elements of this stored inbox its recipient may deliver now, in carrier order, each
-    /// with the add dot that retires it once delivered.
-    ///
-    /// Law: every stored element passed the witness when it was admitted (the hold write law or
-    /// a hand-off's admission), and the witness is judged as of the hold instant, so it holds
-    /// at every later read except for the clock gate: an element held ahead of `now_ms + σ`
-    /// fails only until this clock catches up, as after the clock steps back, and waits for a
-    /// later pass.
+    /// Every element of this stored inbox that decodes, in carrier order, each with the add dot
+    /// that retires it once delivered. Decoding names an element (its transaction) without
+    /// verifying it: a drain verifies only the elements it has not handed over yet
+    /// ([`InboxElement::is_deliverable_at`]). An element that does not decode is logged at
+    /// `warn` and skipped, never retired or repaired: it exists only in a store written under
+    /// another codec of [`HeldMessage`], which the operator clears on such a cutover.
     ///
     /// Pre: `self` is the materialized stored carrier, so `data` and `crdt.dots` align.
-    pub(crate) fn deliverable_inbox_elements(
-        &self,
-        now_ms: u128,
-        network_id: u32,
-    ) -> Vec<InboxElement> {
+    pub(crate) fn stored_inbox_elements(&self) -> Vec<InboxElement> {
         let destination = inbox_destination(self.did);
         self.data
             .iter()
             .zip(self.crdt.dots.iter().copied())
-            .filter_map(|(element, dot)| {
-                verified_element(element, destination, now_ms, network_id)
-                    .ok()
-                    .map(|held| InboxElement {
-                        dot,
-                        payload: held.payload,
-                    })
+            .filter_map(|(element, dot)| match HeldMessage::from_element(element) {
+                Ok(held) => Some(InboxElement {
+                    dot,
+                    destination,
+                    held,
+                }),
+                Err(error) => {
+                    tracing::warn!(
+                        %destination,
+                        ?dot,
+                        error = ?error,
+                        "relay inbox element does not decode; it stays stored"
+                    );
+                    None
+                }
             })
             .collect()
     }
@@ -272,13 +290,50 @@ impl Entry {
     }
 }
 
-/// One deliverable inbox element: the payload and the add dot that retires it once delivered.
+/// One stored inbox element: its add dot, the peer it is kept for, and the held message it
+/// decodes to.
 #[derive(Debug)]
 pub(crate) struct InboxElement {
     /// The add dot of the element in the stored carrier.
     pub(crate) dot: EntryDot,
-    /// The held application payload.
-    pub(crate) payload: MessagePayload,
+    /// The peer the carrier is kept for: the recipient.
+    destination: Did,
+    /// The held message.
+    pub(crate) held: HeldMessage,
+}
+
+impl InboxElement {
+    /// The transaction of the held payload, which names the element across passes.
+    pub(crate) fn tx_id(&self) -> uuid::Uuid {
+        self.held.payload.transaction.tx_id
+    }
+
+    /// Whether the recipient may deliver this element at `now_ms`.
+    ///
+    /// Law: every stored element passed the witness when it was admitted (the hold write law or
+    /// a hand-off's admission), and the witness is judged as of the hold instant, so it holds
+    /// at every later check except for the clock gate: an element held ahead of `now_ms + σ`
+    /// fails only until this clock catches up, as after the clock steps back, and waits for a
+    /// later pass. Any other failure is lasting ([`is_lasting_witness_failure`]): it is logged
+    /// at `warn` and the element stays, never retired or repaired.
+    pub(crate) fn is_deliverable_at(&self, now_ms: u128, network_id: u32) -> bool {
+        match self
+            .held
+            .validate_witness(self.destination, now_ms, network_id)
+        {
+            Ok(()) => true,
+            Err(Error::RelayMessageHeldAheadOfClock) => false,
+            Err(error) => {
+                tracing::warn!(
+                    destination = %self.destination,
+                    tx_id = %self.tx_id(),
+                    error = ?error,
+                    "relay inbox element fails its witness; it stays stored"
+                );
+                false
+            }
+        }
+    }
 }
 
 impl EntryOperation {

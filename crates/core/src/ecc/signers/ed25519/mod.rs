@@ -28,9 +28,7 @@ pub fn verify(
     if pubkey.address() != *address {
         return false;
     }
-    if sig.as_ref().len() != 64 {
-        return false;
-    }
+    // The one length gate: any signature other than 64 bytes is refused here.
     let sig_data = match <[u8; 64]>::try_from(sig.as_ref()) {
         Ok(sig_data) => sig_data,
         Err(_) => return false,

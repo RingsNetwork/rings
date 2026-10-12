@@ -14,8 +14,9 @@
 //!    never receive raw `Arc` ownership tokens.
 //!
 //! 2. **Application inbox for FFI**: the extension [`Backend`] consumes the swarm's application
-//!    inbox on the provider runtime; its observer retains E2E messages, bounded, for
-//!    `rings_node_take_e2e_events`.
+//!    inbox on the provider runtime; its observer retains E2E messages, bounded, for the
+//!    `takeE2eEvents` request, which also reports how many it dropped. The
+//!    `dispatchDropCounters` request reports the envelopes the backend dropped, by reason.
 //!
 //! 3. **Functions for Provider Interaction**: The `rings_node_*` C ABI functions create providers,
 //!    start listeners, configure logging, and make internal requests. The prefix prevents symbol
@@ -39,6 +40,8 @@ use std::ffi::c_char;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::ptr;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -68,28 +71,34 @@ struct FfiE2eEvent {
     ciphertext_blocks: Option<usize>,
 }
 
+/// The answer to `takeE2eEvents`.
 #[derive(Serialize)]
 struct TakeFfiE2eEventsResponse {
+    /// The events retained since the previous take.
     events: Vec<FfiE2eEvent>,
+    /// The events dropped because the inbox was full, cumulative since the provider was created.
+    dropped: u64,
 }
 
 /// E2E events retained for the C caller to take: bounded, so a caller that never takes them
-/// costs at most [`FFI_E2E_EVENT_CAPACITY`] events, and a further event is dropped, counted
-/// (#913 R10 M2).
+/// costs at most [`FFI_E2E_EVENT_CAPACITY`] events, and a further event is dropped, counted.
 #[derive(Default)]
 struct FfiE2eInbox {
     events: Mutex<Vec<FfiE2eEvent>>,
-    dropped: std::sync::atomic::AtomicU64,
+    dropped: AtomicU64,
 }
 
 /// E2E events an [`FfiE2eInbox`] retains before it drops further ones.
 const FFI_E2E_EVENT_CAPACITY: usize = 4096;
 
 impl FfiE2eInbox {
-    /// Take every retained event.
-    fn take(&self) -> Result<Vec<FfiE2eEvent>> {
+    /// Take every retained event, with the count of those dropped so far.
+    fn take(&self) -> Result<TakeFfiE2eEventsResponse> {
         let mut events = self.events.lock().map_err(|_| Error::Lock)?;
-        Ok(std::mem::take(&mut *events))
+        Ok(TakeFfiE2eEventsResponse {
+            events: std::mem::take(&mut *events),
+            dropped: self.dropped.load(Ordering::Relaxed),
+        })
     }
 
     /// Retain `event`, or drop it, counted, when full.
@@ -100,7 +109,7 @@ impl FfiE2eInbox {
         } else {
             let dropped = self
                 .dropped
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .fetch_add(1, Ordering::Relaxed)
                 .saturating_add(1);
             tracing::warn!(dropped, "FFI E2E event inbox full; event dropped");
         }
@@ -113,7 +122,7 @@ impl BackendObserver for FfiE2eInbox {
     fn e2e_message(&self, message: &ApplicationMessage) {
         match ffi_e2e_event(message).and_then(|event| event.map_or(Ok(()), |e| self.push(e))) {
             Ok(()) => {}
-            Err(error) => tracing::warn!(%error, "FFI E2E event not retained"),
+            Err(error) => tracing::warn!(error = ?error, "FFI E2E event not retained"),
         }
     }
 }
@@ -215,7 +224,7 @@ impl ProviderHandle {
         Ok(())
     }
 
-    fn take_e2e_events(&self) -> Result<Vec<FfiE2eEvent>> {
+    fn take_e2e_events(&self) -> Result<TakeFfiE2eEventsResponse> {
         self.e2e_events.take()
     }
 
@@ -325,9 +334,9 @@ pub unsafe extern "C" fn rings_node_request(
         let params = serde_json::from_str(&params)?;
 
         let ret = if method == "takeE2eEvents" {
-            serde_json::to_value(TakeFfiE2eEventsResponse {
-                events: handle.take_e2e_events()?,
-            })?
+            serde_json::to_value(handle.take_e2e_events()?)?
+        } else if method == "dispatchDropCounters" {
+            serde_json::to_value(handle.provider.dispatch_drop_counters())?
         } else {
             let provider = handle.provider.clone();
             let runtime = handle.runtime.clone();
@@ -620,6 +629,9 @@ mod tests {
             assert!(did.eq_ignore_ascii_case(TEST_ACCOUNT));
             let events_response = request(handle, "takeE2eEvents", "{}");
             assert!(events_response.contains("\"events\":[]"));
+            assert!(events_response.contains("\"dropped\":0"));
+            let drops_response = request(handle, "dispatchDropCounters", "{}");
+            assert!(drops_response.contains("\"queueFull\":0"));
 
             let weak_provider = unsafe { Arc::downgrade(&(*handle).provider) };
             unsafe { rings_node_provider_destroy(handle) };

@@ -41,11 +41,13 @@ use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
 use crate::message::MessageCategory;
+use crate::message::MessageLimit;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::OriginQuotaCounters;
 use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
+use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationInbox;
 use crate::swarm::application::SuccessorReport;
 use crate::swarm::inbox::SwarmInboxDelivery;
@@ -160,7 +162,9 @@ impl Swarm {
         self.dht.clone()
     }
 
-    fn inner_callback(&self) -> SwarmTransportCallback {
+    /// The transport callback of a connection this swarm starts: its inbound pipeline and
+    /// lifecycle handling.
+    fn transport_callback(&self) -> SwarmTransportCallback {
         SwarmTransportCallback::new(self.transport.clone())
     }
 
@@ -174,18 +178,18 @@ impl Swarm {
         self.transport.application().outlet.claim()
     }
 
-    /// Record whether application payloads starting with `namespace_prefix` delegate their
-    /// admission (see [`MessageLimit`](crate::message::MessageLimit)).
+    /// Record the message limit of application payloads starting with `namespace_prefix`:
+    /// [`MessageLimit::Delegated`] to the namespace, or [`MessageLimit::Enforced`] by core.
     ///
     /// The application registers its namespaces in advance and core matches the prefix on its
     /// admission path, without calling the application. The match is exact when the
     /// application's namespace encoding is prefix-free. Delegation is trusted local
     /// configuration: a delegating namespace must enforce its own per-neighbour admission.
-    pub fn set_admission_delegation(&self, namespace_prefix: Vec<u8>, delegates: bool) {
+    pub fn set_admission_delegation(&self, namespace_prefix: Vec<u8>, limit: MessageLimit) {
         self.transport
             .application()
             .delegations
-            .set(namespace_prefix, delegates);
+            .set(namespace_prefix, limit);
     }
 
     /// Whether an application payload belongs to a namespace registered as delegating through
@@ -222,25 +226,66 @@ impl Swarm {
         if peer == self.did() {
             return Err(Error::ShouldNotConnectSelf);
         }
-        self.transport.connect(peer, self.inner_callback()).await
-    }
-
-    /// Send [Message] to peer.
-    pub async fn send_message(&self, msg: Message, destination: Did) -> Result<uuid::Uuid> {
         self.transport
-            .application_egress()
-            .send_message(msg, destination)
+            .connect(peer, self.transport_callback())
             .await
     }
 
-    /// Send a message directly to an already connected peer, without a Chord lookup.
+    /// Send application `data` to `destination`, routed by Chord.
+    ///
+    /// Only [`ApplicationData`] crosses the boundary outbound, as inbound: an application cannot
+    /// originate core's own protocol messages. `data` is sent as `Message::from(data)`, which
+    /// the receiving core projects back to `data` (`project ∘ from = Some`).
+    pub async fn send_message(
+        &self,
+        data: ApplicationData,
+        destination: Did,
+    ) -> Result<uuid::Uuid> {
+        self.transport
+            .application_egress()
+            .send_message(Message::from(data), destination)
+            .await
+    }
+
+    /// Send application `data` directly to an already connected peer, without a Chord lookup.
     ///
     /// This preserves an application protocol's explicit next-hop selection. Callers must
     /// ensure the destination has an active direct transport connection.
-    pub async fn send_direct_message(&self, msg: Message, destination: Did) -> Result<uuid::Uuid> {
+    pub async fn send_direct_message(
+        &self,
+        data: ApplicationData,
+        destination: Did,
+    ) -> Result<uuid::Uuid> {
         self.transport
             .application_egress()
-            .send_direct_message(msg, destination)
+            .send_direct_message(Message::from(data), destination)
+            .await
+    }
+
+    /// Test builds: send core's own `message` under the application discipline, routed by
+    /// Chord, as no application can. Witnesses that drive a protocol message end to end use it.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) async fn send_core_message_for_test(
+        &self,
+        message: Message,
+        destination: Did,
+    ) -> Result<uuid::Uuid> {
+        self.transport
+            .application_egress()
+            .send_message(message, destination)
+            .await
+    }
+
+    /// Test builds: [`Self::send_core_message_for_test`] directly to a connected peer.
+    #[cfg(test)]
+    pub(crate) async fn send_direct_core_message_for_test(
+        &self,
+        message: Message,
+        destination: Did,
+    ) -> Result<uuid::Uuid> {
+        self.transport
+            .application_egress()
+            .send_direct_message(message, destination)
             .await
     }
 
@@ -391,7 +436,7 @@ impl Swarm {
     pub async fn offer_connection(&self, peer: Did) -> Result<(ConnectionAttempt, MessagePayload)> {
         let (attempt, offer_msg) = self
             .transport
-            .prepare_connection_offer_with_attempt(peer, self.inner_callback())
+            .prepare_connection_offer_with_attempt(peer, self.transport_callback())
             .await?;
 
         // This payload has fake next_hop.
@@ -432,7 +477,7 @@ impl Swarm {
         let peer = offer_payload.transaction.origin();
         let answer_msg = self
             .transport
-            .answer_remote_connection(peer, self.inner_callback(), &msg)
+            .answer_remote_connection(peer, self.transport_callback(), &msg)
             .await?;
 
         // This payload has fake next_hop.

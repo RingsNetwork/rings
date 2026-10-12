@@ -224,13 +224,14 @@ async fn test_unknown_legacy_namespace_is_a_nonfatal_drop() -> Result<()> {
     let from = extensions.core().did();
 
     extensions
+        .core()
         .dispatch(
             from,
             Envelope::new("snark", Bytes::from_static(b"legacy-task")),
         )
         .await?;
 
-    assert!(extensions.core.handler("snark").is_none());
+    assert!(extensions.core().route("snark").is_none());
     Ok(())
 }
 
@@ -280,6 +281,7 @@ async fn test_committed_transitions_execute_effects_in_commit_order() -> Result<
     let first_extensions = extensions.clone();
     let first = tokio::spawn(async move {
         first_extensions
+            .core()
             .dispatch(
                 from,
                 Envelope::new("ordered-effects", Bytes::from_static(&[1])),
@@ -292,6 +294,7 @@ async fn test_committed_transitions_execute_effects_in_commit_order() -> Result<
     let second_extensions = extensions.clone();
     let second = tokio::spawn(async move {
         second_extensions
+            .core()
             .dispatch(
                 from,
                 Envelope::new("ordered-effects", Bytes::from_static(&[2])),
@@ -326,6 +329,7 @@ async fn test_failed_effect_releases_ordered_turn_for_later_transition() -> Resu
     let from = extensions.core().did();
 
     let failed = extensions
+        .core()
         .dispatch(
             from,
             Envelope::new("ordered-effects", Bytes::from_static(&[1])),
@@ -333,6 +337,7 @@ async fn test_failed_effect_releases_ordered_turn_for_later_transition() -> Resu
         .await;
     assert!(matches!(failed, Err(Error::ExtensionError(_))));
     extensions
+        .core()
         .dispatch(
             from,
             Envelope::new("ordered-effects", Bytes::from_static(&[2])),
@@ -398,6 +403,7 @@ async fn test_returned_feedback_precedes_a_waiting_transition() -> Result<()> {
     let first_extensions = extensions.clone();
     let first = tokio::spawn(async move {
         first_extensions
+            .core()
             .dispatch(from, Envelope::new(TCP, first_open))
             .await
     });
@@ -407,6 +413,7 @@ async fn test_returned_feedback_precedes_a_waiting_transition() -> Result<()> {
     let second_extensions = extensions.clone();
     let second = tokio::spawn(async move {
         second_extensions
+            .core()
             .dispatch(from, Envelope::new(TCP, open))
             .await
     });

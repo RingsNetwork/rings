@@ -53,6 +53,7 @@ use super::PendingConnectionAttempt;
 use super::SwarmTransport;
 use super::SESSION_HOLD_TIMEOUT;
 use crate::delegation::DelegationDigest;
+use crate::error::DetachedWork;
 use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopToken;
@@ -164,7 +165,9 @@ impl SwarmTransport {
             Some(Some(Some(permit))) => permit,
         };
         if spawn_detached(Box::pin(deliver_link_control(admitted, frame, permit))).is_err() {
-            return Err(Error::DetachedRuntimeUnavailable("a link-control send"));
+            return Err(Error::DetachedRuntimeUnavailable(
+                DetachedWork::LinkControlSend,
+            ));
         }
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         super::outbound::record_dispatched_link_control(peer, control);

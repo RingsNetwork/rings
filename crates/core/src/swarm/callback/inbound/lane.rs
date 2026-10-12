@@ -66,8 +66,8 @@ impl InboundLane {
     }
 
     /// Whether a frame of this lane may have arrived on `carrier`, the transport lane whose
-    /// credit it took (#913 R9 M3): a lane of known class only on its class's channel lane, so
-    /// the priority lane's credit carries DHT control alone. The reassembly lane's class is
+    /// credit it took (one lane per class): a lane of known class only on its class's channel
+    /// lane, so the priority lane's credit carries DHT control alone. The reassembly lane's class is
     /// judged once its message is reassembled; no carrier (a frame handed in without a
     /// transport) is judged by nothing.
     pub(in crate::swarm::callback) fn admits_carrier(self, carrier: Option<ChannelLane>) -> bool {
@@ -97,7 +97,7 @@ mod tests {
     use crate::message::MessageCategory;
 
     /// A lane of known class admits exactly its class's channel lane; the reassembly lane, and
-    /// a frame without a transport carrier, are judged elsewhere (#913 R9 M3).
+    /// a frame without a transport carrier, are judged elsewhere (one lane per class).
     #[test]
     fn test_a_lane_admits_only_its_class_channel() {
         let channels = [0, 1, 2, 3].map(ChannelLane::new);

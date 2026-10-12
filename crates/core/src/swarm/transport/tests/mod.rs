@@ -697,7 +697,13 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
     assert_eq!(recorder.inbounds(), 0);
     assert_eq!(max_on_message_recursion_depth_for_test(), 1);
     assert_eq!(failed_receive_count(&measure, peer)?, 1);
-    assert_eq!(pending.callback.inbound_admitted_count_for_test(), 0);
+    assert_eq!(
+        pending
+            .callback
+            .inbound_for_test()
+            .admitted_count_for_test(),
+        0
+    );
     assert_eq!(transport.reassembly_budget().buffered_cost_for_test(), 0);
     Ok(())
 }

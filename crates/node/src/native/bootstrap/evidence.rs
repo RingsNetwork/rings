@@ -40,7 +40,8 @@ use crate::sync_lock::lock;
 /// ```text
 ///   wait_for(p) ─▶ register waiter ─▶ observe(p) ─▶ resolved
 ///   observe(p) with no waiter ─▶ dropped
-///   drop(AdmissionWaiter(p)) ─▶ waiter forgotten; idempotent, so a resolved waiter may drop too
+///   drop(AdmissionWaiter(p)) ─▶ waiter forgotten
+///                               (idempotent, so a resolved waiter may drop too)
 /// ```
 ///
 /// An admission observed before its waiter is not kept: a dial registers first and then checks

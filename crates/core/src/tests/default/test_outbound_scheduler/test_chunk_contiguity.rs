@@ -12,6 +12,7 @@ use super::wait_until;
 use crate::chunk::Chunk;
 use crate::error::Result;
 use crate::message::Message;
+use crate::swarm::application::ApplicationData;
 use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
@@ -75,7 +76,7 @@ async fn test_same_class_chunked_transfers_are_contiguous_on_the_wire() -> Resul
 
     node1
         .swarm
-        .send_direct_message(Message::custom(&vec![0x11; 50_000])?, peer)
+        .send_direct_message(ApplicationData::custom(&vec![0x11; 50_000]), peer)
         .await?;
     wait_until("first chunk delivery gate", || {
         dummy_controlled::delivery_future_waiting()
@@ -93,7 +94,7 @@ async fn test_same_class_chunked_transfers_are_contiguous_on_the_wire() -> Resul
     let second_swarm = node1.swarm.clone();
     let second_send = tokio::spawn(async move {
         second_swarm
-            .send_direct_message(Message::custom(&vec![0x22; 40_000])?, peer)
+            .send_direct_message(ApplicationData::custom(&vec![0x22; 40_000]), peer)
             .await
     });
     wait_until("second application transfer submission", || {

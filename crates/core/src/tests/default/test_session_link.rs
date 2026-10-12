@@ -13,6 +13,7 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::message::PerSlot;
+use crate::swarm::application::ApplicationData;
 use crate::swarm::transport::dispatched_link_control_for_test;
 use crate::swarm::transport::referenced_slots_for_test;
 use crate::swarm::transport::LinkDirection;
@@ -119,7 +120,7 @@ async fn test_link_reaches_references_without_a_question() -> Result<()> {
             "the link never switched to references"
         );
         left.swarm
-            .send_direct_message(Message::custom(b"steady")?, right.did())
+            .send_direct_message(ApplicationData::custom(b"steady"), right.did())
             .await?;
         next_custom_message_from(&right, left.did(), b"steady").await?;
         sent += 1;

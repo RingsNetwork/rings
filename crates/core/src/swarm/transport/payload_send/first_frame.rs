@@ -4,7 +4,7 @@
 //!
 //! Test builds can hold the deadline on the current thread, so a witness of the inbound-locality
 //! law observes a send stuck behind withheld credit for as long as the witness runs, instead of
-//! racing the short dummy deadline (#913 R9 M7).
+//! racing the short dummy deadline.
 
 use std::time::Duration;
 

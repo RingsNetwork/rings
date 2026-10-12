@@ -116,6 +116,11 @@ const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// registry refresh bound.
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: u32 = 40;
 
+/// Whether the fetch-cache read numbered `attempt` (from 0) is a DHT fetch's last one.
+const fn is_final_lookup_poll(attempt: u32) -> bool {
+    attempt.saturating_add(1) >= DHT_LOOKUP_CACHE_POLL_ATTEMPTS
+}
+
 /// The longest a DHT fetch polls the cache for its reply: its attempts times their interval.
 pub(crate) const fn dht_lookup_poll_budget() -> Duration {
     DHT_LOOKUP_CACHE_POLL_INTERVAL.saturating_mul(DHT_LOOKUP_CACHE_POLL_ATTEMPTS)
@@ -159,9 +164,9 @@ pub(crate) enum HandshakePeer {
 #[derive(Debug)]
 pub(crate) enum HandshakeFailure {
     /// The peer's slot is owned by another attempt (a handshake in flight, whichever side
-    /// started it, or an admission not yet announced): refused before any request when the
-    /// local core already holds an unadmitted handshake, or by the local core during the
-    /// exchange. Nothing is wrong; a later attempt may succeed.
+    /// started it): refused before any request when the local core already holds an unadmitted
+    /// handshake, or by the local core during the exchange. Nothing is wrong; a later attempt may
+    /// succeed.
     InFlight {
         /// The peer whose slot is owned.
         peer: Did,
@@ -265,14 +270,6 @@ impl Processor {
             .descriptor_at(&self.registration_context(), now_ms)
     }
 
-    fn online_node_descriptors_from_entry(entry: &entry::Entry) -> Vec<OnlineNodeDescriptor> {
-        OnlineNodeRegistration::descriptors_from_entry(entry)
-    }
-
-    fn onion_exit_descriptors_from_entry(entry: &entry::Entry) -> Vec<OnionExitDescriptor> {
-        OnionExitRegistration::descriptors_from_entry(entry)
-    }
-
     /// The registry entry under `topic` whose elements are `descriptors`.
     #[cfg(all(test, feature = "node"))]
     fn registry_entry<D: RegistryElement>(
@@ -309,7 +306,7 @@ impl Processor {
             return Ok(vec![]);
         };
 
-        let descriptors = Self::online_node_descriptors_from_entry(&entry)
+        let descriptors = OnlineNodeRegistration::descriptors_from_entry(&entry)
             .into_iter()
             .filter(|descriptor| descriptor.matches_dht_protocol(self.swarm.dht_protocol_mode()));
 
@@ -370,7 +367,7 @@ impl Processor {
                 .swarm
                 .storage_fetch_answered_since(entry_key, mark)
                 .map_err(Error::EntryError)?;
-            if answered || attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            if answered || is_final_lookup_poll(attempt) {
                 break;
             }
             sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
@@ -385,7 +382,7 @@ impl Processor {
         include_expired: bool,
     ) -> Vec<OnionExitDescriptor> {
         OnionExitDescriptor::latest_valid_by_service_did(
-            Self::onion_exit_descriptors_from_entry(entry),
+            OnionExitRegistration::descriptors_from_entry(entry),
             get_epoch_ms(),
             self.swarm.network_id(),
             include_expired,

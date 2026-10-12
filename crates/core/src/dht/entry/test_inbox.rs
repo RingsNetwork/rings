@@ -2,6 +2,7 @@ use super::inbox::inbox_destination;
 use super::inbox::inbox_key;
 use super::inbox::relocates_from_predecessor;
 use super::inbox::HeldMessage;
+use super::inbox::InboxElement;
 use super::Entry;
 use super::EntryKind;
 use super::EntryOperation;
@@ -361,9 +362,7 @@ fn test_hold_law_admits_only_the_responsible_holder_of_a_live_message() -> Resul
         &held_by(&holder, destination, TEST_NETWORK_ID)?,
         stale_now,
     )?);
-    stale
-        .entry()
-        .validate_admissible_at(stale_now, TEST_NETWORK_ID)?;
+    stale.validate_admissible_at(stale_now, TEST_NETWORK_ID)?;
     assert!(matches!(
         stale.validate_inbox_write(responsible, Some(responsible), stale_now, TEST_NETWORK_ID),
         Err(Error::RelayMessageHoldStale)
@@ -429,11 +428,14 @@ fn test_each_deliverable_element_is_paired_with_the_dot_that_retires_it() -> Res
         .extend(now_ms, Entry::inbox_delta(&first)?, actor)?
         .extend(now_ms + 1, Entry::inbox_delta(&second)?, actor)?;
 
-    let deliverable = carrier.deliverable_inbox_elements(now_ms + 2, TEST_NETWORK_ID);
+    let deliverable = carrier.stored_inbox_elements();
+    assert!(deliverable
+        .iter()
+        .all(|element| element.is_deliverable_at(now_ms + 2, TEST_NETWORK_ID)));
     assert_eq!(
         deliverable
             .iter()
-            .map(|element| element.payload.transaction.tx_id)
+            .map(InboxElement::tx_id)
             .collect::<Vec<_>>(),
         vec![
             first.payload.transaction.tx_id,
@@ -486,8 +488,12 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
         if round == 0 {
             first_round_dots = carrier.crdt.dots.clone();
         }
-        let deliverable = carrier.deliverable_inbox_elements(get_epoch_ms(), TEST_NETWORK_ID);
-        let removal = carrier.removal_of(deliverable.iter().map(|element| element.dot));
+        let removal = carrier.removal_of(
+            carrier
+                .stored_inbox_elements()
+                .iter()
+                .map(|element| element.dot),
+        );
         carrier = carrier.tombstone(removal)?;
         assert!(carrier.data.is_empty());
     }
@@ -503,8 +509,8 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
     Ok(())
 }
 
-/// Law (#913 R7 M1): after this clock steps back, an element held ahead of it by more than σ is
-/// not delivered, and it is delivered once the clock catches up.
+/// Law (clock gate): after this clock steps back, an element held ahead of it by more than σ
+/// is not delivered, and it is delivered once the clock catches up.
 #[test]
 fn test_an_element_held_ahead_of_a_stepped_back_clock_is_kept_for_a_later_pass() -> Result<()> {
     let now_ms = get_epoch_ms();
@@ -518,14 +524,11 @@ fn test_an_element_held_ahead_of_a_stepped_back_clock_is_kept_for_a_later_pass()
     )?;
 
     let stepped_back = now_ms - TS_OFFSET_TOLERANCE_MS - 1;
-    assert!(carrier
-        .deliverable_inbox_elements(stepped_back, TEST_NETWORK_ID)
-        .is_empty());
-    assert_eq!(
-        carrier
-            .deliverable_inbox_elements(now_ms, TEST_NETWORK_ID)
-            .len(),
-        1
-    );
+    let [element] = carrier
+        .stored_inbox_elements()
+        .try_into()
+        .expect("one element");
+    assert!(!element.is_deliverable_at(stepped_back, TEST_NETWORK_ID));
+    assert!(element.is_deliverable_at(now_ms, TEST_NETWORK_ID));
     Ok(())
 }

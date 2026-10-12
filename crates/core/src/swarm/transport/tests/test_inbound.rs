@@ -61,7 +61,10 @@ async fn test_pre_admission_drain_does_not_block_open_and_orders_admitted_arriva
     let transport = default_transport()?;
     let application = ApplicationRecorder::attach(&transport)?;
     let pending = pending_peer(&transport).await?;
-    let application_admission = pending.callback.hold_application_admission_for_test()?;
+    let application_admission = pending
+        .callback
+        .inbound_for_test()
+        .hold_application_admission_for_test()?;
     admit_after_one_held_frame(
         &transport,
         &pending,
@@ -142,7 +145,9 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     // Held for the whole saturation: the lane's front sequence never becomes
     // ready, so the actor dispatches no application frame and no permit is
     // released while the capacity laws are observed.
-    let application_hold = callback.hold_application_admission_for_test()?;
+    let application_hold = callback
+        .inbound_for_test()
+        .hold_application_admission_for_test()?;
     let application_inputs = saturating_application_inputs(transport.dht.did)?;
     let control_peer = unbound_peer(&transport, &SecretKey::random())?;
     let overflow_message = local_wire(
@@ -168,7 +173,8 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         }
     }
     callback
-        .await_inbound_admitted_count_for_test(|admitted| {
+        .inbound_for_test()
+        .await_admitted_count_for_test(|admitted| {
             admitted >= inbound_application_capacity_for_test()
         })
         .await;
@@ -178,7 +184,8 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     let overflow =
         spawn_inbound_delivery(Arc::clone(&callback), control_cid.clone(), overflow_message);
     callback
-        .await_inbound_waiting_for_test(|waiting| waiting == 1)
+        .inbound_for_test()
+        .await_waiting_for_test(|waiting| waiting == 1)
         .await;
 
     // The reserved control lane is independent of the held application lane, and of the
@@ -190,7 +197,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert_eq!(application.observed(), 1);
     assert_eq!(
-        callback.inbound_admitted_count_for_test(),
+        callback.inbound_for_test().admitted_count_for_test(),
         inbound_application_capacity_for_test()
     );
     assert!(!overflow.is_finished());
@@ -198,7 +205,7 @@ async fn test_inbound_mailbox_reserves_control_capacity_under_application_satura
     drop(application_hold);
     deliveries.push(overflow);
     await_deliveries(deliveries).await?;
-    assert_eq!(callback.inbound_admitted_count_for_test(), 0);
+    assert_eq!(callback.inbound_for_test().admitted_count_for_test(), 0);
     Ok(())
 }
 
@@ -228,11 +235,14 @@ async fn test_closing_inbound_mailbox_cancels_waiting_application_delivery() -> 
 
     // Observed, the frame waits at its held lane, just before dispatch.
     application.next_tapped().await?;
-    peer.callback.close_inbound_for_test();
+    peer.callback.inbound_for_test().close_for_test();
     assert!(delivery
         .await
         .map_err(|_| Error::InvalidMessage("inbound mailbox task panicked".to_string()))?);
-    assert_eq!(peer.callback.inbound_admitted_count_for_test(), 0);
+    assert_eq!(
+        peer.callback.inbound_for_test().admitted_count_for_test(),
+        0
+    );
     drop(lane_hold);
     assert_eq!(application.inbounds(), 0);
     Ok(())
@@ -362,10 +372,17 @@ fn hold_saturated_application_capacity(
     while capacity_holds.len() < lane_capacity {
         let peer: Did = SecretKey::random().address().into();
         for _ in 0..peer_capacity.min(lane_capacity - capacity_holds.len()) {
-            capacity_holds.push(callback.hold_application_capacity_for_test(peer)?);
+            capacity_holds.push(
+                callback
+                    .inbound_for_test()
+                    .hold_application_capacity_for_test(peer)?,
+            );
         }
     }
-    assert_eq!(callback.inbound_admitted_count_for_test(), lane_capacity);
+    assert_eq!(
+        callback.inbound_for_test().admitted_count_for_test(),
+        lane_capacity
+    );
     Ok(capacity_holds)
 }
 

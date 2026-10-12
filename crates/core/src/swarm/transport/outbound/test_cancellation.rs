@@ -44,7 +44,7 @@ async fn admit_detached_peer(node: &Swarm, peer: Did) {
         .await
         .expect("fixture reserves a pending generation");
     let callback = node
-        .inner_callback()
+        .transport_callback()
         .with_pending_connection_attempt(attempt);
     node.transport
         .new_pending_connection(attempt, callback)
@@ -251,23 +251,18 @@ async fn test_a_class_credit_of_another_generation_is_not_spent() {
         ClassCredit::Unavailable(stale),
         ClassCredit::Awaiting(stale),
     ] {
-        if let Some(credit) = worker.credits.get_mut(class.index()) {
-            *credit = slot;
-        }
+        worker.credits[class] = slot;
         assert!(!worker.grants_a_frame(class));
 
         worker.acquire_credits();
-        let settled = worker
-            .credits
-            .get(class.index())
-            .and_then(ClassCredit::attempt);
+        let settled = worker.credits[class].attempt();
         // The detached generation has no link, so its reservation settles at once.
         assert_eq!(settled, Some(current));
         assert!(worker.grants_a_frame(class));
     }
 }
 
-/// Law (wait settlement), #913 R8: a reservation's outcome settles its slot only while the slot
+/// Law (wait settlement): a reservation's outcome settles its slot only while the slot
 /// awaits one on the same generation. The late outcome of a wait on a generation the slot no
 /// longer serves is dropped, so it cannot leave the class gated on that generation's verdict;
 /// an idle slot records nothing.
@@ -293,8 +288,7 @@ async fn test_a_late_credit_outcome_of_an_abandoned_wait_settles_nothing() {
     let (transfer, _completion) = scheduled_transfer(&node, peer, &capacity, &StopSource::new());
     let attempt = transfer.transfer.admitted.attempt();
     let class = TransferClass::Application;
-    let slot =
-        |worker: &OutboundWorker| worker.credits.get(class.index()).map(ClassCredit::attempt);
+    let slot = |worker: &OutboundWorker| worker.credits[class].attempt();
     let abandoned = PendingConnectionAttempt {
         peer,
         generation: attempt.generation.wrapping_sub(1),
@@ -302,21 +296,15 @@ async fn test_a_late_credit_outcome_of_an_abandoned_wait_settles_nothing() {
     let refusal = || Err(Error::ChannelSendMessageFailed);
 
     worker.settle_credit(class, attempt, refusal());
-    assert_eq!(slot(&worker), Some(None), "an idle slot awaits no wait");
+    assert_eq!(slot(&worker), None, "an idle slot awaits no wait");
 
-    if let Some(credit) = worker.credits.get_mut(class.index()) {
-        *credit = ClassCredit::Awaiting(attempt);
-    }
+    worker.credits[class] = ClassCredit::Awaiting(attempt);
     worker.settle_credit(class, abandoned, refusal());
-    assert_eq!(
-        slot(&worker),
-        Some(None),
-        "the slot awaits another generation"
-    );
+    assert_eq!(slot(&worker), None, "the slot awaits another generation");
     worker.settle_credit(class, attempt, refusal());
     assert_eq!(
         slot(&worker),
-        Some(Some(attempt)),
+        Some(attempt),
         "the awaited wait settles its slot"
     );
 }

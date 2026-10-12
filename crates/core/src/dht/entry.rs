@@ -30,6 +30,7 @@ pub use crdt::EntryCrdt;
 pub use crdt::EntryDot;
 pub use crdt::EntryTombstone;
 pub use crdt::EntryVersion;
+pub(crate) use retention::AdmittedEntry;
 
 /// DHT storage entry categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,7 +185,7 @@ fn placement_belongs_to_entry_key(
 ///
 /// Retention: every entry accepted into storage carries a retention bound `expires_at_ms`,
 /// stamped by the origin at the operation boundary and bounded by the receiver at admission
-/// (see the `retention` module and [`Entry::validate_admissible_at`]). The bound joins by
+/// (see the `retention` module and `Entry::validate_admissible_at`). The bound joins by
 /// `max`, so every accepted write extends the carrier's life to at least its own bound, and an
 /// entry whose bound has elapsed (and that holds no remove still inside its horizon) is dropped
 /// on the next read instead of being served or replicated. Inside a live data carrier, every

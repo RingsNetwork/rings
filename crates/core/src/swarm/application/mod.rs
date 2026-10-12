@@ -14,13 +14,18 @@
 //! ```
 //!
 //! Laws:
-//! - **L0.** Core never calls, awaits or waits for application code. A full inbox drops further
-//!   live application data, counted, as a best-effort network drops it; no lane and no
-//!   lifecycle transition ever waits for the application to read (#913 R10). Stored relay mail
-//!   is offered only when it fits, and is retired only once the application takes it.
-//! - Only [`ApplicationData`] crosses the boundary: no control message has a representation
-//!   here, and the projection `ApplicationData::project` is total over [`Message`] variants, so
-//!   a new variant fails to compile until it is classified.
+//! - **Core never waits on the application.** Core never calls, awaits or waits for
+//!   application code. Application delivery is lossy by design: a full inbox drops further live
+//!   application data, counted ([`ApplicationInbox::dropped`]) and logged at `warn`, as a
+//!   best-effort network drops it, and no lane and no lifecycle transition ever waits for the
+//!   application to read. A protocol that needs a reliable stream detects and recovers loss
+//!   end to end (#939). Stored relay mail is offered only when it fits, and is retired once the
+//!   application took it from the inbox; what the application does with it afterwards is the
+//!   application's.
+//! - Only [`ApplicationData`] crosses the boundary, in both directions: no control message has
+//!   a representation here. Inbound, the projection `ApplicationData::project` is total over
+//!   [`Message`] variants, so a new variant fails to compile until it is classified; outbound,
+//!   the application sends only `ApplicationData`, injected into [`Message`] by `From`.
 //! - Events are the logical facts [`SwarmEvent::PeerAdmitted`] and [`SwarmEvent::PeerRetired`],
 //!   never a physical connection state.
 
@@ -34,7 +39,6 @@ use std::sync::Arc;
 use delegation::DelegatedNamespaces;
 pub use inbox::ApplicationInbox;
 use inbox::ApplicationOutlet;
-pub(crate) use inbox::Delivered;
 pub use inbox::APPLICATION_INBOX_WEIGHT;
 use lookup::ApplicationLookups;
 pub use lookup::SuccessorReport;
@@ -93,8 +97,10 @@ pub enum ApplicationData {
 impl ApplicationData {
     /// The application data `message` carries, if it carries any.
     ///
-    /// Law: total and exhaustive over [`Message`], so `project(m) = Some(_)` exactly for the
-    /// `Application` and `E2e` classes other than a chunk, which is reassembled by core first.
+    /// Laws (with [`From`] as the injection into [`Message`]):
+    /// - total and exhaustive over [`Message`]: `project(m) = Some(_)` exactly for the
+    ///   `Application` and `E2e` classes other than a chunk, which core reassembles first;
+    /// - `project(Message::from(d)) = Some(d)`.
     pub(crate) fn project(message: Message) -> Option<Self> {
         match message {
             Message::CustomMessage(message) => Some(Self::Custom(message)),
@@ -120,13 +126,34 @@ impl ApplicationData {
         }
     }
 
-    /// The heap bytes this body owns beyond its own size, part of the measure of
-    /// [`APPLICATION_INBOX_WEIGHT`].
-    fn heap_bytes(&self) -> usize {
+    /// An application message carrying `bytes`, as an application sends one.
+    pub fn custom(bytes: &[u8]) -> Self {
+        Self::Custom(CustomMessage(bytes.to_vec()))
+    }
+
+    /// The bytes of data this body carries beyond its own size, part of the measure of
+    /// [`APPLICATION_INBOX_WEIGHT`]. One rule for every variant: the byte length of the data,
+    /// not its allocation, so a message weighs the same however it was built.
+    fn data_len(&self) -> usize {
         match self {
-            Self::Custom(CustomMessage(bytes)) => bytes.capacity(),
+            Self::Custom(CustomMessage(bytes)) => bytes.len(),
             Self::E2eHandshakeRequest(_) | Self::E2eHandshakeResponse(_) => 0,
             Self::E2eStreamFrame(frame) => std::mem::size_of_val(frame.ciphertext.as_slice()),
+        }
+    }
+}
+
+/// The injection of application data into the messages core sends: a section of
+/// `ApplicationData::project`: `project ∘ from = Some`.
+impl From<ApplicationData> for Message {
+    fn from(data: ApplicationData) -> Self {
+        match data {
+            ApplicationData::Custom(message) => Message::CustomMessage(message),
+            ApplicationData::E2eHandshakeRequest(request) => Message::E2eHandshakeRequest(request),
+            ApplicationData::E2eHandshakeResponse(response) => {
+                Message::E2eHandshakeResponse(response)
+            }
+            ApplicationData::E2eStreamFrame(frame) => Message::E2eStreamFrame(frame),
         }
     }
 }
@@ -153,10 +180,10 @@ impl ApplicationMessage {
         })
     }
 
-    /// The bytes this message retains while it waits in the inbox: its own size and the heap
-    /// bytes of its data, so an empty message still counts (#913 R10 M1).
+    /// The bytes this message retains while it waits in the inbox: its own size and the length
+    /// of its data in bytes, so an empty message still counts.
     fn weight(&self) -> usize {
-        std::mem::size_of::<Self>().saturating_add(self.data.heap_bytes())
+        std::mem::size_of::<Self>().saturating_add(self.data.data_len())
     }
 }
 
@@ -199,4 +226,43 @@ pub enum ApplicationDelivery {
     Message(ApplicationMessage),
     /// A logical fact about a peer.
     Event(SwarmEvent),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApplicationData;
+    use crate::dht::Did;
+    use crate::ecc::SecretKey;
+    use crate::message::e2e::E2eHandshakeRequest;
+    use crate::message::FindSuccessorReportHandler;
+    use crate::message::FindSuccessorSend;
+    use crate::message::FindSuccessorThen;
+    use crate::message::Message;
+
+    /// The injection is a section of the projection: `project(Message::from(d)) = Some(d)`.
+    #[test]
+    fn test_projecting_injected_application_data_gives_it_back() {
+        let key = SecretKey::random();
+        for data in [
+            ApplicationData::custom(b"application"),
+            ApplicationData::E2eHandshakeRequest(E2eHandshakeRequest::new(key.pubkey())),
+        ] {
+            assert_eq!(
+                ApplicationData::project(Message::from(data.clone())),
+                Some(data)
+            );
+        }
+    }
+
+    /// A body that is core's own projects to nothing.
+    #[test]
+    fn test_a_core_message_carries_no_application_data() {
+        let did: Did = SecretKey::random().address().into();
+        let core = Message::FindSuccessorSend(FindSuccessorSend {
+            did,
+            strict: false,
+            then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
+        });
+        assert_eq!(ApplicationData::project(core), None);
+    }
 }

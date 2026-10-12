@@ -18,6 +18,10 @@
 
 #[cfg(rings_transport_runtime)]
 use std::collections::VecDeque;
+#[cfg(rings_transport_backend)]
+use std::future::Future;
+#[cfg(rings_transport_runtime)]
+use std::mem;
 #[cfg(all(target_family = "wasm", feature = "web-sys-webrtc"))]
 use std::rc::Rc;
 #[cfg(any(test, rings_transport_runtime))]
@@ -50,9 +54,12 @@ use crate::core::pool::ChannelLane;
 use crate::core::transport::BorrowedTransportMessage;
 #[cfg(rings_transport_backend)]
 use crate::core::transport::SendPermit;
-#[cfg(rings_transport_backend)]
-use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
+use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+#[cfg(rings_transport_backend)]
+use crate::delivery::SendCreditWait;
+#[cfg(rings_transport_backend)]
+use crate::error::Error;
 #[cfg(rings_transport_backend)]
 use crate::error::Result;
 use crate::notifier::Notifier;
@@ -208,33 +215,37 @@ impl InnerTransportCallback {
     #[cfg(rings_transport_backend)]
     /// Wait for one credit to send a custom frame on `lane`; see [`LinkCredit::reserve`]. The
     /// wait owns the link's credit state and nothing else of the connection.
-    pub(crate) fn reserve_credit(
+    fn reserve_credit(
         &self,
         lane: ChannelLane,
-    ) -> impl std::future::Future<Output = Result<LaneCreditReservation>> + 'static {
+    ) -> impl Future<Output = Result<LaneCreditReservation>> + 'static {
         let link = Arc::clone(&self.link_credit);
         async move { link.reserve(lane).await.map(LaneCreditReservation) }
     }
 
     #[cfg(rings_transport_backend)]
-    /// The credit a frame on `lane` is sent under, bound to the send `permit` admits: for a
-    /// custom frame, the credit `permit` carries or, without one, a credit reserved now; for a
-    /// credit frame, none, since credit frames are never charged.
-    pub(crate) async fn credit_for_send(
+    /// [`Self::reserve_credit`], boxed as a backend's `ConnectionInterface::reserve_send_credit`
+    /// returns it.
+    pub(crate) fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
+        Box::pin(self.reserve_credit(lane))
+    }
+
+    #[cfg(rings_transport_backend)]
+    /// The credit a custom frame on `lane` is sent under, bound to the send `permit` admits: the
+    /// credit `permit` carries or, without one, a credit reserved now.
+    pub(crate) async fn credit_for_custom_send(
         &self,
-        message: &TransportMessage,
         lane: ChannelLane,
         permit: &mut SendPermit,
-    ) -> Result<Option<CreditReservation>> {
-        let credit = match (message, permit.take_credit()) {
-            (TransportMessage::Credit(_), _) => return Ok(None),
-            (TransportMessage::Custom(_), Some(credit)) if !credit.0.is_of(&self.link_credit) => {
-                return Err(crate::error::Error::ForeignCredit(self.cid.to_string()));
+    ) -> Result<CreditReservation> {
+        let credit = match permit.take_credit() {
+            Some(credit) if !credit.0.is_of(&self.link_credit) => {
+                return Err(Error::ForeignCredit(self.cid.to_string()));
             }
-            (TransportMessage::Custom(_), Some(credit)) => credit,
-            (TransportMessage::Custom(_), None) => self.reserve_credit(lane).await?,
+            Some(credit) => credit,
+            None => self.reserve_credit(lane).await?,
         };
-        Ok(Some(credit.0.bind(permit.acceptance())))
+        Ok(credit.0.bind(permit.acceptance()))
     }
 
     /// Notify the data channel is open.
@@ -272,7 +283,7 @@ impl InnerTransportCallback {
         if inbound_frame_exceeds_protocol_ceiling(raw.len()) {
             return InboundFrameAdmission::Oversized {
                 bytes: raw.len(),
-                max_bytes: crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE,
+                max_bytes: MAX_DATA_CHANNEL_MESSAGE_SIZE,
             };
         }
         let (borrowed, remaining) =
@@ -336,25 +347,21 @@ impl InnerTransportCallback {
     fn enqueue_frame(&self, frame: AdmittedInboundFrame, index: CreditIndex) -> bool {
         let queue = &mut lock_recover(&self.lanes)[index];
         queue.frames.push_back(frame);
-        !std::mem::replace(&mut queue.draining, true)
+        !mem::replace(&mut queue.draining, true)
     }
 
     /// Hand the queued frames of credit index `index` to the protocol callback, in order, until
     /// the queue is empty; the drainer then gives the queue up.
+    ///
+    /// Pre: the caller claimed the lane's drainer ([`Self::enqueue_frame`] returned `true`).
     #[cfg(rings_transport_runtime)]
     async fn drain_lane(&self, index: CreditIndex) {
-        loop {
-            let next = {
-                let queue = &mut lock_recover(&self.lanes)[index];
-                let next = queue.frames.pop_front();
-                if next.is_none() {
-                    queue.draining = false;
-                }
-                next
-            };
-            let Some(frame) = next else {
-                return;
-            };
+        let mut drainer = LaneDrainer {
+            callback: self,
+            index,
+            finished: false,
+        };
+        while let Some(frame) = drainer.next() {
             self.handle_admitted_frame(frame).await;
         }
     }
@@ -395,6 +402,57 @@ impl InnerTransportCallback {
         if let Err(e) = self.callback.on_peer_connection_state_change(cid, s).await {
             tracing::error!("Callback on_peer_connection_state_change failed: {e:?}");
         }
+    }
+}
+
+/// The claim of one running drainer on its lane's queue.
+///
+/// Law (claim release). The claim ends with the drainer however it ends. A drainer that empties
+/// the queue gives the lane up under the queue's lock; one cancelled or unwound mid-dispatch
+/// gives it up on drop and drops the frames still queued, whose permits return their credit to
+/// the peer. No lane is thus left claimed by a drainer that no longer runs, with its frames
+/// holding the lane's window shut.
+#[cfg(rings_transport_runtime)]
+struct LaneDrainer<'a> {
+    /// The callback whose lane is drained.
+    callback: &'a InnerTransportCallback,
+    /// The credit index of the lane.
+    index: CreditIndex,
+    /// Whether the drainer emptied the queue and gave the lane up.
+    finished: bool,
+}
+
+#[cfg(rings_transport_runtime)]
+impl LaneDrainer<'_> {
+    /// The next queued frame, or `None` once the queue is empty, which gives the lane up.
+    fn next(&mut self) -> Option<AdmittedInboundFrame> {
+        let queue = &mut lock_recover(&self.callback.lanes)[self.index];
+        let next = queue.frames.pop_front();
+        if next.is_none() {
+            queue.draining = false;
+            self.finished = true;
+        }
+        next
+    }
+}
+
+#[cfg(rings_transport_runtime)]
+impl Drop for LaneDrainer<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let abandoned = {
+            let queue = &mut lock_recover(&self.callback.lanes)[self.index];
+            queue.draining = false;
+            mem::take(&mut queue.frames)
+        };
+        tracing::warn!(
+            peer = %self.callback.cid,
+            lane = self.index.lane().index(),
+            frames = abandoned.len(),
+            "a lane drainer ended mid-dispatch; the lane's queued frames were dropped"
+        );
     }
 }
 

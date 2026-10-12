@@ -14,8 +14,14 @@ A receiver holds at most `LANE_CREDIT_WINDOW` (16) frames of a lane, so at most
 `INBOUND_PEER_FRAME_CAPACITY` (64) frames of at most `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes per
 connection. It advertises more credit, as a cumulative and idempotent `TransportMessage::Credit`
 frame, as the protocol takes frames over. A sender holds a custom frame until its lane has
-credit. Credit frames are applied on arrival, never behind queued data, and are not themselves
-charged.
+credit. A received credit frame is applied on arrival, never behind received data, and is not
+itself charged. On the sending side a credit frame goes out on its own lane, so it may wait
+behind up to a window of this end's committed frames on that lane.
+
+Credit counts frames, not bytes, so it caps each lane's throughput toward one neighbour at a
+window per round trip: about 160 small messages per second at a 100 ms round trip (53 at
+300 ms), or about 10 MiB/s of 64 KiB frames (3.3 MiB/s). Byte-denominated credit, sent ahead of
+queued data, would lift both (#937).
 
 The laws, model checked with stateright over every interleaving, with credits reordered and
 duplicated (`rings-transport`, `core::credit`):
@@ -128,25 +134,36 @@ Core never calls, awaits or waits on application code (#935). The application re
 and peer facts from one bounded inbox (`ApplicationInbox::next`, or `try_next` without
 waiting) at its own pace, and no inbound lane ever waits for it to read:
 
-- A live application message that does not fit the full inbox is dropped and counted
-  (`ApplicationInbox::dropped`), as a best-effort network drops it. The bound,
-  `APPLICATION_INBOX_WEIGHT` (64 MiB), weighs each message by its own size plus its heap
-  bytes, so empty messages are bounded too.
+- Application delivery is lossy by design. A live application message that does not fit the
+  full inbox is dropped, counted (`ApplicationInbox::dropped`) and logged at `warn`, as a
+  best-effort network drops it, and nothing tells its sender. A protocol that needs a
+  reliable stream detects and recovers loss end to end (#939). The bound,
+  `APPLICATION_INBOX_WEIGHT` (64 MiB), weighs each message by its own size plus the byte
+  length of its data, one rule for every kind, so empty messages are bounded too.
 - Before the application claims the inbox, live messages are discarded and peer facts are
   kept, so a late reader still learns the peers already admitted. Once the inbox is dropped,
   everything is discarded.
 - Messages and peer facts share one queue, in the order core produced them. An unread
   `PeerAdmitted` is withdrawn by its `PeerRetired`, so facts are bounded by twice the peers.
 - Mail stored for this node in its relay inbox is offered only through a reservation of room
-  in the inbox, and retired from storage only once the application has taken it. Mail that
-  finds no room or no reader, or whose origin's quota is spent for now, stays stored for a
-  later pass; delivery is at least once.
+  in the inbox, and retired from storage once the application has taken it from the inbox.
+  Taking ends core's custody: what the application does with the message afterwards is its
+  own (the node's `Backend`, below, may drop it beyond its namespace queues). Mail that finds
+  no room or no reader, or whose origin's quota is spent for now, stays stored for a later
+  pass; an origin with a spent quota does not hold back the others. Delivery is at least once
+  within a run: a restart between the taking and the retirement loses the mail, as the replay
+  window refuses its redelivery (#936).
 
 The node's `Backend` reads the inbox and dispatches each registered namespace on its own
-bounded queue (256 envelopes), in arrival order, so one slow protocol holds back neither
-another namespace nor the peer facts; a full namespace queue drops further envelopes, counted.
-The FFI provider's E2E event buffer is likewise bounded (4096 events) and drops further
-events, counted.
+queue, bounded by 256 envelopes and by 16 MiB of encoded envelopes (an empty queue admits any
+one envelope), in arrival order, so one slow protocol holds back neither another namespace nor
+the peer facts. An envelope that cannot be decoded, names no registered namespace, finds its
+queue full or its namespace unserved is dropped, logged at `warn` and counted by reason
+(`Provider::dispatch_drop_counters`, FFI `dispatchDropCounters`). Protocols are registered
+before the inbox is claimed: from the claim on, an envelope of a namespace not yet registered
+is dropped. Facts and E2E messages reach the `BackendObserver` at once, so they may overtake
+custom messages still queued for a namespace. The FFI provider's E2E event buffer is likewise
+bounded (4096 events) and drops further events, counted (`takeE2eEvents` reports `dropped`).
 
 Every such wait is logged at `warn`, with the peer and lane: a sender waiting for credit, and an
 arrival waiting for the mailbox.

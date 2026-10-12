@@ -135,9 +135,9 @@ impl BootstrapPort for ProcessorPort {
 impl ProcessorPort {
     /// Whether `peer` is admitted within [`DIAL_ADMISSION_TIMEOUT`]. The waiter is registered
     /// before the record is checked, which closes the window: an admission committed before the
-    /// check is seen by it, one committed after is announced and resolves the waiter. A closed waiter
-    /// is unreachable under one turn per target; it reads as the timeout it would otherwise
-    /// become.
+    /// check is seen by it, one committed after is announced and resolves the waiter. A closed
+    /// waiter is unreachable under one turn per target; it reads as the timeout it would
+    /// otherwise become.
     async fn await_admission(&self, peer: Did) -> Result<bool> {
         let waiter = self.evidence.admissions().wait_for(peer)?;
         if self

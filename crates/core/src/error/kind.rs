@@ -1,3 +1,6 @@
+use std::fmt::Display;
+use std::fmt::Formatter;
+
 /// Errors collections in ring-core.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -162,10 +165,9 @@ pub enum Error {
     #[error("Link-control frame is meaningful only on the connection it arrived on")]
     LinkControlOutsideLink,
 
-    /// No runtime is current to run the named work detached from its caller: a
-    /// protocol-context handshake, or a link-control send.
+    /// No runtime is current to run the named work detached from its caller.
     #[error("{0} needs a runtime to run detached")]
-    DetachedRuntimeUnavailable(&'static str),
+    DetachedRuntimeUnavailable(DetachedWork),
 
     /// The peer already has the most link-control sends this end keeps in flight for it.
     #[error("Link-control sends in flight to {0} are at capacity")]
@@ -813,4 +815,23 @@ pub enum Error {
     /// External Javascript error: {0}
     #[error("External Javascript error: {0}")]
     JsError(String),
+}
+
+/// Work the swarm runs detached from its caller and refuses when no runtime is current to
+/// carry it (see `swarm::detached`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DetachedWork {
+    /// A handshake negotiated in a protocol handler's context.
+    ProtocolHandshake,
+    /// A link-control send.
+    LinkControlSend,
+}
+
+impl Display for DetachedWork {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ProtocolHandshake => "a protocol-context handshake",
+            Self::LinkControlSend => "a link-control send",
+        })
+    }
 }

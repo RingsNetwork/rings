@@ -10,10 +10,12 @@ use crate::message::CustomMessage;
 use crate::message::EdgeRelation;
 use crate::message::HandleMsg;
 use crate::message::Message;
+use crate::message::MessageCategory;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::OriginQuotaCharge;
+use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationMessage;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
@@ -34,11 +36,12 @@ impl LocalDelivery {
     /// Deliver one locally sourced payload: dispatch, then the application inbox, exactly as for
     /// a verified frame from a connection, but with no connection to gate on and never waiting.
     ///
-    /// Room for application data is reserved before the transaction is admitted, so a payload
-    /// this pass cannot hand over (no room, or no application reading) is left unadmitted for a
-    /// later pass instead of being admitted, handled and lost to the replay window. A payload
-    /// carrying application data is queued with a consumption signal, so its stored copy is
-    /// retired only once the application takes it (#913 R10 H3).
+    /// Room for application data is reserved, holding the message, before the transaction is
+    /// admitted, so a payload this pass cannot hand over (no room, or no application reading)
+    /// is left unadmitted for a later pass instead of being admitted, handled and lost to the
+    /// replay window. Core handles the message the room holds by reference, so it is decoded
+    /// once and never copied. A payload carrying application data is queued with a consumption
+    /// signal, so its stored copy is retired only once the application takes it.
     ///
     /// Pre: `payload.transaction.destination` is this node and the payload was verified by the
     /// caller (the inbox witness verifies it as of its hold instant).
@@ -49,33 +52,24 @@ impl LocalDelivery {
         let pipeline = &self.pipeline;
         let message = payload.transaction.data::<Message>()?;
         let lane = InboundLane::from_kind(MessageKind::from_message(&message));
-        let application = pipeline.application_message(payload, message.clone());
-        let room = match &application {
-            Some(application) => {
-                let outlet = &pipeline.transport.application().outlet;
-                match outlet.try_reserve(application) {
-                    Some(room) => Some(room),
-                    None => return Ok(LocalDelivered::Deferred),
-                }
-            }
-            None => None,
-        };
-        pipeline.observe_for_test(payload);
-        // A local payload crossed no connection, so no neighbour can have its admission
-        // delegated.
-        pipeline
-            .admit_final_transaction(payload, &message, lane, EdgeRelation::Remote)
-            .await?;
-        pipeline.handle_payload(payload, Some(message)).await?;
-        let (Some(room), Some(application)) = (room, application) else {
+        let Some(application) = pipeline.application_message(payload, message) else {
+            // Core's own body. Stored mail is application data by its witness, so the inbox
+            // drain never comes here; the body is decoded again for its handler.
+            pipeline.tap_inbound(payload);
+            pipeline.admit_local_transaction(payload, lane).await?;
+            pipeline.handle_payload(payload, None).await?;
             return Ok(LocalDelivered::Handled);
         };
-        let (consumed, taken) = futures::channel::oneshot::channel();
-        if room.fill(application, consumed) {
-            Ok(LocalDelivered::Queued(taken))
-        } else {
-            Ok(LocalDelivered::Deferred)
-        }
+        let outlet = &pipeline.transport.application().outlet;
+        let Some(room) = outlet.try_reserve(application) else {
+            return Ok(LocalDelivered::Deferred);
+        };
+        pipeline.tap_inbound(payload);
+        pipeline.admit_local_transaction(payload, lane).await?;
+        pipeline
+            .handle_application(payload, &room.message().data)
+            .await?;
+        Ok(LocalDelivered::Queued(room.fill()))
     }
 }
 
@@ -87,9 +81,8 @@ pub(crate) enum LocalDelivered {
     /// Admitted, handled, and its application data queued: the receiver resolves once the
     /// application takes it, and is cancelled if the inbox discards it first.
     Queued(futures::channel::oneshot::Receiver<()>),
-    /// Its application data reached no application: the inbox had no room or no reader (then
-    /// nothing was admitted or handled), or it was released after the reservation (then the
-    /// payload was admitted and handled). Either way its stored copy stays.
+    /// Its application data found no room or no reader: nothing was admitted or handled, and
+    /// its stored copy stays.
     Deferred,
 }
 
@@ -126,7 +119,6 @@ impl LogicalInbound {
             Some(message) => message,
             None => payload.transaction.data()?,
         };
-        let message_kind = MessageKind::from_message(&message);
         let lookup_completion = match &message {
             Message::FindSuccessorReport(_) => Some((
                 LookupKind::Successor,
@@ -163,7 +155,54 @@ impl LogicalInbound {
         }
 
         let result = with_message_variants!(dispatch_message);
+        self.record_handling(
+            payload,
+            MessageKind::from_message(&message),
+            lookup_completion,
+            result,
+        )?;
+        Ok(message)
+    }
 
+    /// Dispatch application data `payload` carries to its handler, by reference, and record the
+    /// observation: the data stays where the caller keeps it (the inbox room that hands it to
+    /// the application).
+    async fn handle_application(
+        &self,
+        payload: &MessagePayload,
+        data: &ApplicationData,
+    ) -> crate::error::Result<()> {
+        let (kind, result) = match data {
+            ApplicationData::Custom(message) => (
+                MessageKind::CustomMessage,
+                self.message_handler.handle(payload, message).await,
+            ),
+            ApplicationData::E2eHandshakeRequest(request) => (
+                MessageKind::E2eHandshakeRequest,
+                self.message_handler.handle(payload, request).await,
+            ),
+            ApplicationData::E2eHandshakeResponse(response) => (
+                MessageKind::E2eHandshakeResponse,
+                self.message_handler.handle(payload, response).await,
+            ),
+            ApplicationData::E2eStreamFrame(frame) => (
+                MessageKind::E2eStreamFrame,
+                self.message_handler.handle(payload, frame).await,
+            ),
+        };
+        self.record_handling(payload, kind, None, result)
+    }
+
+    /// Record the observation of a handled message of `kind`, finish the lookup it completes,
+    /// and surface a handler's error, so a message whose handler failed is never handed to
+    /// the application as a successful inbound message.
+    fn record_handling(
+        &self,
+        payload: &MessagePayload,
+        kind: MessageKind,
+        lookup_completion: Option<(LookupKind, LookupCorrelation)>,
+        result: crate::error::Result<()>,
+    ) -> crate::error::Result<()> {
         let outcome = if result.is_ok() {
             ObservationOutcome::Succeeded
         } else {
@@ -171,11 +210,10 @@ impl LogicalInbound {
         };
         self.transport.observe_message(MessageObservation {
             activity: MessageActivity::Received,
-            category: message_kind.class(),
-            message_class: message_kind.as_str(),
+            category: kind.class(),
+            message_class: kind.as_str(),
             outcome,
         });
-
         if result.is_ok() && self.is_local_destination(payload) {
             if let Some((kind, correlation)) = lookup_completion {
                 self.transport.observer().lookup_finished(
@@ -185,15 +223,7 @@ impl LogicalInbound {
                 );
             }
         }
-
-        // A handler that errored must not then be handed to the application as a successful
-        // inbound message: surface the error and deliver nothing.
-        if let Err(e) = result {
-            tracing::error!("Failed to handle_payload: {e:?}");
-            return Err(e);
-        }
-
-        Ok(message)
+        result.inspect_err(|error| tracing::error!(error = ?error, "failed to handle a payload"))
     }
 
     pub(super) fn is_local_destination(&self, payload: &MessagePayload) -> bool {
@@ -212,14 +242,38 @@ impl LogicalInbound {
         lane: crate::swarm::callback::InboundLane,
         edge: EdgeRelation,
     ) -> crate::error::Result<()> {
+        self.admit_charged(payload, lane, |class| {
+            OriginQuotaCharge::select(class, edge, || self.delegates_admission(message))
+        })
+        .await
+    }
+
+    /// [`Self::admit_final_transaction`] for a locally sourced payload: it crossed no
+    /// connection, so no neighbour can have its admission delegated and its class record's
+    /// message limit is enforced, as for any remote origin.
+    async fn admit_local_transaction(
+        &self,
+        payload: &MessagePayload,
+        lane: crate::swarm::callback::InboundLane,
+    ) -> crate::error::Result<()> {
+        self.admit_charged(payload, lane, OriginQuotaCharge::from)
+            .await
+    }
+
+    /// Commit admission of `payload` under the charge `charge` selects for its class, if it is
+    /// addressed to this node.
+    async fn admit_charged(
+        &self,
+        payload: &MessagePayload,
+        lane: crate::swarm::callback::InboundLane,
+        charge: impl FnOnce(MessageCategory) -> OriginQuotaCharge,
+    ) -> crate::error::Result<()> {
         if self.is_local_destination(payload) {
             let class = lane
                 .class()
                 .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
-            let charge =
-                OriginQuotaCharge::select(class, edge, || self.delegates_admission(message));
             self.transport
-                .admit_final_transaction(&payload.transaction, charge)
+                .admit_final_transaction(&payload.transaction, charge(class))
                 .await?;
         }
         Ok(())
@@ -251,25 +305,25 @@ impl LogicalInbound {
         ApplicationMessage::project(payload, message)
     }
 
-    /// Test builds: show `payload`, about to enter the logical stage, to the inbound tap.
+    /// Show `payload`, about to enter the logical stage, to the inbound tap of test builds.
     #[cfg(test)]
-    pub(super) fn observe_for_test(&self, payload: &MessagePayload) {
+    pub(super) fn tap_inbound(&self, payload: &MessagePayload) {
         self.transport.inbound_tap_for_test().observe(payload);
     }
 
-    /// Outside test builds there is no inbound tap: nothing to observe.
+    /// Outside test builds there is no inbound tap: nothing is shown.
     #[cfg(not(test))]
-    pub(super) fn observe_for_test(&self, _payload: &MessagePayload) {}
+    pub(super) fn tap_inbound(&self, _payload: &MessagePayload) {}
 
-    /// Test builds: wait while a test holds `lane` (see the inbound tap).
+    /// Wait while a test build holds `lane` (see the inbound tap).
     #[cfg(test)]
-    pub(super) async fn pass_lane_for_test(&self, lane: crate::swarm::callback::InboundLane) {
+    pub(super) async fn pass_tapped_lane(&self, lane: crate::swarm::callback::InboundLane) {
         self.transport.inbound_tap_for_test().pass_lane(lane).await;
     }
 
-    /// Outside test builds no lane is held.
+    /// Outside test builds no lane is held: nothing waits.
     #[cfg(not(test))]
-    pub(super) async fn pass_lane_for_test(&self, _lane: crate::swarm::callback::InboundLane) {}
+    pub(super) async fn pass_tapped_lane(&self, _lane: crate::swarm::callback::InboundLane) {}
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]

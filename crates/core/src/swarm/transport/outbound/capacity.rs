@@ -6,6 +6,7 @@ use std::task::Poll;
 #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
 use tokio::sync::watch;
 
+use super::model::of_class;
 use super::model::TransferClass;
 use super::sender_bounded::SenderBoundedTransfer;
 use crate::dht::Did;
@@ -60,7 +61,7 @@ fn fixed_request_bytes(
     reservations: &[usize; TransferClass::COUNT],
     class: TransferClass,
 ) -> usize {
-    reservations.get(class.index()).copied().unwrap_or(0)
+    *of_class(reservations, class)
 }
 
 /// Native-wide retained outbound bytes across all peers.
@@ -136,14 +137,17 @@ fn admit_with_fixed_reservation<T>(
 /// first-come-first-served wait on `waiters` for the shared capacity; a smaller request does not
 /// wait ([`admit_with_fixed_reservation`]).
 ///
-/// Law (FIFO is the resource order here). Every waiter of one queue waits for the same shared
-/// capacity: a peer's queue for that peer's, the global queue for the node's shared bytes,
-/// since a request takes its reserved share before it queues and queues only for the shared
-/// part. A first-in-first-out queue is therefore the resource-ordered queue of
-/// `fair_admission::resource_order`, which differs from it only when waiters draw on different
-/// resources, as the inbound actor's do (lane, peer and node): nothing waiting here is held
-/// back by a resource it does not need, and no request overtakes one refused by its own. Only
-/// application and storage-maintenance sends wait here; a protocol send never does.
+/// Law (FIFO, up to one class reservation). Every waiter of one queue waits for the shared
+/// capacity of one scope (a peer's queue for that peer's, the global queue for the node's
+/// shared bytes), since a request takes its reserved share before it queues and queues only
+/// for the shared part. The part a class may borrow excludes the *other* classes' unused
+/// reservations, so the waiters of one queue do not see quite the same resource: a head of one
+/// class that cannot fit may hold back a waiter of another class that would, by at most one
+/// class reservation. Within that bound the queue is the resource-ordered queue of
+/// `fair_admission::resource_order` (which serves the inbound actor, whose waiters draw on
+/// wholly different resources: lane, peer and node), and no request overtakes one refused by
+/// its own class's share. Only application and storage-maintenance sends wait here; a protocol
+/// send never does.
 async fn acquire_with_fixed_reservation<T>(
     waiters: &Arc<FairWaitQueue>,
     bytes: usize,

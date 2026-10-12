@@ -781,7 +781,7 @@ impl Stabilizer {
                         tx_id = %tx_id,
                         "STABILIZATION fix_fingers send start"
                     );
-                    // Maintenance never waits on a peer (#913 R9 M2): the query is queued and the
+                    // Maintenance never waits on a peer: the query is queued and the
                     // step moves on; a query that leaves no report expires with its lookup.
                     if let Err(e) = self.transport.protocol_egress().send_payload(payload).await {
                         tracing::error!(

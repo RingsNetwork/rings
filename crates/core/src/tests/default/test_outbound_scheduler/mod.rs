@@ -30,6 +30,7 @@ use crate::message::FoundEntry;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::swarm::application::ApplicationData;
 use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::SendCompletionOutcome;
@@ -294,7 +295,7 @@ async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<(
     let held = fill_application_window(&node1, peer, "lane-head").await?;
     let error = node1
         .swarm
-        .send_message(Message::custom(b"queued-successor")?, peer)
+        .send_message(ApplicationData::custom(b"queued-successor"), peer)
         .await
         .expect_err("detached completion must not wait indefinitely behind a lane head");
 
@@ -328,7 +329,7 @@ async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() ->
     let swarm = node1.swarm.clone();
     let successor = tokio::spawn(async move {
         swarm
-            .send_message(Message::custom(b"drop-queued-successor")?, peer)
+            .send_message(ApplicationData::custom(b"drop-queued-successor"), peer)
             .await
     });
     wait_until("detached successor scheduler admission", || {
@@ -382,7 +383,7 @@ async fn test_backlogged_cancellations_all_apply_behind_a_blocked_head() -> Resu
             tokio::spawn(async move {
                 swarm
                     .send_message(
-                        Message::custom(format!("backlog-successor-{index}").as_bytes())?,
+                        ApplicationData::custom(format!("backlog-successor-{index}").as_bytes()),
                         peer,
                     )
                     .await
@@ -439,7 +440,7 @@ async fn test_cancelled_transfer_is_rejected_when_cancel_command_precedes_submit
     let paused_delivery = PausedDeliveryGuard::new();
     node1
         .swarm
-        .send_message(Message::custom(b"pre-cancel-lane-head")?, peer)
+        .send_message(ApplicationData::custom(b"pre-cancel-lane-head"), peer)
         .await?;
     let payload = tracked_payload(&node1, peer, b"pre-cancelled-successor")?;
 
@@ -792,7 +793,7 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
 
     node1
         .swarm
-        .send_direct_message(Message::custom(&vec![0x33; 50_000])?, peer)
+        .send_direct_message(ApplicationData::custom(&vec![0x33; 50_000]), peer)
         .await?;
     wait_until("bulk delivery gate", || {
         dummy_controlled::delivery_future_waiting()
@@ -808,7 +809,7 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     let storage_swarm = node1.swarm.clone();
     let storage_send = tokio::spawn(async move {
         storage_swarm
-            .send_direct_message(
+            .send_direct_core_message_for_test(
                 Message::FoundEntry(FoundEntry {
                     data: Vec::new(),
                     misses: Vec::new(),
@@ -829,7 +830,7 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     let control_swarm = node1.swarm.clone();
     let control_send = tokio::spawn(async move {
         control_swarm
-            .send_direct_message(Message::ProbeRequest(test_probe_request(41)), peer)
+            .send_direct_core_message_for_test(Message::ProbeRequest(test_probe_request(41)), peer)
             .await
     });
     wait_until("control transfer submission", || {

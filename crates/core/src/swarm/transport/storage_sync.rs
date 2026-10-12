@@ -2,9 +2,13 @@ use std::collections::BTreeMap;
 use std::mem;
 
 use super::delivery::SendCompletionOutcome;
+use super::egress::Discipline;
 use super::egress::Egress;
+use super::egress::Protocol;
 use super::SwarmTransport;
+use crate::dht::entry::inbox::is_lasting_witness_failure;
 use crate::dht::entry::inbox::relocates_from_predecessor;
+use crate::dht::entry::AdmittedEntry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
@@ -36,10 +40,10 @@ pub(super) struct StorageSyncAckCapability {
 
 /// How a storage sync payload meets its next hop.
 #[derive(Clone, Copy)]
-enum StorageSyncSend<'s, 't> {
+enum StorageSyncSend<'s, 't, D> {
     /// Through an egress, under its discipline (see `swarm::transport::egress`), which the
     /// sender's context fixes: a handler holds only the protocol egress.
-    Egress(&'s Egress<'t>),
+    Egress(&'s Egress<'t, D>),
     /// Return once every frame has completed or been cancelled: storage maintenance, inside its
     /// own step deadline.
     Tracked,
@@ -141,7 +145,8 @@ pub(crate) struct StorageSyncBatch<'data> {
     destination: StorageSyncDestination,
     data: &'data [PlacedEntry],
     validate_index: usize,
-    accepted: Vec<SyncedEntryAck>,
+    /// The placement key and admitted value of every entry the batch persists and acknowledges.
+    accepted: Vec<(Did, AdmittedEntry)>,
     persist_index: usize,
     phase: StorageSyncBatchPhase,
 }
@@ -253,15 +258,20 @@ impl<'data> StorageSyncBatch<'data> {
             && self.relay_relocation_permits(transport, placed)?
         {
             placed.validate_placement(transport.storage_redundancy())?;
-            let admitted = placed
+            match placed
                 .entry
+                .clone()
                 .validate_admissible_at(self.now_ms, transport.network_id)
-                .and_then(|()| placed.entry.clone().try_into_storage_entry());
-            match admitted {
-                Ok(entry) => self.accepted.push(SyncedEntryAck::new(placed.key, entry)),
+            {
+                Ok(admitted) => self.accepted.push((placed.key, admitted)),
+                Err(error) if is_lasting_witness_failure(&error) => tracing::warn!(
+                    key = %placed.key,
+                    error = ?error,
+                    "skipping a synced relay inbox whose witness fails; its owner keeps it"
+                ),
                 Err(error) => tracing::debug!(
                     key = %placed.key,
-                    %error,
+                    error = ?error,
                     "skipping a synced entry this node cannot admit; its owner keeps it"
                 ),
             }
@@ -294,15 +304,13 @@ impl<'data> StorageSyncBatch<'data> {
     }
 
     async fn persist_one(&mut self, transport: &SwarmTransport) -> Result<StorageSyncBatchStep> {
-        let Some(ack) = self.accepted.get(self.persist_index) else {
+        let Some((key, admitted)) = self.accepted.get(self.persist_index) else {
             return Ok(self.complete());
         };
-        let key = ack.key;
-        let entry = ack.entry.clone();
 
         transport
             .dht
-            .join_admitted_storage_entry(self.now_ms, key, entry)
+            .join_admitted_storage_entry(self.now_ms, *key, admitted.clone())
             .await?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         crate::simulation::record_storage_persisted(transport.dht.did);
@@ -316,7 +324,12 @@ impl<'data> StorageSyncBatch<'data> {
     }
 
     fn complete(&mut self) -> StorageSyncBatchStep {
-        StorageSyncBatchStep::Complete(mem::take(&mut self.accepted))
+        StorageSyncBatchStep::Complete(
+            mem::take(&mut self.accepted)
+                .into_iter()
+                .map(|(key, admitted)| SyncedEntryAck::new(key, admitted.into_entry()))
+                .collect(),
+        )
     }
 }
 
@@ -501,10 +514,10 @@ impl SwarmTransport {
     /// Local ownership persists directly; successful remote work retains its transaction
     /// identity. Cancellation and deferrable failures revoke any cleanup acknowledgement
     /// capability before returning `Deferred`, so maintenance can safely recompute the route.
-    async fn send_storage_sync_as(
+    async fn send_storage_sync_as<D: Discipline>(
         &self,
         msg: SyncEntriesWithSuccessor,
-        send: StorageSyncSend<'_, '_>,
+        send: StorageSyncSend<'_, '_, D>,
     ) -> Result<StorageSyncOutcome> {
         let destination = msg.destination.did();
         match self
@@ -539,7 +552,7 @@ impl SwarmTransport {
                 }
                 let send_outcome = match send {
                     StorageSyncSend::Egress(egress) => {
-                        egress.send_payload_with_outcome(payload).await
+                        egress.send_payload_with_outcome(next_hop, payload).await
                     }
                     StorageSyncSend::Tracked => self.send_payload_tracked(payload).await,
                 };
@@ -571,7 +584,7 @@ impl SwarmTransport {
         &self,
         msg: SyncEntriesWithSuccessor,
     ) -> Result<StorageSyncOutcome> {
-        self.send_storage_sync_as(msg, StorageSyncSend::Tracked)
+        self.send_storage_sync_as(msg, StorageSyncSend::<Protocol>::Tracked)
             .await
     }
 
@@ -590,10 +603,10 @@ impl SwarmTransport {
     /// a cleanup acknowledgement that only a sender awaiting its outcome can revoke. Every such
     /// caller sends read repair, which `PeerRingAction::sync_entries_for_repair` builds as
     /// `AdditiveRepair`.
-    pub(crate) async fn send_storage_sync_or_defer(
+    pub(crate) async fn send_storage_sync_or_defer<D: Discipline>(
         &self,
         msg: SyncEntriesWithSuccessor,
-        egress: &Egress<'_>,
+        egress: &Egress<'_, D>,
         context: &'static str,
     ) -> Result<StorageSyncOutcome> {
         let purpose = msg.purpose;

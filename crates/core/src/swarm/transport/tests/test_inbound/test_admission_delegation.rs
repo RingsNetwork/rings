@@ -23,6 +23,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::Message;
 use crate::message::MessageCategory;
+use crate::message::MessageLimit;
 use crate::message::OriginQuotaConfig;
 use crate::message::OriginQuotaError;
 use crate::message::OriginQuotaLaneConfig;
@@ -65,7 +66,7 @@ impl Harness {
         let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
             .origin_quota(quota)
             .build();
-        swarm.set_admission_delegation(DELEGATED_PREFIX.to_vec(), true);
+        swarm.set_admission_delegation(DELEGATED_PREFIX.to_vec(), MessageLimit::Delegated);
         let transport = Arc::clone(&swarm.transport);
         Ok(Self { swarm, transport })
     }

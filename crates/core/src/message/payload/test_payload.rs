@@ -155,12 +155,12 @@ fn test_payload_envelope_reserve_is_the_widest_envelope() -> Result<()> {
 }
 
 /// The other framing boundary: a payload [`WireReserves::plan`] keeps `Whole`, once wrapped in
-/// the outer `TransportMessage::Custom` frame, stays within the limit — pinning that
+/// the outer custom frame (`custom_frame_wire`), stays within the limit — pinning that
 /// `WireReserves::PRODUCTION.whole` is enough for the whole-message path (not just the chunk
 /// path), and that one byte past the boundary switches to chunked.
 #[test]
 fn test_whole_message_boundary_fits_custom_wrapper() {
-    use rings_transport::core::transport::TransportMessage;
+    use rings_transport::core::transport::custom_frame_wire;
     use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
     use crate::chunk::Framing;
@@ -172,11 +172,7 @@ fn test_whole_message_boundary_fits_custom_wrapper() {
     let payload_len = limit - reserves.whole;
     assert_eq!(reserves.plan(payload_len, limit), Some(Framing::Whole));
 
-    let wire = rings_codec::serialize(&TransportMessage::Custom(Bytes::from(vec![
-        0u8;
-        payload_len
-    ])))
-    .unwrap();
+    let wire = custom_frame_wire(Bytes::from(vec![0u8; payload_len])).unwrap();
     assert!(
         wire.len() <= limit,
         "whole wire {} exceeds limit {}",

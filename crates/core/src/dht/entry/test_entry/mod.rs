@@ -669,7 +669,9 @@ fn test_admission_bounds_the_retention_bound() -> Result<()> {
     let delta = data_delta("topic", "value", 1)?;
 
     assert!(matches!(
-        delta.validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
+        delta
+            .clone()
+            .validate_admissible_at(NOW_MS, TEST_NETWORK_ID),
         Err(Error::EntryNotLive)
     ));
     assert!(matches!(

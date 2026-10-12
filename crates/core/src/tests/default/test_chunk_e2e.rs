@@ -33,6 +33,7 @@ use crate::message::test_probe_request;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::SyncEntriesWithSuccessor;
+use crate::swarm::application::ApplicationData;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::default::connect_nodes;
@@ -247,7 +248,7 @@ async fn test_whole_and_chunked_payloads_have_identical_measurement_delta() {
 
     node1
         .swarm
-        .send_direct_message(Message::custom(&big).unwrap(), node2.did())
+        .send_direct_message(ApplicationData::custom(&big), node2.did())
         .await
         .expect("whole send should succeed");
     let whole = recv_custom(&node2).await.expect("whole custom message");
@@ -269,7 +270,7 @@ async fn test_whole_and_chunked_payloads_have_identical_measurement_delta() {
     let _max_size = MaxMessageSizeGuard::new(8192);
     node1
         .swarm
-        .send_direct_message(Message::custom(&big).unwrap(), node2.did())
+        .send_direct_message(ApplicationData::custom(&big), node2.did())
         .await
         .expect("chunked send should succeed");
     let chunked = recv_custom(&node2)
@@ -494,7 +495,7 @@ async fn test_send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Res
     let peer = node2.did();
     let send = tokio::spawn(async move {
         swarm
-            .send_message(Message::custom(b"stale-generation")?, peer)
+            .send_message(ApplicationData::custom(b"stale-generation"), peer)
             .await
     });
     wait_for_test_condition(
@@ -715,7 +716,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
 
     node1
         .swarm
-        .send_message(Message::ProbeRequest(test_probe_request(7)), node2.did())
+        .send_core_message_for_test(Message::ProbeRequest(test_probe_request(7)), node2.did())
         .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
@@ -775,7 +776,7 @@ async fn test_send_queue_backpressure_returns_transport_timeout() {
     let _guard = PendingSendGuard::new();
     let err = node1
         .swarm
-        .send_message(Message::custom(b"queue-blocked").unwrap(), node2.did())
+        .send_message(ApplicationData::custom(b"queue-blocked"), node2.did())
         .await
         .expect_err("send admission should time out when the backend never accepts bytes");
 
@@ -817,7 +818,7 @@ async fn test_negotiated_size_too_small_errors_without_partial_send() {
     dummy_controlled::reset_sent_count();
     let err = node1
         .swarm
-        .send_message(Message::custom(&big).unwrap(), node2.did())
+        .send_message(ApplicationData::custom(&big), node2.did())
         .await
         .expect_err("an unusably small negotiated size must fail the send");
     assert!(

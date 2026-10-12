@@ -32,6 +32,8 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::swarm::transport::egress::Application;
+use crate::swarm::transport::egress::Discipline;
 use crate::swarm::transport::egress::Egress;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
@@ -95,7 +97,7 @@ async fn cache_lookup_reply(
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
 pub(crate) async fn handle_storage_fetch_act(
     transport: Arc<SwarmTransport>,
-    sender: &Egress<'_>,
+    sender: &Egress<'_, Application>,
     resource: Did,
     act: PeerRingAction,
     redundancy: u16,
@@ -210,9 +212,9 @@ async fn handle_placed_entry_operation(
 
 /// Execute copy-only storage repair actions through `egress`, under its discipline: the Swarm
 /// storage API waits for each repair's admission, a handler only queues it.
-async fn run_storage_repair_transport_effects(
+async fn run_storage_repair_transport_effects<D: Discipline>(
     transport: &SwarmTransport,
-    egress: &Egress<'_>,
+    egress: &Egress<'_, D>,
     act: PeerRingAction,
 ) -> Result<()> {
     for (delivery, has_next) in core_actor_steps(act.coalesced_storage_sync_deliveries()?) {

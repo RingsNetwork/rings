@@ -1,4 +1,4 @@
-//! The inbound-locality law at the boundary every handler sends through (#913 R8 H1; see
+//! The inbound-locality law at the boundary every handler sends through (see
 //! `swarm::transport::egress`).
 
 use tokio::time::timeout;
@@ -44,8 +44,8 @@ fn variant(effect: &CoreEffect<'_>) -> usize {
 /// waiting on it: a send is queued apart from its handler, a connection's offer is negotiated
 /// apart from it, and the local effects touch local state alone. A handler therefore never
 /// holds the inbound event and lane that carried its request, whatever it asks for. The set of
-/// effects run is checked against every variant, so the witness cannot fall behind the type
-/// (#913 R9 M1). Under the application discipline a send waits for its first frame's admission
+/// effects run is checked against every variant, so the witness cannot fall behind the type.
+/// Under the application discipline a send waits for its first frame's admission
 /// instead (`test_an_application_send_waits_for_its_first_frame_while_the_peer_withholds_credit`).
 #[tokio::test]
 async fn test_every_effect_returns_without_waiting_while_its_next_hop_withholds_credit(

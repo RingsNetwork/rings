@@ -4,13 +4,15 @@
 //!   ApplicationOutlet (core)                     ApplicationInbox (application)
 //!     announce(event)         ──┐
 //!     deliver(message)        ──┼──▶ Queue (one order) ──next()──▶ the application
-//!     try_reserve ▸ fill(m, ⊥|t)┘        take ▸ consumed(t) fires
+//!     try_reserve(m) ▸ fill() ──┘        take ▸ consumed(m) fires
 //! ```
 //!
 //! Laws, over the queue `(claim, items, weight)`:
 //! - **Never waits on the application.** Every operation of the outlet returns at once. A live
-//!   message that does not fit is dropped and counted (`dropped`), as a best-effort network
-//!   drops it; no lane ever waits for the application to read (#913 R10 H1, H2, M4).
+//!   message that does not fit is dropped, counted (`dropped`) and logged at `warn`: application
+//!   delivery is lossy by design, as a best-effort network is, and no lane ever waits for the
+//!   application to read. A protocol that needs a reliable stream detects and recovers loss
+//!   end to end itself (#939).
 //! - **One order.** Messages and peer facts share one queue, in the order core produced them,
 //!   so a peer fact never overtakes an earlier message from the same peer. Facts describe
 //!   overlay membership, not a gate on messages: a message's identity is its origin, not the
@@ -18,8 +20,9 @@
 //!   retirement, as relayed mail from any non-neighbour does. Only a frame whose carrier was
 //!   retired before dispatch is withheld, at the inbound gate.
 //! - **Bounded messages.** `Σ weight(messages) + reserved ≤ APPLICATION_INBOX_WEIGHT`, where a
-//!   message weighs its own size and its heap bytes, except that an inbox holding no message
-//!   and no reservation admits one of any weight.
+//!   message weighs its own size and the length of its data, except that an inbox holding no
+//!   message and no reservation admits one of any weight. A message is weighed once, when it
+//!   is admitted; its weight leaves the queue with it.
 //! - **Bounded facts.** An admission is withdrawn together with its retirement while unread
 //!   (`announce(PeerRetired p)` cancels a queued `PeerAdmitted p`), so per peer the queue holds
 //!   at most `[PeerRetired]` followed by `[PeerAdmitted]`: `|facts| ≤ 2 · |peers|` over the peers
@@ -29,9 +32,10 @@
 //!   admitted. No room is reserved then, so stored mail stays stored.
 //! - **Released.** Once the inbox is dropped, everything is discarded and it cannot be claimed
 //!   again.
-//! - **Consumption.** A message queued through a reservation may carry a consumption signal,
-//!   fired when the application takes it, so stored mail is retired only once read (#913 R10
-//!   H3); a signal whose message is discarded is dropped unfired.
+//! - **Consumption.** A message filled into a reserved room carries a consumption signal, fired
+//!   when the application takes it from the queue, so stored mail is retired only once taken; a
+//!   signal whose message is discarded is dropped unfired. Taking is where core's custody ends:
+//!   what the application does with the message afterwards is the application's.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -62,9 +66,20 @@ enum Claim {
     Released,
 }
 
-/// One queued item, with the signal its consumption fires, if any.
+/// Why the queue refuses a message's weight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Refusal {
+    /// No application reads the queue: the message is discarded.
+    Unread,
+    /// The message does not fit: a live one is dropped and counted.
+    Full,
+}
+
+/// One queued item: the delivery, the weight it holds, and the signal its taking fires.
 struct Queued {
     delivery: ApplicationDelivery,
+    /// The weight admitted with a message; zero for a fact.
+    weight: usize,
     consumed: Option<oneshot::Sender<()>>,
 }
 
@@ -80,39 +95,39 @@ struct Queue {
     dropped: u64,
 }
 
-/// What [`ApplicationOutlet::deliver`] did with a live message.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Delivered {
-    /// Queued for the application.
-    Queued,
-    /// Discarded: no application reads the inbox.
-    Discarded,
-    /// Dropped and counted: the inbox is full.
-    Dropped,
-}
-
 impl Queue {
     /// Whether `weight` more bytes fit: always into an inbox holding none.
     fn fits(&self, weight: usize) -> bool {
         self.weight == 0 || self.weight.saturating_add(weight) <= APPLICATION_INBOX_WEIGHT
     }
 
-    /// Queue `message` if an application reads the queue and it fits.
-    fn offer(&mut self, message: ApplicationMessage) -> Delivered {
+    /// Admit `weight` bytes for one message, if an application reads the queue and it fits.
+    fn admit(&mut self, weight: usize) -> std::result::Result<(), Refusal> {
         if self.claim != Claim::Claimed {
-            return Delivered::Discarded;
+            return Err(Refusal::Unread);
         }
-        let weight = message.weight();
         if !self.fits(weight) {
-            self.dropped = self.dropped.saturating_add(1);
-            return Delivered::Dropped;
+            return Err(Refusal::Full);
         }
         self.weight = self.weight.saturating_add(weight);
-        self.items.push_back(Queued {
-            delivery: ApplicationDelivery::Message(message),
-            consumed: None,
-        });
-        Delivered::Queued
+        Ok(())
+    }
+
+    /// Queue `message` under the `weight` [`Self::admit`] admitted for it. An inbox released
+    /// since then discards it, together with its signal: its weight left with the release.
+    fn push(
+        &mut self,
+        message: ApplicationMessage,
+        weight: usize,
+        consumed: Option<oneshot::Sender<()>>,
+    ) {
+        if self.claim == Claim::Claimed {
+            self.items.push_back(Queued {
+                delivery: ApplicationDelivery::Message(message),
+                weight,
+                consumed,
+            });
+        }
     }
 
     /// Record `event`, withdrawing an unread admission its retirement ends.
@@ -144,16 +159,19 @@ impl Queue {
         }
         self.items.push_back(Queued {
             delivery: ApplicationDelivery::Event(event),
+            weight: 0,
             consumed: None,
         });
     }
 
-    /// The next item, firing its consumption signal.
+    /// The next item, releasing its weight and firing its consumption signal.
     fn take(&mut self) -> Option<ApplicationDelivery> {
-        let Queued { delivery, consumed } = self.items.pop_front()?;
-        if let ApplicationDelivery::Message(message) = &delivery {
-            self.weight = self.weight.saturating_sub(message.weight());
-        }
+        let Queued {
+            delivery,
+            weight,
+            consumed,
+        } = self.items.pop_front()?;
+        self.weight = self.weight.saturating_sub(weight);
         if let Some(consumed) = consumed {
             let _ = consumed.send(());
         }
@@ -222,75 +240,86 @@ impl ApplicationOutlet {
         self.shared.ready.notify(1);
     }
 
-    /// Queue a live `message`, or discard or drop it as the module laws say.
-    pub(crate) fn deliver(&self, message: ApplicationMessage) -> Delivered {
-        let delivered = self.shared.lock().offer(message);
-        if delivered == Delivered::Queued {
-            self.shared.ready.notify(1);
-        }
-        delivered
-    }
-
-    /// Room for `message`, held until filled or dropped, if an application reads the inbox and
-    /// the message fits now. Stored mail is offered only through a reservation, so mail that
-    /// finds no room, or no reader, stays where it is stored.
-    pub(crate) fn try_reserve(&self, message: &ApplicationMessage) -> Option<InboxRoom> {
+    /// Queue a live `message`; discard it when no application reads the inbox, or drop, count
+    /// and log it when it does not fit, as the module laws say.
+    pub(crate) fn deliver(&self, message: ApplicationMessage) {
         let weight = message.weight();
         let mut queue = self.shared.lock();
-        if queue.claim != Claim::Claimed || !queue.fits(weight) {
-            return None;
+        match queue.admit(weight) {
+            Ok(()) => {
+                queue.push(message, weight, None);
+                drop(queue);
+                self.shared.ready.notify(1);
+            }
+            Err(Refusal::Unread) => {}
+            Err(Refusal::Full) => {
+                queue.dropped = queue.dropped.saturating_add(1);
+                let dropped = queue.dropped;
+                drop(queue);
+                tracing::warn!(
+                    tx_id = %message.tx_id,
+                    from = %message.from,
+                    dropped,
+                    "application inbox full: live message dropped"
+                );
+            }
         }
-        queue.weight = queue.weight.saturating_add(weight);
+    }
+
+    /// Room holding `message`, its weight reserved until it is filled or dropped, if an
+    /// application reads the inbox and the message fits now. Stored mail is offered only through
+    /// a reservation, so mail that finds no room, or no reader, stays where it is stored.
+    pub(crate) fn try_reserve(&self, message: ApplicationMessage) -> Option<InboxRoom> {
+        let weight = message.weight();
+        self.shared.lock().admit(weight).ok()?;
         Some(InboxRoom {
-            shared: self.shared.clone(),
-            held: Some(weight),
+            held: HeldWeight {
+                shared: self.shared.clone(),
+                weight,
+            },
+            message,
         })
     }
 }
 
-/// Room for one message, reserved in the inbox: filling it never waits.
-pub(crate) struct InboxRoom {
+/// Weight reserved in the inbox, returned when dropped unless a message took it over.
+struct HeldWeight {
     shared: Arc<Shared>,
-    /// The weight held, until the room is filled.
-    held: Option<usize>,
+    /// The weight still held; zero once a queued message holds it instead.
+    weight: usize,
 }
 
-impl InboxRoom {
-    /// Queue `message` into this room, with `consumed` to fire when the application takes it.
-    /// Pre: `message` is the one the room was reserved for, so its weight is the weight held.
-    /// Returns whether it was queued: an inbox released meanwhile discards it.
-    pub(crate) fn fill(
-        mut self,
-        message: ApplicationMessage,
-        consumed: oneshot::Sender<()>,
-    ) -> bool {
-        // `held` is `Some` from the reservation until here; taking it tells `Drop` the room was
-        // filled.
-        let held = self.held.take().unwrap_or_default();
-        let mut queue = self.shared.lock();
-        if queue.claim != Claim::Claimed {
-            return false;
+impl Drop for HeldWeight {
+    fn drop(&mut self) {
+        if self.weight > 0 {
+            let mut queue = self.shared.lock();
+            queue.weight = queue.weight.saturating_sub(self.weight);
         }
-        queue.weight = queue
-            .weight
-            .saturating_sub(held)
-            .saturating_add(message.weight());
-        queue.items.push_back(Queued {
-            delivery: ApplicationDelivery::Message(message),
-            consumed: Some(consumed),
-        });
-        drop(queue);
-        self.shared.ready.notify(1);
-        true
     }
 }
 
-impl Drop for InboxRoom {
-    fn drop(&mut self) {
-        if let Some(held) = self.held {
-            let mut queue = self.shared.lock();
-            queue.weight = queue.weight.saturating_sub(held);
-        }
+/// Room for one message, reserved in the inbox together with the message it holds: filling it
+/// never waits, and the weight queued is the weight reserved, by construction.
+pub(crate) struct InboxRoom {
+    held: HeldWeight,
+    message: ApplicationMessage,
+}
+
+impl InboxRoom {
+    /// The message this room holds.
+    pub(crate) fn message(&self) -> &ApplicationMessage {
+        &self.message
+    }
+
+    /// Queue the held message. The returned receiver resolves once the application takes it,
+    /// and is cancelled if the inbox discards it first, as a release since the reservation does.
+    pub(crate) fn fill(self) -> oneshot::Receiver<()> {
+        let Self { mut held, message } = self;
+        let (consumed, taken) = oneshot::channel();
+        let weight = std::mem::take(&mut held.weight);
+        held.shared.lock().push(message, weight, Some(consumed));
+        held.shared.ready.notify(1);
+        taken
     }
 }
 
@@ -333,7 +362,8 @@ impl ApplicationInbox {
         self.shared.lock().take()
     }
 
-    /// How many live messages were dropped because the inbox was full.
+    /// The counter of live messages core dropped because the inbox was full: application
+    /// delivery is lossy by design, and this is how an application observes the loss.
     pub fn dropped(&self) -> u64 {
         self.shared.lock().dropped
     }

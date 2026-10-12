@@ -522,7 +522,7 @@ impl MessageCategory {
     pub(crate) const COUNT: usize = 4;
 
     /// The connection lane a category travels on: one lane per category (#906), chosen by the
-    /// sender and enforced by the receiver (#913 R9 M3), so the priority lane carries DHT
+    /// sender and enforced by the receiver, so the priority lane carries DHT
     /// control alone.
     ///
     /// Law: a category's frames reach the peer's handler in the order its lane admitted them,

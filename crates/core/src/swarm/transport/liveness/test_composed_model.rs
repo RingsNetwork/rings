@@ -12,37 +12,44 @@
 //!
 //! What is production and what is a replica:
 //! - **Production, run unchanged:** [`ProbeClock`] (period 3 ticks, deadline 9 ticks from
-//!   issue), and the first-frame deadline of a detached send
-//!   ([`IRREVOCABLE_SEND_COMPLETION_TIMEOUT`], 5 ticks), which a mutant applies to the probe.
+//!   issue), keyed by the production challenge [`ProbeRequest`].
+//! - **Production constant, replica code:** the first-frame deadline of a detached send
+//!   ([`IRREVOCABLE_SEND_COMPLETION_TIMEOUT`], 5 ticks), which only a mutant applies to the
+//!   probe; no production deadline code runs here.
 //! - **Replica, as transitions:** credit, lanes, the reassembler, handlers and egress. Each rule
 //!   below is a law the code keeps by construction or witnesses in a test on the real
 //!   transport; the model checks that the laws together judge every subject right, not that the
 //!   code keeps them.
-//!   - L2, lane-0 service is local: an honest `B` serves its lane-0 head within the tick, and
-//!     its report toward `M` is queued without waiting (`ProtocolEgress`, detached handshakes;
+//!   - Lane-0 service is local: an honest `B` serves its lane-0 head within the tick, and
+//!     its report toward `M` is queued without waiting (`Egress<Protocol>`, detached handshakes;
 //!     `message::effects::test_inbound_locality`). A report that `M` holds without credit keeps
 //!     holding `B`'s shared outbound capacity (`report_held`).
-//!   - L4, lane isolation: lane-0 credit is granted apart from the data lanes' receive budget,
+//!   - Lane isolation: lane-0 credit is granted apart from the data lanes' receive budget,
 //!     and lane-0 service never waits on a partly reassembled data message
 //!     (`transport::tests::test_inbound::test_application_backpressure`). A lane hands its next
 //!     frame to `B`'s actor only once the previous one completed (`InboundCompletion::Await`),
 //!     so each lane holds at most one event of the per-peer share, [`PEER_EVENTS`], which a
-//!     lane-0 event needs a free slot of.
-//!   - Probe and answer slots: a probe, and an answer, take no shared outbound capacity
-//!     (`outbound::sender_bounded`), so frames that other traffic holds cannot refuse them.
+//!     lane-0 event needs a free slot of. Hand-off is a transition; the exception for frames
+//!     released from a hold (`LogHeld`) and the node-wide receive load (`NodeReceiveLoad`) are
+//!     not modelled.
+//!   - Probe and answer slots: a probe, and a direct answer, take no shared outbound capacity
+//!     (`outbound::sender_bounded`), so frames that other traffic holds cannot refuse them. An
+//!     answer `B` relays for another origin takes shared capacity, never the slot, so a flood of
+//!     relayed probes cannot occupy it.
 //!   - The probe waits for credit until its own deadline, never the shorter first-frame one.
-//!   - An unsent probe stays outstanding, charged from its issue, and is resent
-//!     (`PeerLiveness::unsent`).
+//!   - An unsent probe stays outstanding, charged from its issue, and the next pass that finds
+//!     the connection ready sends it again (`ProbeClock::unsent`, `ProbeWork::Resend`).
 //!
 //! An urgent action (a due arrival, lane-0 service, a due probe, an expiry, a due drop) is
 //! taken before time may pass. A frame takes 0 or [`SLOW_HOP`] ticks per hop, chosen by the
 //! checker; an honest round trip stays inside the deadline. Credit that returns lets held
 //! frames leave at once.
 //!
-//! Subjects: four honest ones (fast; under load, with a stalled data lane and an application
-//! that never reads; late to grant credit; slow to handle a data-lane backlog) and two that
-//! dodge judgment (withholding lane-0 credit; keeping its connection unready at every probe
-//! pass).
+//! Subjects: five honest ones (fast; under load, with a stalled data lane and an application
+//! that never reads; late to grant credit; slow to handle a data-lane backlog; unready at the
+//! first probe only) and two that dodge judgment (withholding lane-0 credit; keeping its
+//! connection unready at every probe pass). The environment may also flood `B` with probes of
+//! other origins whose answers `B` relays through `A`.
 //!
 //! Properties:
 //! - `Always` an honest subject is never evicted;
@@ -51,9 +58,8 @@
 //! - `Sometimes` a probe is answered, and a dodging subject's eviction is reachable, so neither
 //!   is vacuous.
 //!
-//! Each design #913 R5–R10, its redundancy audit and #935 refuted is a mutant that breaks one
-//! law above, and the checker refutes it by the property it breaks; production refutes
-//! nothing.
+//! Each refuted design is a mutant that breaks one law above, and the checker refutes it by the
+//! property it breaks; production refutes nothing.
 
 use std::collections::BTreeSet;
 
@@ -63,8 +69,8 @@ use stateright::Expectation;
 use stateright::Model;
 use stateright::Property;
 
+use super::Outstanding;
 use super::ProbeClock;
-use super::ProbeIdentity;
 use super::PEER_LIVENESS_PERIOD_MS;
 use super::PEER_LIVENESS_TIMEOUT_MS;
 use crate::message::ProbeRequest;
@@ -85,6 +91,9 @@ const FIRST_FRAME_MS: u128 = IRREVOCABLE_SEND_COMPLETION_TIMEOUT.as_millis();
 const PEER_EVENTS: u8 = 2;
 /// The frames `A` has queued on a slow-handler subject's data lane: more than the share.
 const DATA_BACKLOG: u8 = 3;
+/// The tick from which a transiently unready subject's connection is ready: after the first
+/// probe's issue, early enough that a fast round trip of its resend beats the deadline.
+const READY_AT: u8 = 5;
 /// The tick from which a late subject grants credit: after the first probe's first-frame
 /// deadline, before its answer deadline.
 const CREDIT_RETURNS: u8 = 9;
@@ -97,6 +106,9 @@ const _: () =
     assert!((CREDIT_RETURNS as i64) * TICK_MS > PEER_LIVENESS_PERIOD_MS + (FIRST_FRAME_MS as i64));
 const _: () =
     assert!((CREDIT_RETURNS as i64) * TICK_MS < PEER_LIVENESS_PERIOD_MS + PEER_LIVENESS_TIMEOUT_MS);
+const _: () = assert!((READY_AT as i64) * TICK_MS > PEER_LIVENESS_PERIOD_MS);
+const _: () =
+    assert!((READY_AT as i64) * TICK_MS < PEER_LIVENESS_PERIOD_MS + PEER_LIVENESS_TIMEOUT_MS);
 
 /// How the subject behaves.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -111,6 +123,9 @@ enum Subject {
     /// Honest: its handler on the data lane runs past the horizon (a long storage batch), with
     /// [`DATA_BACKLOG`] frames of `A` queued on that lane.
     SlowHandler,
+    /// Honest, over a fast link, but its connection is unready before [`READY_AT`], so the
+    /// first probe does not reach its queue when issued.
+    TransientlyUnready,
     /// Dodging: grants `A` no lane-0 credit; may chatter on its application lane.
     Withholding,
     /// Dodging: keeps its connection unready at every probe pass, so no probe reaches it.
@@ -122,7 +137,11 @@ impl Subject {
     fn honest(self) -> bool {
         matches!(
             self,
-            Self::Fast | Self::Loaded | Self::LateCredit | Self::SlowHandler
+            Self::Fast
+                | Self::Loaded
+                | Self::LateCredit
+                | Self::SlowHandler
+                | Self::TransientlyUnready
         )
     }
 }
@@ -132,34 +151,39 @@ impl Subject {
 enum Discipline {
     /// The production liveness and egress.
     Production,
-    /// #913 R6 H1: a credit stall on a data lane is a verdict.
+    /// A credit stall on a data lane is a verdict.
     StallIsVerdict,
-    /// #913 R7 H1: the deadline starts when the probe leaves the queue.
+    /// The deadline starts when the probe leaves the queue.
     ClockFromDeparture,
-    /// #913 R8 H1: a handler waits for its send to the next hop on the inbound lane.
+    /// A handler waits for its send to the next hop on the inbound lane.
     HandlerWaitsOnRemote,
-    /// #913 R8 M1: any inbound payload clears the outstanding probe.
+    /// Any inbound payload clears the outstanding probe.
     InboundClears,
-    /// #913 R8 M2: a probe takes shared capacity, which other frames to the subject hold; a
+    /// A probe takes shared capacity, which other frames to the subject hold; a
     /// refused probe is withdrawn.
     ProbeTakesSharedCapacity,
-    /// #913 R9 H1: a due probe replaces an outstanding one, keeping its deadline.
+    /// A due probe replaces an outstanding one, keeping its deadline.
     ReissueOverOutstanding,
-    /// #935: lane-0 service awaits the application.
+    /// Lane-0 service awaits the application (#935).
     ApplicationOnControlLane,
-    /// #913 R10 H1, M4: lane-0 credit draws on the receive budget the data lanes spend.
+    /// Lane-0 credit draws on the receive budget the data lanes spend.
     SharedReceiveBudget,
-    /// #913 R10 H2: lane-0 service waits behind a partly reassembled data message.
+    /// Lane-0 service waits behind a partly reassembled data message.
     ReassemblyBarrier,
-    /// #913 R10 M5: a probe waiting for credit is dropped at the first-frame deadline.
+    /// A probe waiting for credit is dropped at the first-frame deadline.
     ProbeDroppedAtFirstFrame,
-    /// #913 R10 M6: an answer takes shared capacity, which other frames of the subject hold.
+    /// An answer takes shared capacity, which other frames of the subject hold.
     AnswerTakesSharedCapacity,
-    /// #913 R10 M7: a probe issued while the connection is unready is withdrawn uncharged.
+    /// A probe issued while the connection is unready is withdrawn uncharged.
     WithdrawWhenUnready,
-    /// #913 audit: a lane hands every frame over without awaiting the previous one, so one
+    /// A lane hands every frame over without awaiting the previous one, so one
     /// lane's backlog fills the per-peer share.
     HandOffWithoutAwait,
+    /// An unsent probe is kept outstanding but never sent again.
+    NeverResend,
+    /// An answer `B` relays for another origin takes `B`'s answer slot toward the next hop, so
+    /// a flood of relayed answers pushes `B`'s own answer onto shared capacity.
+    RelayedAnswerTakesSlot,
 }
 
 /// A frame of the model.
@@ -202,6 +226,8 @@ struct State {
     partial: bool,
     /// Whether `B`'s report toward `M` waits without credit, holding `B`'s shared capacity.
     report_held: bool,
+    /// `A`'s data-lane frames queued at `B`'s transport, not yet handed to `B`'s actor.
+    data_backlog: u8,
     /// The events of `B`'s per-peer share its data lane holds, which never complete.
     actor_data: u8,
     /// Whether `B`'s lane-0 service is blocked for good.
@@ -223,6 +249,10 @@ enum Action {
     Serve(u8),
     /// `A` issues a due probe, sent after the given hop latency.
     Issue(u8),
+    /// `A` sends its unsent outstanding probe again, after the given hop latency.
+    Resend(u8),
+    /// `B`'s data lane hands its next queued frame to `B`'s actor.
+    HandOff,
     /// `A` evicts `B` on an expired probe or (a mutant) a stall verdict.
     Evict,
     /// (A mutant) `A` drops its held probe at the first-frame deadline.
@@ -235,18 +265,22 @@ enum Action {
 struct LivenessModel {
     subject: Subject,
     third_withholds: bool,
+    /// Whether other origins keep `B` relaying answers through `A`.
+    relayed_flood: bool,
     discipline: Discipline,
 }
 
-/// The production identity of probe `n`.
-fn identity(n: u8) -> ProbeIdentity {
-    ProbeIdentity {
-        tx_id: uuid::Uuid::from_u128(u128::from(n)),
-        request: ProbeRequest {
-            epoch: ProvisionalEpoch::from_unix_seconds(0),
-            nonce: [n; 32],
-        },
+/// The production challenge of probe `n`.
+fn challenge(n: u8) -> ProbeRequest {
+    ProbeRequest {
+        epoch: ProvisionalEpoch::from_unix_seconds(0),
+        nonce: [n; 32],
     }
+}
+
+/// The probe number of `request`, the inverse of [`challenge`].
+fn probe_number(request: ProbeRequest) -> u8 {
+    request.nonce[0]
 }
 
 /// Milliseconds at tick `now`.
@@ -263,7 +297,10 @@ impl LivenessModel {
             Subject::Loaded => {
                 self.discipline != Discipline::SharedReceiveBudget || state.data_held.is_empty()
             }
-            Subject::Fast | Subject::SlowHandler | Subject::Flapping => true,
+            Subject::Fast
+            | Subject::SlowHandler
+            | Subject::TransientlyUnready
+            | Subject::Flapping => true,
         }
     }
 
@@ -272,14 +309,18 @@ impl LivenessModel {
         match self.subject {
             Subject::Loaded => frame == Frame::Chunk(0),
             Subject::LateCredit => state.now >= CREDIT_RETURNS,
-            Subject::Fast | Subject::SlowHandler | Subject::Withholding | Subject::Flapping => true,
+            Subject::Fast
+            | Subject::SlowHandler
+            | Subject::TransientlyUnready
+            | Subject::Withholding
+            | Subject::Flapping => true,
         }
     }
 
     /// The hop latencies the checker may choose.
     fn hops(&self) -> &'static [u8] {
         match self.subject {
-            Subject::LateCredit => &[0],
+            Subject::LateCredit | Subject::TransientlyUnready => &[0],
             _ => &[0, SLOW_HOP],
         }
     }
@@ -295,6 +336,35 @@ impl LivenessModel {
             }
             _ => state.clock.due(ms(state.now)),
         }
+    }
+
+    /// Whether `A`'s connection to `B` is ready, so a probe sent now reaches the queue.
+    fn ready(&self, state: &State) -> bool {
+        match self.subject {
+            Subject::Flapping => false,
+            Subject::TransientlyUnready => state.now >= READY_AT,
+            _ => true,
+        }
+    }
+
+    /// Whether the probe pass sends `A`'s unsent outstanding probe again now.
+    fn resends(&self, state: &State) -> bool {
+        self.discipline != Discipline::NeverResend
+            && self.ready(state)
+            && state.clock.unsent().is_some()
+    }
+
+    /// Whether `B`'s data lane may hand its next queued frame to the actor now: the share has
+    /// a free slot, and (unless a mutant) the lane's previous event completed.
+    fn hands_off(&self, state: &State) -> bool {
+        let awaited = self.discipline == Discipline::HandOffWithoutAwait || state.actor_data == 0;
+        state.data_backlog > 0 && state.actor_data < PEER_EVENTS && awaited
+    }
+
+    /// Whether `B`'s own answer to `A` takes shared outbound capacity rather than its slot.
+    fn answer_shares_capacity(&self) -> bool {
+        self.discipline == Discipline::AnswerTakesSharedCapacity
+            || (self.discipline == Discipline::RelayedAnswerTakesSlot && self.relayed_flood)
     }
 
     /// Whether `A` evicts `B` now: on an expired probe, or (a mutant) on a data-lane stall as
@@ -335,6 +405,8 @@ impl LivenessModel {
                 || due(&state.to_a)
                 || self.serves(state)
                 || self.probe_due(state)
+                || self.resends(state)
+                || self.hands_off(state)
                 || self.evicts(state)
                 || self.drops_probe(state))
     }
@@ -344,7 +416,7 @@ impl LivenessModel {
         state.to_b.push((frame, state.now + hop));
         if let (Discipline::ClockFromDeparture, Frame::Probe(n)) = (self.discipline, frame) {
             state.unstarted.retain(|unstarted| *unstarted != n);
-            state.clock.issue(identity(n), ms(state.now));
+            state.clock.issue(challenge(n), ms(state.now));
         }
     }
 
@@ -400,15 +472,31 @@ impl LivenessModel {
             }
             Discipline::ReissueOverOutstanding => {
                 let first = state.clock.outstanding_since_ms().unwrap_or(now);
-                state.clock.outstanding = Some((identity(n), first));
+                state.clock.outstanding = Some(Outstanding {
+                    request: challenge(n),
+                    issued_ms: first,
+                    queued: false,
+                });
                 state.clock.last_issued_ms = now;
             }
             _ => {
-                state.clock.issue(identity(n), now);
+                state.clock.issue(challenge(n), now);
             }
         }
-        if self.subject == Subject::Flapping {
-            // No ready connection: the probe does not reach the queue.
+        self.dispatch(state, n, hop);
+    }
+
+    /// `A` sends its unsent outstanding probe again.
+    fn resend(&self, state: &mut State, hop: u8) {
+        if let Some(request) = state.clock.unsent() {
+            self.dispatch(state, probe_number(request), hop);
+        }
+    }
+
+    /// `A` sends probe `n` toward `B`: it reaches the queue only over a ready connection, and
+    /// (a mutant) only when shared capacity admits it.
+    fn dispatch(&self, state: &mut State, n: u8, hop: u8) {
+        if !self.ready(state) {
             if self.discipline == Discipline::WithdrawWhenUnready {
                 state.clock.outstanding = None;
             }
@@ -421,6 +509,7 @@ impl LivenessModel {
             return;
         }
         self.send_to_b(state, Frame::Probe(n), hop);
+        state.clock.queued(challenge(n));
     }
 
     /// `B` serves its lane-0 head.
@@ -440,8 +529,7 @@ impl LivenessModel {
                 }
             }
             Frame::Probe(n) => {
-                let refused =
-                    self.discipline == Discipline::AnswerTakesSharedCapacity && state.report_held;
+                let refused = self.answer_shares_capacity() && state.report_held;
                 if !refused {
                     state.to_a.push((Frame::Answer(n), state.now + hop));
                 }
@@ -464,13 +552,13 @@ impl LivenessModel {
     fn receive_at_a(&self, state: &mut State, frame: Frame) {
         match frame {
             Frame::Answer(n) => {
-                if state.clock.answer(identity(n)) {
+                if state.clock.answer(challenge(n)) {
                     state.answered += 1;
                 }
             }
             Frame::Chatter if self.discipline == Discipline::InboundClears => {
-                if let Some((outstanding, ..)) = state.clock.outstanding {
-                    state.clock.answer(outstanding);
+                if let Some(outstanding) = state.clock.outstanding {
+                    state.clock.answer(outstanding.request);
                 }
             }
             Frame::Request | Frame::Probe(_) | Frame::Chunk(_) | Frame::Chatter => {}
@@ -496,13 +584,12 @@ impl Model for LivenessModel {
             lane0: Vec::new(),
             partial: false,
             report_held: false,
-            actor_data: match (self.subject, self.discipline) {
-                (Subject::SlowHandler, Discipline::HandOffWithoutAwait) => {
-                    DATA_BACKLOG.min(PEER_EVENTS)
-                }
-                (Subject::SlowHandler, _) => 1,
-                _ => 0,
+            data_backlog: if self.subject == Subject::SlowHandler {
+                DATA_BACKLOG
+            } else {
+                0
             },
+            actor_data: 0,
             blocked: false,
             chatter_left: if self.subject == Subject::Withholding {
                 CHATTER
@@ -562,6 +649,12 @@ impl Model for LivenessModel {
             if state.chatter_left > 0 {
                 actions.push(Action::Chatter(hop));
             }
+            if self.resends(state) {
+                actions.push(Action::Resend(hop));
+            }
+        }
+        if self.hands_off(state) {
+            actions.push(Action::HandOff);
         }
         if self.evicts(state) {
             actions.push(Action::Evict);
@@ -585,6 +678,11 @@ impl Model for LivenessModel {
             }
             Action::Serve(hop) => self.serve(&mut state, hop),
             Action::Issue(hop) => self.issue(&mut state, hop),
+            Action::Resend(hop) => self.resend(&mut state, hop),
+            Action::HandOff => {
+                state.data_backlog -= 1;
+                state.actor_data += 1;
+            }
             Action::Evict => state.evicted = true,
             Action::DropProbe => state.held.retain(|frame| !matches!(frame, Frame::Probe(_))),
             Action::Chatter(hop) => {
@@ -615,15 +713,17 @@ impl Model for LivenessModel {
     }
 }
 
-/// The properties `discipline` violates for `subject` with the third peer withholding or not.
+/// The properties `discipline` violates for `subject` under an environment: whether the third
+/// peer withholds credit, and whether other origins flood `B` with relayed probes.
 fn refuted(
     discipline: Discipline,
     subject: Subject,
-    third_withholds: bool,
+    (third_withholds, relayed_flood): (bool, bool),
 ) -> BTreeSet<&'static str> {
     let checker = LivenessModel {
         subject,
         third_withholds,
+        relayed_flood,
         discipline,
     }
     .checker()
@@ -645,7 +745,8 @@ fn refuted(
 }
 
 /// Production satisfies every property for every subject, whether or not the third peer
-/// withholds credit (and so holds the subject's shared outbound capacity).
+/// withholds credit (and so holds the subject's shared outbound capacity), and whether or not
+/// other origins flood the subject with relayed probes.
 #[test]
 fn test_production_liveness_satisfies_the_composed_laws() {
     for subject in [
@@ -653,92 +754,119 @@ fn test_production_liveness_satisfies_the_composed_laws() {
         Subject::Loaded,
         Subject::LateCredit,
         Subject::SlowHandler,
+        Subject::TransientlyUnready,
         Subject::Withholding,
         Subject::Flapping,
     ] {
-        for third_withholds in [false, true] {
+        for environment in [(false, false), (true, false), (false, true), (true, true)] {
             assert_eq!(
-                refuted(Discipline::Production, subject, third_withholds),
+                refuted(Discipline::Production, subject, environment),
                 BTreeSet::new(),
-                "{subject:?}, third withholds: {third_withholds}"
+                "{subject:?}, third withholds and relayed flood: {environment:?}"
             );
         }
     }
 }
 
-/// Every design #913 R5–R10, its redundancy audit and #935 refuted is refuted by the property
-/// it breaks.
+/// Every refuted design is refuted by the property it breaks.
 #[test]
 fn test_each_refuted_design_is_refuted_by_the_composed_model() {
     let never = "an honest subject is never evicted";
     let eventually = "a dodging subject is evicted";
-    for (discipline, subject, third_withholds, law) in [
-        (Discipline::StallIsVerdict, Subject::Loaded, false, never),
+    for (discipline, subject, environment, law) in [
+        (
+            Discipline::StallIsVerdict,
+            Subject::Loaded,
+            (false, false),
+            never,
+        ),
         (
             Discipline::ClockFromDeparture,
             Subject::Withholding,
-            false,
+            (false, false),
             eventually,
         ),
-        (Discipline::HandlerWaitsOnRemote, Subject::Fast, true, never),
+        (
+            Discipline::HandlerWaitsOnRemote,
+            Subject::Fast,
+            (true, false),
+            never,
+        ),
         (
             Discipline::InboundClears,
             Subject::Withholding,
-            false,
+            (false, false),
             eventually,
         ),
         (
             Discipline::ProbeTakesSharedCapacity,
             Subject::Withholding,
-            false,
+            (false, false),
             eventually,
         ),
         (
             Discipline::ReissueOverOutstanding,
             Subject::Fast,
-            false,
+            (false, false),
             never,
         ),
         (
             Discipline::ApplicationOnControlLane,
             Subject::Loaded,
-            false,
+            (false, false),
             never,
         ),
         (
             Discipline::SharedReceiveBudget,
             Subject::Loaded,
-            false,
+            (false, false),
             never,
         ),
-        (Discipline::ReassemblyBarrier, Subject::Loaded, false, never),
+        (
+            Discipline::ReassemblyBarrier,
+            Subject::Loaded,
+            (false, false),
+            never,
+        ),
         (
             Discipline::ProbeDroppedAtFirstFrame,
             Subject::LateCredit,
-            false,
+            (false, false),
             never,
         ),
         (
             Discipline::AnswerTakesSharedCapacity,
             Subject::Fast,
-            true,
+            (true, false),
             never,
         ),
         (
             Discipline::WithdrawWhenUnready,
             Subject::Flapping,
-            false,
+            (false, false),
             eventually,
         ),
         (
             Discipline::HandOffWithoutAwait,
             Subject::SlowHandler,
-            false,
+            (false, false),
+            never,
+        ),
+        (
+            Discipline::NeverResend,
+            Subject::TransientlyUnready,
+            (false, false),
+            never,
+        ),
+        (
+            Discipline::RelayedAnswerTakesSlot,
+            Subject::Fast,
+            (true, true),
             never,
         ),
     ] {
         assert!(
-            refuted(discipline, subject, third_withholds).contains(law),
+            refuted(discipline, subject, environment).contains(law),
             "{discipline:?} with {subject:?} must be refuted by `{law}`"
         );
     }

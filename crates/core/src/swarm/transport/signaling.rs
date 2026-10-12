@@ -15,6 +15,7 @@ use super::IncomingOfferAdmittedPeer;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
 use crate::dht::Did;
+use crate::error::DetachedWork;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::ConnectNodeReport;
@@ -33,7 +34,11 @@ impl SwarmTransport {
     /// The application boundary: the offer is created here, waiting on ICE gathering, and sent
     /// under the application discipline, so this returns once the offer's first frame is
     /// admitted.
-    pub(crate) async fn connect(&self, peer: Did, callback: SwarmTransportCallback) -> Result<()> {
+    pub(in crate::swarm) async fn connect(
+        &self,
+        peer: Did,
+        callback: SwarmTransportCallback,
+    ) -> Result<()> {
         let Some(pending) = self.open_offer(peer, callback).await? else {
             return Ok(());
         };
@@ -43,7 +48,7 @@ impl SwarmTransport {
             .await
     }
 
-    /// Connect from the protocol context (#913 R9 M4): the generation is reserved and its
+    /// Connect from the protocol context: the generation is reserved and its
     /// connection created now, so a finger proof waiting for it has an owner at once; the offer,
     /// whose ICE gathering waits on STUN or TURN servers, is created and queued through the
     /// protocol egress on a task detached from the inbound event that asked for it.
@@ -94,7 +99,7 @@ impl SwarmTransport {
             self.abandon_pending_connection(attempt, "scheduling connection negotiation")
                 .await;
             return Err(Error::DetachedRuntimeUnavailable(
-                "a protocol-context handshake",
+                DetachedWork::ProtocolHandshake,
             ));
         }
         Ok(())
@@ -259,7 +264,7 @@ impl SwarmTransport {
             IncomingOfferAdmittedPeer::Routable => return Err(Error::AlreadyConnected),
             IncomingOfferAdmittedPeer::Unroutable(attempt) => {
                 if self.disconnect_unavailable(attempt).await?.is_none()
-                    && self.has_active_connection(peer)
+                    && self.active_attempt(peer)?.is_some()
                 {
                     return Err(Error::AlreadyConnected);
                 }
@@ -333,7 +338,7 @@ impl SwarmTransport {
 
     /// Answer the offer of remote connection, waiting on ICE gathering: the application
     /// boundary.
-    pub(crate) async fn answer_remote_connection(
+    pub(in crate::swarm) async fn answer_remote_connection(
         &self,
         peer: Did,
         callback: SwarmTransportCallback,
@@ -343,7 +348,7 @@ impl SwarmTransport {
         self.create_answer(&pending, offer).await
     }
 
-    /// Answer the offer `request` carries from the protocol context (#913 R9 M4): the slot is
+    /// Answer the offer `request` carries from the protocol context: the slot is
     /// reconciled and the answering generation opened now; the answer, which waits on ICE
     /// gathering, is created and reported through the protocol egress on a detached task.
     pub(crate) async fn answer_remote_connection_detached(

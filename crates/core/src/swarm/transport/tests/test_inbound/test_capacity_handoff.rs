@@ -5,14 +5,14 @@ use rings_transport::callback::NodeReceiveLoad;
 use rings_transport::core::callback::AdmittedInboundMessage;
 use rings_transport::core::credit::LANE_CREDIT_WINDOW;
 use rings_transport::core::pool::ChannelLane;
-use rings_transport::core::transport::TransportMessage;
+use rings_transport::core::transport::custom_frame_wire;
 use rings_transport::notifier::Notifier;
 
 use super::*;
 use crate::message::MessageCategory;
 
 /// The connection lane this test's application frames travel on: the receiver refuses a frame
-/// on any lane but its category's (#913 R9 M3).
+/// on any lane but its category's (one lane per class).
 const APPLICATION_CHANNEL: ChannelLane = MessageCategory::Application.channel_lane();
 
 struct SharedCoreCallback(Arc<SwarmTransportCallback>);
@@ -51,7 +51,8 @@ async fn wait_for_raw_capacity_release(
     held: &mut Vec<AdmittedInboundFrame>,
 ) -> Result<AdmittedInboundFrame> {
     core_callback
-        .await_inbound_handoffs_for_test(|handoffs| handoffs >= 1)
+        .inbound_for_test()
+        .await_handoffs_for_test(|handoffs| handoffs >= 1)
         .await;
     let batch = usize::try_from(LANE_CREDIT_WINDOW / 2)
         .map_err(|_| Error::InvalidMessage("the credit batch must fit usize".to_string()))?;
@@ -73,13 +74,14 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
     let peer = unbound_peer(&transport, &SecretKey::random())?;
     let payload = peer.custom_message_wire(&transport, b"transport-capacity-handoff")?;
     let raw = bytes::Bytes::from(
-        rings_codec::serialize(&TransportMessage::Custom(payload))
-            .map_err(|error| Error::InvalidMessage(error.to_string()))?,
+        custom_frame_wire(payload).map_err(|error| Error::InvalidMessage(error.to_string()))?,
     );
     let (application, lane_hold) =
         ApplicationRecorder::attach_holding_application_lane(&transport)?;
     let core_callback = Arc::clone(&peer.callback);
-    let admission_blocker = core_callback.hold_application_admission_for_test()?;
+    let admission_blocker = core_callback
+        .inbound_for_test()
+        .hold_application_admission_for_test()?;
     let transport_callback = Arc::new(InnerTransportCallback::new(
         &peer.peer.to_string(),
         Box::new(SharedCoreCallback(Arc::clone(&core_callback))),
@@ -102,7 +104,10 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
     let released =
         wait_for_raw_capacity_release(&core_callback, &transport_callback, &raw, &mut window)
             .await?;
-    assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
+    assert_eq!(
+        core_callback.inbound_for_test().admitted_count_for_test(),
+        1
+    );
     assert_eq!(application.observed(), 0);
     drop((released, window));
 
@@ -110,11 +115,17 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
     // its core permit: only the core permit outlives the handoff.
     drop(admission_blocker);
     application.next_tapped().await?;
-    assert_eq!(core_callback.inbound_admitted_count_for_test(), 1);
+    assert_eq!(
+        core_callback.inbound_for_test().admitted_count_for_test(),
+        1
+    );
     drop(lane_hold);
     dispatch
         .await
         .map_err(|_| Error::InvalidMessage("transport dispatch task panicked".to_string()))?;
-    assert_eq!(core_callback.inbound_admitted_count_for_test(), 0);
+    assert_eq!(
+        core_callback.inbound_for_test().admitted_count_for_test(),
+        0
+    );
     Ok(())
 }

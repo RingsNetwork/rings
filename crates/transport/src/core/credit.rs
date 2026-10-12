@@ -47,6 +47,9 @@
 //! These laws are model-checked in `test_credit_model` over every interleaving with credits
 //! reordered and duplicated.
 
+use std::ops::Index;
+use std::ops::IndexMut;
+
 use crate::core::pool::ChannelLane;
 use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 
@@ -157,7 +160,7 @@ impl<T> PerLane<T> {
     }
 }
 
-impl<T> std::ops::Index<CreditIndex> for PerLane<T> {
+impl<T> Index<CreditIndex> for PerLane<T> {
     type Output = T;
 
     fn index(&self, index: CreditIndex) -> &T {
@@ -171,7 +174,7 @@ impl<T> std::ops::Index<CreditIndex> for PerLane<T> {
     }
 }
 
-impl<T> std::ops::IndexMut<CreditIndex> for PerLane<T> {
+impl<T> IndexMut<CreditIndex> for PerLane<T> {
     fn index_mut(&mut self, index: CreditIndex) -> &mut T {
         let [c0, c1, c2, c3] = &mut self.0;
         match index {

@@ -106,6 +106,7 @@ use measurement::MeasurementRecorder;
 use measurement::OutboundMeasurement;
 pub(super) use model::OutboundCompletion;
 pub(super) use model::OutboundMessageKind;
+use model::PerClass;
 pub(super) use model::TransferClass;
 use queue::FrameRemainder;
 use queue::RunnableTransfer;
@@ -406,9 +407,10 @@ impl OutboundSchedulers {
     pub(super) fn reserve_bounded_by_sender(
         &self,
         bound: SenderBound,
+        peer: Did,
     ) -> Option<TransferCapacityPermit> {
         self.sender_bounded
-            .admit(bound)
+            .admit(bound, peer)
             .map(TransferCapacityPermit::bounded_by_sender)
     }
 
@@ -501,7 +503,7 @@ struct OutboundWorker {
     announced: SharedAnnouncedDelegations,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     /// The transport credit of each class's lane.
-    credits: [ClassCredit; TransferClass::COUNT],
+    credits: PerClass<ClassCredit>,
     /// Pending credit reservations; one whose slot no longer awaits its generation resolves
     /// into nothing.
     credit_waits: FuturesUnordered<CreditWaitFuture>,
@@ -536,7 +538,7 @@ impl OutboundWorker {
             active: None,
             announced: link.announced,
             deliveries: FuturesUnordered::new(),
-            credits: std::array::from_fn(|_| ClassCredit::Idle),
+            credits: PerClass::from_fn(|_| ClassCredit::Idle),
             credit_waits: FuturesUnordered::new(),
             delivery_progress: DeliveryProgress::default(),
             measurements,
@@ -571,10 +573,8 @@ impl OutboundWorker {
                 return;
             }
             self.acquire_credits();
-            let credited = CLASSES.map(|class| self.grants_a_frame(class));
-            let transfer = self
-                .ready
-                .pop(|class| credited.get(class.index()).copied().unwrap_or(false));
+            let credited = PerClass::from_fn(|class| self.grants_a_frame(class));
+            let transfer = self.ready.pop(|class| credited[class]);
             if let Some(transfer) = transfer {
                 self.active = Some(transfer);
                 self.admit_active_frame().await;

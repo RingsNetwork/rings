@@ -69,6 +69,8 @@ impl std::fmt::Display for HeldFrameDrop {
 }
 
 impl InboundProcessor {
+    /// The connection stage of one connection over `transport`, judging reassembly timeouts by
+    /// `reassembly_clock`, with no connection attempt bound yet and empty holds.
     pub(super) fn new(transport: Arc<SwarmTransport>, reassembly_clock: ReassemblyClock) -> Self {
         let reassembler = MessageReassembler::with_limits_and_budget(
             transport.reassembly_limits(),

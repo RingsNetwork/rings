@@ -169,7 +169,7 @@ async fn advance_chunk_event(
     }
     let lane = InboundLane::from_kind(kind);
     // Every chunk took credit on the lane they arrived on, which must be the lane of the
-    // message they carry (#913 R9 M3).
+    // message they carry (one lane per class).
     if !lane.admits_carrier(bytes.carrier()) {
         processor
             .record_receive_failure(event.peer, event.authentication)

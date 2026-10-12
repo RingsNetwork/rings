@@ -13,6 +13,7 @@ use crate::error::Result;
 use crate::message::test_probe_request;
 use crate::message::Message;
 use crate::message::MessagePayload;
+use crate::swarm::application::ApplicationData;
 use crate::swarm::transport::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 use crate::swarm::transport::OUTBOUND_DATA_TRANSFER_CAPACITY;
 use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
@@ -53,7 +54,7 @@ async fn assert_data_capacity_is_bounded(node: &Node, peer: Did) -> Result<()> {
 
     let data_error = node
         .swarm
-        .send_direct_message(Message::custom(b"over-data-capacity")?, peer)
+        .send_direct_message(ApplicationData::custom(b"over-data-capacity"), peer)
         .await
         .expect_err("non-control work must not consume the control reserve");
     assert!(matches!(
@@ -102,7 +103,7 @@ async fn assert_control_capacity_is_bounded(node: &Node, peer: Did) -> Result<()
     .await?;
     let control_error = node
         .swarm
-        .send_direct_message(Message::ProbeRequest(test_probe_request(255)), peer)
+        .send_direct_core_message_for_test(Message::ProbeRequest(test_probe_request(255)), peer)
         .await
         .expect_err("control traffic must preserve the other data-class reserves");
     assert!(matches!(

@@ -577,7 +577,7 @@ struct LegacyEntry {
     expires_at_ms: Option<u128>,
 }
 
-/// The cutover premise of #913: a carrier stored with a tombstone of the old shape does not
+/// The cutover premise: a carrier stored with a tombstone of the old shape does not
 /// decode as the current `Entry`, and the disposable entry store retires it on read instead of
 /// failing every scan.
 #[wasm_bindgen_test]

@@ -395,7 +395,7 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
     let received_bytes_before = received_before.credit.bytes_received_from_peer();
 
     p1.swarm
-        .send_direct_message(Message::custom(b"measure-provider").unwrap(), p2.did())
+        .send_direct_message(ApplicationData::custom(b"measure-provider"), p2.did())
         .await
         .unwrap();
     let got_msg2 = wait_for_application_data(

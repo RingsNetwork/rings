@@ -341,6 +341,14 @@ impl ConnectionLifecycleRegistry {
         }
     }
 
+    /// Whether `attempt` is the generation that owns its peer's active slot.
+    pub(in crate::swarm::transport) fn owns_active_slot(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> bool {
+        self.active_attempt(attempt.peer) == Some(attempt)
+    }
+
     pub(in crate::swarm::transport) fn sendable_attempt(
         &self,
         peer: Did,
@@ -355,7 +363,7 @@ impl ConnectionLifecycleRegistry {
         &mut self,
         attempt: PendingConnectionAttempt,
     ) -> bool {
-        if self.active_attempt(attempt.peer) != Some(attempt) {
+        if !self.owns_active_slot(attempt) {
             return false;
         }
         self.send_terminal.insert(attempt);
@@ -499,7 +507,7 @@ impl ConnectionLifecycleRegistry {
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
     ) -> Result<RetirementOutcome<T>> {
-        if self.active_attempt(attempt.peer) != Some(attempt) {
+        if !self.owns_active_slot(attempt) {
             return Ok(RetirementOutcome::Superseded);
         }
         let Some(value) = action(&self.active_connections())? else {
@@ -517,7 +525,7 @@ impl ConnectionLifecycleRegistry {
         &mut self,
         attempt: PendingConnectionAttempt,
     ) -> bool {
-        if self.active_attempt(attempt.peer) != Some(attempt) {
+        if !self.owns_active_slot(attempt) {
             return false;
         }
         self.peers.remove(&attempt.peer);

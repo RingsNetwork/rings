@@ -23,6 +23,8 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::extension::Backend;
 use crate::extension::BackendObserver;
+use crate::extension::DispatchDropCounters;
+use crate::extension::DispatchDrops;
 use crate::measure::EvidenceCollectorIdentity;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
@@ -50,6 +52,7 @@ pub struct Provider {
     processor: Arc<Processor>,
     handler: InternalRpcHandler,
     extensions: crate::extension::ext::Extensions,
+    dispatch_drops: Arc<DispatchDrops>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion::https::OnionHttpsRuntime>>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -89,6 +92,7 @@ impl Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
+            dispatch_drops: Arc::default(),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_https_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -100,6 +104,16 @@ impl Provider {
     /// this, so registration (via the provider) and dispatch see the same table.
     pub fn extensions(&self) -> crate::extension::ext::Extensions {
         self.extensions.clone()
+    }
+
+    /// The drop counters the [`Backend`] serving this provider's application inbox records in.
+    pub(crate) fn dispatch_drops(&self) -> Arc<DispatchDrops> {
+        Arc::clone(&self.dispatch_drops)
+    }
+
+    /// The application envelopes the [`Backend`] dropped instead of dispatching, by reason.
+    pub fn dispatch_drop_counters(&self) -> DispatchDropCounters {
+        self.dispatch_drops.counters()
     }
 
     /// The capability handle — overlay `send` / `did` / self-addressed `inject`. (Authenticated
@@ -209,6 +223,7 @@ impl Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
+            dispatch_drops: Arc::default(),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_https_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -295,8 +310,11 @@ impl Provider {
     /// Serve the swarm's application inbox with the extension [`Backend`] on a detached task,
     /// so inbound custom messages are decoded as
     /// [`Envelope`](crate::extension::ext::Envelope)s and routed to their namespace's protocol.
-    /// Call once, after registering protocols: the inbox is claimed once, so a second call
-    /// fails with `ApplicationInboxClaimed`.
+    /// Call once, after registering every protocol whose messages may already be on their way
+    /// (relay mail included): from the claim on, an envelope of a namespace not yet registered
+    /// is dropped, counted. The inbox is claimed once, so a second call fails with
+    /// `ApplicationInboxClaimed`. Serving never stops; use
+    /// [`application_service`](Provider::application_service) for a stoppable one.
     pub fn set_backend(&self) -> Result<()> {
         let service = self.application_service(None, StopToken::never())?;
         rings_runtime::spawn_detached(service).map_err(|_| {
@@ -315,7 +333,9 @@ impl Provider {
     ///
     /// The claim is eager, so data that arrives before the caller spawns the future waits in
     /// the inbox instead of being discarded unclaimed; the caller owns only the spawner and the
-    /// stop token. The inbox is claimed once (see
+    /// stop token. As with [`set_backend`](Provider::set_backend), register protocols first:
+    /// an envelope of a namespace not yet registered when it is read is dropped, counted. The
+    /// inbox is claimed once (see
     /// [`Swarm::application_inbox`](rings_core::swarm::Swarm::application_inbox)), so a second
     /// call fails.
     pub fn application_service(

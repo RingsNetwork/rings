@@ -176,8 +176,8 @@ impl SignatureAlgorithm {
     }
 
     /// `Ok` when `sig` has this algorithm's signature length: the length gate of an explicit
-    /// public key, which no signer reads when only the key is returned. Every signer refuses
-    /// any other length itself (the recovering ones through [`Self::recoverable_signature`]).
+    /// public key, which no signer reads when only the key is returned. A verification refuses
+    /// any other length by its signer's own gate (see [`VerificationPublicKey::verify`]).
     fn check_signature_len(self, sig: &[u8]) -> Result<()> {
         if sig.len() == self.signature_len() {
             return Ok(());
@@ -227,7 +227,9 @@ impl VerificationPublicKey {
     /// Verify a signature for this explicit public key.
     ///
     /// Post: `false` for a signature that is not its algorithm's length
-    /// ([`SignatureAlgorithm::signature_len`]): each signer refuses any other length.
+    /// ([`SignatureAlgorithm::signature_len`]), each by one length gate: the recovering signers
+    /// through `SignatureAlgorithm::recoverable_signature`, Secp256r1 and Ed25519 in their
+    /// signature decoding, and BLS12-381 at its conversion here.
     pub fn verify(&self, msg: &[u8], sig: impl AsRef<[u8]>) -> bool {
         match self {
             Self::Secp256k1(pk) => signers::secp256k1::verify(msg, &pk.address(), sig.as_ref()),
@@ -324,7 +326,8 @@ impl AccountVerifier {
     /// Verify an account signature.
     ///
     /// Post: `false` for a signature that is not its algorithm's length
-    /// ([`SignatureAlgorithm::signature_len`]): each signer refuses any other length.
+    /// ([`SignatureAlgorithm::signature_len`]), by the one length gate of its signer (see
+    /// [`VerificationPublicKey::verify`]).
     pub fn verify(&self, msg: &[u8], sig: impl AsRef<[u8]>) -> bool {
         let sig = sig.as_ref();
         let (algorithm, did) = match self {

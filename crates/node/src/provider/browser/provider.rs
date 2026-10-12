@@ -217,10 +217,10 @@ impl Provider {
             Some(replay_storage),
         )
         .await?;
-        provider.set_backend()?;
         if let Some(policy) = onion_https_exit_policy {
             provider.install_onion_https_protocol(Some(policy))?;
         }
+        provider.set_backend()?;
         Ok(provider)
     }
 }
@@ -335,10 +335,10 @@ impl Provider {
             )
             .await?;
 
-            provider.set_backend().map_err(JsError::from)?;
             provider
                 .install_onion_https_protocol(Some(policy))
                 .map_err(JsError::from)?;
+            provider.set_backend().map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
         })

@@ -1,23 +1,22 @@
-//! Liveness judges a peer by its probes alone (L3, `swarm::transport::liveness`): a probe's
+//! Liveness judges a peer by its probes alone (`swarm::transport::liveness`): a probe's
 //! deadline counts from its issue, so a probe the peer will not let this end send goes
-//! unanswered (#913 R7 H1); the peer's own traffic clears nothing (#913 R8 M1); a peer slow
-//! only on a data lane answers on lane 0 and is kept (#913 R6 H1); a probe takes no shared
-//! outbound capacity, so other traffic cannot refuse it (#913 R8 M2); and no probe waits on
+//! unanswered; the peer's own traffic clears nothing; a peer slow
+//! only on a data lane answers on lane 0 and is kept; a probe takes no shared
+//! outbound capacity, so other traffic cannot refuse it; and no probe waits on
 //! its peer.
-//! Every send a handler makes is released once it is queued (#913 R8 H1, the inbound-locality
+//! Every send a handler makes is released once it is queued (the inbound-locality
 //! law of `swarm::transport::egress`), so one peer's backpressure never holds the inbound lane
 //! of another; a send through the Swarm API still waits for its first frame's admission.
 
 use rings_transport::core::pool::ChannelLane;
 use tokio::time::timeout;
-use tokio::time::Duration;
 
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::Message;
 use crate::message::PayloadSender;
-use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
+use crate::swarm::application::ApplicationData;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::default::connected_nodes;
 use crate::tests::default::credit_starvation::starve;
@@ -96,7 +95,7 @@ async fn test_a_withholding_peers_own_traffic_leaves_its_probe_outstanding() -> 
 
     node2
         .swarm
-        .send_direct_message(Message::custom(b"still sending")?, node1.did())
+        .send_direct_message(ApplicationData::custom(b"still sending"), node1.did())
         .await?;
     timeout(TEST_HANG_GUARD, async {
         while let Some(payload) = node1.listen_once().await {
@@ -119,15 +118,11 @@ async fn test_a_withholding_peers_own_traffic_leaves_its_probe_outstanding() -> 
     Ok(())
 }
 
-/// A bound on one probe pass, well inside a probe's deadline: a pass that waited for a starved
-/// probe's admission would return only when that probe's transfer expires, at its deadline from
-/// issue (#913 R10 M5), so it cannot meet the bound.
-const PROBE_PASS_BOUND: Duration = Duration::from_secs(15);
-const _: () = assert!((PROBE_PASS_BOUND.as_millis() as i64) < PEER_LIVENESS_TIMEOUT_MS);
-
 /// Probes do not wait on their peers: with two peers withholding control credit, the probe pass
 /// returns while their probes are provably queued, and the peer that grants credit is probed
-/// and answers (#913 R10 M9).
+/// and answers. The oracle is the queued state, not the clock: a pass that waited for a starved
+/// probe's admission could return only once that transfer had been admitted or had expired, so
+/// never with the probe still queued; the timeout only guards a hang.
 #[tokio::test]
 async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
@@ -152,7 +147,7 @@ async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
     }
 
     timeout(
-        PROBE_PASS_BOUND,
+        TEST_HANG_GUARD,
         node.swarm.stabilizer().probe_peer_liveness_for_simulation(),
     )
     .await
@@ -180,7 +175,7 @@ async fn test_peers_withholding_credit_delay_no_other_probe() -> Result<()> {
     Ok(())
 }
 
-/// A probe takes no shared outbound capacity (#913 R8 M2): with the control capacity toward a
+/// A probe takes no shared outbound capacity: with the control capacity toward a
 /// peer that withholds control credit held full by other transfers, the probe is still queued
 /// and its deadline runs.
 #[tokio::test]
@@ -220,9 +215,10 @@ async fn test_an_application_send_waits_for_its_first_frame_while_the_peer_withh
 
     let sent = timeout(
         TEST_HANG_GUARD,
-        node1
-            .swarm
-            .send_direct_message(Message::custom(b"from the application")?, node2.did()),
+        node1.swarm.send_direct_message(
+            ApplicationData::custom(b"from the application"),
+            node2.did(),
+        ),
     )
     .await
     .map_err(|_| Error::InvalidMessage("the application send hung".to_string()))?;
@@ -251,7 +247,7 @@ async fn test_a_quiet_link_holds_no_credit_at_its_sender() -> Result<()> {
     Ok(())
 }
 
-/// The three-node cascade (#913 R7, R8): `M` withholds every credit from `B`, and `X` relays
+/// The three-node cascade: `M` withholds every credit from `B`, and `X` relays
 /// through `B` a control message whose next hop is `M`. `B` queues the forward toward `M` and
 /// frees the lane-0 event that carried it, so `X`'s lane 0 at `B` keeps progressing: `X`'s
 /// probe of `B`, behind the relayed message on the same lane, is answered, and `X` keeps `B`.

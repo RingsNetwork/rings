@@ -8,4 +8,5 @@ mod policy;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 mod wasm;
 
+pub use kind::DetachedWork;
 pub use kind::Error;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::swarm::application::ApplicationData;
 
 #[tokio::test]
 async fn test_missing_connection_records_locally_addressed_failure() -> Result<()> {
@@ -9,7 +10,7 @@ async fn test_missing_connection_records_locally_addressed_failure() -> Result<(
 
     let error = node
         .swarm
-        .send_direct_message(Message::custom(b"missing-connection")?, peer)
+        .send_direct_message(ApplicationData::custom(b"missing-connection"), peer)
         .await
         .expect_err("a direct send without a connection must fail");
 
@@ -34,7 +35,7 @@ async fn test_detached_delivery_timeout_releases_transfer_capacity() -> Result<(
 
     node1
         .swarm
-        .send_direct_message(Message::custom(b"bounded-detached-delivery")?, peer)
+        .send_direct_message(ApplicationData::custom(b"bounded-detached-delivery"), peer)
         .await?;
     wait_until("detached transfer admission", || {
         node1
@@ -110,7 +111,7 @@ async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_l
     let second_swarm = node1.swarm.clone();
     let second_send = tokio::spawn(async move {
         second_swarm
-            .send_direct_message(Message::custom(b"second-fifo-transfer")?, peer)
+            .send_direct_message(ApplicationData::custom(b"second-fifo-transfer"), peer)
             .await
     });
     wait_until("second FIFO transfer submission", || {

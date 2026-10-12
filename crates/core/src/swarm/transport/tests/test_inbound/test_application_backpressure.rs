@@ -1,5 +1,5 @@
-//! A full application inbox (#913 R10 H1, H2, law L0): core drops further live application
-//! data, counted, and no lane waits for the application to read.
+//! A full application inbox (lossy delivery: core never waits on the application): core drops
+//! further live application data, counted, and no lane waits for the application to read.
 //!
 //! ```text
 //!   peer ──App × (budget + k)──▶ handled ──▶ inbox full: dropped, counted
@@ -30,7 +30,6 @@ use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationDelivery;
 use crate::swarm::application::ApplicationInbox;
 use crate::swarm::application::ApplicationMessage;
-use crate::swarm::application::Delivered;
 use crate::swarm::application::APPLICATION_INBOX_WEIGHT;
 use crate::swarm::callback::inbound_peer_capacity_for_test;
 use crate::swarm::transport::SwarmTransport;
@@ -49,18 +48,12 @@ const BEYOND_BUDGET: usize = 8;
 
 /// Fill `transport`'s claimed application inbox: one live message of the whole
 /// [`APPLICATION_INBOX_WEIGHT`], queued into the empty inbox, leaves room for no other.
-fn fill_inbox(transport: &SwarmTransport) -> Result<()> {
-    let filler = ApplicationMessage {
+fn fill_inbox(transport: &SwarmTransport) {
+    transport.application().outlet.deliver(ApplicationMessage {
         tx_id: FILLER_TX,
         from: transport.dht.did,
         data: ApplicationData::Custom(CustomMessage(vec![0; APPLICATION_INBOX_WEIGHT])),
-    };
-    match transport.application().outlet.deliver(filler) {
-        Delivered::Queued => Ok(()),
-        other => Err(Error::InvalidMessage(format!(
-            "an empty claimed inbox must queue the filler, but it was {other:?}"
-        ))),
-    }
+    });
 }
 
 /// The body of the next custom message `inbox` yields, waiting for it. Peer facts, which share
@@ -82,14 +75,14 @@ async fn next_custom_data(inbox: &ApplicationInbox) -> Result<Vec<u8>> {
     }
 }
 
-/// Law (H1, no lane waits): with the inbox full, one peer's application frames beyond its
+/// Law (no lane waits): with the inbox full, one peer's application frames beyond its
 /// inbound budget are each handled and dropped, counted, and the same peer's control frame
 /// sent behind them is handled; nothing stays admitted.
 #[tokio::test]
 async fn test_full_inbox_drops_application_frames_beyond_the_peer_budget() -> Result<()> {
     let transport = default_transport()?;
     let application = ApplicationRecorder::attach(&transport)?;
-    fill_inbox(&transport)?;
+    fill_inbox(&transport);
     let peer = unbound_peer(&transport, &SecretKey::random())?;
     let (local, callback, cid) = (transport.dht.did, &peer.callback, peer.peer.to_string());
     let sent = inbound_peer_capacity_for_test() + BEYOND_BUDGET;
@@ -140,18 +133,18 @@ async fn test_full_inbox_drops_application_frames_beyond_the_peer_budget() -> Re
         application.dropped(),
         u64::try_from(sent).map_err(|_| Error::MessageSizeOverflow)?
     );
-    assert_eq!(callback.inbound_admitted_count_for_test(), 0);
+    assert_eq!(callback.inbound_for_test().admitted_count_for_test(), 0);
     Ok(())
 }
 
-/// Law (H2, no hand-off barrier waits): with the inbox full, a chunked application message is
+/// Law (no hand-off barrier waits): with the inbox full, a chunked application message is
 /// reassembled, handed off and dropped, counted, and the same peer's storage frame sent behind
 /// it is handled next, its entries reaching the DHT.
 #[tokio::test]
 async fn test_full_inbox_drops_a_reassembled_message_without_stalling_storage() -> Result<()> {
     let transport = default_transport()?;
     let application = ApplicationRecorder::attach(&transport)?;
-    fill_inbox(&transport)?;
+    fill_inbox(&transport);
     let peer = unbound_peer(&transport, &SecretKey::random())?;
     let (local, callback, cid) = (transport.dht.did, &peer.callback, peer.peer.to_string());
 
@@ -196,7 +189,7 @@ async fn test_full_inbox_drops_a_reassembled_message_without_stalling_storage() 
             .is_some());
     }
     assert_eq!(application.dropped(), 1);
-    assert_eq!(callback.inbound_admitted_count_for_test(), 0);
+    assert_eq!(callback.inbound_for_test().admitted_count_for_test(), 0);
     Ok(())
 }
 
@@ -206,7 +199,7 @@ async fn test_full_inbox_drops_a_reassembled_message_without_stalling_storage() 
 async fn test_reading_the_inbox_makes_room_for_the_next_application_frame() -> Result<()> {
     let transport = default_transport()?;
     let inbox = transport.application().outlet.claim()?;
-    fill_inbox(&transport)?;
+    fill_inbox(&transport);
     let peer = unbound_peer(&transport, &SecretKey::random())?;
 
     peer.receive(&peer.custom_message_wire(&transport, b"dropped-while-full")?)

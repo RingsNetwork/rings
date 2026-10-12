@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
 use crate::callback::NodeReceiveLoad;
 use crate::connection_ref::ConnectionRef;
@@ -505,24 +506,16 @@ where
 }
 
 #[async_trait]
-impl ConnectionInterface for DummyConnection {
-    type Sdp = String;
-    type Error = Error;
-
+impl FrameSink for DummyConnection {
     /// The dummy link delivers one connection's messages over one ordered event queue, which
     /// meets the lane law for every lane at once (a controlled test may reorder events on
     /// purpose), so the lane needs no channel of its own here.
-    async fn send_message_with_permit(
+    async fn send_frame(
         &self,
-        msg: TransportMessage,
+        frame: TransportMessage,
         lane: ChannelLane,
-        mut permit: SendPermit,
+        permit: SendPermit,
     ) -> Result<DeliveryFuture> {
-        self.webrtc_wait_for_data_channel_open().await?;
-        let _credit = self
-            .callback
-            .credit_for_send(&msg, lane, &mut permit)
-            .await?;
         if SEND_MESSAGE_PENDING.with(|pending| pending.get())
             || SEND_MESSAGE_PENDING_AFTER_SENT_COUNT.with(|threshold| {
                 threshold
@@ -539,7 +532,7 @@ impl ConnectionInterface for DummyConnection {
             send_gate.notified().await;
             SEND_MESSAGE_GATE_WAITING.with(|waiting| waiting.set(false));
         }
-        let data = rings_codec::serialize(&msg).map(Bytes::from)?;
+        let data = rings_codec::serialize(&frame).map(Bytes::from)?;
         if !permit.allows() {
             return Err(Error::SendPermitRevoked);
         }
@@ -596,9 +589,24 @@ impl ConnectionInterface for DummyConnection {
             permit_retirement,
         )
     }
+}
+
+#[async_trait]
+impl ConnectionInterface for DummyConnection {
+    type Sdp = String;
+    type Error = Error;
+
+    async fn send_message_with_permit(
+        &self,
+        payload: Bytes,
+        lane: ChannelLane,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
+        self.callback.send_custom(self, payload, lane, permit).await
+    }
 
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
-        Box::pin(self.callback.reserve_credit(lane))
+        self.callback.reserve_send_credit(lane)
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {

@@ -117,7 +117,7 @@ fn target(did: Did) -> ValidatedSeedPeer {
 /// interval is refuted without leaving `C`.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn routed_probe_reports_presence_through_one_hop() {
+async fn test_routed_probe_reports_presence_through_one_hop() {
     let _guard = network_test_guard().await;
     let (a_key, b_key, c_key) = chain_keys();
     let a = ProbeNode::new(a_key).await;
@@ -186,7 +186,7 @@ async fn routed_probe_reports_presence_through_one_hop() {
 /// it at its own pace (#935), so the loss is awaited on the activity the backend records.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
+async fn test_a_local_disconnect_is_reported_as_a_peer_retirement() {
     let _guard = network_test_guard().await;
     let a = ProbeNode::new(SecretKey::random()).await;
     let b = ProbeNode::new(SecretKey::random()).await;
@@ -229,7 +229,7 @@ async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
 /// A pending handshake to the target, here one this node reserved by offering, refuses a dial
 /// before any request leaves: the never-dialed endpoint would otherwise fail to resolve.
 #[tokio::test]
-async fn a_pending_handshake_refuses_the_dial_without_a_request() {
+async fn test_a_pending_handshake_refuses_the_dial_without_a_request() {
     let _guard = network_test_guard().await;
     let a = ProbeNode::new(SecretKey::random()).await;
     let b = ProbeNode::new(SecretKey::random()).await;

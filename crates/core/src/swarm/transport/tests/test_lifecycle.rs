@@ -866,3 +866,10 @@ mod finger;
 /// The child module checks that a shutdown cancels exactly the sends that were not yet
 /// irrevocable.
 mod scheduler;
+
+#[cfg(feature = "dummy")]
+/// Probe-pass regression tests.
+///
+/// The child module checks that probe passes run one at a time and that a probe rides only
+/// the connection of the generation it judges.
+mod probe;

@@ -9,7 +9,7 @@ use rings_core::message::e2e::E2eHandshakeRequest;
 use rings_core::message::e2e::E2eHandshakeResponse;
 use rings_core::message::e2e::E2eStreamDecryptor;
 use rings_core::message::e2e::E2eStreamFrame;
-use rings_core::message::Message;
+use rings_core::swarm::application::ApplicationData;
 
 use super::Processor;
 use crate::error::Error;
@@ -18,12 +18,10 @@ use crate::error::Result;
 impl Processor {
     /// Send custom message to a did.
     pub async fn send_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
-        tracing::trace!("send_message, message size: {:?}", msg.len());
-
-        let msg = Message::custom(msg).map_err(Error::SendMessage)?;
+        tracing::trace!(size = msg.len(), %destination, "send_message");
 
         self.swarm
-            .send_message(msg, destination)
+            .send_message(ApplicationData::custom(msg), destination)
             .await
             .map_err(Error::SendMessage)
     }
@@ -33,12 +31,10 @@ impl Processor {
     /// Protocols with their own authenticated hop selection, such as onion circuits, use this
     /// to keep the core transport from replacing their selected next hop.
     pub async fn send_direct_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
-        tracing::trace!("send_direct_message, message size: {:?}", msg.len());
-
-        let msg = Message::custom(msg).map_err(Error::SendMessage)?;
+        tracing::trace!(size = msg.len(), %destination, "send_direct_message");
 
         self.swarm
-            .send_direct_message(msg, destination)
+            .send_direct_message(ApplicationData::custom(msg), destination)
             .await
             .map_err(Error::SendMessage)
     }
@@ -51,7 +47,7 @@ impl Processor {
         let public_key = self.swarm.delegator_pubkey().map_err(Error::SendMessage)?;
         self.swarm
             .send_message(
-                Message::E2eHandshakeRequest(E2eHandshakeRequest::new(public_key)),
+                ApplicationData::E2eHandshakeRequest(E2eHandshakeRequest::new(public_key)),
                 destination,
             )
             .await
@@ -103,7 +99,7 @@ impl Processor {
 
         for frame in frames {
             self.swarm
-                .send_message(Message::E2eStreamFrame(frame), destination)
+                .send_message(ApplicationData::E2eStreamFrame(frame), destination)
                 .await
                 .map_err(Error::SendMessage)?;
         }

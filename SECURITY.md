@@ -98,9 +98,13 @@ and expire, but a party with many identities can try to hold several positions o
   sees the message. Rotating keys or relays does not reset them, and a drop never disconnects
   the relay.
 - **Application boundary.** Core never calls, awaits or consults application code (#935): the
-  application cannot see, validate or veto a protocol message, and no inbound lane waits for it.
-  A slow application therefore costs only its own messages, never a peer's credit or another
-  link's liveness.
+  application cannot see, validate or veto a protocol message, nor send one, and no inbound
+  lane waits for it. A slow application therefore costs only its own messages, never a peer's
+  credit or another link's liveness. Application delivery is lossy by design: a message that
+  does not fit the full inbox is dropped and counted, unknown to its sender, so a protocol
+  that needs a reliable stream recovers loss end to end (#939). Relay mail leaves core's
+  custody once the application takes it from the inbox; it is delivered at least once within
+  a run, and a restart before its retirement loses it (#936).
   [Details](docs/src/advanced-topic/transport-flow-control.md#application-inbox).
 - **Measurement and credit.** Local and advisory: they may reorder eligible candidates but
   never add one or change DHT placement. Service receipts affect neither.
@@ -113,14 +117,18 @@ and expire, but a party with many identities can try to hold several positions o
   size; versions too far ahead of the receiver's clock are rejected. Each data-topic element
   expires at its own horizon, and a removal is collected only once every write it covers has
   expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
-  while the carrier is retained. A relay inbox is verified by its owner, readable and
-  removable only by its recipient, and capped at 64 messages. Values are stored in the clear.
+  while the carrier is retained. A relay inbox is verified by its owner, readable only by
+  its recipient, and removable only by its recipient or, in an ownership hand-off, by the
+  previous owner once the next one acknowledged holding exactly that value; it is capped at
+  64 messages. Values are stored in the clear.
   [Details](docs/src/advanced-topic/chord.md#data-topic-storage).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
   refuses no honest frame, refuses and reports a frame beyond its credit, and pushes overload
-  back to the sender. One peer's backpressure never holds another's link, and liveness reads no
-  credit state, so a peer that withholds the control lane's credit is evicted whatever else it
-  sends. The node-wide receive bound is soft (#934).
+  back to the sender. One peer's backpressure never holds another's control lane (lane 0, which
+  the node-wide receive bound never defers; that bound has no per-peer share, so one peer's
+  load can defer the other lanes of every link). Liveness reads no credit state, so a peer
+  that withholds the control lane's credit is evicted whatever else it sends. The node-wide
+  receive bound is soft (#934).
   [Details](docs/src/advanced-topic/transport-flow-control.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.

@@ -235,7 +235,7 @@ impl NodeState {
     /// gate of `InboundProcessor::pending_connection_gate`
     /// (`InboundGate::Admitted`).
     fn admits(&self, attempt: PendingConnectionAttempt) -> bool {
-        self.lifecycles.active_attempt(attempt.peer()) == Some(attempt)
+        self.lifecycles.owns_active_slot(attempt)
     }
 
     /// `Sendable(g)`: `g` is admitted and not send-terminal, the production

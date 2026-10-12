@@ -28,9 +28,10 @@ use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
 use crate::callback::admit_inbound_data_channel;
+use crate::callback::credit_pump::pump_lane_credits;
 use crate::callback::data_channel_label;
 use crate::callback::inbound_frame_exceeds_protocol_ceiling;
-use crate::callback::link_credit::pump_lane_credits;
+use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
 use crate::callback::NodeReceiveLoad;
 use crate::connection_ref::ConnectionRef;
@@ -153,28 +154,6 @@ impl WebSysWebrtcConnection {
         let result = send_sync(send, permit, enqueued, bytes, Rc::clone(&lifecycle)).await;
         lifecycle.finish(result).await
     }
-
-    /// Encode and account one browser send using the shared checked queue owner.
-    async fn send_with_permit(
-        &self,
-        msg: TransportMessage,
-        lane: ChannelLane,
-        permit: SendPermit,
-    ) -> Result<DeliveryFuture> {
-        let (channel, delivery) = self.webrtc_data_channel.select(lane)?;
-        let data = rings_codec::serialize(&msg)?;
-        let bytes = u64::try_from(data.len()).map_err(|_| Error::SendByteCountOverflow)?;
-        // The primitive runs only after shared queue admission; failures do not advance offsets.
-        let end_offset = self
-            .send_after_permit(permit, Arc::clone(delivery.enqueued()), bytes, || {
-                channel
-                    .send_with_u8_array(&data)
-                    .map_err(Error::WebSysWebrtc)
-            })
-            .await
-            .inspect_err(|error| tracing::error!(%error, bytes, "browser send failed"))?;
-        Ok(delivery_future(channel, &delivery, end_offset))
-    }
 }
 
 impl ChannelPool<TrackedChannel> {
@@ -280,26 +259,46 @@ impl WebSysWebrtcTransport {
 }
 
 #[async_trait(?Send)]
+impl FrameSink for WebSysWebrtcConnection {
+    /// Encode and account one browser send using the shared checked queue owner.
+    async fn send_frame(
+        &self,
+        frame: TransportMessage,
+        lane: ChannelLane,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
+        let (channel, delivery) = self.webrtc_data_channel.select(lane)?;
+        let data = rings_codec::serialize(&frame)?;
+        let bytes = u64::try_from(data.len()).map_err(|_| Error::SendByteCountOverflow)?;
+        // The primitive runs only after shared queue admission; failures do not advance offsets.
+        let end_offset = self
+            .send_after_permit(permit, Arc::clone(delivery.enqueued()), bytes, || {
+                channel
+                    .send_with_u8_array(&data)
+                    .map_err(Error::WebSysWebrtc)
+            })
+            .await
+            .inspect_err(|error| tracing::error!(error = ?error, bytes, "browser send failed"))?;
+        Ok(delivery_future(channel, &delivery, end_offset))
+    }
+}
+
+#[async_trait(?Send)]
 impl ConnectionInterface for WebSysWebrtcConnection {
     type Sdp = String;
     type Error = Error;
 
     async fn send_message_with_permit(
         &self,
-        msg: TransportMessage,
+        payload: Bytes,
         lane: ChannelLane,
-        mut permit: SendPermit,
+        permit: SendPermit,
     ) -> Result<DeliveryFuture> {
-        self.webrtc_wait_for_data_channel_open().await?;
-        let _credit = self
-            .callback
-            .credit_for_send(&msg, lane, &mut permit)
-            .await?;
-        self.send_with_permit(msg, lane, permit).await
+        self.callback.send_custom(self, payload, lane, permit).await
     }
 
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
-        Box::pin(self.callback.reserve_credit(lane))
+        self.callback.reserve_send_credit(lane)
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -818,7 +817,7 @@ mod tests {
         assert!(matches!(
             connection
                 .send_message_with_permit(
-                    TransportMessage::Custom(Bytes::from_static(&[1])),
+                    Bytes::from_static(&[1]),
                     ChannelLane::default(),
                     SendPermit::always(),
                 )
@@ -882,7 +881,7 @@ mod tests {
         );
 
         let result = backend
-            .send_with_permit(
+            .send_frame(
                 TransportMessage::Custom(Bytes::from_static(&[1, 2, 3])),
                 ChannelLane::default(),
                 SendPermit::new(|| false),

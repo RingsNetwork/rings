@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use super::model::PerClass;
 use super::model::TransferClass;
 
 /// Four control frames followed by one lower-class frame gives control at most
@@ -16,18 +17,6 @@ pub(super) const CLASSES: [TransferClass; TransferClass::COUNT] = {
     let [storage, e2e, application] = LOWER_CLASSES;
     [TransferClass::DhtControl, storage, e2e, application]
 };
-
-macro_rules! lane_for_class {
-    ($lanes:expr, $class:expr) => {{
-        let [control, storage, e2e, application] = $lanes;
-        match $class {
-            TransferClass::DhtControl => control,
-            TransferClass::Storage => storage,
-            TransferClass::E2e => e2e,
-            TransferClass::Application => application,
-        }
-    }};
-}
 
 /// Transfers of one class lane that may be in flight at once (#899).
 ///
@@ -327,7 +316,7 @@ impl<T> RunnableTransfer<T> {
 /// receiver's credit never takes the worker from another lane, and the classes stay isolated as
 /// their transport lanes are.
 pub(super) struct TransferQueues<T> {
-    lanes: [TransferLane<T>; TransferClass::COUNT],
+    lanes: PerClass<TransferLane<T>>,
     lower_cursor: usize,
     consecutive_control: usize,
     /// In-flight transfers allowed per lane.
@@ -344,7 +333,7 @@ impl<T> TransferQueues<T> {
     /// Queues whose lanes each keep at most `window` transfers in flight.
     fn with_window(window: usize) -> Self {
         Self {
-            lanes: std::array::from_fn(|_| TransferLane::default()),
+            lanes: PerClass::from_fn(|_| TransferLane::default()),
             lower_cursor: 0,
             consecutive_control: 0,
             window,
@@ -477,7 +466,7 @@ impl<T> TransferQueues<T> {
 
     pub(super) fn drain_transfers(&mut self) -> Vec<T> {
         self.lanes
-            .iter_mut()
+            .values_mut()
             .flat_map(TransferLane::drain_transfers)
             .collect()
     }
@@ -487,17 +476,17 @@ impl<T> TransferQueues<T> {
     pub(super) fn remove_ready_where(&mut self, mut predicate: impl FnMut(&T) -> bool) -> Vec<T> {
         let window = self.window;
         self.lanes
-            .iter_mut()
+            .values_mut()
             .flat_map(|lane| lane.remove_ready_where(&mut predicate, window))
             .collect()
     }
 
     fn lane(&self, class: TransferClass) -> &TransferLane<T> {
-        lane_for_class!(&self.lanes, class)
+        &self.lanes[class]
     }
 
     fn lane_mut(&mut self, class: TransferClass) -> &mut TransferLane<T> {
-        lane_for_class!(&mut self.lanes, class)
+        &mut self.lanes[class]
     }
 
     /// The next lower class, round robin from the cursor, that `runnable` admits.

@@ -529,7 +529,10 @@ async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) -> Vec<BTreeMap
         );
         nodes[sender]
             .swarm
-            .send_direct_message(Message::ProbeRequest(test_probe_request(1)), receiver_did)
+            .send_direct_core_message_for_test(
+                Message::ProbeRequest(test_probe_request(1)),
+                receiver_did,
+            )
             .await
             .expect("control probe must enter the real outbound scheduler");
     }

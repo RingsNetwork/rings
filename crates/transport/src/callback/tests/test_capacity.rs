@@ -10,7 +10,7 @@ use crate::core::pool::ChannelLane;
 use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 use crate::core::transport::TransportMessage;
 
-/// Soft bound (#913 R7 M3): while the node's connections hold at least its soft limit, a lane
+/// Law (soft bound): while the node's connections hold at least its soft limit, a lane
 /// whose releases complete a batch defers its advertisement; the release, on any connection,
 /// that brings the load below the limit makes it.
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
@@ -50,10 +50,9 @@ fn test_a_loaded_node_defers_credit_until_any_release_relieves_it() {
     assert_eq!(load.held(), 0);
 }
 
-/// The priority lane is never deferred (#913 R8 M3): while the node holds its soft limit, a
-/// batch released on [`ChannelLane::PRIORITY`] is advertised at once, and a batch released on any
-/// other lane is deferred, so a peer's control traffic never waits for what other traffic makes
-/// the node hold.
+/// The priority lane is never deferred: while the node holds its soft limit, a batch released
+/// on [`ChannelLane::PRIORITY`] is advertised at once, and a batch released on any other lane is
+/// deferred, so a peer's control traffic never waits for what other traffic makes the node hold.
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
 #[test]
 fn test_a_loaded_node_still_advertises_the_priority_lane() {
@@ -176,9 +175,9 @@ fn test_a_terminal_state_fails_a_sender_waiting_for_credit() {
     drop(held);
 }
 
-/// An abandoned credit wait leaves nothing behind (#913 R7 M2): the wait registers its waker
-/// while it waits, and dropping it before credit comes removes exactly its own registration,
-/// while another wait on the lane stays registered.
+/// An abandoned credit wait leaves nothing behind: the wait registers its waker while it
+/// waits, and dropping it before credit comes removes exactly its own registration, while
+/// another wait on the lane stays registered.
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
 #[test]
 fn test_an_abandoned_credit_wait_leaves_no_waker() {
@@ -320,9 +319,8 @@ fn test_a_send_carrying_another_connections_credit_is_refused() {
         .expect("a fresh lane has credit")
         .expect("a fresh lane is open");
     let mut permit = SendPermit::always().with_credit(LaneCreditReservation(foreign));
-    let message = TransportMessage::Custom(Bytes::from_static(b"data"));
     assert!(matches!(
-        own.credit_for_send(&message, lane, &mut permit)
+        own.credit_for_custom_send(lane, &mut permit)
             .now_or_never()
             .expect("a carried credit is judged at once"),
         Err(Error::ForeignCredit(_))

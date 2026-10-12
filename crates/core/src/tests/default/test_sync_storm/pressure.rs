@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::*;
+use crate::swarm::application::ApplicationData;
 
 const BARRIER_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
 /// The frames one lane may have in flight: its credit window.
@@ -172,11 +173,7 @@ fn mixed_pressure_sends<'a>(
         async move {
             nodes[sender]
                 .swarm
-                .send_direct_message(
-                    Message::custom(b"sync-storm-lower-class")
-                        .expect("mixed-load application message must encode"),
-                    peer,
-                )
+                .send_direct_message(ApplicationData::custom(b"sync-storm-lower-class"), peer)
                 .await
                 .expect("mixed-load application send must complete");
         }
@@ -187,7 +184,7 @@ fn mixed_pressure_sends<'a>(
             async move {
                 nodes[sender]
                     .swarm
-                    .send_direct_message(
+                    .send_direct_core_message_for_test(
                         Message::ProbeRequest(test_probe_request(
                             u8::try_from(ordinal).unwrap_or(u8::MAX),
                         )),
@@ -319,7 +316,7 @@ async fn issue_stabilizer_probe(
     for (index, node) in nodes.iter().enumerate() {
         if index != sender && index != receiver && transport.has_active_connection(node.did()) {
             transport
-                .restart_peer_liveness_period_for_test(node.did())
+                .restart_peer_liveness_period_for_test(node.did(), 0)
                 .expect("non-target peer liveness must be restartable");
         }
     }
@@ -423,8 +420,7 @@ async fn start_barrier_backlog<'a>(
     Vec<ScheduledDelivery>,
 ) {
     dummy_controlled::set_max_message_size(super::CHUNKED_MAX_MESSAGE_SIZE);
-    let large_application = Message::custom(&vec![0x5a; BARRIER_PAYLOAD_BYTES])
-        .expect("chunked barrier payload must encode");
+    let large_application = ApplicationData::custom(&vec![0x5a; BARRIER_PAYLOAD_BYTES]);
     let mut application_send = nodes[sender]
         .swarm
         .send_direct_message(large_application, peer)

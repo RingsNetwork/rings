@@ -16,13 +16,13 @@ use crate::message::test_probe_request;
 use crate::message::CustomMessage;
 use crate::message::Message;
 use crate::message::MessageCategory;
+use crate::message::MessageLimit;
 use crate::message::MessagePayload;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::TRANSACTION_REPLAY_WINDOW;
 use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationDelivery;
 use crate::swarm::application::ApplicationMessage;
-use crate::swarm::callback::InboundLane;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
 use crate::tests::data_transfer_progressed;
@@ -81,7 +81,7 @@ async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fi
         let controls_before = frame_count(&trace, MessageCategory::DhtControl);
         node1
             .swarm
-            .send_direct_message(
+            .send_direct_core_message_for_test(
                 Message::ProbeRequest(test_probe_request(round)),
                 node2.did(),
             )
@@ -169,7 +169,7 @@ async fn next_inbound(node: &Node, waiting_for: &str) -> Result<MessagePayload> 
 ///
 /// The stall is the inbound tap's hold on the receiver's Application lane: its first frame
 /// waits at the logical stage until the hold is dropped. No application can stall a lane, since
-/// a full inbox drops live data instead of waiting (#913 R10), so the hold stands for any stall
+/// a full inbox drops live data instead of waiting, so the hold stands for any stall
 /// of one class.
 ///
 /// Under per-lane credit (#924) the stalled lane holds back its sender once the receiver holds
@@ -190,12 +190,12 @@ async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order()
     let inbox = node2.swarm.application_inbox()?;
     node2
         .swarm
-        .set_admission_delegation(BACKLOG_PREFIX.as_bytes().to_vec(), true);
+        .set_admission_delegation(BACKLOG_PREFIX.as_bytes().to_vec(), MessageLimit::Delegated);
     let lane_hold = node2
         .swarm
         .transport
         .inbound_tap_for_test()
-        .hold_lane(InboundLane::Application);
+        .hold_application_lane();
     connect_native_nodes(&node1, &node2).await?;
     let peer = node2.did();
 
@@ -203,7 +203,7 @@ async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order()
     let sender = node1.swarm.clone();
     let backlog_sends = tokio::spawn(async move {
         for index in 0..backlog {
-            let message = Message::custom(format!("{BACKLOG_PREFIX}{index}").as_bytes())?;
+            let message = ApplicationData::custom(format!("{BACKLOG_PREFIX}{index}").as_bytes());
             sender.send_direct_message(message, peer).await?;
         }
         Ok::<(), Error>(())
@@ -219,7 +219,10 @@ async fn test_a_stalled_class_channel_holds_only_its_class_and_keeps_its_order()
     for nonce in 0..probes {
         node1
             .swarm
-            .send_direct_message(Message::ProbeRequest(test_probe_request(nonce)), peer)
+            .send_direct_core_message_for_test(
+                Message::ProbeRequest(test_probe_request(nonce)),
+                peer,
+            )
             .await?;
     }
     let mut controls = 0;

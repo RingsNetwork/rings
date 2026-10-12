@@ -459,7 +459,7 @@ pub(super) async fn wait_for_online_node_dids_in_storage(
                     .await
                     .map_err(Error::Storage)?
                 {
-                    Some(entry) => Processor::online_node_descriptors_from_entry(&entry)
+                    Some(entry) => OnlineNodeRegistration::descriptors_from_entry(&entry)
                         .into_iter()
                         .map(|descriptor| descriptor.did)
                         .collect::<BTreeSet<_>>(),
