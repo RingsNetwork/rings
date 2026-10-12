@@ -24,7 +24,10 @@
 //!     holding `B`'s shared outbound capacity (`report_held`).
 //!   - L4, lane isolation: lane-0 credit is granted apart from the data lanes' receive budget,
 //!     and lane-0 service never waits on a partly reassembled data message
-//!     (`transport::tests::test_inbound::test_application_backpressure`).
+//!     (`transport::tests::test_inbound::test_application_backpressure`). A lane hands its next
+//!     frame to `B`'s actor only once the previous one completed (`InboundCompletion::Await`),
+//!     so each lane holds at most one event of the per-peer share, [`PEER_EVENTS`], which a
+//!     lane-0 event needs a free slot of.
 //!   - Probe and answer slots: a probe, and an answer, take no shared outbound capacity
 //!     (`outbound::sender_bounded`), so frames that other traffic holds cannot refuse them.
 //!   - The probe waits for credit until its own deadline, never the shorter first-frame one.
@@ -35,9 +38,10 @@
 //! checker; an honest round trip stays inside the deadline. Credit that returns lets held
 //! frames leave at once.
 //!
-//! Subjects: three honest ones (fast; under load, with a stalled data lane and an application
-//! that never reads; late to grant credit) and two that dodge judgment (withholding lane-0
-//! credit; keeping its connection unready at every probe pass).
+//! Subjects: four honest ones (fast; under load, with a stalled data lane and an application
+//! that never reads; late to grant credit; slow to handle a data-lane backlog) and two that
+//! dodge judgment (withholding lane-0 credit; keeping its connection unready at every probe
+//! pass).
 //!
 //! Properties:
 //! - `Always` an honest subject is never evicted;
@@ -46,8 +50,9 @@
 //! - `Sometimes` a probe is answered, and a dodging subject's eviction is reachable, so neither
 //!   is vacuous.
 //!
-//! Each design #913 R5–R10 and #935 refuted is a mutant that breaks one law above, and the
-//! checker refutes it by the property it breaks; production refutes nothing.
+//! Each design #913 R5–R10, its redundancy audit and #935 refuted is a mutant that breaks one
+//! law above, and the checker refutes it by the property it breaks; production refutes
+//! nothing.
 
 use std::collections::BTreeSet;
 
@@ -74,6 +79,11 @@ const HORIZON: u8 = 13;
 const CHATTER: u8 = 3;
 /// The first-frame deadline of a detached send, in milliseconds.
 const FIRST_FRAME_MS: u128 = IRREVOCABLE_SEND_COMPLETION_TIMEOUT.as_millis();
+/// The events of `B`'s per-peer actor share, which reserves none per lane: one per lane of the
+/// model (lane 0 and the data lane), as production's share exceeds its lanes.
+const PEER_EVENTS: u8 = 2;
+/// The frames `A` has queued on a slow-handler subject's data lane: more than the share.
+const DATA_BACKLOG: u8 = 3;
 /// The tick from which a late subject grants credit: after the first probe's first-frame
 /// deadline, before its answer deadline.
 const CREDIT_RETURNS: u8 = 9;
@@ -97,6 +107,9 @@ enum Subject {
     Loaded,
     /// Honest, over a fast link, but grants `A` no credit before [`CREDIT_RETURNS`].
     LateCredit,
+    /// Honest: its handler on the data lane runs past the horizon (a long storage batch), with
+    /// [`DATA_BACKLOG`] frames of `A` queued on that lane.
+    SlowHandler,
     /// Dodging: grants `A` no lane-0 credit; may chatter on its application lane.
     Withholding,
     /// Dodging: keeps its connection unready at every probe pass, so no probe reaches it.
@@ -106,7 +119,10 @@ enum Subject {
 impl Subject {
     /// Whether the subject is honest, so must never be evicted.
     fn honest(self) -> bool {
-        matches!(self, Self::Fast | Self::Loaded | Self::LateCredit)
+        matches!(
+            self,
+            Self::Fast | Self::Loaded | Self::LateCredit | Self::SlowHandler
+        )
     }
 }
 
@@ -140,6 +156,9 @@ enum Discipline {
     AnswerTakesSharedCapacity,
     /// #913 R10 M7: a probe issued while the connection is unready is withdrawn uncharged.
     WithdrawWhenUnready,
+    /// #913 audit: a lane hands every frame over without awaiting the previous one, so one
+    /// lane's backlog fills the per-peer share.
+    HandOffWithoutAwait,
 }
 
 /// A frame of the model.
@@ -182,6 +201,8 @@ struct State {
     partial: bool,
     /// Whether `B`'s report toward `M` waits without credit, holding `B`'s shared capacity.
     report_held: bool,
+    /// The events of `B`'s per-peer share its data lane holds, which never complete.
+    actor_data: u8,
     /// Whether `B`'s lane-0 service is blocked for good.
     blocked: bool,
     chatter_left: u8,
@@ -241,7 +262,7 @@ impl LivenessModel {
             Subject::Loaded => {
                 self.discipline != Discipline::SharedReceiveBudget || state.data_held.is_empty()
             }
-            Subject::Fast | Subject::Flapping => true,
+            Subject::Fast | Subject::SlowHandler | Subject::Flapping => true,
         }
     }
 
@@ -250,7 +271,7 @@ impl LivenessModel {
         match self.subject {
             Subject::Loaded => frame == Frame::Chunk(0),
             Subject::LateCredit => state.now >= CREDIT_RETURNS,
-            Subject::Fast | Subject::Withholding | Subject::Flapping => true,
+            Subject::Fast | Subject::SlowHandler | Subject::Withholding | Subject::Flapping => true,
         }
     }
 
@@ -301,7 +322,8 @@ impl LivenessModel {
     /// Whether `B` can serve its lane-0 head now.
     fn serves(&self, state: &State) -> bool {
         let barrier = self.discipline == Discipline::ReassemblyBarrier && state.partial;
-        !state.lane0.is_empty() && !state.blocked && !state.evicted && !barrier
+        let share_full = state.actor_data >= PEER_EVENTS;
+        !state.lane0.is_empty() && !state.blocked && !state.evicted && !barrier && !share_full
     }
 
     /// Whether some action must happen before time may pass.
@@ -474,6 +496,13 @@ impl Model for LivenessModel {
             lane0: Vec::new(),
             partial: false,
             report_held: false,
+            actor_data: match (self.subject, self.discipline) {
+                (Subject::SlowHandler, Discipline::HandOffWithoutAwait) => {
+                    DATA_BACKLOG.min(PEER_EVENTS)
+                }
+                (Subject::SlowHandler, _) => 1,
+                _ => 0,
+            },
             blocked: false,
             chatter_left: if self.subject == Subject::Withholding {
                 CHATTER
@@ -623,6 +652,7 @@ fn test_production_liveness_satisfies_the_composed_laws() {
         Subject::Fast,
         Subject::Loaded,
         Subject::LateCredit,
+        Subject::SlowHandler,
         Subject::Withholding,
         Subject::Flapping,
     ] {
@@ -636,7 +666,8 @@ fn test_production_liveness_satisfies_the_composed_laws() {
     }
 }
 
-/// Every design #913 R5–R10 and #935 refuted is refuted by the property it breaks.
+/// Every design #913 R5–R10, its redundancy audit and #935 refuted is refuted by the property
+/// it breaks.
 #[test]
 fn test_each_refuted_design_is_refuted_by_the_composed_model() {
     let never = "an honest subject is never evicted";
@@ -698,6 +729,12 @@ fn test_each_refuted_design_is_refuted_by_the_composed_model() {
             Subject::Flapping,
             false,
             eventually,
+        ),
+        (
+            Discipline::HandOffWithoutAwait,
+            Subject::SlowHandler,
+            false,
+            never,
         ),
     ] {
         assert!(

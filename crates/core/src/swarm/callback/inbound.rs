@@ -93,6 +93,8 @@ const INBOUND_RESERVED_BYTES: [usize; INBOUND_LANE_COUNT] =
     [INBOUND_RESERVED_BYTES_PER_LANE; INBOUND_LANE_COUNT];
 /// Per-peer share prevents one connection from occupying the node-wide actor.
 const INBOUND_PEER_CAPACITY: usize = 32;
+const _: () =
+    assert!((rings_transport::core::pool::DATA_CHANNEL_POOL_SIZE as usize) < INBOUND_PEER_CAPACITY);
 const INBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 /// Bounds command work before completed lane tasks are observed.
 const INBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
@@ -103,8 +105,33 @@ const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 /// Where the drainer that handed an event over learns its logical outcome.
 type InboundReply = oneshot::Sender<Result<()>>;
 
+/// How the submitter of an event learns its logical outcome, which is also how the transport
+/// lane that carried it is paced.
+///
+/// ```text
+///   lane FIFO ─drainer─▶ hand-off (credit returned) ─▶ actor ─▶ handler done ─▶ reply
+///        ▲                                                                       │
+///        └──────────── the drainer takes the lane's next frame only now ◀────────┘
+/// ```
+///
+/// Law (lane-local pacing). An arrived frame is submitted with [`Self::Await`], and the
+/// transport's drainer of its lane hands the next frame over only once this one completed, so
+/// every transport lane of a peer has at most one event in the actor. A peer has
+/// `DATA_CHANNEL_POOL_SIZE` lanes, fewer than the events of its per-peer share
+/// (`INBOUND_PEER_CAPACITY`), so arrived frames never contend for those events, which the share
+/// reserves for no lane; its bytes hold at most one data-channel message per lane, the peer's
+/// own. A lane slow to process holds its own frames, and their transport credit, in its FIFO,
+/// and backpressure reaches the peer through that lane's credit alone (#913 R10 L4). Without
+/// it, credit returned at hand-off would let one lane fill the shared per-peer capacity and
+/// stall the others, lane 0 included; the composed liveness model refutes that design
+/// (`HandOffWithoutAwait`). The dummy transport's "delivered = processed" rests on it too.
+///
+/// A frame released from a hold is submitted with [`Self::LogHeld`] and is not paced: the
+/// holds bound how many are released, once, at admission or when the session is learned.
 enum InboundCompletion {
+    /// Reply with the outcome once the event's logical processing is done.
     Await(InboundReply),
+    /// Nobody awaits: a failure is logged against `peer`.
     LogHeld { peer: Did },
 }
 

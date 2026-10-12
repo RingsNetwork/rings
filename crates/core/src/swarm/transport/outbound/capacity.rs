@@ -132,6 +132,18 @@ fn admit_with_fixed_reservation<T>(
     try_reserved().or_else(|_| waiters.try_admit_unqueued(capacity_error, try_shared))
 }
 
+/// The class's reserved share, else, for a request larger than the class's fixed request, a
+/// first-come-first-served wait on `waiters` for the shared capacity; a smaller request does not
+/// wait ([`admit_with_fixed_reservation`]).
+///
+/// Law (FIFO is the resource order here). Every waiter of one queue waits for the same shared
+/// capacity: a peer's queue for that peer's, the global queue for the node's shared bytes,
+/// since a request takes its reserved share before it queues and queues only for the shared
+/// part. A first-in-first-out queue is therefore the resource-ordered queue of
+/// `fair_admission::resource_order`, which differs from it only when waiters draw on different
+/// resources, as the inbound actor's do (lane, peer and node): nothing waiting here is held
+/// back by a resource it does not need, and no request overtakes one refused by its own. Only
+/// application and storage-maintenance sends wait here; a protocol send never does.
 async fn acquire_with_fixed_reservation<T>(
     waiters: &Arc<FairWaitQueue>,
     bytes: usize,
