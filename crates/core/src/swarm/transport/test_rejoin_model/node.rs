@@ -235,7 +235,7 @@ impl NodeState {
     /// gate of `InboundProcessor::pending_connection_gate`
     /// (`InboundGate::Admitted`).
     fn admits(&self, attempt: PendingConnectionAttempt) -> bool {
-        self.lifecycles.active_attempt(attempt.peer()) == Some(attempt)
+        self.lifecycles.owns_active_slot(attempt)
     }
 
     /// `Sendable(g)`: `g` is admitted and not send-terminal, the production
@@ -328,7 +328,7 @@ impl NodeState {
         }
     }
 
-    /// `reconcile_incoming_offer_peer` then `create_connection_answer`.
+    /// `reconcile_incoming_offer_peer` then `open_answer` and `create_answer`.
     ///
     /// ```text
     /// [admitted record?] ── sendable ──▶ refuse (AlreadyConnected)
@@ -508,9 +508,7 @@ impl NodeState {
             };
             Ok(Some((next, expected_after_head_replacement, requested)))
         });
-        let Ok(RetirementOutcome::Retired(((topology, expected, requested), _announcement))) =
-            retired
-        else {
+        let Ok(RetirementOutcome::Retired((topology, expected, requested))) = retired else {
             return None;
         };
         if expected.is_some_and(|expected| expected != topology.successors) {

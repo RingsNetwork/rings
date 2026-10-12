@@ -18,6 +18,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopToken;
 use crate::message::types::Message;
+use crate::swarm::transport::egress::QueueAdmission;
 use crate::swarm::transport::SwarmTransport;
 
 /// Where one placement goes under the topology now.
@@ -52,12 +53,17 @@ pub(crate) trait Placement {
 /// of one operation observes the same stop.
 #[derive(Clone)]
 pub(crate) enum Attempts {
-    /// Reroute within `REROUTING_BUDGET`; a wait ends once the stop is requested.
+    /// Reroute within `REROUTING_BUDGET`; a wait ends once the stop is requested. Each attempt
+    /// is sent under the application discipline: the Swarm storage API is the application
+    /// boundary.
     Rerouted(StopToken),
     /// One attempt, as before #859: a pre-acceptance refusal ends the placement with
     /// `SingleAttemptRefused` carrying it, and nothing waits. For writes originated on the
     /// inbound path (relay holds, inbox retirement), which must never hold an inbound lane on a
-    /// rerouting wait.
+    /// rerouting wait: the attempt is sent under the protocol discipline, so it waits on no peer
+    /// either (the inbound-locality law of `swarm::transport::egress`). It is accepted once
+    /// queued; a queued frame the first-frame deadline later drops is local backpressure, which
+    /// the origin's own retry covers (an inbox element stays at its owner and is offered again).
     Single,
 }
 
@@ -88,12 +94,16 @@ pub(crate) async fn reroute<P: Placement>(
 ) -> Result<()> {
     let stop = match attempts {
         Attempts::Rerouted(stop) => stop,
-        Attempts::Single => return attempt(transport, placement, first).await.single(),
+        Attempts::Single => {
+            return attempt(transport, placement, first, QueueAdmission::Immediate)
+                .await
+                .single()
+        }
     };
     let mut rerouting = Rerouting::start();
     let mut route = first;
     loop {
-        let verdict = attempt(transport, placement, route).await;
+        let verdict = attempt(transport, placement, route, QueueAdmission::Waiting).await;
         let awaiting = match rerouting.after(verdict) {
             Step::Complete => return Ok(()),
             Step::Fail(error) => return Err(error),
@@ -104,15 +114,18 @@ pub(crate) async fn reroute<P: Placement>(
     }
 }
 
-/// One attempt of `placement` along `route`: settle it here, or send it toward `next`.
+/// One attempt of `placement` along `route`: settle it here, or send it toward `next` under
+/// `admission` (the application discipline for a rerouted placement, the protocol discipline
+/// for a single attempt, whose caller runs on an inbound lane).
 async fn attempt<P: Placement>(
     transport: &Arc<SwarmTransport>,
     placement: &P,
     route: Route<P::Local>,
+    admission: QueueAdmission,
 ) -> Verdict {
     match route {
         Route::Local(local) => Verdict::local(placement.settle(transport, local).await),
-        Route::Remote { next, message } => transport.attempt_remote(message, next).await,
+        Route::Remote { next, message } => transport.attempt_remote(message, next, admission).await,
     }
 }
 

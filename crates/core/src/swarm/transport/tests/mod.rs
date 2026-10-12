@@ -1,8 +1,4 @@
 use std::collections::BTreeMap;
-#[cfg(feature = "dummy")]
-use std::sync::atomic::AtomicUsize;
-#[cfg(feature = "dummy")]
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -10,21 +6,31 @@ use async_trait::async_trait;
 #[cfg(feature = "dummy")]
 use bytes::Bytes;
 use rings_transport::core::callback::TransportCallback;
+#[cfg(feature = "dummy")]
+use serde::Serialize;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use tracing_test::traced_test;
 
+use self::application_recorder::ApplicationRecorder;
 #[cfg(feature = "dummy")]
 use super::outbound::TransferDemand;
 use super::pending::ConnectionLifecycleRegistry;
 #[cfg(feature = "dummy")]
 use super::pending::FingerUpdateDisposition;
 use super::pending::LifecycleBounds;
+#[cfg(feature = "dummy")]
+use super::pending::RawConnectionOwner;
 use super::pending::ReservationVerdict;
 use super::*;
 #[cfg(feature = "dummy")]
 use crate::chunk::Chunk;
 #[cfg(feature = "dummy")]
 use crate::chunk::ChunkMeta;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::dht::delivery::NextHop;
+use crate::dht::EntryStorage;
+#[cfg(feature = "dummy")]
+use crate::dht::FingerFixRequest;
 use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
@@ -38,21 +44,26 @@ use crate::measure::MeasureError;
 use crate::measure::MeasurementBatch;
 use crate::measure::PeerQuality;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::HopBudget;
+use crate::message::Message;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::MessageCategory;
 use crate::message::MessagePayload;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::MessageRelay;
 #[cfg(feature = "dummy")]
 use crate::message::MessageSigner;
+use crate::message::PayloadSender;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::message::Transaction;
 use crate::storage::MemStorage;
+#[cfg(feature = "dummy")]
+use crate::swarm::application::SwarmEvent;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::callback::max_on_message_recursion_depth_for_test;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::callback::reset_on_message_recursion_depth_for_test;
-use crate::swarm::callback::DefaultCallback;
-use crate::swarm::callback::InnerSwarmCallback;
-use crate::swarm::callback::SwarmCallback;
-use crate::swarm::callback::SwarmCallbackSlot;
-#[cfg(feature = "dummy")]
-use crate::swarm::callback::SwarmEvent;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::SwarmBuilder;
 #[cfg(feature = "dummy")]
 use crate::tests::TEST_NETWORK_ID;
@@ -60,9 +71,12 @@ use crate::utils::GenerationWitness;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::utils::Witness;
 
+mod application_recorder;
 mod test_events;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_finger;
+#[cfg(feature = "dummy")]
+mod test_held_messages;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_inbound;
 mod test_lifecycle;
@@ -80,10 +94,6 @@ mod test_retirement_events;
 /// witness retains the value.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 type TestLatch = Witness<bool>;
-
-/// Monotone test counter whose readings can be awaited by event.
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-type TestCounter = Witness<usize>;
 
 #[derive(Default)]
 struct RecordingMeasure {
@@ -194,174 +204,81 @@ impl BehaviourJudgement for RecordingMeasure {
     }
 }
 
-pub(super) struct NoopSwarmCallback;
-
-/// Records every swarm event the application was told about, in start order.
-#[derive(Default)]
-struct EventLog {
-    events: Mutex<Vec<SwarmEvent>>,
-}
-
-impl EventLog {
-    /// Every event so far, in start order.
-    fn events(&self) -> Vec<SwarmEvent> {
-        self.events
-            .lock()
-            .expect("event log is never poisoned")
-            .clone()
-    }
-
-    /// Peers reported retired so far, in start order.
-    fn retired(&self) -> Vec<Did> {
-        self.events()
-            .into_iter()
-            .filter_map(|event| match event {
-                SwarmEvent::PeerRetired { peer } => Some(peer),
-                SwarmEvent::ConnectionStateChange { .. } => None,
-            })
-            .collect()
-    }
-}
-
-#[async_trait]
-impl SwarmCallback for EventLog {
-    /// Record the event.
-    async fn on_event(
-        &self,
-        event: &SwarmEvent,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        self.events
-            .lock()
-            .expect("event log is never poisoned")
-            .push(event.clone());
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl SwarmCallback for NoopSwarmCallback {}
-
-#[cfg(feature = "dummy")]
-#[derive(Default)]
-struct CountingSwarmCallback {
-    validates: AtomicUsize,
-    inbounds: AtomicUsize,
-    /// The bytes of every inbound `CustomMessage`, in delivery order.
-    inbound_custom_data: Mutex<Vec<Vec<u8>>>,
-    events: Mutex<Vec<WebrtcConnectionState>>,
-    inbound_changed: GenerationWitness,
-}
-
-#[cfg(feature = "dummy")]
-impl CountingSwarmCallback {
-    fn validates(&self) -> usize {
-        self.validates.load(Ordering::SeqCst)
-    }
-
-    fn inbounds(&self) -> usize {
-        self.inbounds.load(Ordering::SeqCst)
-    }
-
-    async fn wait_for_inbounds_at_least(&self, count: usize) {
-        self.inbound_changed
-            .await_until(|_generation| self.inbounds() >= count)
-            .await;
-    }
-
-    fn inbound_custom_data(&self) -> std::io::Result<Vec<Vec<u8>>> {
-        self.inbound_custom_data
-            .lock()
-            .map(|data| data.clone())
-            .map_err(|_| std::io::Error::other("inbound data poisoned"))
-    }
-
-    fn events(&self) -> std::io::Result<Vec<WebrtcConnectionState>> {
-        self.events
-            .lock()
-            .map(|events| events.clone())
-            .map_err(|_| std::io::Error::other("events poisoned"))
-    }
-
-    fn clear_events(&self) -> std::io::Result<()> {
-        self.events
-            .lock()
-            .map(|mut events| events.clear())
-            .map_err(|_| std::io::Error::other("events poisoned"))
-    }
-}
-
-#[cfg(feature = "dummy")]
-#[async_trait]
-impl SwarmCallback for CountingSwarmCallback {
-    async fn on_validate(
-        &self,
-        _payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        self.validates.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        self.inbounds.fetch_add(1, Ordering::SeqCst);
-        if let Ok(Message::CustomMessage(message)) = payload.transaction.data::<Message>() {
-            match self.inbound_custom_data.lock() {
-                Ok(mut data) => data.push(message.0),
-                Err(_) => tracing::error!("CountingSwarmCallback inbound data mutex is poisoned"),
-            }
-        }
-        self.inbound_changed.bump();
-        Ok(())
-    }
-
-    async fn on_event(
-        &self,
-        event: &SwarmEvent,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        let SwarmEvent::ConnectionStateChange { state, .. } = event else {
-            return Ok(());
-        };
-        match self.events.lock() {
-            Ok(mut events) => events.push(*state),
-            Err(_) => tracing::error!("CountingSwarmCallback events mutex is poisoned"),
-        }
-        Ok(())
-    }
-}
-
+/// The receive failures `measure` counted against `peer`.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-#[derive(Default)]
-struct BlockingConnectMeasure {
+fn failed_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> {
+    Ok(measure
+        .snapshot_counters()?
+        .into_iter()
+        .filter(|(did, counter)| *did == peer && *counter == MeasurementEvent::FailedToReceive)
+        .count())
+}
+
+/// The successful receives `measure` applied for `peer`.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+fn successful_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> {
+    Ok(measure
+        .snapshot_measurements()?
+        .into_iter()
+        .filter(|(did, event)| *did == peer && matches!(event, MeasurementEvent::Received { .. }))
+        .count())
+}
+
+/// A [`RecordingMeasure`] that pauses at the first observation of one lifecycle event, so a
+/// test can act while the transition reporting it is in flight: `started` is set as the event
+/// arrives, and the observation proceeds once the test sets `release`.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+struct BlockingEventMeasure {
     inner: RecordingMeasure,
-    connect_started: TestLatch,
-    release_connect: TestLatch,
+    /// The lifecycle event whose observation is paused.
+    gated: MeasurementEvent,
+    started: TestLatch,
+    release: TestLatch,
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-impl BlockingConnectMeasure {
-    async fn wait_for_connect_started(&self) {
-        self.connect_started.wait().await;
+impl BlockingEventMeasure {
+    /// A measure that pauses each observation of `gated` until released.
+    fn gating(gated: MeasurementEvent) -> Self {
+        Self {
+            inner: RecordingMeasure::default(),
+            gated,
+            started: TestLatch::default(),
+            release: TestLatch::default(),
+        }
     }
 
-    fn release_connect(&self) {
-        self.release_connect.set();
+    /// Resolve once an observation of the gated event has arrived and is paused.
+    async fn wait_for_started(&self) {
+        self.started.wait().await;
+    }
+
+    /// Let every paused observation of the gated event proceed.
+    fn release(&self) {
+        self.release.set();
+    }
+
+    /// Pause the gated lifecycle event before publishing any observation.
+    async fn wait_for_event(&self, event: MeasurementEvent) {
+        if event == self.gated {
+            self.started.set();
+            self.release.wait().await;
+        }
     }
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[async_trait]
-impl Measure for BlockingConnectMeasure {
+impl Measure for BlockingEventMeasure {
     /// Apply one explicitly attributed observation in this test double.
     async fn record(
         &self,
-        did: crate::dht::Did,
-        authentication: crate::measure::Authentication,
+        did: Did,
+        authentication: Authentication,
         event: MeasurementEvent,
-    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+    ) -> std::result::Result<ApplyOutcome, MeasureError> {
         if !authentication.permits(event) {
-            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
+            return Ok(ApplyOutcome::IgnoredUnattributable);
         }
         self.wait_for_event(event).await;
         self.inner.record(did, authentication, event).await
@@ -370,160 +287,116 @@ impl Measure for BlockingConnectMeasure {
     /// Gate once, then delegate the complete batch without splitting its transition.
     async fn record_batch(
         &self,
-        did: crate::dht::Did,
-        authentication: crate::measure::Authentication,
-        batch: crate::measure::MeasurementBatch,
-    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        did: Did,
+        authentication: Authentication,
+        batch: MeasurementBatch,
+    ) -> std::result::Result<ApplyOutcome, MeasureError> {
         if !authentication.permits(batch.event()) {
-            return Ok(crate::measure::ApplyOutcome::IgnoredUnattributable);
+            return Ok(ApplyOutcome::IgnoredUnattributable);
         }
         self.wait_for_event(batch.event()).await;
         self.inner.record_batch(did, authentication, batch).await
     }
 }
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-impl BlockingConnectMeasure {
-    /// Pause the target lifecycle event before publishing any observation.
-    async fn wait_for_event(&self, event: MeasurementEvent) {
-        if event == MeasurementEvent::Connected {
-            self.connect_started.set();
-            self.release_connect.wait().await;
-        }
-    }
-}
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[async_trait]
-impl BehaviourJudgement for BlockingConnectMeasure {
+impl BehaviourJudgement for BlockingEventMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
         self.inner.quality(did).await
     }
 }
 
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-#[derive(Default)]
-struct BlockingEventSwarmCallback {
-    blocked_peer: Mutex<Option<Did>>,
-    connected_started: TestLatch,
-    release_connected: TestLatch,
-    events: Mutex<Vec<(Did, WebrtcConnectionState)>>,
-}
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-impl BlockingEventSwarmCallback {
-    fn blocking_peer(peer: Did) -> Self {
-        Self {
-            blocked_peer: Mutex::new(Some(peer)),
-            ..Self::default()
-        }
-    }
-
-    async fn wait_for_connected_event_started(&self) {
-        self.connected_started.wait().await;
-    }
-
-    fn release_connected_event(&self) {
-        self.release_connected.set();
-    }
-
-    fn events(&self) -> std::io::Result<Vec<WebrtcConnectionState>> {
-        self.events
-            .lock()
-            .map(|events| events.iter().map(|(_, state)| *state).collect())
-            .map_err(|_| std::io::Error::other("events poisoned"))
-    }
-
-    fn peer_events(&self) -> std::io::Result<Vec<(Did, WebrtcConnectionState)>> {
-        self.events
-            .lock()
-            .map(|events| events.clone())
-            .map_err(|_| std::io::Error::other("events poisoned"))
-    }
-
-    fn blocks_connected_peer(&self, peer: Did) -> bool {
-        self.blocked_peer
-            .lock()
-            .map(|blocked| match *blocked {
-                Some(blocked) => blocked == peer,
-                None => true,
-            })
-            .unwrap_or(true)
-    }
-}
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-#[async_trait]
-impl SwarmCallback for BlockingEventSwarmCallback {
-    async fn on_event(
-        &self,
-        event: &SwarmEvent,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        let SwarmEvent::ConnectionStateChange { peer, state } = event else {
-            return Ok(());
-        };
-        match self.events.lock() {
-            Ok(mut events) => events.push((*peer, *state)),
-            Err(_) => tracing::error!("BlockingEventSwarmCallback events mutex is poisoned"),
-        }
-        if *state == WebrtcConnectionState::Connected && self.blocks_connected_peer(*peer) {
-            self.connected_started.set();
-            self.release_connected.wait().await;
-        }
-        Ok(())
-    }
-}
-
-fn transport_with_key_and_measure(key: &SecretKey, measure: MeasureImpl) -> Result<SwarmTransport> {
-    transport_with_key_measure_and_reassembly_limits(key, measure, ReassemblyLimits::production())
-}
-
-fn transport_with_key_measure_and_reassembly_limits(
-    key: &SecretKey,
+/// What a test transport varies, each part defaulting to the common case: a random identity,
+/// a fresh [`RecordingMeasure`], production reassembly limits, and in-memory DHT storage.
+struct TransportSpec {
+    /// The local identity.
+    key: SecretKey,
+    /// The measure the transport reports to.
     measure: MeasureImpl,
+    /// The bounds of inbound chunk reassembly.
     reassembly_limits: ReassemblyLimits,
-) -> Result<SwarmTransport> {
-    let delegatee_key = DelegateeKey::new_with_seckey(key)?;
-    let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
-        delegatee_key.delegator_did(),
-        3,
-        Box::new(MemStorage::new()),
-        DEFAULT_FINGER_TABLE_SIZE,
-    ));
-    Ok(SwarmTransport::new(SwarmTransportParts {
-        network_id: 0,
-        webrtc: SwarmWebrtcConfig::new("".to_string(), None, None),
-        delegatee_key,
-        dht,
-        measure: Some(measure),
-        transaction_replay: Arc::new(crate::message::TransactionReplay::new(Box::new(
-            crate::storage::MemStorage::new(),
-        ))),
-        settings: SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
-        callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
-        observer: Arc::new(crate::swarm::observer::NoopSwarmObserver),
-    }))
+    /// The DHT's entry storage.
+    storage: EntryStorage,
 }
 
+impl Default for TransportSpec {
+    fn default() -> Self {
+        Self {
+            key: SecretKey::random(),
+            measure: Arc::new(RecordingMeasure::default()),
+            reassembly_limits: ReassemblyLimits::production(),
+            storage: Box::new(MemStorage::new()),
+        }
+    }
+}
+
+impl TransportSpec {
+    /// The transport this spec describes.
+    fn build(self) -> Result<SwarmTransport> {
+        let delegatee_key = DelegateeKey::new_with_seckey(&self.key)?;
+        let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
+            delegatee_key.delegator_did(),
+            3,
+            self.storage,
+            DEFAULT_FINGER_TABLE_SIZE,
+        ));
+        Ok(SwarmTransport::new(SwarmTransportParts {
+            network_id: 0,
+            webrtc: SwarmWebrtcConfig::new("".to_string(), None, None),
+            delegatee_key,
+            dht,
+            measure: Some(self.measure),
+            transaction_replay: crate::message::TransactionReplay::new_shared(Box::new(
+                MemStorage::new(),
+            )),
+            settings: SwarmTransportSettings::new(
+                1,
+                VirtualNodeConfig::disabled(),
+                self.reassembly_limits,
+            ),
+            observer: Arc::new(crate::swarm::observer::NoopSwarmObserver),
+        }))
+    }
+}
+
+/// A transport reporting to `measure`, otherwise as [`TransportSpec::default`].
 fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
-    transport_with_key_and_measure(&SecretKey::random(), measure)
+    TransportSpec {
+        measure,
+        ..TransportSpec::default()
+    }
+    .build()
 }
 
 /// A transport whose identity is derived from `key`, for tests that must
 /// place the local peer at a known ring position.
 pub(super) fn transport_with_key(key: &SecretKey) -> Result<SwarmTransport> {
-    transport_with_key_and_measure(key, Arc::new(RecordingMeasure::default()))
+    TransportSpec {
+        key: key.clone(),
+        ..TransportSpec::default()
+    }
+    .build()
 }
 
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-fn transport_with_measure_and_reassembly_limits(
-    measure: MeasureImpl,
-    reassembly_limits: ReassemblyLimits,
-) -> Result<SwarmTransport> {
-    transport_with_key_measure_and_reassembly_limits(
-        &SecretKey::random(),
-        measure,
-        reassembly_limits,
-    )
+/// A shared [`TransportSpec::default`] transport, for a test that reads none of its parts.
+fn default_transport() -> Result<Arc<SwarmTransport>> {
+    TransportSpec::default().build().map(Arc::new)
+}
+
+/// Prepare a live finger-fix request for `slot`, the exact token production finger lookup
+/// would place in the DHT.
+///
+/// The finger state enters the same `AwaitingReport` state production uses, and the helper
+/// fails explicitly if `slot` cannot begin a request, so no test manufactures an uncorrelated
+/// token.
+#[cfg(feature = "dummy")]
+fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRequest> {
+    transport
+        .dht
+        .lock_finger()?
+        .prepare_request_for_test(slot)
+        .ok_or_else(|| Error::InvalidMessage("failed to prepare test finger request".to_owned()))
 }
 
 #[cfg(feature = "dummy")]
@@ -593,14 +466,12 @@ fn test_swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_successor_failover_considers_active_peer_outside_topology_hints() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let removed = SecretKey::random().address().into();
     let replacement = SecretKey::random().address().into();
 
     for peer in [removed, replacement] {
-        let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+        let callback = SwarmTransportCallback::new(Arc::clone(&transport));
         let (attempt, _offer) = transport
             .prepare_connection_offer_with_attempt(peer, callback)
             .await?;
@@ -621,51 +492,67 @@ async fn test_successor_failover_considers_active_peer_outside_topology_hints() 
     Ok(())
 }
 
+/// A frame of `message` that `session` signed and sent directly to `local`, its destination and
+/// next hop.
 #[cfg(feature = "dummy")]
-#[tokio::test]
-async fn test_data_channel_open_admits_successor_before_ice_connected() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, callback)
-        .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
-
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
-        .with_pending_connection_attempt(attempt);
-    callback
-        .on_data_channel_open(&peer.to_string())
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-
-    assert!(transport.has_active_connection(peer));
-    assert!(transport.get_connection(peer).is_some());
-    assert!(
-        transport.dht.successors().contains(&peer)?,
-        "opened data channel must promote the advertised peer into DHT successors"
-    );
-
-    transport.disconnect(peer).await?;
-    Ok(())
+fn local_payload(
+    message: impl Serialize,
+    session: &DelegateeKey,
+    local: Did,
+) -> Result<MessagePayload> {
+    MessagePayload::new_send(
+        message,
+        MessageSigner::new(session, TEST_NETWORK_ID),
+        local,
+        local,
+    )
 }
 
-/// A pending handshake bound to a callback, with a signer for the peer's messages.
+/// The wire bytes of [`local_payload`].
+#[cfg(feature = "dummy")]
+fn local_wire(message: Message, session: &DelegateeKey, local: Did) -> Result<Bytes> {
+    local_payload(message, session, local)?.to_wire()
+}
+
+/// A frame of `message` for `local` whose transaction `origin` signed at `sequence`, and whose
+/// last hop to `local` `carrier` signed.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+fn relayed_payload(
+    message: Message,
+    origin: &DelegateeKey,
+    carrier: &DelegateeKey,
+    local: Did,
+    sequence: u64,
+) -> Result<MessagePayload> {
+    let transaction = Transaction::new(
+        local,
+        crate::utils::new_uuid(),
+        sequence,
+        None,
+        message,
+        MessageSigner::new(origin, TEST_NETWORK_ID),
+    )?;
+    MessagePayload::new(
+        transaction,
+        MessageSigner::new(carrier, TEST_NETWORK_ID),
+        MessageRelay::new(NextHop::toward(local), local, HopBudget::MAX),
+    )
+}
+
+/// A peer, a signer for its messages, and the callback its frames arrive on: bound to a
+/// pending handshake with the peer, or, from [`unbound_peer`], to none.
 #[cfg(feature = "dummy")]
 struct PendingPeer {
     peer: Did,
     session: DelegateeKey,
-    callback: InnerSwarmCallback,
+    /// The handshake the callback is bound to; `None` for an unbound callback.
+    attempt: Option<PendingConnectionAttempt>,
+    callback: Arc<SwarmTransportCallback>,
 }
 
 #[cfg(feature = "dummy")]
-async fn pending_peer(
-    transport: &Arc<SwarmTransport>,
-    app_callback: &Arc<CountingSwarmCallback>,
-) -> Result<PendingPeer> {
-    pending_peer_with_key(transport, app_callback, SecretKey::random()).await
+async fn pending_peer(transport: &Arc<SwarmTransport>) -> Result<PendingPeer> {
+    pending_peer_with_key(transport, SecretKey::random()).await
 }
 
 /// A pending handshake with the peer behind `peer_key`, on a fresh connection generation and a
@@ -674,56 +561,88 @@ async fn pending_peer(
 #[cfg(feature = "dummy")]
 async fn pending_peer_with_key(
     transport: &Arc<SwarmTransport>,
-    app_callback: &Arc<CountingSwarmCallback>,
     peer_key: SecretKey,
 ) -> Result<PendingPeer> {
-    pending_peer_with(transport, app_callback, peer_key, None).await
+    pending_peer_with(transport, peer_key, None).await
 }
 
 /// [`pending_peer_with_key`], with the callback's inbound clock injected when `clock` is
-/// given, so a test drives the session hold's time itself.
+/// given, so a test drives the session hold's and reassembly's time itself.
 #[cfg(feature = "dummy")]
 async fn pending_peer_with(
     transport: &Arc<SwarmTransport>,
-    app_callback: &Arc<CountingSwarmCallback>,
     peer_key: SecretKey,
     clock: Option<Arc<Mutex<u128>>>,
 ) -> Result<PendingPeer> {
     let peer: Did = peer_key.address().into();
     let session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(transport), app_callback.clone());
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     let callback = match clock {
-        Some(clock) => InnerSwarmCallback::new_with_reassembly_clock_for_test(
-            Arc::clone(transport),
-            app_callback.clone(),
-            clock,
-        ),
-        None => InnerSwarmCallback::new(Arc::clone(transport), app_callback.clone()),
+        Some(clock) => {
+            SwarmTransportCallback::new_with_reassembly_clock_for_test(Arc::clone(transport), clock)
+        }
+        None => SwarmTransportCallback::new(Arc::clone(transport)),
     }
     .with_pending_connection_attempt(attempt);
     Ok(PendingPeer {
         peer,
         session,
-        callback,
+        attempt: Some(attempt),
+        callback: Arc::new(callback),
+    })
+}
+
+/// A peer behind `peer_key` whose frames arrive on a callback bound to no handshake: on no
+/// link, and admitted by no connection.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+fn unbound_peer(transport: &Arc<SwarmTransport>, peer_key: &SecretKey) -> Result<PendingPeer> {
+    Ok(PendingPeer {
+        peer: peer_key.address().into(),
+        session: DelegateeKey::new_with_seckey(peer_key)?,
+        attempt: None,
+        callback: Arc::new(SwarmTransportCallback::new(Arc::clone(transport))),
     })
 }
 
 #[cfg(feature = "dummy")]
 impl PendingPeer {
-    fn custom_message_wire(&self, transport: &SwarmTransport, data: &[u8]) -> Result<Vec<u8>> {
-        MessagePayload::new_send(
-            Message::custom(data)?,
-            MessageSigner::new(&self.session, TEST_NETWORK_ID),
-            transport.dht.did,
-            transport.dht.did,
-        )?
-        .to_wire()
-        .map(|wire| wire.to_vec())
+    /// The bound handshake, which an unbound peer lacks.
+    fn attempt(&self) -> Result<PendingConnectionAttempt> {
+        self.attempt.ok_or(Error::SwarmMissTransport(self.peer))
     }
 
+    /// A custom message of `data` from this peer to `transport`'s node.
+    fn custom_payload(&self, transport: &SwarmTransport, data: &[u8]) -> Result<MessagePayload> {
+        local_payload(Message::custom(data)?, &self.session, transport.dht.did)
+    }
+
+    /// The wire bytes of [`Self::custom_payload`].
+    fn custom_message_wire(&self, transport: &SwarmTransport, data: &[u8]) -> Result<Bytes> {
+        self.custom_payload(transport, data)?.to_wire()
+    }
+
+    /// A custom message of `data` from `origin`, carried its last hop to `transport`'s node by
+    /// this peer: a session this connection learns only if told.
+    #[cfg(not(target_family = "wasm"))]
+    fn relayed_custom_payload(
+        &self,
+        transport: &SwarmTransport,
+        origin: &DelegateeKey,
+        data: &[u8],
+    ) -> Result<MessagePayload> {
+        relayed_payload(
+            Message::custom(data)?,
+            origin,
+            &self.session,
+            transport.dht.did,
+            0,
+        )
+    }
+
+    /// Deliver `bytes` on this peer's connection.
     async fn receive(&self, bytes: &[u8]) -> Result<()> {
         self.callback
             .on_admitted_message_for_test(&self.peer.to_string(), bytes)
@@ -731,6 +650,8 @@ impl PendingPeer {
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     }
 
+    /// Admit the handshake through the production path: the data channel opens before ICE
+    /// connects.
     async fn admit(&self, transport: &SwarmTransport) -> Result<()> {
         open_dummy_data_channel_before_ice_connected(transport, self.peer).await?;
         self.callback
@@ -738,123 +659,12 @@ impl PendingPeer {
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     }
-}
 
-/// A verified message that arrives before this end admits the connection is held, not dropped,
-/// and is delivered once by admission itself; a message after admission passes straight through.
-#[cfg(feature = "dummy")]
-#[tokio::test]
-async fn test_pending_callback_messages_are_held_until_admission() -> Result<()> {
-    let measure = Arc::new(RecordingMeasure::default());
-    let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
-    let early = pending.custom_message_wire(&transport, b"message-before-admission")?;
-
-    pending.receive(&early).await?;
-
-    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 1);
-    assert_eq!(app_callback.validates(), 0);
-    assert_eq!(app_callback.inbounds(), 0);
-    assert_eq!(measure.snapshot_counters()?, Vec::new());
-    assert!(!transport.dht.successors().contains(&pending.peer)?);
-
-    pending.admit(&transport).await?;
-    app_callback.wait_for_inbounds_at_least(1).await;
-
-    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 0);
-    assert_eq!(app_callback.validates(), 1);
-    assert_eq!(app_callback.inbounds(), 1);
-    let counters = measure.snapshot_counters()?;
-    assert!(counters.contains(&(pending.peer, MeasurementEvent::Connected)));
-    assert!(counters
-        .iter()
-        .any(|(peer, event)| *peer == pending.peer
-            && matches!(event, MeasurementEvent::Received { .. })));
-    assert!(transport.has_active_connection(pending.peer));
-
-    let late = pending.custom_message_wire(&transport, b"message-after-admission")?;
-    pending.receive(&late).await?;
-    assert_eq!(app_callback.inbounds(), 2);
-    assert_eq!(app_callback.inbound_custom_data()?, vec![
-        b"message-before-admission".to_vec(),
-        b"message-after-admission".to_vec(),
-    ]);
-
-    transport.disconnect(pending.peer).await?;
-    Ok(())
-}
-
-/// Law (order): held messages are delivered in arrival order, ahead of anything that arrives
-/// after admission.
-#[cfg(feature = "dummy")]
-#[tokio::test]
-async fn test_held_messages_are_delivered_in_arrival_order() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
-
-    pending
-        .receive(&pending.custom_message_wire(&transport, b"first")?)
-        .await?;
-    pending
-        .receive(&pending.custom_message_wire(&transport, b"second")?)
-        .await?;
-    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 2);
-    assert_eq!(app_callback.inbounds(), 0);
-
-    pending.admit(&transport).await?;
-    pending
-        .receive(&pending.custom_message_wire(&transport, b"third")?)
-        .await?;
-    app_callback.wait_for_inbounds_at_least(3).await;
-
-    assert_eq!(app_callback.inbound_custom_data()?, vec![
-        b"first".to_vec(),
-        b"second".to_vec(),
-        b"third".to_vec(),
-    ]);
-    transport.disconnect(pending.peer).await?;
-    Ok(())
-}
-
-/// A message from a peer the handshake does not belong to cancels the handshake, and the frames
-/// held for it are discarded with it.
-#[cfg(feature = "dummy")]
-#[tokio::test]
-async fn test_held_messages_are_discarded_when_the_pending_connection_is_cancelled() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let pending = pending_peer(&transport, &app_callback).await?;
-    pending
-        .receive(&pending.custom_message_wire(&transport, b"held")?)
-        .await?;
-    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 1);
-
-    let stranger_key = SecretKey::random();
-    let stranger: Did = stranger_key.address().into();
-    let stranger_session = DelegateeKey::new_with_seckey(&stranger_key)?;
-    let intrusion = MessagePayload::new_send(
-        Message::custom(b"stranger")?,
-        MessageSigner::new(&stranger_session, TEST_NETWORK_ID),
-        transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
-    pending
-        .callback
-        .on_admitted_message_for_test(&stranger.to_string(), &intrusion)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-
-    assert_eq!(pending.callback.pre_admission_held_count_for_test(), 0);
-    assert!(!transport.has_connection_attempt(pending.peer)?);
-    assert_eq!(app_callback.inbounds(), 0);
-    Ok(())
+    /// Activate the handshake's generation directly, without opening its data channel.
+    fn activate(&self, transport: &SwarmTransport) -> Result<()> {
+        assert!(transport.activate_connection_for_test(self.attempt()?)?);
+        Ok(())
+    }
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -863,60 +673,39 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
 {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    assert!(transport.activate_connection_for_test(attempt)?);
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-        .with_pending_connection_attempt(attempt);
-    let mut current: Bytes = MessagePayload::new_send(
-        Message::custom(b"mailbox-drained")?,
-        MessageSigner::new(&peer_session, TEST_NETWORK_ID),
-        transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
+    let recorder = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
+    pending.activate(&transport)?;
+    let peer = pending.peer;
+    let mut current = pending.custom_message_wire(&transport, b"mailbox-drained")?;
     for _ in 0..2 {
         let chunk = Chunk {
             chunk: [0, 1],
             data: current,
             meta: ChunkMeta::default(),
         };
-        current = MessagePayload::new_send(
-            Message::Chunk(chunk),
-            MessageSigner::new(&peer_session, TEST_NETWORK_ID),
-            transport.dht.did,
-            transport.dht.did,
-        )?
-        .to_wire()?;
+        current = local_wire(Message::Chunk(chunk), &pending.session, transport.dht.did)?;
     }
 
     reset_on_message_recursion_depth_for_test();
-    let error = callback
+    let error = pending
+        .callback
         .on_admitted_message_for_test(&peer.to_string(), &current)
         .await
         .expect_err("nested chunks must be rejected");
 
     assert!(error.to_string().contains("Nested chunk"));
-    assert_eq!(app_callback.validates(), 1);
-    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(recorder.observed(), 1);
+    assert_eq!(recorder.inbounds(), 0);
     assert_eq!(max_on_message_recursion_depth_for_test(), 1);
+    assert_eq!(failed_receive_count(&measure, peer)?, 1);
     assert_eq!(
-        measure
-            .snapshot_counters()?
-            .into_iter()
-            .filter(|(did, counter)| {
-                *did == peer && *counter == MeasurementEvent::FailedToReceive
-            })
-            .count(),
-        1
+        pending
+            .callback
+            .inbound_for_test()
+            .admitted_count_for_test(),
+        0
     );
-    assert_eq!(callback.inbound_admitted_count_for_test(), 0);
     assert_eq!(transport.reassembly_budget().buffered_cost_for_test(), 0);
     Ok(())
 }
@@ -944,7 +733,7 @@ async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Resul
     )?;
 
     let error = transport
-        .send_payload_detached_with_outcome(payload)
+        .send_payload_admitted(payload)
         .await
         .expect_err("missing route must be checked before capacity");
 
@@ -963,13 +752,11 @@ async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Resul
 #[tokio::test]
 async fn test_invalid_inbound_log_omits_transaction_data() -> Result<()> {
     const PRIVATE_MARKER: &str = "PRIVATE-INBOUND-PAYLOAD-7f34c91a";
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let mut payload = MessagePayload::new_send(
         Message::custom(PRIVATE_MARKER.as_bytes())?,
         MessageSigner::new(&peer_session, TEST_NETWORK_ID),
@@ -1015,92 +802,84 @@ async fn test_invalid_inbound_log_omits_transaction_data() -> Result<()> {
     Ok(())
 }
 
+/// A `Disconnected` state before the data channel opens neither retires the handshake nor
+/// reaches the application; the later admission is announced as `PeerAdmitted` alone.
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_pending_disconnected_before_data_channel_open_is_not_reported() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let peer = SecretKey::random().address().into();
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    let pending_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-        .with_pending_connection_attempt(attempt);
+    let recorder = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
+    let peer = pending.peer;
 
-    pending_callback
+    pending
+        .callback
         .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Disconnected)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
     assert_eq!(transport.pending_connection_count()?, 1);
-    assert_eq!(app_callback.events()?, Vec::new());
+    assert_eq!(recorder.events(), Vec::new());
     assert_eq!(measure.snapshot_counters()?, Vec::new());
     assert!(!transport.dht.successors().contains(&peer)?);
 
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
-    pending_callback
-        .on_data_channel_open(&peer.to_string())
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    pending.admit(&transport).await?;
 
-    assert!(transport.is_active_connection_attempt(attempt));
-    let events = app_callback.events()?;
-    assert_eq!(events, vec![
-        WebrtcConnectionState::Connecting,
-        WebrtcConnectionState::Connected,
-    ]);
-    assert!(transport.dht.successors().contains(&peer)?);
+    assert!(transport.has_active_connection(peer));
+    assert!(transport.get_connection(peer).is_some());
+    assert_eq!(recorder.events(), vec![SwarmEvent::PeerAdmitted { peer }]);
+    assert!(
+        transport.dht.successors().contains(&peer)?,
+        "opened data channel must promote the advertised peer into DHT successors"
+    );
 
     transport.disconnect(peer).await?;
     Ok(())
 }
 
+/// A terminal state that retires the generation while its admission is in flight keeps the
+/// peer out of the DHT, and the application reads neither the admission nor a retirement.
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -> Result<()> {
-    let measure = Arc::new(BlockingConnectMeasure::default());
+    let measure = Arc::new(BlockingEventMeasure::gating(MeasurementEvent::Connected));
     let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let recorder = ApplicationRecorder::attach(&transport)?;
     let peer = SecretKey::random().address().into();
-    let app_callback = Arc::new(CountingSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let offer_callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
     open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
-    app_callback.clear_events()?;
 
     let opening_transport = Arc::clone(&transport);
-    let opening_callback = app_callback.clone();
     let opening = tokio::spawn(async move {
-        let callback = InnerSwarmCallback::new(opening_transport, opening_callback)
-            .with_pending_connection_attempt(attempt);
+        let callback =
+            SwarmTransportCallback::new(opening_transport).with_pending_connection_attempt(attempt);
         callback
             .on_data_channel_open(&peer.to_string())
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
 
-    measure.wait_for_connect_started().await;
+    measure.wait_for_started().await;
     assert!(transport.is_active_connection_attempt(attempt));
 
-    let terminal_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+    let terminal_callback = SwarmTransportCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(attempt);
     terminal_callback
         .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
-    measure.release_connect();
+    measure.release();
     opening
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))??;
 
     assert!(!transport.is_active_connection_attempt(attempt));
     assert!(!transport.dht.successors().contains(&peer)?);
-    let events = app_callback.events()?;
-    assert!(events.contains(&WebrtcConnectionState::Closed));
-    assert!(!events.contains(&WebrtcConnectionState::Connected));
+    assert_eq!(recorder.events(), Vec::new());
     Ok(())
 }

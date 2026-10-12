@@ -11,7 +11,6 @@ use futures::future::join_all;
 use jsonrpc_core::types::error::Error;
 use jsonrpc_core::types::error::ErrorCode;
 use jsonrpc_core::Result;
-use rings_core::dht::entry::Entry;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::message::e2e;
@@ -256,11 +255,7 @@ impl HandleRpc<PublishMessageToTopicRequest, PublishMessageToTopicResponse> for 
         &self,
         req: PublishMessageToTopicRequest,
     ) -> Result<PublishMessageToTopicResponse> {
-        let encoded = req
-            .data
-            .encode()
-            .map_err(|e| Error::invalid_params(format!("Failed to encode data: {e:?}")))?;
-        self.storage_append_data(&req.topic, encoded).await?;
+        self.append_text_element(&req.topic, req.data).await?;
         Ok(PublishMessageToTopicResponse {})
     }
 }
@@ -272,24 +267,9 @@ impl HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse> for Proces
         &self,
         req: FetchTopicMessagesRequest,
     ) -> Result<FetchTopicMessagesResponse> {
-        let entry_key = Entry::gen_did(&req.topic)
-            .map_err(|_| Error::invalid_params("Failed to get id of topic"))?;
-
-        self.storage_fetch(entry_key).await?;
-        let result = self.storage_check_cache(entry_key).await;
-
-        let Some(entry) = result else {
-            return Ok(FetchTopicMessagesResponse { data: vec![] });
-        };
-
-        let data = entry
-            .data
-            .iter()
-            .skip(req.skip as usize)
-            .map(|v| v.decode())
-            .filter_map(|v| v.ok())
-            .collect::<Vec<String>>();
-
+        let data = self
+            .fetch_text_elements(&req.topic, req.skip as usize)
+            .await?;
         Ok(FetchTopicMessagesResponse { data })
     }
 }
@@ -307,23 +287,7 @@ impl HandleRpc<RegisterServiceRequest, RegisterServiceResponse> for Processor {
 #[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<LookupServiceRequest, LookupServiceResponse> for Processor {
     async fn handle_rpc(&self, req: LookupServiceRequest) -> Result<LookupServiceResponse> {
-        let entry_key = Entry::gen_did(&req.name)
-            .map_err(|_| Error::invalid_params("Failed to get id of topic"))?;
-
-        self.storage_fetch(entry_key).await?;
-        let result = self.storage_check_cache(entry_key).await;
-
-        let Some(entry) = result else {
-            return Ok(LookupServiceResponse { dids: vec![] });
-        };
-
-        let dids = entry
-            .data
-            .iter()
-            .map(|v| v.decode())
-            .filter_map(|v| v.ok())
-            .collect::<Vec<String>>();
-
+        let dids = self.fetch_text_elements(&req.name, 0).await?;
         Ok(LookupServiceResponse { dids })
     }
 }

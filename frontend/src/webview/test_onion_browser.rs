@@ -13,7 +13,6 @@ use futures::future::try_join_all;
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
-use rings_node::extension::Backend;
 use rings_node::extension::BackendObserver;
 use rings_node::onion::OnionExitOffer;
 use rings_node::onion::OnionExitPolicy;
@@ -24,6 +23,7 @@ use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
 use rings_node::prelude::uuid;
+use rings_node::prelude::StopToken;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
@@ -282,8 +282,6 @@ impl AdmittedPeers {
 }
 
 impl BackendObserver for AdmittedPeers {
-    fn lookup_report(&self, _tx_id: uuid::Uuid, _successor: Did) {}
-
     fn peer_admitted(&self, peer: Did) {
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -354,22 +352,20 @@ async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewR
     })
 }
 
-/// Wrap `processor` in a provider whose backend reports admissions to `admitted`.
+/// Wrap `processor` in a provider whose application service reports admissions to `admitted`.
 #[expect(
     clippy::arc_with_non_send_sync,
-    reason = "Provider, Backend and Swarm::set_callback take Arc; this browser test keeps Rc"
+    reason = "Provider takes an Arc processor; this browser test keeps Rc"
 )]
 fn observed_provider(
     processor: Processor,
     admitted: Arc<AdmittedPeers>,
 ) -> WebviewResult<Provider> {
-    let swarm = Arc::clone(&processor.swarm);
     let provider = Provider::from_processor(Arc::new(processor));
-    swarm
-        .set_callback(Arc::new(
-            Backend::new(Arc::new(provider.clone())).observed_by(admitted),
-        ))
-        .map_err(|error| WebviewError::transport(format!("install backend: {error:?}")))?;
+    let service = provider
+        .application_service(Some(admitted), StopToken::never())
+        .map_err(|error| WebviewError::transport(format!("claim the inbox: {error:?}")))?;
+    wasm_bindgen_futures::spawn_local(service);
     Ok(provider)
 }
 

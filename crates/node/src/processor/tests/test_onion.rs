@@ -14,13 +14,13 @@ async fn test_onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
     let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "tcp", get_epoch_ms())?;
 
     processor
-        .storage_store(Processor::online_node_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONLINE_NODES_TOPIC, vec![
             relay_descriptor,
         ])?)
         .await?;
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![
-            exit_descriptor.clone()
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
+            exit_descriptor.clone(),
         ])?)
         .await?;
 
@@ -45,7 +45,7 @@ async fn test_onion_exit_lookup_preserves_distinct_services_for_same_did() -> Re
     let newer_https = onion_exit_descriptor_for_processor(&exit, "https", now_ms + 1)?;
 
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
             older_tcp,
             newer_https,
         ])?)
@@ -66,8 +66,8 @@ async fn test_onion_proxy_route_uses_presence_relays_without_exit_descriptor() -
     let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "tcp", get_epoch_ms())?;
     let relays = store_onion_relays(&processor, &[&exit], 3).await?;
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![
-            exit_descriptor.clone()
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
+            exit_descriptor.clone(),
         ])?)
         .await?;
 
@@ -106,7 +106,7 @@ async fn test_onion_proxy_route_rejects_exit_with_stale_process_epoch() -> Resul
     let stale_descriptor = onion_exit_descriptor_for_processor(&exit, "tcp", get_epoch_ms())?;
     store_onion_relays(&processor, &[&restarted], 3).await?;
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
             stale_descriptor,
         ])?)
         .await?;
@@ -138,7 +138,7 @@ async fn test_onion_proxy_route_uses_protocol_service_class() -> Result<()> {
     let https_exit_descriptor = onion_exit_descriptor_for_processor(&https_exit, "https", now_ms)?;
 
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
             tcp_exit_descriptor,
             https_exit_descriptor,
         ])?)
@@ -179,7 +179,9 @@ async fn test_onion_route_accepts_https_service() -> Result<()> {
     )?;
 
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![descriptor])?)
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
+            descriptor,
+        ])?)
         .await?;
     store_onion_relays(&processor, &[&exit], 3).await?;
 
@@ -215,7 +217,9 @@ async fn test_onion_proxy_route_accepts_https_service() -> Result<()> {
     )?;
 
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![descriptor])?)
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
+            descriptor,
+        ])?)
         .await?;
     store_onion_relays(&processor, &[&exit], 3).await?;
 
@@ -248,7 +252,9 @@ async fn test_tcp_connect_route_rejects_browser_https_exit_descriptor() -> Resul
     )?;
 
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![descriptor])?)
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
+            descriptor,
+        ])?)
         .await?;
 
     let target = OnionProxyTarget::parse_authority("example.com:443")?;
@@ -293,7 +299,7 @@ async fn test_onion_proxy_route_filters_exits_by_target_policy() -> Result<()> {
         })?;
 
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
             denied_descriptor,
             allowed_descriptor,
         ])?)
@@ -324,7 +330,7 @@ async fn test_onion_proxy_route_reports_policy_denied_target() -> Result<()> {
         })?;
 
     processor
-        .storage_store(Processor::onion_exit_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
             denied_descriptor,
         ])?)
         .await?;

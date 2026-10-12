@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
-use super::inbound;
-use super::CallbackError;
+use super::InboundLane;
 use super::LocalDelivery;
 use super::LogicalInbound;
-use super::SharedSwarmCallback;
 use crate::dht::Did;
 use crate::measure::Authentication;
 use crate::message::with_message_variants;
@@ -12,10 +10,13 @@ use crate::message::CustomMessage;
 use crate::message::EdgeRelation;
 use crate::message::HandleMsg;
 use crate::message::Message;
+use crate::message::MessageCategory;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::OriginQuotaCharge;
+use crate::swarm::application::ApplicationData;
+use crate::swarm::application::ApplicationMessage;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
 use crate::swarm::observer::LookupOutcome;
@@ -25,20 +26,64 @@ use crate::swarm::observer::ObservationOutcome;
 use crate::swarm::transport::SwarmTransport;
 
 impl LocalDelivery {
-    /// Deliver to `callback` through `transport`'s handlers.
-    pub(crate) fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
+    /// Deliver through `transport`'s handlers to its application inbox.
+    pub(crate) fn new(transport: Arc<SwarmTransport>) -> Self {
         Self {
-            pipeline: LogicalInbound::new(transport, callback),
+            pipeline: LogicalInbound::new(transport),
         }
     }
 
-    /// Deliver one payload.
+    /// Deliver one locally sourced payload: dispatch, then the application inbox, exactly as for
+    /// a verified frame from a connection, but with no connection to gate on and never waiting.
+    ///
+    /// Room for application data is reserved, holding the message, before the transaction is
+    /// admitted, so a payload this pass cannot hand over (no room, or no application reading)
+    /// is left unadmitted for a later pass instead of being admitted, handled and lost to the
+    /// replay window. Core handles the message the room holds by reference, so it is decoded
+    /// once and never copied. A payload carrying application data is queued with a consumption
+    /// signal, so its stored copy is retired only once the application takes it.
     ///
     /// Pre: `payload.transaction.destination` is this node and the payload was verified by the
     /// caller (the inbox witness verifies it as of its hold instant).
-    pub(crate) async fn deliver(&self, payload: &MessagePayload) -> crate::error::Result<()> {
-        inbound::deliver_local(&self.pipeline, payload).await
+    pub(crate) async fn deliver(
+        &self,
+        payload: &MessagePayload,
+    ) -> crate::error::Result<LocalDelivered> {
+        let pipeline = &self.pipeline;
+        let message = payload.transaction.data::<Message>()?;
+        let lane = InboundLane::from_kind(MessageKind::from_message(&message));
+        let Some(application) = pipeline.application_message(payload, message) else {
+            // Core's own body. Stored mail is application data by its witness, so the inbox
+            // drain never comes here; the body is decoded again for its handler.
+            pipeline.tap_inbound(payload);
+            pipeline.admit_local_transaction(payload, lane).await?;
+            pipeline.handle_payload(payload, None).await?;
+            return Ok(LocalDelivered::Handled);
+        };
+        let outlet = &pipeline.transport.application().outlet;
+        let Some(room) = outlet.try_reserve(application) else {
+            return Ok(LocalDelivered::Deferred);
+        };
+        pipeline.tap_inbound(payload);
+        pipeline.admit_local_transaction(payload, lane).await?;
+        pipeline
+            .handle_application(payload, &room.message().data)
+            .await?;
+        Ok(LocalDelivered::Queued(room.fill()))
     }
+}
+
+/// What [`LocalDelivery::deliver`] did with a payload.
+#[derive(Debug)]
+pub(crate) enum LocalDelivered {
+    /// Admitted and handled, with no application data to hand over.
+    Handled,
+    /// Admitted, handled, and its application data queued: the receiver resolves once the
+    /// application takes it, and is cancelled if the inbox discards it first.
+    Queued(futures::channel::oneshot::Receiver<()>),
+    /// Its application data found no room or no reader: nothing was admitted or handled, and
+    /// its stored copy stays.
+    Deferred,
 }
 
 /// Relate the connection that delivered `payload` to its origin account.
@@ -55,25 +100,25 @@ pub(super) fn edge_relation(
 }
 
 impl LogicalInbound {
-    pub(super) fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
-        let message_handler = MessageHandler::new(transport.clone(), callback.clone());
+    /// The logical stage over `transport`, with its message handler.
+    pub(super) fn new(transport: Arc<SwarmTransport>) -> Self {
+        let message_handler = MessageHandler::new(transport.clone());
         Self {
             transport,
             message_handler,
-            callback,
         }
     }
 
+    /// Dispatch `payload` to its handler and record the observation; returns the decoded body.
     pub(super) async fn handle_payload(
         &self,
         payload: &MessagePayload,
         prepared_message: Option<Message>,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<Message> {
         let message = match prepared_message {
             Some(message) => message,
             None => payload.transaction.data()?,
         };
-        let message_kind = MessageKind::from_message(&message);
         let lookup_completion = match &message {
             Message::FindSuccessorReport(_) => Some((
                 LookupKind::Successor,
@@ -110,7 +155,54 @@ impl LogicalInbound {
         }
 
         let result = with_message_variants!(dispatch_message);
+        self.record_handling(
+            payload,
+            MessageKind::from_message(&message),
+            lookup_completion,
+            result,
+        )?;
+        Ok(message)
+    }
 
+    /// Dispatch application data `payload` carries to its handler, by reference, and record the
+    /// observation: the data stays where the caller keeps it (the inbox room that hands it to
+    /// the application).
+    async fn handle_application(
+        &self,
+        payload: &MessagePayload,
+        data: &ApplicationData,
+    ) -> crate::error::Result<()> {
+        let (kind, result) = match data {
+            ApplicationData::Custom(message) => (
+                MessageKind::CustomMessage,
+                self.message_handler.handle(payload, message).await,
+            ),
+            ApplicationData::E2eHandshakeRequest(request) => (
+                MessageKind::E2eHandshakeRequest,
+                self.message_handler.handle(payload, request).await,
+            ),
+            ApplicationData::E2eHandshakeResponse(response) => (
+                MessageKind::E2eHandshakeResponse,
+                self.message_handler.handle(payload, response).await,
+            ),
+            ApplicationData::E2eStreamFrame(frame) => (
+                MessageKind::E2eStreamFrame,
+                self.message_handler.handle(payload, frame).await,
+            ),
+        };
+        self.record_handling(payload, kind, None, result)
+    }
+
+    /// Record the observation of a handled message of `kind`, finish the lookup it completes,
+    /// and surface a handler's error, so a message whose handler failed is never handed to
+    /// the application as a successful inbound message.
+    fn record_handling(
+        &self,
+        payload: &MessagePayload,
+        kind: MessageKind,
+        lookup_completion: Option<(LookupKind, LookupCorrelation)>,
+        result: crate::error::Result<()>,
+    ) -> crate::error::Result<()> {
         let outcome = if result.is_ok() {
             ObservationOutcome::Succeeded
         } else {
@@ -118,11 +210,10 @@ impl LogicalInbound {
         };
         self.transport.observe_message(MessageObservation {
             activity: MessageActivity::Received,
-            category: message_kind.class(),
-            message_class: message_kind.as_str(),
+            category: kind.class(),
+            message_class: kind.as_str(),
             outcome,
         });
-
         if result.is_ok() && self.is_local_destination(payload) {
             if let Some((kind, correlation)) = lookup_completion {
                 self.transport.observer().lookup_finished(
@@ -132,15 +223,7 @@ impl LogicalInbound {
                 );
             }
         }
-
-        // A handler that errored must not then be reported to the application as a successful
-        // inbound message: surface the error and do not run `on_inbound` for it.
-        if let Err(e) = result {
-            tracing::error!("Failed to handle_payload: {e:?}");
-            return Err(e);
-        }
-
-        Ok(())
+        result.inspect_err(|error| tracing::error!(error = ?error, "failed to handle a payload"))
     }
 
     pub(super) fn is_local_destination(&self, payload: &MessagePayload) -> bool {
@@ -159,43 +242,92 @@ impl LogicalInbound {
         lane: crate::swarm::callback::InboundLane,
         edge: EdgeRelation,
     ) -> crate::error::Result<()> {
+        self.admit_charged(payload, lane, |class| {
+            OriginQuotaCharge::select(class, edge, || self.delegates_admission(message))
+        })
+        .await
+    }
+
+    /// [`Self::admit_final_transaction`] for a locally sourced payload: it crossed no
+    /// connection, so no neighbour can have its admission delegated and its class record's
+    /// message limit is enforced, as for any remote origin.
+    async fn admit_local_transaction(
+        &self,
+        payload: &MessagePayload,
+        lane: crate::swarm::callback::InboundLane,
+    ) -> crate::error::Result<()> {
+        self.admit_charged(payload, lane, OriginQuotaCharge::from)
+            .await
+    }
+
+    /// Commit admission of `payload` under the charge `charge` selects for its class, if it is
+    /// addressed to this node.
+    async fn admit_charged(
+        &self,
+        payload: &MessagePayload,
+        lane: crate::swarm::callback::InboundLane,
+        charge: impl FnOnce(MessageCategory) -> OriginQuotaCharge,
+    ) -> crate::error::Result<()> {
         if self.is_local_destination(payload) {
             let class = lane
                 .class()
                 .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
-            let charge =
-                OriginQuotaCharge::select(class, edge, || self.delegates_admission(message));
             self.transport
-                .admit_final_transaction(&payload.transaction, charge)
+                .admit_final_transaction(&payload.transaction, charge(class))
                 .await?;
         }
         Ok(())
     }
 
-    /// Whether the namespace of an application message delegated its admission.
+    /// Whether the namespace of an application message delegated its admission, as the
+    /// application registered it in advance; no application code runs here.
     fn delegates_admission(&self, message: &Message) -> bool {
         match message {
             Message::CustomMessage(CustomMessage(application_payload)) => self
-                .callback
-                .delegates_admission(application_payload.as_slice()),
+                .transport
+                .application()
+                .delegations
+                .delegates(application_payload.as_slice()),
             _ => false,
         }
     }
 
-    pub(super) async fn on_inbound(
+    /// The application message `payload` carries for this node: `None` when it is addressed
+    /// elsewhere or its body is core's own.
+    pub(super) fn application_message(
         &self,
         payload: &MessagePayload,
-    ) -> std::result::Result<(), CallbackError> {
-        self.callback.on_inbound(payload).await
+        message: Message,
+    ) -> Option<ApplicationMessage> {
+        if !self.is_local_destination(payload) {
+            return None;
+        }
+        ApplicationMessage::project(payload, message)
     }
+
+    /// Show `payload`, about to enter the logical stage, to the inbound tap of test builds.
+    #[cfg(test)]
+    pub(super) fn tap_inbound(&self, payload: &MessagePayload) {
+        self.transport.inbound_tap_for_test().observe(payload);
+    }
+
+    /// Outside test builds there is no inbound tap: nothing is shown.
+    #[cfg(not(test))]
+    pub(super) fn tap_inbound(&self, _payload: &MessagePayload) {}
+
+    /// Wait while a test build holds `lane` (see the inbound tap).
+    #[cfg(test)]
+    pub(super) async fn pass_tapped_lane(&self, lane: crate::swarm::callback::InboundLane) {
+        self.transport.inbound_tap_for_test().pass_lane(lane).await;
+    }
+
+    /// Outside test builds no lane is held: nothing waits.
+    #[cfg(not(test))]
+    pub(super) async fn pass_tapped_lane(&self, _lane: crate::swarm::callback::InboundLane) {}
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-    use std::sync::Arc;
-
     use super::*;
     use crate::delegation::DelegateeKey;
     use crate::dht::delivery::NextHop;
@@ -210,45 +342,22 @@ mod tests {
     use crate::swarm::SwarmBuilder;
     use crate::tests::TEST_NETWORK_ID;
 
-    #[derive(Default)]
-    struct ObservedCallback {
-        validations: AtomicUsize,
-        inbounds: AtomicUsize,
-    }
-
-    #[derive(Default)]
-    struct RejectingValidationCallback {
-        validations: AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::swarm::callback::SwarmCallback for RejectingValidationCallback {
-        async fn on_validate(
-            &self,
-            _payload: &MessagePayload,
-        ) -> std::result::Result<(), CallbackError> {
-            self.validations.fetch_add(1, Ordering::Relaxed);
-            Err(std::io::Error::other("rejected by application").into())
+    /// A swarm with the given origin quota whose application inbox is claimed.
+    fn claimed_swarm(
+        quota: Option<OriginQuotaConfig>,
+    ) -> (
+        crate::swarm::Swarm,
+        crate::swarm::application::ApplicationInbox,
+    ) {
+        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
+        let builder = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local);
+        let swarm = match quota {
+            Some(quota) => builder.origin_quota(quota),
+            None => builder,
         }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::swarm::callback::SwarmCallback for ObservedCallback {
-        async fn on_validate(
-            &self,
-            _payload: &MessagePayload,
-        ) -> std::result::Result<(), CallbackError> {
-            self.validations.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        async fn on_inbound(
-            &self,
-            _payload: &MessagePayload,
-        ) -> std::result::Result<(), CallbackError> {
-            self.inbounds.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
+        .build();
+        let inbox = swarm.application_inbox().expect("unclaimed inbox");
+        (swarm, inbox)
     }
 
     fn payload(
@@ -282,58 +391,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_destination_persists_before_validation_and_rejects_duplicate_dispatch() {
-        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
-        let callback = Arc::new(ObservedCallback::default());
-        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-            .callback(callback.clone())
-            .build();
-        let delivery = LocalDelivery::new(swarm.transport.clone(), callback.clone());
+    async fn test_a_final_destination_persists_before_delivery_and_rejects_a_duplicate() {
+        let (swarm, inbox) = claimed_swarm(None);
+        let delivery = LocalDelivery::new(swarm.transport.clone());
         let payload = payload(swarm.did(), 0).expect("payload");
 
-        delivery.deliver(&payload).await.expect("first delivery");
+        assert!(matches!(
+            delivery.deliver(&payload).await.expect("first delivery"),
+            LocalDelivered::Queued(_)
+        ));
         assert!(matches!(
             delivery.deliver(&payload).await,
             Err(Error::TransactionReplay { .. })
         ));
-        assert_eq!(callback.validations.load(Ordering::Relaxed), 1);
-        assert_eq!(callback.inbounds.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            inbox.try_next(),
+            Some(crate::swarm::application::ApplicationDelivery::Message(_))
+        ));
+        assert_eq!(inbox.try_next(), None);
     }
 
+    /// Room in the application inbox is reserved before admission: a payload deferred for want
+    /// of room is neither admitted nor charged, so the later pass that delivers it is not
+    /// refused as a replay or by the quota.
     #[tokio::test]
-    async fn application_validation_failure_still_consumes_committed_quota() {
-        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
+    async fn test_a_deferred_local_delivery_commits_no_admission() {
         let sender = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("sender session");
-        let callback = Arc::new(RejectingValidationCallback::default());
         let lane =
             OriginQuotaLaneConfig::new(1, 1, 1024, 1024, 8).expect("test quota configuration");
-        let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
-        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-            .origin_quota(quota)
-            .callback(callback.clone())
-            .build();
-        let delivery = LocalDelivery::new(swarm.transport.clone(), callback.clone());
+        let (swarm, inbox) = claimed_swarm(Some(OriginQuotaConfig::new(lane, lane, lane, lane)));
+        let delivery = LocalDelivery::new(swarm.transport.clone());
+        let filler = payload(swarm.did(), 0).expect("filler payload");
+        let fill = crate::swarm::application::ApplicationMessage::project(
+            &filler,
+            Message::CustomMessage(crate::message::CustomMessage(vec![
+                0;
+                crate::swarm::application::APPLICATION_INBOX_WEIGHT
+            ])),
+        )
+        .expect("application data");
+        swarm.transport.application().outlet.deliver(fill);
         let first = payload_from(&sender, swarm.did(), 0).expect("first payload");
         let second = payload_from(&sender, swarm.did(), 1).expect("second payload");
 
-        assert!(delivery.deliver(&first).await.is_err());
+        assert!(matches!(
+            delivery.deliver(&first).await.expect("deferred"),
+            LocalDelivered::Deferred
+        ));
+        assert!(inbox.try_next().is_some());
+        assert!(matches!(
+            delivery.deliver(&first).await.expect("delivered"),
+            LocalDelivered::Queued(_)
+        ));
         assert!(matches!(
             delivery.deliver(&second).await,
             Err(Error::OriginQuota(
                 OriginQuotaError::MessageRateExhausted { .. }
             ))
         ));
-        assert_eq!(callback.validations.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
-    async fn intermediate_relay_does_not_create_origin_replay_state() {
+    async fn test_an_intermediate_relay_creates_no_origin_replay_state() {
         let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
-        let callback = Arc::new(ObservedCallback::default());
-        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-            .callback(callback.clone())
-            .build();
-        let logical = LogicalInbound::new(swarm.transport.clone(), callback);
+        let swarm =
+            SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local).build();
+        let logical = LogicalInbound::new(swarm.transport.clone());
         let remote_destination = SecretKey::random().address().into();
         let payload = payload(remote_destination, 0).expect("payload");
         let message = payload.transaction.data::<Message>().expect("message");

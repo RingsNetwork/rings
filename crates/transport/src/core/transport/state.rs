@@ -48,7 +48,7 @@ impl WebrtcConnectionState {
         matches!(self, Self::New | Self::Connecting | Self::Connected)
     }
 
-    #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+    /// Whether the connection generation has ended: it fails or closes, and never reconnects.
     pub(crate) const fn is_terminal(self) -> bool {
         matches!(self, Self::Failed | Self::Closed)
     }

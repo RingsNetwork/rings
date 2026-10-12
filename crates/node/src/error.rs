@@ -216,7 +216,7 @@ pub enum Error {
         actual: Did,
     } = 818,
     /// A handshake was refused because the peer's slot is owned by another attempt: a handshake
-    /// in flight, whichever side started it, or an admission not yet announced.
+    /// in flight, whichever side started it.
     #[error("a handshake with {peer} is already in flight")]
     HandshakeInFlight {
         /// The peer whose slot is owned.

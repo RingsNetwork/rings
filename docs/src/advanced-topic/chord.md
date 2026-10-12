@@ -60,6 +60,51 @@ its bootstrap during a join. Successor and connection answers (`FindSuccessorRep
 `ConnectNodeReport`) then travel to that peer, which hands them over its direct link. Every other
 report goes straight to the origin, so `reply_via` reflects at most one bounded answer per request.
 
+## Data-topic storage
+
+A data topic is a replicated set of elements (a state-based CRDT): each element carries the
+*dot* of the write that issued it, and replicas and hand-offs merge by join, so a replica's value
+does not depend on the order writes and hand-offs arrive in. A reader's fetch cache does not
+merge: it keeps the last reply it received, so a late reply from a stale replica can replace a
+fresher one until the next fetch (a cache that joins its replies is #864).
+
+- **Every element expires individually.** An element expires at the earlier of two instants:
+  100 minutes after its dot was issued (the element horizon `H`, the longest retention one write
+  may request), and its topic's retention bound, the latest bound any write joined into the
+  topic requested (a plain write, such as `publishMessageToTopic` or `registerService`,
+  requests 10 minutes). Writing the value again issues a fresh dot and a fresh bound and is what
+  keeps it: a sole writer rewrites each value within 10 minutes, and every writer within `H`,
+  even while other writes keep the topic alive. The online-node and onion-exit registries
+  refresh their descriptors every heartbeat (30 s by default). Once the topic's bound has
+  elapsed, it serves no element; it is kept only while it holds a tombstone or overwrite that
+  is not yet collected, and it answers lookups as absent, from a replica and from a reader's
+  fetch cache alike, so a reader asks the next replica. Its tombstones still spread by
+  hand-off, by republish, and by read-repair from the reader's cache, which repairs a missed
+  replica from the carrier it holds even past its bound.
+- **A removal wins over every earlier write of its value.** A tombstone names the value and the
+  newest dot of it the storage owner holds, and covers every dot of that value up to that one,
+  including dots already forgotten under a later write. "Earlier" is the dot order, not real
+  time: a rewrite of the value by a writer whose clock runs behind the removed write's writer
+  (by at most `σ`) is issued below the tombstone and stays removed. A removal carries no dot
+  of its own, so each owner removes the dot it holds when the removal arrives, and a removal
+  delivered after the same client's later rewrite removes that rewrite too.
+- **Removals are collected by the clock, not by a reset.** A tombstone is collected `H + σ`
+  after the dot it covers, where `σ` (3 s) bounds clock skew between nodes, and an overwrite's
+  reset `H + σ` after it was issued. By then every copy of every write they shadowed has expired
+  on every node, so no stale replica can bring the value back, and a topic that holds either
+  stays stored until it is collected (storage byte-budget eviction aside). There is no compaction
+  operation: a reset stamped by one owner would erase every concurrent write that owner had
+  not yet received.
+- **Bounds.** A topic holds at most 1024 elements (the oldest are dropped when the cap binds) and
+  one tombstone per value removed within the last `H + σ`, so a registry holds about
+  `(H + σ) / heartbeat` tombstones per registrant, about 25 KB per registrant at the default
+  30 s heartbeat (a tombstone encodes in 125 bytes). This is a rate bound, not a count cap: a
+  capped tombstone could be dropped while a write it covers is still live somewhere.
+
+An overwrite (the browser provider's `storage_store`, or `storage_store` on a node) still
+replaces a topic: it drops every element and tombstone older than itself, and its own elements
+expire like any other.
+
 ## Finger-table convergence
 
 ### Algorithmic basis and Rings policy

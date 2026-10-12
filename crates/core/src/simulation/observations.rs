@@ -12,8 +12,10 @@ pub(crate) enum ProductionTraceObservation {
     YieldActor { node_did: String },
 }
 
+/// When a control delivery the reassembly barrier blocked completed, against its deadline: a
+/// completion past the deadline is a starvation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct DeadlineMissWitness {
+pub(crate) struct ControlCompletionWitness {
     pub(crate) observed_virtual_ms: u64,
     pub(crate) deadline_virtual_ms: u64,
 }
@@ -43,11 +45,29 @@ pub(crate) struct ProductionCapacityObservations {
     reassembly_node_bytes: CapacityMetric,
     reassembly_peer_bytes: CapacityMetric,
     reassembly_pending_messages: CapacityMetric,
+    /// Frames a receiving transport refused (malformed, oversized, or beyond its credit).
+    rejected_frames: usize,
 }
 
 impl ProductionCapacityObservations {
-    /// Require every storm-relevant metric to be observed and within its production limit.
+    /// Frames a receiving transport refused.
+    pub(crate) const fn rejected_frames(&self) -> usize {
+        self.rejected_frames
+    }
+
+    /// Require every storm-relevant metric to be observed and within its production limit, and
+    /// every frame to have been admitted.
+    ///
+    /// Law (frame conservation). Every simulated peer is honest, so a receiving transport
+    /// refuses no frame: flow control holds the sender back instead of the receiver dropping
+    /// what arrives (#924).
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.rejected_frames > 0 {
+            return Err(format!(
+                "a receiving transport refused {} frames of honest peers",
+                self.rejected_frames
+            ));
+        }
         let metrics = [
             ("outbound_peer_transfers", self.outbound_peer_transfers),
             ("outbound_peer_bytes", self.outbound_peer_bytes),
@@ -80,6 +100,16 @@ impl ProductionCapacityObservations {
     }
 }
 
+/// Record one frame a receiving transport refused.
+pub(crate) fn record_rejected_frame() {
+    RUNTIME.with(|runtime| {
+        if let Some(runtime) = runtime.borrow_mut().as_mut() {
+            let rejected = &mut runtime.capacity_observations.rejected_frames;
+            *rejected = rejected.saturating_add(1);
+        }
+    });
+}
+
 /// Record an observed protection failure at a production effect boundary.
 pub(crate) fn record_protection_violation(layer: ProtectionLayer) {
     RUNTIME.with(|runtime| {
@@ -98,8 +128,10 @@ pub(crate) fn record_barrier_control_blocked() {
     });
 }
 
-/// Combine a real production barrier block with an explicit scheduler deadline miss.
-pub(crate) fn record_barrier_control_deadline_miss(
+/// Record when a blocked control delivery completed, against its deadline. Combined with a
+/// real production barrier block, a completion past the deadline violates
+/// `BarrierControlExemption`; one within it records nothing.
+pub(crate) fn record_barrier_control_completion(
     observed_virtual_ms: u64,
     deadline_virtual_ms: u64,
 ) {
@@ -107,7 +139,7 @@ pub(crate) fn record_barrier_control_deadline_miss(
         if let Some(runtime) = runtime.borrow_mut().as_mut() {
             runtime
                 .observations
-                .record_barrier_deadline_miss(DeadlineMissWitness {
+                .record_barrier_control_completion(ControlCompletionWitness {
                     observed_virtual_ms,
                     deadline_virtual_ms,
                 });

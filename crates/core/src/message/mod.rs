@@ -55,7 +55,7 @@ pub use types::MessageCategory;
 mod replay;
 pub use replay::observe;
 pub use replay::ReplayCounters;
-pub use replay::ReplaySnapshot;
+pub use replay::ReplayRecord;
 pub use replay::ReplayStorage;
 pub use replay::SequenceState;
 pub use replay::SequenceVerdict;
@@ -63,6 +63,9 @@ pub use replay::StreamKey;
 pub use replay::TransactionDigest;
 pub use replay::TransactionForkEvidence;
 pub(crate) use replay::TransactionReplay;
+pub use replay::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
+pub use replay::TRANSACTION_REPLAY_STORE_MAX_BYTES;
+pub use replay::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 pub use replay::TRANSACTION_REPLAY_STREAM_CAPACITY;
 pub use replay::TRANSACTION_REPLAY_WINDOW;
 
@@ -85,11 +88,12 @@ pub mod types;
 pub use types::*;
 
 pub mod handlers;
-pub use handlers::storage::ChordStorageInterface;
-pub use handlers::storage::ChordStorageInterfaceCacheChecker;
-pub use handlers::storage::ScopedStorage;
 pub use handlers::HandleMsg;
 pub use handlers::MessageHandler;
+
+pub use crate::swarm::storage_api::ChordStorageInterface;
+pub use crate::swarm::storage_api::ChordStorageInterfaceCacheChecker;
+pub use crate::swarm::storage_api::ScopedStorage;
 
 mod protocols;
 pub use protocols::DomainTag;

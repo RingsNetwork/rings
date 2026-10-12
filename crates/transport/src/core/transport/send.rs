@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::callback::link_credit::LaneCreditReservation;
 use crate::core::admission::AdmissionEvent;
 use crate::core::admission::AdmissionPhase;
 use crate::core::admission::AtomicAdmission;
@@ -31,6 +32,8 @@ pub struct SendPermit {
     predicate: Arc<SendPermitPredicate>,
     irrevocable_guard: Arc<SendPermitIrrevocableGuard>,
     state: AtomicAdmission,
+    /// The lane credit the send is made under, when the caller reserved it ahead of the send.
+    credit: Option<LaneCreditReservation>,
 }
 
 /// One-use capability that linearizes backend admission with an external guard.
@@ -110,6 +113,7 @@ impl SendPermit {
                 let _claimed = claim.try_claim();
             }),
             state: AtomicAdmission::new(),
+            credit: None,
         }
     }
 
@@ -122,12 +126,26 @@ impl SendPermit {
                 let _claimed = claim.try_claim();
             }),
             state: AtomicAdmission::new(),
+            credit: None,
         }
     }
 
     /// Construct an unconditional permit for direct low-level transport users.
     pub fn always() -> Self {
         Self::new(|| true)
+    }
+
+    /// Carry `credit`, reserved ahead of the send, into it: a custom frame is then sent under this
+    /// credit instead of waiting for one inside the send.
+    pub fn with_credit(mut self, credit: LaneCreditReservation) -> Self {
+        self.credit = Some(credit);
+        self
+    }
+
+    #[cfg(rings_transport_backend)]
+    /// The credit carried by [`Self::with_credit`], taken by the backend that sends under it.
+    pub(crate) fn take_credit(&mut self) -> Option<LaneCreditReservation> {
+        self.credit.take()
     }
 
     /// Evaluate this permit where a backend is about to start its send.

@@ -1,5 +1,6 @@
 use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -27,13 +28,19 @@ use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
 use crate::callback::admit_inbound_data_channel;
+use crate::callback::credit_pump::pump_lane_credits;
+use crate::callback::data_channel_label;
 use crate::callback::inbound_frame_exceeds_protocol_ceiling;
-use crate::callback::InboundFrameCapacity;
+use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
+use crate::callback::NodeReceiveLoad;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::pool::RoundRobin;
-use crate::core::pool::RoundRobinPool;
+use crate::core::credit::CreditIndex;
+use crate::core::pool::ChannelLane;
+use crate::core::pool::ChannelPool;
+use crate::core::pool::LanePool;
+use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 use crate::core::send::operation::send_sync;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
@@ -49,6 +56,7 @@ use crate::delivery::tracker::BufferedChannel;
 use crate::delivery::tracker::DeliveryTracker;
 use crate::delivery::tracker::RoundLease;
 use crate::delivery::DeliveryFuture;
+use crate::delivery::SendCreditWait;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
@@ -64,8 +72,6 @@ use send_lifecycle::BrowserLifecycle;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
-/// pool size of data channel
-const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
 /// A data channel paired with its delivery tracker, which owns the monotonic
 /// counter of the total bytes ever enqueued onto it. See the native backend
@@ -148,30 +154,9 @@ impl WebSysWebrtcConnection {
         let result = send_sync(send, permit, enqueued, bytes, Rc::clone(&lifecycle)).await;
         lifecycle.finish(result).await
     }
-
-    /// Encode and account one browser send using the shared checked queue owner.
-    async fn send_with_permit(
-        &self,
-        msg: TransportMessage,
-        permit: SendPermit,
-    ) -> Result<DeliveryFuture> {
-        let (channel, delivery) = self.webrtc_data_channel.select()?;
-        let data = rings_codec::serialize(&msg)?;
-        let bytes = u64::try_from(data.len()).map_err(|_| Error::SendByteCountOverflow)?;
-        // The primitive runs only after shared queue admission; failures do not advance offsets.
-        let end_offset = self
-            .send_after_permit(permit, Arc::clone(delivery.enqueued()), bytes, || {
-                channel
-                    .send_with_u8_array(&data)
-                    .map_err(Error::WebSysWebrtc)
-            })
-            .await
-            .inspect_err(|error| tracing::error!(%error, bytes, "browser send failed"))?;
-        Ok(delivery_future(channel, &delivery, end_offset))
-    }
 }
 
-impl RoundRobinPool<TrackedChannel> {
+impl ChannelPool<TrackedChannel> {
     /// Return whether every channel in this backend pool is open.
     fn all_ready(&self) -> Result<bool> {
         self.all(|(c, _)| c.ready_state() == RtcDataChannelState::Open)
@@ -184,12 +169,14 @@ pub struct WebSysWebrtcConnection {
     webrtc_conn: RtcPeerConnection,
     // `Rc`, not `Arc`: the browser backend is single-threaded (the `ConnectionInterface` impl is
     // `?Send`), so the channel pool is never shared across threads.
-    webrtc_data_channel: Rc<RoundRobinPool<TrackedChannel>>,
+    webrtc_data_channel: Rc<ChannelPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
     connection_state: ConnectionStateCell,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. Parsed identically to native for consistent behaviour.
     remote_max_message_size: Arc<AtomicUsize>,
+    /// The connection's callback: its credit gates every custom send.
+    callback: Rc<InnerTransportCallback>,
 }
 
 /// [WebSysWebrtcTransport] manages all the [WebSysWebrtcConnection] and
@@ -197,15 +184,17 @@ pub struct WebSysWebrtcConnection {
 pub struct WebSysWebrtcTransport {
     ice_servers: Vec<IceServer>,
     pool: Pool<WebSysWebrtcConnection>,
-    inbound_frames: Arc<InboundFrameCapacity>,
+    /// The frames this node lends its connections' lanes, shared by every connection.
+    receive_load: NodeReceiveLoad,
 }
 
 impl WebSysWebrtcConnection {
     fn new(
         webrtc_conn: RtcPeerConnection,
-        webrtc_data_channel: Rc<RoundRobinPool<TrackedChannel>>,
+        webrtc_data_channel: Rc<ChannelPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
         connection_state: ConnectionStateCell,
+        callback: Rc<InnerTransportCallback>,
     ) -> Self {
         Self {
             webrtc_conn,
@@ -213,6 +202,7 @@ impl WebSysWebrtcConnection {
             webrtc_data_channel_state_notifier,
             connection_state,
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
+            callback,
         }
     }
 
@@ -263,8 +253,33 @@ impl WebSysWebrtcTransport {
         Self {
             ice_servers,
             pool: Pool::new(),
-            inbound_frames: Arc::new(InboundFrameCapacity::new()),
+            receive_load: NodeReceiveLoad::new(),
         }
+    }
+}
+
+#[async_trait(?Send)]
+impl FrameSink for WebSysWebrtcConnection {
+    /// Encode and account one browser send using the shared checked queue owner.
+    async fn send_frame(
+        &self,
+        frame: TransportMessage,
+        lane: ChannelLane,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
+        let (channel, delivery) = self.webrtc_data_channel.select(lane)?;
+        let data = rings_codec::serialize(&frame)?;
+        let bytes = u64::try_from(data.len()).map_err(|_| Error::SendByteCountOverflow)?;
+        // The primitive runs only after shared queue admission; failures do not advance offsets.
+        let end_offset = self
+            .send_after_permit(permit, Arc::clone(delivery.enqueued()), bytes, || {
+                channel
+                    .send_with_u8_array(&data)
+                    .map_err(Error::WebSysWebrtc)
+            })
+            .await
+            .inspect_err(|error| tracing::error!(error = ?error, bytes, "browser send failed"))?;
+        Ok(delivery_future(channel, &delivery, end_offset))
     }
 }
 
@@ -275,11 +290,15 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     async fn send_message_with_permit(
         &self,
-        msg: TransportMessage,
+        payload: Bytes,
+        lane: ChannelLane,
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
-        self.webrtc_wait_for_data_channel_open().await?;
-        self.send_with_permit(msg, permit).await
+        self.callback.send_custom(self, payload, lane, permit).await
+    }
+
+    fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
+        self.callback.reserve_send_credit(lane)
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -372,6 +391,9 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     async fn close(&self) -> Result<()> {
         self.connection_state.close();
         self.webrtc_conn.close();
+        // `RTCPeerConnection.close()` fires no `connectionstatechange`, so the terminal-state
+        // boundary never sees this close.
+        self.callback.close_link_credit();
         Ok(())
     }
 }
@@ -392,21 +414,21 @@ fn decode_data_channel_message(data: JsValue) -> Result<Vec<u8>> {
     Ok(message)
 }
 
-fn dispatch_data_channel_message(callback: Rc<InnerTransportCallback>, data: JsValue) {
+/// Receive one browser message on `lane`: a credit frame is applied and a custom frame queued on
+/// its lane at once; `onmessage` never waits on the protocol.
+fn dispatch_data_channel_message(
+    callback: Rc<InnerTransportCallback>,
+    data: JsValue,
+    lane: ChannelLane,
+) {
     match decode_data_channel_message(data) {
         Ok(message) => {
-            let bytes = message.len();
-            let Some(frame) = callback.prepare_inbound_frame(Bytes::from(message)) else {
-                return;
-            };
-            spawn_local(async move {
-                tracing::debug!(
-                    peer = %callback.cid(),
-                    bytes,
-                    "received data-channel message"
-                );
-                callback.handle_admitted_frame(frame).await;
-            });
+            tracing::debug!(
+                peer = %callback.cid(),
+                bytes = message.len(),
+                "received data-channel message"
+            );
+            callback.receive_inbound_frame(Bytes::from(message), lane);
         }
         Err(error) => {
             tracing::warn!(peer = %callback.cid(), %error, "rejected data-channel message");
@@ -415,9 +437,13 @@ fn dispatch_data_channel_message(callback: Rc<InnerTransportCallback>, data: JsV
     }
 }
 
-fn wire_data_channel_messages(channel: &RtcDataChannel, callback: Rc<InnerTransportCallback>) {
+fn wire_data_channel_messages(
+    channel: &RtcDataChannel,
+    callback: Rc<InnerTransportCallback>,
+    lane: ChannelLane,
+) {
     let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
-        dispatch_data_channel_message(callback.clone(), event.data());
+        dispatch_data_channel_message(callback.clone(), event.data(), lane);
     }) as Box<dyn FnMut(MessageEvent)>);
     channel.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     on_message.forget();
@@ -430,22 +456,22 @@ fn wire_received_data_channels(
     // Inbound channels carry messages only. One remote-created channel closing
     // does not prove the SCTP association is gone; outbound-pool state owns
     // readiness and emits the terminal data-channel callback when all close.
-    let admitted_channels = AtomicUsize::new(0);
+    let admitted_channels = AtomicU8::new(0);
     let on_data_channel = Box::new(move |event: RtcDataChannelEvent| {
         let channel = event.channel();
-        if !admit_inbound_data_channel(&admitted_channels) {
+        let Some(lane) = admit_inbound_data_channel(&admitted_channels, &channel.label()) else {
             tracing::warn!(
                 peer = %inner_cb.cid(),
                 label = channel.label(),
-                "rejected excess inbound data channel"
+                "rejected an inbound data channel that names no lane, or a lane already open"
             );
             channel.close();
             return;
-        }
+        };
         channel.set_binary_type(web_sys::RtcDataChannelType::Arraybuffer);
         tracing::debug!(label = channel.label(), "new received data channel");
 
-        wire_data_channel_messages(&channel, inner_cb.clone());
+        wire_data_channel_messages(&channel, inner_cb.clone(), lane);
     });
 
     let callback = Closure::wrap(on_data_channel as Box<dyn FnMut(RtcDataChannelEvent)>);
@@ -472,12 +498,12 @@ fn wire_peer_connection_state(
 
 fn create_outbound_data_channels(
     webrtc_conn: &RtcPeerConnection,
-    channel_pool: &Rc<RoundRobinPool<TrackedChannel>>,
+    channel_pool: &Rc<ChannelPool<TrackedChannel>>,
     inner_cb: &Rc<InnerTransportCallback>,
     connection_state: &ConnectionStateCell,
 ) -> Result<()> {
     for index in 0..DATA_CHANNEL_POOL_SIZE {
-        let channel = webrtc_conn.create_data_channel(&format!("rings_data_channel_{index}"));
+        let channel = webrtc_conn.create_data_channel(&data_channel_label(ChannelLane::new(index)));
         let open_pool = channel_pool.clone();
         let open_cb = inner_cb.clone();
         let open_state = connection_state.clone();
@@ -532,10 +558,6 @@ impl TransportInterface for WebSysWebrtcTransport {
     type Connection = WebSysWebrtcConnection;
     type Error = Error;
 
-    fn inbound_frame_capacity(&self) -> &Arc<InboundFrameCapacity> {
-        &self.inbound_frames
-    }
-
     async fn new_connection(
         &self,
         cid: &str,
@@ -562,14 +584,14 @@ impl TransportInterface for WebSysWebrtcTransport {
         //
         let webrtc_data_channel_state_notifier = Notifier::default();
         let connection_state = ConnectionStateCell::new();
-        let inner_cb = Rc::new(InnerTransportCallback::for_transport(
-            self,
+        let inner_cb = Rc::new(InnerTransportCallback::new(
             cid,
             callback,
             webrtc_data_channel_state_notifier.clone(),
+            self.receive_load.clone(),
         ));
 
-        let channel_pool = Rc::new(RoundRobinPool::default());
+        let channel_pool = Rc::new(ChannelPool::default());
         // Wire open/close on the channels this side creates (the pool), not only
         // on received channels: a received channel's `onopen` can be missed if
         // it opens before the handler is registered, so `on_data_channel_open`
@@ -587,9 +609,18 @@ impl TransportInterface for WebSysWebrtcTransport {
             channel_pool,
             webrtc_data_channel_state_notifier,
             connection_state,
+            Rc::clone(&inner_cb),
         );
 
-        self.pool.safely_insert(cid, conn).await
+        let connection = self.pool.safely_insert(cid, conn).await?;
+        for index in CreditIndex::ALL {
+            spawn_local(pump_lane_credits(
+                Arc::clone(inner_cb.link_credit()),
+                connection.clone(),
+                index,
+            ));
+        }
+        Ok(connection)
     }
 
     async fn close_connection_if_current(
@@ -698,6 +729,22 @@ mod tests {
         }
     }
 
+    /// A transport callback that ignores every event.
+    struct IgnoredCallback;
+
+    #[async_trait(?Send)]
+    impl TransportCallback for IgnoredCallback {}
+
+    /// A callback for a backend under test, which these tests never dispatch to.
+    fn ignored_callback() -> Rc<InnerTransportCallback> {
+        Rc::new(InnerTransportCallback::new(
+            "peer",
+            Box::new(IgnoredCallback),
+            Notifier::default(),
+            NodeReceiveLoad::new(),
+        ))
+    }
+
     fn test_backend() -> (
         RtcPeerConnection,
         ConnectionStateCell,
@@ -708,9 +755,10 @@ mod tests {
         let connection_state = ConnectionStateCell::new();
         let connection = WebSysWebrtcConnection::new(
             peer_connection.clone(),
-            Rc::new(RoundRobinPool::from_vec(Vec::new())),
+            Rc::new(ChannelPool::from_vec(Vec::new())),
             Notifier::default(),
             connection_state.clone(),
+            ignored_callback(),
         );
         (peer_connection, connection_state, connection)
     }
@@ -769,7 +817,8 @@ mod tests {
         assert!(matches!(
             connection
                 .send_message_with_permit(
-                    TransportMessage::Custom(Bytes::from_static(&[1])),
+                    Bytes::from_static(&[1]),
+                    ChannelLane::default(),
                     SendPermit::always(),
                 )
                 .await,
@@ -791,17 +840,17 @@ mod tests {
     #[wasm_bindgen_test]
     async fn test_registered_browser_onmessage_coalesces_invalid_frame_accounting() {
         let invalid_frames = Rc::new(Cell::new(0));
-        let callback = Rc::new(InnerTransportCallback::new_for_test(
+        let callback = Rc::new(InnerTransportCallback::new(
             "peer",
             Box::new(InvalidRecordingCallback {
                 invalid_frames: Rc::clone(&invalid_frames),
             }),
             Notifier::default(),
-            Arc::new(InboundFrameCapacity::new()),
+            NodeReceiveLoad::new(),
         ));
         let connection = RtcPeerConnection::new().expect("browser peer connection must construct");
         let channel = connection.create_data_channel("invalid-frame-accounting");
-        wire_data_channel_messages(&channel, callback);
+        wire_data_channel_messages(&channel, callback, ChannelLane::default());
         let event = MessageEvent::new("message").expect("browser message event must construct");
 
         for _ in 0..32 {
@@ -819,7 +868,7 @@ mod tests {
         let connection = RtcPeerConnection::new().expect("browser peer connection must construct");
         let channel = connection.create_data_channel("permit-boundary-test");
         let delivery = Arc::new(DeliveryTracker::default());
-        let pool = Rc::new(RoundRobinPool::from_vec(vec![(
+        let pool = Rc::new(ChannelPool::from_vec(vec![(
             channel,
             Arc::clone(&delivery),
         )]));
@@ -828,11 +877,13 @@ mod tests {
             pool,
             Notifier::default(),
             ConnectionStateCell::new(),
+            ignored_callback(),
         );
 
         let result = backend
-            .send_with_permit(
+            .send_frame(
                 TransportMessage::Custom(Bytes::from_static(&[1, 2, 3])),
+                ChannelLane::default(),
                 SendPermit::new(|| false),
             )
             .await;

@@ -13,6 +13,7 @@
 
 pub mod admission;
 pub mod callback;
+pub mod credit;
 pub mod drop_guard;
 pub mod pool;
 pub mod sdp;

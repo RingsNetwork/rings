@@ -1,6 +1,6 @@
 //! Fair off-gate execution for unordered relay terminal frames.
 
-#[cfg(all(test, rings_native))]
+#[cfg(test)]
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -15,7 +15,7 @@ use crate::error::OnionQueueKind;
 use crate::extension::ext::Scope;
 use crate::peer_quota::PeerQuota;
 use crate::sync_lock::lock;
-#[cfg(all(test, rings_native))]
+#[cfg(test)]
 use crate::test_support::BlockingSendProbe;
 
 const MAX_PENDING_RELAY_CONTROL_SENDS: usize = 64;
@@ -25,12 +25,12 @@ struct ControlSend {
     scope: Scope,
     to: Did,
     payload: Bytes,
-    #[cfg(all(test, rings_native))]
+    #[cfg(test)]
     test_hook: Option<Arc<ControlSendTestHook>>,
 }
 
 async fn apply_control_send(control: ControlSend) {
-    #[cfg(all(test, rings_native))]
+    #[cfg(test)]
     if let Some(hook) = control.test_hook.as_ref() {
         if let Err(error) = hook.before_send(control.to).await {
             tracing::debug!(?error, "relay control-send test hook failed");
@@ -39,7 +39,7 @@ async fn apply_control_send(control: ControlSend) {
     if let Err(error) = control.scope.send(control.to, control.payload).await {
         tracing::debug!(peer = %control.to, ?error, "relay terminal control send failed");
     }
-    #[cfg(all(test, rings_native))]
+    #[cfg(test)]
     if let Some(hook) = control.test_hook.as_ref() {
         if let Err(error) = hook.record_completed(control.to) {
             tracing::debug!(?error, "relay control-send test hook failed");
@@ -47,14 +47,14 @@ async fn apply_control_send(control: ControlSend) {
     }
 }
 
-#[cfg(all(test, rings_native))]
+#[cfg(test)]
 pub(crate) struct ControlSendTestHook {
     blocking: BlockingSendProbe<Did>,
     completed: Mutex<HashSet<Did>>,
     completion: tokio::sync::Notify,
 }
 
-#[cfg(all(test, rings_native))]
+#[cfg(test)]
 impl Default for ControlSendTestHook {
     fn default() -> Self {
         Self {
@@ -65,7 +65,7 @@ impl Default for ControlSendTestHook {
     }
 }
 
-#[cfg(all(test, rings_native))]
+#[cfg(test)]
 impl ControlSendTestHook {
     async fn before_send(&self, peer: Did) -> crate::error::Result<()> {
         self.blocking.block_key(peer).await
@@ -123,7 +123,7 @@ impl Drop for ControlPermit {
 
 pub(super) struct ControlOutbox {
     budget: Arc<Mutex<PeerQuota>>,
-    #[cfg(all(test, rings_native))]
+    #[cfg(test)]
     test_hook: Option<Arc<ControlSendTestHook>>,
 }
 
@@ -134,14 +134,14 @@ impl Default for ControlOutbox {
                 MAX_PENDING_RELAY_CONTROL_SENDS,
                 MAX_PENDING_RELAY_CONTROL_SENDS_PER_PEER,
             ))),
-            #[cfg(all(test, rings_native))]
+            #[cfg(test)]
             test_hook: None,
         }
     }
 }
 
 impl ControlOutbox {
-    #[cfg(all(test, rings_native))]
+    #[cfg(test)]
     pub(super) fn with_test_hook(hook: Arc<ControlSendTestHook>) -> Self {
         Self {
             budget: Arc::new(Mutex::new(PeerQuota::new(
@@ -164,7 +164,7 @@ impl ControlOutbox {
             scope,
             to,
             payload,
-            #[cfg(all(test, rings_native))]
+            #[cfg(test)]
             test_hook: self.test_hook.clone(),
         };
         spawner.spawn(async move {
@@ -225,7 +225,6 @@ mod tests {
     }
 
     /// Law: without a runtime the enqueue is refused before a permit is claimed.
-    #[cfg(rings_native)]
     #[test]
     fn test_enqueue_without_a_runtime_claims_no_permit() -> crate::error::Result<()> {
         use rings_core::delegation::DelegateeKey;

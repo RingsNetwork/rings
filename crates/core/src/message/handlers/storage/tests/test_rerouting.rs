@@ -8,13 +8,16 @@
 //! is involved: the test drives the events and awaits the operation's own completion.
 
 use std::cmp::Ordering;
+use std::fmt::Debug;
+use std::future::poll_fn;
+use std::future::Future;
+use std::pin::Pin;
 use std::task::Poll;
 
+use bytes::Bytes;
 use futures::pin_mut;
-use futures::poll;
 
 use super::super::operate_entry;
-use super::super::ChordStorageInterface;
 use super::test_support::assert_cached_data_values;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload_matching;
@@ -28,7 +31,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopSource;
 use crate::message::types::Message;
-use crate::message::Encoder;
+use crate::message::ChordStorageInterface;
 use crate::swarm::transport::Attempts;
 use crate::tests::activity::activity_after;
 use crate::tests::activity::activity_mark;
@@ -37,6 +40,7 @@ use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_until_result;
 use crate::tests::default::Node;
+use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::manually_establish_connection;
 
 /// Two linked nodes, ordered so that `owner` holds `topic`'s placement: `(writer, owner)`.
@@ -74,6 +78,28 @@ fn kill_generation(writer: &Node, owner: &Node) -> Result<()> {
         "the generation was sendable"
     );
     Ok(())
+}
+
+/// Drive `operation` until a placement of it registers its rerouting wait on `node`'s link
+/// epoch, which it does once its refusal is classified.
+///
+/// Woken by the operation itself: each poll of the operation is followed by the check, and the
+/// operation is polled again only when one of its own futures wakes it (its stream sequence is
+/// reserved by a detached replay transition, so the refusal follows a few wake-ups, not the
+/// first poll). The hang guard only bounds the wait.
+async fn until_waiting<F>(node: &Node, mut operation: Pin<&mut F>)
+where
+    F: Future,
+    F::Output: Debug,
+{
+    let waiting = poll_fn(|context| match operation.as_mut().poll(context) {
+        Poll::Ready(output) => panic!("the operation ended before it waited: {output:?}"),
+        Poll::Pending if node.swarm.transport.link_waiters_for_test() > 0 => Poll::Ready(()),
+        Poll::Pending => Poll::Pending,
+    });
+    tokio::time::timeout(TEST_HANG_GUARD, waiting)
+        .await
+        .expect("the refused placement registers its rerouting wait");
 }
 
 /// Drain `node`'s inbox and count the `OperateEntry` payloads it received.
@@ -133,9 +159,9 @@ async fn test_append_refused_by_a_dead_generation_waits_and_applies_once() -> Re
 
     let append = writer
         .swarm
-        .storage_append_data(topic, "111".to_string().encode()?);
+        .storage_append_data(topic, Bytes::from_static(b"111"));
     pin_mut!(append);
-    assert!(poll!(append.as_mut()).is_pending());
+    until_waiting(&writer, append.as_mut()).await;
     assert_eq!(
         writer.swarm.transport.link_waiters_for_test(),
         1,
@@ -174,14 +200,14 @@ async fn test_fetch_refused_by_a_dead_generation_waits_for_the_replacement() -> 
     let placement = Entry::gen_did(topic)?;
     reader
         .swarm
-        .storage_append_data(topic, "111".to_string().encode()?)
+        .storage_append_data(topic, Bytes::from_static(b"111"))
         .await?;
     wait_for_msgs([&reader, &owner]).await;
     kill_generation(&reader, &owner)?;
 
     let fetch = reader.swarm.storage_fetch(placement);
     pin_mut!(fetch);
-    assert!(poll!(fetch.as_mut()).is_pending());
+    until_waiting(&reader, fetch.as_mut()).await;
     assert_eq!(
         reader.swarm.transport.link_waiters_for_test(),
         1,
@@ -208,9 +234,9 @@ async fn test_stop_ends_a_waiting_placement() -> Result<()> {
     let stop = StopSource::new();
 
     let storage = writer.swarm.scoped_storage(stop.token());
-    let append = storage.storage_append_data(topic, "111".to_string().encode()?);
+    let append = storage.storage_append_data(topic, Bytes::from_static(b"111"));
     pin_mut!(append);
-    assert!(poll!(append.as_mut()).is_pending());
+    until_waiting(&writer, append.as_mut()).await;
     assert_eq!(writer.swarm.transport.link_waiters_for_test(), 1);
 
     stop.request_stop();
@@ -223,24 +249,24 @@ async fn test_stop_ends_a_waiting_placement() -> Result<()> {
 /// inbound path issues it (relay hold, inbox retirement), ends at its first refusal with
 /// `SingleAttemptRefused` carrying it, and never registers a rerouting wait.
 ///
-/// As in the stop test, the path to the first refusal completes within one poll on the dummy
-/// transport; a wait would leave the future pending with a link waiter.
+/// The single attempt ends with no external event: it waits only for its own detached replay
+/// transition, so it completes within the hang guard, and a rerouting wait would leave it
+/// pending with a link waiter instead.
 #[tokio::test]
 async fn test_single_attempt_write_ends_at_its_first_refusal() -> Result<()> {
     let topic = "inbound-path append makes one attempt";
     let (writer, owner) = linked_route(topic).await?;
     kill_generation(&writer, &owner)?;
 
-    let entry: Entry = (topic.to_string(), "111".to_string().encode()?).try_into()?;
+    let entry: Entry = (topic.to_string(), Bytes::from_static(b"111")).try_into()?;
     let append = operate_entry(
-        writer.swarm.transport.clone(),
+        &writer.swarm.transport,
         EntryOperation::Extend(entry),
         Attempts::Single,
     );
-    pin_mut!(append);
-    let Poll::Ready(result) = poll!(append.as_mut()) else {
-        panic!("a single attempt must not wait");
-    };
+    let result = tokio::time::timeout(TEST_HANG_GUARD, append)
+        .await
+        .expect("a single attempt must not wait");
     assert!(
         matches!(&result, Err(Error::SingleAttemptRefused { refusal }) if refusal.to_string()
             == Error::SwarmMissDidInTable(owner.did()).to_string()),

@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "rings-aez"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "aes",
  "subtle",
@@ -2464,7 +2464,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "postcard",
  "serde",
@@ -2472,14 +2472,13 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
  "ark-ff",
  "ark-serialize",
  "ark-std",
- "arrayref",
  "async-lock",
  "async-recursion",
  "async-stream",
@@ -2532,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2559,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "rings-measure"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
@@ -2567,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -2575,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -2629,7 +2628,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -2649,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "rings-runtime"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "futures",
  "futures-timer",
@@ -2663,7 +2662,7 @@ dependencies = [
 
 [[package]]
 name = "rings-test-support"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "futures",
  "rings-core",
@@ -2672,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "async-trait",
  "bytes",

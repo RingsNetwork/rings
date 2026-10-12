@@ -579,8 +579,7 @@ fn test_lifecycle_property_state_never_diverges_from_model() {
 /// A faithful in-test model of a relay engine's resource table: `key → generation`,
 /// mirroring `register` (insert a fresh generation), `close` (drop the current handle) and
 /// `close_if_current` (drop only if the generation matches, returning whether it did).
-/// This logic is identical in the native [`TransportSessions`] and browser `WtSessions`
-/// engines, so the model covers both — only the socket vs. WebTransport plumbing differs.
+/// This is the logic of the native [`TransportSessions`] engine.
 struct EngineModel {
     map: HashMap<SessionKey, u64>,
     next_gen: u64,

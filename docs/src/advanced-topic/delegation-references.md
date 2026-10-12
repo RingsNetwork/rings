@@ -104,7 +104,11 @@ receiver                                   sender
   queued behind one that does not, and a held frame never waits for one held before it,
   because the link promises no order to preserve. Among the held frames that resolve at one
   instant, when a later frame or an announcement teaches the delegation they await, the earliest
-  arrival leaves first; nothing downstream may rely on more than this.
+  arrival leaves first; nothing downstream may rely on more than this. In particular, frames of
+  the held frame's traffic class that arrive after it may pass transaction-replay admission
+  first, and a held frame released after a replay window's worth of them is rejected as stale
+  (see [Transaction Replay Protection](transaction-replay.md); removing this loss is tracked in
+  #908).
 - The hold keeps at most 16 frames per connection (half the pre-admission hold, so the two
   holds together leave a quarter of the transport's per-peer frames for the control frames that
   release them), each for at most twice the transport's delivery timeout plus one period of the
@@ -130,7 +134,7 @@ They are meaningful only on the authenticated connection generation they arrive 
 announced delegation authenticates itself through its account signature, and a digest names a
 value rather than asserting one; a duplicate or a stale one changes nothing. They are emitted
 in a task of their own (refused, never run inline, when no runtime can carry one), never
-awaited from the transport's read loop, and never through the transfer lanes. Each inbound
+awaited by the transport lane whose frame caused them, and never through the transfer lanes. Each inbound
 frame causes at most two of them, and at most 128 are in flight to one peer at a time, twice
 the raw frames that peer may have in flight at this end's transport; a send beyond that budget
 is dropped and repeated by the next frame that misses or teaches the same delegation. So what this

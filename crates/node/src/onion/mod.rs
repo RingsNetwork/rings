@@ -21,20 +21,16 @@ use rings_core::ecc::PublicKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error as CoreError;
 use rings_core::error::Result as CoreResult;
-use rings_core::message::Decoder;
 use rings_core::message::DomainTag;
-use rings_core::message::Encoded;
-use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
 use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::descriptor::decode_descriptor;
-use crate::descriptor::encode_descriptor;
 use crate::descriptor::latest_valid_by_key;
 use crate::descriptor::sign_descriptor_body;
+use crate::descriptor::RegistryElement;
 use crate::descriptor::SignedDescriptor;
 use crate::descriptor::SignedDescriptorBody;
 use crate::error::Error;
@@ -182,20 +178,6 @@ pub fn https_onion_exit_services() -> Vec<OnionServiceName> {
 /// Default exit policy. It is intentionally closed until the operator configures targets.
 pub fn default_onion_exit_policy() -> OnionExitPolicy {
     OnionExitPolicy::default()
-}
-
-/// Validate onion-exit registration scheduling.
-pub(crate) fn validate_onion_exit_registration_timing(
-    advertise_exit: bool,
-    heartbeat_interval: Duration,
-    ttl: Duration,
-) -> Result<()> {
-    if advertise_exit && heartbeat_interval >= ttl {
-        return Err(Error::InvalidConfig(format!(
-            "onion_exit_heartbeat_interval ({heartbeat_interval:?}) must be less than onion_exit_ttl ({ttl:?}) when advertise_onion_exit is enabled"
-        )));
-    }
-    Ok(())
 }
 
 /// Signed policy fields for an onion exit.
@@ -606,17 +588,7 @@ impl SignedDescriptor for OnionExitDescriptor {
     }
 }
 
-impl Encoder for OnionExitDescriptor {
-    fn encode(&self) -> CoreResult<Encoded> {
-        encode_descriptor(self)
-    }
-}
-
-impl Decoder for OnionExitDescriptor {
-    fn from_encoded(encoded: &Encoded) -> CoreResult<Self> {
-        decode_descriptor(encoded)
-    }
-}
+impl RegistryElement for OnionExitDescriptor {}
 
 /// Result of decoding one onion-exit registry entry.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -712,20 +684,8 @@ impl OnionExitRegistration {
     ) -> Result<Vec<OnionExitDescriptor>> {
         let now_ms = get_epoch_ms();
         let descriptors = self.descriptors_at(context, now_ms)?;
-        let encoded = descriptors
-            .iter()
-            .map(|descriptor| descriptor.encode().map_err(Error::CoreError))
-            .collect::<Result<Vec<_>>>()?;
         self.publisher
-            .publish_replacing(context, encoded, |observed| {
-                observed
-                    .decode::<OnionExitDescriptor>()
-                    .is_ok_and(|descriptor| {
-                        descriptor.did == context.did()
-                            || (descriptor.verify_signature(context.network_id())
-                                && descriptor.is_expired_at(now_ms))
-                    })
-            })
+            .publish_replacing(context, now_ms, &descriptors)
             .await?;
         Ok(descriptors)
     }
@@ -736,7 +696,7 @@ impl OnionExitRegistration {
     ) -> OnionExitDescriptorDecodeReport {
         let mut report = OnionExitDescriptorDecodeReport::default();
         for value in &entry.data {
-            match value.decode::<OnionExitDescriptor>() {
+            match OnionExitDescriptor::from_element(value) {
                 Ok(descriptor) => report.descriptors.push(descriptor),
                 Err(error) => {
                     report.rejected_values = report.rejected_values.saturating_add(1);

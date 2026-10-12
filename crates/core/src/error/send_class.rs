@@ -213,7 +213,7 @@ impl Error {
             | Self::PublicKeyBadFormat | Self::PrivateKeyBadFormat | Self::InvalidPublicKey
             | Self::InvalidRecoverId(_) | Self::NonCanonicalSignature | Self::VerifySignatureFailed
             | Self::UnknownAccount | Self::InvalidAffineScalar | Self::IdentityElement
-            | Self::ZeroScalar
+            | Self::ZeroScalar | Self::InvalidSignatureLength { .. }
             // end-to-end frames
             | Self::E2eStreamIdMismatch { .. } | Self::E2eFrameSequenceMismatch { .. }
             | Self::E2eFrameReorderWindowExceeded { .. } | Self::E2eFrameSequenceOverflow
@@ -224,13 +224,15 @@ impl Error {
             | Self::TransactionSequenceFork { .. } | Self::TransactionSequenceStale { .. }
             | Self::TransactionReplayStreamCapacityExceeded { .. }
             | Self::TransactionReplayStateInvalid | Self::TransactionReplayPersistence { .. }
+            | Self::TransactionReplayStreamUnavailable { .. }
+            | Self::TransactionReplayUnscheduled(_)
             // accounting and delegation
             | Self::OriginQuota(_) | Self::ServiceReceipt(_) | Self::ProvisionalEvidence(_)
             | Self::UnmarkedFrame | Self::DelegationReferenceUnresolved(_)
             | Self::DelegationExpired
             // link control
-            | Self::LinkControlOutsideLink | Self::LinkControlRuntimeUnavailable
-            | Self::LinkControlInFlightCapacity(_)
+            | Self::LinkControlOutsideLink | Self::LinkControlInFlightCapacity(_)
+            | Self::DetachedRuntimeUnavailable(_)
             // entries, inboxes and storage
             | Self::EntryKindNotEqual | Self::EntryDidNotEqual | Self::EntryNotOverwritable
             | Self::EntryNotAppendable | Self::EntryDotIndexOutOfBounds { .. } | Self::EntryNotLive
@@ -243,6 +245,8 @@ impl Error {
             | Self::RelayInboxOperationNotAllowed | Self::RelayInboxWriterNotRecipient
             | Self::StorageCountOverflow | Self::StorageRedundancyMismatch { .. }
             | Self::InvalidCapacity | Self::StorageValueExceedsCapacity { .. }
+            | Self::StorageBudgetExhausted { .. } | Self::StorageWorkUnscheduled(_)
+            | Self::StorageRecordUndecodable(_)
             // encoding and payload bounds
             | Self::Encode | Self::Decode | Self::SerializeToString | Self::SerializeError
             | Self::Serialize(_) | Self::Deserialize(_) | Self::CodecSerialize(_)
@@ -263,15 +267,14 @@ impl Error {
             // local channels and schedulers
             | Self::ChannelSendMessageFailed | Self::ChannelRecvMessageFailed(_)
             | Self::OutboundSchedulerRuntimeUnavailable | Self::LockPoisoned
+            | Self::ApplicationInboxClaimed | Self::SwarmStopped
             // inbound processing
             | Self::InboundMailboxCapacityExceeded { .. }
             | Self::InboundMailboxMemoryCapacityExceeded { .. }
             | Self::InboundPeerCapacityExceeded { .. }
             | Self::InboundPeerMemoryCapacityExceeded { .. } | Self::InboundMailboxClosed
             | Self::InboundMailboxRuntimeUnavailable | Self::InboundActorInvariantViolation
-            | Self::InboundValidationFailed { .. } | Self::InboundValidationTimeout { .. }
-            | Self::InboundCallbackFailed { .. } | Self::InboundProcessingTimeout { .. }
-            | Self::InboundTimerUnavailable { .. }
+            | Self::InboundLaneMismatch
             // routing
             | Self::PeerRingInvalidAction | Self::FailedToReadSuccessors
             | Self::SuccessorIndexOutOfBounds { .. } | Self::FailedToWriteSuccessors
@@ -292,12 +295,16 @@ impl Error {
 /// enables `dummy`, and `wasm` enables `web-sys-webrtc`, so each arm is compiled exactly when
 /// its variant exists.
 ///
-/// Only `SendPermitRevoked` is proved pre-acceptance (lemma (T)). Backend I/O and the failures
+/// Only `SendPermitRevoked` (lemma (T)) and `LinkCreditClosed` are proved pre-acceptance: a
+/// credit reservation precedes every byte handed to the backend, and fails with
+/// `LinkCreditClosed` only once its connection generation ended, so nothing was sent. Backend I/O and the failures
 /// of an irrevocable write are `Ambiguous`; configuration, pairing and pre-dispatch failures
 /// are `Fatal`.
 const fn transport_send_class(error: &rings_transport::error::Error) -> SendClass {
     match error {
-        TransportError::SendPermitRevoked => SendClass::Deferrable(DeferralTrigger::LinkChange),
+        TransportError::SendPermitRevoked | TransportError::LinkCreditClosed(_) => {
+            SendClass::Deferrable(DeferralTrigger::LinkChange)
+        }
         TransportError::Io(_) | TransportError::MessageNotDelivered(_) => SendClass::Ambiguous,
         #[cfg(feature = "std")]
         TransportError::Webrtc(_)
@@ -329,7 +336,9 @@ const fn transport_send_class(error: &rings_transport::error::Error) -> SendClas
         | TransportError::ConnectionReleased(_)
         | TransportError::RwLockWrite(_)
         | TransportError::RwLockRead(_)
-        | TransportError::RoundRobinPoolEmpty => SendClass::Fatal,
+        | TransportError::ForeignCredit(_)
+        | TransportError::CreditPumpUnavailable(_)
+        | TransportError::ChannelPoolEmpty => SendClass::Fatal,
     }
 }
 

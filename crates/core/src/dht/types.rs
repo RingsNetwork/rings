@@ -100,8 +100,10 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 /// ChordStorageCache defines the basic API for getting and setting DHT cache storage.
 ///
 /// The cache is bounded and shares the storage admission law: a fetched entry
-/// is cached only if it could have been accepted into storage, and it is
-/// retired once its retention bound elapses.
+/// is cached only if it could have been accepted into storage. It shares the
+/// retention law too: a cached carrier is retired once its retention bound has
+/// elapsed and it holds no uncollected remove or register, and a carrier past
+/// its bound is served as absent while those still hold it.
 ///
 /// Laws (#864):
 /// - Read-join: a put joins the reply into the cached carrier, `cache[k] ← cache[k] ⊔ reply`
@@ -111,18 +113,19 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 /// - Monotone in the lattice order: while a key stays resident, successive cached carriers
 ///   ascend in `⊑`. The *visible element set* is monotone only between reset floors and
 ///   tombstones: an element leaves it when a tombstone for its dot arrives, when an overwrite
-///   or compaction floor above its dot arrives, or when the `max_data_len` cap drops it. A
-///   floor from an owner that never held an element erases that element from the join (#867).
+///   floor above its dot arrives, or when the `max_data_len` cap drops it. A floor from an
+///   owner that never held an element erases that element from the join (#867).
 /// - Bounds: every reply is admitted like a replicated write, every carrier is capped at its
 ///   kind's `max_data_len` (oldest dropped), and the cache holds at most
 ///   [`LOCAL_CACHE_CAPACITY`](crate::consts::LOCAL_CACHE_CAPACITY) carriers.
-/// - Residency: evicting a key at capacity, or retiring it at its retention bound, un-observes
-///   it, and its next read starts again from the replies it gets.
+/// - Residency: evicting a key at capacity, or retiring it under the retention law,
+///   un-observes it, and its next read starts again from the replies it gets.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageCache<Action>: Chord<Action> {
     /// Join a fetched resource into the local cache.
     async fn local_cache_put(&self, entry: Entry) -> Result<()>;
-    /// Get a live cached entry.
+    /// Get a live cached entry as a lookup serves it: a carrier past its retention bound is
+    /// absent.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>>;
 }

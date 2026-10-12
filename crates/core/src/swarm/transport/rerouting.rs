@@ -52,7 +52,7 @@
 //!      Proof: an attempt is retried only from Deferred(d) (δ has no other edge to Waiting);
 //!            PreAcceptance(d) (send_class lemmas) ⇒ the attempt had no remote effect; a
 //!            Local attempt and an Accepted or Failed verdict end the automaton. So at most
-//!            one attempt per placement can have an effect, append, tombstone and compact
+//!            one attempt per placement can have an effect, append and tombstone
 //!            included.
 //! (S2) Fresh hop.
 //!      Law : the hop of every send after Waiting is computed from topology read after the

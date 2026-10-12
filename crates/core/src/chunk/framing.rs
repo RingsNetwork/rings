@@ -107,10 +107,10 @@ pub enum Framing {
 /// `usize`s, and so the production reserves live in exactly one place ([`WireReserves::PRODUCTION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireReserves {
-    /// Bytes added around a *whole* payload - the outer `TransportMessage::Custom` frame.
+    /// Bytes added around a *whole* payload - the outer custom frame (`custom_frame_wire`).
     pub whole: usize,
     /// Bytes added around *each chunk's* data - its `MessagePayload` envelope **and** the outer
-    /// `TransportMessage::Custom` frame.
+    /// custom frame (`custom_frame_wire`).
     pub chunk: usize,
     /// Smallest per-chunk data payload worth producing; a limit that cannot fit `chunk +
     /// min_chunk_data` is rejected rather than fragmented into near-empty chunks.

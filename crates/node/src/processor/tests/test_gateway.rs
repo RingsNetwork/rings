@@ -288,7 +288,8 @@ async fn prepare_onion_loop_public_gateway(
 
     let now_ms = get_epoch_ms();
     client
-        .storage_store(Processor::online_node_registry_entry(
+        .storage_store(Processor::registry_entry(
+            ONLINE_NODES_TOPIC,
             relays
                 .iter()
                 .chain([&exit])
@@ -297,7 +298,7 @@ async fn prepare_onion_loop_public_gateway(
         )?)
         .await?;
     client
-        .storage_store(Processor::onion_exit_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
             onion_exit_descriptor_for_processor_with_service(
                 &exit,
                 OnionServiceName::tcp(),

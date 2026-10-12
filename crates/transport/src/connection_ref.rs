@@ -1,20 +1,23 @@
 //! This module contains the [ConnectionRef] struct.
 
+use std::future::ready;
 use std::sync::Arc;
 use std::sync::Weak;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use rings_runtime::MaybeSendSync;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use crate::core::pool::ChannelLane;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::SendPermit;
-use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
+use crate::delivery::SendCreditWait;
 use crate::error::Error;
 use crate::error::Result;
 
@@ -109,16 +112,28 @@ where
     type Sdp = C::Sdp;
     type Error = C::Error;
 
-    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
-        self.upgrade()?.send_message(msg).await
+    async fn send_message(&self, payload: Bytes) -> Result<DeliveryFuture> {
+        self.upgrade()?.send_message(payload).await
     }
 
     async fn send_message_with_permit(
         &self,
-        msg: TransportMessage,
+        payload: Bytes,
+        lane: ChannelLane,
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
-        self.upgrade()?.send_message_with_permit(msg, permit).await
+        self.upgrade()?
+            .send_message_with_permit(payload, lane, permit)
+            .await
+    }
+
+    /// The wait is taken from the connection and the connection let go at once: a long wait
+    /// keeps the connection alive no longer than this call.
+    fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
+        match self.upgrade() {
+            Ok(connection) => connection.reserve_send_credit(lane),
+            Err(error) => Box::pin(ready(Err(error))),
+        }
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -201,14 +216,18 @@ mod tests {
             4242
         }
 
-        async fn send_message(&self, _: TransportMessage) -> Result<DeliveryFuture> {
+        async fn send_message(&self, _: Bytes) -> Result<DeliveryFuture> {
             unreachable!("a released ref must fail before reaching the inner connection")
         }
         async fn send_message_with_permit(
             &self,
-            _: TransportMessage,
+            _: Bytes,
+            _: ChannelLane,
             _: SendPermit,
         ) -> Result<DeliveryFuture> {
+            unreachable!("a released ref must fail before reaching the inner connection")
+        }
+        fn reserve_send_credit(&self, _: ChannelLane) -> crate::delivery::SendCreditWait<Error> {
             unreachable!("a released ref must fail before reaching the inner connection")
         }
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {

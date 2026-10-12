@@ -105,15 +105,13 @@ pub fn verify(
     if pubkey.address() != *address {
         return false;
     }
-    if sig.as_ref().len() != 64 {
-        return false;
-    }
     let ct_pk: CtOption<Result<ecdsa::VerifyingKey<p256::NistP256>>> =
         (*pubkey).ct_try_into_secp256r1_pubkey();
     if !bool::from(ct_pk.is_some()) {
         return false;
     }
     let msg_hash = hash(msg);
+    // The one length gate: `from_slice` refuses any signature other than 64 bytes.
     let signature = match ecdsa::Signature::<p256::NistP256>::from_slice(sig.as_ref()) {
         Ok(signature) if !super::ecdsa_signature_s_is_high(&signature) => signature,
         Ok(_) | Err(_) => return false,

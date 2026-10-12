@@ -19,7 +19,7 @@
 //! the same record's byte bucket, at least `DELEGATED_MIN_CHARGE` bytes, and the record bound
 //! still applies. The byte bound on the neighbour's application traffic is unchanged, and the
 //! floor bounds how many delegated messages core admits, and so the per-message work that
-//! follows admission (the replay-snapshot persist onwards), which no delegating protocol can
+//! follows admission (the replay-record persist onwards), which no delegating protocol can
 //! bound because it runs before the protocol sees the message. The decode and signature checks
 //! precede the quota and are not bounded by it. Core takes a flag, not a rate, and has no
 //! vocabulary of the protocol that declares it.
@@ -43,9 +43,11 @@
 //!
 //! # Trust
 //!
-//! Delegation is trusted local configuration. It enters through `SwarmCallback` (and, in the
-//! node, a registered `Protocol`), with the authority of the operator who configures the quota.
-//! A namespace that declares it must enforce its own per-neighbour admission.
+//! Delegation is trusted local configuration. The application registers it in advance as data,
+//! through `Swarm::set_admission_delegation` (in the node, by registering a `Protocol`), with
+//! the authority of the operator who configures the quota; core matches it without calling the
+//! application (#935). A namespace that declares it must enforce its own per-neighbour
+//! admission.
 
 use crate::dht::Did;
 use crate::message::types::MessageCategory;

@@ -2,13 +2,15 @@
 
 use super::controlled;
 use crate::callback::AdmittedInboundFrame;
+use crate::core::pool::ChannelLane;
 use crate::core::transport::WebrtcConnectionState;
 
 pub(super) enum Event {
     PeerConnectionStateChange(WebrtcConnectionState, Option<String>),
     DataChannelOpen(Option<String>),
     DataChannelClose(Option<String>),
-    Message(AdmittedInboundFrame),
+    /// A frame admitted against the receiver's credit at send, and the lane it travels on.
+    Message(AdmittedInboundFrame, ChannelLane),
 }
 
 impl Event {
@@ -19,14 +21,14 @@ impl Event {
             }
             Self::DataChannelOpen(_) => controlled::QueuedDeliveryKind::DataChannelOpen,
             Self::DataChannelClose(_) => controlled::QueuedDeliveryKind::DataChannelClose,
-            Self::Message(frame) => {
+            Self::Message(frame, _) => {
                 controlled::QueuedDeliveryKind::Message(frame.payload().clone())
             }
         }
     }
 
     pub(super) fn is_lifecycle_event(&self) -> bool {
-        !matches!(self, Self::Message(_))
+        !matches!(self, Self::Message(..))
     }
 
     pub(super) fn set_callback_cid(&mut self, cid: String) {
@@ -36,7 +38,7 @@ impl Event {
             | Self::DataChannelClose(callback_cid) => {
                 *callback_cid = Some(cid);
             }
-            Self::Message(_) => {}
+            Self::Message(..) => {}
         }
     }
 }

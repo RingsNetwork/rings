@@ -47,7 +47,7 @@ impl From<StorageInspect> for rings_node::StorageInfo {
                     value: Some(rings_node::StorageValue {
                         did: vnode.did.to_string(),
                         kind: format!("{:?}", vnode.kind),
-                        data: vnode.data.into_iter().map(|x| x.value().clone()).collect(),
+                        data: vnode.data.iter().map(base64::encode).collect(),
                     }),
                 })
                 .collect(),

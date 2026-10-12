@@ -427,7 +427,7 @@ pub struct StorageValue {
     pub did: String,
     /// Storage record kind.
     pub kind: String,
-    /// Stored payload values encoded for the JSON-RPC boundary.
+    /// Stored elements, each as the base64 of its bytes.
     pub data: Vec<String>,
 }
 

@@ -51,7 +51,6 @@ use crate::error::Result;
 use crate::message::MessageHandler;
 use crate::swarm::transport::pending::PendingConnectionAttempt;
 use crate::swarm::transport::tests::transport_with_key;
-use crate::swarm::transport::tests::NoopSwarmCallback;
 use crate::swarm::transport::SwarmTransport;
 
 /// Fixed observer key, so the compared ring is the same in every run.
@@ -128,7 +127,7 @@ fn observed_step(
 /// the closed generation's peer and requests the repair round from the
 /// removal outcome.
 fn handler_for(transport: &Arc<SwarmTransport>) -> MessageHandler {
-    MessageHandler::new(Arc::clone(transport), Arc::new(NoopSwarmCallback))
+    MessageHandler::new(Arc::clone(transport))
 }
 
 /// A transport at the fixed observer identity, the model ring of `PEERS`
@@ -293,7 +292,7 @@ async fn test_model_agrees_with_the_production_shell_on_an_unreferenced_close() 
 #[tokio::test]
 async fn test_model_agrees_with_the_production_shell_on_the_unavailable_path() -> Result<()> {
     use crate::dht::Stabilizer;
-    use crate::swarm::callback::InnerSwarmCallback;
+    use crate::swarm::callback::SwarmTransportCallback;
     use crate::swarm::inbox::SwarmInboxDelivery;
     use crate::swarm::transport::tests::open_dummy_data_channel_before_ice_connected;
 
@@ -302,7 +301,7 @@ async fn test_model_agrees_with_the_production_shell_on_the_unavailable_path() -
         transport: &Arc<SwarmTransport>,
         peer: Did,
     ) -> Result<PendingConnectionAttempt> {
-        let callback = InnerSwarmCallback::new(Arc::clone(transport), Arc::new(NoopSwarmCallback));
+        let callback = SwarmTransportCallback::new(Arc::clone(transport));
         let (attempt, _offer) = transport
             .prepare_connection_offer_with_attempt(peer, callback)
             .await?;

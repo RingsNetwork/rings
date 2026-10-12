@@ -36,11 +36,10 @@ impl Envelope {
         rings_codec::deserialize(bytes).map_err(|_| Error::DecodeError)
     }
 
-    /// Read only the namespace of an encoded envelope, borrowing it from `bytes` without
-    /// decoding or copying the payload. `namespace_of : [u8] ⇀ str` (partial).
-    pub(crate) fn namespace_of(bytes: &[u8]) -> Result<&str> {
-        rings_codec::deserialize_prefix::<&str>(bytes)
-            .map(|(namespace, _payload)| namespace)
-            .map_err(|_| Error::DecodeError)
+    /// The encoded prefix every envelope of `namespace` starts with. The encoding is
+    /// length-prefixed, so the prefixes of distinct namespaces never prefix each other.
+    /// `namespace_prefix : str → [u8]`.
+    pub(crate) fn namespace_prefix(namespace: &str) -> Result<Vec<u8>> {
+        rings_codec::serialize(&namespace).map_err(|_| Error::EncodeError)
     }
 }

@@ -73,4 +73,5 @@ rings-test-support = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+stateright = "0.31.0"
 tokio = { version = "1.32.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

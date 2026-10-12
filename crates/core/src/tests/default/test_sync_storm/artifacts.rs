@@ -229,21 +229,6 @@ pub(super) fn persist_inflight_trace_artifact(
     persist_json(&path, &artifact)
 }
 
-pub(super) fn persist_named_trace_artifact(
-    label: &str,
-    runtime: &SimulationRuntimeGuard,
-    state: &SimState,
-) -> Result<(), String> {
-    let Some(path) = artifact_path(format!("{label}.json"))? else {
-        return Ok(());
-    };
-    let artifact = serde_json::json!({
-        "scenario": runtime.artifact_context().map_err(|error| error.to_string())?,
-        "trace": trace_json(state)?,
-    });
-    persist_json(&path, &artifact)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

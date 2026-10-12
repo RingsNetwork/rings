@@ -1,4 +1,5 @@
 use super::*;
+use crate::swarm::application::ApplicationData;
 
 #[tokio::test]
 async fn test_missing_connection_records_locally_addressed_failure() -> Result<()> {
@@ -9,7 +10,7 @@ async fn test_missing_connection_records_locally_addressed_failure() -> Result<(
 
     let error = node
         .swarm
-        .send_direct_message(Message::custom(b"missing-connection")?, peer)
+        .send_direct_message(ApplicationData::custom(b"missing-connection"), peer)
         .await
         .expect_err("a direct send without a connection must fail");
 
@@ -34,7 +35,7 @@ async fn test_detached_delivery_timeout_releases_transfer_capacity() -> Result<(
 
     node1
         .swarm
-        .send_direct_message(Message::custom(b"bounded-detached-delivery")?, peer)
+        .send_direct_message(ApplicationData::custom(b"bounded-detached-delivery"), peer)
         .await?;
     wait_until("detached transfer admission", || {
         node1
@@ -103,23 +104,14 @@ async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_l
 {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    let _paused_delivery = PausedDeliveryGuard::new();
     let _pending_close = PendingCloseGuard::new();
     dummy_controlled::reset_sent_count();
-
-    node1
-        .swarm
-        .send_direct_message(Message::custom(b"first-stalled-delivery")?, peer)
-        .await?;
-    wait_until("first delivery gate", || {
-        dummy_controlled::delivery_future_waiting()
-    })
-    .await?;
+    let held = fill_application_window(&node1, peer, "stalled-delivery").await?;
 
     let second_swarm = node1.swarm.clone();
     let second_send = tokio::spawn(async move {
         second_swarm
-            .send_direct_message(Message::custom(b"second-fifo-transfer")?, peer)
+            .send_direct_message(ApplicationData::custom(b"second-fifo-transfer"), peer)
             .await
     });
     wait_until("second FIFO transfer submission", || {
@@ -127,7 +119,7 @@ async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_l
             .swarm
             .transport
             .outbound_admitted_transfer_count_for_test(peer)
-            == Some(2)
+            == window_plus(1)
     })
     .await?;
     wait_until("timed-out generation send revocation", || {
@@ -136,7 +128,7 @@ async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_l
     .await?;
     assert!(node1.swarm.transport.has_active_connection(peer));
 
-    dummy_controlled::release_delivery_future_gate();
+    drop(held);
     let second_result = timeout(Duration::from_secs(2), second_send)
         .await
         .map_err(|_| invalid_test_state("second FIFO submission did not finish"))?
@@ -151,7 +143,7 @@ async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_l
         ),
         "unexpected terminal-generation result: {second_result:?}"
     );
-    assert_eq!(dummy_controlled::sent_count(), 1);
+    assert_eq!(dummy_controlled::sent_count(), OUTBOUND_LANE_WINDOW);
     timeout(
         Duration::from_secs(2),
         node1.swarm.stabilizer().clean_unavailable_connections(),

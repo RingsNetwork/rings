@@ -2,10 +2,11 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::*;
+use crate::swarm::application::ApplicationData;
 
 const BARRIER_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
-const STARTED_REASSEMBLY_FRAMES: usize = 28;
-
+/// The frames one lane may have in flight: its credit window.
+const LANE_CREDIT_WINDOW_FRAMES: usize = rings_transport::core::credit::LANE_CREDIT_WINDOW as usize;
 pub(super) async fn exercise_per_entry_yield(
     runtime: &SimulationRuntimeGuard,
     nodes: &[Node],
@@ -172,11 +173,7 @@ fn mixed_pressure_sends<'a>(
         async move {
             nodes[sender]
                 .swarm
-                .send_direct_message(
-                    Message::custom(b"sync-storm-lower-class")
-                        .expect("mixed-load application message must encode"),
-                    peer,
-                )
+                .send_direct_message(ApplicationData::custom(b"sync-storm-lower-class"), peer)
                 .await
                 .expect("mixed-load application send must complete");
         }
@@ -187,7 +184,7 @@ fn mixed_pressure_sends<'a>(
             async move {
                 nodes[sender]
                     .swarm
-                    .send_direct_message(
+                    .send_direct_core_message_for_test(
                         Message::ProbeRequest(test_probe_request(
                             u8::try_from(ordinal).unwrap_or(u8::MAX),
                         )),
@@ -209,10 +206,7 @@ async fn wait_for_worker_submissions(
 ) {
     let minimum_submissions = OUTBOUND_CONTROL_BURST + 2;
     for _ in 0..64 {
-        while matches!(
-            futures::poll!(sends.next()),
-            std::task::Poll::Ready(Some(()))
-        ) {}
+        poll_completed_sends(sends).await;
         if transport.outbound_submitted_transfers_for_test(peer) >= minimum_submissions {
             return;
         }
@@ -223,16 +217,9 @@ async fn wait_for_worker_submissions(
 
 async fn wait_for_mixed_frames(runtime: &SimulationRuntimeGuard) {
     for _ in 0..64 {
-        let pending = runtime
-            .pending_deliveries()
-            .expect("mixed-load frames must classify");
-        let has_control = pending
-            .iter()
-            .any(|delivery| delivery.class == ScheduledDeliveryClass::Control);
-        let has_application = pending
-            .iter()
-            .any(|delivery| delivery.class == ScheduledDeliveryClass::Application);
-        if has_control && has_application {
+        if has_pending_class(runtime, ScheduledDeliveryClass::Control)
+            && has_pending_class(runtime, ScheduledDeliveryClass::Application)
+        {
             return;
         }
         settle_one_poll().await;
@@ -243,12 +230,7 @@ async fn wait_for_mixed_frames(runtime: &SimulationRuntimeGuard) {
 async fn drain_control_burst(runtime: &SimulationRuntimeGuard) {
     for _ in 0..=OUTBOUND_CONTROL_BURST {
         wait_for_optional_class(runtime, ScheduledDeliveryClass::Control).await;
-        let has_control = runtime
-            .pending_deliveries()
-            .expect("control-pressure frames must classify")
-            .iter()
-            .any(|delivery| delivery.class == ScheduledDeliveryClass::Control);
-        if has_control {
+        if has_pending_class(runtime, ScheduledDeliveryClass::Control) {
             deliver_one_class(runtime, ScheduledDeliveryClass::Control).await;
             settle_one_poll().await;
         }
@@ -257,18 +239,18 @@ async fn drain_control_burst(runtime: &SimulationRuntimeGuard) {
 
 async fn wait_for_optional_class(runtime: &SimulationRuntimeGuard, class: ScheduledDeliveryClass) {
     for _ in 0..64 {
-        if runtime
-            .pending_deliveries()
-            .expect("pressure frames must classify")
-            .iter()
-            .any(|delivery| delivery.class == class)
-        {
+        if has_pending_class(runtime, class) {
             return;
         }
         settle_one_poll().await;
     }
 }
 
+/// Hold the barrier with a reassembly backlog toward a peer, and probe that peer through the
+/// production stabilizer behind it: the probe is blocked by the barrier unless the exemption
+/// admits it, delivered within one hand-over either way, and answered, so the healthy peer is
+/// kept and no repair follows (before #924 the barrier starved the probe past its deadline,
+/// a false disconnect whose repair refed the storm).
 pub(super) async fn exercise_barrier_control_exemption(
     runtime: &SimulationRuntimeGuard,
     nodes: &[Node],
@@ -280,21 +262,10 @@ pub(super) async fn exercise_barrier_control_exemption(
     let (mut reassembly_deliveries, reassembly) =
         start_barrier_backlog(runtime, nodes, sender, peer, driver).await;
 
-    let mut control_send = nodes[sender]
-        .swarm
-        .send_direct_message(Message::ProbeRequest(test_probe_request(1)), peer)
-        .boxed_local();
-    let mut control_send_complete = false;
-    wait_for_class_while_sending(
-        runtime,
-        ScheduledDeliveryClass::Control,
-        control_send.as_mut(),
-        &mut control_send_complete,
-        "barrier control send must complete",
-    )
-    .await;
-    let control = delivery_for_class(runtime, ScheduledDeliveryClass::Control);
-    driver.observe_pending(runtime, std::slice::from_ref(&control));
+    let repairs_before = runtime
+        .repair_entries_observed()
+        .expect("repair observation must remain available");
+    let control = issue_stabilizer_probe(runtime, nodes, sender, receiver, driver).await;
     let deadline = control
         .deadline_virtual_ms
         .expect("control pressure must carry an explicit deadline");
@@ -306,9 +277,10 @@ pub(super) async fn exercise_barrier_control_exemption(
     driver.observe_barrier(&control, blocked_control);
     persist_runtime_artifact("barrier-control-verdict", runtime)
         .expect("barrier verdict artifact must be writable");
-    if blocked_control {
-        observe_barrier_deadline_miss(runtime, deadline, control_delivery.as_mut()).await;
+    if !control_complete && blocked_control {
+        await_one_handover(runtime, control_delivery.as_mut(), &reassembly, deadline).await;
     }
+    let control_complete = control_complete || blocked_control;
     drain_started_reassembly(runtime, &mut reassembly_deliveries).await;
     for delivery in &reassembly {
         driver.observe_delivery(runtime, delivery);
@@ -321,13 +293,120 @@ pub(super) async fn exercise_barrier_control_exemption(
     }
     driver.observe_delivery(runtime, &control);
     driver.observe_production_handlers(runtime);
-    finish_send(control_send.as_mut(), control_send_complete).await;
+    drop(control_delivery);
     runtime
         .disable_reassembly_service()
         .expect("deterministic reassembly service must disable");
+    deliver_probe_answer(runtime, driver, &control).await;
     drain_bootstrap(runtime, nodes).await;
+    assert_peer_kept_by_its_answer(runtime, nodes, sender, receiver, repairs_before).await;
     dummy_controlled::set_max_message_size(CHUNK_MESSAGE_SIZE);
-    drop(control_delivery);
+}
+
+/// Make `sender`'s probe of `receiver` due, and no other of its probes, then run the production
+/// probe pass and return the one probe it queued; the probe's clock starts at its issue.
+async fn issue_stabilizer_probe(
+    runtime: &SimulationRuntimeGuard,
+    nodes: &[Node],
+    sender: usize,
+    receiver: usize,
+    driver: &mut TraceDriver,
+) -> ScheduledDelivery {
+    let transport = &nodes[sender].swarm.transport;
+    for (index, node) in nodes.iter().enumerate() {
+        if index != sender && index != receiver && transport.has_active_connection(node.did()) {
+            transport
+                .restart_peer_liveness_period_for_test(node.did(), 0)
+                .expect("non-target peer liveness must be restartable");
+        }
+    }
+    let peer = nodes[receiver].did();
+    transport
+        .force_peer_liveness_probe_due(peer)
+        .expect("target peer liveness must be forceable");
+    nodes[sender]
+        .swarm
+        .stabilizer()
+        .probe_peer_liveness_for_simulation()
+        .await
+        .expect("production stabilizer must send its real liveness probe");
+    let issued_at_ms =
+        i64::try_from(crate::utils::get_epoch_ms()).expect("simulated epoch must fit liveness");
+    assert_eq!(
+        transport
+            .peer_liveness_outstanding_since_for_test(peer)
+            .expect("active peer liveness state must remain readable"),
+        Some(issued_at_ms),
+        "the liveness clock must originate at the real stabilizer probe"
+    );
+    let new_deliveries = new_deliveries_with_controls(runtime, 1).await;
+    driver.observe_pending(runtime, &new_deliveries);
+    let probes = new_deliveries
+        .into_iter()
+        .filter(|delivery| delivery.class == ScheduledDeliveryClass::Control)
+        .collect::<Vec<_>>();
+    let [probe] = probes.as_slice() else {
+        panic!("the pass must queue exactly the target's probe: {probes:?}");
+    };
+    assert!(probe.transaction_id.is_some());
+    assert!(probe.deadline_virtual_ms.is_some());
+    probe.clone()
+}
+
+/// Deliver the peer's answer to `probe`, under the probe's transaction.
+async fn deliver_probe_answer(
+    runtime: &SimulationRuntimeGuard,
+    driver: &mut TraceDriver,
+    probe: &ScheduledDelivery,
+) {
+    let answer = runtime
+        .pending_deliveries()
+        .expect("probe answer must classify")
+        .into_iter()
+        .find(|delivery| {
+            delivery.class == ScheduledDeliveryClass::Control
+                && delivery.transaction_id == probe.transaction_id
+        })
+        .expect("the peer must answer the probe once the barrier released it");
+    assert!(runtime
+        .deliver(&answer)
+        .await
+        .expect("probe answer delivery must remain stable"));
+    driver.observe_delivery(runtime, &answer);
+}
+
+/// The probe was answered: none is left to expire into a false disconnect, `sender` keeps
+/// `receiver` through a liveness pass, and no repair entry followed.
+async fn assert_peer_kept_by_its_answer(
+    runtime: &SimulationRuntimeGuard,
+    nodes: &[Node],
+    sender: usize,
+    receiver: usize,
+    repairs_before: u64,
+) {
+    let peer = nodes[receiver].did();
+    let transport = &nodes[sender].swarm.transport;
+    assert_eq!(
+        transport
+            .peer_liveness_outstanding_since_for_test(peer)
+            .expect("active peer liveness state must remain readable"),
+        None,
+        "the probe must be answered once the barrier released it"
+    );
+    nodes[sender]
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await
+        .expect("liveness evidence must be processed");
+    assert!(transport.get_connection(peer).is_some());
+    assert_eq!(
+        runtime
+            .repair_entries_observed()
+            .expect("repair observation must remain available"),
+        repairs_before,
+        "no repair follows an answered probe"
+    );
 }
 
 async fn start_barrier_backlog<'a>(
@@ -341,8 +420,7 @@ async fn start_barrier_backlog<'a>(
     Vec<ScheduledDelivery>,
 ) {
     dummy_controlled::set_max_message_size(super::CHUNKED_MAX_MESSAGE_SIZE);
-    let large_application = Message::custom(&vec![0x5a; BARRIER_PAYLOAD_BYTES])
-        .expect("chunked barrier payload must encode");
+    let large_application = ApplicationData::custom(&vec![0x5a; BARRIER_PAYLOAD_BYTES]);
     let mut application_send = nodes[sender]
         .swarm
         .send_direct_message(large_application, peer)
@@ -360,24 +438,9 @@ async fn start_barrier_backlog<'a>(
     runtime
         .enable_reassembly_service()
         .expect("deterministic reassembly service must enable");
-    let reassembly = runtime
-        .pending_deliveries()
-        .expect("barrier reassembly frames must classify")
-        .into_iter()
-        .filter(|delivery| delivery.class == ScheduledDeliveryClass::Reassembly)
-        .take(STARTED_REASSEMBLY_FRAMES)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        reassembly.len(),
-        STARTED_REASSEMBLY_FRAMES,
-        "barrier pressure must fill the real inbound reassembly lane"
-    );
+    let reassembly = in_flight_reassembly(runtime);
     driver.observe_pending(runtime, &reassembly);
-    let mut reassembly_deliveries = start_controlled_deliveries(runtime, reassembly.clone());
-    assert!(matches!(
-        futures::poll!(reassembly_deliveries.next()),
-        std::task::Poll::Pending
-    ));
+    let reassembly_deliveries = start_lane_handover(runtime, reassembly.clone()).await;
     settle_one_poll().await;
     for delivery in &reassembly {
         driver.observe_dispatch(delivery);
@@ -398,7 +461,7 @@ where
             std::task::Poll::Ready(result) => {
                 assert!(
                     !blocked_control,
-                    "legacy barrier unexpectedly admitted control"
+                    "a barrier without the exemption unexpectedly admitted control"
                 );
                 assert!(result.expect("enabled control delivery must remain stable"));
                 return true;
@@ -423,6 +486,51 @@ where
 
 pub(super) type ControlledDelivery<'a> =
     futures::future::LocalBoxFuture<'a, Result<bool, crate::simulation::SimulationRuntimeError>>;
+
+/// Every chunk frame in flight, the backlog a reassembly-pressure scenario starts.
+///
+/// Law: flow control lets a sender have at most its lane's free credit in flight,
+/// `limit − committed`, which the credit law bounds by one window and the batched advertising
+/// keeps above zero; the rest of a longer transfer waits at its sender.
+pub(super) fn in_flight_reassembly(runtime: &SimulationRuntimeGuard) -> Vec<ScheduledDelivery> {
+    let reassembly = runtime
+        .pending_deliveries()
+        .expect("reassembly frames in flight must classify")
+        .into_iter()
+        .filter(|delivery| delivery.class == ScheduledDeliveryClass::Reassembly)
+        .collect::<Vec<_>>();
+    assert!(
+        !reassembly.is_empty(),
+        "reassembly pressure must put chunk frames in flight"
+    );
+    assert!(
+        reassembly.len() <= LANE_CREDIT_WINDOW_FRAMES,
+        "flow control must bound the frames in flight on one lane by its credit window"
+    );
+    reassembly
+}
+
+/// Start the deliveries of one lane's frames, under an enabled reassembly service, and return
+/// the deliveries still in progress.
+///
+/// Law: arrival never waits on the protocol. Every frame but the one being handed over joins
+/// the lane's FIFO at once and its delivery completes; the hand-over waits for the reassembly
+/// service, so exactly the draining delivery remains.
+pub(super) async fn start_lane_handover<'a>(
+    runtime: &'a SimulationRuntimeGuard,
+    deliveries: Vec<ScheduledDelivery>,
+) -> FuturesUnordered<ControlledDelivery<'a>> {
+    let mut started = start_controlled_deliveries(runtime, deliveries);
+    while let std::task::Poll::Ready(Some(arrived)) = futures::poll!(started.next()) {
+        assert!(arrived.expect("reassembly arrival must remain stable"));
+    }
+    assert_eq!(
+        started.len(),
+        1,
+        "exactly the hand-over waits for the reassembly service; every other arrival completes"
+    );
+    started
+}
 
 pub(super) fn start_controlled_deliveries<'a>(
     runtime: &'a SimulationRuntimeGuard,
@@ -455,30 +563,61 @@ pub(super) async fn drain_started_reassembly(
     }
 }
 
-async fn observe_barrier_deadline_miss<F>(
+/// Witness of the reassembly barrier's bound under per-lane credit dispatch (#924, #927).
+///
+/// Law: a transport lane hands its frames to core one at a time, so a control frame the barrier
+/// blocks waits behind the one reassembly frame being handed over, never behind the lane's
+/// whole backlog. It therefore completes within that frame's service cost, which fits the
+/// control deadline: the barrier delays control but cannot starve it.
+///
+/// Post: the control delivery is complete and its completion recorded against the deadline,
+/// so a starvation would surface as a `BarrierControlExemption` violation.
+pub(super) async fn await_one_handover<F>(
     runtime: &SimulationRuntimeGuard,
+    control_delivery: Pin<&mut F>,
+    reassembly: &[ScheduledDelivery],
     deadline: u64,
-    mut control_delivery: Pin<&mut F>,
 ) where
     F: Future<Output = Result<bool, crate::simulation::SimulationRuntimeError>> + ?Sized,
 {
-    let elapsed = u64::try_from(runtime.elapsed_ms().expect("elapsed time must fit"))
+    let blocked_at = u64::try_from(runtime.elapsed_ms().expect("elapsed time must fit"))
         .expect("pressure time must fit u64");
-    let delta_ms = deadline.saturating_sub(elapsed).saturating_add(1);
+    let handover = reassembly
+        .iter()
+        .map(|delivery| crate::simulation::reassembly_frame_service_ms(delivery.bytes))
+        .max()
+        .expect("a blocked control frame waits behind a reassembly frame");
+    assert!(
+        blocked_at.saturating_add(handover) < deadline,
+        "one reassembly hand-over must fit the control deadline"
+    );
     runtime
-        .advance(std::time::Duration::from_millis(delta_ms))
+        .advance(std::time::Duration::from_millis(handover))
         .await
-        .expect("barrier deadline must advance deterministically");
+        .expect("one hand-over must advance deterministically");
+    // Tokio time is paused and auto-advances only while every task waits on a timer, so the
+    // control completing with the clock still here is the witness that it waited on the
+    // hand-over alone: a wait behind further service (another frame of the backlog) moves the
+    // clock and fails below. The timeout is a hang guard, not a pace.
+    let handed_over_at = tokio::time::Instant::now();
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(60), control_delivery)
+        .await
+        .expect("blocked control must complete once its hand-over is done, not starve")
+        .expect("blocked control delivery must remain stable");
+    assert!(
+        delivered,
+        "blocked control must complete once its hand-over is done"
+    );
+    assert_eq!(
+        tokio::time::Instant::now(),
+        handed_over_at,
+        "blocked control must complete with no time past its one hand-over"
+    );
     let observed = u64::try_from(runtime.elapsed_ms().expect("elapsed time must fit"))
         .expect("pressure time must fit u64");
-    assert!(observed > deadline);
-    assert!(matches!(
-        futures::poll!(control_delivery.as_mut()),
-        std::task::Poll::Pending
-    ));
-    crate::simulation::record_barrier_control_deadline_miss(observed, deadline);
-    persist_runtime_artifact("barrier-control-deadline-miss", runtime)
-        .expect("barrier deadline artifact must be writable");
+    // The completion is the barrier's witness: past the deadline it records the starvation the
+    // exemption protects against, which every caller rules out.
+    crate::simulation::record_barrier_control_completion(observed, deadline);
 }
 
 async fn wait_for_class_while_sending<F, T, E>(
@@ -498,12 +637,7 @@ async fn wait_for_class_while_sending<F, T, E>(
                 *send_complete = true;
             }
         }
-        if runtime
-            .pending_deliveries()
-            .expect("barrier workload must classify")
-            .iter()
-            .any(|delivery| delivery.class == class)
-        {
+        if has_pending_class(runtime, class) {
             return;
         }
         settle_one_poll().await;
@@ -521,6 +655,25 @@ where
             .await
             .expect("pressure send must complete after the barrier releases");
     }
+}
+
+/// Whether a frame of `class` waits in the controlled delivery queue.
+fn has_pending_class(runtime: &SimulationRuntimeGuard, class: ScheduledDeliveryClass) -> bool {
+    runtime
+        .pending_deliveries()
+        .expect("pressure frames must classify")
+        .iter()
+        .any(|delivery| delivery.class == class)
+}
+
+/// Poll `sends` until none is ready, dropping every completed send.
+async fn poll_completed_sends(
+    sends: &mut FuturesUnordered<futures::future::LocalBoxFuture<'_, ()>>,
+) {
+    while matches!(
+        futures::poll!(sends.next()),
+        std::task::Poll::Ready(Some(()))
+    ) {}
 }
 
 async fn deliver_one_class(runtime: &SimulationRuntimeGuard, class: ScheduledDeliveryClass) {
@@ -558,14 +711,45 @@ async fn drain_pressure_futures(
                 .await
                 .expect("pressure cleanup delivery must remain stable"));
         }
-        while matches!(
-            futures::poll!(sends.next()),
-            std::task::Poll::Ready(Some(()))
-        ) {}
+        poll_completed_sends(sends).await;
         if sends.is_empty() && dummy_controlled::pending() == 0 && !network_busy(nodes) {
             return;
         }
         settle_one_poll().await;
     }
     panic!("scheduler-pressure workload did not quiesce within the derived harness bound");
+}
+
+/// The deliveries queued since the last inspection, once `controls` control frames are among
+/// them. A probe pass returns when its probes are queued in core, before the outbound workers
+/// dispatch them, so this waits for each frame woken by the queue's enqueue signal, enabled
+/// before the queue is read; the timeout is a hang guard, not a pace.
+pub(super) async fn new_deliveries_with_controls(
+    runtime: &SimulationRuntimeGuard,
+    controls: usize,
+) -> Vec<ScheduledDelivery> {
+    let collect = async {
+        let mut seen = Vec::new();
+        loop {
+            let signal = dummy_controlled::enqueue_signal();
+            let mut enqueued = std::pin::pin!(signal.notified());
+            enqueued.as_mut().enable();
+            seen.extend(
+                runtime
+                    .new_pending_deliveries()
+                    .expect("queued deliveries must classify"),
+            );
+            let queued = seen
+                .iter()
+                .filter(|delivery| delivery.class == ScheduledDeliveryClass::Control)
+                .count();
+            if queued >= controls {
+                return seen;
+            }
+            enqueued.await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), collect)
+        .await
+        .expect("every queued probe must reach the delivery queue")
 }

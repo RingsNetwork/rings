@@ -3,7 +3,6 @@
 
 use event_listener::EventListener;
 use futures::future::select_all;
-use serde::Serialize;
 
 use super::Awaiting;
 use super::LinkHop;
@@ -14,8 +13,11 @@ use crate::dht::delivery::Origination;
 use crate::dht::Did;
 use crate::error::DeferralTrigger;
 use crate::error::Result;
+use crate::message::types::Message;
+use crate::message::types::MessageKind;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
+use crate::swarm::transport::delivery::SendCompletionOutcome;
+use crate::swarm::transport::egress::QueueAdmission;
 use crate::swarm::transport::outbound::CapacityView;
 use crate::swarm::transport::outbound::PeerStamp;
 use crate::swarm::transport::SwarmTransport;
@@ -38,7 +40,9 @@ impl SwarmTransport {
     /// `LinkChange` deferral, so the placement waits for a link or topology change instead of
     /// failing: the same wait as a hop whose generation died (L1), and still no hop past `next`.
     fn first_hop(&self, next: Did) -> Result<(NextHop, Origination)> {
-        let origination = self.dht.origination(next, |peer| self.is_connected(peer))?;
+        let origination = self
+            .dht
+            .origination(next, |peer| self.get_connection(peer).is_some())?;
         let hop = origination.hop.unwrap_or_else(|| NextHop::toward(next));
         Ok((hop, origination))
     }
@@ -64,15 +68,26 @@ impl SwarmTransport {
         self.link_of(hop.peer)
     }
 
-    /// Send `message` to `destination` through the first hop [`Self::first_hop`] decides,
-    /// detached, and classify the outcome.
+    /// Send `message` to `destination` through the first hop [`Self::first_hop`] decides, under
+    /// `admission`, and classify the outcome.
+    ///
+    /// ```text
+    /// admission = Waiting   ⇒ the application discipline: wait, bounded, for capacity and
+    ///                         readiness, then for the first frame's admission
+    /// admission = Immediate ⇒ the protocol discipline: capacity and readiness now, or refused
+    ///                         as local backpressure; settled once queued
+    /// ```
     ///
     /// The hop, its link and the payload's `reply_via` come from one decision, so the verdict
     /// is attributed to the hop the payload actually left through. Unlike
     /// `PayloadSender::send_message`, a `Cancelled` completion is not reported as a success: it
     /// is the pre-acceptance deferral the cancellation gate proves it to be.
-    pub(super) async fn attempt_remote<T>(&self, message: T, destination: Did) -> Verdict
-    where T: Serialize + Send {
+    pub(super) async fn attempt_remote(
+        &self,
+        message: Box<Message>,
+        destination: Did,
+        admission: QueueAdmission,
+    ) -> Verdict {
         let (hop, origination) = match self.first_hop(destination) {
             Ok(first) => first,
             Err(error) => return Verdict::Failed(error),
@@ -82,7 +97,7 @@ impl SwarmTransport {
             Err(error) => return Verdict::Failed(error),
         };
         let payload = match self
-            .originated_payload(message, hop, destination, origination.reply_via)
+            .originated_payload(*message, hop, destination, origination.reply_via)
             .await
         {
             Ok(payload) => payload,
@@ -92,24 +107,28 @@ impl SwarmTransport {
             Ok(demand) => demand,
             Err(error) => return Verdict::Failed(error),
         };
-        let result = self.send_payload_detached_with_outcome(payload).await;
+        let result = match admission {
+            QueueAdmission::Waiting => self.send_payload_admitted(payload).await,
+            admission => self
+                .send_payload_enqueued(hop.peer, payload, admission, None)
+                .await
+                .map(|()| SendCompletionOutcome::Succeeded),
+        };
         Verdict::remote(hop.peer, generation, demand, result)
     }
 
     /// Build a locally originated payload through `hop`, naming `reply_via`, after durably
     /// reserving its stream sequence: `PayloadSender::originate` with the hop already decided.
-    async fn originated_payload<T>(
+    async fn originated_payload(
         &self,
-        message: T,
+        message: Message,
         hop: NextHop,
         destination: Did,
         reply_via: Option<Did>,
-    ) -> Result<MessagePayload>
-    where
-        T: Serialize + Send,
-    {
+    ) -> Result<MessagePayload> {
+        let class = MessageKind::from_message(&message).class();
         let sequence = *self
-            .reserve_transaction_sequences(destination, std::num::NonZeroU64::MIN)
+            .reserve_transaction_sequences(destination, class, std::num::NonZeroU64::MIN)
             .await?
             .start();
         MessagePayload::new_send_with_sequence(

@@ -1,28 +1,32 @@
 //! Real-network checks of the bootstrap plumbing: the routed successor lookup issued by
-//! `ProcessorPort::reachable`, the backend's translation of swarm events into reachability
-//! evidence, and the core's `PeerRetired` event on a locally decided disconnect.
+//! `ProcessorPort::reachable`, the backend's translation of the inbox's peer facts into
+//! reachability evidence, and the core's `PeerRetired` event on a locally decided disconnect.
 //!
 //! Topology for the probe: `C — B — A`, with keys chosen so that `A` is `B`'s successor head
 //! (clockwise from `B`, `A` precedes `C`). `C`'s only peer is `B`, so every lookup `C` issues
 //! goes to `B`, which answers `A` for any key in `(B, A]`.
 
+#[cfg(feature = "dummy")]
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rings_core::ecc::SecretKey;
+use rings_core::lifecycle::StopToken;
 #[cfg(feature = "dummy")]
 use rings_core::swarm::SuccessorLookup;
-use tokio::sync::oneshot::error::TryRecvError;
 
 use super::common::*;
 use super::*;
-use crate::extension::Backend;
+use crate::extension::BackendObserver;
 use crate::native::bootstrap::BootstrapPort;
 use crate::native::bootstrap::DialFailure;
 use crate::native::bootstrap::ProcessorPort;
 use crate::native::bootstrap::ReachabilityEvidence;
 use crate::seed::SeedPeer;
 use crate::seed::ValidatedSeedPeer;
+#[cfg(feature = "dummy")]
+use crate::tests::activity::probe_on_activity;
+use crate::tests::activity::record_activity;
 
 /// Draws of random identity keys before giving up on a chain layout.
 #[cfg(feature = "dummy")]
@@ -30,33 +34,19 @@ const CHAIN_KEY_DRAWS: usize = 512;
 /// An endpoint that validates as public and is never dialed.
 const NEVER_DIALED: &str = "https://never-dialed.example.org:50001/";
 
-/// Swarm callback that dispatches through the real [`Backend`] (so lookup reports and swarm
-/// events reach the reachability evidence exactly as in `rings run`) while keeping the test
-/// fixture's connection notifications.
-struct ProbeTestCallback {
-    backend: Backend,
-    fixture: Arc<SwarmCallbackInstance>,
-}
+/// Reachability evidence that records activity after every fact it records, so probes waiting
+/// on an admission or retirement the backend reported wake on it.
+struct ActiveEvidence(Arc<ReachabilityEvidence>);
 
-#[async_trait]
-impl SwarmCallback for ProbeTestCallback {
-    /// Route inbound payloads through the backend, then record them in the fixture.
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), rings_core::error::CallbackError> {
-        self.backend.on_inbound(payload).await?;
-        self.fixture.on_inbound(payload).await
+impl BackendObserver for ActiveEvidence {
+    fn peer_admitted(&self, peer: Did) {
+        self.0.peer_admitted(peer);
+        record_activity();
     }
 
-    /// Forward events to both the backend (which writes the evidence) and the fixture's
-    /// connection notifier.
-    async fn on_event(
-        &self,
-        event: &SwarmEvent,
-    ) -> std::result::Result<(), rings_core::error::CallbackError> {
-        self.backend.on_event(event).await?;
-        self.fixture.on_event(event).await
+    fn peer_retired(&self, peer: Did) {
+        self.0.peer_retired(peer);
+        record_activity();
     }
 }
 
@@ -67,18 +57,19 @@ struct ProbeNode {
 }
 
 impl ProbeNode {
-    /// A node over `key` whose swarm callback dispatches through a backend that writes fresh
+    /// A node over `key` whose application inbox is served by a backend that writes fresh
     /// reachability evidence.
     async fn new(key: SecretKey) -> Self {
         let processor = Arc::new(prepare_processor_with_identity_key(key).await);
         let evidence = Arc::new(ReachabilityEvidence::default());
-        let fixture = test_callback();
-        let provider = Arc::new(Provider::from_processor(processor.clone()));
-        let backend = Backend::new(provider).observed_by(evidence.clone());
-        processor
-            .swarm
-            .set_callback(Arc::new(ProbeTestCallback { backend, fixture }))
-            .expect("callback installs");
+        // Served exactly as `rings run` serves it, recording activity on every fact.
+        let service = Provider::from_processor(processor.clone())
+            .application_service(
+                Some(Arc::new(ActiveEvidence(evidence.clone()))),
+                StopToken::never(),
+            )
+            .expect("the probe node's inbox is unclaimed");
+        tokio::spawn(service);
         Self {
             processor,
             evidence,
@@ -126,7 +117,7 @@ fn target(did: Did) -> ValidatedSeedPeer {
 /// interval is refuted without leaving `C`.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn routed_probe_reports_presence_through_one_hop() {
+async fn test_routed_probe_reports_presence_through_one_hop() {
     let _guard = network_test_guard().await;
     let (a_key, b_key, c_key) = chain_keys();
     let a = ProbeNode::new(a_key).await;
@@ -186,68 +177,16 @@ async fn routed_probe_reports_presence_through_one_hop() {
     );
 }
 
-/// The backend translates swarm events into evidence: `Connected` resolves an admission
-/// waiter, `PeerRetired` records a loss, and other physical states record nothing.
-#[tokio::test]
-async fn backend_translates_admission_and_retirement_only() {
-    let processor = Arc::new(prepare_processor().await);
-    let managed = Did::from(1);
-    let evidence = Arc::new(ReachabilityEvidence::default());
-    let provider = Arc::new(Provider::from_processor(processor));
-    let backend = Backend::new(provider).observed_by(evidence.clone());
-    let state_change = |state: WebrtcConnectionState| SwarmEvent::ConnectionStateChange {
-        peer: managed,
-        state,
-    };
-
-    let mut admitted = evidence
-        .admissions()
-        .wait_for(managed)
-        .expect("record readable");
-    for state in [
-        WebrtcConnectionState::Connecting,
-        WebrtcConnectionState::Disconnected,
-        WebrtcConnectionState::Failed,
-        WebrtcConnectionState::Closed,
-    ] {
-        backend
-            .on_event(&state_change(state))
-            .await
-            .expect("events are accepted");
-    }
-    assert!(evidence
-        .losses()
-        .take()
-        .expect("record readable")
-        .is_empty());
-    assert!(
-        matches!(admitted.try_recv(), Err(TryRecvError::Empty)),
-        "no physical state other than Connected admits"
-    );
-
-    backend
-        .on_event(&state_change(WebrtcConnectionState::Connected))
-        .await
-        .expect("events are accepted");
-    assert_eq!(admitted.await, Ok(()));
-
-    backend
-        .on_event(&SwarmEvent::PeerRetired { peer: managed })
-        .await
-        .expect("events are accepted");
-    assert_eq!(
-        evidence.losses().take().expect("record readable"),
-        BTreeSet::from([managed])
-    );
-}
-
 /// A disconnect decided by the local node retires the peer through the core's single
 /// retirement transition and reaches the evidence as a loss, without any physical terminal
-/// state. The disconnect follows the admission *event*, not merely transport readiness: by the
-/// retirement law a retirement before the admission was announced is silent.
+/// state. The disconnect follows the admission *event*, not merely transport readiness: a
+/// retirement before the backend read the admission withdraws it, and the loss is never seen.
+///
+/// The retirement is announced to the inbox before `disconnect` returns, and the backend reads
+/// it at its own pace (#935), so the loss is awaited on the activity the backend records.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
+async fn test_a_local_disconnect_is_reported_as_a_peer_retirement() {
     let _guard = network_test_guard().await;
     let a = ProbeNode::new(SecretKey::random()).await;
     let b = ProbeNode::new(SecretKey::random()).await;
@@ -274,17 +213,23 @@ async fn a_local_disconnect_is_reported_as_a_peer_retirement() {
         .disconnect(b.did())
         .await
         .expect("disconnect succeeds");
-    assert_eq!(
-        a.evidence.losses().take().expect("record readable"),
-        BTreeSet::from([b.did()]),
-        "the retirement is observed before disconnect returns"
-    );
+    let lost = probe_on_activity(
+        "the retirement reaches the evidence",
+        PROCESSOR_TEST_HANG_GUARD,
+        || {
+            let lost = a.evidence.losses().take().expect("record readable");
+            async move { Ok((!lost.is_empty()).then_some(lost)) }
+        },
+    )
+    .await
+    .expect("the retirement of B is announced to A");
+    assert_eq!(lost, BTreeSet::from([b.did()]));
 }
 
 /// A pending handshake to the target, here one this node reserved by offering, refuses a dial
 /// before any request leaves: the never-dialed endpoint would otherwise fail to resolve.
 #[tokio::test]
-async fn a_pending_handshake_refuses_the_dial_without_a_request() {
+async fn test_a_pending_handshake_refuses_the_dial_without_a_request() {
     let _guard = network_test_guard().await;
     let a = ProbeNode::new(SecretKey::random()).await;
     let b = ProbeNode::new(SecretKey::random()).await;

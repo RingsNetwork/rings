@@ -2,15 +2,12 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 
 use super::super::chord::PeerRing;
 use super::super::chord::PeerRingAction;
 use super::super::chord::RemoteAction;
-use super::sync::sync_entries_batch_wire_cost;
-use super::sync::sync_entries_batches;
 use super::sync::SYNC_BATCH_MAX_BYTES;
-use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
-use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::Entry;
@@ -20,9 +17,7 @@ use crate::dht::entry::EntryOperation;
 use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
-use crate::dht::entry::SyncedEntryAck;
 use crate::dht::stabilization::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
-use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
@@ -34,9 +29,6 @@ use crate::dht::VirtualNodeConfig;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::types::Message;
-use crate::message::types::SyncEntriesWithSuccessor;
-use crate::message::Encoded;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::tests::expired;
@@ -44,6 +36,9 @@ use crate::tests::held_inbox_for;
 use crate::tests::live_entry;
 use crate::utils::get_epoch_ms;
 
+mod test_cache_join;
+mod test_handoff;
+mod test_horizon;
 mod test_repair;
 
 fn data_entry(did: Did) -> Entry {
@@ -51,7 +46,11 @@ fn data_entry(did: Did) -> Entry {
 }
 
 fn data_entry_with_data(did: Did, data: &str) -> Entry {
-    live_entry(did, vec![data.into()], EntryKind::Data)
+    live_entry(
+        did,
+        vec![Bytes::copy_from_slice(data.as_bytes())],
+        EntryKind::Data,
+    )
 }
 
 fn data_entry_with_payload_len(did: Did, len: usize) -> Entry {
@@ -558,298 +557,6 @@ fn test_placement_key_route_uses_one_virtual_owner_topology_snapshot() -> Result
     Ok(())
 }
 
-#[tokio::test]
-async fn test_sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
-    let node_did = Did::from(0u32);
-    let new_successor = Did::from(50u32);
-    let placement_key = Did::from(100u32);
-    let resource_id = Did::from(10u32);
-    let entry = data_entry(resource_id);
-    let node = PeerRing::new_with_storage(node_did, 3, Box::new(MemStorage::new()));
-    node.storage.put(&placement_key.to_string(), &entry).await?;
-
-    let action = node.sync_entries_with_successor(new_successor).await?;
-    let retried_action = node.sync_entries_with_successor(new_successor).await?;
-    let expected = vec![(new_successor, vec![PlacedEntry::new(
-        placement_key,
-        entry.clone(),
-    )])];
-
-    assert_eq!(collect_sync_batches(action)?, expected);
-    assert_eq!(collect_sync_batches(retried_action)?, expected);
-    assert_eq!(
-        node.storage.get(&placement_key.to_string()).await?,
-        Some(entry)
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_sync_ack_deletes_local_entry_after_copy() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let new_successor = Did::from(50u32);
-    let placement_key = Did::from(100u32);
-    let entry = data_entry(Did::from(10u32));
-    node.storage.put(&placement_key.to_string(), &entry).await?;
-
-    let action = node.sync_entries_with_successor(new_successor).await?;
-    assert_eq!(collect_sync_batches(action)?.len(), 1);
-
-    let ack_action = node
-        .acknowledge_synced_entries(&[SyncedEntryAck::new(placement_key, entry)])
-        .await?;
-
-    assert_eq!(ack_action, PeerRingAction::None);
-    assert_eq!(node.storage.get(&placement_key.to_string()).await?, None);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_sync_ack_retains_changed_local_value() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let new_successor = Did::from(50u32);
-    let placement_key = Did::from(100u32);
-    let resource_id = Did::from(10u32);
-    let copied_entry = data_entry_with_data(resource_id, "copied");
-    let local_write = data_entry_with_data(resource_id, "local-write");
-    node.storage
-        .put(&placement_key.to_string(), &copied_entry)
-        .await?;
-
-    let action = node.sync_entries_with_successor(new_successor).await?;
-    assert_eq!(collect_sync_batches(action)?.len(), 1);
-    node.storage
-        .put(&placement_key.to_string(), &local_write)
-        .await?;
-
-    node.acknowledge_synced_entries(&[SyncedEntryAck::new(placement_key, copied_entry)])
-        .await?;
-
-    assert_eq!(
-        node.storage.get(&placement_key.to_string()).await?,
-        Some(local_write)
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_sync_partial_ack_retains_unacked_entries() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let acked_key = Did::from(100u32);
-    let pending_key = Did::from(120u32);
-    let acked_entry = data_entry(Did::from(10u32));
-    let pending_entry = data_entry(Did::from(20u32));
-    node.storage
-        .put(&acked_key.to_string(), &acked_entry)
-        .await?;
-    node.storage
-        .put(&pending_key.to_string(), &pending_entry)
-        .await?;
-
-    node.acknowledge_synced_entries(&[SyncedEntryAck::new(acked_key, acked_entry)])
-        .await?;
-
-    assert_eq!(node.storage.get(&acked_key.to_string()).await?, None);
-    assert_eq!(
-        node.storage.get(&pending_key.to_string()).await?,
-        Some(pending_entry)
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_sync_ack_deletes_placement_key_not_entry_identity() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let placement_key = Did::from(100u32);
-    let resource_id = Did::from(10u32);
-    let placed_entry = data_entry(resource_id);
-    let identity_entry = data_entry(resource_id);
-    node.storage
-        .put(&placement_key.to_string(), &placed_entry)
-        .await?;
-    node.storage
-        .put(&resource_id.to_string(), &identity_entry)
-        .await?;
-
-    node.acknowledge_synced_entries(&[SyncedEntryAck::new(placement_key, placed_entry)])
-        .await?;
-
-    assert_eq!(node.storage.get(&placement_key.to_string()).await?, None);
-    assert_eq!(
-        node.storage.get(&resource_id.to_string()).await?,
-        Some(identity_entry)
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_sync_entries_with_successor_batches_by_wire_budget() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let new_successor = Did::from(50u32);
-    let payload_len = SYNC_BATCH_MAX_BYTES / 2;
-    let entries = vec![
-        PlacedEntry::new(
-            Did::from(100u32),
-            data_entry_with_payload_len(Did::from(10u32), payload_len),
-        ),
-        PlacedEntry::new(
-            Did::from(120u32),
-            data_entry_with_payload_len(Did::from(20u32), payload_len),
-        ),
-        PlacedEntry::new(
-            Did::from(140u32),
-            data_entry_with_payload_len(Did::from(30u32), payload_len),
-        ),
-    ];
-    for placed in &entries {
-        node.storage
-            .put(&placed.key.to_string(), &placed.entry)
-            .await?;
-    }
-
-    let batches = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
-
-    assert!(
-        batches.len() > 1,
-        "entries should be split into more than one sync batch"
-    );
-    for (target, batch) in &batches {
-        assert_eq!(*target, new_successor);
-        assert!(
-            sync_entries_batch_wire_cost(batch)? <= SYNC_BATCH_MAX_BYTES,
-            "sync batch exceeds byte budget"
-        );
-    }
-    let actual =
-        placed_entries_by_key(batches.into_iter().flat_map(|(_, batch)| batch.into_iter()));
-    let expected = placed_entries_by_key(entries);
-    assert_eq!(actual, expected);
-    Ok(())
-}
-
-#[test]
-fn test_sync_entries_batching_emits_oversized_single_entry_alone() -> Result<()> {
-    let placed = PlacedEntry::new(
-        Did::from(100u32),
-        data_entry_with_data(Did::from(10u32), "x"),
-    );
-
-    assert!(sync_entries_batch_wire_cost(std::slice::from_ref(&placed))? > 1);
-    let batches = sync_entries_batches(vec![placed.clone()], 1)?;
-
-    assert_eq!(batches, vec![vec![placed]]);
-    Ok(())
-}
-
-#[test]
-fn test_sync_entries_batching_preserves_input_order_across_batches() -> Result<()> {
-    let entries = vec![
-        PlacedEntry::new(
-            Did::from(100u32),
-            data_entry_with_data(Did::from(10u32), "first"),
-        ),
-        PlacedEntry::new(
-            Did::from(120u32),
-            data_entry_with_data(Did::from(20u32), "second"),
-        ),
-        PlacedEntry::new(
-            Did::from(140u32),
-            data_entry_with_data(Did::from(30u32), "third"),
-        ),
-    ];
-    let expected_order = entries.iter().map(|placed| placed.key).collect::<Vec<_>>();
-
-    let batches = sync_entries_batches(entries, 1)?;
-
-    assert_eq!(batches.len(), 3);
-    let actual_order = batches
-        .iter()
-        .flat_map(|batch| batch.iter().map(|placed| placed.key))
-        .collect::<Vec<_>>();
-    assert_eq!(actual_order, expected_order);
-    Ok(())
-}
-
-#[test]
-fn test_sync_entries_batch_wire_cost_matches_serialized_message_cost() -> Result<()> {
-    let entries = vec![
-        PlacedEntry::new(
-            Did::from(100u32),
-            data_entry_with_data(Did::from(10u32), "first"),
-        ),
-        PlacedEntry::new(
-            Did::from(120u32),
-            data_entry_with_data(Did::from(20u32), "second"),
-        ),
-    ];
-    let message = Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
-        purpose: StorageSyncPurpose::OwnershipHandoff,
-        destination: StorageSyncDestination::PhysicalOwner(Did::from(50u32)),
-        data: entries.clone(),
-    });
-    let serialized_bytes = rings_codec::serialized_size(&message).map_err(Error::CodecSerialize)?;
-    let message_bytes =
-        usize::try_from(serialized_bytes).map_err(|_| Error::MessageSizeOverflow)?;
-    let expected = message_bytes
-        .checked_add(MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD)
-        .ok_or(Error::MessageSizeOverflow)?;
-
-    assert_eq!(sync_entries_batch_wire_cost(&entries)?, expected);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let new_successor = Did::from(50u32);
-    let payload_len = SYNC_BATCH_MAX_BYTES / 2;
-    let entries = vec![
-        PlacedEntry::new(
-            Did::from(100u32),
-            data_entry_with_payload_len(Did::from(10u32), payload_len),
-        ),
-        PlacedEntry::new(
-            Did::from(120u32),
-            data_entry_with_payload_len(Did::from(20u32), payload_len),
-        ),
-        PlacedEntry::new(
-            Did::from(140u32),
-            data_entry_with_payload_len(Did::from(30u32), payload_len),
-        ),
-    ];
-    for placed in &entries {
-        node.storage
-            .put(&placed.key.to_string(), &placed.entry)
-            .await?;
-    }
-    let batches = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
-    let Some((_, acked_batch)) = batches.first() else {
-        return Err(Error::InvalidMessage("expected sync batch".to_string()));
-    };
-    let acked_batch = acked_batch.clone();
-    let acks = acked_batch
-        .iter()
-        .cloned()
-        .map(|placed| SyncedEntryAck::new(placed.key, placed.entry))
-        .collect::<Vec<_>>();
-
-    node.acknowledge_synced_entries(&acks).await?;
-
-    for placed in &acked_batch {
-        assert_eq!(node.storage.get(&placed.key.to_string()).await?, None);
-    }
-    let retried = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
-    let retried_entries =
-        placed_entries_by_key(retried.into_iter().flat_map(|(_, batch)| batch.into_iter()));
-    let expected_remaining = placed_entries_by_key(
-        entries
-            .into_iter()
-            .filter(|placed| !acked_batch.iter().any(|acked| acked.key == placed.key)),
-    );
-    assert_eq!(retried_entries, expected_remaining);
-    Ok(())
-}
-
 /// Retention law: a stored value whose bound elapsed is retired on read and reported absent.
 #[tokio::test]
 async fn test_live_storage_read_retires_expired_value() -> Result<()> {
@@ -972,7 +679,7 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
         .await?
         .ok_or_else(|| Error::InvalidMessage("hold was not stored".to_string()))?;
     assert_eq!(topic.kind, EntryKind::Data);
-    assert_eq!(topic.data, vec![Encoded::from("parked")]);
+    assert_eq!(topic.data, vec![Bytes::from("parked")]);
     assert_eq!(inbox.kind, EntryKind::RelayMessage);
     assert_eq!(inbox.data.len(), 1);
     assert_eq!(node.storage.count().await?, 2);
@@ -1085,7 +792,7 @@ async fn test_removal_against_nothing_held_stores_nothing() -> Result<()> {
     let topic = Did::from(100u32);
     let removal = EntryOperation::Tombstone(Entry::new(
         topic,
-        vec![Encoded::from("gone")],
+        vec![Bytes::from("gone")],
         EntryKind::Data,
     ))
     .stamped(now_ms, node.did)?;
@@ -1187,169 +894,5 @@ async fn test_join_storage_entry_keeps_the_later_retention_bound() -> Result<()>
         .join_storage_entry(now_ms, placement_key, earlier)
         .await?;
     assert_eq!(stored.expires_at_ms, Some(now_ms + 2_000));
-    Ok(())
-}
-
-/// The fetched-entry cache shares the admission law and retires expired values on read.
-#[tokio::test]
-async fn test_local_cache_shares_admission_and_retention() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let resource = Did::from(10u32);
-
-    assert!(matches!(
-        node.local_cache_put(expired(data_entry(resource))).await,
-        Err(Error::EntryNotLive)
-    ));
-    let mut pinned = data_entry(resource);
-    pinned.crdt.register = Some(EntryVersion::new(
-        u128::MAX,
-        Did::from(9u32),
-        Did::from(1u32),
-    ));
-    assert!(matches!(
-        node.local_cache_put(pinned).await,
-        Err(Error::EntryVersionAheadOfClock)
-    ));
-
-    node.cache
-        .put(&resource.to_string(), &expired(data_entry(resource)))
-        .await?;
-    assert_eq!(node.local_cache_get(resource).await?, None);
-    assert_eq!(node.cache.count().await?, 0);
-    Ok(())
-}
-
-/// The replica shape of `operation` on `value` for the carrier `did`, stamped by `writer` at
-/// `now_ms`.
-fn stamped_delta(
-    operation: fn(Entry) -> EntryOperation,
-    did: Did,
-    value: &str,
-    now_ms: u128,
-    writer: Did,
-) -> Result<Entry> {
-    Ok(
-        operation(live_entry(did, vec![value.into()], EntryKind::Data))
-            .stamped(now_ms, writer)?
-            .entry()
-            .clone(),
-    )
-}
-
-/// A stamped `Extend` delta that adds `value` to the carrier `did`, written by `writer` at
-/// `now_ms`: the shape a replica holds after that write.
-fn extend_delta(did: Did, value: &str, now_ms: u128, writer: Did) -> Result<Entry> {
-    stamped_delta(EntryOperation::Extend, did, value, now_ms, writer)
-}
-
-/// The carrier cached for `resource` after `replies` are put in order into a fresh cache.
-async fn cached_after(resource: Did, replies: &[&Entry]) -> Result<Option<Entry>> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    for reply in replies {
-        node.local_cache_put((*reply).clone()).await?;
-    }
-    node.local_cache_get(resource).await
-}
-
-/// Assert that `first` and `second` cache to the same carrier in both reply orders, repeats
-/// included, and return it.
-async fn assert_cached_in_any_order(
-    resource: Did,
-    first: &Entry,
-    second: &Entry,
-) -> Result<Option<Entry>> {
-    let forward = cached_after(resource, &[first, second, first]).await?;
-    let reverse = cached_after(resource, &[second, first, second]).await?;
-    assert_eq!(forward, reverse);
-    Ok(forward)
-}
-
-/// Read-join (#864): replies adding distinct payloads cache to their union in either order.
-#[tokio::test]
-async fn test_local_cache_joins_replies_in_any_order() -> Result<()> {
-    let resource = Did::from(10u32);
-    let now_ms = get_epoch_ms();
-    let first = extend_delta(resource, "a", now_ms, Did::from(1u32))?;
-    let second = extend_delta(resource, "b", now_ms, Did::from(2u32))?;
-
-    let cached = assert_cached_in_any_order(resource, &first, &second).await?;
-    assert_eq!(cached.map(|entry| entry.data.len()), Some(2));
-    Ok(())
-}
-
-/// Tie (#864): one payload added by two writers at the same instant competes on its dot, and
-/// the cache keeps the greater dot whichever reply arrives last.
-#[tokio::test]
-async fn test_local_cache_breaks_a_same_instant_add_tie_by_dot() -> Result<()> {
-    let resource = Did::from(10u32);
-    let now_ms = get_epoch_ms();
-    let first = extend_delta(resource, "a", now_ms, Did::from(1u32))?;
-    let second = extend_delta(resource, "a", now_ms, Did::from(2u32))?;
-    assert_ne!(first.crdt.dots, second.crdt.dots);
-
-    let cached = assert_cached_in_any_order(resource, &first, &second).await?;
-    let greater = first
-        .crdt
-        .dots
-        .iter()
-        .chain(&second.crdt.dots)
-        .max()
-        .copied();
-    assert_eq!(
-        cached.map(|entry| entry.crdt.dots.last().copied()),
-        Some(greater)
-    );
-    Ok(())
-}
-
-/// Tie (#864): two overwrites by different writers at the same instant compete on the
-/// register, and the cache keeps the greater register's value whichever arrives last.
-#[tokio::test]
-async fn test_local_cache_breaks_a_same_instant_overwrite_tie_by_register() -> Result<()> {
-    let resource = Did::from(10u32);
-    let now_ms = get_epoch_ms();
-    let first = stamped_delta(
-        EntryOperation::Overwrite,
-        resource,
-        "a",
-        now_ms,
-        Did::from(1u32),
-    )?;
-    let second = stamped_delta(
-        EntryOperation::Overwrite,
-        resource,
-        "b",
-        now_ms,
-        Did::from(2u32),
-    )?;
-    assert_ne!(first.crdt.register, second.crdt.register);
-
-    let cached = assert_cached_in_any_order(resource, &first, &second).await?;
-    let winner = if first.crdt.register > second.crdt.register {
-        &first
-    } else {
-        &second
-    };
-    assert_eq!(
-        cached.map(|entry| (entry.crdt.register, entry.data)),
-        Some((winner.crdt.register, winner.data.clone()))
-    );
-    Ok(())
-}
-
-/// Tombstones propagate through the cache: a stale replica that still holds a removed element
-/// does not resurrect it when it answers after the replica that observed the removal.
-#[tokio::test]
-async fn test_local_cache_keeps_a_tombstone_against_a_stale_reply() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let resource = Did::from(10u32);
-    let added = extend_delta(resource, "a", get_epoch_ms(), Did::from(1u32))?;
-    let removed = added.tombstone(added.clone())?;
-
-    node.local_cache_put(removed).await?;
-    node.local_cache_put(added).await?;
-
-    let cached = node.local_cache_get(resource).await?;
-    assert_eq!(cached.map(|entry| entry.data), Some(Vec::new()));
     Ok(())
 }
