@@ -9,25 +9,21 @@
 //!   fin(sent)    | sent ≥ next ∧ sent > max ahead ∧ fin = None  ↦ fin := sent
 //!                | otherwise             ↦ Fault
 //!   finished     ⇔ fin = Some(next)
-//!   gap open     ⇔ ¬finished ∧ (ahead ≠ ∅ ∨ fin ≠ None)
+//!   gap          = Some next  if ¬finished ∧ (ahead ≠ ∅ ∨ fin ≠ None),  else None
 //! ```
 //!
 //! Laws:
 //! - **Prefix.** What has been written is exactly segments `0 .. next` in order, so the local
 //!   stream is always a prefix of what the peer sent; a `Fault` never writes.
-//! - **Bounded.** `ahead` holds fewer than `W` = [`TRANSACTION_REPLAY_WINDOW`] segments: a
-//!   segment that many behind a later one is refused by the replay window and cannot arrive.
+//! - **Bounded.** `ahead` holds fewer than `W` = [`REORDER_WINDOW`] segments: a segment that
+//!   many behind a later one is refused by the replay window and cannot arrive.
 //! - **Clean end only when complete.** `finished` holds only once every one of the `sent`
 //!   segments was written.
 
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use rings_core::message::TRANSACTION_REPLAY_WINDOW;
-
-/// How far ahead of the next segment a segment may arrive and wait: as far as the replay window
-/// lets a later frame overtake an earlier one.
-const REORDER_WINDOW: u64 = TRANSACTION_REPLAY_WINDOW as u64;
+use rings_core::message::REORDER_WINDOW;
 
 /// Why a direction's stream cannot continue: the session is reset.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,14 +103,11 @@ impl StreamReorder {
         Ok(self.release())
     }
 
-    /// Whether a segment is missing that a later one, or the half-close, has shown was sent.
-    pub(super) fn gap_open(&self) -> bool {
-        !self.finished() && (!self.ahead.is_empty() || self.fin.is_some())
-    }
-
-    /// The segment the open gap waits for, which identifies the gap.
-    pub(super) fn missing(&self) -> u64 {
-        self.next
+    /// The segment missing although a later one, or the half-close, shows it was sent: the
+    /// open gap, identified by the segment it waits for.
+    pub(super) fn gap(&self) -> Option<u64> {
+        let shown_sent = !self.ahead.is_empty() || self.fin.is_some();
+        (!self.finished() && shown_sent).then_some(self.next)
     }
 
     /// Whether every segment the half-close counted has been written.
@@ -157,7 +150,7 @@ mod tests {
         assert_eq!(stream.data(0, segment(0)), Ok(ready(&[0], false)));
         assert_eq!(stream.data(1, segment(1)), Ok(ready(&[1], false)));
         assert_eq!(stream.fin(2), Ok(ready(&[], true)));
-        assert!(!stream.gap_open());
+        assert_eq!(stream.gap(), None);
     }
 
     #[test]
@@ -165,10 +158,9 @@ mod tests {
         let mut stream = StreamReorder::default();
         assert_eq!(stream.data(1, segment(1)), Ok(ready(&[], false)));
         assert_eq!(stream.data(2, segment(2)), Ok(ready(&[], false)));
-        assert!(stream.gap_open());
-        assert_eq!(stream.missing(), 0);
+        assert_eq!(stream.gap(), Some(0));
         assert_eq!(stream.data(0, segment(0)), Ok(ready(&[0, 1, 2], false)));
-        assert!(!stream.gap_open());
+        assert_eq!(stream.gap(), None);
     }
 
     #[test]
@@ -177,10 +169,9 @@ mod tests {
         assert_eq!(stream.data(0, segment(0)), Ok(ready(&[0], false)));
         // The half-close overtook segment 1: a gap is open until it arrives.
         assert_eq!(stream.fin(2), Ok(ready(&[], false)));
-        assert!(stream.gap_open());
-        assert_eq!(stream.missing(), 1);
+        assert_eq!(stream.gap(), Some(1));
         assert_eq!(stream.data(1, segment(1)), Ok(ready(&[1], true)));
-        assert!(!stream.gap_open());
+        assert_eq!(stream.gap(), None);
     }
 
     /// A lost first, middle or last segment leaves the gap open at that segment, so the gap
@@ -200,8 +191,7 @@ mod tests {
                 panic!("the half-close counts every segment");
             };
             assert!(!ready.finished, "lost {lost}: never a clean end");
-            assert!(stream.gap_open(), "lost {lost}: the gap stays open");
-            assert_eq!(stream.missing(), lost);
+            assert_eq!(stream.gap(), Some(lost), "lost {lost}: the gap stays open");
             let prefix: Vec<Bytes> = (0..lost).map(segment).collect();
             assert_eq!(written, prefix, "lost {lost}: only the prefix is written");
         }

@@ -274,10 +274,6 @@ fn test_data_writes_to_a_live_keyed_session() {
         &t.state.sessions
     ));
     assert_eq!(opened.state.session_quota, t.state.session_quota);
-    assert!(std::sync::Arc::ptr_eq(
-        &opened.state.peer_shutdown,
-        &t.state.peer_shutdown
-    ));
 }
 
 #[test]
@@ -444,43 +440,34 @@ fn test_close_after_close_is_idempotent() {
     assert!(c2.state.sessions.is_empty());
 }
 
-/// The FIN is affine and counts the peer's segments: a counted segment that the FIN overtook
-/// still reaches the backend, a segment past the count never does, and the reverse direction
-/// stays open until `Close`.
+/// The reducer hands a live TCP session's segments and FIN to its backend, which owns their
+/// order (`engine::reorder`); the FIN half-closes one direction only, and after `Close` nothing
+/// reaches the backend.
 #[test]
-fn test_tcp_shutdown_is_affine_and_admits_only_the_segments_it_counted() {
+fn test_a_live_tcp_session_hands_its_segments_and_fin_to_the_backend() {
     let relay = web_relay();
     let key = rkey(peer_a(), 9);
     let opened = step_frame(&relay, &relay.init(), peer_a(), &open(9, "web"));
 
-    let shutdown_once = step_frame(&relay, &opened.state, peer_a(), &shutdown(9, 1));
-    assert!(matches!(shutdown_once.effects.as_slice(), [
+    let fin = step_frame(&relay, &opened.state, peer_a(), &shutdown(9, 1));
+    assert!(matches!(fin.effects.as_slice(), [
         RelayEffect::Shutdown { key: effect_key, sent: 1 }
     ] if *effect_key == key));
-    assert!(shutdown_once.state.sessions.contains(&key));
-    assert_eq!(shutdown_once.state.peer_shutdown.get(&key), Some(&1));
-
-    let shutdown_twice = step_frame(&relay, &shutdown_once.state, peer_a(), &shutdown(9, 2));
-    assert!(shutdown_twice.effects.is_empty());
-    let counted = step_frame(
-        &relay,
-        &shutdown_twice.state,
-        peer_a(),
-        &segment(9, 0, b"held"),
-    );
-    assert!(matches!(counted.effects.as_slice(), [RelayEffect::Write {
+    assert!(fin.state.sessions.contains(&key));
+    // A segment the FIN overtook still reaches the backend, which judges it against the count.
+    let held = step_frame(&relay, &fin.state, peer_a(), &segment(9, 0, b"held"));
+    assert!(matches!(held.effects.as_slice(), [RelayEffect::Write {
         seq: 0,
         ..
     }]));
-    let past = step_frame(&relay, &counted.state, peer_a(), &segment(9, 1, b"past"));
-    assert!(past.effects.is_empty());
 
-    let closed = step_frame(&relay, &past.state, peer_a(), &close(9));
+    let closed = step_frame(&relay, &held.state, peer_a(), &close(9));
     assert!(matches!(closed.effects.as_slice(), [
         RelayEffect::Close { .. }
     ]));
     assert!(!closed.state.sessions.contains(&key));
-    assert!(!closed.state.peer_shutdown.contains_key(&key));
+    let late = step_frame(&relay, &closed.state, peer_a(), &segment(9, 1, b"late"));
+    assert!(late.effects.is_empty());
 }
 
 /// Each kind takes only its own frames: a TCP session ignores datagrams.

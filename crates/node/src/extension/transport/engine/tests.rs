@@ -7,6 +7,7 @@ use bytes::Bytes;
 use rings_core::dht::Did;
 use tokio::net::UdpSocket;
 
+use super::Outbound;
 use super::Pending;
 use super::TransportSessions;
 use super::MAX_PENDING_ACCEPTS;
@@ -86,17 +87,26 @@ fn test_saturated_local_queue_fails_closed_without_waiting() {
 
     for seq in 0..1024 {
         assert_eq!(
-            sessions.write(&key, seq, Bytes::from_static(b"x")),
+            sessions.deliver(&key, Outbound::Segment {
+                seq,
+                bytes: Bytes::from_static(b"x")
+            }),
             EffectEnqueue::Enqueued
         );
     }
     assert_eq!(
-        sessions.write(&key, 1024, Bytes::from_static(b"overflow")),
+        sessions.deliver(&key, Outbound::Segment {
+            seq: 1024,
+            bytes: Bytes::from_static(b"overflow")
+        }),
         EffectEnqueue::Failed
     );
     assert!(!sessions.is_live(&key));
     assert_eq!(
-        sessions.write(&key, 1025, Bytes::from_static(b"stale")),
+        sessions.deliver(&key, Outbound::Segment {
+            seq: 1025,
+            bytes: Bytes::from_static(b"stale")
+        }),
         EffectEnqueue::Missing
     );
 }

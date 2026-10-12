@@ -269,13 +269,8 @@ fn test_future_frame_outside_reorder_window_is_rejected() {
         &mut rng,
     )
     .unwrap();
-    let mut decryptor = E2eStreamDecryptor::with_reorder_window(
-        stream_id,
-        sender.address().into(),
-        recipient,
-        2,
-        0,
-    );
+    let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0)
+        .with_reorder_window(2);
 
     assert!(matches!(
         decryptor.decrypt_next(&frames[3], 0),

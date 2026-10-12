@@ -45,7 +45,7 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::REORDER_DEADLINE;
-use crate::message::TRANSACTION_REPLAY_WINDOW;
+use crate::message::REORDER_WINDOW;
 
 /// Plaintext bytes carried by one ElGamal body block.
 pub const E2E_PLAINTEXT_BLOCK_LEN: usize = secp256k1::PLAINTEXT_BLOCK_SIZE;
@@ -53,10 +53,9 @@ pub const E2E_PLAINTEXT_BLOCK_LEN: usize = secp256k1::PLAINTEXT_BLOCK_SIZE;
 /// Default plaintext bytes per encrypted E2E stream frame.
 pub const DEFAULT_E2E_PLAINTEXT_FRAME_LEN: usize = E2E_PLAINTEXT_BLOCK_LEN * 16;
 
-/// Default maximum number of out-of-order future frames buffered per stream: as far as the
-/// replay window lets a later frame of the stream overtake an earlier one, which arrives no
-/// later than that or not at all.
-pub const DEFAULT_E2E_REORDER_WINDOW_FRAMES: u64 = TRANSACTION_REPLAY_WINDOW as u64;
+/// Default maximum number of out-of-order future frames buffered per stream: the stream
+/// reorder window, beyond which a missing frame can no longer arrive.
+pub const DEFAULT_E2E_REORDER_WINDOW_FRAMES: u64 = REORDER_WINDOW;
 
 /// Identifier shared by all frames of one encrypted E2E stream.
 pub type E2eStreamId = uuid::Uuid;
@@ -316,23 +315,6 @@ impl E2eStreamDecryptor {
         recipient_secret_key: SecretKey,
         now_ms: u128,
     ) -> Self {
-        Self::with_reorder_window(
-            stream_id,
-            expected_sender,
-            recipient_secret_key,
-            DEFAULT_E2E_REORDER_WINDOW_FRAMES,
-            now_ms,
-        )
-    }
-
-    /// Create a decryptor with an explicit future-frame reorder window, at `now_ms`.
-    pub fn with_reorder_window(
-        stream_id: E2eStreamId,
-        expected_sender: Did,
-        recipient_secret_key: SecretKey,
-        reorder_window: u64,
-        now_ms: u128,
-    ) -> Self {
         Self {
             stream_id,
             expected_sender,
@@ -340,11 +322,18 @@ impl E2eStreamDecryptor {
             next_sequence: 0,
             final_sequence: None,
             seen_final: false,
-            reorder_window,
+            reorder_window: DEFAULT_E2E_REORDER_WINDOW_FRAMES,
             pending_frames: BTreeMap::new(),
             stall_deadline: REORDER_DEADLINE,
             progress_ms: now_ms,
         }
+    }
+
+    /// This decryptor with the future-frame reorder window `reorder_window` instead of
+    /// [`DEFAULT_E2E_REORDER_WINDOW_FRAMES`].
+    pub fn with_reorder_window(mut self, reorder_window: u64) -> Self {
+        self.reorder_window = reorder_window;
+        self
     }
 
     /// This decryptor with the stall deadline `deadline` instead of [`REORDER_DEADLINE`].

@@ -87,7 +87,7 @@ const UDP_BUF: usize = 65_536;
 const MAX_PENDING_ACCEPTS: usize = 128;
 
 /// Something to deliver to a session's local socket (peer → local direction).
-enum Outbound {
+pub(crate) enum Outbound {
     /// A segment of the peer's TCP stream at its position `seq`, written in `seq` order.
     Segment {
         /// The segment's position in the peer's direction.
@@ -263,25 +263,6 @@ impl TransportSessions {
         if inject_accepted(&scope, token, peer, service).await.is_err() {
             self.evict_pending(token);
         }
-    }
-
-    /// Enqueue peer bytes without waiting for local-socket backpressure. Returns whether the
-    /// pure relay must forget the session. A full channel is a terminal local resource failure:
-    /// removing it bounds memory and prevents one stalled socket from holding the namespace's
-    /// ordered transition gate.
-    pub fn write(&self, key: &SessionKey, seq: u64, bytes: Bytes) -> EffectEnqueue {
-        self.enqueue_for_effect(key, Outbound::Segment { seq, bytes })
-    }
-
-    /// Enqueue a peer datagram for a UDP flow; see [`Self::write`].
-    pub fn send_datagram(&self, key: &SessionKey, bytes: Bytes) -> EffectEnqueue {
-        self.enqueue_for_effect(key, Outbound::Datagram(bytes))
-    }
-
-    /// Half-close a session's local write side once the `sent` segments the peer counted are
-    /// written (peer sent FIN).
-    pub fn shutdown(&self, key: &SessionKey, sent: u64) -> EffectEnqueue {
-        self.enqueue_for_effect(key, Outbound::Shutdown { sent })
     }
 
     /// Release a session while applying a `Close` effect.
@@ -636,12 +617,15 @@ impl TransportSessions {
             .and_then(|map| map.get(key).map(|handle| handle.generation))
     }
 
-    /// Imperative admission boundary for the bounded peer→local queue.
+    /// Enqueue `outbound` for the session's local socket without waiting for local-socket
+    /// backpressure: the imperative admission boundary of the bounded peer→local queue. A full
+    /// queue is a terminal local resource failure: removing the session bounds memory and keeps
+    /// one stalled socket from holding the namespace's ordered transition gate.
     ///
     /// Post: [`EffectEnqueue::Failed`] means this effect removed the exact generation whose
     /// queue rejected the operation; [`EffectEnqueue::Missing`] means no generation existed.
     /// An ABA-replaced generation is never removed.
-    fn enqueue_for_effect(&self, key: &SessionKey, outbound: Outbound) -> EffectEnqueue {
+    pub(crate) fn deliver(&self, key: &SessionKey, outbound: Outbound) -> EffectEnqueue {
         let Some((sender, generation)) = self.sender(key) else {
             return EffectEnqueue::Missing;
         };

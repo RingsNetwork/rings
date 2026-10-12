@@ -79,15 +79,10 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
     relay_tcp_with_timeouts(task, stream, RELAY_IDLE_TIMEOUT, REORDER_DEADLINE).await;
 }
 
-/// [`relay_tcp`] with its idle timeout and its gap deadline given.
-///
-/// Local reads go to the peer as `Data` segments numbered `0, 1, …`, and a local EOF as a
-/// `Shutdown` counting them. Peer segments reach the local socket through a
-/// [`StreamReorder`], so the local stream is always a prefix of the peer's. The session is
-/// reset when a gap stays open for `reorder_deadline` (measured from when its missing segment
-/// became the one awaited) or the peer's segments contradict its stream; a reset, like any end
-/// but both directions finishing, closes the local socket abortively, so the local client sees
-/// a reset rather than a clean end of a truncated stream.
+/// [`relay_tcp`] with its idle timeout and its gap deadline given: the law of
+/// [`Frame::Data`] in both directions, peer segments reaching the socket through a
+/// [`StreamReorder`]. A gap's deadline runs from when its missing segment became the one
+/// awaited.
 async fn relay_tcp_with_timeouts(
     task: RelayTask,
     stream: TcpStream,
@@ -184,7 +179,7 @@ async fn relay_tcp_with_timeouts(
                     local_write_open = false;
                 }
                 // The deadline runs from when the missing segment became the one awaited.
-                let missing = inbound.gap_open().then(|| inbound.missing());
+                let missing = inbound.gap();
                 if missing.is_some() && missing != gap {
                     gap_deadline.as_mut().reset(Instant::now() + reorder_deadline);
                 }
@@ -284,6 +279,13 @@ mod tests {
         Ok((client, relay, sessions, key))
     }
 
+    /// Wait for the relay task to end.
+    async fn joined(relay: tokio::task::JoinHandle<()>) -> Result<()> {
+        relay
+            .await
+            .map_err(|error| Error::ExtensionError(format!("relay task failed: {error}")))
+    }
+
     /// The bytes of the peer's segment `seq`.
     fn segment(seq: u64) -> Bytes {
         Bytes::from(format!("s{seq};"))
@@ -298,14 +300,12 @@ mod tests {
 
     /// Deliver the peer's segments `seqs` in that order, then (if any) its half-close.
     fn deliver(sessions: &TransportSessions, key: &SessionKey, seqs: &[u64], fin: Option<u64>) {
-        for seq in seqs {
-            assert_eq!(
-                sessions.write(key, *seq, segment(*seq)),
-                EffectEnqueue::Enqueued
-            );
-        }
-        if let Some(sent) = fin {
-            assert_eq!(sessions.shutdown(key, sent), EffectEnqueue::Enqueued);
+        let segments = seqs.iter().map(|seq| Outbound::Segment {
+            seq: *seq,
+            bytes: segment(*seq),
+        });
+        for outbound in segments.chain(fin.map(|sent| Outbound::Shutdown { sent })) {
+            assert_eq!(sessions.deliver(key, outbound), EffectEnqueue::Enqueued);
         }
     }
 
@@ -348,9 +348,7 @@ mod tests {
             read_to_end(&mut client).await?,
             (segments([0, 1]), Ending::Eof)
         );
-        relay
-            .await
-            .map_err(|error| Error::ExtensionError(format!("relay task failed: {error}")))?;
+        joined(relay).await?;
         assert!(!sessions.is_live(&key));
         Ok(())
     }
@@ -368,9 +366,7 @@ mod tests {
                 (segments(0..lost), Ending::Reset),
                 "segment {lost} lost"
             );
-            relay
-                .await
-                .map_err(|error| Error::ExtensionError(format!("relay task failed: {error}")))?;
+            joined(relay).await?;
             assert!(!sessions.is_live(&key));
         }
         Ok(())
@@ -381,12 +377,10 @@ mod tests {
     #[tokio::test]
     async fn test_a_segment_beyond_the_window_resets_the_stream_at_once() -> Result<()> {
         let (mut client, relay, sessions, key) = relayed(Duration::from_secs(60)).await?;
-        let beyond = rings_core::message::TRANSACTION_REPLAY_WINDOW as u64;
+        let beyond = rings_core::message::REORDER_WINDOW;
         deliver(&sessions, &key, &[beyond], None);
         assert_eq!(read_to_end(&mut client).await?, (Vec::new(), Ending::Reset));
-        relay
-            .await
-            .map_err(|error| Error::ExtensionError(format!("relay task failed: {error}")))?;
+        joined(relay).await?;
         Ok(())
     }
 

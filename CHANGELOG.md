@@ -9,7 +9,7 @@
   - Relay wire: a TCP `Frame::Data` carries its direction's `seq`, and `Frame::Shutdown` the
     number `sent` of segments before it; a UDP datagram travels as the new `Frame::Datagram`.
     A TCP receiver writes segments to its local socket in `seq` order only, reordering at most
-    `TRANSACTION_REPLAY_WINDOW` segments ahead, and applies a FIN once every segment it
+    `REORDER_WINDOW` segments ahead, and applies a FIN once every segment it
     counted is written. A gap still open after `REORDER_DEADLINE`, a segment past the window,
     or segments that contradict the stream reset the session: the peer gets `Close`, and the
     local socket an abortive close. Every abrupt end (a reset, an overlay or socket failure, a
@@ -17,14 +17,16 @@
     so a local client sees a clean end of stream only once it received every byte. UDP flows
     stay unsequenced and lossy. `RelayEffect::Write` gains `seq`, `RelayEffect::Shutdown` gains
     `sent`, and `RelayEffect::SendDatagram` is new.
-  - E2E: `E2eStreamDecryptor::new` and `with_reorder_window` take the creation time `now_ms`,
-    `decrypt_next` takes the frame's arrival time, and the new `check(now_ms)` reports a stream
+  - E2E: `E2eStreamDecryptor::new` takes the creation time `now_ms` and `with_reorder_window`
+    becomes a builder; `decrypt_next` takes the frame's arrival time, and the new
+    `check(now_ms)` reports a stream
     that made no progress for its stall deadline (`REORDER_DEADLINE`, or
     `with_stall_deadline`) as `Error::E2eStreamStalled`, whether the lost frame is the first, a
-    middle or the final one. `DEFAULT_E2E_REORDER_WINDOW_FRAMES` is the replay window, 32 (was
+    middle or the final one. `DEFAULT_E2E_REORDER_WINDOW_FRAMES` is `REORDER_WINDOW`, 32 (was
     64). Node: `Processor::check_e2e_stream` polls a stream with the node's clock.
-  - Core: `message::REORDER_DEADLINE` (twice `SESSION_HOLD_TIMEOUT`) bounds how late a frame of
-    one stream may still arrive after a later one.
+  - Core: `message::REORDER_WINDOW` (the replay window) bounds how many later frames of one
+    stream may overtake a frame that still arrives, and `message::REORDER_DEADLINE` (twice
+    `SESSION_HOLD_TIMEOUT`) how late it may arrive after a later one.
   - Cutover: a relay wire change, incompatible with the previous release.
 
 - Core never calls, awaits or consults application code (#935). Since 2022 core awaited
