@@ -16,6 +16,9 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::Message;
 use crate::message::PayloadSender;
+use crate::message::ProbeRequest;
+use crate::message::ProvisionalEpoch;
+use crate::message::TRANSACTION_REPLAY_WINDOW;
 use crate::swarm::application::ApplicationData;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::default::connected_nodes;
@@ -291,5 +294,74 @@ async fn test_a_peer_withholding_credit_from_a_relay_never_costs_the_relay_its_o
     x.swarm.stabilizer().clean_unavailable_connections().await?;
     assert!(x.swarm.transport.get_connection(b.did()).is_some());
     drop(held);
+    Ok(())
+}
+
+/// A probe that did not reach the queue is resent signed anew. Once its peer has admitted more
+/// than a replay window of newer control transactions from this end, the original payload is
+/// rejected as stale, so a resend of it could never be answered; the pass's resend is.
+#[tokio::test]
+async fn test_a_resent_probe_is_answered_after_a_replay_window_of_newer_control() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let transport = &node1.swarm.transport;
+    transport.force_peer_liveness_probe_due(peer)?;
+
+    // Issue a probe whose transfer is cut short before the queue: outstanding and unsent.
+    let now_ms = get_epoch_ms_i64();
+    let epoch = ProvisionalEpoch::from_unix_seconds(u64::try_from(now_ms).unwrap_or(0) / 1_000);
+    let request = ProbeRequest::random_for_epoch(epoch);
+    let attempt = transport
+        .active_attempt(peer)?
+        .ok_or(Error::SwarmMissDidInTable(peer))?;
+    let pass = transport
+        .liveness_probe_pass(now_ms)?
+        .ok_or_else(|| Error::InvalidMessage("no other pass runs".to_string()))?;
+    let original = transport
+        .protocol_egress()
+        .originate(Message::ProbeRequest(request), peer, Some(peer))
+        .await?;
+    let issued = transport
+        .issue_liveness_probe(&pass, attempt, original, request, now_ms)?
+        .ok_or_else(|| Error::InvalidMessage("the due probe is issued".to_string()))?;
+    drop(pass);
+
+    // More than a window of newer transactions of the same control stream reach the peer, each
+    // admitted before the next is sent, so the lane's credit never runs out.
+    for _ in 0..=TRANSACTION_REPLAY_WINDOW {
+        let unrelated = ProbeRequest::random_for_epoch(epoch);
+        node1
+            .swarm
+            .send_direct_core_message_for_test(Message::ProbeRequest(unrelated), peer)
+            .await?;
+        wait_for_msgs([&node1, &node2]).await;
+    }
+
+    // The original payload is stale at the peer now.
+    let stale_before = node2.swarm.transaction_replay_counters().stale;
+    transport.protocol_egress().send_probe(issued).await?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_eq!(
+        node2.swarm.transaction_replay_counters().stale,
+        stale_before + 1,
+        "the original payload is rejected as stale"
+    );
+    assert!(
+        !transport.peer_liveness_probe_queued_for_test(peer)?,
+        "the probe is still outstanding and unsent"
+    );
+
+    // The pass resends it signed anew, and the peer answers it.
+    node1
+        .swarm
+        .stabilizer()
+        .probe_peer_liveness_for_simulation()
+        .await?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_eq!(
+        transport.peer_liveness_outstanding_since_for_test(peer)?,
+        None,
+        "the resent probe is answered"
+    );
     Ok(())
 }

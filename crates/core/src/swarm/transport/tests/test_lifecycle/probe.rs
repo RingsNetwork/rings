@@ -1,7 +1,11 @@
-//! A probe pass runs alone, and a probe rides only its own generation's connection.
+//! A probe pass runs alone, a probe rides only its own generation's connection, and only a
+//! direct answer takes its next hop's answer slot.
 
+use super::super::super::egress::Discipline;
+use super::super::super::egress::ProbeAnswer;
 use super::super::super::egress::QueueAdmission;
 use super::super::super::outbound::SenderBound;
+use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::swarm::transport::tests::test_lifecycle::transport_with_routable_peer;
 use crate::swarm::Error;
@@ -56,6 +60,34 @@ async fn test_a_probe_rides_only_its_own_generation() -> Result<()> {
                 if refused_peer == peer && generation == stale
         ),
         "a probe of another generation is refused: {refused:?}"
+    );
+    Ok(())
+}
+
+/// The answer slot: only an answer that goes straight to the prober it answers holds its next
+/// hop's slot; an answer relayed through that neighbour for another origin is an ordinary
+/// protocol send, so a flood of relayed probes cannot occupy the neighbour's slot.
+#[tokio::test]
+async fn test_only_a_direct_answer_takes_the_answer_slot() -> Result<()> {
+    let (transport, neighbour, _attempt) = transport_with_routable_peer().await?;
+    let origin = SecretKey::random().address().into();
+    let answer = |destination| {
+        MessagePayload::new_send(
+            Message::custom(b"probe-answer")?,
+            transport.message_signer(),
+            neighbour,
+            destination,
+        )
+    };
+    assert_eq!(
+        ProbeAnswer::admission(neighbour, &answer(neighbour)?),
+        QueueAdmission::Bounded(SenderBound::Answer),
+        "a direct answer holds the neighbour's slot"
+    );
+    assert_eq!(
+        ProbeAnswer::admission(neighbour, &answer(origin)?),
+        QueueAdmission::Immediate,
+        "a relayed answer takes shared capacity"
     );
     Ok(())
 }

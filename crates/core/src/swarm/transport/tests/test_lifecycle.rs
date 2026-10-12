@@ -870,6 +870,6 @@ mod scheduler;
 #[cfg(feature = "dummy")]
 /// Probe-pass regression tests.
 ///
-/// The child module checks that probe passes run one at a time and that a probe rides only
-/// the connection of the generation it judges.
+/// The child module checks that probe passes run one at a time, that a probe rides only
+/// the connection of the generation it judges, and that only a direct answer takes the slot.
 mod probe;
