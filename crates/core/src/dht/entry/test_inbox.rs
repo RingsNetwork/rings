@@ -417,25 +417,21 @@ fn test_relocation_is_accepted_from_the_predecessor_alone() {
 }
 
 #[test]
-fn test_partition_pairs_each_witnessed_element_with_its_dot_and_retires_the_rest() -> Result<()> {
+fn test_each_deliverable_element_is_paired_with_the_dot_that_retires_it() -> Result<()> {
     let now_ms = get_epoch_ms();
     let holder = session()?;
     let destination: Did = SecretKey::random().address().into();
     let actor = holder.delegator_did();
     let first = held_by(&holder, destination, TEST_NETWORK_ID)?;
     let second = held_by(&holder, destination, TEST_NETWORK_ID)?;
-    let junk = held_by(&holder, destination, TEST_NETWORK_ID + 1)?;
 
     let carrier = Entry::new(inbox_key(destination), Vec::new(), EntryKind::RelayMessage)
         .extend(now_ms, Entry::inbox_delta(&first)?, actor)?
-        .extend(now_ms + 1, Entry::inbox_delta(&second)?, actor)?
-        .extend(now_ms + 2, Entry::inbox_delta(&junk)?, actor)?;
-    assert_eq!(carrier.data.len(), 3);
+        .extend(now_ms + 1, Entry::inbox_delta(&second)?, actor)?;
 
-    let drain = carrier.partition_inbox(now_ms + 3, TEST_NETWORK_ID);
+    let deliverable = carrier.deliverable_inbox_elements(now_ms + 2, TEST_NETWORK_ID);
     assert_eq!(
-        drain
-            .deliverable
+        deliverable
             .iter()
             .map(|element| element.payload.transaction.tx_id)
             .collect::<Vec<_>>(),
@@ -444,20 +440,19 @@ fn test_partition_pairs_each_witnessed_element_with_its_dot_and_retires_the_rest
             second.payload.transaction.tx_id
         ]
     );
-    let delivered_dots = drain
-        .deliverable
-        .iter()
-        .map(|element| element.dot)
-        .chain(drain.rejected.crdt.dots.iter().copied())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(delivered_dots, carrier.crdt.dots.iter().copied().collect());
-    assert_eq!(drain.rejected.crdt.dots.len(), 1);
+    assert_eq!(
+        deliverable
+            .iter()
+            .map(|element| element.dot)
+            .collect::<Vec<_>>(),
+        carrier.crdt.dots
+    );
 
     // Retiring by dot removes exactly the named element, a stale copy cannot resurrect it, and
     // an element held afterwards is untouched.
     let stale = carrier.clone();
-    let mut retired = carrier.tombstone(drain.rejected)?;
-    for element in &drain.deliverable {
+    let mut retired = carrier.clone();
+    for element in &deliverable {
         retired = retired.tombstone(carrier.removal_of([element.dot]))?;
     }
     assert!(retired.data.is_empty());
@@ -491,8 +486,8 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
         if round == 0 {
             first_round_dots = carrier.crdt.dots.clone();
         }
-        let drained = carrier.partition_inbox(get_epoch_ms(), TEST_NETWORK_ID);
-        let removal = carrier.removal_of(drained.deliverable.iter().map(|element| element.dot));
+        let deliverable = carrier.deliverable_inbox_elements(get_epoch_ms(), TEST_NETWORK_ID);
+        let removal = carrier.removal_of(deliverable.iter().map(|element| element.dot));
         carrier = carrier.tombstone(removal)?;
         assert!(carrier.data.is_empty());
     }
@@ -508,9 +503,8 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
     Ok(())
 }
 
-/// Law (only what time cannot cure is retired, #913 R7 M1): after this clock steps back, an
-/// element held ahead of it by more than σ is neither delivered nor retired, and it is
-/// delivered once the clock catches up.
+/// Law (#913 R7 M1): after this clock steps back, an element held ahead of it by more than σ is
+/// not delivered, and it is delivered once the clock catches up.
 #[test]
 fn test_an_element_held_ahead_of_a_stepped_back_clock_is_kept_for_a_later_pass() -> Result<()> {
     let now_ms = get_epoch_ms();
@@ -524,14 +518,14 @@ fn test_an_element_held_ahead_of_a_stepped_back_clock_is_kept_for_a_later_pass()
     )?;
 
     let stepped_back = now_ms - TS_OFFSET_TOLERANCE_MS - 1;
-    let drain = carrier.partition_inbox(stepped_back, TEST_NETWORK_ID);
-    assert!(drain.deliverable.is_empty());
-    assert!(
-        drain.rejected.crdt.dots.is_empty(),
-        "a clock gate failure retires nothing"
+    assert!(carrier
+        .deliverable_inbox_elements(stepped_back, TEST_NETWORK_ID)
+        .is_empty());
+    assert_eq!(
+        carrier
+            .deliverable_inbox_elements(now_ms, TEST_NETWORK_ID)
+            .len(),
+        1
     );
-
-    let drain = carrier.partition_inbox(now_ms, TEST_NETWORK_ID);
-    assert_eq!(drain.deliverable.len(), 1);
     Ok(())
 }

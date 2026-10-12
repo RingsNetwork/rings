@@ -124,11 +124,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         let (relay, data): (Vec<_>, Vec<_>) = all_items
             .into_iter()
             .partition(|(_, entry)| entry.kind.is_relay_inbox());
-        // Only the carriers this hand-off offers are judged for retirement.
-        let relay = self
-            .retire_unwitnessed_inbox_elements(self.beyond(new_successor, relay), now_ms)
-            .await?;
-        let mut actions = vec![self.hand_off_to(new_successor, relay)?];
+        let mut actions = vec![self.hand_off_to(new_successor, self.beyond(new_successor, relay))?];
         actions.push(if self.storage_virtual_nodes_enabled()? {
             self.copy_entries_to_observed_virtual_storage_owners(data)?
         } else {
@@ -162,40 +158,6 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
 }
 
 impl PeerRing {
-    /// Bring each relay carrier in `inboxes` to a shape its receiver admits before it is
-    /// offered: remove the elements that fail the witness for good at `now_ms`, and return the
-    /// carriers that remain.
-    ///
-    /// Law: what is removed is what no receiver admits and time cannot cure (see
-    /// [`Entry::partition_inbox`]; an element held ahead of this clock is kept), which only a
-    /// carrier written before the storage cutover holds: offered as it is, it would be skipped
-    /// without an ack on every pass until its retention bound. Removing it here, as the
-    /// recipient's drain does, is what lets the rest of the carrier be acked and handed off.
-    async fn retire_unwitnessed_inbox_elements(
-        &self,
-        inboxes: Vec<(StorageKey, Entry)>,
-        now_ms: u128,
-    ) -> Result<Vec<(StorageKey, Entry)>> {
-        let mut offered = Vec::with_capacity(inboxes.len());
-        for (key, inbox) in inboxes {
-            let rejected = inbox.partition_inbox(now_ms, self.network_id()).rejected;
-            if rejected.crdt.dots.is_empty() {
-                offered.push((key, inbox));
-                continue;
-            }
-            tracing::warn!(
-                local = %self.did,
-                inbox = %key,
-                rejected = rejected.crdt.dots.len(),
-                "relay inbox elements failed the witness and are retired unoffered"
-            );
-            if let Some(remaining) = self.remove_inbox_elements(key, rejected, now_ms).await? {
-                offered.push((key, remaining));
-            }
-        }
-        Ok(offered)
-    }
-
     /// The items of `items` placed beyond `(self, new_successor]`: what a hand-off to
     /// `new_successor` offers.
     fn beyond(

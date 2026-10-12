@@ -234,9 +234,11 @@
     - Native: an old carrier holding a tombstone no longer decodes and is retired on first
       read. One without still decodes, its elements read as the bytes of their old base58
       text. A data topic serves those as values until the element horizon, `lookupService` and
-      `fetchTopicMessages` included. A relay inbox's held messages fail its witness and are
-      retired undelivered, by its holder's next hand-off or by its recipient's drain, so every
-      message held at the upgrade is lost.
+      `fetchTopicMessages` included. A relay inbox's held messages fail its witness: they are
+      never delivered, and their carrier is never accepted by a hand-off. Core keeps no code
+      for stores from before the cutover, so **operators clear each native node's DHT data
+      store (the `data_storage` path) before upgrading**; data topics and registries are
+      repopulated by their next writes, and every message held at the upgrade is lost.
     - Browser: every non-empty old carrier is refused and retired on first read.
     - A storage hand-off now skips an entry the receiver cannot admit, without acknowledging
       it, instead of rejecting its batch; only a placement outside the entry's replica set

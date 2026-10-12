@@ -101,10 +101,9 @@ async fn hold_message_for_offline_peer(
     let held = wait_for_storage_entry(node1, StorageKey::inbox_of(offline)).await?;
     assert_eq!(held.kind, EntryKind::RelayMessage);
     assert_eq!(held.data.len(), 1);
-    let drain = held.partition_inbox(get_epoch_ms(), node1.swarm.network_id());
-    assert!(drain.rejected.crdt.dots.is_empty());
-    assert!(drain
-        .deliverable
+    let deliverable = held.deliverable_inbox_elements(get_epoch_ms(), node1.swarm.network_id());
+    assert_eq!(deliverable.len(), 1);
+    assert!(deliverable
         .iter()
         .all(|element| is_held_message(&element.payload)));
     Ok(())

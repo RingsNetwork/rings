@@ -1,8 +1,6 @@
 //! Ownership hand-off to the successor: batching, acknowledgement-gated cleanup, and the
 //! shape a relay carrier is offered in.
 
-use bytes::Bytes;
-
 use super::super::super::chord::PeerRing;
 use super::super::super::chord::PeerRingAction;
 use super::super::sync::sync_entries_batch_wire_cost;
@@ -10,11 +8,6 @@ use super::super::sync::sync_entries_batches;
 use super::super::sync::SYNC_BATCH_MAX_BYTES;
 use crate::consts::MAX_PAYLOAD_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
-use crate::delegation::DelegateeKey;
-use crate::dht::entry::inbox::inbox_key;
-use crate::dht::entry::Entry;
-use crate::dht::entry::EntryKind;
-use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::storage::tests::collect_sync_batches;
@@ -24,17 +17,13 @@ use crate::dht::storage::tests::data_entry_with_payload_len;
 use crate::dht::storage::tests::placed_entries_by_key;
 use crate::dht::types::ChordStorageSync;
 use crate::dht::Did;
-use crate::dht::StorageKey;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
-use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::storage::MemStorage;
-use crate::tests::held_inbox_for;
-use crate::utils::get_epoch_ms;
 #[tokio::test]
 async fn test_sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
     let node_did = Did::from(0u32);
@@ -324,48 +313,5 @@ async fn test_sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -
             .filter(|placed| !acked_batch.iter().any(|acked| acked.key == placed.key)),
     );
     assert_eq!(retried_entries, expected_remaining);
-    Ok(())
-}
-
-/// Hand-off law for relay carriers: an element that fails the witness for good (only in a
-/// carrier written before the storage cutover) is retired by the sender rather than offered, so
-/// the receiver can admit and ack the rest instead of skipping the whole carrier on every pass.
-#[tokio::test]
-async fn test_handoff_retires_an_unwitnessed_inbox_element_and_offers_the_rest() -> Result<()> {
-    let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    // Standing alone, the node routes every position to itself and is the hold authority.
-    let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()));
-    let new_successor = node.did + Did::from(1u32);
-    let destination = node.did + Did::from(100u32);
-    let position = inbox_key(destination);
-    let key = StorageKey::inbox_of(destination);
-    let now_ms = get_epoch_ms();
-    let hold =
-        EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
-    node.operate_storage_entry(now_ms, position, hold, node.did)
-        .await?;
-    // The write law refuses an element that fails the witness, so the junk is stored directly,
-    // as a carrier from before the cutover was.
-    let junk = Entry::new(position, vec![Bytes::from("junk")], EntryKind::RelayMessage);
-    let junk = EntryOperation::Extend(junk).stamped(now_ms, node.did)?;
-    let stored = node
-        .live_storage_entry(key, now_ms)
-        .await?
-        .ok_or_else(|| Error::InvalidMessage("hold was not stored".to_string()))?
-        .operate(now_ms, junk, node.did)?;
-    assert_eq!(stored.data.len(), 2);
-    node.storage.put(&key.to_string(), &stored).await?;
-
-    let batches = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
-
-    let remaining = node
-        .live_storage_entry(key, now_ms)
-        .await?
-        .ok_or_else(|| Error::InvalidMessage("the witnessed hold was retired".to_string()))?;
-    assert_eq!(remaining.data.len(), 1);
-    remaining.witnessed_inbox_elements(now_ms, node.network_id())?;
-    assert_eq!(batches, vec![(new_successor, vec![PlacedEntry::new(
-        position, remaining
-    )])]);
     Ok(())
 }

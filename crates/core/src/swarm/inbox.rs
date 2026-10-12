@@ -2,10 +2,10 @@
 //!
 //! The inbox carrier `d + 1` lies in `d`'s own storage interval once `d` is online, so the
 //! predecessor's storage repair pass hands the held messages to `d`. Every storage maintenance
-//! pass the DHT emits [`InboxDelivery::deliver_inbox`]; this interpreter reads the inbox from
-//! local storage, retires at once every element that fails the witness for good under the local
-//! overlay (an element held ahead of this clock is kept for a later pass, as
-//! `Entry::partition_inbox` states), and then, element by element, delivers through the inbound
+//! pass the DHT emits [`InboxDelivery::deliver_inbox`]; this interpreter reads the deliverable
+//! elements of the inbox from local storage (an element held ahead of this clock waits for a
+//! later pass, as `Entry::deliverable_inbox_elements` states), and, element by element, delivers
+//! through the inbound
 //! pipeline (handler dispatch, then the application inbox) and retires the element by its add
 //! dot once it is done with: a message core handles itself at once, an application message only
 //! once the application took it from the inbox (its consumption signal, read by a later pass),
@@ -62,10 +62,10 @@ impl SwarmInboxDelivery {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl InboxDelivery for SwarmInboxDelivery {
-    /// Post: a prefix of the elements of the locally stored inbox that pass the witness was
-    /// handed to the application inbox and then tombstoned at its owner, the whole of them
-    /// unless the application inbox ran out of room; every element that fails the witness for
-    /// good was tombstoned unread; an element held ahead of this clock is left for a later pass.
+    /// Post: a prefix of the deliverable elements of the locally stored inbox was handed to the
+    /// application inbox and then tombstoned at its owner, the whole of them unless the
+    /// application inbox ran out of room; an element held ahead of this clock is left for a
+    /// later pass.
     async fn deliver_inbox(&self) -> Result<()> {
         let now_ms = get_epoch_ms();
         let key = StorageKey::inbox_of(self.transport.dht.did);
@@ -75,25 +75,16 @@ impl InboxDelivery for SwarmInboxDelivery {
         if inbox.data.is_empty() {
             return Ok(());
         }
-        let drain = inbox.partition_inbox(now_ms, self.transport.network_id);
-        if !drain.rejected.crdt.dots.is_empty() {
-            tracing::warn!(
-                local = %self.transport.dht.did,
-                rejected = drain.rejected.crdt.dots.len(),
-                "relay inbox elements failed the witness and are retired undelivered"
-            );
-            self.retire(drain.rejected).await?;
-        }
+        let deliverable = inbox.deliverable_inbox_elements(now_ms, self.transport.network_id);
         let relay = &self.transport.application().relay_in_flight;
         relay.retain(
-            &drain
-                .deliverable
+            &deliverable
                 .iter()
                 .map(|element| element.payload.transaction.tx_id)
                 .collect(),
         );
         let delivery = LocalDelivery::new(self.transport.clone());
-        for element in drain.deliverable {
+        for element in deliverable {
             let tx_id = element.payload.transaction.tx_id;
             match relay.poll(tx_id) {
                 RelayConsumption::Consumed => {}

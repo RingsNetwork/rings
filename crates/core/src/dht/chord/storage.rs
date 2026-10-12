@@ -264,35 +264,6 @@ impl PeerRing {
         Ok(())
     }
 
-    /// Remove the elements `removal` names from the relay carrier stored at `key`, as this node
-    /// holds it at `now_ms`, and return the carrier that remains.
-    ///
-    /// Pre: `removal` is a removal delta of that carrier ([`Entry::removal_of`]). It is applied
-    /// locally, outside the inbox write law, which admits a remote removal only from the
-    /// recipient: the caller removes what fails the witness for good, which no write law could
-    /// have admitted.
-    /// Post: dots are unique to elements, so a join landing since `removal` was computed loses
-    /// nothing it did not name; a carrier left without retention is removed.
-    pub(crate) async fn remove_inbox_elements(
-        &self,
-        key: StorageKey,
-        removal: Entry,
-        now_ms: u128,
-    ) -> Result<Option<Entry>> {
-        let key = key.to_string();
-        let _transition = self.storage_transition.lock().await;
-        let Some(local) = live_entry(&self.storage, &key, now_ms, Projection::WrittenBack).await?
-        else {
-            return Ok(None);
-        };
-        write_live(
-            &self.storage,
-            &key,
-            local.tombstone(removal)?.live_at(now_ms),
-        )
-        .await
-    }
-
     /// Join a peer-supplied replicated value into local storage at time `now_ms`.
     ///
     /// Pre: `incoming` is the value a peer supplied, not a local join result; it is admitted

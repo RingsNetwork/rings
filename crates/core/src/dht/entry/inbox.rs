@@ -35,10 +35,7 @@
 //! carrier is never fetched, cached, or replicated. Removal is per element by the add dot the
 //! recipient holds, as a covering remove of that payload up to that dot (every hold of one
 //! payload is the same hold), never by a reset floor, so a message the recipient has not seen
-//! is never dropped by a removal it did not issue. The one other removal is the holder's own,
-//! on hand-off, of elements that fail the witness for good (see [`Entry::partition_inbox`]):
-//! no receiver could admit them, so they were never deliverable, and the removal replicates
-//! with the carrier.
+//! is never dropped by a removal it did not issue.
 //!
 //! Both "responsible for `d`" (the holder's `(pred, self]`) and "routes `d` to" (the owner's
 //! successor list) are projections of failure detection: while an owner still lists the departed
@@ -237,37 +234,34 @@ impl Entry {
         self.witnessed_inbox_elements(now_ms, network_id).map(drop)
     }
 
-    /// Partition this stored inbox into the elements its recipient may deliver, each with the
-    /// add dot that retires it, and the removal delta of every element that fails the witness
-    /// for good under the reader's overlay (junk a misbehaving owner relocated, or an element of
-    /// a format before the storage cutover).
+    /// The elements of this stored inbox its recipient may deliver now, in carrier order, each
+    /// with the add dot that retires it once delivered.
     ///
-    /// Law (only what time cannot cure is retired). Every part of the witness is judged as of
-    /// the element's hold instant, except the clock gate: an element held ahead of
-    /// `now_ms + σ` fails only until this clock catches up, as it does after the clock steps
-    /// back. Such an element is neither delivered nor retired; it waits for a later pass.
+    /// Law: every stored element passed the witness when it was admitted (the hold write law or
+    /// a hand-off's admission), and the witness is judged as of the hold instant, so it holds
+    /// at every later read except for the clock gate: an element held ahead of `now_ms + σ`
+    /// fails only until this clock catches up, as after the clock steps back, and waits for a
+    /// later pass.
     ///
     /// Pre: `self` is the materialized stored carrier, so `data` and `crdt.dots` align.
-    /// Post: `deliverable` is in carrier order; `deliverable` dots, `rejected` dots and the dots
-    /// of elements held ahead of the clock together are every dot of the carrier.
-    pub(crate) fn partition_inbox(&self, now_ms: u128, network_id: u32) -> InboxDrain {
+    pub(crate) fn deliverable_inbox_elements(
+        &self,
+        now_ms: u128,
+        network_id: u32,
+    ) -> Vec<InboxElement> {
         let destination = inbox_destination(self.did);
-        let mut deliverable = Vec::new();
-        let mut rejected = Vec::new();
-        for (element, dot) in self.data.iter().zip(self.crdt.dots.iter().copied()) {
-            match verified_element(element, destination, now_ms, network_id) {
-                Ok(held) => deliverable.push(InboxElement {
-                    dot,
-                    payload: held.payload,
-                }),
-                Err(Error::RelayMessageHeldAheadOfClock) => {}
-                Err(_) => rejected.push(dot),
-            }
-        }
-        InboxDrain {
-            deliverable,
-            rejected: self.removal_of(rejected),
-        }
+        self.data
+            .iter()
+            .zip(self.crdt.dots.iter().copied())
+            .filter_map(|(element, dot)| {
+                verified_element(element, destination, now_ms, network_id)
+                    .ok()
+                    .map(|held| InboxElement {
+                        dot,
+                        payload: held.payload,
+                    })
+            })
+            .collect()
     }
 
     /// The removal delta of this carrier naming `dots`.
@@ -287,22 +281,12 @@ pub(crate) struct InboxElement {
     pub(crate) payload: MessagePayload,
 }
 
-/// The outcome of partitioning an inbox: what to deliver and what to retire unread.
-#[derive(Debug)]
-pub(crate) struct InboxDrain {
-    /// Elements that pass the witness, in carrier order.
-    pub(crate) deliverable: Vec<InboxElement>,
-    /// The removal delta of the elements that failed the witness for good; empty when none did.
-    pub(crate) rejected: Entry,
-}
-
 impl EntryOperation {
     /// The write law of a relay-carrier operation issued by `writer` at the owner's clock
     /// `now_ms`: a hold (`Extend`) only from the node the owner routes the destination to
     /// (`responsible`, `None` when that route is not local), every element held by that node,
     /// and held while its sender's proof is still live by the owner's own clock; a remote
-    /// removal (`Tombstone`) only from the recipient; no other operation. (The holder's removal
-    /// of elements that fail the witness for good is local, and joins in on hand-off.)
+    /// removal (`Tombstone`) only from the recipient; no other operation.
     ///
     /// The freshness bound is what makes the hold instant honest: the holder signs it, so the
     /// witness alone would let a holder judge an old message at a time of its choosing. Judged

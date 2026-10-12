@@ -115,9 +115,7 @@ and expire, but a party with many identities can try to hold several positions o
   expires at its own horizon, and a removal is collected only once every write it covers has
   expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
   while the carrier is retained. A relay inbox is verified by its owner, readable and
-  removable by its recipient, and capped at 64 messages; its holder removes only an element
-  that fails the witness for good, which no write could have admitted. Values are stored in
-  the clear.
+  removable only by its recipient, and capped at 64 messages. Values are stored in the clear.
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
   holds at most 16 frames per lane, refuses and reports a frame beyond its advertised credit,
   and refuses no honest frame for want of credit. Overload is pushed back to the sender and
