@@ -5,14 +5,17 @@ use rand_hc::Hc128Rng;
 
 use super::*;
 
+/// The fixed identity the test streams are encrypted to.
 fn recipient_key() -> SecretKey {
     SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0").unwrap()
 }
 
+/// The fixed identity that signs and encrypts the test streams.
 fn sender_key() -> SecretKey {
     SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54").unwrap()
 }
 
+/// A stream's public key is accepted only for the DID it hashes to: the key-ownership proof.
 #[test]
 fn test_public_key_must_match_did() {
     let sender = sender_key();
@@ -25,6 +28,7 @@ fn test_public_key_must_match_did() {
     ));
 }
 
+/// A handshake verifies only for the DID that owns the key it carries, in both directions.
 #[test]
 fn test_handshake_messages_verify_signed_owner() {
     let sender = sender_key();
@@ -42,13 +46,25 @@ fn test_handshake_messages_verify_signed_owner() {
     assert!(response.verify_responder(sender.address().into()).is_err());
 }
 
+/// Every payload round-trips through every framing, and the frame count is
+/// `max(1, ⌈len / limit⌉)` (an empty payload still sends its final frame).
 #[test]
 fn test_round_trip_random_binary_payloads_and_frame_sizes() {
     let sender = sender_key();
     let recipient = recipient_key();
     let mut rng = Hc128Rng::seed_from_u64(608);
+    // Payload lengths at the edges framing can get wrong: empty (one final frame of nothing),
+    // one byte, either side of 16 and 32, and lengths longer than every frame limit, one of
+    // them a byte past 4 KiB so the last frame is a single byte.
     let payload_lens = [0usize, 1, 15, 16, 17, 31, 32, 255, 1024, 4097];
-    let frame_limits = [1usize, E2E_PLAINTEXT_BLOCK_LEN, 64, 511];
+    // Frame limits: one byte per frame (the most frames), exactly one ElGamal block, several
+    // blocks with a partial last one, and a large odd limit.
+    const SEVERAL_BLOCKS: usize = 64;
+    const _: () = assert!(
+        SEVERAL_BLOCKS > E2E_PLAINTEXT_BLOCK_LEN
+            && !SEVERAL_BLOCKS.is_multiple_of(E2E_PLAINTEXT_BLOCK_LEN)
+    );
+    let frame_limits = [1usize, E2E_PLAINTEXT_BLOCK_LEN, SEVERAL_BLOCKS, 511];
 
     for payload_len in payload_lens {
         for frame_limit in frame_limits {
@@ -83,6 +99,7 @@ fn test_round_trip_random_binary_payloads_and_frame_sizes() {
     }
 }
 
+/// An empty plaintext is one final frame at sequence 0, which decrypts to nothing.
 #[test]
 fn test_empty_plaintext_sends_final_stream_frame() {
     let sender = sender_key();
@@ -110,6 +127,8 @@ fn test_empty_plaintext_sends_final_stream_frame() {
     );
 }
 
+/// Frames fed one by one in order release their plaintext as they arrive, and the final
+/// frame completes the stream; arbitrary bytes (`0x00`, `0xFF`) survive.
 #[test]
 fn test_streaming_decryptor_accepts_ordered_final_frame() {
     let sender = sender_key();
@@ -130,6 +149,7 @@ fn test_streaming_decryptor_accepts_ordered_final_frame() {
     assert_eq!(plaintext, b"\0hello\xFFworld");
 }
 
+/// A stream missing its final frame is truncated: decrypting it fails.
 #[test]
 fn test_truncation_is_rejected_without_final_frame() {
     let sender = sender_key();
@@ -155,6 +175,7 @@ fn test_truncation_is_rejected_without_final_frame() {
     ));
 }
 
+/// Two frames that arrive swapped are buffered and released in order.
 #[test]
 fn test_reordered_frames_are_buffered_until_contiguous() {
     let sender = sender_key();
@@ -180,6 +201,8 @@ fn test_reordered_frames_are_buffered_until_contiguous() {
     );
 }
 
+/// A frame repeated after its plaintext was released, the final one included, releases
+/// nothing more.
 #[test]
 fn test_replayed_consumed_frame_is_idempotent() {
     let sender = sender_key();
@@ -218,6 +241,7 @@ fn test_replayed_consumed_frame_is_idempotent() {
     assert_eq!(plaintext, payload);
 }
 
+/// A frame repeated while it waits buffered is taken once.
 #[test]
 fn test_replayed_buffered_frame_is_idempotent() {
     let sender = sender_key();
@@ -254,6 +278,7 @@ fn test_replayed_buffered_frame_is_idempotent() {
     assert_eq!(plaintext, payload);
 }
 
+/// A frame further ahead than the reorder window is refused.
 #[test]
 fn test_future_frame_outside_reorder_window_is_rejected() {
     let sender = sender_key();
@@ -282,6 +307,7 @@ fn test_future_frame_outside_reorder_window_is_rejected() {
     ));
 }
 
+/// The final frame may arrive first: the stream completes once the frames before it do.
 #[test]
 fn test_final_frame_can_arrive_before_gap_is_filled() {
     let sender = sender_key();
@@ -320,6 +346,7 @@ fn test_final_frame_can_arrive_before_gap_is_filled() {
     assert_eq!(plaintext, payload);
 }
 
+/// A frame past a buffered final frame is refused.
 #[test]
 fn test_frame_after_buffered_final_is_rejected() {
     let sender = sender_key();
@@ -350,6 +377,7 @@ fn test_frame_after_buffered_final_is_rejected() {
     ));
 }
 
+/// A frame of another stream is refused.
 #[test]
 fn test_wrong_stream_id_is_rejected() {
     let sender = sender_key();
@@ -373,6 +401,7 @@ fn test_wrong_stream_id_is_rejected() {
     ));
 }
 
+/// A frame carrying a key other than the sender's is refused.
 #[test]
 fn test_wrong_sender_key_is_rejected() {
     let sender = sender_key();

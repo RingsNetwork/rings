@@ -69,6 +69,8 @@ fn test_duplicate_registration_preserves_live_owner() {
     assert_eq!(sessions.current_generation(&key), Some(original_generation));
 }
 
+/// A full peer→local queue removes its session at once instead of waiting, and a later
+/// delivery finds no session.
 #[test]
 fn test_saturated_local_queue_fails_closed_without_waiting() {
     let sessions = TransportSessions::new();
@@ -111,6 +113,7 @@ fn test_saturated_local_queue_fails_closed_without_waiting() {
     );
 }
 
+/// The table of accepts awaiting their session id holds at most `MAX_PENDING_ACCEPTS`.
 #[tokio::test]
 async fn test_pending_accept_table_rejects_above_its_hard_bound() {
     let sessions = TransportSessions::new();
@@ -147,6 +150,8 @@ async fn test_pending_accept_table_rejects_above_its_hard_bound() {
     );
 }
 
+/// A UDP source has one pending accept at a time, and its flow becomes visible to the fast
+/// path only once its `Open` is admitted.
 #[tokio::test]
 async fn test_udp_source_is_unique_and_invisible_until_open_admission() {
     let sessions = TransportSessions::new();
@@ -189,6 +194,7 @@ async fn test_udp_source_is_unique_and_invisible_until_open_admission() {
     assert_eq!(sessions.udp_flow(&src), Some(key));
 }
 
+/// An accept that fails releases its source, which can then be accepted again.
 #[tokio::test]
 async fn test_failed_udp_accept_releases_its_source_reservation() {
     let sessions = TransportSessions::new();

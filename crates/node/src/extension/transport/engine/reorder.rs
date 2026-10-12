@@ -133,10 +133,12 @@ impl StreamReorder {
 mod tests {
     use super::*;
 
+    /// The bytes of segment `seq`: its own number, so a misordered write shows.
     fn segment(seq: u64) -> Bytes {
         Bytes::from(seq.to_be_bytes().to_vec())
     }
 
+    /// The release of segments `seqs`, in that order, with the direction `finished` or not.
     fn ready(seqs: &[u64], finished: bool) -> Ready {
         Ready {
             segments: seqs.iter().copied().map(segment).collect(),
@@ -144,6 +146,8 @@ mod tests {
         }
     }
 
+    /// Segments in order are written as they arrive, and the half-close counting them ends the
+    /// direction with no gap.
     #[test]
     fn test_in_order_segments_are_written_at_once() {
         let mut stream = StreamReorder::default();
@@ -153,6 +157,8 @@ mod tests {
         assert_eq!(stream.gap(), None);
     }
 
+    /// Segments ahead of a missing one wait, open a gap at it, and are released in order once it
+    /// arrives.
     #[test]
     fn test_a_reordered_segment_releases_the_ones_behind_it() {
         let mut stream = StreamReorder::default();
@@ -163,6 +169,8 @@ mod tests {
         assert_eq!(stream.gap(), None);
     }
 
+    /// A half-close that overtook a segment opens a gap at it, and ends the direction once it
+    /// arrives.
     #[test]
     fn test_a_half_close_waits_for_the_segments_it_counts() {
         let mut stream = StreamReorder::default();
@@ -197,6 +205,8 @@ mod tests {
         }
     }
 
+    /// A segment a whole window ahead is a fault, one short of it waits: the window bound is
+    /// exact.
     #[test]
     fn test_a_segment_past_the_window_is_a_fault() {
         let mut stream = StreamReorder::default();
@@ -213,6 +223,8 @@ mod tests {
         );
     }
 
+    /// A repeated segment, a half-close below a segment seen or after another, and a segment
+    /// past the half-close's count are faults, never writes.
     #[test]
     fn test_repeats_and_counts_that_contradict_the_stream_are_faults() {
         let mut stream = StreamReorder::default();
