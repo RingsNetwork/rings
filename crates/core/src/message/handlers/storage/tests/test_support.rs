@@ -1,11 +1,11 @@
 use std::panic::AssertUnwindSafe;
 
+use bytes::Bytes;
 use futures::FutureExt;
 use tokio::time::timeout;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
-use super::super::ChordStorageInterfaceCacheChecker;
 use crate::delegation::DelegateeKey;
 use crate::dht::delivery::NextHop;
 use crate::dht::entry::Entry;
@@ -20,22 +20,16 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessorReport;
-use crate::message::Encoder;
+use crate::message::ChordStorageInterfaceCacheChecker;
 use crate::message::HopBudget;
 use crate::message::MessagePayload;
 use crate::message::MessageRelay;
 use crate::message::MessageSigner;
-use crate::message::PayloadSender;
 use crate::message::Transaction;
 use crate::storage::MemStorage;
-use crate::swarm::callback::SwarmCallback;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
-
-pub(super) struct NoopCallback;
-
-impl SwarmCallback for NoopCallback {}
 
 fn payload_observation_error(label: &str, observed: &[MessagePayload]) -> Error {
     let observed = observed
@@ -408,8 +402,8 @@ pub(super) async fn assert_cached_data_values(
         .ok_or_else(|| Error::InvalidMessage("expected cached entry".to_string()))?;
     let expected_data = expected
         .iter()
-        .map(|value| value.to_string().encode())
-        .collect::<Result<Vec<_>>>()?;
+        .map(|value| Bytes::from(value.to_string()))
+        .collect::<Vec<_>>();
 
     assert_eq!(entry.did, entry_key);
     assert_eq!(entry.kind, EntryKind::Data);

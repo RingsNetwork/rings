@@ -88,10 +88,11 @@ pub mod types;
 pub use types::*;
 
 pub mod handlers;
-pub use handlers::storage::ChordStorageInterface;
-pub use handlers::storage::ChordStorageInterfaceCacheChecker;
 pub use handlers::HandleMsg;
 pub use handlers::MessageHandler;
+
+pub use crate::swarm::storage_api::ChordStorageInterface;
+pub use crate::swarm::storage_api::ChordStorageInterfaceCacheChecker;
 
 mod protocols;
 pub use protocols::DomainTag;

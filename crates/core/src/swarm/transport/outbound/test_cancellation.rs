@@ -9,7 +9,7 @@ use super::*;
 use crate::ecc::SecretKey;
 use crate::message::Message;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
+use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::Swarm;
 use crate::tests::fixed_secret_keys;
 
@@ -44,8 +44,7 @@ async fn admit_detached_peer(node: &Swarm, peer: Did) {
         .await
         .expect("fixture reserves a pending generation");
     let callback = node
-        .inner_callback()
-        .expect("fixture callback is installed")
+        .transport_callback()
         .with_pending_connection_attempt(attempt);
     node.transport
         .new_pending_connection(attempt, callback)
@@ -141,11 +140,11 @@ async fn test_cancellation_after_scan_releases_successor_behind_waiting_head() {
         StopSource::new(),
         measurements,
         peer,
-        SharedAnnouncedDelegations::new(),
+        PeerLinkState::new(),
     );
     let (head, head_completion) = scheduled_transfer(&node, peer, &capacity, &StopSource::new());
     worker.enqueue_transfer(head);
-    let waiting = worker.ready.pop().expect("head runnable");
+    let waiting = worker.ready.pop(|_| true).expect("head runnable");
     worker
         .ready
         .wait_for_delivery(1, FrameRemainder::Final, waiting);
@@ -213,4 +212,99 @@ async fn test_cancellation_after_scan_releases_successor_behind_waiting_head() {
             Some(Ok(Ok(SendCompletionOutcome::Cancelled)))
         ));
     }
+}
+
+/// Law (generation): a class slot's credit or verdict counts only for transfers on the
+/// generation it was reserved on. A slot left with an older generation's verdict admits no
+/// frame of the current generation; the next credit acquisition returns it and settles the
+/// slot on the current generation, which then admits the frame.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), tokio::test)]
+async fn test_a_class_credit_of_another_generation_is_not_spent() {
+    let [node_key, peer_key] = fixed_secret_keys::<2>().expect("fixed test keys are valid");
+    let node = test_swarm(node_key).await;
+    let peer: Did = peer_key.address().into();
+    admit_detached_peer(&node, peer).await;
+    let capacity = Arc::new(TransferCapacity::new(Arc::new(
+        GlobalTransferCapacity::new(),
+    )));
+    let (_sender, receiver) = mailbox::channel();
+    let (measurements, _measurement_receiver) = MeasurementRecorder::channel(None, peer);
+    let mut worker = OutboundWorker::new(
+        receiver,
+        StopSource::new(),
+        measurements,
+        peer,
+        PeerLinkState::new(),
+    );
+    let (transfer, _completion) = scheduled_transfer(&node, peer, &capacity, &StopSource::new());
+    let current = transfer.transfer.admitted.attempt();
+    worker.enqueue_transfer(transfer);
+    let class = TransferClass::Application;
+    let stale = PendingConnectionAttempt {
+        peer,
+        generation: current.generation.wrapping_sub(1),
+    };
+    // A verdict and a pending reservation of the stale generation are both reset; a pending one
+    // would otherwise gate the class until the stale link closed.
+    for slot in [
+        ClassCredit::Unavailable(stale),
+        ClassCredit::Awaiting(stale),
+    ] {
+        worker.credits[class] = slot;
+        assert!(!worker.grants_a_frame(class));
+
+        worker.acquire_credits();
+        let settled = worker.credits[class].attempt();
+        // The detached generation has no link, so its reservation settles at once.
+        assert_eq!(settled, Some(current));
+        assert!(worker.grants_a_frame(class));
+    }
+}
+
+/// Law (wait settlement): a reservation's outcome settles its slot only while the slot
+/// awaits one on the same generation. The late outcome of a wait on a generation the slot no
+/// longer serves is dropped, so it cannot leave the class gated on that generation's verdict;
+/// an idle slot records nothing.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), tokio::test)]
+async fn test_a_late_credit_outcome_of_an_abandoned_wait_settles_nothing() {
+    let [node_key, peer_key] = fixed_secret_keys::<2>().expect("fixed test keys are valid");
+    let node = test_swarm(node_key).await;
+    let peer: Did = peer_key.address().into();
+    admit_detached_peer(&node, peer).await;
+    let capacity = Arc::new(TransferCapacity::new(Arc::new(
+        GlobalTransferCapacity::new(),
+    )));
+    let (_sender, receiver) = mailbox::channel();
+    let (measurements, _measurement_receiver) = MeasurementRecorder::channel(None, peer);
+    let mut worker = OutboundWorker::new(
+        receiver,
+        StopSource::new(),
+        measurements,
+        peer,
+        PeerLinkState::new(),
+    );
+    let (transfer, _completion) = scheduled_transfer(&node, peer, &capacity, &StopSource::new());
+    let attempt = transfer.transfer.admitted.attempt();
+    let class = TransferClass::Application;
+    let slot = |worker: &OutboundWorker| worker.credits[class].attempt();
+    let abandoned = PendingConnectionAttempt {
+        peer,
+        generation: attempt.generation.wrapping_sub(1),
+    };
+    let refusal = || Err(Error::ChannelSendMessageFailed);
+
+    worker.settle_credit(class, attempt, refusal());
+    assert_eq!(slot(&worker), None, "an idle slot awaits no wait");
+
+    worker.credits[class] = ClassCredit::Awaiting(attempt);
+    worker.settle_credit(class, abandoned, refusal());
+    assert_eq!(slot(&worker), None, "the slot awaits another generation");
+    worker.settle_credit(class, attempt, refusal());
+    assert_eq!(
+        slot(&worker),
+        Some(attempt),
+        "the awaited wait settles its slot"
+    );
 }

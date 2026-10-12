@@ -1,52 +1,51 @@
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::PoisonError;
 
 use async_trait::async_trait;
 
-use super::super::RecordingMeasure;
+use super::super::local_wire;
+use super::super::unbound_peer;
+use super::super::ApplicationRecorder;
 use super::super::TestLatch;
-use super::local_wire;
-use super::noop_control_message;
+use super::super::TransportSpec;
 use super::spawn_inbound_delivery;
-use crate::chunk::ReassemblyLimits;
-use crate::delegation::DelegateeKey;
+use super::storage_message;
 use crate::dht::entry::Entry;
-use crate::dht::entry::EntryKind;
-use crate::dht::entry::PlacedEntry;
-use crate::dht::Did;
-use crate::dht::PeerRing;
-use crate::dht::StorageSyncDestination;
-use crate::dht::StorageSyncPurpose;
-use crate::dht::VirtualNodeConfig;
-use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::Message;
-use crate::message::MessagePayload;
-use crate::message::SyncEntriesWithSuccessor;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
-use crate::swarm::callback::DefaultCallback;
-use crate::swarm::callback::InnerSwarmCallback;
-use crate::swarm::callback::SwarmCallback;
-use crate::swarm::callback::SwarmCallbackSlot;
-use crate::swarm::observer::NoopSwarmObserver;
-use crate::swarm::transport::SwarmTransport;
-use crate::swarm::transport::SwarmTransportParts;
-use crate::swarm::transport::SwarmTransportSettings;
-use crate::swarm::transport::SwarmWebrtcConfig;
-use crate::tests::live_entry;
+use crate::swarm::transport::inbound_tap::LaneHold;
 
+/// The witnesses of one storage batch interleaved with an application delivery waiting at its
+/// held lane.
 #[derive(Default)]
 struct InterleaveProbe {
+    /// Persistence steps the storage batch has taken.
     put_calls: AtomicUsize,
+    /// Set once the first entry is persisted.
     first_persisted: TestLatch,
+    /// Released by the test to let the first persistence step return.
     release_first_persist: TestLatch,
-    control_waiting: TestLatch,
-    control_may_progress: TestLatch,
-    control_progressed: TestLatch,
+    /// The application end, where the second step looks for the woken delivery.
+    application: OnceLock<ApplicationRecorder>,
+    /// The hold on the Application lane, dropped at the end of the first step to wake the
+    /// waiting application delivery from within the storage batch.
+    lane_hold: Mutex<Option<LaneHold>>,
+}
+
+impl InterleaveProbe {
+    /// The application end; attached before any frame is submitted.
+    fn application(&self) -> Result<&ApplicationRecorder> {
+        self.application
+            .get()
+            .ok_or_else(|| Error::InvalidMessage("application end not attached".to_string()))
+    }
 }
 
 struct InterleaveStorage {
@@ -62,16 +61,27 @@ impl KvStorageInterface<Entry> for InterleaveStorage {
 
     async fn put(&self, key: &str, value: &Entry) -> Result<()> {
         let call = self.probe.put_calls.fetch_add(1, Ordering::SeqCst);
-        if call == 1 && !self.probe.control_progressed.is_set() {
+        if call == 1 && self.probe.application()?.inbounds() == 0 {
             return Err(Error::InvalidMessage(
-                "second storage effect ran before queued control traffic".to_string(),
+                "second storage effect ran before the woken application delivery".to_string(),
             ));
         }
         self.inner.put(key, value).await?;
         if call == 0 {
             self.probe.first_persisted.set();
             self.probe.release_first_persist.wait().await;
-            self.probe.control_may_progress.set();
+            // Releasing the lane wakes the waiting application delivery here, before this step
+            // returns and the batch yields.
+            let lane_hold = self
+                .probe
+                .lane_hold
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .ok_or_else(|| {
+                    Error::InvalidMessage("the Application lane is not held".to_string())
+                })?;
+            drop(lane_hold);
         }
         Ok(())
     }
@@ -93,105 +103,64 @@ impl KvStorageInterface<Entry> for InterleaveStorage {
     }
 }
 
-struct InterleaveCallback {
-    probe: Arc<InterleaveProbe>,
-}
-
-#[async_trait]
-impl SwarmCallback for InterleaveCallback {
-    async fn on_validate(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        if matches!(
-            payload.transaction.data::<Message>()?,
-            Message::FindSuccessorReport(_)
-        ) {
-            self.probe.control_waiting.set();
-            self.probe.control_may_progress.wait().await;
-            self.probe.control_progressed.set();
-        }
-        Ok(())
-    }
-}
-
+/// A storage batch yields between persistence steps, so work of another lane that became ready
+/// during one step runs before the next. The other lane's work is an application delivery
+/// waiting at its held lane, which the first step releases; the second step checks it was
+/// queued.
 #[tokio::test]
-async fn test_inbound_storage_batch_yields_to_control_between_persistence_steps() -> Result<()> {
+async fn test_inbound_storage_batch_yields_between_persistence_steps() -> Result<()> {
     let probe = Arc::new(InterleaveProbe::default());
-    let local_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
-        local_session.delegator_did(),
-        3,
-        Box::new(InterleaveStorage {
-            inner: MemStorage::new(),
-            probe: Arc::clone(&probe),
-        }),
-        DEFAULT_FINGER_TABLE_SIZE,
-    ));
-    let transport = Arc::new(SwarmTransport::new(SwarmTransportParts {
-        network_id: 0,
-        webrtc: SwarmWebrtcConfig::new("".to_string(), None, None),
-        delegatee_key: local_session,
-        dht,
-        measure: Some(Arc::new(RecordingMeasure::default())),
-        transaction_replay: crate::message::TransactionReplay::new_shared(Box::new(
-            crate::storage::MemStorage::new(),
-        )),
-        settings: SwarmTransportSettings::new(
-            1,
-            VirtualNodeConfig::disabled(),
-            ReassemblyLimits::production(),
-        ),
-        callback: SwarmCallbackSlot::new(Arc::new(DefaultCallback)),
-        observer: Arc::new(NoopSwarmObserver),
-    }));
-    let callback = Arc::new(InnerSwarmCallback::new(
-        Arc::clone(&transport),
-        Arc::new(InterleaveCallback {
-            probe: Arc::clone(&probe),
-        }),
-    ));
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let peer_session = DelegateeKey::new_with_seckey(&peer_key)?;
-    let cid = peer.to_string();
+    let transport = Arc::new(
+        TransportSpec {
+            storage: Box::new(InterleaveStorage {
+                inner: MemStorage::new(),
+                probe: Arc::clone(&probe),
+            }),
+            ..TransportSpec::default()
+        }
+        .build()?,
+    );
+    let (application, lane_hold) =
+        ApplicationRecorder::attach_holding_application_lane(&transport)?;
+    *probe
+        .lane_hold
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(lane_hold);
+    if probe.application.set(application).is_err() {
+        return Err(Error::InvalidMessage(
+            "application end attached twice".to_string(),
+        ));
+    }
+    let peer = unbound_peer(&transport, &SecretKey::random())?;
+    let callback = Arc::clone(&peer.callback);
+    let cid = peer.peer.to_string();
 
-    let entries = [31_u32, 32_u32]
-        .into_iter()
-        .map(|did| {
-            let entry = live_entry(Did::from(did), Vec::new(), EntryKind::Data);
-            PlacedEntry::new(entry.did, entry)
-        })
-        .collect();
     let storage = local_wire(
-        Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
-            purpose: StorageSyncPurpose::AdditiveRepair,
-            destination: StorageSyncDestination::PhysicalOwner(transport.dht.did),
-            data: entries,
-        }),
-        &peer_session,
+        storage_message(transport.dht.did, [31, 32]),
+        &peer.session,
         transport.dht.did,
     )?;
     let storage_delivery = spawn_inbound_delivery(Arc::clone(&callback), cid.clone(), storage);
     probe.first_persisted.wait().await;
 
-    let control = local_wire(
-        noop_control_message(transport.dht.did),
-        &peer_session,
-        transport.dht.did,
-    )?;
-    let control_delivery = spawn_inbound_delivery(callback, cid, control);
-    probe.control_waiting.wait().await;
+    let application =
+        peer.custom_message_wire(&transport, b"waits-at-the-held-application-lane")?;
+    let application_delivery = spawn_inbound_delivery(callback, cid, application);
+    // The storage frame entered the logical stage first, then the application frame, which
+    // waits at its held lane once it is observed.
+    for _ in 0..2 {
+        probe.application()?.next_tapped().await?;
+    }
+    assert!(!application_delivery.is_finished());
     probe.release_first_persist.set();
 
     storage_delivery
         .await
         .map_err(|_| Error::InvalidMessage("storage mailbox task panicked".to_string()))??;
-    control_delivery
+    application_delivery
         .await
-        .map_err(|_| Error::InvalidMessage("control mailbox task panicked".to_string()))??;
+        .map_err(|_| Error::InvalidMessage("application mailbox task panicked".to_string()))??;
 
     assert_eq!(probe.put_calls.load(Ordering::SeqCst), 2);
-    assert!(probe.control_progressed.is_set());
     Ok(())
 }

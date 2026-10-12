@@ -1,27 +1,22 @@
 use std::collections::VecDeque;
 
+use super::model::PerClass;
 use super::model::TransferClass;
 
 /// Four control frames followed by one lower-class frame gives control at most
 /// 80% of frame admissions under sustained mixed load.
 pub(crate) const OUTBOUND_CONTROL_BURST: usize = 4;
+/// The classes below control, in their round-robin order.
 const LOWER_CLASSES: [TransferClass; 3] = [
     TransferClass::Storage,
     TransferClass::E2e,
     TransferClass::Application,
 ];
-
-macro_rules! lane_for_class {
-    ($lanes:expr, $class:expr) => {{
-        let [control, storage, e2e, application] = $lanes;
-        match $class {
-            TransferClass::DhtControl => control,
-            TransferClass::Storage => storage,
-            TransferClass::E2e => e2e,
-            TransferClass::Application => application,
-        }
-    }};
-}
+/// Every class, control first: `[DhtControl] ++ LOWER_CLASSES`.
+pub(super) const CLASSES: [TransferClass; TransferClass::COUNT] = {
+    let [storage, e2e, application] = LOWER_CLASSES;
+    [TransferClass::DhtControl, storage, e2e, application]
+};
 
 /// Transfers of one class lane that may be in flight at once (#899).
 ///
@@ -157,6 +152,15 @@ impl<T> TransferLane<T> {
     /// Whether some in-flight transfer may admit a frame now.
     fn is_runnable(&self) -> bool {
         self.runnable_position().is_some()
+    }
+
+    /// The transfer at [`Self::runnable_position`], left where it is.
+    fn runnable(&self) -> Option<&T> {
+        let position = self.runnable_position()?;
+        match self.slots.get(position) {
+            Some((_, SlotState::Runnable { item, .. })) => Some(item),
+            _ => None,
+        }
     }
 
     /// Take the transfer at [`Self::runnable_position`], leaving its slot `Sending`.
@@ -305,8 +309,14 @@ impl<T> RunnableTransfer<T> {
     }
 }
 
+/// The class lanes of one peer, scheduled by bounded control priority and round robin.
+///
+/// Law (credit gate). A class whose lane holds no transport credit is not runnable: `pop`
+/// chooses among the classes its caller reports credited only, so a lane waiting for its
+/// receiver's credit never takes the worker from another lane, and the classes stay isolated as
+/// their transport lanes are.
 pub(super) struct TransferQueues<T> {
-    lanes: [TransferLane<T>; TransferClass::COUNT],
+    lanes: PerClass<TransferLane<T>>,
     lower_cursor: usize,
     consecutive_control: usize,
     /// In-flight transfers allowed per lane.
@@ -323,11 +333,16 @@ impl<T> TransferQueues<T> {
     /// Queues whose lanes each keep at most `window` transfers in flight.
     fn with_window(window: usize) -> Self {
         Self {
-            lanes: std::array::from_fn(|_| TransferLane::default()),
+            lanes: PerClass::from_fn(|_| TransferLane::default()),
             lower_cursor: 0,
             consecutive_control: 0,
             window,
         }
+    }
+
+    /// The transfer of `class` that would admit the next frame, credit aside.
+    pub(super) fn next_of(&self, class: TransferClass) -> Option<&T> {
+        self.lane(class).runnable()
     }
 
     /// Queues with a small window, so that tests reach the bound.
@@ -347,9 +362,15 @@ impl<T> TransferQueues<T> {
         self.lane_mut(class).enqueue(item, window);
     }
 
-    pub(super) fn pop(&mut self) -> Option<RunnableTransfer<T>> {
-        let has_control = self.is_runnable(TransferClass::DhtControl);
-        let has_lower = self.has_lower();
+    /// Take the next transfer to admit a frame, among the classes `credited` reports holding a
+    /// transport credit (the credit gate).
+    pub(super) fn pop(
+        &mut self,
+        credited: impl Fn(TransferClass) -> bool,
+    ) -> Option<RunnableTransfer<T>> {
+        let runnable = |class| credited(class) && self.lane(class).is_runnable();
+        let has_control = runnable(TransferClass::DhtControl);
+        let has_lower = LOWER_CLASSES.iter().copied().any(runnable);
         let selected = if has_control
             && (!bounded_control_burst_enabled()
                 || self.consecutive_control < OUTBOUND_CONTROL_BURST
@@ -357,7 +378,7 @@ impl<T> TransferQueues<T> {
         {
             Some(TransferClass::DhtControl)
         } else {
-            self.next_lower_class()
+            self.next_lower_class(runnable)
         }?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         if selected == TransferClass::DhtControl
@@ -445,7 +466,7 @@ impl<T> TransferQueues<T> {
 
     pub(super) fn drain_transfers(&mut self) -> Vec<T> {
         self.lanes
-            .iter_mut()
+            .values_mut()
             .flat_map(TransferLane::drain_transfers)
             .collect()
     }
@@ -455,38 +476,28 @@ impl<T> TransferQueues<T> {
     pub(super) fn remove_ready_where(&mut self, mut predicate: impl FnMut(&T) -> bool) -> Vec<T> {
         let window = self.window;
         self.lanes
-            .iter_mut()
+            .values_mut()
             .flat_map(|lane| lane.remove_ready_where(&mut predicate, window))
             .collect()
     }
 
-    fn is_runnable(&self, class: TransferClass) -> bool {
-        self.lane(class).is_runnable()
-    }
-
-    fn has_lower(&self) -> bool {
-        LOWER_CLASSES
-            .iter()
-            .copied()
-            .any(|class| self.is_runnable(class))
-    }
-
     fn lane(&self, class: TransferClass) -> &TransferLane<T> {
-        lane_for_class!(&self.lanes, class)
+        &self.lanes[class]
     }
 
     fn lane_mut(&mut self, class: TransferClass) -> &mut TransferLane<T> {
-        lane_for_class!(&mut self.lanes, class)
+        &mut self.lanes[class]
     }
 
-    fn next_lower_class(&self) -> Option<TransferClass> {
+    /// The next lower class, round robin from the cursor, that `runnable` admits.
+    fn next_lower_class(&self, runnable: impl Fn(TransferClass) -> bool) -> Option<TransferClass> {
         LOWER_CLASSES
             .iter()
             .copied()
             .cycle()
             .skip(self.lower_cursor)
             .take(LOWER_CLASSES.len())
-            .find(|class| self.is_runnable(*class))
+            .find(|class| runnable(*class))
     }
 }
 

@@ -225,11 +225,12 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
             .await?
             .start();
         let offer = plan.build(completion_sequence, self.handler.transport.message_signer())?;
+        // The answer takes its next hop's answer slot, not the shared capacity, so peers that
+        // hold this node's control reserve cannot keep it from answering.
         self.handler
-            .run_effects([CoreEffect::send_report_message(
-                ctx,
-                Message::ProbeOffer(Box::new(offer)),
-            )])
+            .transport
+            .probe_answer_egress()
+            .send_report_message(ctx, Message::ProbeOffer(Box::new(offer)))
             .await
     }
 
@@ -244,7 +245,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
         )?;
         self.handler
             .transport
-            .consume_pending_probe(provider, ctx.transaction.tx_id, request)?
+            .answer_liveness_probe(provider, request)?
             .then_some(())
             .ok_or_else(|| {
                 Error::InvalidMessage("probe offer has no matching outstanding request".to_string())

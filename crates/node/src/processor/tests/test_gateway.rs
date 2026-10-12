@@ -270,12 +270,12 @@ async fn prepare_two_hop_public_gateway(config: GatewayConfig) -> Result<TwoHopG
 
     let now_ms = get_epoch_ms();
     client
-        .storage_store(Processor::online_node_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONLINE_NODES_TOPIC, vec![
             online_relay_descriptor_for_processor(&relay, now_ms)?,
         ])?)
         .await?;
     client
-        .storage_store(Processor::onion_exit_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
             onion_exit_descriptor_for_processor_with_service(
                 &exit,
                 OnionServiceName::tcp(),

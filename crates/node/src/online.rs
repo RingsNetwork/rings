@@ -7,20 +7,16 @@ use rings_core::ecc::PublicKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
 use rings_core::error::Result;
-use rings_core::message::Decoder;
 use rings_core::message::DhtProtocolMode;
 use rings_core::message::DomainTag;
-use rings_core::message::Encoded;
-use rings_core::message::Encoder;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::descriptor::decode_descriptor;
-use crate::descriptor::encode_descriptor;
 use crate::descriptor::latest_valid_by_did;
 use crate::descriptor::sign_descriptor_body;
+use crate::descriptor::RegistryElement;
 use crate::descriptor::SignedDescriptor;
 use crate::descriptor::SignedDescriptorBody;
 
@@ -324,17 +320,7 @@ impl SignedDescriptor for OnlineNodeDescriptor {
     }
 }
 
-impl Encoder for OnlineNodeDescriptor {
-    fn encode(&self) -> Result<Encoded> {
-        encode_descriptor(self)
-    }
-}
-
-impl Decoder for OnlineNodeDescriptor {
-    fn from_encoded(encoded: &Encoded) -> Result<Self> {
-        decode_descriptor(encoded)
-    }
-}
+impl RegistryElement for OnlineNodeDescriptor {}
 
 #[cfg(test)]
 mod tests {
@@ -342,6 +328,7 @@ mod tests {
     use rings_core::ecc::SecretKey;
 
     use super::*;
+    use crate::descriptor::prunes_registry_element;
     use crate::tests::TEST_NETWORK_ID;
 
     fn descriptor_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnlineNodeDescriptor> {
@@ -384,8 +371,8 @@ mod tests {
     #[test]
     fn test_descriptor_round_trips_through_dht_encoding() -> Result<()> {
         let descriptor = descriptor_at(20, 30)?;
-        let encoded = descriptor.encode()?;
-        let decoded = OnlineNodeDescriptor::from_encoded(&encoded)?;
+        let element = descriptor.to_element()?;
+        let decoded = OnlineNodeDescriptor::from_element(&element)?;
 
         assert_eq!(decoded, descriptor);
         assert!(decoded.verify_signature(TEST_NETWORK_ID));
@@ -463,6 +450,40 @@ mod tests {
             true,
         );
         assert_eq!(with_expired.len(), 3);
+        Ok(())
+    }
+
+    /// A publisher prunes its own descriptors and every one that does not decode, does not
+    /// verify, or expired more than the skew tolerance ago; a descriptor of another registrant
+    /// expired within the tolerance is kept.
+    #[test]
+    fn test_a_publisher_keeps_only_live_descriptors_of_other_registrants() -> Result<()> {
+        let skew = rings_core::consts::TS_OFFSET_TOLERANCE_MS;
+        let now_ms = 40 + skew + 1;
+        let own = descriptor_at(20, 10 * now_ms)?;
+        let other_live = descriptor_at(25, 10 * now_ms)?;
+        let expired = descriptor_at(30, 40)?;
+        let expired_within_skew = descriptor_at(35, 41)?;
+        let mut forged = descriptor_at(35, 10 * now_ms)?;
+        forged.version = "forged".to_string();
+        let prunes = |element: &[u8]| {
+            prunes_registry_element::<OnlineNodeDescriptor>(
+                element,
+                own.did,
+                now_ms,
+                TEST_NETWORK_ID,
+            )
+        };
+
+        assert!(prunes(&own.to_element()?));
+        assert!(!prunes(&other_live.to_element()?));
+        assert!(prunes(&expired.to_element()?));
+        assert!(
+            !prunes(&expired_within_skew.to_element()?),
+            "a clock up to σ behind still holds it live"
+        );
+        assert!(prunes(&forged.to_element()?));
+        assert!(prunes(b"not a descriptor"));
         Ok(())
     }
 }

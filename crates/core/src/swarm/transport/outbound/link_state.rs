@@ -62,8 +62,12 @@ impl LinkControlBudget {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |in_flight| {
                 (in_flight < LINK_CONTROL_IN_FLIGHT_CAPACITY).then(|| in_flight + 1)
             })
-            .ok()
-            .map(|_| LinkControlPermit(Arc::clone(&self.0)))
+            .ok()?;
+        // Test builds: a reserved permit is a state change that quiescence probes read, as a
+        // released one is.
+        #[cfg(test)]
+        crate::tests::activity::record_activity();
+        Some(LinkControlPermit(Arc::clone(&self.0)))
     }
 }
 
@@ -73,6 +77,9 @@ pub(in crate::swarm::transport) struct LinkControlPermit(Arc<AtomicUsize>);
 impl Drop for LinkControlPermit {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
+        // Test builds: a released permit is a state change that quiescence probes read.
+        #[cfg(test)]
+        crate::tests::activity::record_activity();
     }
 }
 
@@ -84,6 +91,13 @@ impl OutboundSchedulers {
             .peers
             .get(&peer)
             .map(|handle| handle.state.link.clone())
+    }
+
+    /// The link-control sends in flight to `peer`, read without reserving.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(in crate::swarm::transport) fn link_control_in_flight_for_test(&self, peer: Did) -> usize {
+        self.link_of(peer)
+            .map_or(0, |link| link.control_budget.0.load(Ordering::Acquire))
     }
 
     /// One link-control send to `peer` counted against its budget: `None` when this end has

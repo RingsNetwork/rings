@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use bytes::Bytes;
 
 use super::super::next_hop_for_sync_entries;
 use super::test_support::next_generated_key;
@@ -6,7 +6,6 @@ use super::test_support::next_payload_for_tx;
 use super::test_support::physical_sync_route_next_hop;
 use super::test_support::prepare_node_with_virtual_nodes;
 use super::test_support::storage_sync_route_next_hop;
-use super::test_support::NoopCallback;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
@@ -18,17 +17,16 @@ use crate::dht::PeerRingRemoteAction;
 use crate::dht::StorageKey;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
+use crate::ecc::tests::deterministic_key;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
-use crate::message::Encoder;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
@@ -48,11 +46,10 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
     }
     *receiver.dht().lock_predecessor()? = None;
 
-    let receiver_handler =
-        MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+    let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
     let entry = live_entry(
         Did::from(10u32),
-        vec!["handler acked".to_string().encode()?],
+        vec![Bytes::from("handler acked")],
         EntryKind::Data,
     );
     let placement_key = entry.did;
@@ -125,7 +122,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predeces
     *receiver.dht().lock_predecessor()? = Some(predecessor);
     let topic = live_entry(
         Did::from(10u32),
-        vec!["acked".to_string().encode()?],
+        vec![Bytes::from("acked")],
         EntryKind::Data,
     );
     let inbox = inbox_held_by_a_stranger(receiver.did())?;
@@ -176,7 +173,7 @@ async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<
     let receiver = prepare_node(SecretKey::random()).await;
     let entry = live_entry(
         Did::from(10u32),
-        vec!["acked".to_string().encode()?],
+        vec![Bytes::from("acked")],
         EntryKind::Data,
     );
     let placement_key = entry.did;
@@ -233,7 +230,7 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
 
     let entry = live_entry(
         Did::from(10u32),
-        vec!["wrong owner".to_string().encode()?],
+        vec![Bytes::from("wrong owner")],
         EntryKind::Data,
     );
     let stored_entry = entry.clone().try_into_storage_entry()?;
@@ -260,8 +257,7 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
         receiver.did(),
         &sync_msg.data,
     )?;
-    let receiver_handler =
-        MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+    let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
 
     receiver_handler.handle(&context, &sync_msg).await?;
 
@@ -294,7 +290,9 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
 #[tokio::test]
 async fn test_sync_entries_physical_destination_routes_by_physical_did_not_storage_owner(
 ) -> Result<()> {
-    let mut keys = gen_ordered_keys::<6>().into_iter();
+    // Fixed keys: the routes must diverge for some peer, a property of the identities, so a
+    // random draw would make the witness a matter of luck.
+    let mut keys = (0..6).map(deterministic_key);
     let node = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 4)?;
     let mut peers = Vec::new();
     for _ in 0..5 {
@@ -331,7 +329,7 @@ async fn test_sync_entries_physical_destination_routes_by_physical_did_not_stora
         node.did(),
         destination,
     )?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
 
     let next = next_hop_for_sync_entries(&handler, &context, &msg)?;
 

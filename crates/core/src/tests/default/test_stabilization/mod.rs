@@ -41,7 +41,6 @@ use crate::measure::ProvisionalEvidenceRecord;
 use crate::message::ProvisionalServiceReceipt;
 use crate::storage::MemStorage;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
@@ -61,6 +60,8 @@ use crate::tests::manually_establish_connection;
 use crate::tests::replace_observed_fingers;
 use crate::utils::get_epoch_ms_i64;
 
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_credit_liveness;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_storage_handoff;
 mod test_storage_repair;
@@ -391,6 +392,8 @@ async fn test_get_and_check_connection_waits_for_disconnected_open_transport() -
     Ok(())
 }
 
+/// A probe stuck in local backpressure (its transport send never completes) is no evidence
+/// against its peer: the pass issues it, and no failed send is measured against the peer.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
 async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> {
@@ -404,7 +407,7 @@ async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> 
     node1
         .swarm
         .transport
-        .force_peer_connected_at(node2.did(), get_epoch_ms_i64() - PEER_LIVENESS_IDLE_MS - 1)?;
+        .force_peer_liveness_probe_due(node2.did())?;
 
     let _pending_send = PendingSendGuard::new();
     node1
@@ -413,6 +416,14 @@ async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> 
         .stabilize_with_step_timeout(Duration::from_secs(1))
         .await?;
 
+    assert!(
+        node1
+            .swarm
+            .transport
+            .peer_liveness_outstanding_since_for_test(node2.did())?
+            .is_some(),
+        "the pass issued a probe"
+    );
     assert_eq!(
         measure
             .event_count(node2.did(), MeasurementEvent::FailedToSend)
@@ -434,10 +445,10 @@ async fn test_liveness_probe_round_trip_admits_provider_evidence() -> Result<()>
     wait_for_successor(&beneficiary, provider.did()).await?;
     wait_for_successor(&provider, beneficiary.did()).await?;
     wait_for_msgs([&beneficiary, &provider]).await;
-    beneficiary.swarm.transport.force_peer_last_inbound_at(
-        provider.did(),
-        get_epoch_ms_i64() - PEER_LIVENESS_IDLE_MS - 1,
-    )?;
+    beneficiary
+        .swarm
+        .transport
+        .force_peer_liveness_probe_due(provider.did())?;
 
     beneficiary
         .swarm
@@ -487,7 +498,7 @@ async fn test_clean_unavailable_connections_removes_silent_connected_peer() -> R
     node1
         .swarm
         .transport
-        .force_peer_liveness_probe_sent_at(node2.did(), stale_probe_sent_at)?;
+        .force_peer_liveness_probe_issued_at(node2.did(), stale_probe_sent_at)?;
 
     let _drop_messages = DropMessagesGuard::new();
     node1
@@ -526,7 +537,7 @@ async fn test_clean_unavailable_connections_requests_no_repair_for_unreferenced_
     node1
         .swarm
         .transport
-        .force_peer_liveness_probe_sent_at(node2.did(), stale_probe_sent_at)?;
+        .force_peer_liveness_probe_issued_at(node2.did(), stale_probe_sent_at)?;
 
     let _drop_messages = DropMessagesGuard::new();
     node1

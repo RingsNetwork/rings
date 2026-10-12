@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
@@ -9,37 +7,47 @@ use serde::Serialize;
 use super::ConnectionStateSnapshot;
 use super::SendPermit;
 use super::WebrtcConnectionState;
-use crate::callback::InboundFrameCapacity;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::pool::ChannelLane;
 use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
+use crate::delivery::SendCreditWait;
 
-macro_rules! define_transport_messages {
-    ($( $(#[$docs:meta])* $variant:ident ),+ $(,)?) => {
-        /// Wrapper for the data that is sent over the data channel.
-        #[derive(Deserialize, Serialize, Debug, Clone)]
-        pub enum TransportMessage {
-            $(
-                $(#[$docs])*
-                $variant(Bytes),
-            )+
-        }
-
-        #[derive(Deserialize)]
-        pub(crate) enum BorrowedTransportMessage<'a> {
-            $($variant(#[serde(borrow)] &'a [u8]),)+
-        }
-    };
-}
-
-define_transport_messages!(
+/// Wrapper for the data that is sent over the data channel.
+///
+/// Variant order is wire format: `Custom` keeps index 0, so a custom frame encodes as before.
+///
+/// Law (only the pump advertises). The enum is private to the crate and the public send API
+/// takes a custom payload, so a `Credit` frame leaves this end only from its own credit pump:
+/// every limit the peer holds was advertised by this end's receive window.
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub(crate) enum TransportMessage {
     /// A custom message sent by an external invoker and handled by the
     /// `on_admitted_message` callback. Since 0.18 this stores [`Bytes`]
     /// instead of `Vec<u8>` without changing its wire encoding.
-    Custom
-);
+    Custom(Bytes),
+    /// The cumulative credit of the lane the frame travels on: the receiving end may send that
+    /// lane's frames with index below it (see [`crate::core::credit`]). The transport applies it
+    /// on arrival; it is never dispatched to the callback, never charged against credit itself,
+    /// and idempotent, so it may be duplicated or reordered.
+    Credit(u64),
+}
+
+/// [`TransportMessage`] decoded without copying a custom payload.
+#[derive(Deserialize)]
+pub(crate) enum BorrowedTransportMessage<'a> {
+    /// See [`TransportMessage::Custom`].
+    Custom(#[serde(borrow)] &'a [u8]),
+    /// See [`TransportMessage::Credit`].
+    Credit(u64),
+}
+
+/// The wire frame a send of the custom `payload` puts on the data channel, for callers that
+/// size or replay frames. Credit frames have no public encoder: only the transport sends them.
+pub fn custom_frame_wire(payload: Bytes) -> rings_codec::Result<Vec<u8>> {
+    rings_codec::serialize(&TransportMessage::Custom(payload))
+}
 
 /// Interop ceiling for a single data-channel message, in bytes - RFC 8841's default
 /// `max-message-size` (65536), the value a spec-compliant peer accepts when it advertises nothing
@@ -89,7 +97,7 @@ pub trait ConnectionInterface {
     /// The error type that is returned by connection.
     type Error: std::error::Error;
 
-    /// Send a [TransportMessage] to the remote peer.
+    /// Send the custom `payload` to the remote peer, for its `on_admitted_message` callback.
     ///
     /// The returned `Result` reflects whether the bytes were accepted into the
     /// local send buffer. The [DeliveryFuture] it yields resolves later to the
@@ -99,8 +107,8 @@ pub trait ConnectionInterface {
     /// [crate::delivery]).
     ///
     /// It uses the default lane; see [`send_message_with_permit`](Self::send_message_with_permit).
-    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture, Self::Error> {
-        self.send_message_with_permit(msg, ChannelLane::default(), SendPermit::always())
+    async fn send_message(&self, payload: Bytes) -> Result<DeliveryFuture, Self::Error> {
+        self.send_message_with_permit(payload, ChannelLane::default(), SendPermit::always())
             .await
     }
 
@@ -121,12 +129,27 @@ pub trait ConnectionInterface {
     ///
     /// The message travels on the data channel `lane` is pinned to, so the messages of one lane
     /// reach the remote handler in send order (see [`crate::core::pool`]).
+    ///
+    /// The send is charged one credit of `lane` (see
+    /// [`reserve_send_credit`](Self::reserve_send_credit)): the one `permit` carries, or else one
+    /// reserved here.
     async fn send_message_with_permit(
         &self,
-        msg: TransportMessage,
+        payload: Bytes,
         lane: ChannelLane,
         permit: SendPermit,
     ) -> Result<DeliveryFuture, Self::Error>;
+
+    /// Wait for one credit to send a custom frame on `lane` (see [`crate::core::credit`]).
+    ///
+    /// This is where a sender is held back while the receiver holds the lane's window full:
+    /// the wait is backpressure, and lasts as long as the receiver keeps its window full. A
+    /// caller that bounds its send in time reserves here first, untimed, and hands the credit to
+    /// the send with [`SendPermit::with_credit`]. A send without a credit reserves one itself.
+    ///
+    /// The wait owns only the lane's credit state, never the connection, so a sender held back
+    /// for long keeps no connection, callback or channel alive.
+    fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Self::Error>;
 
     /// Get current webrtc connection state.
     fn webrtc_connection_state(&self) -> WebrtcConnectionState;
@@ -179,11 +202,6 @@ pub trait TransportInterface {
 
     /// The error type that is returned by transport.
     type Error: std::error::Error;
-
-    /// Return the stable raw-frame capacity account shared by every connection.
-    ///
-    /// Implementations must return the same allocation for their entire lifetime.
-    fn inbound_frame_capacity(&self) -> &Arc<InboundFrameCapacity>;
 
     /// Used to create a new connection and register it in the transport.
     ///

@@ -43,9 +43,11 @@
 //!
 //! # Trust
 //!
-//! Delegation is trusted local configuration. It enters through `SwarmCallback` (and, in the
-//! node, a registered `Protocol`), with the authority of the operator who configures the quota.
-//! A namespace that declares it must enforce its own per-neighbour admission.
+//! Delegation is trusted local configuration. The application registers it in advance as data,
+//! through `Swarm::set_admission_delegation` (in the node, by registering a `Protocol`), with
+//! the authority of the operator who configures the quota; core matches it without calling the
+//! application (#935). A namespace that declares it must enforce its own per-neighbour
+//! admission.
 
 use crate::dht::Did;
 use crate::message::types::MessageCategory;

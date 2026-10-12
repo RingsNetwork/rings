@@ -1,4 +1,5 @@
 use super::*;
+use crate::swarm::application::ApplicationData;
 
 #[tokio::test]
 async fn test_outbound_capacity_is_reserved_before_readiness_wait() -> Result<()> {
@@ -8,7 +9,7 @@ async fn test_outbound_capacity_is_reserved_before_readiness_wait() -> Result<()
     let swarm = node1.swarm.clone();
     let send = tokio::spawn(async move {
         swarm
-            .send_direct_message(Message::custom(b"reserve-before-readiness")?, peer)
+            .send_direct_message(ApplicationData::custom(b"reserve-before-readiness"), peer)
             .await
     });
 
@@ -48,7 +49,7 @@ async fn test_pending_measurement_does_not_block_peer_scheduler() -> Result<()> 
 
     node1
         .swarm
-        .send_direct_message(Message::custom(b"first-measured-send")?, peer)
+        .send_direct_message(ApplicationData::custom(b"first-measured-send"), peer)
         .await?;
     wait_until("pending outbound measurement", || {
         started.load(Ordering::Acquire)
@@ -59,7 +60,7 @@ async fn test_pending_measurement_does_not_block_peer_scheduler() -> Result<()> 
         Duration::from_secs(1),
         node1
             .swarm
-            .send_direct_message(Message::custom(b"scheduler-must-progress")?, peer),
+            .send_direct_message(ApplicationData::custom(b"scheduler-must-progress"), peer),
     )
     .await
     .map_err(|_| invalid_test_state("measurement blocked the peer scheduler"))??;
@@ -90,6 +91,7 @@ async fn test_oversized_payload_log_omits_the_custom_message_body() -> Result<()
     let error = node1
         .swarm
         .transport
+        .protocol_egress()
         .send_payload(payload)
         .await
         .expect_err("oversized payload must be rejected before scheduling");

@@ -615,6 +615,14 @@ jobs:
       - name: Check typos
         uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
 
+      - name: Reject review-round tags in sources
+        run: |
+          # A comment names the law it states, not the review round that asked for it.
+          if grep -rnE '#[0-9]+ R[0-9]+|\bR[0-9]+ [HML][0-9]+\b' --include='*.rs' crates; then
+            echo "error: review-round tag in source; name the law instead" >&2
+            exit 1
+          fi
+
       - name: Setup rust toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal

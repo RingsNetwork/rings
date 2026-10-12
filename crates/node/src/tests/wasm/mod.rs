@@ -10,15 +10,14 @@ use futures::StreamExt;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
+use rings_core::lifecycle::StopToken;
 use rings_core::storage::idb::IdbStorage;
-use rings_core::swarm::callback::PeerTransition;
-use rings_core::swarm::callback::SwarmEvent;
+use rings_core::swarm::application::SwarmEvent;
 use rings_rpc::protos::rings_node::*;
 use uuid;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
-use crate::extension::Backend;
 use crate::extension::BackendObserver;
 use crate::logging::browser::init_logging;
 use crate::prelude::rings_core::utils::js_value;
@@ -39,8 +38,8 @@ const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 /// Every guard therefore fails by name before the runner's timeout.
 pub const TEST_HANG_GUARD: Duration = Duration::from_secs(20);
 
-/// A logical peer transition, as [`SwarmEvent::peer_transition`] reads it off the event stream.
-type Transition = (Did, PeerTransition);
+/// A logical peer transition: an admission or retirement fact read off the application inbox.
+type Transition = SwarmEvent;
 
 /// Write side of a peer-transition log: forwards every admission and retirement of one swarm.
 ///
@@ -50,11 +49,9 @@ type Transition = (Did, PeerTransition);
 pub struct TransitionRecorder(mpsc::UnboundedSender<Transition>);
 
 impl TransitionRecorder {
-    /// Record the transition `event` carries, if any.
+    /// Record the transition `event` is.
     pub fn record(&self, event: &SwarmEvent) {
-        if let Some(transition) = event.peer_transition() {
-            self.send(transition);
-        }
+        self.send(*event);
     }
 
     /// Append `transition` to the log; a log whose reader is gone has nobody left to wake.
@@ -64,14 +61,12 @@ impl TransitionRecorder {
 }
 
 impl BackendObserver for TransitionRecorder {
-    fn lookup_report(&self, _tx_id: uuid::Uuid, _successor: Did) {}
-
     fn peer_admitted(&self, peer: Did) {
-        self.send((peer, PeerTransition::Admitted));
+        self.send(SwarmEvent::PeerAdmitted { peer });
     }
 
     fn peer_retired(&self, peer: Did) {
-        self.send((peer, PeerTransition::Retired));
+        self.send(SwarmEvent::PeerRetired { peer });
     }
 }
 
@@ -99,12 +94,12 @@ pub fn peer_transitions() -> (TransitionRecorder, PeerTransitions) {
 impl PeerTransitions {
     /// Await `peer`'s next admission: its transport is ready and it joined the local DHT.
     pub async fn admitted(&self, peer: Did) {
-        self.consume((peer, PeerTransition::Admitted)).await
+        self.consume(SwarmEvent::PeerAdmitted { peer }).await
     }
 
     /// Await `peer`'s next retirement: its record left the local DHT.
     pub async fn retired(&self, peer: Did) {
-        self.consume((peer, PeerTransition::Retired)).await
+        self.consume(SwarmEvent::PeerRetired { peer }).await
     }
 
     /// Consume the oldest unconsumed occurrence of `wanted`, waiting for it if necessary.
@@ -216,10 +211,10 @@ pub async fn new_provider() -> ObservedProvider {
     let processor = prepare_processor().await;
     let provider = Provider::from_processor(Arc::new(processor));
     let (recorder, transitions) = peer_transitions();
-    let backend = Backend::new(Arc::new(provider.clone())).observed_by(Arc::new(recorder));
-    provider
-        .set_swarm_callback_internal(Arc::new(backend))
+    let service = provider
+        .application_service(Some(Arc::new(recorder)), StopToken::never())
         .unwrap();
+    wasm_bindgen_futures::spawn_local(service);
     ObservedProvider {
         provider,
         transitions,

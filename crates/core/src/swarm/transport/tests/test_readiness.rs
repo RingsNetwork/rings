@@ -5,11 +5,9 @@ use crate::message::PayloadSender;
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 async fn admitted_dummy_transport() -> Result<(Arc<SwarmTransport>, Did)> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
@@ -21,11 +19,9 @@ async fn admitted_dummy_transport() -> Result<(Arc<SwarmTransport>, Did)> {
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
 async fn test_disconnected_open_transport_cannot_commit_admission() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
@@ -53,17 +49,15 @@ async fn test_disconnected_open_transport_cannot_commit_admission() -> Result<()
 #[tokio::test]
 async fn test_data_channel_open_before_peer_state_converges_preserves_pending_admission(
 ) -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
     transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
 
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(attempt);
     callback
         .on_data_channel_open(&peer.to_string())
@@ -98,7 +92,10 @@ async fn test_non_ready_transport_is_admitted_but_not_routable_or_live() -> Resu
 
     assert!(transport.has_active_connection(peer));
     assert!(transport.get_connection(peer).is_none());
-    assert!(!PayloadSender::is_connected(transport.as_ref(), peer));
+    assert!(!PayloadSender::is_connected(
+        &transport.application_egress(),
+        peer
+    ));
     let raw = transport
         .get_raw_connection(peer)
         .ok_or(Error::SwarmMissTransport(peer))?;
@@ -108,7 +105,10 @@ async fn test_non_ready_transport_is_admitted_but_not_routable_or_live() -> Resu
         .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connected)?;
     transport.force_peer_data_channel_open_without_callback(peer, Some(false))?;
     assert!(transport.get_connection(peer).is_none());
-    assert!(!PayloadSender::is_connected(transport.as_ref(), peer));
+    assert!(!PayloadSender::is_connected(
+        &transport.application_egress(),
+        peer
+    ));
     assert!(!raw.readiness().can_make_progress());
 
     transport.disconnect(peer).await?;

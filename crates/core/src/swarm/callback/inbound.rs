@@ -1,12 +1,16 @@
 //! Bounded inbound admission and per-lane actor scheduling.
 //!
-//! Transport first bounds undecoded frames and transfers an opaque capacity lease.
-//! Core then verifies the frame and atomically reserves per-peer plus class-aware
-//! actor capacity before waiting for its lane ticket. The raw transport lease is
-//! released after the ticket wait, when both capacity ownership and lane order are
-//! established. Decode, validation, reassembly, and dispatch retain only the core
-//! permit. Capacity pressure fails without peer penalty rather than parking ingress
-//! behind the actor that releases it.
+//! Transport first bounds undecoded frames by per-lane credit and transfers an opaque
+//! credit lease. Core then verifies the frame and reserves per-peer plus class-aware actor
+//! capacity, and only then takes its lane ticket. The transport lease is released after the
+//! ticket, when both capacity ownership and lane order are established, which returns the
+//! sender's credit. Decode, validation, reassembly, and dispatch retain only the core permit.
+//!
+//! Capacity pressure parks the arrival instead of refusing it: the arrival keeps its lease, so
+//! the pressure reaches the sender as transport backpressure. Parked arrivals are admitted in
+//! resource order (`capacity::InboundResource`). The wait cannot deadlock against the actor that
+//! releases capacity, because a waiting arrival holds no ticket: the actor never orders its
+//! lanes behind it, and releases capacity as the events it already admitted complete.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -22,6 +26,7 @@ use futures::channel::oneshot;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
+use rings_transport::core::pool::ChannelLane;
 
 use super::logical::edge_relation;
 use super::InboundFrameLease;
@@ -32,20 +37,17 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::Authentication;
-use crate::message::EdgeRelation;
 use crate::message::MessagePayload;
+use crate::swarm::detached::spawn_detached;
 use crate::utils::try_sleep;
 use crate::utils::GenerationWitness;
 use crate::utils::Instant;
 
 mod barrier;
 mod capacity;
-mod deadline;
-mod failure;
 mod lane;
 mod reassembly;
 mod reassembly_clock;
-mod spawn;
 mod ticket;
 
 use self::barrier::lane_waits_for_reassembly;
@@ -53,15 +55,10 @@ use self::barrier::ReassemblyHandoffBarrier;
 use self::capacity::memory_reservation;
 pub(crate) use self::capacity::InboundCapacity;
 use self::capacity::InboundCapacityPermit;
-use self::deadline::await_inbound_deadline;
-use self::deadline::InboundDeadline;
-use self::failure::inbound_failure_error;
-use self::failure::InboundFailure;
 pub(crate) use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
 pub(super) use self::reassembly_clock::ReassemblyClock;
-use self::spawn::spawn_actor;
 use self::ticket::InboundCommand;
 use self::ticket::InboundSender;
 use self::ticket::InboundTicket;
@@ -93,30 +90,45 @@ const INBOUND_RESERVED_BYTES: [usize; INBOUND_LANE_COUNT] =
     [INBOUND_RESERVED_BYTES_PER_LANE; INBOUND_LANE_COUNT];
 /// Per-peer share prevents one connection from occupying the node-wide actor.
 const INBOUND_PEER_CAPACITY: usize = 32;
+const _: () =
+    assert!((rings_transport::core::pool::DATA_CHANNEL_POOL_SIZE as usize) < INBOUND_PEER_CAPACITY);
 const INBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 /// Bounds command work before completed lane tasks are observed.
 const INBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
-/// Maximum time an application-owned inbound callback may retain one lane and
-/// its capacity permit. The deadline cancels the future; callback
-/// implementations must therefore be cancellation-safe at every suspension.
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-const INBOUND_CALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
-#[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
-const INBOUND_CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InboundValidation {
-    Dispatch,
-    AcknowledgeDrop,
-}
+/// Where the drainer that handed an event over learns its logical outcome.
+type InboundReply = oneshot::Sender<Result<()>>;
 
-type InboundReply = oneshot::Sender<std::result::Result<(), InboundFailure>>;
-
+/// How the submitter of an event learns its logical outcome, which is also how the transport
+/// lane that carried it is paced.
+///
+/// ```text
+///   lane FIFO ─drainer─▶ hand-off (credit returned) ─▶ actor ─▶ handler done ─▶ reply
+///        ▲                                                                       │
+///        └──────────── the drainer takes the lane's next frame only now ◀────────┘
+/// ```
+///
+/// Law (lane-local pacing). An arrived frame is submitted with [`Self::Await`], and the
+/// transport's drainer of its lane hands the next frame over only once this one completed, so
+/// every transport lane of a peer has at most one event in the actor. A peer has
+/// `DATA_CHANNEL_POOL_SIZE` lanes, fewer than the events of its per-peer share
+/// (`INBOUND_PEER_CAPACITY`), so arrived frames never contend for those events, which the share
+/// reserves for no lane; its bytes hold at most one data-channel message per lane, the peer's
+/// own. A lane slow to process holds its own frames, and their transport credit, in its FIFO,
+/// and backpressure reaches the peer through that lane's credit alone (per-lane isolation). Without
+/// it, credit returned at hand-off would let one lane fill the shared per-peer capacity and
+/// stall the others, lane 0 included; the composed liveness model refutes that design
+/// (`HandOffWithoutAwait`). The dummy transport's "delivered = processed" rests on it too.
+///
+/// A frame released from a hold is submitted with [`Self::LogHeld`] and is not paced: the
+/// holds bound how many are released, once, at admission or when the session is learned.
 enum InboundCompletion {
+    /// Reply with the outcome once the event's logical processing is done.
     Await(InboundReply),
+    /// Nobody awaits: a failure is logged against `peer`.
     LogHeld { peer: Did },
 }
 
@@ -127,6 +139,9 @@ struct InboundEvent {
     payload: MessagePayload,
     prepared_message: Option<crate::message::Message>,
     lane: InboundLane,
+    /// The transport lane the frame arrived on; a chunk's carrier is checked against its
+    /// message once reassembled.
+    carrier: Option<ChannelLane>,
     wire_bytes: usize,
     permit: InboundCapacityPermit,
     completion: InboundCompletion,
@@ -162,7 +177,7 @@ impl InboundEvent {
 }
 
 #[derive(Clone)]
-pub(super) struct InboundMailbox {
+pub(crate) struct InboundMailbox {
     sender: Arc<Mutex<InboundSender>>,
     capacity: Arc<InboundCapacity>,
     actor_available: bool,
@@ -188,7 +203,7 @@ impl InboundMailbox {
             reassembly_clock,
             Arc::clone(&cleanup_passes),
         );
-        let actor_available = spawn_actor(actor);
+        let actor_available = spawn_detached(Box::pin(actor.run())).is_ok();
         Self {
             sender: Arc::new(Mutex::new(InboundSender::new(sender))),
             capacity,
@@ -210,7 +225,7 @@ impl InboundMailbox {
             .await?;
         match completion.await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(inbound_failure_error(error)),
+            Ok(Err(error)) => Err(error),
             Err(_) => Err(Error::InboundMailboxClosed),
         }
     }
@@ -254,7 +269,9 @@ impl InboundMailbox {
             lease:
                 InboundFrameLease {
                     bytes,
-                    transport_capacity,
+                    transport_credit,
+                    carrier,
+                    held: _,
                     #[cfg(test)]
                     in_flight,
                 },
@@ -271,10 +288,13 @@ impl InboundMailbox {
                 .admit_final_transaction(&prepared.payload, &prepared.message, lane, edge)
                 .await?;
         }
-        let ticket = self.reserve_ticket(lane)?;
+        // Capacity before the ticket: an arrival waiting for capacity holds no sequence, so
+        // the actor's ordering never waits on it.
         let permit = self
             .capacity
-            .acquire(peer, lane, memory_reservation(bytes.len()))?;
+            .acquire(peer, lane, memory_reservation(bytes.len()))
+            .await?;
+        let ticket = self.reserve_ticket(lane)?;
         let PreparedInboundFrame {
             payload,
             message,
@@ -284,7 +304,7 @@ impl InboundMailbox {
         // Core now owns both retained decoded representations. Release the raw
         // bytes and their transport lease together at this handoff boundary.
         let wire_bytes = bytes.len();
-        drop((bytes, transport_capacity));
+        drop((bytes, transport_credit));
         // Test builds: the actor's capacity permit now covers the frame.
         #[cfg(test)]
         drop(in_flight);
@@ -311,6 +331,7 @@ impl InboundMailbox {
             payload,
             prepared_message: Some(message),
             lane,
+            carrier,
             wire_bytes,
             permit,
             completion,
@@ -326,37 +347,43 @@ impl InboundMailbox {
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn admitted_count_for_test(&self) -> usize {
+    pub(crate) fn admitted_count_for_test(&self) -> usize {
         self.capacity.admitted_count_for_test()
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) async fn await_admitted_count_for_test(&self, predicate: impl Fn(usize) -> bool) {
+    pub(crate) async fn await_admitted_count_for_test(&self, predicate: impl Fn(usize) -> bool) {
         self.capacity.await_admitted_count_for_test(predicate).await;
     }
 
+    /// Wait until the number of arrivals waiting for the mailbox satisfies `predicate`.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) async fn await_handoffs_for_test(&self, predicate: impl Fn(u64) -> bool) {
+    pub(crate) async fn await_waiting_for_test(&self, predicate: impl Fn(usize) -> bool) {
+        self.capacity.await_waiting_for_test(predicate).await;
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn await_handoffs_for_test(&self, predicate: impl Fn(u64) -> bool) {
         self.handoffs.await_until(predicate).await;
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn cleanup_passes_for_test(&self) -> u64 {
+    pub(crate) fn cleanup_passes_for_test(&self) -> u64 {
         self.cleanup_passes.get()
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) async fn await_cleanup_passes_for_test(&self, predicate: impl Fn(u64) -> bool) {
+    pub(crate) async fn await_cleanup_passes_for_test(&self, predicate: impl Fn(u64) -> bool) {
         self.cleanup_passes.await_until(predicate).await;
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn hold_application_admission_for_test(&self) -> Result<impl Drop> {
+    pub(crate) fn hold_application_admission_for_test(&self) -> Result<impl Drop> {
         self.reserve_ticket(InboundLane::Application)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn hold_application_capacity_for_test(
+    pub(crate) fn hold_application_capacity_for_test(
         &self,
         peer: crate::dht::Did,
     ) -> Result<impl Drop> {
@@ -365,17 +392,12 @@ impl InboundMailbox {
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(super) fn close_for_test(&self) {
+    pub(crate) fn close_for_test(&self) {
         self.sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .close_channel();
     }
-}
-
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(super) const fn capacity_for_test() -> usize {
-    INBOUND_MAILBOX_CAPACITY
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -735,9 +757,9 @@ async fn process_event(
     }
     let lane = event.lane();
     let sequence = event.sequence;
-    match validate_event(&processor, &event).await {
-        Ok(InboundValidation::Dispatch) => {}
-        Ok(InboundValidation::AcknowledgeDrop) => {
+    match processor.pending_connection_admits(event.peer).await {
+        Ok(true) => processor.logical.tap_inbound(&event.payload),
+        Ok(false) => {
             finish_completion(event.completion, Ok(()));
             return InboundTaskCompletion {
                 lane,
@@ -765,13 +787,9 @@ async fn process_event(
         };
     }
 
-    let result = process_logical_message(
-        &processor.logical,
-        event.peer,
-        &event.payload,
-        event.prepared_message,
-    )
-    .await;
+    processor.logical.pass_tapped_lane(lane).await;
+    let result =
+        process_logical_message(&processor.logical, &event.payload, event.prepared_message).await;
     finish_completion(event.completion, result);
     InboundTaskCompletion {
         lane,
@@ -780,104 +798,30 @@ async fn process_event(
     }
 }
 
-/// Offer `payload` to the application's `on_validate` under the inbound deadline.
-async fn validate_payload(
-    pipeline: &LogicalInbound,
-    peer: Option<Did>,
-    payload: &MessagePayload,
-) -> std::result::Result<(), InboundFailure> {
-    match await_inbound_deadline(
-        pipeline.callback.on_validate(payload),
-        INBOUND_CALLBACK_TIMEOUT,
-    )
-    .await
-    {
-        InboundDeadline::Completed(result) => result.map_err(InboundFailure::Validation),
-        InboundDeadline::TimedOut => Err(InboundFailure::ValidationTimeout { peer }),
-        InboundDeadline::TimerUnavailable => Err(InboundFailure::TimerUnavailable {
-            peer,
-            operation: "validation",
-        }),
-    }
-}
-
-/// Deliver a locally sourced payload: validation, dispatch, and `on_inbound`, exactly as for a
-/// verified frame from a connection, but with no connection to gate on.
-pub(super) async fn deliver_local(
-    pipeline: &LogicalInbound,
-    payload: &MessagePayload,
-) -> Result<()> {
-    let message = payload.transaction.data::<crate::message::Message>()?;
-    let lane = InboundLane::from_kind(crate::message::MessageKind::from_message(&message));
-    // A local payload crossed no connection, so no neighbour can have its admission delegated.
-    pipeline
-        .admit_final_transaction(payload, &message, lane, EdgeRelation::Remote)
-        .await?;
-    validate_payload(pipeline, None, payload)
-        .await
-        .map_err(inbound_failure_error)?;
-    process_logical_message(pipeline, None, payload, Some(message))
-        .await
-        .map_err(inbound_failure_error)
-}
-
-async fn validate_event(
-    processor: &InboundProcessor,
-    event: &InboundEvent,
-) -> std::result::Result<InboundValidation, InboundFailure> {
-    if !processor
-        .pending_connection_admits(event.peer)
-        .await
-        .map_err(InboundFailure::Core)?
-    {
-        return Ok(InboundValidation::AcknowledgeDrop);
-    }
-    validate_payload(&processor.logical, event.peer, &event.payload).await?;
-    let still_admitted = processor
-        .pending_connection_admits(event.peer)
-        .await
-        .map_err(InboundFailure::Core)?;
-    Ok(if still_admitted {
-        InboundValidation::Dispatch
-    } else {
-        InboundValidation::AcknowledgeDrop
-    })
-}
-
+/// Dispatch `payload`, then hand its application data, if any, to the application inbox:
+/// queued or, when full, dropped, counted and logged by the inbox. Never waits on the
+/// application.
 async fn process_logical_message(
     pipeline: &LogicalInbound,
-    peer: Option<Did>,
     payload: &MessagePayload,
     prepared_message: Option<crate::message::Message>,
-) -> std::result::Result<(), InboundFailure> {
-    pipeline
-        .handle_payload(payload, prepared_message)
-        .await
-        .map_err(InboundFailure::Core)?;
-    if !pipeline.is_local_destination(payload) {
-        return Ok(());
+) -> Result<()> {
+    let message = pipeline.handle_payload(payload, prepared_message).await?;
+    if let Some(application) = pipeline.application_message(payload, message) {
+        pipeline.transport.application().outlet.deliver(application);
     }
-    match await_inbound_deadline(pipeline.on_inbound(payload), INBOUND_CALLBACK_TIMEOUT).await {
-        InboundDeadline::Completed(result) => result.map_err(InboundFailure::Callback),
-        InboundDeadline::TimedOut => Err(InboundFailure::ProcessingTimeout { peer }),
-        InboundDeadline::TimerUnavailable => Err(InboundFailure::TimerUnavailable {
-            peer,
-            operation: "processing",
-        }),
-    }
+    Ok(())
 }
 
-fn finish_completion(
-    completion: InboundCompletion,
-    result: std::result::Result<(), InboundFailure>,
-) {
+/// Report an event's logical `result` as its `completion` asks: to the awaiting drainer, or to
+/// the log for a message released from a hold, which nobody awaits.
+fn finish_completion(completion: InboundCompletion, result: Result<()>) {
     match completion {
         InboundCompletion::Await(reply) => {
             let _ = reply.send(result);
         }
         InboundCompletion::LogHeld { peer } => {
-            if let Err(failure) = result {
-                let error = inbound_failure_error(failure);
+            if let Err(error) = result {
                 tracing::warn!(
                     peer = %peer,
                     error = ?error,

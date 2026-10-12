@@ -1,9 +1,8 @@
+use futures::FutureExt;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
 use super::*;
 use crate::message::MessageCategory;
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-use crate::swarm::callback::CallbackError;
 
 const DHT_CONTROL_LANE: InboundLane = InboundLane::from_class(MessageCategory::DhtControl);
 const STORAGE_LANE: InboundLane = InboundLane::from_class(MessageCategory::Storage);
@@ -73,11 +72,15 @@ fn test_maximum_transport_frame_fits_every_lane_reservation() {
     .into_iter()
     .enumerate()
     .map(|(peer, lane)| {
-        capacity.acquire(
-            Some(Did::from(u32::try_from(peer + 1).expect("test peer fits"))),
-            lane,
-            reserved,
-        )
+        // Each lane's reservation admits at once: the acquisition completes without waiting.
+        capacity
+            .acquire(
+                Some(Did::from(u32::try_from(peer + 1).expect("test peer fits"))),
+                lane,
+                reserved,
+            )
+            .now_or_never()
+            .unwrap_or(Err(Error::InboundMailboxClosed))
     })
     .collect::<Result<Vec<_>>>()
     .expect("every lane must admit one maximum transport frame from its reservation");
@@ -296,34 +299,4 @@ fn test_one_peer_cannot_exhaust_another_peers_inbound_allowance() {
         .try_acquire(control_peer, DHT_CONTROL_LANE, 1)
         .is_ok());
     drop(permits);
-}
-
-#[cfg_attr(
-    all(feature = "wasm", target_family = "wasm"),
-    wasm_bindgen_test::wasm_bindgen_test
-)]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), test)]
-fn test_inbound_callback_failures_preserve_typed_sources() {
-    let validation = inbound_failure_error(InboundFailure::Validation(Box::new(
-        std::io::Error::other("validation source"),
-    )));
-    let callback = inbound_failure_error(InboundFailure::Callback(Box::new(
-        std::io::Error::other("callback source"),
-    )));
-
-    assert!(std::error::Error::source(&validation)
-        .and_then(|source| source.downcast_ref::<std::io::Error>())
-        .is_some());
-    assert!(std::error::Error::source(&callback)
-        .and_then(|source| source.downcast_ref::<std::io::Error>())
-        .is_some());
-}
-
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-#[test]
-fn test_native_callback_error_contract_is_send_and_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    assert_send_sync::<CallbackError>();
-    let _: CallbackError = Box::new(std::io::Error::other("native callback error"));
 }

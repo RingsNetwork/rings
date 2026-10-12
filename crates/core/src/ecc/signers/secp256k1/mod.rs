@@ -1,6 +1,7 @@
 //! Default method signing using secp256k1 ECDSA.
 
 use crate::ecc::keccak256;
+use crate::ecc::keys::SignatureAlgorithm;
 use crate::ecc::PublicKey;
 use crate::ecc::PublicKeyAddress;
 use crate::ecc::SecretKey;
@@ -22,9 +23,12 @@ pub fn hash(msg: &[u8]) -> [u8; 32] {
 }
 
 /// recover public key from message and signature.
+///
+/// One length gate, `SignatureAlgorithm::recoverable_signature`, refuses any signature other
+/// than 65 bytes as `InvalidSignatureLength`.
 pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey<33>> {
-    let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
-    crate::ecc::recover(msg, sig_byte)
+    let sig_byte = SignatureAlgorithm::Secp256k1.recoverable_signature(sig.as_ref())?;
+    crate::ecc::recover_hash(&hash(msg), &sig_byte)
 }
 
 /// verify signature with message and address.

@@ -146,6 +146,9 @@ impl std::fmt::Debug for SigningSecretKey {
     }
 }
 
+/// The length of a recoverable signature `r ‖ s ‖ v` (secp256k1, EIP-191, BIP-137).
+pub(crate) const RECOVERABLE_SIGNATURE_LEN: usize = 65;
+
 impl SignatureAlgorithm {
     /// Stable lower-case algorithm name.
     pub fn as_str(self) -> &'static str {
@@ -156,6 +159,49 @@ impl SignatureAlgorithm {
             Self::Secp256r1 => "secp256r1",
             Self::Ed25519 => "ed25519",
             Self::Bls12381 => "bls12-381",
+        }
+    }
+
+    /// The length of this algorithm's signatures, in bytes: 65 for every recoverable one.
+    ///
+    /// Law: an [`AccountVerifier`] accepts a signature of exactly this length and no other, so
+    /// every delegation that verified (built or admitted) carries a signature of its
+    /// algorithm's length, at most 96 bytes, the bound the chunk envelope reserve assumes.
+    pub const fn signature_len(self) -> usize {
+        match self {
+            Self::Secp256k1 | Self::Eip191 | Self::Bip137 => RECOVERABLE_SIGNATURE_LEN,
+            Self::Secp256r1 | Self::Ed25519 => 64,
+            Self::Bls12381 => 96,
+        }
+    }
+
+    /// `Ok` when `sig` has this algorithm's signature length: the length gate of an explicit
+    /// public key, which no signer reads when only the key is returned. A verification refuses
+    /// any other length by its signer's own gate (see [`VerificationPublicKey::verify`]).
+    fn check_signature_len(self, sig: &[u8]) -> Result<()> {
+        if sig.len() == self.signature_len() {
+            return Ok(());
+        }
+        Err(self.signature_length_error(sig.len()))
+    }
+
+    /// `sig` as a recoverable signature `r ‖ s ‖ v` of this algorithm, refused with
+    /// [`Error::InvalidSignatureLength`] at any other length: the gate and the conversion in one
+    /// step, for the recovering signers.
+    pub(crate) fn recoverable_signature(
+        self,
+        sig: &[u8],
+    ) -> Result<[u8; RECOVERABLE_SIGNATURE_LEN]> {
+        sig.try_into()
+            .map_err(|_| self.signature_length_error(sig.len()))
+    }
+
+    /// The refusal of a signature of `actual` bytes.
+    fn signature_length_error(self, actual: usize) -> Error {
+        Error::InvalidSignatureLength {
+            algorithm: self.as_str(),
+            expected: self.signature_len(),
+            actual,
         }
     }
 
@@ -179,6 +225,11 @@ impl VerificationPublicKey {
     }
 
     /// Verify a signature for this explicit public key.
+    ///
+    /// Post: `false` for a signature that is not its algorithm's length
+    /// ([`SignatureAlgorithm::signature_len`]), each by one length gate: the recovering signers
+    /// through `SignatureAlgorithm::recoverable_signature`, Secp256r1 and Ed25519 in their
+    /// signature decoding, and BLS12-381 at its conversion here.
     pub fn verify(&self, msg: &[u8], sig: impl AsRef<[u8]>) -> bool {
         match self {
             Self::Secp256k1(pk) => signers::secp256k1::verify(msg, &pk.address(), sig.as_ref()),
@@ -273,22 +324,23 @@ impl AccountVerifier {
     }
 
     /// Verify an account signature.
+    ///
+    /// Post: `false` for a signature that is not its algorithm's length
+    /// ([`SignatureAlgorithm::signature_len`]), by the one length gate of its signer (see
+    /// [`VerificationPublicKey::verify`]).
     pub fn verify(&self, msg: &[u8], sig: impl AsRef<[u8]>) -> bool {
-        match self {
-            Self::Recoverable {
-                algorithm: SignatureAlgorithm::Secp256k1,
-                did,
-            } => signers::secp256k1::verify(msg, &(*did).into(), sig.as_ref()),
-            Self::Recoverable {
-                algorithm: SignatureAlgorithm::Eip191,
-                did,
-            } => signers::eip191::verify(msg, &(*did).into(), sig.as_ref()),
-            Self::Recoverable {
-                algorithm: SignatureAlgorithm::Bip137,
-                did,
-            } => signers::bip137::verify(msg, &(*did).into(), sig.as_ref()),
-            Self::Recoverable { .. } => false,
-            Self::PublicKey(public_key) => public_key.verify(msg, sig.as_ref()),
+        let sig = sig.as_ref();
+        let (algorithm, did) = match self {
+            Self::PublicKey(public_key) => return public_key.verify(msg, sig),
+            Self::Recoverable { algorithm, did } => (*algorithm, (*did).into()),
+        };
+        match algorithm {
+            SignatureAlgorithm::Secp256k1 => signers::secp256k1::verify(msg, &did, sig),
+            SignatureAlgorithm::Eip191 => signers::eip191::verify(msg, &did, sig),
+            SignatureAlgorithm::Bip137 => signers::bip137::verify(msg, &did, sig),
+            SignatureAlgorithm::Secp256r1
+            | SignatureAlgorithm::Ed25519
+            | SignatureAlgorithm::Bls12381 => false,
         }
     }
 
@@ -320,7 +372,10 @@ impl AccountVerifier {
                 sig.as_ref(),
             )?)),
             Self::Recoverable { .. } => Err(Error::UnknownAccount),
-            Self::PublicKey(public_key) => Ok(public_key.clone()),
+            Self::PublicKey(public_key) => {
+                public_key.algorithm().check_signature_len(sig.as_ref())?;
+                Ok(public_key.clone())
+            }
         }
     }
 }
@@ -492,6 +547,58 @@ mod tests {
             reference.verification_key_from_signature(msg, sig).unwrap(),
             VerificationPublicKey::Secp256k1(secret.pubkey())
         );
+    }
+
+    /// The verifier of `secret`: by DID for a recoverable algorithm, by public key otherwise.
+    fn verifier_of(secret: &SigningSecretKey) -> AccountVerifier {
+        let public_key = secret.public_key().unwrap();
+        match public_key.algorithm().is_recoverable() {
+            true => AccountVerifier::Recoverable {
+                algorithm: public_key.algorithm(),
+                did: public_key.did(),
+            },
+            false => AccountVerifier::PublicKey(public_key),
+        }
+    }
+
+    /// The signature length law (#933): every signer produces its algorithm's length, and every
+    /// verifier refuses any other length, empty, one short and one long, with a typed error and
+    /// without panicking, where BIP-137 recovery used to slice a short signature.
+    #[test]
+    fn test_every_verifier_accepts_exactly_its_signature_length() {
+        let secret = SecretKey::random();
+        let secrets = [
+            SigningSecretKey::Secp256k1(secret.clone()),
+            SigningSecretKey::Eip191(secret.clone()),
+            SigningSecretKey::Bip137(secret.clone()),
+            SigningSecretKey::Secp256r1(secret),
+            SigningSecretKey::random_ed25519(),
+            SigningSecretKey::random_bls12381().unwrap(),
+        ];
+        let msg = b"signature length law";
+        for secret in secrets {
+            let verifier = verifier_of(&secret);
+            let expected = verifier.algorithm().signature_len();
+            let sig = secret.sign_raw(msg).unwrap();
+            assert_eq!(sig.len(), expected, "{}", secret.algorithm());
+            assert!(verifier.verify(msg, &sig));
+            let malformed = [
+                Vec::new(),
+                sig[..expected - 1].to_vec(),
+                [&sig[..], &[0]].concat(),
+            ];
+            for bad in malformed {
+                assert!(!verifier.verify(msg, &bad));
+                if let AccountVerifier::PublicKey(key) = &verifier {
+                    assert!(!key.verify(msg, &bad));
+                }
+                assert!(matches!(
+                    verifier.verification_key_from_signature(msg, &bad),
+                    Err(Error::InvalidSignatureLength { algorithm: named, actual, .. })
+                        if named == verifier.algorithm().as_str() && actual == bad.len()
+                ));
+            }
+        }
     }
 
     #[test]

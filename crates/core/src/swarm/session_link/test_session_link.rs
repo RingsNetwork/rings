@@ -167,7 +167,7 @@ fn arrive_and_deliver(
     carrier: u8,
     now_ms: u128,
 ) -> Result<Digests> {
-    let resolved = expect_resolved(receiver.arrive(frame, carrier, now_ms)?);
+    let resolved = expect_resolved(receiver.arrive(frame, carrier, now_ms, true)?);
     deliver(receiver, resolved, now_ms)
 }
 
@@ -398,7 +398,7 @@ fn test_loss_drifts_the_orders_and_the_sender_still_answers_the_miss() -> Result
     let late = sent(&mut sender, &relayed_payload(&origin, &hop, 2)?, now_ms)?;
     assert_eq!(encoding(late.as_ref()).origin, SlotEncoding::Referenced);
     assert_eq!(
-        expect_held(receiver.arrive(late, 2, now_ms)?),
+        expect_held(receiver.arrive(late, 2, now_ms, true)?),
         digests([origin_digest])
     );
     assert_eq!(
@@ -453,7 +453,7 @@ fn test_receiver_table_is_bounded_and_outlasts_the_sender_table() -> Result<()> 
         LinkControl::Unknown(first_digest)
     );
     let late = relayed_payload(&first_origin, &hop, 1)?;
-    expect_resolved(receiver.arrive(origin_referenced(&late)?, 2, now_ms)?);
+    expect_resolved(receiver.arrive(origin_referenced(&late)?, 2, now_ms, true)?);
 
     // That reference refreshed it: the receiver forgets it only once its whole capacity of
     // other sessions was referenced after it (the hop's session is always among them).
@@ -461,14 +461,14 @@ fn test_receiver_table_is_bounded_and_outlasts_the_sender_table() -> Result<()> 
     assert_eq!(receiver.known_len(), REFERENCED_TABLE_CAPACITY);
     let stale = relayed_payload(&first_origin, &hop, 2)?;
     assert_eq!(
-        expect_held(receiver.arrive(origin_referenced(&stale)?, 3, now_ms)?),
+        expect_held(receiver.arrive(origin_referenced(&stale)?, 3, now_ms, true)?),
         digests([first_digest])
     );
     // `hop`, referenced throughout, is kept by both.
     let hop_only = relayed_payload(&hop, &hop, 0)?;
     let frame = sent(&mut sender, &hop_only, now_ms)?;
     assert_eq!(encoding(frame.as_ref()), BOTH_REFERENCED);
-    expect_resolved(receiver.arrive(frame, 4, now_ms)?);
+    expect_resolved(receiver.arrive(frame, 4, now_ms, true)?);
     Ok(())
 }
 
@@ -486,7 +486,7 @@ fn test_confirmation_exchange_reaches_references_and_resolves() -> Result<()> {
     let payload = relayed_payload(&origin, &hop, 0)?;
     let frame = sent(&mut sender, &payload, now_ms)?;
     assert_eq!(encoding(frame.as_ref()), BOTH_INLINE);
-    let resolved = expect_resolved(receiver.arrive(frame, 0, now_ms)?);
+    let resolved = expect_resolved(receiver.arrive(frame, 0, now_ms, true)?);
     assert_eq!(resolved.payload, payload);
     let confirm = deliver(&mut receiver, resolved, now_ms)?;
     assert_eq!(
@@ -500,7 +500,7 @@ fn test_confirmation_exchange_reaches_references_and_resolves() -> Result<()> {
     let payload = relayed_payload(&origin, &hop, 1)?;
     let frame = sent(&mut sender, &payload, now_ms)?;
     assert_eq!(encoding(frame.as_ref()), BOTH_REFERENCED);
-    let resolved = expect_resolved(receiver.arrive(frame, 1, now_ms)?);
+    let resolved = expect_resolved(receiver.arrive(frame, 1, now_ms, true)?);
     assert_eq!(resolved.payload, payload);
     assert_eq!(
         resolved.payload.transaction.digest()?,
@@ -539,7 +539,7 @@ fn test_loss_and_reordering_before_confirmation_never_miss() -> Result<()> {
     assert_eq!(encoding(fourth.as_ref()), BOTH_REFERENCED);
 
     // The reference arrives before the late inline frame, and both resolve.
-    expect_resolved(receiver.arrive(fourth, 3, now_ms)?);
+    expect_resolved(receiver.arrive(fourth, 3, now_ms, true)?);
     let confirm_again = arrive_and_deliver(&mut receiver, second, 1, now_ms)?;
     assert_eq!(confirm_again, digests([digest]));
     assert_eq!(receiver.held_len(), 0);
@@ -557,7 +557,7 @@ fn test_origin_session_miss_is_repaired_by_announcement() -> Result<()> {
     let mut receiver = receiver();
 
     assert_eq!(
-        expect_held(receiver.arrive(origin_referenced(&payload)?, 7u8, now_ms)?),
+        expect_held(receiver.arrive(origin_referenced(&payload)?, 7u8, now_ms, true)?),
         digests([origin.delegation().digest()?])
     );
     assert!(receiver.release_next(now_ms)?.is_none());
@@ -585,7 +585,7 @@ fn test_hop_session_miss_is_repaired_by_announcement() -> Result<()> {
     let mut receiver = receiver();
 
     assert_eq!(
-        expect_held(receiver.arrive(frame, 7u8, now_ms)?),
+        expect_held(receiver.arrive(frame, 7u8, now_ms, true)?),
         digests([hop.delegation().digest()?])
     );
     assert!(matches!(
@@ -613,7 +613,7 @@ fn test_miss_is_answered_from_the_sender_table() -> Result<()> {
     let frame = sent(&mut sender, &payload, now_ms)?;
     assert_eq!(encoding(frame.as_ref()), BOTH_REFERENCED);
     let mut receiver = receiver();
-    let request = expect_held(receiver.arrive(frame, 1u8, now_ms)?);
+    let request = expect_held(receiver.arrive(frame, 1u8, now_ms, true)?);
     assert_eq!(request, digests([digest]));
     for digest in request {
         match sender.answer(GENERATION, digest, now_ms) {
@@ -647,20 +647,20 @@ fn test_held_frames_never_wait_for_each_other_and_resolvable_ones_leave_earliest
     let third = relayed_payload(&first_stranger, &hop, 1)?;
     let ready = relayed_payload(&hop, &hop, 0)?;
     assert_eq!(
-        expect_held(receiver.arrive(origin_referenced(&first)?, 1u8, now_ms)?),
+        expect_held(receiver.arrive(origin_referenced(&first)?, 1u8, now_ms, true)?),
         digests([first_stranger.delegation().digest()?])
     );
     assert_eq!(
-        expect_held(receiver.arrive(origin_referenced(&second)?, 2u8, now_ms)?),
+        expect_held(receiver.arrive(origin_referenced(&second)?, 2u8, now_ms, true)?),
         digests([second_stranger.delegation().digest()?])
     );
     // The third misses what the first already awaits, and asks again all the same.
     assert_eq!(
-        expect_held(receiver.arrive(origin_referenced(&third)?, 3u8, now_ms)?),
+        expect_held(receiver.arrive(origin_referenced(&third)?, 3u8, now_ms, true)?),
         digests([first_stranger.delegation().digest()?])
     );
     let ready_frame = received(&ready, ready.delegations().map(DelegationRef::inline))?;
-    expect_resolved(receiver.arrive(ready_frame, 4u8, now_ms)?);
+    expect_resolved(receiver.arrive(ready_frame, 4u8, now_ms, true)?);
     assert_eq!(receiver.held_len(), 3);
 
     assert!(matches!(
@@ -694,17 +694,42 @@ fn test_overflow_drops_the_newcomer_and_asks_the_oldest_question_again() -> Resu
     for carrier in 0..HOLD_CAPACITY {
         let payload = relayed_payload(&stranger, &hop, 0)?;
         assert_eq!(
-            expect_held(receiver.arrive(origin_referenced(&payload)?, carrier, now_ms)?),
+            expect_held(receiver.arrive(origin_referenced(&payload)?, carrier, now_ms, true)?),
             digests([digest])
         );
     }
     let newcomer = relayed_payload(&newcomer_stranger, &hop, 0)?;
     assert!(matches!(
-        receiver.arrive(origin_referenced(&newcomer)?, HOLD_CAPACITY, now_ms)?,
+        receiver.arrive(origin_referenced(&newcomer)?, HOLD_CAPACITY, now_ms, true)?,
         FrameArrival::Overflow { carrier, request }
             if carrier == HOLD_CAPACITY && request == digests([digest])
     ));
     assert_eq!(receiver.held_len(), HOLD_CAPACITY);
+    Ok(())
+}
+
+/// Law (node bound): without room in the node's holds, an unresolved frame overflows even into
+/// an empty hold, while a frame that resolves is unaffected, since it is never held.
+#[test]
+fn test_a_frame_without_node_room_overflows_and_a_resolved_frame_is_unaffected() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let mut receiver = receiver();
+    let unresolved = relayed_payload(&stranger, &hop, 0)?;
+
+    assert!(matches!(
+        receiver.arrive(origin_referenced(&unresolved)?, 0, now_ms, false)?,
+        FrameArrival::Overflow { carrier: 0, .. }
+    ));
+    assert_eq!(receiver.held_len(), 0);
+    let inline = relayed_payload(&stranger, &hop, 1)?;
+    let sessions = inline.delegations();
+    let frame = received(&inline, PerSlot {
+        origin: DelegationRef::inline(sessions.origin),
+        hop: DelegationRef::inline(sessions.hop),
+    })?;
+    expect_resolved(receiver.arrive(frame, 1, now_ms, false)?);
     Ok(())
 }
 
@@ -725,7 +750,7 @@ fn test_unsolicited_announcement_is_ignored_and_disclaimer_fails_awaiting_frames
     assert_eq!(receiver.known_len(), 0);
 
     let payload = relayed_payload(&stranger, &hop, 0)?;
-    expect_held(receiver.arrive(origin_referenced(&payload)?, 1u8, now_ms)?);
+    expect_held(receiver.arrive(origin_referenced(&payload)?, 1u8, now_ms, true)?);
 
     assert!(receiver
         .unknown(other.delegation().digest()?, now_ms)
@@ -758,7 +783,7 @@ fn test_receiver_expiry_evicts_and_refuses_the_expired_delegation() -> Result<()
     }
     let steady = sent(&mut sender, &relayed_payload(&node, &node, 1)?, now_ms)?;
     assert_eq!(encoding(steady.as_ref()), BOTH_REFERENCED);
-    expect_resolved(receiver.arrive(steady, 1u8, now_ms)?);
+    expect_resolved(receiver.arrive(steady, 1u8, now_ms, true)?);
 
     let expired_ms = now_ms + u128::from(SHORT_SESSION_TTL_MS) + 1;
     let payload = relayed_payload(&node, &node, 2)?;
@@ -768,7 +793,7 @@ fn test_receiver_expiry_evicts_and_refuses_the_expired_delegation() -> Result<()
         hop: DelegationRef::Digest(digest),
     })?;
     assert_eq!(
-        expect_held(receiver.arrive(stale, 2u8, expired_ms)?),
+        expect_held(receiver.arrive(stale, 2u8, expired_ms, true)?),
         digests([digest])
     );
     assert!(matches!(
@@ -800,7 +825,7 @@ fn test_reannouncing_a_known_session_is_idempotent() -> Result<()> {
         let payload = relayed_payload(&node, &node, sequence)?;
         let frame = sent(&mut AnnouncedDelegations::new(), &payload, now_ms)?;
         assert_eq!(encoding(frame.as_ref()), BOTH_INLINE);
-        let resolved = expect_resolved(receiver.arrive(frame, 0u8, now_ms)?);
+        let resolved = expect_resolved(receiver.arrive(frame, 0u8, now_ms, true)?);
         assert_eq!(resolved.payload, payload);
         assert_eq!(
             deliver(&mut receiver, resolved, now_ms)?,
@@ -827,11 +852,11 @@ fn test_sweep_drops_frames_past_the_hold_timeout_or_their_proof() -> Result<()> 
     let mut receiver = receiver();
 
     let early = relayed_payload(&stranger, &hop, 0)?;
-    let question = expect_held(receiver.arrive(origin_referenced(&early)?, 0u8, now_ms)?);
+    let question = expect_held(receiver.arrive(origin_referenced(&early)?, 0u8, now_ms, true)?);
     receiver.note_asked(question);
     let later_ms = now_ms + HOLD_TIMEOUT_MS;
     let late = relayed_payload(&stranger, &hop, 1)?;
-    expect_held(receiver.arrive(origin_referenced(&late)?, 1u8, later_ms)?);
+    expect_held(receiver.arrive(origin_referenced(&late)?, 1u8, later_ms, true)?);
 
     assert_eq!(swept(receiver.sweep(later_ms)), (vec![], vec![]));
     assert_eq!(swept(receiver.sweep(later_ms + 1)), (vec![0], vec![]));
@@ -842,7 +867,8 @@ fn test_sweep_drops_frames_past_the_hold_timeout_or_their_proof() -> Result<()> 
     let hold_outlasting_the_proof_ms = u128::from(late.verification.ttl_ms).saturating_mul(2);
     let mut lapsed_receiver: ReferencedDelegations<u8> =
         ReferencedDelegations::new(HOLD_CAPACITY, hold_outlasting_the_proof_ms);
-    let question = expect_held(lapsed_receiver.arrive(origin_referenced(&late)?, 2u8, now_ms)?);
+    let question =
+        expect_held(lapsed_receiver.arrive(origin_referenced(&late)?, 2u8, now_ms, true)?);
     lapsed_receiver.note_asked(question);
     assert_eq!(
         swept(lapsed_receiver.sweep(lapsed_ms - 1)),
@@ -864,17 +890,17 @@ fn test_sweep_tells_unasked_frames_from_unanswered_ones() -> Result<()> {
     let stale_ms = now_ms + HOLD_TIMEOUT_MS + 1;
 
     let unasked = relayed_payload(&stranger, &hop, 0)?;
-    expect_held(receiver.arrive(origin_referenced(&unasked)?, 0u8, now_ms)?);
+    expect_held(receiver.arrive(origin_referenced(&unasked)?, 0u8, now_ms, true)?);
     assert_eq!(swept(receiver.sweep(stale_ms)), (vec![], vec![0]));
 
     let asked = relayed_payload(&stranger, &hop, 1)?;
-    let question = expect_held(receiver.arrive(origin_referenced(&asked)?, 1u8, now_ms)?);
+    let question = expect_held(receiver.arrive(origin_referenced(&asked)?, 1u8, now_ms, true)?);
     receiver.note_asked(question);
     assert_eq!(swept(receiver.sweep(stale_ms)), (vec![1], vec![]));
 
     // Once the session is learned the question is spent: a later miss on it starts unasked.
     let again = relayed_payload(&stranger, &hop, 2)?;
-    let question = expect_held(receiver.arrive(origin_referenced(&again)?, 2u8, now_ms)?);
+    let question = expect_held(receiver.arrive(origin_referenced(&again)?, 2u8, now_ms, true)?);
     receiver.note_asked(question);
     assert!(matches!(
         receiver.announce(stranger.delegation(), now_ms)?,

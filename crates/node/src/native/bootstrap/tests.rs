@@ -17,9 +17,8 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use super::evidence::Admissions;
 use super::evidence::ReachabilityEvidence;
-use super::evidence::Rendezvous;
-use super::evidence::EARLY_REPORT_CAPACITY;
 use super::schedule::duration_ms;
 use super::schedule::is_one_slow_delay_after;
 use super::BootstrapPort;
@@ -501,59 +500,47 @@ fn targets_validate_as_a_seed_set_and_skip_self() {
     );
 }
 
-/// A rendezvous resolves a waiter whether the value arrived before or after it; a later waiter
-/// for the same key replaces the earlier one, whose drop leaves the replacement registered; a
-/// dropped waiter forgets its own registration.
+/// The admission rendezvous resolves a registered waiter and drops an admission observed before
+/// any; a later waiter for the same peer replaces the earlier one, whose drop leaves the
+/// replacement registered; a dropped waiter forgets its own registration.
 #[tokio::test]
-async fn rendezvous_resolves_in_either_order_replaces_and_forgets() {
-    let rendezvous: Rendezvous<u8, Did> = Rendezvous::new(EARLY_REPORT_CAPACITY);
+async fn test_admissions_resolve_registered_waiters_replace_and_forget() {
+    let admissions = Admissions::default();
 
-    rendezvous.observe(1, Did::from(1)).unwrap();
-    let waiter = rendezvous.wait_for(1).unwrap();
-    assert_eq!(waiter.await, Ok(Did::from(1)));
+    admissions.observe(Did::from(1)).unwrap();
+    assert_eq!(
+        admissions.len().unwrap(),
+        0,
+        "an unawaited admission is dropped"
+    );
+    let mut late = admissions.wait_for(Did::from(1)).unwrap();
+    assert!(
+        matches!(late.try_recv(), Err(TryRecvError::Empty)),
+        "a waiter never sees an admission observed before it"
+    );
+    admissions.observe(Did::from(1)).unwrap();
+    assert_eq!(late.await, Ok(()));
 
-    let mut stale = rendezvous.wait_for(2).unwrap();
-    let waiter = rendezvous.wait_for(2).unwrap();
+    let mut stale = admissions.wait_for(Did::from(2)).unwrap();
+    let waiter = admissions.wait_for(Did::from(2)).unwrap();
     assert!(
         matches!(stale.try_recv(), Err(TryRecvError::Closed)),
         "the replaced waiter is closed"
     );
     drop(stale);
-    rendezvous.observe(2, Did::from(2)).unwrap();
+    admissions.observe(Did::from(2)).unwrap();
     assert_eq!(
         waiter.await,
-        Ok(Did::from(2)),
+        Ok(()),
         "dropping the replaced waiter leaves the replacement registered"
     );
 
-    let waiter = rendezvous.wait_for(3).unwrap();
-    assert_eq!(rendezvous.len().unwrap(), 1);
+    let waiter = admissions.wait_for(Did::from(3)).unwrap();
+    assert_eq!(admissions.len().unwrap(), 1);
     drop(waiter);
     assert_eq!(
-        rendezvous.len().unwrap(),
+        admissions.len().unwrap(),
         0,
         "a dropped waiter forgets its registration"
     );
-}
-
-/// Early values are bounded by the capacity, evicting the oldest first, and a capacity of
-/// zero buffers nothing.
-#[tokio::test]
-async fn rendezvous_bounds_early_values() {
-    let rendezvous: Rendezvous<u8, ()> = Rendezvous::new(2);
-    for key in 1..=3 {
-        rendezvous.observe(key, ()).unwrap();
-    }
-    assert_eq!(rendezvous.len().unwrap(), 2);
-    let mut evicted = rendezvous.wait_for(1).unwrap();
-    assert!(
-        matches!(evicted.try_recv(), Err(TryRecvError::Empty)),
-        "the evicted value is gone"
-    );
-    drop(evicted);
-    assert_eq!(rendezvous.wait_for(3).unwrap().await, Ok(()));
-
-    let unbuffered: Rendezvous<u8, ()> = Rendezvous::new(0);
-    unbuffered.observe(1, ()).unwrap();
-    assert_eq!(unbuffered.len().unwrap(), 0);
 }

@@ -94,8 +94,18 @@ and expire, but a party with many identities can try to hold several positions o
   Exactly-once effects are not claimed.
   [Details](docs/src/advanced-topic/transaction-replay.md).
 - **Rate limits.** After verification, the destination charges per-origin message and byte
-  buckets keyed by the account DID, committed together with replay and before application
-  code. Rotating keys or relays does not reset them, and a drop never disconnects the relay.
+  buckets keyed by the account DID, committed together with replay and before the application
+  sees the message. Rotating keys or relays does not reset them, and a drop never disconnects
+  the relay.
+- **Application boundary.** Core never calls, awaits or consults application code (#935): the
+  application cannot see, validate or veto a protocol message, nor send one, and no inbound
+  lane waits for it. A slow application therefore costs only its own messages, never a peer's
+  credit or another link's liveness. Application delivery is lossy by design: a message that
+  does not fit the full inbox is dropped and counted, unknown to its sender, so a protocol
+  that needs a reliable stream recovers loss end to end (#939). Relay mail leaves core's
+  custody once the application takes it from the inbox; it is delivered at least once within
+  a run, and a restart before its retirement loses it (#936).
+  [Details](docs/src/advanced-topic/transport-flow-control.md#application-inbox).
 - **Measurement and credit.** Local and advisory: they may reorder eligible candidates but
   never add one or change DHT placement. Service receipts affect neither.
 - **Connection admission.** Connection records are bounded at twice the topology's
@@ -104,9 +114,22 @@ and expire, but a party with many identities can try to hold several positions o
   handshake methods `nodeDid` and `answerOffer` are public. The external listener binds a
   non-loopback address only on opt-in, and browser requests must come from configured origins.
 - **DHT storage.** Retention is capped at the maximum TTL; carriers are bounded in count and
-  size; versions too far ahead of the receiver's clock are rejected. A relay inbox is
-  verified by its owner, readable and removable only by its recipient, and capped at 64
-  messages. Values are stored in the clear.
+  size; versions too far ahead of the receiver's clock are rejected. Each data-topic element
+  expires at its own horizon, and a removal is collected only once every write it covers has
+  expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
+  while the carrier is retained. A relay inbox is verified by its owner, readable only by
+  its recipient, and removable only by its recipient or, in an ownership hand-off, by the
+  previous owner once the next one acknowledged holding exactly that value; it is capped at
+  64 messages. Values are stored in the clear.
+  [Details](docs/src/advanced-topic/chord.md#data-topic-storage).
+- **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
+  refuses no honest frame, refuses and reports a frame beyond its credit, and pushes overload
+  back to the sender. One peer's backpressure never holds another's control lane (lane 0, which
+  the node-wide receive bound never defers; that bound has no per-peer share, so one peer's
+  load can defer the other lanes of every link). Liveness reads no credit state, so a peer
+  that withholds the control lane's credit is evicted whatever else it sends. The node-wide
+  receive bound is soft (#934).
+  [Details](docs/src/advanced-topic/transport-flow-control.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.
 - **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures
@@ -128,3 +151,10 @@ and expire, but a party with many identities can try to hold several positions o
 - #912: the browser replay store uses IndexedDB's default durability hint.
 - #915: a missing replay record restarts its stream from the first sequence.
 - #916: durable replay writes cap a node near 50 transitions per second on macOS.
+- #918: registry tombstones are bounded by the heartbeat rate per registrant, not by count
+  ([bounds](docs/src/advanced-topic/chord.md#data-topic-storage)).
+- #920: storage byte-budget eviction can drop a removal before it is collected, resurrecting
+  the values it covered.
+- #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal
+  received by sync can hold a topic live for up to the horizon past the receiver's clock.
+- #932: a reassembled message whose full-size mailbox charge does not fit is dropped.

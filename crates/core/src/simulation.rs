@@ -17,7 +17,7 @@ use std::time::Duration;
 use rings_transport::connections::dummy_controlled;
 use tokio::sync::Notify;
 
-use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
+use crate::swarm::transport::PEER_LIVENESS_PERIOD_MS;
 
 mod delivery;
 pub(crate) mod model;
@@ -36,10 +36,11 @@ pub(crate) use observations::observe_outbound_global_capacity;
 pub(crate) use observations::observe_outbound_peer_capacity;
 pub(crate) use observations::observe_reassembly_capacity;
 pub(crate) use observations::record_barrier_control_blocked;
-pub(crate) use observations::record_barrier_control_deadline_miss;
+pub(crate) use observations::record_barrier_control_completion;
 pub(crate) use observations::record_outbound_submission;
 pub(crate) use observations::record_protection_violation;
 pub(crate) use observations::record_reassembly_advance;
+pub(crate) use observations::record_rejected_frame;
 pub(crate) use observations::record_repair_entries;
 pub(crate) use observations::record_storage_actor_yield;
 pub(crate) use observations::record_storage_persisted;
@@ -47,15 +48,18 @@ pub(crate) use observations::record_storage_progress;
 pub(crate) use observations::record_storage_progress_between_entries;
 pub(crate) use observations::signal_storage_progress_probe;
 pub(crate) use observations::storage_progress_epoch;
-use observations::DeadlineMissWitness;
+use observations::ControlCompletionWitness;
 pub(crate) use observations::ProductionCapacityObservations;
 pub(crate) use observations::ProductionTraceObservation;
+pub(crate) use service::reassembly_frame_service_ms;
 pub(crate) use service::wait_reassembly_service;
 pub(crate) use spawn::spawn_storage_progress_observer;
 
 const UUID_VERSION_4: u8 = 0x40;
 const UUID_RFC4122_VARIANT: u8 = 0x80;
-pub(crate) const CONTROL_DEADLINE_MS: u64 = PEER_LIVENESS_IDLE_MS as u64;
+/// The virtual deadline of a queued control send: one probe period, so a control frame the
+/// simulation holds longer is one a probe of its peer would also be waiting behind.
+pub(crate) const CONTROL_DEADLINE_MS: u64 = PEER_LIVENESS_PERIOD_MS.unsigned_abs();
 
 thread_local! {
     static RUNTIME: RefCell<Option<SimulationRuntimeState>> = const { RefCell::new(None) };
@@ -300,7 +304,7 @@ impl SimulationRuntimeState {
 pub(crate) struct ProtectionObservations {
     violations: BTreeSet<ProtectionLayer>,
     barrier_control_blocked: bool,
-    barrier_deadline_miss: Option<DeadlineMissWitness>,
+    barrier_control_completion: Option<ControlCompletionWitness>,
     storage_progress_between_entries: bool,
 }
 
@@ -322,15 +326,18 @@ impl ProtectionObservations {
     fn record_barrier_blocked(&mut self) {
         self.barrier_control_blocked = true;
         if self
-            .barrier_deadline_miss
+            .barrier_control_completion
             .is_some_and(|witness| witness.observed_virtual_ms > witness.deadline_virtual_ms)
         {
             self.record(ProtectionLayer::BarrierControlExemption);
         }
     }
 
-    fn record_barrier_deadline_miss(&mut self, witness: DeadlineMissWitness) {
-        self.barrier_deadline_miss = Some(witness);
+    /// Record the completion of a control frame that waited behind a barrier: every completion
+    /// is recorded, and one observed past its deadline violates the barrier control exemption
+    /// once the barrier is known to have blocked it.
+    fn record_barrier_control_completion(&mut self, witness: ControlCompletionWitness) {
+        self.barrier_control_completion = Some(witness);
         if self.barrier_control_blocked && witness.observed_virtual_ms > witness.deadline_virtual_ms
         {
             self.record(ProtectionLayer::BarrierControlExemption);

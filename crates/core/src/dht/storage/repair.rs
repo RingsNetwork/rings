@@ -76,6 +76,7 @@ use super::StorageSyncDestination;
 use super::StorageSyncTarget;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
+use crate::dht::entry::AdmittedEntry;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
@@ -115,8 +116,15 @@ impl PeerRing {
         let placed = PlacedEntry::new(placement_key, entry.clone());
         match self.storage_sync_target(placement_key)? {
             StorageSyncTarget::Local => {
-                self.join_storage_entry(now_ms, placement_key, entry.clone())
-                    .await?;
+                // A republished value was read from this node's own storage: admitted by
+                // construction, so it is not judged again (its derived versions may run
+                // ahead of the clock).
+                self.join_admitted_storage_entry(
+                    now_ms,
+                    placement_key,
+                    AdmittedEntry::stored(entry.clone()),
+                )
+                .await?;
                 Ok(PeerRingAction::None)
             }
             StorageSyncTarget::Remote(destination) => {

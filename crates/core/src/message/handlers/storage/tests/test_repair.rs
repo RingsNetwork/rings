@@ -1,29 +1,28 @@
-use std::sync::Arc;
+use bytes::Bytes;
 
-use super::super::ChordStorageInterface;
-use super::super::ChordStorageInterfaceCacheChecker;
 #[cfg(feature = "dummy")]
 use super::test_support::install_two_node_chord_view;
-use super::test_support::next_generated_key;
 use super::test_support::next_payload_matching;
 use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::split_redundant_entry;
-use super::test_support::NoopCallback;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryDot;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
+use crate::dht::entry::EntryTombstone;
+use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
-use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
-use crate::message::Encoder;
+use crate::message::ChordStorageInterface;
+use crate::message::ChordStorageInterfaceCacheChecker;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
@@ -38,9 +37,11 @@ use crate::tests::default::dummy_hooks::PendingSendGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::Node;
+use crate::tests::fixed_secret_keys;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::TEST_NETWORK_ID;
+use crate::utils::get_epoch_ms;
 
 #[tokio::test]
 async fn test_storage_repair_request_after_claim_remains_pending() -> Result<()> {
@@ -78,7 +79,7 @@ async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
         .storage
         .put(&placement_keys[0].to_string(), &entry)
         .await?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
 
     handler.leave_dht(departed).await?;
 
@@ -112,7 +113,7 @@ async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
 async fn test_leave_dht_attempt_requests_repair_only_for_a_referenced_peer() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let transport = node.swarm.transport.clone();
-    let handler = MessageHandler::new(transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(transport.clone());
 
     let unreferenced = SecretKey::random().address().into();
     let attempt = transport
@@ -139,8 +140,11 @@ async fn test_leave_dht_attempt_requests_repair_only_for_a_referenced_peer() -> 
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
-    let node1 = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let node2 = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    // Fixed identities: with random ones, two nearby addresses leave one node an arc too short
+    // for any sampled entry to split its placements between the nodes.
+    let [key1, key2] = fixed_secret_keys::<2>()?;
+    let node1 = prepare_node_with_storage_redundancy(key1, 2)?;
+    let node2 = prepare_node_with_storage_redundancy(key2, 2)?;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     install_two_node_chord_view(&node1, &node2)?;
     wait_for_msgs([&node1, &node2]).await;
@@ -167,7 +171,7 @@ async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
         node1.did(),
         node1.did(),
     )?;
-    let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node1.swarm.transport.clone());
     node1.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
     handler
@@ -210,7 +214,7 @@ async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
 #[tokio::test]
 async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let topic = "reject misplaced remote storage operation".to_string();
     let entry: Entry = crate::tests::live((topic.clone(), topic).try_into()?);
     let invalid_placement = non_affine_placement(entry.did, 2)?;
@@ -246,9 +250,10 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
 
 #[tokio::test]
 async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() -> Result<()> {
-    let mut keys = gen_ordered_keys::<2>().into_iter();
-    let node1 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
-    let node2 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
+    // Fixed identities, so the sampled split-owner entry exists on every run.
+    let [key1, key2] = fixed_secret_keys::<2>()?;
+    let node1 = prepare_node_with_storage_redundancy(key1, 2)?;
+    let node2 = prepare_node_with_storage_redundancy(key2, 2)?;
 
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_msgs([&node1, &node2]).await;
@@ -325,7 +330,7 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
     );
     let entry = live_entry(
         key.address().into(),
-        vec!["local".to_string().encode()?],
+        vec![Bytes::from("local")],
         EntryKind::Data,
     );
     let first_key = entry
@@ -349,10 +354,10 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
 #[tokio::test]
 async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let entry = live_entry(
         Did::from(10u32),
-        vec!["repair".to_string().encode()?],
+        vec![Bytes::from("repair")],
         EntryKind::Data,
     );
     let stored_entry = entry.clone().try_into_storage_entry()?;
@@ -406,21 +411,67 @@ async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
     Ok(())
 }
 
+/// The handler split: a found-empty reply that reports misses repairs them from
+/// the carrier the cache holds (`PeerRing::local_cache_held`), even one past its retention
+/// bound that the cache serves as absent, since its removes are what the repair spreads. A
+/// repair that read the served view (`local_cache_get`) would find nothing and write nothing.
+#[tokio::test]
+async fn test_found_empty_reply_repairs_misses_from_a_held_carrier_past_its_bound() -> Result<()> {
+    let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    let handler = MessageHandler::new(node.swarm.transport.clone());
+    let now_ms = get_epoch_ms();
+    let resource = Did::from(10u32);
+    let mut carrier = Entry::new(resource, vec![], EntryKind::Data);
+    carrier.crdt.tombstones = vec![EntryTombstone::of(&Bytes::from("removed"), EntryDot {
+        version: EntryVersion::new(now_ms - 1_000, Did::from(1u32), Did::from(2u32)),
+        index: 0,
+    })];
+    carrier.expires_at_ms = Some(now_ms - 1);
+    node.dht()
+        .cache
+        .put(&resource.to_string(), &carrier)
+        .await?;
+    let placement_key = resource
+        .rotate_affine(2)?
+        .into_iter()
+        .nth(1)
+        .ok_or_else(|| Error::InvalidMessage("expected repair placement".to_string()))?;
+    let found_empty = FoundEntry {
+        data: vec![],
+        misses: vec![PlacementMiss::new(placement_key, node.did())],
+        resource,
+        redundancy: 2,
+    };
+    let context_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(found_empty.clone()),
+        MessageSigner::new(&context_session, TEST_NETWORK_ID),
+        node.did(),
+        node.did(),
+    )?;
+    node.swarm.transport.start_storage_lookup(resource, 2)?;
+
+    assert_eq!(node.swarm.storage_check_cache(resource).await, None);
+    handler.handle(&context, &found_empty).await?;
+
+    let repaired = node
+        .dht()
+        .storage
+        .get(&placement_key.to_string())
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("the missed placement is repaired".to_string()))?;
+    assert!(repaired.data.is_empty());
+    assert_eq!(repaired.crdt.tombstones, carrier.crdt.tombstones);
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let resource = Did::from(10u32);
-    let first = live_entry(
-        resource,
-        vec!["first".to_string().encode()?],
-        EntryKind::Data,
-    );
-    let second = live_entry(
-        resource,
-        vec!["second".to_string().encode()?],
-        EntryKind::Data,
-    );
+    let first = live_entry(resource, vec![Bytes::from("first")], EntryKind::Data);
+    let second = live_entry(resource, vec![Bytes::from("second")], EntryKind::Data);
     let context_key = SecretKey::random();
     let context_session = DelegateeKey::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
@@ -455,11 +506,11 @@ async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
 #[tokio::test]
 async fn test_found_entry_rejects_redundancy_outside_local_protocol_mode() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let resource = Did::from(10u32);
     let entry = live_entry(
         resource,
-        vec!["wrong redundancy".to_string().encode()?],
+        vec![Bytes::from("wrong redundancy")],
         EntryKind::Data,
     );
     let context_key = SecretKey::random();
@@ -500,13 +551,9 @@ async fn test_found_entry_rejects_redundancy_outside_local_protocol_mode() -> Re
 #[tokio::test]
 async fn test_found_entry_rejects_response_without_active_lookup() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let resource = Did::from(10u32);
-    let entry = live_entry(
-        resource,
-        vec!["unsolicited".to_string().encode()?],
-        EntryKind::Data,
-    );
+    let entry = live_entry(resource, vec![Bytes::from("unsolicited")], EntryKind::Data);
     let context_key = SecretKey::random();
     let context_session = DelegateeKey::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(
@@ -541,11 +588,11 @@ async fn test_found_entry_rejects_response_without_active_lookup() -> Result<()>
 #[tokio::test]
 async fn test_found_entry_rejects_resource_mismatch_without_cache_write() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let resource = Did::from(10u32);
     let entry = live_entry(
         Did::from(11u32),
-        vec!["wrong resource".to_string().encode()?],
+        vec![Bytes::from("wrong resource")],
         EntryKind::Data,
     );
     let context_key = SecretKey::random();
@@ -618,13 +665,135 @@ async fn test_storage_fetch_starts_fresh_observation_round() -> Result<()> {
     Ok(())
 }
 
+/// A fetch's reply marker: a reply that caches an entry answers the key since every
+/// mark read before it, a found-empty one does not, and neither a new round of the key nor the
+/// eviction of its bucket makes an answer read as earlier than a mark. A reader polls the marker
+/// instead of comparing cached values, which change with no reply as elements cross their
+/// horizon.
+#[tokio::test]
+async fn test_storage_fetch_answers_are_stamped_after_every_earlier_mark() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let handler = MessageHandler::new(node.swarm.transport.clone());
+    let redundancy = node.swarm.storage_redundancy();
+    let entry = live_entry(
+        Did::from(10u32),
+        vec![Bytes::from("answer")],
+        EntryKind::Data,
+    );
+    let reply = |data: Vec<Entry>| FoundEntry {
+        data,
+        misses: vec![],
+        resource: entry.did,
+        redundancy,
+    };
+    let context_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(reply(vec![])),
+        MessageSigner::new(&context_session, TEST_NETWORK_ID),
+        node.did(),
+        node.did(),
+    )?;
+
+    let answered_since = |mark| node.swarm.storage_fetch_answered_since(entry.did, mark);
+    let first = node.swarm.storage_fetch_mark();
+    node.swarm
+        .transport
+        .start_storage_lookup(entry.did, redundancy)?;
+    assert!(!answered_since(first)?);
+    handler.handle(&context, &reply(vec![])).await?;
+    assert!(
+        !answered_since(first)?,
+        "a found-empty reply answers nothing"
+    );
+    handler
+        .handle(&context, &reply(vec![entry.clone()]))
+        .await?;
+    assert!(answered_since(first)?);
+
+    let second = node.swarm.storage_fetch_mark();
+    assert!(
+        !answered_since(second)?,
+        "an answer before a mark is earlier"
+    );
+    node.swarm
+        .transport
+        .start_storage_lookup(entry.did, redundancy)?;
+    assert!(
+        answered_since(first)?,
+        "a concurrent round does not undo what an earlier fetcher saw"
+    );
+
+    // A bucket evicted and started again stamps its next answer above every earlier mark.
+    node.swarm
+        .transport
+        .expire_storage_lookup_observation(entry.did, redundancy)?;
+    node.swarm
+        .transport
+        .start_storage_lookup(entry.did, redundancy)?;
+    assert!(!answered_since(second)?);
+    handler
+        .handle(&context, &reply(vec![entry.clone()]))
+        .await?;
+    assert!(answered_since(second)?);
+    Ok(())
+}
+
+/// A reply the cache cannot serve is not an answer: a carrier one placement read just before
+/// its retention bound, received just after it (or under a clock up to σ ahead), is admitted
+/// and cached, since an unstable remove holds it live, but it is served as absent, so the
+/// marker stays put; the live reply a second placement sends afterwards is the answer.
+#[tokio::test]
+async fn test_a_reply_past_its_bound_is_no_answer_and_a_later_live_placement_is() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let handler = MessageHandler::new(node.swarm.transport.clone());
+    let redundancy = node.swarm.storage_redundancy();
+    let now_ms = get_epoch_ms();
+    let live = live_entry(
+        Did::from(10u32),
+        vec![Bytes::from("answer")],
+        EntryKind::Data,
+    );
+    let mut past_bound = live.clone();
+    past_bound.expires_at_ms = Some(now_ms - 1);
+    past_bound.crdt.tombstones = vec![EntryTombstone::of(&Bytes::from("removed"), EntryDot {
+        version: EntryVersion::new(now_ms - 1_000, Did::from(1u32), Did::from(2u32)),
+        index: 0,
+    })];
+    let reply = |data: Vec<Entry>| FoundEntry {
+        data,
+        misses: vec![],
+        resource: live.did,
+        redundancy,
+    };
+    let context_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(reply(vec![])),
+        MessageSigner::new(&context_session, TEST_NETWORK_ID),
+        node.did(),
+        node.did(),
+    )?;
+
+    let mark = node.swarm.storage_fetch_mark();
+    node.swarm
+        .transport
+        .start_storage_lookup(live.did, redundancy)?;
+    handler.handle(&context, &reply(vec![past_bound])).await?;
+    assert!(!node.swarm.storage_fetch_answered_since(live.did, mark)?);
+    assert_eq!(node.swarm.storage_check_cache(live.did).await, None);
+
+    handler.handle(&context, &reply(vec![live.clone()])).await?;
+    assert!(node.swarm.storage_fetch_answered_since(live.did, mark)?);
+    assert!(node.swarm.storage_check_cache(live.did).await.is_some());
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
     let entry = live_entry(
         Did::from(10u32),
-        vec!["fresh".to_string().encode()?],
+        vec![Bytes::from("fresh")],
         EntryKind::Data,
     );
     let placement_key = entry
@@ -679,5 +848,3 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
     );
     Ok(())
 }
-#[cfg(feature = "dummy")]
-use crate::message::PayloadSender;

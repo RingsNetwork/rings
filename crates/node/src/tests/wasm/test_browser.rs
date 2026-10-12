@@ -25,8 +25,8 @@ use crate::provider::browser;
 ///
 /// Each backend records transitions from provider creation on, before any connection exists,
 /// so an admission or retirement that lands before its wait is still in the log. The swarm
-/// emits `Connected` only once the record is admitted, and `PeerRetired` only after the record
-/// has been retired, so both listings are read after the transition they depend on.
+/// announces `PeerAdmitted` only once the record is admitted, and `PeerRetired` only after the
+/// record has been retired, so both listings are read after the transition they depend on.
 #[wasm_bindgen_test]
 async fn test_two_provider_connect_and_list() {
     with_hang_guard(

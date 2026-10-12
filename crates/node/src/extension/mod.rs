@@ -1,56 +1,67 @@
 //! This module provide basic mechanism.
 
+mod dispatch;
 pub mod ext;
 pub mod protocols;
 #[cfg(rings_native)]
 pub mod transport;
-use std::result::Result;
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use futures::FutureExt;
 use rings_core::dht::Did;
+use rings_core::lifecycle::StopToken;
 use rings_core::message::CustomMessage;
-use rings_core::message::Message;
-use rings_core::message::MessagePayload;
-use rings_core::message::MessageVerificationExt;
-use rings_core::swarm::callback::PeerTransition;
-use rings_core::swarm::callback::SwarmCallback;
-use rings_core::swarm::callback::SwarmEvent;
-use rings_runtime::run_detached;
+use rings_core::swarm::application::ApplicationData;
+use rings_core::swarm::application::ApplicationDelivery;
+use rings_core::swarm::application::ApplicationInbox;
+use rings_core::swarm::application::ApplicationMessage;
+use rings_core::swarm::application::SwarmEvent;
 
-use crate::extension::ext::Envelope;
+pub use crate::extension::dispatch::DispatchDropCounters;
+pub(crate) use crate::extension::dispatch::DispatchDrops;
 use crate::extension::ext::Extensions;
 use crate::provider::Provider;
 
-/// Observer of swarm facts the [`Backend`] decodes or receives but does not act on itself.
+/// Observer of what the [`Backend`] reads from the application inbox but does not act on
+/// itself: the peer facts, and the E2E messages it routes to no protocol.
 ///
-/// The backend hands the observer each fact synchronously, before any await, so a later
-/// callback for the same peer observes it. Facts are the swarm's logical conclusions, never a
-/// physical connection state: the backend is the one place that translates.
+/// The backend hands the observer each item in inbox order, before it reads the next. Facts are
+/// the swarm's logical conclusions, never a physical connection state. The observer must not
+/// block: it runs on the inbox's one reader.
+///
+/// A fact reaches the observer as soon as it is read, while the custom messages read before it
+/// may still wait in their namespace's queue: facts keep their order among themselves and with
+/// E2E messages, but may overtake custom messages.
 pub trait BackendObserver: Send + Sync {
-    /// A successor lookup report addressed to this node for a lookup that requested no core
-    /// action (`FindSuccessorReportHandler::None`), i.e. an application-issued lookup:
-    /// `successor` is the reported successor of the key queried under transaction `tx_id`.
-    fn lookup_report(&self, tx_id: uuid::Uuid, successor: Did);
-
     /// `peer` was admitted: its transport is ready and it joined the local DHT.
-    fn peer_admitted(&self, peer: Did);
+    fn peer_admitted(&self, _peer: Did) {}
 
     /// `peer` left the local DHT, whichever physical event or local decision caused it.
-    fn peer_retired(&self, peer: Did);
+    fn peer_retired(&self, _peer: Did) {}
+
+    /// An E2E message (handshake or stream frame) addressed to this node.
+    fn e2e_message(&self, _message: &ApplicationMessage) {}
 }
 
-/// Backend handles inbound custom messages from the Swarm, routing each decoded
-/// [`Envelope`] to its namespace's protocol via the [`Extensions`] registry. The
-/// registry is shared with the [`Provider`], so protocols registered there are visible
-/// to inbound dispatch here. Each protocol's interpreter does its IO through a
-/// namespace-scoped [`Scope`](ext::Scope); the underlying router capability is internal.
-/// Dispatch owns a detached task so a swarm callback deadline stops waiting without
-/// cancelling an already committed protocol transition or its ordered effect trace.
-/// Core lookup reports, admissions and retirements are not dispatched; they are handed to the
-/// optional [`BackendObserver`].
+/// Backend consumes the swarm's application inbox: it routes each inbound custom message,
+/// decoded as an [`Envelope`](ext::Envelope), to its namespace's protocol via the
+/// [`Extensions`] registry, and hands everything else to the optional [`BackendObserver`]. The
+/// registry is shared with the [`Provider`], so protocols registered there are visible to
+/// inbound dispatch here. Each protocol's interpreter does its IO through a namespace-scoped
+/// [`Scope`](ext::Scope).
+///
+/// The swarm never waits on the backend (#935): it reads at its own pace, and a full inbox
+/// drops further live messages. Each registered namespace is dispatched by its own task, in the
+/// order its messages arrived, so a protocol waiting on a slow send holds back neither another
+/// namespace nor the peer facts; a namespace whose queue is full drops further messages,
+/// counted, as the inbox does. Facts and E2E messages go to the observer at once, so a fact can
+/// overtake a custom message still queued for its namespace.
+///
+/// Every message the backend drops is counted in the provider's
+/// [`dispatch_drop_counters`](Provider::dispatch_drop_counters).
 pub struct Backend {
     extensions: Extensions,
+    drops: Arc<DispatchDrops>,
     observer: Option<Arc<dyn BackendObserver>>,
 }
 
@@ -59,64 +70,61 @@ impl Backend {
     pub fn new(provider: Arc<Provider>) -> Self {
         Self {
             extensions: provider.extensions(),
+            drops: provider.dispatch_drops(),
             observer: None,
         }
     }
 
-    /// Attach the observer that receives application lookup reports, admissions and retirements.
+    /// Attach the observer that receives peer facts and E2E messages.
     pub fn observed_by(mut self, observer: Arc<dyn BackendObserver>) -> Self {
         self.observer = Some(observer);
         self
     }
-}
 
-#[cfg_attr(rings_browser, async_trait(?Send))]
-#[cfg_attr(rings_native, async_trait)]
-impl SwarmCallback for Backend {
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> Result<(), rings_core::error::CallbackError> {
-        let data: Message = payload.transaction.data()?;
-
-        let msg = match data {
-            Message::CustomMessage(CustomMessage(msg)) => msg,
-            Message::FindSuccessorReport(report) if report.is_application_lookup() => {
-                if let Some(observer) = self.observer.as_deref() {
-                    observer.lookup_report(payload.transaction.tx_id, report.did);
-                }
-                return Ok(());
-            }
-            _ => return Ok(()),
-        };
-
-        let envelope = Envelope::decode(&msg)?;
-        let from = payload.transaction.signer();
-        let extensions = self.extensions.clone();
-        let dispatch =
-            run_detached(async move { extensions.dispatch(from, envelope).await }).await?;
-        dispatch?;
-
-        Ok(())
-    }
-
-    /// Report whether an inbound envelope's namespace delegates its admission, so a protocol's
-    /// declaration (see [`ext::Protocol::delegates_admission`]) reaches core's admission. Core
-    /// alone decides whether delegation applies to the delivering edge.
-    fn delegates_admission(&self, application_payload: &[u8]) -> bool {
-        self.extensions.delegates_admission(application_payload)
-    }
-
-    /// Translate the swarm's events into the observer's facts: an admission and a retirement.
-    async fn on_event(&self, event: &SwarmEvent) -> Result<(), rings_core::error::CallbackError> {
-        let Some(observer) = self.observer.as_deref() else {
-            return Ok(());
-        };
-        match event.peer_transition() {
-            Some((peer, PeerTransition::Admitted)) => observer.peer_admitted(peer),
-            Some((peer, PeerTransition::Retired)) => observer.peer_retired(peer),
-            None => {}
+    /// Consume `inbox` until the swarm is gone or `stop` is requested; the namespace workers it
+    /// starts end with it once `stop` is requested.
+    pub async fn serve(self, inbox: ApplicationInbox, stop: StopToken) {
+        let mut namespaces = dispatch::NamespaceQueues::new(
+            self.extensions.core(),
+            Arc::clone(&self.drops),
+            stop.clone(),
+        );
+        loop {
+            let delivery = futures::select_biased! {
+                () = stop.stopped().fuse() => return,
+                delivery = inbox.next().fuse() => delivery,
+            };
+            let Some(delivery) = delivery else {
+                return;
+            };
+            self.route(&mut namespaces, delivery);
         }
-        Ok(())
+    }
+
+    /// Route one item of the application inbox: a custom message to its namespace's queue,
+    /// everything else to the observer. Never waits.
+    fn route(&self, namespaces: &mut dispatch::NamespaceQueues, delivery: ApplicationDelivery) {
+        match delivery {
+            ApplicationDelivery::Message(ApplicationMessage {
+                from,
+                data: ApplicationData::Custom(CustomMessage(bytes)),
+                ..
+            }) => namespaces.submit(from, &bytes),
+            ApplicationDelivery::Message(message) => {
+                if let Some(observer) = self.observer.as_deref() {
+                    observer.e2e_message(&message);
+                }
+            }
+            ApplicationDelivery::Event(event) => {
+                if let Some(observer) = self.observer.as_deref() {
+                    match event {
+                        SwarmEvent::PeerAdmitted { peer } => observer.peer_admitted(peer),
+                        SwarmEvent::PeerRetired { peer } => observer.peer_retired(peer),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }

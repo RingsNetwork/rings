@@ -3,11 +3,12 @@
 //! state, so it holds whichever input moved the head; a direct connection is the case no message
 //! reports, and admitting it only requests the pass.
 
+use bytes::Bytes;
+
 use super::*;
 use crate::dht::entry::EntryKind;
 use crate::dht::StorageKey;
 use crate::ecc::tests::gen_ordered_keys;
-use crate::message::Encoder;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_storage_absence;
 use crate::tests::default::wait_for_storage_entry;
@@ -28,11 +29,7 @@ async fn test_repair_pass_hands_off_entries_beyond_a_directly_connected_head() -
     wait_for_successor(&node1, node3.did()).await?;
 
     // `node3 ∈ (node1, node3]`, so node1 owns the key while node3 is its head.
-    let entry = live_entry(
-        node3.did(),
-        vec![String::from("sync me").encode()?],
-        EntryKind::Data,
-    );
+    let entry = live_entry(node3.did(), vec![Bytes::from("sync me")], EntryKind::Data);
     node1
         .dht()
         .storage

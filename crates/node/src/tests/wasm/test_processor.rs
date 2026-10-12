@@ -1,12 +1,12 @@
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex;
 use futures::StreamExt;
 use rings_core::dht::Did;
-use rings_core::swarm::callback::SwarmCallback;
-use rings_core::swarm::callback::SwarmEvent;
+use rings_core::message::CustomMessage;
+use rings_core::swarm::application::ApplicationData;
+use rings_core::swarm::application::ApplicationDelivery;
+use rings_core::swarm::application::ApplicationInbox;
+use rings_core::swarm::application::ApplicationMessage;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_test::*;
 
@@ -30,34 +30,31 @@ async fn close_all_connections(p: &Processor) {
     .await;
 }
 
-/// Swarm callback that forwards received custom texts and peer transitions to the test.
-struct RecordingCallback {
+/// Read `inbox` for the life of the test, forwarding received custom texts and peer
+/// transitions to the test.
+async fn record_inbox(
+    inbox: ApplicationInbox,
     texts: mpsc::UnboundedSender<String>,
     transitions: TransitionRecorder,
-}
-
-#[async_trait(?Send)]
-impl SwarmCallback for RecordingCallback {
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> Result<(), rings_core::error::CallbackError> {
-        let msg: Message = payload.transaction.data().map_err(Box::new)?;
-        if let Message::CustomMessage(ref msg) = msg {
-            let text = String::from_utf8(msg.0.to_vec()).unwrap();
-            console_log!("msg received: {}", text);
-            self.texts.unbounded_send(text).unwrap();
+) {
+    while let Some(delivery) = inbox.next().await {
+        match delivery {
+            ApplicationDelivery::Message(ApplicationMessage {
+                data: ApplicationData::Custom(CustomMessage(bytes)),
+                ..
+            }) => {
+                let text = String::from_utf8(bytes.to_vec()).unwrap();
+                console_log!("msg received: {}", text);
+                texts.unbounded_send(text).unwrap();
+            }
+            ApplicationDelivery::Event(event) => transitions.record(&event),
+            _ => {}
         }
-        Ok(())
-    }
-
-    async fn on_event(&self, event: &SwarmEvent) -> Result<(), rings_core::error::CallbackError> {
-        self.transitions.record(event);
-        Ok(())
     }
 }
 
-/// A processor whose callback records received texts and peer transitions from creation on.
+/// A processor whose application inbox records received texts and peer transitions from
+/// creation on.
 struct ObservedProcessor {
     processor: Processor,
     transitions: PeerTransitions,
@@ -65,18 +62,13 @@ struct ObservedProcessor {
 }
 
 impl ObservedProcessor {
-    /// Build a processor and install its recording callback before any connection exists.
+    /// Build a processor and claim its application inbox before any connection exists.
     async fn new() -> Self {
         let processor = prepare_processor().await;
         let (texts_sender, texts) = mpsc::unbounded();
         let (recorder, transitions) = peer_transitions();
-        processor
-            .swarm
-            .set_callback(Arc::new(RecordingCallback {
-                texts: texts_sender,
-                transitions: recorder,
-            }))
-            .unwrap();
+        let inbox = processor.swarm.application_inbox().unwrap();
+        spawn_local(record_inbox(inbox, texts_sender, recorder));
         Self {
             processor,
             transitions,
@@ -105,9 +97,10 @@ impl ObservedProcessor {
     ///
     /// Concurrent connects from both ends may admit a generation that is superseded and
     /// retired right after. Its `Admitted` is then followed by a `Retired` in the log (the
-    /// core law pairs them), so the loop consumes both and awaits the next admission. The
-    /// browser runtime is single-threaded, and the check and the listing run with no await
-    /// between them, so the entries returned belong to the announced generation.
+    /// inbox pairs them, or withdraws both while unread), so the loop consumes both and awaits
+    /// the next admission. The browser runtime is single-threaded, and the check and the
+    /// listing run with no await between them, so the entries returned belong to the
+    /// announced generation.
     ///
     /// Assumption: an announced generation is `Ready` right after admission. `peers()` lists
     /// only connections that can make progress, so a generation that is announced but
@@ -139,7 +132,7 @@ impl ObservedProcessor {
 /// Connect `p1` to `p2` by offer and answer, and await both admissions.
 ///
 /// `accept_answer` returns before the data channel opens and the peer joins the DHT; the
-/// admission (`Connected`) event on each end is emitted exactly then.
+/// admission (`PeerAdmitted`) event on each end is emitted exactly then.
 async fn create_connection(p1: &ObservedProcessor, p2: &ObservedProcessor) {
     console_log!("create_offer");
     let offer = p1

@@ -175,11 +175,11 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use bytes::Bytes;
 
     use super::*;
     use crate::core::pool::ChannelLane;
     use crate::core::transport::SendPermit;
-    use crate::core::transport::TransportMessage;
     use crate::delivery::DeliveryFuture;
 
     struct TestConnection {
@@ -210,7 +210,7 @@ mod tests {
         type Sdp = String;
         type Error = Error;
 
-        async fn send_message(&self, _: TransportMessage) -> Result<DeliveryFuture> {
+        async fn send_message(&self, _: Bytes) -> Result<DeliveryFuture> {
             Err(Error::DataChannelOpen(
                 "test connection cannot send".to_string(),
             ))
@@ -218,13 +218,19 @@ mod tests {
 
         async fn send_message_with_permit(
             &self,
-            _: TransportMessage,
+            _: Bytes,
             _: ChannelLane,
             _: SendPermit,
         ) -> Result<DeliveryFuture> {
             Err(Error::DataChannelOpen(
                 "test connection cannot send".to_string(),
             ))
+        }
+
+        fn reserve_send_credit(&self, _: ChannelLane) -> crate::delivery::SendCreditWait<Error> {
+            Box::pin(std::future::ready(Err(Error::DataChannelOpen(
+                "test connection cannot send".to_string(),
+            ))))
         }
 
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {

@@ -152,6 +152,18 @@ pub enum Error {
     #[error("Rwlock try read failed: {0}")]
     RwLockRead(String),
 
+    /// The connection to {0} closed while a send waited for credit.
+    #[error("The connection to {0} closed while a send waited for credit")]
+    LinkCreditClosed(String),
+
+    /// A send carried a credit reserved on another connection than {0}'s.
+    #[error("A send to {0} carried a credit reserved on another connection")]
+    ForeignCredit(String),
+
+    /// The connection to {0} cannot run its credit pump: no runtime.
+    #[error("The connection to {0} cannot run its credit pump: no runtime")]
+    CreditPumpUnavailable(String),
+
     /// Cannot select from an empty channel pool
     #[error("Cannot select from an empty channel pool")]
     ChannelPoolEmpty,

@@ -3,6 +3,7 @@
 //! Most of the messages follow the Ping/Pong pattern, where there is a one-to-one correspondence between them,
 //! such as xxxSend and xxxReport messages.
 
+use rings_transport::core::pool::ChannelLane;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -109,12 +110,6 @@ impl FindSuccessorSend {
 }
 
 impl FindSuccessorReport {
-    /// Whether this report answers a lookup that requested no core action, i.e. one issued by
-    /// the application rather than by finger maintenance or connection setup.
-    pub fn is_application_lookup(&self) -> bool {
-        matches!(self.handler, FindSuccessorReportHandler::None)
-    }
-
     /// Returns whether the reported successor is remote from `local`.
     pub(crate) fn reports_remote_successor(&self, local: Did) -> bool {
         self.did != local
@@ -312,8 +307,11 @@ impl SyncEntriesWithSuccessorReport {
     }
 }
 
-/// MessageType use to customize message, will be handle by `custom_message` method.
-#[derive(Deserialize, Serialize, Clone)]
+/// An opaque application message. Core routes it like any payload and, at its destination,
+/// hands it to the application as
+/// [`ApplicationData::Custom`](crate::swarm::application::ApplicationData::Custom) through the
+/// [`ApplicationInbox`](crate::swarm::application::ApplicationInbox).
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct CustomMessage(pub Vec<u8>);
 
 /// MessageType enum Report contain FindSuccessorSend.
@@ -341,8 +339,6 @@ pub enum FindSuccessorReportHandler {
         /// ownership before the reported successor can update or defer a slot.
         request: crate::dht::FingerFixRequest,
     },
-    /// - CustomCallback: custom callback handle by `custom_message` method.
-    CustomCallback(u8),
 }
 
 macro_rules! with_message_variants {
@@ -518,9 +514,26 @@ pub enum MessageCategory {
     Application,
 }
 
+const _: () =
+    assert!(MessageCategory::DhtControl.channel_lane().index() == ChannelLane::PRIORITY.index());
+
 impl MessageCategory {
     /// Number of disjoint traffic categories used to size lane tables.
     pub(crate) const COUNT: usize = 4;
+
+    /// The connection lane a category travels on: one lane per category (#906), chosen by the
+    /// sender and enforced by the receiver, so the priority lane carries DHT
+    /// control alone.
+    ///
+    /// Law: a category's frames reach the peer's handler in the order its lane admitted them,
+    /// whatever the other categories' channels do. With at most `OUTBOUND_LANE_WINDOW` of them
+    /// in flight, fewer than the replay window, a category stream never arrives reordered beyond
+    /// it.
+    /// The lane is the category's [`Self::index`], so DHT control, index 0, rides
+    /// [`ChannelLane::PRIORITY`].
+    pub(crate) const fn channel_lane(self) -> ChannelLane {
+        ChannelLane::new(self.index() as u8)
+    }
 
     /// Stable local lane index shared by scheduling and quota tables.
     pub(crate) const fn index(self) -> usize {

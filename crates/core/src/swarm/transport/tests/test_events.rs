@@ -1,141 +1,69 @@
 use super::*;
 use crate::message::DhtProtocolMode;
+#[cfg(feature = "dummy")]
+use crate::swarm::application::SwarmEvent;
 
+/// Drive `pending`'s current generation to the terminal `Closed` state.
+#[cfg(feature = "dummy")]
+async fn close(pending: &PendingPeer) -> Result<()> {
+    pending
+        .callback
+        .on_peer_connection_state_change(&pending.peer.to_string(), WebrtcConnectionState::Closed)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))
+}
+
+/// Law (per-peer order): the application reads one peer's facts in decision order across
+/// generations, `PeerAdmitted`, `PeerRetired`, `PeerAdmitted`: a re-admission is never read
+/// ahead of the retirement of the generation it replaces.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn test_terminal_event_starts_in_order_without_waiting_for_connected_callback() -> Result<()>
-{
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer = SecretKey::random().address().into();
-    let app_callback = Arc::new(BlockingEventSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+async fn test_peer_facts_are_read_in_decision_order_across_generations() -> Result<()> {
+    let transport = default_transport()?;
+    let recorder = ApplicationRecorder::attach(&transport)?;
+    let peer_key = SecretKey::random();
+    let first = pending_peer_with_key(&transport, peer_key.clone()).await?;
+    let peer = first.peer;
+    first.admit(&transport).await?;
+    assert_eq!(recorder.events(), vec![SwarmEvent::PeerAdmitted { peer }]);
 
-    let opening_transport = Arc::clone(&transport);
-    let opening_callback = app_callback.clone();
-    let opening = tokio::spawn(async move {
-        let callback = InnerSwarmCallback::new(opening_transport, opening_callback)
-            .with_pending_connection_attempt(attempt);
-        callback
-            .on_data_channel_open(&peer.to_string())
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
+    close(&first).await?;
+    let second = pending_peer_with_key(&transport, peer_key).await?;
+    second.admit(&transport).await?;
 
-    app_callback.wait_for_connected_event_started().await;
-    let terminal_transport = Arc::clone(&transport);
-    let terminal_callback = app_callback.clone();
-    let terminal = tokio::spawn(async move {
-        let callback = InnerSwarmCallback::new(terminal_transport, terminal_callback)
-            .with_pending_connection_attempt(attempt);
-        callback
-            .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
-
-    tokio::time::timeout(std::time::Duration::from_secs(1), terminal)
-        .await
-        .map_err(|_| {
-            Error::InvalidMessage("terminal event was blocked by application callback".to_string())
-        })?
-        .map_err(|error| Error::InvalidMessage(error.to_string()))??;
-    assert_eq!(connected_and_closed_events(app_callback.events()?), vec![
-        WebrtcConnectionState::Connected,
-        WebrtcConnectionState::Closed
+    assert_eq!(recorder.events(), vec![
+        SwarmEvent::PeerAdmitted { peer },
+        SwarmEvent::PeerRetired { peer },
+        SwarmEvent::PeerAdmitted { peer },
     ]);
-    app_callback.release_connected_event();
-
-    opening
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))??;
-    assert_eq!(connected_and_closed_events(app_callback.events()?), vec![
-        WebrtcConnectionState::Connected,
-        WebrtcConnectionState::Closed
-    ]);
-    assert!(!transport.is_active_connection_attempt(attempt));
-    assert!(!transport.dht.successors().contains(&peer)?);
+    assert!(transport.has_active_connection(peer));
+    transport.disconnect(peer).await?;
     Ok(())
 }
 
+/// Law (no departure without an arrival): an admission retired before the application read it
+/// is withdrawn together with its retirement, so the application reads neither, and the
+/// transport no longer holds the peer.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn test_slow_connected_event_for_one_peer_does_not_block_other_peer_events() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let blocked_peer: Did = SecretKey::random().address().into();
-    let other_peer: Did = SecretKey::random().address().into();
-    let app_callback = Arc::new(BlockingEventSwarmCallback::blocking_peer(blocked_peer));
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(blocked_peer, offer_callback)
-        .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, blocked_peer).await?;
+async fn test_admission_retired_before_it_is_read_is_withdrawn() -> Result<()> {
+    let transport = default_transport()?;
+    let recorder = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
+    pending.admit(&transport).await?;
 
-    let opening_transport = Arc::clone(&transport);
-    let opening_callback = app_callback.clone();
-    let opening = tokio::spawn(async move {
-        let callback = InnerSwarmCallback::new(opening_transport, opening_callback)
-            .with_pending_connection_attempt(attempt);
-        callback
-            .on_data_channel_open(&blocked_peer.to_string())
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
+    close(&pending).await?;
 
-    app_callback.wait_for_connected_event_started().await;
-    let other_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
-    tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        other_callback.on_peer_connection_state_change(
-            &other_peer.to_string(),
-            WebrtcConnectionState::Connecting,
-        ),
-    )
-    .await
-    .map_err(|_| Error::InvalidMessage("unrelated peer event was blocked".to_string()))?
-    .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-
-    assert!(app_callback
-        .peer_events()?
-        .contains(&(other_peer, WebrtcConnectionState::Connecting)));
-    app_callback.release_connected_event();
-    opening
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))??;
-
-    assert!(app_callback
-        .peer_events()?
-        .contains(&(blocked_peer, WebrtcConnectionState::Connected)));
-    transport.disconnect(blocked_peer).await?;
+    assert_eq!(recorder.events(), Vec::new());
+    assert!(!transport.has_active_connection(pending.peer));
+    assert!(!transport.dht.successors().contains(&pending.peer)?);
     Ok(())
-}
-
-#[cfg(feature = "dummy")]
-fn connected_and_closed_events(events: Vec<WebrtcConnectionState>) -> Vec<WebrtcConnectionState> {
-    events
-        .into_iter()
-        .filter(|state| {
-            matches!(
-                state,
-                WebrtcConnectionState::Connected | WebrtcConnectionState::Closed
-            )
-        })
-        .collect()
 }
 
 #[tokio::test]
 async fn test_local_did_lifecycle_callbacks_are_ignored() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let transport = default_transport()?;
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let local_cid = transport.dht.did.to_string();
 
     callback
@@ -158,17 +86,14 @@ async fn test_local_did_lifecycle_callbacks_are_ignored() -> Result<()> {
 
 #[tokio::test]
 async fn test_mismatched_pending_callback_cancels_attempt_without_admission() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
-    let mismatched_callback =
-        InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
-            .with_pending_connection_attempt(attempt);
+    let mismatched_callback = SwarmTransportCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(attempt);
     let local_cid = transport.dht.did.to_string();
 
     mismatched_callback
@@ -184,17 +109,14 @@ async fn test_mismatched_pending_callback_cancels_attempt_without_admission() ->
 
 #[tokio::test]
 async fn test_late_terminal_callback_cannot_remove_replacement_active_slot() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let old_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.cancel_pending_connection(old_attempt).await?);
     let current_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(current_attempt)?);
-    let late_callback =
-        InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
-            .with_pending_connection_attempt(old_attempt);
+    let late_callback = SwarmTransportCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(old_attempt);
 
     late_callback
         .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
@@ -208,7 +130,7 @@ async fn test_late_terminal_callback_cannot_remove_replacement_active_slot() -> 
 
 #[test]
 fn test_connection_offer_protocol_mode_includes_storage_redundancy() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let matching = ConnectNodeSend {
         sdp: String::new(),
         dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
@@ -225,7 +147,7 @@ fn test_connection_offer_protocol_mode_includes_storage_redundancy() -> Result<(
 
 #[test]
 fn test_connection_answer_protocol_mode_includes_storage_redundancy() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let matching = ConnectNodeReport {
         sdp: String::new(),
         dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
@@ -286,7 +208,7 @@ async fn test_dht_candidate_order_uses_peer_quality_without_dropping_candidates(
 
 #[tokio::test]
 async fn test_malformed_outbound_payload_is_rejected_before_connection_admission() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = TransportSpec::default().build()?;
     let peer = SecretKey::random().address().into();
     let mut payload = MessagePayload::new_send(
         Message::custom(b"malformed outbound payload")?,
@@ -297,7 +219,7 @@ async fn test_malformed_outbound_payload_is_rejected_before_connection_admission
     payload.transaction.data = vec![0xff];
 
     assert!(matches!(
-        transport.send_payload(payload).await,
+        transport.application_egress().send_payload(payload).await,
         Err(Error::CodecDeserialize(_))
     ));
     Ok(())

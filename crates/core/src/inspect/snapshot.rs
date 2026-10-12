@@ -6,6 +6,7 @@ use crate::dht::entry::Entry;
 use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
 use crate::swarm::Swarm;
+use crate::utils::get_epoch_ms;
 
 /// Full runtime inspection snapshot for a swarm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,11 +62,16 @@ pub struct MailboxStorageInspect {
 
 impl MailboxStorageInspect {
     /// Build privacy-safe aggregate mailbox state from the ring's live storage view.
+    ///
+    /// Post: read only, as every snapshot is: values are projected and filtered as a storage
+    /// read would, but no projection is written back and no expired value is retired.
     pub async fn inspect(dht: &PeerRing) -> crate::error::Result<Self> {
+        let now_ms = get_epoch_ms();
         let mut snapshot = Self::default();
-        for (_, entry) in dht
-            .live_storage_entries(crate::utils::get_epoch_ms())
-            .await?
+        let stored = dht.storage.get_all().await?;
+        for entry in stored
+            .into_iter()
+            .filter_map(|(_, entry)| entry.live_at(now_ms))
         {
             if entry.kind == crate::dht::entry::EntryKind::RelayMessage {
                 snapshot.registered = snapshot.registered.saturating_add(1);
@@ -137,13 +143,22 @@ impl DHTInspect {
 
 impl StorageInspect {
     /// Build a storage inspection snapshot from an entry storage handle.
+    ///
+    /// Post: every item is live and projected by [`Entry::retired_at`] at the current clock, as
+    /// a storage read holds it: a carrier past its retention bound that an uncollected remove
+    /// or register keeps live is listed, with no element, although lookups serve it as absent.
+    /// The snapshot retires no expired value and writes back no
+    /// projection, leaving both to the next storage read; the store's own scan may still retire
+    /// a record it cannot decode, under a disposable store's decode law.
     pub async fn inspect_kv_storage(storage: &EntryStorage) -> Self {
+        let now_ms = get_epoch_ms();
         Self {
             items: storage
                 .get_all()
                 .await
                 .unwrap_or_default()
                 .into_iter()
+                .filter_map(|(key, entry)| Some((key, entry.live_at(now_ms)?)))
                 .collect(),
         }
     }

@@ -5,10 +5,14 @@
 //! Authority law: every store is opened as [`RecordAuthority::Disposable`][disposable] (a cache
 //! its owner can rebuild) or [`RecordAuthority::Authoritative`][authoritative] (the only copy of
 //! security state, such as the transaction replay store). The authority fixes the budget,
-//! durability, open and decode laws below; nothing else differs.
+//! durability, open and decode laws below; nothing else differs. Read on this backend, a
+//! disposable store's writes are not flushed, its budget evicts the oldest records and a record
+//! the schema cannot decode is retired and reported absent; an authoritative store's writes and
+//! removals are flushed to stable storage, nothing is evicted, and a record the schema cannot
+//! decode is reported and kept.
 //!
-//! [disposable]: crate::storage::file::RecordAuthority::Disposable
-//! [authoritative]: crate::storage::file::RecordAuthority::Authoritative
+//! [disposable]: crate::storage::RecordAuthority::Disposable
+//! [authoritative]: crate::storage::RecordAuthority::Authoritative
 //!
 //! Budget law: the bytes of every stored file sum to at most `capacity`, and a value larger
 //! than the whole budget is rejected with `Error::StorageValueExceedsCapacity`, changing
@@ -77,32 +81,16 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
 use crate::storage::KvStorageScan;
+use crate::storage::RecordAuthority;
 use crate::storage::ScannedRecord;
 use crate::storage::UndecodableRecord;
 
-/// What a store's records are to their owner, which fixes how the store writes and reads them
-/// (the authority law of the module documentation).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum RecordAuthority {
-    /// A cache its owner can rebuild or do without: writes are not flushed, the budget evicts
-    /// the oldest records, and a record the schema cannot decode is retired and reported
-    /// absent.
-    Disposable,
-    /// The only copy of security state: writes and removals are flushed to stable storage,
-    /// nothing is evicted, and a record the schema cannot decode is reported and kept.
-    Authoritative,
-}
-
+/// The file-store reading of the authority laws (module docs); the predicates are local to
+/// this backend, as each backend states the laws of its authority.
 impl RecordAuthority {
     /// Whether the open flushes the store's directory entry (the durability law).
     const fn flushes(self) -> bool {
         matches!(self, Self::Authoritative)
-    }
-
-    /// Whether a read retires a record it cannot decode instead of reporting it.
-    const fn retires_undecodable(self) -> bool {
-        matches!(self, Self::Disposable)
     }
 
     /// Whether the budget retires the oldest records to make room (the budget law), and a write

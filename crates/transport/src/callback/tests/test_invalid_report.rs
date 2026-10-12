@@ -8,13 +8,13 @@ use super::*;
 #[tokio::test]
 async fn test_invalid_frame_reports_use_one_coalesced_worker() {
     let invalid = Arc::new(AtomicUsize::new(0));
-    let callback = InnerTransportCallback::new_for_test(
+    let callback = InnerTransportCallback::new(
         "peer",
         Box::new(InvalidRecordingCallback {
             invalid: Arc::clone(&invalid),
         }),
         Notifier::default(),
-        Arc::new(InboundFrameCapacity::new()),
+        NodeReceiveLoad::new(),
     );
 
     for index in 0..64 {
@@ -31,11 +31,11 @@ async fn test_invalid_frame_reports_use_one_coalesced_worker() {
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
 async fn test_cancelling_invalid_frame_worker_discards_backlog_and_allows_replacement() {
-    let callback = InnerTransportCallback::new_for_test(
+    let callback = InnerTransportCallback::new(
         "peer",
         Box::new(PendingInvalidCallback),
         Notifier::default(),
-        Arc::new(InboundFrameCapacity::new()),
+        NodeReceiveLoad::new(),
     );
     assert!(callback.queue_invalid_inbound_frame());
     let mut drain = Box::pin(callback.drain_invalid_inbound_frames());
@@ -51,13 +51,13 @@ async fn test_cancelling_invalid_frame_worker_discards_backlog_and_allows_replac
 #[tokio::test]
 async fn test_invalid_frame_backlog_is_bounded_and_yields_between_quanta() {
     let invalid = Arc::new(AtomicUsize::new(0));
-    let callback = InnerTransportCallback::new_for_test(
+    let callback = InnerTransportCallback::new(
         "peer",
         Box::new(InvalidRecordingCallback {
             invalid: Arc::clone(&invalid),
         }),
         Notifier::default(),
-        Arc::new(InboundFrameCapacity::new()),
+        NodeReceiveLoad::new(),
     );
     for _ in 0..INVALID_FRAME_REPORT_BACKLOG_CAPACITY.saturating_add(32) {
         callback.queue_invalid_inbound_frame();

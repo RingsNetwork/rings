@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use dashmap::DashMap;
+use futures::channel::mpsc;
 use futures::lock::Mutex;
+use futures::StreamExt;
 use rings_transport::core::transport::WebrtcConnectionState;
-use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio::time::Duration;
 
@@ -21,8 +21,6 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::storage::MemStorage;
-use crate::swarm::callback::SwarmCallback;
-use crate::swarm::callback::SwarmEvent;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 use crate::tests::activity::activity_after;
@@ -31,11 +29,12 @@ use crate::tests::activity::probe_on_activity;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::activity::sample_swarm;
 use crate::tests::activity::swarms_quiescent;
-use crate::tests::activity::ActivityCallback;
 use crate::tests::activity::ActivityObserver;
 
 mod test_dht_convergence;
 // Uses the `stateright` model checker, which doesn't build for wasm32.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) mod credit_starvation;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub(crate) mod dummy_hooks;
 #[cfg(not(target_family = "wasm"))]
@@ -98,23 +97,13 @@ pub(crate) struct NodeMessageScan<'a> {
     skipped: Vec<MessagePayload>,
 }
 
-/// Callback of a test node: records every validated message in the node's inbox, and counts and
-/// records activity through [`ActivityCallback`].
-pub struct NodeCallback {
-    message_tx: mpsc::UnboundedSender<MessagePayload>,
-    activity: ActivityCallback,
-}
-
 impl Node {
-    /// Build a test node from `builder`, with its activity observer and recording callback.
+    /// Build a test node from `builder`, with its activity observer, recording every payload
+    /// entering its logical inbound stage (see
+    /// [`InboundTap`](crate::swarm::transport::InboundTap)) in the node's inbox.
     pub fn build(builder: SwarmBuilder) -> Self {
         let swarm = Arc::new(builder.observer(Arc::new(ActivityObserver)).build());
-        let (message_tx, message_rx) = mpsc::unbounded_channel();
-        let callback = NodeCallback {
-            message_tx,
-            activity: ActivityCallback,
-        };
-        swarm.set_callback(Arc::new(callback)).unwrap();
+        let message_rx = swarm.transport.inbound_tap_for_test().subscribe();
         Self {
             swarm,
             inbox: Mutex::new(NodeInbox {
@@ -197,7 +186,7 @@ impl NodeMessageScan<'_> {
     pub(crate) async fn next(&mut self) -> Option<MessagePayload> {
         match self.inbox.buffered.pop_front() {
             Some(payload) => Some(payload),
-            None => self.inbox.receiver.recv().await,
+            None => self.inbox.receiver.next().await,
         }
     }
 
@@ -215,34 +204,6 @@ impl Drop for NodeMessageScan<'_> {
         for payload in self.skipped.drain(..).rev() {
             self.inbox.buffered.push_front(payload);
         }
-    }
-}
-
-#[async_trait]
-impl SwarmCallback for NodeCallback {
-    async fn on_validate(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        // Here we are using on_validate to record messages.
-        // When on_validate return error, the message will be ignored, which is not on purpose.
-        // To prevent returning errors when sending fails, we choose to panic instead.
-        self.message_tx.send(payload.clone()).unwrap();
-        self.activity.on_validate(payload).await
-    }
-
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        self.activity.on_inbound(payload).await
-    }
-
-    async fn on_event(
-        &self,
-        event: &SwarmEvent,
-    ) -> std::result::Result<(), crate::error::CallbackError> {
-        self.activity.on_event(event).await
     }
 }
 
@@ -343,11 +304,38 @@ pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error
     .await
 }
 
+/// Connect `node1` to `node2` and await node1's admission of node2 (a `Connected` connection,
+/// and node2 among its successors), but not quiescence.
+#[cfg(feature = "dummy")]
+pub(crate) async fn admit_nodes(node1: Node, node2: Node) -> crate::error::Result<(Node, Node)> {
+    crate::tests::manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    Ok((node1, node2))
+}
+
+/// [`admit_nodes`], then await quiescence of the join traffic.
+#[cfg(feature = "dummy")]
+pub(crate) async fn connect_nodes(node1: Node, node2: Node) -> crate::error::Result<(Node, Node)> {
+    let (node1, node2) = admit_nodes(node1, node2).await?;
+    wait_for_msgs([&node1, &node2]).await;
+    Ok((node1, node2))
+}
+
+/// Two fresh nodes, connected by [`connect_nodes`].
+#[cfg(feature = "dummy")]
+pub(crate) async fn connected_nodes() -> crate::error::Result<(Node, Node)> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    connect_nodes(node1, node2).await
+}
+
 /// Wait until the value `node` stores at `key` (or its absence) satisfies `ready`, returning
 /// that value.
 ///
 /// Post: returns only after `ready` held. Storage changes on a node follow a handled message,
-/// whose `on_inbound` records activity, so every change is probed.
+/// and the node's observer records activity once the handler returns (`Received`), so every
+/// change is probed.
 pub async fn wait_for_storage_state(
     node: &Node,
     key: StorageKey,

@@ -9,7 +9,6 @@ use std::sync::Mutex;
 use rings_core::delegation::DelegationBuilder;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
-#[cfg(feature = "node")]
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::EvidenceCounters;
 use rings_core::measure::EvidenceDigest;
@@ -18,13 +17,14 @@ use rings_core::measure::EvidencePage;
 use rings_core::measure::PeerMeasurement;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::MemStorage;
-use rings_core::swarm::callback::SharedSwarmCallback;
-use rings_core::swarm::callback::SwarmCallback;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::Backend;
+use crate::extension::BackendObserver;
+use crate::extension::DispatchDropCounters;
+use crate::extension::DispatchDrops;
 use crate::measure::EvidenceCollectorIdentity;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
@@ -52,6 +52,7 @@ pub struct Provider {
     processor: Arc<Processor>,
     handler: InternalRpcHandler,
     extensions: crate::extension::ext::Extensions,
+    dispatch_drops: Arc<DispatchDrops>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion::https::OnionHttpsRuntime>>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -82,10 +83,6 @@ pub enum Signer {
     Async(AsyncSigner),
 }
 
-struct NoopSwarmCallback;
-
-impl SwarmCallback for NoopSwarmCallback {}
-
 #[allow(dead_code)]
 impl Provider {
     /// Create provider from processor directly
@@ -95,6 +92,7 @@ impl Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
+            dispatch_drops: Arc::default(),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_https_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -102,10 +100,20 @@ impl Provider {
         }
     }
 
-    /// The shared protocol registry. The inbound callback clones this so
-    /// registration (via the provider) and dispatch see the same table.
+    /// The shared protocol registry. The [`Backend`] serving core's application inbox clones
+    /// this, so registration (via the provider) and dispatch see the same table.
     pub fn extensions(&self) -> crate::extension::ext::Extensions {
         self.extensions.clone()
+    }
+
+    /// The drop counters the [`Backend`] serving this provider's application inbox records in.
+    pub(crate) fn dispatch_drops(&self) -> Arc<DispatchDrops> {
+        Arc::clone(&self.dispatch_drops)
+    }
+
+    /// The application envelopes the [`Backend`] dropped instead of dispatching, by reason.
+    pub fn dispatch_drop_counters(&self) -> DispatchDropCounters {
+        self.dispatch_drops.counters()
     }
 
     /// The capability handle — overlay `send` / `did` / self-addressed `inject`. (Authenticated
@@ -215,6 +223,7 @@ impl Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
+            dispatch_drops: Arc::default(),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_https_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -298,29 +307,53 @@ impl Provider {
         .await
     }
 
-    /// Install the extension [`Backend`] as the swarm's inbound callback, so inbound
-    /// custom messages are decoded as [`Envelope`](crate::extension::ext::Envelope)s and
-    /// routed to their namespace's protocol. Call once after registering protocols.
+    /// Serve the swarm's application inbox with the extension [`Backend`] on a detached task,
+    /// so inbound custom messages are decoded as
+    /// [`Envelope`](crate::extension::ext::Envelope)s and routed to their namespace's protocol.
+    /// Call once, after registering every protocol whose messages may already be on their way
+    /// (relay mail included): from the claim on, an envelope of a namespace not yet registered
+    /// is dropped, counted. The inbox is claimed once, so a second call fails with
+    /// `ApplicationInboxClaimed`. Serving never stops; use
+    /// [`application_service`](Provider::application_service) for a stoppable one.
     pub fn set_backend(&self) -> Result<()> {
+        let service = self.application_service(None, StopToken::never())?;
+        rings_runtime::spawn_detached(service).map_err(|_| {
+            Error::ExtensionError("no runtime to serve the application inbox".to_owned())
+        })
+    }
+
+    /// Claim the swarm's application inbox now and return the future that serves it with the
+    /// extension [`Backend`] over this provider's protocol registry, handing peer facts and
+    /// unrouted E2E messages to `observer`, until the swarm is gone or `stop` is requested.
+    ///
+    /// ```text
+    ///   application_service(o, s) = claim inbox  ;  pure (serve_o(inbox, s))
+    ///   serve_o                    = Backend::new(self).observed_by(o).serve
+    /// ```
+    ///
+    /// The claim is eager, so data that arrives before the caller spawns the future waits in
+    /// the inbox instead of being discarded unclaimed; the caller owns only the spawner and the
+    /// stop token. As with [`set_backend`](Provider::set_backend), register protocols first:
+    /// an envelope of a namespace not yet registered when it is read is dropped, counted. The
+    /// inbox is claimed once (see
+    /// [`Swarm::application_inbox`](rings_core::swarm::Swarm::application_inbox)), so a second
+    /// call fails.
+    pub fn application_service(
+        &self,
+        observer: Option<Arc<dyn BackendObserver>>,
+        stop: StopToken,
+    ) -> Result<impl Future<Output = ()> + 'static> {
+        let inbox = self
+            .processor
+            .swarm
+            .application_inbox()
+            .map_err(Error::InternalError)?;
         let backend = Backend::new(Arc::new(self.clone()));
-        self.processor
-            .swarm
-            .set_callback(Arc::new(backend))
-            .map_err(Error::InternalError)
-    }
-
-    pub(crate) fn set_swarm_callback_internal(&self, callback: SharedSwarmCallback) -> Result<()> {
-        self.processor
-            .swarm
-            .set_callback(callback)
-            .map_err(Error::InternalError)
-    }
-
-    pub(crate) fn clear_swarm_callback_internal(&self) -> Result<()> {
-        self.processor
-            .swarm
-            .set_callback(Arc::new(NoopSwarmCallback))
-            .map_err(Error::InternalError)
+        let backend = match observer {
+            Some(observer) => backend.observed_by(observer),
+            None => backend,
+        };
+        Ok(backend.serve(inbox, stop))
     }
 
     /// Request local rpc interface

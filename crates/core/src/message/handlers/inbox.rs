@@ -18,7 +18,6 @@ use crate::dht::Did;
 use crate::error::Result;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
 
@@ -32,7 +31,8 @@ pub(crate) async fn hold_for_offline_destination(
 ) -> Result<()> {
     let held = HeldMessage::hold(payload.clone(), transport.message_signer(), get_epoch_ms())?;
     operate_entry(
-        transport,
+        &transport,
+        &transport.protocol_egress(),
         EntryOperation::Extend(Entry::inbox_delta(&held)?),
     )
     .await

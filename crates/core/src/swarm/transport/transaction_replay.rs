@@ -9,7 +9,6 @@ use crate::error::Result;
 use crate::message::MessageCategory;
 use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaCounters;
-use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
 use crate::message::StreamKey;
 use crate::message::Transaction;

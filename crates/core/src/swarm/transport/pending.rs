@@ -5,13 +5,12 @@ use std::sync::Mutex;
 use rings_transport::core::transport::TransportInterface;
 /// Finger-table proof admission at the pending/active transport boundary.
 ///
-/// The module-level algorithm and its exhaustive lifecycle branches are
-/// documented in `pending::finger`.
+/// The module-level algorithm, its exhaustive lifecycle branches and the transition that
+/// interprets them live in `pending::finger`.
 mod finger;
 mod registry;
 
-use finger::finger_candidate_admission;
-use finger::FingerCandidateAdmission;
+#[cfg(all(test, feature = "dummy"))]
 pub(crate) use finger::FingerUpdateDisposition;
 pub(super) use registry::ActiveConnectionSet;
 pub(super) use registry::ConnectionLifecycleRegistry;
@@ -19,19 +18,17 @@ pub(super) use registry::LifecycleBounds;
 use registry::PeerConnectionLifecycle;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(super) use registry::ReservationVerdict;
-pub(super) use registry::Retirement;
 pub(super) use registry::RetirementOutcome;
 
 use super::SwarmConnection;
 use super::SwarmTransport;
-use crate::dht::finger::FingerDeferOutcome;
-use crate::dht::finger::FingerRetireOutcome;
 use crate::dht::Did;
 use crate::dht::FingerFixRequest;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
-use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::application::SwarmEvent;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::utils::get_epoch_ms_i64;
 
 /// Maximum number of peers that may be handshaking before a data channel opens.
@@ -63,6 +60,15 @@ type PendingFingerUpdatesGuard<'transport> =
 ///
 /// Clone law: every clone refers to the same mutex. Holding the boundary
 /// prevents admission, retirement, and final send admission from crossing.
+///
+/// Lock order: under the boundary, locks are taken in this order and never the reverse, each
+/// optional:
+///
+/// ```text
+///   boundary ─▶ peer_lifecycles ─▶ pending_finger_updates ─▶ peer_liveness
+///            ─▶ measured_disconnects ─▶ DHT (an admission's or retirement's action)
+///            ─▶ outbound registry ─▶ application inbox (a leaf: nothing is taken under it)
+/// ```
 #[derive(Clone)]
 pub(super) struct ConnectionLifecycleBoundary {
     /// Mutex that serializes admission, retirement, and final send checks.
@@ -70,6 +76,14 @@ pub(super) struct ConnectionLifecycleBoundary {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     /// Test-only count of threads waiting to acquire the lifecycle gate.
     waiting: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Evidence that the lifecycle boundary is held: only [`ConnectionLifecycleBoundary::lock`]
+/// makes one, and the boundary is released when it drops. A transition that must run inside the
+/// boundary (an announcement, a retirement under an already held boundary) takes it by
+/// reference, so the compiler checks the precondition.
+pub(super) struct LifecycleHeld<'boundary> {
+    _guard: std::sync::MutexGuard<'boundary, ()>,
 }
 
 impl ConnectionLifecycleBoundary {
@@ -81,9 +95,11 @@ impl ConnectionLifecycleBoundary {
         }
     }
 
-    pub(super) fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+    /// Hold the boundary until the returned evidence drops.
+    pub(super) fn lock(&self) -> Result<LifecycleHeld<'_>> {
         self.inner
             .lock()
+            .map(|guard| LifecycleHeld { _guard: guard })
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
     }
 
@@ -96,7 +112,7 @@ impl ConnectionLifecycleBoundary {
     fn lock_with_waiter_observer_for_test(
         &self,
         waiter_registered: impl FnOnce(),
-    ) -> Result<std::sync::MutexGuard<'_, ()>> {
+    ) -> Result<LifecycleHeld<'_>> {
         self.waiting
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         waiter_registered();
@@ -142,17 +158,6 @@ impl PendingConnectionAttempt {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ConnectionEventDisposition {
-    /// Deliver the callback because it still belongs to the current generation or no owner exists.
-    Deliver,
-    /// Drop the callback because another active generation already owns the peer.
-    Suppress {
-        /// Current active generation that superseded the callback source.
-        active: PendingConnectionAttempt,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RawConnectionOwner {
     /// Raw transport belongs to a still-unadmitted logical attempt.
     Pending(PendingConnectionAttempt),
@@ -160,28 +165,6 @@ pub(super) enum RawConnectionOwner {
     Owned,
     /// Raw transport exists after its logical lifecycle slot was removed.
     Orphan,
-}
-
-fn event_disposition(
-    state: Option<PeerConnectionLifecycle>,
-    source: PendingConnectionAttempt,
-) -> ConnectionEventDisposition {
-    match state {
-        Some(PeerConnectionLifecycle::Active {
-            attempt: active, ..
-        }) if active != source => ConnectionEventDisposition::Suppress { active },
-        Some(PeerConnectionLifecycle::Pending { .. })
-        | Some(PeerConnectionLifecycle::Admitting { .. })
-        | Some(PeerConnectionLifecycle::Active { .. })
-        | None => ConnectionEventDisposition::Deliver,
-    }
-}
-
-/// The retired value of an outcome, its announcement witness projected away; for tests that
-/// assert the retirement itself.
-#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
-fn retired_value<T>(outcome: RetirementOutcome<(T, Retirement)>) -> Option<T> {
-    outcome.retired().map(|(value, _witness)| value)
 }
 
 /// A peer's slot as an answer to this node's offer finds it.
@@ -237,10 +220,13 @@ impl PendingTransportConnection {
 }
 
 impl SwarmTransport {
-    fn connection_lifecycle(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+    fn connection_lifecycle(&self) -> Result<LifecycleHeld<'_>> {
         self.connection_lifecycle.lock()
     }
 
+    /// Run `action` inside the lifecycle boundary. The evidence is not passed on: no action run
+    /// here takes a transition that requires it; one that does (an announcement, a retirement)
+    /// holds the boundary through [`Self::connection_lifecycle`] and passes it explicitly.
     pub(super) fn with_connection_lifecycle<T>(
         &self,
         action: impl FnOnce() -> Result<T>,
@@ -249,6 +235,7 @@ impl SwarmTransport {
         action()
     }
 
+    /// Run `action` inside the lifecycle boundary iff `attempt` owns its peer's active slot.
     pub(super) fn with_active_slot<T>(
         &self,
         attempt: PendingConnectionAttempt,
@@ -319,11 +306,13 @@ impl SwarmTransport {
         })
     }
 
-    /// Return whether `peer` completed a handshake and still owns a logical slot.
+    /// Test builds: whether `peer` completed a handshake and still owns a logical slot, a lock
+    /// failure read as `false`. Production reads [`Self::active_attempt`], which reports it.
     ///
     /// This remains true while a terminal callback removes the peer, so
     /// lifecycle cleanup can evict it from the DHT even after WebRTC reports
     /// `Closed`.
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(crate) fn has_active_connection(&self, peer: Did) -> bool {
         self.peer_lifecycles()
             .map(|lifecycles| lifecycles.active_attempt(peer).is_some())
@@ -341,7 +330,7 @@ impl SwarmTransport {
     /// Return whether `attempt` is the unique owner of its peer's active slot.
     pub(super) fn owns_active_slot(&self, attempt: PendingConnectionAttempt) -> Result<bool> {
         self.peer_lifecycles()
-            .map(|lifecycles| lifecycles.active_attempt(attempt.peer) == Some(attempt))
+            .map(|lifecycles| lifecycles.owns_active_slot(attempt))
     }
 
     pub(super) async fn reserve_pending_connection(
@@ -446,11 +435,6 @@ impl SwarmTransport {
         })
     }
 
-    /// The active generation of `peer` whose admission was announced to the application.
-    pub(crate) fn announced_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
-        Ok(self.peer_lifecycles()?.announced_attempt(peer))
-    }
-
     #[cfg(all(test, feature = "dummy"))]
     pub(crate) fn is_pending_connection_attempt(
         &self,
@@ -475,20 +459,6 @@ impl SwarmTransport {
             .peer_lifecycles()?
             .state(attempt.peer)
             .is_some_and(|state| state.attempt() == attempt))
-    }
-
-    pub(crate) fn connection_event_disposition(
-        &self,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<ConnectionEventDisposition> {
-        Ok(event_disposition(
-            self.peer_connection_lifecycle(attempt.peer)?,
-            attempt,
-        ))
-    }
-
-    fn peer_connection_lifecycle(&self, peer: Did) -> Result<Option<PeerConnectionLifecycle>> {
-        Ok(self.peer_lifecycles()?.state(peer))
     }
 
     /// Start admission only after the coherent transport product state can make progress.
@@ -594,10 +564,11 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         observe_transition: impl FnOnce(&Self),
     ) -> Result<bool> {
-        let _lifecycle = self.connection_lifecycle()?;
+        let lifecycle = self.connection_lifecycle()?;
         if !self.peer_lifecycles()?.activate_for_test(attempt) {
             return Ok(false);
         }
+        self.announce(&lifecycle, SwarmEvent::PeerAdmitted { peer: attempt.peer });
         observe_transition(self);
         Ok(true)
     }
@@ -607,7 +578,7 @@ impl SwarmTransport {
         &self,
         peer: Did,
     ) -> Result<(PendingConnectionAttempt, PendingConnectionAttempt)> {
-        let _lifecycle = self.connection_lifecycle()?;
+        let lifecycle = self.connection_lifecycle()?;
         let mut lifecycles = self.peer_lifecycles()?;
         let old = lifecycles
             .active_attempt(peer)
@@ -618,6 +589,7 @@ impl SwarmTransport {
                 generation: old.generation,
             });
         }
+        self.announce(&lifecycle, SwarmEvent::PeerRetired { peer });
         let replacement = lifecycles.reserve(peer, get_epoch_ms_i64())?;
         if !lifecycles.activate_for_test(replacement) {
             return Err(Error::ConnectionAttemptSuperseded {
@@ -625,6 +597,7 @@ impl SwarmTransport {
                 generation: replacement.generation,
             });
         }
+        self.announce(&lifecycle, SwarmEvent::PeerAdmitted { peer });
         Ok((old, replacement))
     }
 
@@ -633,7 +606,7 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<Option<PeerRingAction>> {
-        let _lifecycle = self.connection_lifecycle()?;
+        let lifecycle = self.connection_lifecycle()?;
         let mut lifecycles = self.peer_lifecycles()?;
         let Some(admitting) = lifecycles.admitting_connection(attempt) else {
             return Ok(None);
@@ -650,6 +623,7 @@ impl SwarmTransport {
         let action = self.dht.admit_connected(attempt.peer, deferred_proof)?;
 
         admitting.activate();
+        self.announce(&lifecycle, SwarmEvent::PeerAdmitted { peer: attempt.peer });
         pending_finger_updates.remove(&attempt);
         tracing::info!(
             target: "rings_core::swarm::transport::handshake",
@@ -671,37 +645,39 @@ impl SwarmTransport {
             .map(|retired| retired.is_some())
     }
 
-    /// Mark the admission of `attempt` as announced to the application, iff `attempt` still
-    /// owns the active slot. Called in the delivery turn that then starts `Connected`, and
-    /// observed atomically with retirement under the lifecycle boundary; see
-    /// `PeerConnectionLifecycle::Active`.
-    pub(crate) fn mark_admission_announced(
-        &self,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<bool> {
-        let _lifecycle = self.connection_lifecycle()?;
-        Ok(self.peer_lifecycles()?.mark_announced(attempt))
+    /// Announce a peer fact to the application inbox, inside the lifecycle boundary `_held`
+    /// whose transition (an activation or a retirement) `event` concludes. Never waits.
+    ///
+    /// Every peer fact is announced there, so for every peer the inbox reads its facts in the
+    /// order they were decided: the boundary serializes the transitions, and the inbox is a
+    /// leaf of its lock order (see [`ConnectionLifecycleBoundary`]), so announcing under it
+    /// cannot deadlock.
+    fn announce(&self, _held: &LifecycleHeld<'_>, event: SwarmEvent) {
+        #[cfg(test)]
+        crate::tests::activity::record_activity();
+        self.application.outlet.announce(event);
     }
 
-    /// Retire `attempt` only if `action` decides to, under the lifecycle boundary; see
-    /// `ConnectionLifecycleRegistry::retire_active_if` for the post-conditions. The witness in
-    /// a `Retired` outcome is the caller's to announce.
+    /// Retire `attempt` only if `action` decides to, under the lifecycle boundary, announcing
+    /// [`SwarmEvent::PeerRetired`] in the same step; see
+    /// `ConnectionLifecycleRegistry::retire_active_if` for the post-conditions.
     pub(super) fn retire_active_connection_if<T>(
         &self,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
-    ) -> Result<RetirementOutcome<(T, Retirement)>> {
-        let _lifecycle = self.connection_lifecycle()?;
-        self.retire_active_connection_locked(attempt, action)
+    ) -> Result<RetirementOutcome<T>> {
+        let lifecycle = self.connection_lifecycle()?;
+        self.retire_active_connection_locked(&lifecycle, attempt, action)
     }
 
-    /// The retirement transition under an already held lifecycle boundary: the registry
-    /// decides, and the per-peer side tables follow a `Retired` decision.
+    /// The retirement transition under the held lifecycle boundary `lifecycle`: the registry
+    /// decides, and the per-peer side tables and the announcement follow a `Retired` decision.
     fn retire_active_connection_locked<T>(
         &self,
+        lifecycle: &LifecycleHeld<'_>,
         attempt: PendingConnectionAttempt,
         action: impl FnOnce(&ActiveConnectionSet) -> Result<Option<T>>,
-    ) -> Result<RetirementOutcome<(T, Retirement)>> {
+    ) -> Result<RetirementOutcome<T>> {
         let mut lifecycles = self.peer_lifecycles()?;
         // Acquire every fallible local-state guard before the action mutates the DHT, so the
         // side-table mutations after a commit are infallible; if the action fails or declines,
@@ -717,12 +693,12 @@ impl SwarmTransport {
             peer_liveness.remove(attempt.peer);
             measured_disconnects.remove(&attempt.peer);
             self.outbound_schedulers.shutdown(attempt.peer);
+            self.announce(lifecycle, SwarmEvent::PeerRetired { peer: attempt.peer });
         }
         Ok(outcome)
     }
 
-    /// Unconditional retirement for tests that assert the retirement itself; the announcement
-    /// witness is projected away.
+    /// Unconditional retirement for tests that assert the retirement itself.
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(super) fn retire_active_connection_for_test<T>(
         &self,
@@ -730,7 +706,7 @@ impl SwarmTransport {
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
     ) -> Result<Option<T>> {
         self.retire_active_connection_if(attempt, |active| action(active).map(Some))
-            .map(retired_value)
+            .map(RetirementOutcome::retired)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -740,121 +716,16 @@ impl SwarmTransport {
         before_lifecycle_gate: impl FnOnce(),
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
     ) -> Result<Option<T>> {
-        let _lifecycle = self
+        let lifecycle = self
             .connection_lifecycle
             .lock_with_waiter_observer_for_test(before_lifecycle_gate)?;
-        self.retire_active_connection_locked(attempt, |active| action(active).map(Some))
-            .map(retired_value)
+        self.retire_active_connection_locked(&lifecycle, attempt, |active| action(active).map(Some))
+            .map(RetirementOutcome::retired)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn retirement_waiter_count_for_test(&self) -> usize {
         self.connection_lifecycle.waiting_for_test()
-    }
-
-    /// Apply one finger candidate or retain its proof until its current handshake commits.
-    ///
-    /// `request` identifies the specific finger lookup being satisfied. The
-    /// returned disposition tells the message handler whether it should open a
-    /// transport connection or cancel a proof that could not gain an owner.
-    pub(crate) fn record_finger_candidate(
-        &self,
-        peer: Did,
-        request: FingerFixRequest,
-    ) -> Result<FingerUpdateDisposition> {
-        self.record_finger_candidate_with_observer(peer, request, || {})
-    }
-
-    /// Classify and either apply, retain, or reject a reported finger candidate.
-    ///
-    /// The lifecycle boundary covers the snapshot, proof transfer, and queue
-    /// attachment so retirement cannot change the owning generation between
-    /// validation and commit. `observe_admission` is a test synchronization
-    /// hook invoked only after the branch is selected and before its mutation.
-    fn record_finger_candidate_with_observer(
-        &self,
-        peer: Did,
-        request: FingerFixRequest,
-        observe_admission: impl FnOnce(),
-    ) -> Result<FingerUpdateDisposition> {
-        // The lifecycle guard keeps classification, proof transfer, and queue
-        // attachment in one critical section. No async network effect occurs
-        // while it is held.
-        let _lifecycle_guard = self.connection_lifecycle()?;
-        if peer == self.dht.did {
-            return self
-                .dht
-                .apply_fixed_finger(request, peer)
-                .map(FingerUpdateDisposition::from);
-        }
-        let (lifecycle, active) = {
-            let lifecycles = self.peer_lifecycles()?;
-            (lifecycles.state(peer), lifecycles.active_connections())
-        };
-        let is_routable = self.is_routable_active_candidate(peer, &active);
-        match finger_candidate_admission(lifecycle, is_routable) {
-            FingerCandidateAdmission::Queue(current) => {
-                observe_admission();
-                // Acquire the queue before transferring proof ownership. If
-                // this lock fails, the proof remains AwaitingReport rather
-                // than becoming an admission proof with no transport owner.
-                let mut pending_updates = self.pending_finger_updates()?;
-                match self.dht.defer_fixed_finger(request, peer)? {
-                    FingerDeferOutcome::Deferred => {
-                        // The DHT owns one attempt at a time, so a generation
-                        // retains one proof; a newer request replaces one the
-                        // DHT has already released.
-                        pending_updates.insert(current, request);
-                        Ok(FingerUpdateDisposition::Queued)
-                    }
-                    FingerDeferOutcome::Rejected(rejection) => {
-                        Ok(FingerUpdateDisposition::Rejected(rejection))
-                    }
-                }
-            }
-            FingerCandidateAdmission::Apply => {
-                observe_admission();
-                self.dht
-                    .apply_fixed_finger(request, peer)
-                    .map(FingerUpdateDisposition::from)
-            }
-            FingerCandidateAdmission::Missing => {
-                observe_admission();
-                // The report becomes a durable, expiring admission proof
-                // before the caller starts an async WebRTC handshake. A
-                // cancelled or hung handler therefore cannot strand it.
-                self.dht
-                    .defer_fixed_finger(request, peer)
-                    .map(|outcome| match outcome {
-                        FingerDeferOutcome::Deferred => FingerUpdateDisposition::Missing,
-                        FingerDeferOutcome::Rejected(rejection) => {
-                            FingerUpdateDisposition::Rejected(rejection)
-                        }
-                    })
-            }
-            FingerCandidateAdmission::Unroutable => {
-                // Validate token and successor in the same topology
-                // transition that retires the unusable candidate. Checking
-                // only the token here would let a conflicting duplicate evict
-                // a different successor's retained admission proof.
-                match self.dht.retire_finger_candidate(request, peer)? {
-                    FingerRetireOutcome::Retired => Ok(FingerUpdateDisposition::Unroutable),
-                    FingerRetireOutcome::Rejected(rejection) => {
-                        Ok(FingerUpdateDisposition::Rejected(rejection))
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn record_finger_candidate_with_observer_for_test(
-        &self,
-        peer: Did,
-        request: FingerFixRequest,
-        observe_admission: impl FnOnce(),
-    ) -> Result<FingerUpdateDisposition> {
-        self.record_finger_candidate_with_observer(peer, request, observe_admission)
     }
 
     /// Cancel a current pending or admitting handshake and release its transport object.
@@ -985,7 +856,7 @@ impl SwarmTransport {
     pub(super) async fn new_pending_connection(
         &self,
         attempt: PendingConnectionAttempt,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
     ) -> Result<PendingTransportConnection> {
         // The per-peer creation lease prevents two async backend calls from
         // racing to install different raw transports for one logical peer.
@@ -1007,7 +878,7 @@ impl SwarmTransport {
     async fn create_pending_transport_connection(
         &self,
         attempt: PendingConnectionAttempt,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
     ) -> Result<PendingTransportConnection> {
         let cid = attempt.peer.to_string();
         tracing::trace!(

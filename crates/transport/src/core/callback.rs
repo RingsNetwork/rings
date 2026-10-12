@@ -8,28 +8,46 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::callback::InboundFramePermit;
+use crate::callback::link_credit::CreditPermit;
+use crate::core::pool::ChannelLane;
 use crate::core::transport::WebrtcConnectionState;
 
 type CallbackError = Box<dyn std::error::Error>;
 
-/// One inbound payload whose transport envelope and raw-frame capacity were admitted.
+/// One inbound payload whose transport envelope was decoded and which took its place in its
+/// lane's credit window.
 ///
 /// Only the transport admission layer can construct this value. Public transport
 /// adapters can therefore dispatch messages only after synchronous admission.
 pub struct AdmittedInboundMessage<'a> {
     cid: &'a str,
     payload: Bytes,
-    capacity: InboundFrameCapacityLease,
+    lane: ChannelLane,
+    credit: InboundCreditLease,
 }
 
 impl<'a> AdmittedInboundMessage<'a> {
-    pub(crate) fn new(cid: &'a str, payload: Bytes, capacity: InboundFrameCapacityLease) -> Self {
+    /// The admitted message `payload` from the connection `cid`, which arrived on the channel
+    /// of `lane` and holds its frame's place in that lane's credit window through `credit`.
+    pub(crate) fn new(
+        cid: &'a str,
+        payload: Bytes,
+        lane: ChannelLane,
+        credit: InboundCreditLease,
+    ) -> Self {
         Self {
             cid,
             payload,
-            capacity,
+            lane,
+            credit,
         }
+    }
+
+    /// The lane whose channel the frame arrived on, named by the channel's least lane: the
+    /// lane whose credit window it took a place in. A receiver checks it against the lane the
+    /// frame's content belongs to.
+    pub const fn lane(&self) -> ChannelLane {
+        self.lane
     }
 
     /// Return the connection identifier associated with this frame.
@@ -42,27 +60,29 @@ impl<'a> AdmittedInboundMessage<'a> {
         self.payload.as_ref()
     }
 
-    /// Consume this admission while retaining its raw-frame capacity lease.
+    /// Consume this admission while retaining its credit lease.
     ///
     /// A callback that transfers the payload into another bounded queue should
     /// hold the returned lease until that queue has admitted the payload, then
-    /// drop it immediately. This prevents the transport's raw-frame bound from
-    /// accounting for downstream callback execution time.
-    pub fn into_parts(self) -> (&'a str, Bytes, InboundFrameCapacityLease) {
-        (self.cid, self.payload, self.capacity)
+    /// drop it immediately: the peer's sender waits on this lane's credit only
+    /// while the frame is held, not for downstream callback execution time.
+    pub fn into_parts(self) -> (&'a str, Bytes, InboundCreditLease) {
+        (self.cid, self.payload, self.credit)
     }
 }
 
-/// Opaque ownership of one transport raw-frame capacity reservation.
+/// Opaque ownership of one admitted frame's place in its lane's credit window.
 ///
-/// Dropping this value releases the reservation. It cannot be cloned, so a
-/// downstream bounded queue can use it as a precise handoff witness.
-pub struct InboundFrameCapacityLease {
-    _permit: InboundFramePermit,
+/// Dropping this value releases the place, which may advertise more credit to the peer. It
+/// cannot be cloned, so a downstream bounded queue can use it as a precise handoff witness:
+/// the peer's sender waits on this lane exactly as long as the protocol holds its frames.
+pub struct InboundCreditLease {
+    _permit: CreditPermit,
 }
 
-impl InboundFrameCapacityLease {
-    pub(crate) const fn new(permit: InboundFramePermit) -> Self {
+impl InboundCreditLease {
+    /// The lease of the place `permit` holds.
+    pub(crate) const fn new(permit: CreditPermit) -> Self {
         Self { _permit: permit }
     }
 }
@@ -87,7 +107,8 @@ pub trait TransportCallback {
         Ok(())
     }
 
-    /// Handle a message together with its non-forgeable raw-frame admission.
+    /// Handle a message together with its credit admission, which only the transport can
+    /// construct.
     async fn on_admitted_message(
         &self,
         _message: AdmittedInboundMessage<'_>,
@@ -95,10 +116,12 @@ pub trait TransportCallback {
         Ok(())
     }
 
-    /// Record a frame rejected as malformed or oversized before core dispatch.
+    /// Record a frame rejected before core dispatch as malformed, oversized, or beyond the
+    /// credit this end advertised for its lane
+    /// ([`CreditExceeded`](crate::callback::InboundFrameAdmission::CreditExceeded)).
     ///
-    /// Local capacity pressure must not call this method because it is not
-    /// evidence of remote peer failure.
+    /// Each is evidence of a remote peer breaking the protocol: admission of an honest frame
+    /// never fails, since a peer sends only within the credit this end advertised.
     async fn on_invalid_inbound_frame(&self, _cid: &str) -> Result<(), CallbackError> {
         Ok(())
     }

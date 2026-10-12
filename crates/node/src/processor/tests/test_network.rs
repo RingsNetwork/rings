@@ -205,10 +205,8 @@ async fn test_provider_wrappers_share_listener_lifecycle_lock() {
 async fn test_online_node_registry_lists_two_publishers_over_network() -> Result<()> {
     let _network_guard = network_test_guard().await;
     let (publisher, owner) = prepare_online_node_registry_pair(42).await?;
-    let callback = test_callback();
-    let other_callback = test_callback();
-    publisher.swarm.set_callback(callback.clone()).unwrap();
-    owner.swarm.set_callback(other_callback.clone()).unwrap();
+    let _recorder = ApplicationRecorder::attach(&publisher);
+    let _other_recorder = ApplicationRecorder::attach(&owner);
     connect_processors(&publisher, &owner).await;
     wait_for_mutual_dht_topology(&publisher, &owner).await?;
     let registry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
@@ -275,17 +273,16 @@ async fn test_online_node_type_is_configurable() {
 /// serialized by the network lock. It checks what only the real transport can: that the
 /// offer/answer SDP, ICE, DTLS and SCTP handshake of a processor completes and is admitted.
 /// Protocol logic over an admitted link is tested on the controlled network (`dummy` build).
-/// Admission is awaited on activity (the `Connected` event); the hang guard only bounds a hang.
+/// Admission is awaited on activity (the `PeerAdmitted` event each recorder reads); the hang
+/// guard only bounds a hang.
 #[tokio::test]
 async fn test_processor_create_offer() {
     let _network_guard = network_test_guard().await;
-    let callback1 = test_callback();
-    let callback2 = test_callback();
     let p1 = prepare_processor().await;
     let p2 = prepare_processor().await;
 
-    p1.swarm.set_callback(callback1.clone()).unwrap();
-    p2.swarm.set_callback(callback2.clone()).unwrap();
+    let _recorder1 = ApplicationRecorder::attach(&p1);
+    let _recorder2 = ApplicationRecorder::attach(&p2);
 
     let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
     assert!(p1.swarm.peers().is_empty());
@@ -310,14 +307,12 @@ async fn test_processor_create_offer() {
 #[tokio::test]
 async fn test_processor_handshake_msg() {
     let _network_guard = network_test_guard().await;
-    let callback1 = test_callback();
-    let callback2 = test_callback();
 
     let p1 = prepare_processor().await;
     let p2 = prepare_processor().await;
 
-    p1.swarm.set_callback(callback1.clone()).unwrap();
-    p2.swarm.set_callback(callback2.clone()).unwrap();
+    let recorder1 = ApplicationRecorder::attach(&p1);
+    let recorder2 = ApplicationRecorder::attach(&p2);
 
     let did1 = p1.did();
     let did2 = p2.did();
@@ -335,44 +330,42 @@ async fn test_processor_handshake_msg() {
     p1.send_message(did2, test_text1.as_bytes()).await.unwrap();
     p2.send_message(did1, test_text2.as_bytes()).await.unwrap();
 
-    let got_msg2 = wait_for_inbound_message(
-        &callback2,
-        |msg| matches!(msg, Message::CustomMessage(custom) if custom.0 == test_text1.as_bytes()),
+    let got_msg2 = wait_for_application_data(
+        &recorder2,
+        |msg| matches!(msg, ApplicationData::Custom(custom) if custom.0 == test_text1.as_bytes()),
     )
     .await;
-    assert!(matches!(got_msg2, Message::CustomMessage(_)));
+    assert!(matches!(got_msg2, ApplicationData::Custom(_)));
 
-    let got_msg1 = wait_for_inbound_message(
-        &callback1,
-        |msg| matches!(msg, Message::CustomMessage(custom) if custom.0 == test_text2.as_bytes()),
+    let got_msg1 = wait_for_application_data(
+        &recorder1,
+        |msg| matches!(msg, ApplicationData::Custom(custom) if custom.0 == test_text2.as_bytes()),
     )
     .await;
-    assert!(matches!(got_msg1, Message::CustomMessage(_)));
+    assert!(matches!(got_msg1, ApplicationData::Custom(_)));
 }
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_processor_direct_message_reaches_connected_peer() {
     let _network_guard = network_test_guard().await;
-    let callback1 = test_callback();
-    let callback2 = test_callback();
     let p1 = prepare_processor().await;
     let p2 = prepare_processor().await;
 
-    p1.swarm.set_callback(callback1.clone()).unwrap();
-    p2.swarm.set_callback(callback2.clone()).unwrap();
+    let _recorder1 = ApplicationRecorder::attach(&p1);
+    let recorder2 = ApplicationRecorder::attach(&p2);
     connect_processors(&p1, &p2).await;
 
     p1.send_direct_message(p2.did(), b"direct-message")
         .await
         .unwrap();
 
-    let received = wait_for_inbound_message(
-        &callback2,
-        |message| matches!(message, Message::CustomMessage(custom) if custom.0 == b"direct-message"),
+    let received = wait_for_application_data(
+        &recorder2,
+        |data| matches!(data, ApplicationData::Custom(custom) if custom.0 == b"direct-message"),
     )
     .await;
-    assert!(matches!(received, Message::CustomMessage(_)));
+    assert!(matches!(received, ApplicationData::Custom(_)));
 }
 
 #[tokio::test]
@@ -390,13 +383,11 @@ async fn test_peer_measurement_is_absent_without_measure_or_observation() {
 #[tokio::test]
 async fn test_provider_exposes_sent_and_received_peer_measurements() {
     let _network_guard = network_test_guard().await;
-    let callback1 = test_callback();
-    let callback2 = test_callback();
     let p1 = prepare_measured_processor().await;
     let p2 = prepare_measured_processor().await;
 
-    p1.swarm.set_callback(callback1.clone()).unwrap();
-    p2.swarm.set_callback(callback2.clone()).unwrap();
+    let _recorder1 = ApplicationRecorder::attach(&p1);
+    let recorder2 = ApplicationRecorder::attach(&p2);
     connect_processors(&p1, &p2).await;
     let sent_before = p1.peer_measurement(p2.did()).await.unwrap();
     let received_before = p2.peer_measurement(p1.did()).await.unwrap();
@@ -404,15 +395,15 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
     let received_bytes_before = received_before.credit.bytes_received_from_peer();
 
     p1.swarm
-        .send_direct_message(Message::custom(b"measure-provider").unwrap(), p2.did())
+        .send_direct_message(ApplicationData::custom(b"measure-provider"), p2.did())
         .await
         .unwrap();
-    let got_msg2 = wait_for_inbound_message(
-        &callback2,
-        |msg| matches!(msg, Message::CustomMessage(custom) if custom.0 == b"measure-provider"),
+    let got_msg2 = wait_for_application_data(
+        &recorder2,
+        |msg| matches!(msg, ApplicationData::Custom(custom) if custom.0 == b"measure-provider"),
     )
     .await;
-    assert!(matches!(got_msg2, Message::CustomMessage(_)));
+    assert!(matches!(got_msg2, ApplicationData::Custom(_)));
 
     let sent = wait_for_peer_measurement(&p1, p2.did(), |measurement| {
         measurement.credit.bytes_sent_to_peer() > sent_bytes_before
@@ -484,14 +475,12 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
 #[tokio::test]
 async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
     let _network_guard = network_test_guard().await;
-    let callback1 = test_callback();
-    let callback2 = test_callback();
 
     let p1 = prepare_processor().await;
     let p2 = prepare_processor().await;
 
-    p1.swarm.set_callback(callback1.clone()).unwrap();
-    p2.swarm.set_callback(callback2.clone()).unwrap();
+    let recorder1 = ApplicationRecorder::attach(&p1);
+    let recorder2 = ApplicationRecorder::attach(&p2);
 
     connect_processors(&p1, &p2).await;
 
@@ -502,34 +491,34 @@ async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
 
     p1.send_e2e_handshake(did2).await.unwrap();
 
-    let request = wait_for_inbound_message(&callback2, |msg| {
-        matches!(msg, Message::E2eHandshakeRequest(_))
+    let request = wait_for_application_data(&recorder2, |msg| {
+        matches!(msg, ApplicationData::E2eHandshakeRequest(_))
     })
     .await;
     match request {
-        Message::E2eHandshakeRequest(request) => {
+        ApplicationData::E2eHandshakeRequest(request) => {
             assert_eq!(request.requester_public_key, requester_public_key);
             assert_eq!(
                 p2.verify_e2e_handshake_request(did1, &request).unwrap(),
                 requester_public_key
             );
         }
-        msg => panic!("expected E2eHandshakeRequest, got {msg:?}"),
+        data => panic!("expected E2eHandshakeRequest, got {data:?}"),
     }
 
-    let response = wait_for_inbound_message(&callback1, |msg| {
-        matches!(msg, Message::E2eHandshakeResponse(_))
+    let response = wait_for_application_data(&recorder1, |msg| {
+        matches!(msg, ApplicationData::E2eHandshakeResponse(_))
     })
     .await;
     match response {
-        Message::E2eHandshakeResponse(response) => {
+        ApplicationData::E2eHandshakeResponse(response) => {
             assert_eq!(response.responder_public_key, responder_public_key);
             assert_eq!(
                 p1.verify_e2e_handshake_response(did2, &response).unwrap(),
                 responder_public_key
             );
         }
-        msg => panic!("expected E2eHandshakeResponse, got {msg:?}"),
+        data => panic!("expected E2eHandshakeResponse, got {data:?}"),
     }
 }
 
@@ -641,16 +630,14 @@ const E2E_STREAM_TEST_SECRETS: [&str; 2] = [
 #[tokio::test]
 async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_key() {
     let network_guard = network_test_guard().await;
-    let callback1 = test_callback();
-    let callback2 = test_callback();
     let [identity1, identity2] =
         E2E_STREAM_TEST_SECRETS.map(|secret| SecretKey::try_from(secret).unwrap());
 
     let p1 = prepare_processor_with_identity_key(identity1).await;
     let p2 = prepare_processor_with_identity_key(identity2.clone()).await;
 
-    p1.swarm.set_callback(callback1.clone()).unwrap();
-    p2.swarm.set_callback(callback2.clone()).unwrap();
+    let _recorder1 = ApplicationRecorder::attach(&p1);
+    let recorder2 = ApplicationRecorder::attach(&p2);
 
     connect_processors(&p1, &p2).await;
 
@@ -670,12 +657,12 @@ async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_
     network_guard
         .network
         .deliver_newest_until("E2E stream complete", || {
-            e2e_stream_complete(received_e2e_stream_frames(&callback2, stream_id).iter())
+            e2e_stream_complete(received_e2e_stream_frames(&recorder2, stream_id).iter())
         })
         .await;
     network_guard.network.resume();
 
-    let frames = received_e2e_stream_frames(&callback2, stream_id);
+    let frames = received_e2e_stream_frames(&recorder2, stream_id);
     assert!(
         frames.len() > 1,
         "streaming send should emit more than one frame for this frame size"

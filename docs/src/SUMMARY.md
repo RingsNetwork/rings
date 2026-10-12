@@ -25,6 +25,7 @@
 - [Architecture](advanced-topic/architecture.md)
 - [How handshake works](advanced-topic/handshake.md)
 - [Exchange SDP](advanced-topic/exchange-sdp.md)
+- [Transport Flow Control](advanced-topic/transport-flow-control.md)
 - [DHT - Network Layer](advanced-topic/chord.md)
 - [API](jsonrpc.md)
 - [Account Abstraction](advanced-topic/account-abstraction.md)

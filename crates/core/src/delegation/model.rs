@@ -4,6 +4,8 @@ use serde::Serialize;
 use super::Account;
 use crate::dht::Did;
 use crate::ecc::keys::AccountVerifier;
+#[cfg(test)]
+use crate::ecc::keys::SignatureAlgorithm;
 use crate::ecc::keys::VerificationPublicKey;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
@@ -137,5 +139,29 @@ impl Delegation {
     /// Get the DID of the delegator that authorized this delegation.
     pub fn delegator_did(&self) -> Did {
         self.delegator.account_verifier().did()
+    }
+}
+
+#[cfg(test)]
+impl Delegation {
+    /// The delegation of the widest wire encoding: the widest account (a BLS12-381 key, which
+    /// also signs the longest signature) and every varint field at its maximum.
+    ///
+    /// It authorizes nothing; it witnesses the envelope bounds of `consts`, which take its
+    /// encoded size in both delegation slots. That it is the widest is itself witnessed by
+    /// `test_the_widest_delegation_bounds_every_account`.
+    pub(crate) fn widest_for_test() -> Self {
+        Self {
+            delegatee_did: Did::from(u32::MAX),
+            delegator: Account::Bls12381(PublicKey([u8::MAX; 48])),
+            ttl_ms: u64::MAX,
+            ts_ms: u128::MAX,
+            delegator_signature: vec![u8::MAX; SignatureAlgorithm::Bls12381.signature_len()],
+        }
+    }
+
+    /// A delegatee key that signs under [`Self::widest_for_test`].
+    pub(crate) fn widest_key_for_test() -> super::DelegateeKey {
+        super::DelegateeKey::from_parts(Self::widest_for_test(), crate::ecc::SecretKey::random())
     }
 }

@@ -1,4 +1,5 @@
-use super::CallbackError;
+use std::fmt::Display;
+use std::fmt::Formatter;
 
 /// Errors collections in ring-core.
 #[derive(thiserror::Error, Debug)]
@@ -164,9 +165,9 @@ pub enum Error {
     #[error("Link-control frame is meaningful only on the connection it arrived on")]
     LinkControlOutsideLink,
 
-    /// No runtime is current to carry a link-control send detached from the read loop.
-    #[error("Link-control send needs a runtime to run detached")]
-    LinkControlRuntimeUnavailable,
+    /// No runtime is current to run the named work detached from its caller.
+    #[error("{0} needs a runtime to run detached")]
+    DetachedRuntimeUnavailable(DetachedWork),
 
     /// The peer already has the most link-control sends this end keeps in flight for it.
     #[error("Link-control sends in flight to {0} are at capacity")]
@@ -300,6 +301,14 @@ pub enum Error {
     #[error("A lock was poisoned by a panicking holder")]
     LockPoisoned,
 
+    /// The application inbox was already claimed
+    #[error("The application inbox was already claimed")]
+    ApplicationInboxClaimed,
+
+    /// The swarm stopped before the awaited answer arrived
+    #[error("The swarm stopped before the awaited answer arrived")]
+    SwarmStopped,
+
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
     InvalidAffineScalar,
@@ -372,6 +381,17 @@ pub enum Error {
     /// ECDSA Invalid recover Id {0}
     #[error("ECDSA Invalid recover Id {0}")]
     InvalidRecoverId(u8),
+
+    /// A signature is not the exact length its algorithm's signatures have.
+    #[error("A {algorithm} signature has {expected} bytes, not {actual}")]
+    InvalidSignatureLength {
+        /// The signature algorithm.
+        algorithm: &'static str,
+        /// The length its signatures have.
+        expected: usize,
+        /// The length received.
+        actual: usize,
+    },
 
     /// Signature encoding is valid but not in its canonical form.
     #[error("Signature is not canonical")]
@@ -553,6 +573,10 @@ pub enum Error {
     #[error("Inbound actor state invariant violated")]
     InboundActorInvariantViolation,
 
+    /// A frame arrived on a transport lane its content does not belong to.
+    #[error("Inbound frame arrived on a lane its content does not belong to")]
+    InboundLaneMismatch,
+
     /// A reassembled chunk payload attempted to contain another chunk envelope.
     #[error("Nested chunk messages are not allowed")]
     NestedChunkMessage,
@@ -560,49 +584,6 @@ pub enum Error {
     /// A chunk was rejected for an invalid remote wire shape or metadata.
     #[error("Invalid chunk message")]
     InvalidChunkMessage,
-
-    /// The application rejected an inbound message during validation.
-    #[error("Inbound message validation failed: {source}")]
-    InboundValidationFailed {
-        /// Original application validation error.
-        #[source]
-        source: CallbackError,
-    },
-
-    /// An application validation callback did not complete within its deadline.
-    #[error("Inbound validation for {peer:?} timed out after {timeout_ms}ms")]
-    InboundValidationTimeout {
-        /// Peer associated with the inbound connection, when its DID parsed successfully.
-        peer: Option<crate::dht::Did>,
-        /// Callback deadline in milliseconds.
-        timeout_ms: u128,
-    },
-
-    /// An application callback failed after core inbound handling.
-    #[error("Inbound message callback failed: {source}")]
-    InboundCallbackFailed {
-        /// Original application callback error.
-        #[source]
-        source: CallbackError,
-    },
-
-    /// Inbound handling and its application callback did not complete within the deadline.
-    #[error("Inbound processing for {peer:?} timed out after {timeout_ms}ms")]
-    InboundProcessingTimeout {
-        /// Peer associated with the inbound connection, when its DID parsed successfully.
-        peer: Option<crate::dht::Did>,
-        /// Processing deadline in milliseconds.
-        timeout_ms: u128,
-    },
-
-    /// The browser runtime could not schedule an inbound deadline timer.
-    #[error("Inbound {operation} timer unavailable for {peer:?}")]
-    InboundTimerUnavailable {
-        /// Peer associated with the inbound connection, when its DID parsed successfully.
-        peer: Option<crate::dht::Did>,
-        /// Inbound phase whose deadline could not be scheduled.
-        operation: &'static str,
-    },
 
     /// Recv message through channel failed {0}
     #[error("Recv message through channel failed {0}")]
@@ -834,4 +815,23 @@ pub enum Error {
     /// External Javascript error: {0}
     #[error("External Javascript error: {0}")]
     JsError(String),
+}
+
+/// Work the swarm runs detached from its caller and refuses when no runtime is current to
+/// carry it (see `swarm::detached`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DetachedWork {
+    /// A handshake negotiated in a protocol handler's context.
+    ProtocolHandshake,
+    /// A link-control send.
+    LinkControlSend,
+}
+
+impl Display for DetachedWork {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ProtocolHandshake => "a protocol-context handshake",
+            Self::LinkControlSend => "a link-control send",
+        })
+    }
 }

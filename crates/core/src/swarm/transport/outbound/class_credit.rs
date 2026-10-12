@@ -1,0 +1,190 @@
+//! The transport credit of each class's lane, as the outbound worker holds it: reserved apart
+//! from the timed send, keyed by connection generation, and gating which classes may admit a
+//! frame.
+
+use std::future::Future;
+use std::mem::replace;
+use std::pin::Pin;
+
+use futures::FutureExt;
+use rings_transport::core::transport::LaneCreditReservation;
+
+use super::OutboundWorker;
+use super::TransferClass;
+use super::CLASSES;
+use crate::error::Result;
+use crate::swarm::transport::PendingConnectionAttempt;
+
+/// The transport credit of one class's lane, as the worker holds it.
+///
+/// The worker admits a frame only of a class whose lane holds a credit, and acquires credits
+/// for the other runnable classes while it serves them: a lane waiting for its receiver (the
+/// transport's backpressure) never holds the worker from another lane, and the send it admits
+/// is timed only for the transport's acceptance, never for the receiver's consumption. A
+/// detached payload's first-frame deadline does include its credit wait, apart from its sender
+/// (see `SwarmTransport::send_payload_enqueued`). A credit wait never retires the generation: a
+/// slow receiver is backpressure, and liveness judges the peer.
+///
+/// Law (generation). A credit, and the verdict that none can be had, belong to the connection
+/// generation they were reserved on: the worker outlives generations, and a credit of one
+/// generation settles only that generation's window. A slot whose generation is not that of the
+/// class's next transfer is reset, returning its credit, and the class reserves anew.
+///
+/// Law (wait settlement). A pending reservation's outcome settles the slot only while the slot
+/// awaits a reservation on the same generation; otherwise it is dropped, returning its credit.
+/// Two pending reservations on one generation are interchangeable: each is a credit of the
+/// same window, or the same verdict that its connection is gone, so whichever settles first is
+/// held and the other is dropped.
+pub(super) enum ClassCredit {
+    /// No credit is held or awaited.
+    Idle,
+    /// A reservation on the generation `attempt` is pending in
+    /// [`OutboundWorker::credit_waits`].
+    Awaiting(PendingConnectionAttempt),
+    /// A credit is held for the class's next frame on the generation `attempt`.
+    Held(LaneCreditReservation, PendingConnectionAttempt),
+    /// The lane of the generation `attempt` cannot grant credit (its connection is gone): the
+    /// next frame on it is sent without one, and fails as its connection does.
+    Unavailable(PendingConnectionAttempt),
+}
+
+impl ClassCredit {
+    /// The generation the slot's credit, verdict or pending reservation belongs to.
+    pub(super) const fn generation(&self) -> Option<PendingConnectionAttempt> {
+        match self {
+            Self::Held(_, attempt) | Self::Unavailable(attempt) | Self::Awaiting(attempt) => {
+                Some(*attempt)
+            }
+            Self::Idle => None,
+        }
+    }
+
+    /// The generation the slot's credit or verdict belongs to, if it holds one: what may
+    /// admit a frame. A pending reservation admits none.
+    pub(super) const fn attempt(&self) -> Option<PendingConnectionAttempt> {
+        match self {
+            Self::Held(_, attempt) | Self::Unavailable(attempt) => Some(*attempt),
+            Self::Idle | Self::Awaiting(_) => None,
+        }
+    }
+}
+
+/// The outcome of one pending credit reservation, for the class and generation it was made for.
+pub(super) type CreditWaitOutput = (
+    TransferClass,
+    PendingConnectionAttempt,
+    Result<LaneCreditReservation>,
+);
+
+/// A pending credit reservation: `Send` for the native executor, unconstrained on the
+/// single-threaded browser event loop.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(super) type CreditWaitFuture = Pin<Box<dyn Future<Output = CreditWaitOutput> + Send>>;
+/// A pending credit reservation; see the native definition.
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(super) type CreditWaitFuture = Pin<Box<dyn Future<Output = CreditWaitOutput>>>;
+
+impl OutboundWorker {
+    /// Reserve a transport credit for every class with a runnable transfer and none held or
+    /// awaited, and return the credit a class holds with none runnable.
+    ///
+    /// A credit available at once is held now; otherwise its reservation joins
+    /// [`Self::credit_waits`], and the class stays gated until it resolves.
+    ///
+    /// Law (no idle credit): a slot holds a credit only while a runnable transfer of its class
+    /// awaits it, so a peer that stops granting credit has stopped this end's traffic on the
+    /// lane, with no credit left behind by a transfer that went away.
+    pub(super) fn acquire_credits(&mut self) {
+        for class in CLASSES {
+            let Some(next) = self.ready.next_of(class) else {
+                let slot = &mut self.credits[class];
+                if matches!(slot, ClassCredit::Held(..)) {
+                    *slot = ClassCredit::Idle;
+                }
+                continue;
+            };
+            let admitted = next.scheduled.transfer.admitted.clone();
+            let attempt = admitted.attempt();
+            let slot = &mut self.credits[class];
+            if slot.generation().is_some_and(|held| held != attempt) {
+                // Another generation's credit settles only its own window: return it, and
+                // abandon a reservation still pending on it (its outcome is then ignored).
+                *slot = ClassCredit::Idle;
+            }
+            if !matches!(slot, ClassCredit::Idle) {
+                continue;
+            }
+            // The wait owns the lane's credit state only, so a long wait pins no connection.
+            let credit = admitted
+                .connection()
+                .reserve_send_credit(class.channel_lane());
+            let mut wait: CreditWaitFuture =
+                Box::pin(async move { (class, attempt, credit.await) });
+            match (&mut wait).now_or_never() {
+                Some((_, attempt, credit)) => self.hold_credit(class, attempt, credit),
+                None => {
+                    self.credits[class] = ClassCredit::Awaiting(attempt);
+                    self.credit_waits.push(wait);
+                }
+            }
+        }
+    }
+
+    /// Record the outcome of a pending credit reservation for `class` on the generation
+    /// `attempt`, if the slot awaits one on that generation; otherwise (the wait settlement law)
+    /// the outcome is dropped, returning its credit.
+    pub(super) fn settle_credit(
+        &mut self,
+        class: TransferClass,
+        attempt: PendingConnectionAttempt,
+        credit: Result<LaneCreditReservation>,
+    ) {
+        if matches!(
+            self.credits[class],
+            ClassCredit::Awaiting(awaited) if awaited == attempt
+        ) {
+            self.hold_credit(class, attempt, credit);
+        }
+    }
+
+    /// Hold the outcome of a reservation for `class` on the generation `attempt` in its slot.
+    fn hold_credit(
+        &mut self,
+        class: TransferClass,
+        attempt: PendingConnectionAttempt,
+        credit: Result<LaneCreditReservation>,
+    ) {
+        let settled = match credit {
+            Ok(credit) => ClassCredit::Held(credit, attempt),
+            Err(error) => {
+                tracing::debug!(class = ?class, error = ?error, "outbound lane cannot reserve credit");
+                ClassCredit::Unavailable(attempt)
+            }
+        };
+        self.credits[class] = settled;
+    }
+
+    /// Whether `class` may admit its next frame: its slot holds a credit, or the verdict that
+    /// none can be had (the frame then fails with its connection), of the generation of the
+    /// class's next transfer.
+    pub(super) fn grants_a_frame(&self, class: TransferClass) -> bool {
+        let next = self
+            .ready
+            .next_of(class)
+            .map(|next| next.scheduled.transfer.admitted.attempt());
+        let held = self.credits[class].attempt();
+        next.is_some() && held == next
+    }
+
+    /// Take the credit held for `class`'s next frame, leaving the class to reserve anew.
+    ///
+    /// Pre: [`Self::grants_a_frame`]`(class)` admitted the frame, so the slot is of the
+    /// generation of the class's next transfer: the generation law is enforced by that gate,
+    /// which a slot of another generation never passes.
+    pub(super) fn take_credit(&mut self, class: TransferClass) -> Option<LaneCreditReservation> {
+        match replace(&mut self.credits[class], ClassCredit::Idle) {
+            ClassCredit::Held(credit, _) => Some(credit),
+            ClassCredit::Idle | ClassCredit::Awaiting(_) | ClassCredit::Unavailable(_) => None,
+        }
+    }
+}

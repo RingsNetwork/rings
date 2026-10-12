@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rings_transport::connections::dummy_controlled;
-use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio::time::Duration;
@@ -31,13 +30,14 @@ use crate::message::FoundEntry;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::swarm::application::ApplicationData;
 use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::SendCompletionOutcome;
-use crate::swarm::transport::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
-use crate::swarm::transport::OUTBOUND_DATA_TRANSFER_CAPACITY;
 use crate::swarm::transport::OUTBOUND_LANE_WINDOW;
-use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
+use crate::tests::default::admit_nodes;
+use crate::tests::default::connect_nodes;
+use crate::tests::default::connected_nodes;
 use crate::tests::default::dummy_hooks::HeldDeliveryGuard;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
 use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
@@ -49,22 +49,13 @@ use crate::tests::default::dummy_hooks::PendingDataChannelOpenGuard;
 use crate::tests::default::dummy_hooks::PendingDeliveryGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_with_measure;
-use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_msgs;
-use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
-use crate::tests::manually_establish_connection;
 use crate::tests::outbound_capacity_released;
 
 fn invalid_test_state(message: impl Into<String>) -> Error {
     Error::InvalidMessage(message.into())
-}
-
-async fn connected_nodes() -> Result<(Node, Node)> {
-    let node1 = prepare_node(SecretKey::random()).await;
-    let node2 = prepare_node(SecretKey::random()).await;
-    connect_nodes(node1, node2).await
 }
 
 /// Fill `peer`'s Application lane window in one scheduler pass (#899): with the worker paused,
@@ -304,7 +295,7 @@ async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<(
     let held = fill_application_window(&node1, peer, "lane-head").await?;
     let error = node1
         .swarm
-        .send_message(Message::custom(b"queued-successor")?, peer)
+        .send_message(ApplicationData::custom(b"queued-successor"), peer)
         .await
         .expect_err("detached completion must not wait indefinitely behind a lane head");
 
@@ -338,7 +329,7 @@ async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() ->
     let swarm = node1.swarm.clone();
     let successor = tokio::spawn(async move {
         swarm
-            .send_message(Message::custom(b"drop-queued-successor")?, peer)
+            .send_message(ApplicationData::custom(b"drop-queued-successor"), peer)
             .await
     });
     wait_until("detached successor scheduler admission", || {
@@ -392,7 +383,7 @@ async fn test_backlogged_cancellations_all_apply_behind_a_blocked_head() -> Resu
             tokio::spawn(async move {
                 swarm
                     .send_message(
-                        Message::custom(format!("backlog-successor-{index}").as_bytes())?,
+                        ApplicationData::custom(format!("backlog-successor-{index}").as_bytes()),
                         peer,
                     )
                     .await
@@ -449,7 +440,7 @@ async fn test_cancelled_transfer_is_rejected_when_cancel_command_precedes_submit
     let paused_delivery = PausedDeliveryGuard::new();
     node1
         .swarm
-        .send_message(Message::custom(b"pre-cancel-lane-head")?, peer)
+        .send_message(ApplicationData::custom(b"pre-cancel-lane-head"), peer)
         .await?;
     let payload = tracked_payload(&node1, peer, b"pre-cancelled-successor")?;
 
@@ -572,21 +563,6 @@ async fn test_shutdown_releases_batch_before_first_tracked_completion() -> Resul
     Ok(())
 }
 
-/// Connect the nodes and await node1's admission of node2, but not quiescence.
-async fn admit_nodes(node1: Node, node2: Node) -> Result<(Node, Node)> {
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_successor(&node1, node2.did()).await?;
-    Ok((node1, node2))
-}
-
-/// Connect the nodes, await admission, and then await quiescence of the join traffic.
-async fn connect_nodes(node1: Node, node2: Node) -> Result<(Node, Node)> {
-    let (node1, node2) = admit_nodes(node1, node2).await?;
-    wait_for_msgs([&node1, &node2]).await;
-    Ok((node1, node2))
-}
-
 struct PendingMeasure {
     started: Arc<AtomicBool>,
 }
@@ -705,130 +681,6 @@ async fn await_send(task: JoinHandle<Result<uuid::Uuid>>, label: &str) -> Result
     Ok(())
 }
 
-fn message_chunk(message: Message) -> Option<Chunk> {
-    match message {
-        Message::Chunk(chunk) => Some(chunk),
-        _ => None,
-    }
-}
-
-async fn collect_two_chunk_transfers(node: &Node, first: Chunk) -> Result<Vec<Chunk>> {
-    timeout(Duration::from_secs(5), async move {
-        let first_id = first.meta.id;
-        let first_total = first.chunk[1];
-        let mut second = None;
-        let mut trace = vec![first];
-
-        loop {
-            if let Some((_, second_total)) = second {
-                if trace.len() == first_total.saturating_add(second_total) {
-                    return Ok(trace);
-                }
-            }
-
-            let payload = node
-                .listen_once()
-                .await
-                .ok_or_else(|| invalid_test_state("message stream closed while tracing chunks"))?;
-            let Some(chunk) = message_chunk(payload.transaction.data::<Message>()?) else {
-                continue;
-            };
-            if chunk.meta.id != first_id {
-                match second {
-                    None => second = Some((chunk.meta.id, chunk.chunk[1])),
-                    Some((second_id, _)) if second_id == chunk.meta.id => {}
-                    Some(_) => {
-                        return Err(invalid_test_state(
-                            "a third chunk transfer appeared in the FIFO trace",
-                        ));
-                    }
-                }
-            }
-            trace.push(chunk);
-        }
-    })
-    .await
-    .map_err(|_| invalid_test_state("timed out collecting complete chunk transfers"))?
-}
-
-fn assert_transfer_positions(chunks: &[&Chunk]) {
-    let total = chunks.len();
-    assert!(chunks
-        .iter()
-        .enumerate()
-        .all(|(position, chunk)| chunk.chunk == [position, total]));
-}
-
-#[tokio::test]
-async fn test_same_class_chunked_transfers_are_contiguous_on_the_wire() -> Result<()> {
-    let (node1, node2) = connected_nodes().await?;
-    let peer = node2.did();
-    let _max_size = MaxMessageSizeGuard::new(8192);
-    let _paused_delivery = PausedDeliveryGuard::new();
-    dummy_controlled::reset_sent_count();
-
-    node1
-        .swarm
-        .send_direct_message(Message::custom(&vec![0x11; 50_000])?, peer)
-        .await?;
-    wait_until("first chunk delivery gate", || {
-        dummy_controlled::delivery_future_waiting()
-    })
-    .await?;
-    let first_payload = node2
-        .listen_once()
-        .await
-        .ok_or_else(|| invalid_test_state("expected the first chunk"))?;
-    let first = message_chunk(first_payload.transaction.data::<Message>()?)
-        .ok_or_else(|| invalid_test_state("the first wire message was not a chunk"))?;
-    assert_eq!(first.chunk[0], 0);
-
-    reset_outbound_submit_count_for_test();
-    let second_swarm = node1.swarm.clone();
-    let second_send = tokio::spawn(async move {
-        second_swarm
-            .send_direct_message(Message::custom(&vec![0x22; 40_000])?, peer)
-            .await
-    });
-    wait_until("second application transfer submission", || {
-        outbound_submit_count_for_test() >= 1
-    })
-    .await?;
-    dummy_controlled::release_delivery_future_gate();
-
-    let trace = collect_two_chunk_transfers(&node2, first).await?;
-    await_send(second_send, "second application transfer").await?;
-    let first_id = trace
-        .first()
-        .map(|chunk| chunk.meta.id)
-        .ok_or_else(|| invalid_test_state("chunk trace was empty"))?;
-    let second_id = trace
-        .iter()
-        .find(|chunk| chunk.meta.id != first_id)
-        .map(|chunk| chunk.meta.id)
-        .ok_or_else(|| invalid_test_state("second chunk transfer was not observed"))?;
-    let first_chunks: Vec<_> = trace
-        .iter()
-        .filter(|chunk| chunk.meta.id == first_id)
-        .collect();
-    let second_chunks: Vec<_> = trace
-        .iter()
-        .filter(|chunk| chunk.meta.id == second_id)
-        .collect();
-
-    assert_transfer_positions(&first_chunks);
-    assert_transfer_positions(&second_chunks);
-    assert!(trace
-        .iter()
-        .take(first_chunks.len())
-        .all(|chunk| chunk.meta.id == first_id));
-    assert!(trace
-        .iter()
-        .skip(first_chunks.len())
-        .all(|chunk| chunk.meta.id == second_id));
-    Ok(())
-}
-
 /// Stall law of #906 end to end, on Tokio's paused clock: a link that delivers one frame of a
 /// full window every three quarters of the stall deadline takes six deadlines to drain it, yet
 /// no frame expires and the connection stays up, because each frame's deadline counts from the
@@ -889,7 +741,10 @@ async fn test_control_overtaking_an_application_backlog_never_makes_it_stale() -
         .map(|index| Message::custom(format!("backlog-{index}").as_bytes()))
         .chain((0..4).map(|nonce| Ok(Message::ProbeRequest(test_probe_request(nonce)))));
     for (index, message) in messages.enumerate() {
-        let payload = transport.originate(message?, peer, Some(peer)).await?;
+        let payload = transport
+            .protocol_egress()
+            .originate(message?, peer, Some(peer))
+            .await?;
         let sender = transport.clone();
         // No admission deadline: every send waits for the resumed worker on events alone.
         sends.push(tokio::spawn(async move {
@@ -938,7 +793,7 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
 
     node1
         .swarm
-        .send_direct_message(Message::custom(&vec![0x33; 50_000])?, peer)
+        .send_direct_message(ApplicationData::custom(&vec![0x33; 50_000]), peer)
         .await?;
     wait_until("bulk delivery gate", || {
         dummy_controlled::delivery_future_waiting()
@@ -954,7 +809,7 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     let storage_swarm = node1.swarm.clone();
     let storage_send = tokio::spawn(async move {
         storage_swarm
-            .send_direct_message(
+            .send_direct_core_message_for_test(
                 Message::FoundEntry(FoundEntry {
                     data: Vec::new(),
                     misses: Vec::new(),
@@ -975,7 +830,7 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     let control_swarm = node1.swarm.clone();
     let control_send = tokio::spawn(async move {
         control_swarm
-            .send_direct_message(Message::ProbeRequest(test_probe_request(41)), peer)
+            .send_direct_core_message_for_test(Message::ProbeRequest(test_probe_request(41)), peer)
             .await
     });
     wait_until("control transfer submission", || {
@@ -1013,147 +868,15 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     Ok(())
 }
 
-fn spawn_data_capacity_transfers(node: &Node, peer: Did) -> Vec<JoinHandle<Result<uuid::Uuid>>> {
-    let mut sends = Vec::with_capacity(OUTBOUND_TRANSFER_QUEUE_CAPACITY);
-    for index in 0..OUTBOUND_DATA_TRANSFER_CAPACITY {
-        let swarm = node.swarm.clone();
-        sends.push(tokio::spawn(async move {
-            let body = format!("capacity-transfer-{index}");
-            let payload = MessagePayload::new_send(
-                Message::custom(body.as_bytes())?,
-                swarm.transport.message_signer(),
-                peer,
-                peer,
-            )?;
-            let tx_id = payload.transaction.tx_id;
-            swarm
-                .transport
-                .send_payload_detached_observing_scheduler_submit_for_test(payload, || {})
-                .await
-                .map(|_| tx_id)
-        }));
+/// The chunk a message is, if it is one.
+fn message_chunk(message: Message) -> Option<Chunk> {
+    match message {
+        Message::Chunk(chunk) => Some(chunk),
+        _ => None,
     }
-    sends
-}
-
-async fn assert_data_capacity_is_bounded(node: &Node, peer: Did) -> Result<()> {
-    wait_until("non-control transfer capacity", || {
-        node.swarm
-            .transport
-            .outbound_admitted_transfer_count_for_test(peer)
-            == Some(OUTBOUND_DATA_TRANSFER_CAPACITY)
-    })
-    .await?;
-
-    let data_error = node
-        .swarm
-        .send_direct_message(Message::custom(b"over-data-capacity")?, peer)
-        .await
-        .expect_err("non-control work must not consume the control reserve");
-    assert!(matches!(
-        data_error,
-        Error::OutboundTransferCapacityExceeded {
-            peer: error_peer,
-            capacity: OUTBOUND_DATA_TRANSFER_CAPACITY,
-        } if error_peer == peer
-    ));
-    assert!(data_error.is_deferrable_data_plane_send());
-    assert!(!data_error.records_peer_send_failure());
-    Ok(())
-}
-
-fn spawn_reserved_control_transfers(
-    node: &Node,
-    peer: Did,
-    sends: &mut Vec<JoinHandle<Result<uuid::Uuid>>>,
-) {
-    for index in 0..OUTBOUND_CONTROL_RESERVED_TRANSFERS {
-        let swarm = node.swarm.clone();
-        sends.push(tokio::spawn(async move {
-            let payload = MessagePayload::new_send(
-                Message::ProbeRequest(test_probe_request(u8::try_from(index).unwrap_or(u8::MAX))),
-                swarm.transport.message_signer(),
-                peer,
-                peer,
-            )?;
-            let tx_id = payload.transaction.tx_id;
-            swarm
-                .transport
-                .send_payload_detached_observing_scheduler_submit_for_test(payload, || {})
-                .await
-                .map(|_| tx_id)
-        }));
-    }
-}
-
-async fn assert_control_capacity_is_bounded(node: &Node, peer: Did) -> Result<()> {
-    wait_until("reserved control transfer capacity", || {
-        node.swarm
-            .transport
-            .outbound_admitted_transfer_count_for_test(peer)
-            == Some(OUTBOUND_DATA_TRANSFER_CAPACITY + OUTBOUND_CONTROL_RESERVED_TRANSFERS)
-    })
-    .await?;
-    let control_error = node
-        .swarm
-        .send_direct_message(Message::ProbeRequest(test_probe_request(255)), peer)
-        .await
-        .expect_err("control traffic must preserve the other data-class reserves");
-    assert!(matches!(
-        control_error,
-        Error::OutboundTransferCapacityExceeded {
-            peer: error_peer,
-            ..
-        } if error_peer == peer
-    ));
-    Ok(())
-}
-
-async fn disconnect_and_join_capacity_transfers(
-    node: &Node,
-    peer: Did,
-    sends: Vec<JoinHandle<Result<uuid::Uuid>>>,
-) -> Result<()> {
-    node.swarm.transport.disconnect(peer).await?;
-    for send in sends {
-        let result = timeout(Duration::from_secs(2), send)
-            .await
-            .map_err(|_| invalid_test_state("capacity transfer did not stop on disconnect"))?
-            .map_err(|error| invalid_test_state(format!("capacity task failed: {error}")))?;
-        if let Err(error) = result {
-            assert!(matches!(
-                error,
-                Error::OutboundTransferCapacityExceeded { .. }
-                    | Error::OutboundTransferMemoryCapacityExceeded { .. }
-                    | Error::OutboundTransferAdmissionTimeout { .. }
-                    | Error::OutboundFirstFrameAdmissionTimeout { .. }
-                    | Error::ConnectionAttemptSuperseded { .. }
-                    | Error::ChannelSendMessageFailed
-            ));
-        }
-    }
-    wait_until("retired scheduler capacity release", || {
-        node.swarm
-            .transport
-            .outbound_admitted_transfer_count_for_test(peer)
-            .is_none()
-    })
-    .await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_transfer_capacity_bounds_real_waiting_and_queued_lifetimes() -> Result<()> {
-    let (node1, node2) = connected_nodes().await?;
-    let peer = node2.did();
-    let _pending_delivery = PendingDeliveryGuard::new();
-    let mut sends = spawn_data_capacity_transfers(&node1, peer);
-
-    assert_data_capacity_is_bounded(&node1, peer).await?;
-    spawn_reserved_control_transfers(&node1, peer, &mut sends);
-    assert_control_capacity_is_bounded(&node1, peer).await?;
-    disconnect_and_join_capacity_transfers(&node1, peer, sends).await
 }
 
 mod test_boundaries;
+mod test_capacity_bounds;
+mod test_chunk_contiguity;
 mod test_delivery;
