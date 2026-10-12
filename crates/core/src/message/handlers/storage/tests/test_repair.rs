@@ -2,7 +2,6 @@ use bytes::Bytes;
 
 #[cfg(feature = "dummy")]
 use super::test_support::install_two_node_chord_view;
-use super::test_support::next_generated_key;
 use super::test_support::next_payload_matching;
 use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
@@ -17,7 +16,6 @@ use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
-use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -39,6 +37,7 @@ use crate::tests::default::dummy_hooks::PendingSendGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::Node;
+use crate::tests::fixed_secret_keys;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::TEST_NETWORK_ID;
@@ -141,8 +140,11 @@ async fn test_leave_dht_attempt_requests_repair_only_for_a_referenced_peer() -> 
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
-    let node1 = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
-    let node2 = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    // Fixed identities: with random ones, two nearby addresses leave one node an arc too short
+    // for any sampled entry to split its placements between the nodes.
+    let [key1, key2] = fixed_secret_keys::<2>()?;
+    let node1 = prepare_node_with_storage_redundancy(key1, 2)?;
+    let node2 = prepare_node_with_storage_redundancy(key2, 2)?;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     install_two_node_chord_view(&node1, &node2)?;
     wait_for_msgs([&node1, &node2]).await;
@@ -248,9 +250,10 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
 
 #[tokio::test]
 async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() -> Result<()> {
-    let mut keys = gen_ordered_keys::<2>().into_iter();
-    let node1 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
-    let node2 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
+    // Fixed identities, so the sampled split-owner entry exists on every run.
+    let [key1, key2] = fixed_secret_keys::<2>()?;
+    let node1 = prepare_node_with_storage_redundancy(key1, 2)?;
+    let node2 = prepare_node_with_storage_redundancy(key2, 2)?;
 
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_msgs([&node1, &node2]).await;
