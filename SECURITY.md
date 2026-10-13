@@ -102,7 +102,9 @@ and expire, but a party with many identities can try to hold several positions o
   lane waits for it. A slow application therefore costs only its own messages, never a peer's
   credit or another link's liveness. Application delivery is lossy by design: a message that
   does not fit the full inbox is dropped and counted, unknown to its sender, so a protocol
-  that needs a reliable stream recovers loss end to end (#939). Relay mail leaves core's
+  that needs a reliable stream detects loss end to end: the TCP relay resets a stream with a
+  segment it cannot recover, and an E2E stream with a lost frame fails as stalled, so neither
+  passes on a stream with a silent gap (#939). Relay mail leaves core's
   custody once the application takes it from the inbox; it is delivered at least once within
   a run, and a restart before its retirement loses it (#936).
   [Details](docs/src/advanced-topic/transport-flow-control.md#application-inbox).

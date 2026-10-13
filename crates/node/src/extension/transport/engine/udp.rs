@@ -55,7 +55,7 @@ impl TransportSessions {
                         };
                         match self.udp_flow(&src) {
                             Some(key) => {
-                                let _ = send_frame(&scope, key.peer, Frame::Data {
+                                let _ = send_frame(&scope, key.peer, Frame::Datagram {
                                     session: key.session,
                                     from_opener: super::opened_by_us(&key),
                                     bytes,
@@ -120,7 +120,7 @@ async fn relay_udp_connected_with_idle(
                     let Some(bytes) = received_bytes(&buf, n) else {
                         break;
                     };
-                    if send_frame(&scope, peer, Frame::Data {
+                    if send_frame(&scope, peer, Frame::Datagram {
                         session,
                         from_opener,
                         bytes,
@@ -134,11 +134,11 @@ async fn relay_udp_connected_with_idle(
                 Err(_) => break,
             },
             outbound = outbound_rx.recv() => match outbound {
-                Some(Outbound::Data(bytes)) => {
+                Some(Outbound::Datagram(bytes)) => {
                     idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
                     let _ = socket.send(bytes.as_ref()).await;
                 }
-                Some(Outbound::Shutdown) | None => break,
+                Some(Outbound::Segment { .. } | Outbound::Shutdown { .. }) | None => break,
             },
             _ = &mut idle => break,
         }
@@ -184,11 +184,11 @@ async fn relay_udp_sendto(
             biased;
             _ = cancel.cancelled() => break,
             outbound = outbound_rx.recv() => match outbound {
-                Some(Outbound::Data(bytes)) => {
+                Some(Outbound::Datagram(bytes)) => {
                     idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
                     let _ = socket.send_to(bytes.as_ref(), dest).await;
                 }
-                Some(Outbound::Shutdown) | None => break,
+                Some(Outbound::Segment { .. } | Outbound::Shutdown { .. }) | None => break,
             },
             _ = &mut idle => break,
         }

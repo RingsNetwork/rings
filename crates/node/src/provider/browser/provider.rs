@@ -365,7 +365,7 @@ impl Provider {
     /// Create new provider instance with serialized config (yaml/json)
     pub fn new_provider_with_serialized_config(config: String) -> js_sys::Promise {
         future_to_promise(async move {
-            let cfg: ProcessorConfig = serde_yaml::from_str(&config).map_err(JsError::from)?;
+            let cfg: ProcessorConfig = serde_saphyr::from_str(&config).map_err(JsError::from)?;
             JsFuture::from(Self::new_provider_with_config(cfg)).await
         })
     }

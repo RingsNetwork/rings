@@ -2,11 +2,15 @@
 //!
 //! # Why these are *not* three protocols
 //!
-//! The rings overlay (DHT + swarm + backend envelopes) already provides a **reliable,
-//! ordered, bidirectional message channel between two DIDs** — call it the *virtual
-//! circuit*. TCP / HTTP / UDP "services" are all the **same thing**: a *relay* that
-//! maps a local I/O resource (a socket) onto that virtual circuit. They differ only in
-//! the shape of the local resource, along three axes:
+//! The rings overlay (DHT + swarm + backend envelopes) provides an **authenticated,
+//! bidirectional message channel between two DIDs** — call it the *virtual circuit*. It is
+//! best effort: a full application inbox or namespace queue drops a message, counted, and a
+//! frame held on an unresolved delegation reference may be overtaken by later frames of its
+//! stream. A relay that promises a reliable byte stream therefore sequences its frames and
+//! resets the stream on a loss it cannot repair (see [`Frame::Data`]). TCP / HTTP / UDP
+//! "services" are all the **same thing**: a *relay* that maps a local I/O resource (a
+//! socket) onto that virtual circuit. They differ only in the shape of the local resource,
+//! along three axes:
 //!
 //! ```text
 //!   axis                     TCP                 HTTP                    UDP
@@ -182,11 +186,26 @@ pub enum TransportKind {
 
 /// The relay's overlay wire message — the payload carried under a transport namespace.
 ///
-/// One vocabulary for both kinds (TCP connections and UDP flows):
+/// One vocabulary for both kinds (TCP connections and UDP flows), differing only in how the
+/// bytes travel:
 ///
 /// ```text
-///   Open(session, service) → Data(session, bytes)* → Close(session)
+///   TCP   Open(session, service) → Data(session, seq, bytes)* → Shutdown(session, sent)
+///                                                                     → Close(session)
+///   UDP   Open(session, service) → Datagram(session, bytes)*        → Close(session)
 /// ```
+///
+/// Law (no silent gap). A TCP direction's `Data` frames carry `seq = 0, 1, 2, …` and its
+/// `Shutdown` carries the number `sent` of them. The receiver writes bytes to its local socket
+/// in `seq` order only, reordering at most [`REORDER_WINDOW`] frames ahead, so the
+/// local stream is always a prefix of what the peer sent. A frame missing for
+/// [`REORDER_DEADLINE`], or more than the window behind, can never arrive (the replay window
+/// refuses it), so the receiver resets the session: the peer gets `Close`, and the local socket
+/// an abortive close. A `Shutdown` is applied only once every one of its `sent` frames was
+/// written, so a lost last frame is a reset, never a clean end of stream.
+///
+/// [`REORDER_WINDOW`]: rings_core::message::REORDER_WINDOW
+/// [`REORDER_DEADLINE`]: rings_core::message::REORDER_DEADLINE
 ///
 /// `Open` is always sent by the session's opener. `Data`/`Shutdown`/`Close` flow in both
 /// directions over the *same* opener-assigned id, so they carry `from_opener` — whether the
@@ -201,23 +220,36 @@ pub enum Frame {
         /// Local service name to connect to.
         service: String,
     },
-    /// Bytes on an open session (one datagram per frame for UDP).
+    /// A segment of a TCP session's byte stream, in its direction's `seq` order.
     Data {
         /// Relay session the bytes belong to.
         session: RelaySessionId,
         /// Whether the sender of this frame opened the session.
         from_opener: bool,
+        /// The segment's position in its direction: the sender's count of earlier `Data`.
+        seq: u64,
         /// Payload bytes.
         bytes: Bytes,
     },
-    /// Half-close: the sender has no more `Data` this direction (a TCP FIN). The
-    /// receiver shuts down its local write side but keeps the reverse direction open.
-    /// Ignored by UDP (datagram flows have no half-close).
+    /// One datagram of a UDP flow; datagrams carry no order and may be lost.
+    Datagram {
+        /// Relay flow the datagram belongs to.
+        session: RelaySessionId,
+        /// Whether the sender of this frame opened the flow.
+        from_opener: bool,
+        /// The datagram.
+        bytes: Bytes,
+    },
+    /// Half-close: the sender has no more `Data` this direction (a TCP FIN). The receiver shuts
+    /// down its local write side once all `sent` segments are written, and keeps the reverse
+    /// direction open. Ignored by UDP (datagram flows have no half-close).
     Shutdown {
         /// Relay session being half-closed.
         session: RelaySessionId,
         /// Whether the sender of this frame opened the session.
         from_opener: bool,
+        /// How many `Data` frames the sender sent this direction.
+        sent: u64,
     },
     /// Close a session/flow (full teardown, both directions).
     Close {

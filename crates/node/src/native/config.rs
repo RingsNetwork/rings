@@ -123,7 +123,7 @@ impl NativeGatewayConfig {
     /// Render this section as the top-level `gateway:` mapping of a config file, so a message
     /// telling an operator what to add quotes the shape `rings init` writes rather than a copy.
     pub fn to_yaml_section(&self) -> Result<String> {
-        serde_yaml::to_string(&GatewaySection { gateway: self }).map_err(|_| Error::EncodeError)
+        serde_saphyr::to_string(&GatewaySection { gateway: self }).map_err(|_| Error::EncodeError)
     }
 }
 
@@ -376,8 +376,8 @@ impl Config {
         ensure_parent_dir(&path)?;
         let f =
             fs::File::create(path.as_path()).map_err(|e| Error::CreateFileError(e.to_string()))?;
-        let f_writer = io::BufWriter::new(f);
-        serde_yaml::to_writer(f_writer, self).map_err(|_| Error::EncodeError)?;
+        let mut f_writer = io::BufWriter::new(f);
+        serde_saphyr::to_io_writer(&mut f_writer, self).map_err(|_| Error::EncodeError)?;
         path.to_str()
             .map(str::to_owned)
             .ok_or_else(|| Error::PathUtf8Error(path.display().to_string()))
@@ -390,7 +390,7 @@ impl Config {
         tracing::debug!("Read config from: {:?}", path);
         let f = fs::File::open(path).map_err(|e| Error::OpenFileError(e.to_string()))?;
         let f_rdr = io::BufReader::new(f);
-        serde_yaml::from_reader(f_rdr).map_err(|_| Error::EncodeError)
+        serde_saphyr::from_reader(f_rdr).map_err(|_| Error::EncodeError)
     }
 }
 
@@ -457,7 +457,7 @@ measure_storage:
   path: /Users/foo/.rings/measure
   capacity: 200000000
 "#;
-        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let cfg: Config = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(cfg.network_id, 1);
         assert_eq!(
             cfg.dht_virtual_nodes,
@@ -510,7 +510,7 @@ measure_storage:
   capacity: 200000000
 "#;
 
-        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let cfg: Config = serde_saphyr::from_str(yaml).unwrap();
 
         assert_eq!(cfg.dht_virtual_nodes, 0);
     }
@@ -555,7 +555,7 @@ gateway:
 "#;
 
     fn config_from(document: &str) -> Config {
-        match serde_yaml::from_str(document) {
+        match serde_saphyr::from_str(document) {
             Ok(config) => config,
             Err(error) => panic!("config document must parse: {error}"),
         }
@@ -585,7 +585,7 @@ gateway:
 
     /// The document `rings init` writes for a fresh delegatee key.
     fn generated_document() -> String {
-        serde_yaml::to_string(&Config::new("delegatee_key")).expect("generated config serializes")
+        serde_saphyr::to_string(&Config::new("delegatee_key")).expect("generated config serializes")
     }
 
     /// `rings init` states the bootstrap section explicitly, with no managed targets.
@@ -621,39 +621,72 @@ gateway:
         assert_eq!(peers[1].api_token.as_deref(), Some("secret"));
     }
 
+    /// The keys of a mapping, in document order; its values are ignored.
+    struct MappingKeys(Vec<String>);
+
+    impl<'de> Deserialize<'de> for MappingKeys {
+        /// Read a mapping's keys in document order, skipping its values.
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where D: serde::Deserializer<'de> {
+            /// Collects a mapping's keys in order.
+            struct Keys;
+
+            impl<'de> serde::de::Visitor<'de> for Keys {
+                type Value = MappingKeys;
+
+                /// What the visitor accepts, for the error of a non-mapping.
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("a mapping")
+                }
+
+                /// Collect each key, ignoring its value.
+                fn visit_map<A>(self, mut map: A) -> std::result::Result<MappingKeys, A::Error>
+                where A: serde::de::MapAccess<'de> {
+                    let mut keys = Vec::new();
+                    while let Some(key) = map.next_key::<String>()? {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        keys.push(key);
+                    }
+                    Ok(MappingKeys(keys))
+                }
+            }
+
+            deserializer.deserialize_map(Keys)
+        }
+    }
+
+    /// A config document read for its `gateway:` section's keys alone.
+    #[derive(Deserialize)]
+    struct GatewayKeys {
+        gateway: MappingKeys,
+    }
+
     #[test]
     fn generated_gateway_section_states_every_field() {
-        let document = match serde_yaml::to_value(Config::new("delegatee_key")) {
-            Ok(document) => document,
-            Err(error) => panic!("generated config must serialize: {error}"),
-        };
-        let keys = document
-            .get("gateway")
-            .and_then(serde_yaml::Value::as_mapping)
-            .map(|section| {
-                section
-                    .keys()
-                    .filter_map(serde_yaml::Value::as_str)
-                    .collect::<Vec<_>>()
-            });
+        let keys = serde_saphyr::from_str::<GatewayKeys>(&generated_document())
+            .map(|document| document.gateway.0);
 
         assert_eq!(
-            keys,
-            Some(vec![
-                "enabled",
-                "plan",
-                "max_flows",
-                "flow_idle_timeout",
-                "tcp_buffer_bytes",
-                "interface_name",
-                "route_ledger_path",
-                "unix_helper_socket",
-                "wintun_dll_path",
-                "status_refresh_secs",
-                "onion_service",
-                "onion_hop_count",
-                "onion_allow_short_paths",
-            ])
+            keys.ok(),
+            Some(
+                [
+                    "enabled",
+                    "plan",
+                    "max_flows",
+                    "flow_idle_timeout",
+                    "tcp_buffer_bytes",
+                    "interface_name",
+                    "route_ledger_path",
+                    "unix_helper_socket",
+                    "wintun_dll_path",
+                    "status_refresh_secs",
+                    "onion_service",
+                    "onion_hop_count",
+                    "onion_allow_short_paths",
+                ]
+                .map(String::from)
+                .to_vec()
+            )
         );
     }
 
@@ -747,7 +780,7 @@ gateway:
                 "network_id:",
                 &format!("{legacy_field}: legacy\nnetwork_id:"),
             );
-            let result = serde_yaml::from_str::<Config>(&document);
+            let result = serde_saphyr::from_str::<Config>(&document);
 
             assert!(
                 result.is_err(),

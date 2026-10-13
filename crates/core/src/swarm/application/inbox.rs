@@ -11,8 +11,8 @@
 //! - **Never waits on the application.** Every operation of the outlet returns at once. A live
 //!   message that does not fit is dropped, counted (`dropped`) and logged at `warn`: application
 //!   delivery is lossy by design, as a best-effort network is, and no lane ever waits for the
-//!   application to read. A protocol that needs a reliable stream detects and recovers loss
-//!   end to end itself (#939).
+//!   application to read. A protocol that needs a reliable stream detects loss end to end
+//!   itself (#939).
 //! - **One order.** Messages and peer facts share one queue, in the order core produced them,
 //!   so a peer fact never overtakes an earlier message from the same peer. Facts describe
 //!   overlay membership, not a gate on messages: a message's identity is its origin, not the

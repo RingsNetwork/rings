@@ -18,10 +18,10 @@
 //!   application code. Application delivery is lossy by design: a full inbox drops further live
 //!   application data, counted ([`ApplicationInbox::dropped`]) and logged at `warn`, as a
 //!   best-effort network drops it, and no lane and no lifecycle transition ever waits for the
-//!   application to read. A protocol that needs a reliable stream detects and recovers loss
-//!   end to end (#939). Stored relay mail is offered only when it fits, and is retired once the
-//!   application took it from the inbox; what the application does with it afterwards is the
-//!   application's.
+//!   application to read. A protocol that needs a reliable stream detects loss end to end, as
+//!   the E2E stream decryptor's stall deadline does (#939). Stored relay mail is offered only
+//!   when it fits, and is retired once the application took it from the inbox; what the
+//!   application does with it afterwards is the application's.
 //! - Only [`ApplicationData`] crosses the boundary, in both directions: no control message has
 //!   a representation here. Inbound, the projection `ApplicationData::project` is total over
 //!   [`Message`] variants, so a new variant fails to compile until it is classified; outbound,

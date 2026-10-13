@@ -137,7 +137,10 @@ waiting) at its own pace, and no inbound lane ever waits for it to read:
 - Application delivery is lossy by design. A live application message that does not fit the
   full inbox is dropped, counted (`ApplicationInbox::dropped`) and logged at `warn`, as a
   best-effort network drops it, and nothing tells its sender. A protocol that needs a
-  reliable stream detects and recovers loss end to end (#939). The bound,
+  reliable stream detects loss end to end: the TCP relay numbers its segments and resets a
+  stream whose gap outlives `REORDER_DEADLINE` or the replay window, closing the local socket
+  abortively, and the E2E stream decryptor fails a stream that made no progress for its stall
+  deadline (#939). The bound,
   `APPLICATION_INBOX_WEIGHT` (64 MiB), weighs each message by its own size plus the byte
   length of its data, one rule for every kind, so empty messages are bounded too.
 - Before the application claims the inbox, live messages are discarded and peer facts are

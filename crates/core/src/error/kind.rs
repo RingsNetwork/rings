@@ -181,6 +181,20 @@ pub enum Error {
     #[error("E2E stream is missing the authenticated final frame")]
     E2eMissingFinalFrame,
 
+    /// E2E stream made no progress for its stall deadline: a frame was lost
+    #[error(
+        "E2E stream stalled at sequence {next_sequence} for {stalled_ms}ms with {buffered} later \
+         frames buffered: a frame was lost"
+    )]
+    E2eStreamStalled {
+        /// The sequence the stream still waits for.
+        next_sequence: u64,
+        /// Later frames buffered behind it.
+        buffered: usize,
+        /// How long the stream has gone without progress.
+        stalled_ms: u128,
+    },
+
     /// E2E public key resolves to {actual}, expected {expected}
     #[error("E2E public key resolves to {actual}, expected {expected}")]
     E2ePublicKeyDidMismatch {

@@ -10,6 +10,7 @@ use rings_core::message::e2e::E2eHandshakeResponse;
 use rings_core::message::e2e::E2eStreamDecryptor;
 use rings_core::message::e2e::E2eStreamFrame;
 use rings_core::swarm::application::ApplicationData;
+use rings_core::utils::get_epoch_ms;
 
 use super::Processor;
 use crate::error::Error;
@@ -131,7 +132,8 @@ impl Processor {
         Ok(response.responder_public_key)
     }
 
-    /// Create an E2E stream decryptor with this node's identity/signing secret key.
+    /// Create an E2E stream decryptor with this node's identity/signing secret key; its stall
+    /// deadline runs from now.
     ///
     /// The ciphertext is encrypted to the DID/account key negotiated by the
     /// handshake. A session private key cannot decrypt it unless the delegatee key
@@ -149,16 +151,27 @@ impl Processor {
             stream_id,
             expected_sender,
             recipient_identity_key,
+            get_epoch_ms(),
         ))
     }
 
-    /// Decrypt one E2E stream frame with an already-created stream decryptor.
+    /// Decrypt one E2E stream frame arriving now with an already-created stream decryptor.
+    /// Fails with `E2eStreamStalled` once the stream has made no progress for its stall
+    /// deadline: a frame of it was lost.
     pub fn decrypt_e2e_stream_frame(
         &self,
         decryptor: &mut E2eStreamDecryptor,
         frame: &E2eStreamFrame,
     ) -> Result<Vec<u8>> {
-        decryptor.decrypt_next(frame).map_err(Error::CoreError)
+        decryptor
+            .decrypt_next(frame, get_epoch_ms())
+            .map_err(Error::CoreError)
+    }
+
+    /// Whether an E2E stream is still live now; poll it while no frame of the stream arrives,
+    /// so a lost frame (the final one included) is reported rather than waited for.
+    pub fn check_e2e_stream(&self, decryptor: &E2eStreamDecryptor) -> Result<()> {
+        decryptor.check(get_epoch_ms()).map_err(Error::CoreError)
     }
 
     /// Send a namespaced [`Envelope`](crate::extension::ext::Envelope) to a did over the
