@@ -21,10 +21,10 @@
 //!
 //! A frame is either a payload or a [`LinkControl`]; the two are told apart by a marker before
 //! any decoding. A control frame is unsigned: it is meaningful only on the authenticated edge it
-//! arrives on, an announced session authenticates itself (its account signature), and a digest
-//! names a value rather than asserting one. The link is treated as a datagram link: control
-//! frames and payload frames may arrive in any order or not at all, and every control frame is
-//! idempotent, so a duplicate or a stale one changes nothing.
+//! arrives on, and a digest names a value rather than asserting one. The link is treated as a
+//! datagram link: control frames and payload frames may arrive in any order or not at all, and
+//! every control frame is idempotent and monotone, so a duplicate or a stale one changes
+//! nothing it should not: a stale lease is never longer than the one held.
 
 use std::borrow::Cow;
 
@@ -41,7 +41,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::protocols::MessageRelay;
 use crate::message::protocols::MessageVerification;
-use crate::message::protocols::ProofLifetime;
 
 /// Marker of a payload frame. A frame without it is refused before any decoding; there is no
 /// version behind the marker, because the protocol is not versioned before 1.0: every wire
@@ -252,12 +251,6 @@ impl<'a> WirePayload<'a> {
         }
     }
 
-    /// The hop proof's lifetime, readable before the slots are resolved. It is unauthenticated
-    /// until the payload verifies, so it may only bound how long an unresolved frame is kept.
-    pub(crate) const fn hop_proof_lifetime(&self) -> ProofLifetime {
-        ProofLifetime::new(self.verification.ts_ms, self.verification.ttl_ms)
-    }
-
     /// The encoded message, readable before the slots are resolved.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn transaction_data(&self) -> &[u8] {
@@ -303,14 +296,16 @@ impl<'a> WirePayload<'a> {
 /// documentation for why these are unsigned.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) enum LinkControl {
-    /// "A frame of yours carried this session inline and it verified: you may reference it."
-    Known(DelegationDigest),
-    /// "A frame of yours references this digest and I cannot resolve it."
-    Request(DelegationDigest),
-    /// "This is a session you asked for." The receiver recomputes the digest; it is never
-    /// taken from the sender.
-    Announce(Delegation),
-    /// "I no longer hold the session you asked for": frames waiting on it cannot be resolved.
+    /// "A frame of yours carried this session inline and it verified: you may reference it
+    /// until `until_ms` on my clock." See the lease law of `swarm::session_link`.
+    Known {
+        /// The session leased.
+        digest: DelegationDigest,
+        /// The end of the lease, on the sender of this frame's clock.
+        until_ms: u128,
+    },
+    /// "A frame of yours referenced this digest and I do not hold it: the frame was dropped;
+    /// send the session inline."
     Unknown(DelegationDigest),
 }
 

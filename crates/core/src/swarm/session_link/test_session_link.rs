@@ -2,24 +2,25 @@
 //! is judged at, and no test waits.
 
 use super::AnnouncedDelegations;
-use super::Announcement;
+use super::Confirmation;
 use super::Digests;
-use super::FrameArrival;
 use super::ReferencedDelegations;
 use super::ResolvedFrame;
-use super::Swept;
 use super::ANNOUNCED_TABLE_CAPACITY;
+use super::LEASE_GRACE_MS;
+use super::LEASE_MARGIN_MS;
+use super::LEASE_MS;
+use super::LINK_PEER_RESERVE;
 use super::REFERENCED_TABLE_CAPACITY;
 use crate::delegation::DelegateeKey;
 use crate::delegation::Delegation;
-use crate::delegation::DelegationDigest;
 use crate::dht::delivery::NextHop;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
+use crate::error::Error;
 use crate::error::Result;
 use crate::message::DelegationRef;
 use crate::message::HopBudget;
-use crate::message::LinkControl;
 use crate::message::LinkFrame;
 use crate::message::Message;
 use crate::message::MessagePayload;
@@ -30,13 +31,10 @@ use crate::message::SlotEncoding;
 use crate::message::Transaction;
 use crate::message::WirePayload;
 use crate::tests::delegatee_key_with_ttl;
+use crate::tests::splitmix64;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 
-/// Frames a test hold keeps: far more than any test queues, except the overflow test's own.
-const HOLD_CAPACITY: usize = 4;
-/// How long a test hold keeps a frame.
-const HOLD_TIMEOUT_MS: u128 = 1_000;
 /// A session lifetime shorter than a proof lifetime, so a session can expire under a live
 /// proof, and long enough that a test cannot outlive it between two statements.
 const SHORT_SESSION_TTL_MS: u64 = 60_000;
@@ -62,6 +60,11 @@ fn relayed_payload(
     MessagePayload::new(transaction, MessageSigner::new(hop, TEST_NETWORK_ID), relay)
 }
 
+/// A fresh session of a fresh account.
+fn session() -> Result<DelegateeKey> {
+    DelegateeKey::new_with_seckey(&SecretKey::random())
+}
+
 /// The frame a receiver decodes when `payload` is sent with `sessions` in its slots.
 fn received<'a>(
     payload: &'a MessagePayload,
@@ -79,15 +82,6 @@ fn by_digest(session: &Delegation) -> Result<DelegationRef<'static>> {
     session.digest().map(DelegationRef::Digest)
 }
 
-/// A frame of `payload` whose origin slot is by reference and whose hop slot is inline.
-fn origin_referenced(payload: &MessagePayload) -> Result<Box<WirePayload<'static>>> {
-    let sessions = payload.delegations();
-    received(payload, PerSlot {
-        origin: by_digest(sessions.origin)?,
-        hop: DelegationRef::inline(sessions.hop),
-    })
-}
-
 /// The frame a sender in state `sender` puts on the wire for `payload`.
 fn sent(
     sender: &mut AnnouncedDelegations,
@@ -98,9 +92,15 @@ fn sent(
     received(payload, sessions)
 }
 
-/// How each slot of `frame` travelled.
-fn encoding(frame: &WirePayload<'_>) -> PerSlot<SlotEncoding> {
-    frame.delegation_refs().map(DelegationRef::encoding)
+/// How each slot of the frame a sender in state `sender` sends for `payload` travels.
+fn sent_encoding(
+    sender: &mut AnnouncedDelegations,
+    payload: &MessagePayload,
+    now_ms: u128,
+) -> Result<PerSlot<SlotEncoding>> {
+    Ok(sent(sender, payload, now_ms)?
+        .delegation_refs()
+        .map(DelegationRef::encoding))
 }
 
 /// Both slots inline.
@@ -115,102 +115,72 @@ const BOTH_REFERENCED: PerSlot<SlotEncoding> = PerSlot {
     hop: SlotEncoding::Referenced,
 };
 
-/// A receiver with the test hold bounds.
-fn receiver<F>() -> ReferencedDelegations<F> {
-    ReferencedDelegations::new(HOLD_CAPACITY, HOLD_TIMEOUT_MS)
+/// The origin slot by reference, the hop slot inline.
+const ORIGIN_REFERENCED: PerSlot<SlotEncoding> = PerSlot {
+    origin: SlotEncoding::Referenced,
+    hop: SlotEncoding::Inline,
+};
+
+/// Lease `session` to `sender` until `until_ms`, as a confirmation from the peer does.
+fn lease(sender: &mut AnnouncedDelegations, session: &DelegateeKey, until_ms: u128) -> Result<()> {
+    sender.acknowledge(GENERATION, session.delegation().digest()?, until_ms);
+    Ok(())
 }
 
-/// The digest set `{digests}`.
-fn digests<const N: usize>(digests: [DelegationDigest; N]) -> Digests {
-    Digests::from(digests)
-}
-
-/// The resolved frame of an arrival that must pass.
-fn expect_resolved<F>(arrival: FrameArrival<F>) -> Box<ResolvedFrame<F>> {
-    match arrival {
-        FrameArrival::Resolved(resolved) => resolved,
-        FrameArrival::Held { .. } => panic!("expected the frame to resolve, it was held"),
-        FrameArrival::Overflow { .. } => {
-            panic!("expected the frame to resolve, the hold overflowed")
-        }
-    }
-}
-
-/// The digests an arrival that must be held asks for.
-fn expect_held<F>(arrival: FrameArrival<F>) -> Digests {
-    match arrival {
-        FrameArrival::Held { request } => request,
-        FrameArrival::Resolved(_) => panic!("expected the frame to be held, it resolved"),
-        FrameArrival::Overflow { .. } => {
-            panic!("expected the frame to be held, the hold overflowed")
-        }
-    }
-}
-
-/// Deliver a frame the receiver resolved: verify it and let the link learn from it, as the
-/// shell does; the digests to confirm to the peer.
-fn deliver(
-    receiver: &mut ReferencedDelegations<u8>,
-    resolved: Box<ResolvedFrame<u8>>,
-    now_ms: u128,
-) -> Result<Digests> {
-    assert!(resolved
-        .payload
-        .verify_transaction_and_payload(TEST_NETWORK_ID));
-    receiver.admit_verified(&resolved.payload, resolved.encoding, now_ms)
-}
-
-/// Arrive and deliver a frame that must resolve; the digests to confirm.
-fn arrive_and_deliver(
-    receiver: &mut ReferencedDelegations<u8>,
+/// Resolve `frame` at `now_ms`, which must resolve.
+fn resolved(
+    receiver: &mut ReferencedDelegations,
     frame: Box<WirePayload<'static>>,
-    carrier: u8,
     now_ms: u128,
-) -> Result<Digests> {
-    let resolved = expect_resolved(receiver.arrive(frame, carrier, now_ms, true)?);
-    deliver(receiver, resolved, now_ms)
-}
-
-/// The carriers and payloads of every held frame that resolves now, in release order.
-fn released(
-    receiver: &mut ReferencedDelegations<u8>,
-    now_ms: u128,
-) -> Result<Vec<(u8, MessagePayload)>> {
-    let mut out = Vec::new();
-    while let Some(resolved) = receiver.release_next(now_ms)? {
-        let ResolvedFrame {
-            payload, carrier, ..
-        } = *resolved;
-        out.push((carrier, payload));
+) -> ResolvedFrame {
+    match receiver.resolve(frame, now_ms) {
+        Ok(resolved) => resolved,
+        Err(missing) => panic!("expected the frame to resolve, it missed {missing:?}"),
     }
-    Ok(out)
 }
 
-/// Law (soundness): a session is referenced only after the peer confirmed it; until then every
-/// frame carries it inline, however many were sent.
+/// Resolve, verify and learn from `frame` at `now_ms`, as the shell does: the leases to confirm.
+fn arrive(
+    receiver: &mut ReferencedDelegations,
+    frame: Box<WirePayload<'static>>,
+    now_ms: u128,
+) -> Result<Vec<Confirmation>> {
+    let ResolvedFrame {
+        payload,
+        encoding,
+        renewals,
+    } = resolved(receiver, frame, now_ms);
+    assert!(payload.verify_transaction_and_payload(TEST_NETWORK_ID));
+    let leased = receiver.admit_verified(&payload, encoding, now_ms)?;
+    Ok(renewals.into_iter().chain(leased).collect())
+}
+
+/// The digests confirmed by `confirmations`.
+fn confirmed(confirmations: &[Confirmation]) -> Digests {
+    confirmations
+        .iter()
+        .map(|confirmation| confirmation.digest)
+        .collect()
+}
+
+/// Law (lease, sending end): a session is referenced only once the peer leased it; until then
+/// every frame carries it inline, however many were sent.
 #[test]
-fn test_sender_references_only_confirmed_sessions() -> Result<()> {
+fn test_sender_references_only_leased_sessions() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let (origin, hop) = (session()?, session()?);
     let payload = relayed_payload(&origin, &hop, 0)?;
     let mut sender = AnnouncedDelegations::new();
 
     for _ in 0..3 {
-        assert_eq!(
-            encoding(sent(&mut sender, &payload, now_ms)?.as_ref()),
-            BOTH_INLINE
-        );
+        assert_eq!(sent_encoding(&mut sender, &payload, now_ms)?, BOTH_INLINE);
     }
-    sender.acknowledge(GENERATION, origin.delegation().digest()?);
+    lease(&mut sender, &origin, now_ms + LEASE_MS)?;
     assert_eq!(
-        encoding(sent(&mut sender, &payload, now_ms)?.as_ref()),
-        PerSlot {
-            origin: SlotEncoding::Referenced,
-            hop: SlotEncoding::Inline,
-        }
+        sent_encoding(&mut sender, &payload, now_ms)?,
+        ORIGIN_REFERENCED
     );
-    sender.acknowledge(GENERATION, hop.delegation().digest()?);
+    lease(&mut sender, &hop, now_ms + LEASE_MS)?;
     assert_eq!(sender.encode(GENERATION, &payload, now_ms)?, PerSlot {
         origin: by_digest(&origin.delegation())?,
         hop: by_digest(&hop.delegation())?,
@@ -218,25 +188,17 @@ fn test_sender_references_only_confirmed_sessions() -> Result<()> {
     Ok(())
 }
 
-/// Law: a confirmation of a digest this end never announced marks nothing.
+/// Law (admission, sending end): a lease of a digest this end never announced marks nothing.
 #[test]
-fn test_unannounced_confirmation_marks_nothing() -> Result<()> {
+fn test_unannounced_lease_marks_nothing() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let node = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let (node, stranger) = (session()?, session()?);
     let payload = relayed_payload(&node, &node, 0)?;
     let mut sender = AnnouncedDelegations::new();
 
-    sender.acknowledge(GENERATION, stranger.delegation().digest()?);
-    sender.acknowledge(GENERATION, node.delegation().digest()?);
-    assert_eq!(
-        encoding(sent(&mut sender, &payload, now_ms)?.as_ref()),
-        BOTH_INLINE
-    );
-    assert_eq!(
-        sender.answer(GENERATION, stranger.delegation().digest()?, now_ms),
-        LinkControl::Unknown(stranger.delegation().digest()?)
-    );
+    lease(&mut sender, &stranger, now_ms + LEASE_MS)?;
+    lease(&mut sender, &node, now_ms + LEASE_MS)?;
+    assert_eq!(sent_encoding(&mut sender, &payload, now_ms)?, BOTH_INLINE);
     Ok(())
 }
 
@@ -245,21 +207,20 @@ fn test_unannounced_confirmation_marks_nothing() -> Result<()> {
 #[test]
 fn test_steady_state_frame_carries_digests_instead_of_sessions() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let (origin, hop) = (session()?, session()?);
     let payload = relayed_payload(&origin, &hop, 0)?;
     let mut sender = AnnouncedDelegations::new();
 
     let first = sender.encode(GENERATION, &payload, now_ms)?;
     let first_size = WirePayload::view(&payload, first).wire_size()?;
-    sender.acknowledge(GENERATION, origin.delegation().digest()?);
-    sender.acknowledge(GENERATION, hop.delegation().digest()?);
+    lease(&mut sender, &origin, now_ms + LEASE_MS)?;
+    lease(&mut sender, &hop, now_ms + LEASE_MS)?;
     let steady = sender.encode(GENERATION, &payload, now_ms)?;
     let steady_size = WirePayload::view(&payload, steady).wire_size()?;
 
     let session_bytes = |session: &Delegation| -> Result<usize> {
         Ok(rings_codec::serialize(session)
-            .map_err(crate::error::Error::CodecSerialize)?
+            .map_err(Error::CodecSerialize)?
             .len())
     };
     let digest_bytes = origin.delegation().digest()?.into_bytes().len();
@@ -275,637 +236,368 @@ fn test_steady_state_frame_carries_digests_instead_of_sessions() -> Result<()> {
 #[test]
 fn test_sender_table_is_scoped_to_its_generation() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let node = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let node = session()?;
     let digest = node.delegation().digest()?;
     let payload = relayed_payload(&node, &node, 0)?;
     let mut sender = AnnouncedDelegations::new();
     sent(&mut sender, &payload, now_ms)?;
-    sender.acknowledge(GENERATION, digest);
+    lease(&mut sender, &node, now_ms + LEASE_MS)?;
     assert_eq!(
-        encoding(sent(&mut sender, &payload, now_ms)?.as_ref()),
+        sent_encoding(&mut sender, &payload, now_ms)?,
         BOTH_REFERENCED
     );
 
     let next = sender.encode(GENERATION + 1, &payload, now_ms)?;
     assert_eq!(next, payload.delegations().map(DelegationRef::inline));
-    assert_eq!(
-        sender.answer(GENERATION, digest, now_ms),
-        LinkControl::Unknown(digest)
-    );
-    sender.acknowledge(GENERATION, digest);
+    sender.acknowledge(GENERATION, digest, now_ms + LEASE_MS);
     let stale = sender.encode(GENERATION, &payload, now_ms)?;
     assert_eq!(stale, payload.delegations().map(DelegationRef::inline));
+    assert_eq!(sent_encoding(&mut sender, &payload, now_ms)?, BOTH_INLINE);
+    Ok(())
+}
+
+/// Law (bound, sending end): the sender remembers at most `ANNOUNCED_TABLE_CAPACITY` sessions,
+/// and the one referenced least recently is the one it forgets: a lease of it then marks
+/// nothing, and it travels inline.
+#[test]
+fn test_sender_table_is_bounded_and_forgets_least_recently_referenced() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let (hop, first_origin) = (session()?, session()?);
+    let first = relayed_payload(&first_origin, &hop, 0)?;
+    let mut sender = AnnouncedDelegations::new();
+    sent(&mut sender, &first, now_ms)?;
+
+    // `hop` is referenced by every frame, so it stays; `first_origin` is never referenced again.
+    for _ in 0..ANNOUNCED_TABLE_CAPACITY {
+        sent(&mut sender, &relayed_payload(&session()?, &hop, 0)?, now_ms)?;
+    }
+    lease(&mut sender, &first_origin, now_ms + LEASE_MS)?;
+    lease(&mut sender, &hop, now_ms + LEASE_MS)?;
+    assert_eq!(sent_encoding(&mut sender, &first, now_ms)?, PerSlot {
+        origin: SlotEncoding::Inline,
+        hop: SlotEncoding::Referenced,
+    });
+    Ok(())
+}
+
+/// Law (lease, margin): the sender stops referencing a session `Δ` before its lease ends, and a
+/// stale lease never shortens the one it holds.
+#[test]
+fn test_sender_references_only_until_a_margin_before_the_lease_ends() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let node = session()?;
+    let payload = relayed_payload(&node, &node, 0)?;
+    let mut sender = AnnouncedDelegations::new();
+    sent(&mut sender, &payload, now_ms)?;
+    let until_ms = now_ms + LEASE_MS;
+    lease(&mut sender, &node, until_ms)?;
+    // A stale, shorter lease changes nothing.
+    lease(&mut sender, &node, now_ms + LEASE_MARGIN_MS)?;
+
+    let last_reference_ms = until_ms - LEASE_MARGIN_MS - 1;
     assert_eq!(
-        encoding(sent(&mut sender, &payload, now_ms)?.as_ref()),
+        sent_encoding(&mut sender, &payload, last_reference_ms)?,
+        BOTH_REFERENCED
+    );
+    assert_eq!(
+        sent_encoding(&mut sender, &payload, last_reference_ms + 1)?,
         BOTH_INLINE
     );
     Ok(())
 }
 
-/// Acceptance (expiry, sending end): an expired session is sent inline again rather than
-/// referenced, and is no longer offered to a peer that asks for it.
+/// Law (repair, sending end): a session the peer disclaims travels inline again, until the
+/// peer leases it anew.
 #[test]
-fn test_sender_expiry_forces_reannouncement() -> Result<()> {
-    // The session is stamped before `now_ms`, so `now_ms + ttl + 1` is past its expiry.
-    let node = delegatee_key_with_ttl(SHORT_SESSION_TTL_MS)?;
+fn test_a_disclaimed_session_travels_inline_until_leased_again() -> Result<()> {
     let now_ms = get_epoch_ms();
+    let node = session()?;
     let digest = node.delegation().digest()?;
     let payload = relayed_payload(&node, &node, 0)?;
     let mut sender = AnnouncedDelegations::new();
     sent(&mut sender, &payload, now_ms)?;
-    sender.acknowledge(GENERATION, digest);
+    lease(&mut sender, &node, now_ms + LEASE_MS)?;
     assert_eq!(
-        encoding(sent(&mut sender, &payload, now_ms)?.as_ref()),
+        sent_encoding(&mut sender, &payload, now_ms)?,
         BOTH_REFERENCED
     );
-    assert_eq!(
-        sender.answer(GENERATION, digest, now_ms),
-        LinkControl::Announce(node.delegation())
-    );
 
-    let expired_ms = now_ms + u128::from(SHORT_SESSION_TTL_MS) + 1;
+    sender.unknown(GENERATION + 1, digest);
     assert_eq!(
-        encoding(sent(&mut sender, &payload, expired_ms)?.as_ref()),
-        BOTH_INLINE
+        sent_encoding(&mut sender, &payload, now_ms)?,
+        BOTH_REFERENCED
     );
+    sender.unknown(GENERATION, digest);
+    assert_eq!(sent_encoding(&mut sender, &payload, now_ms)?, BOTH_INLINE);
+    lease(&mut sender, &node, now_ms + LEASE_MS)?;
     assert_eq!(
-        sender.answer(GENERATION, digest, expired_ms),
-        LinkControl::Unknown(digest)
-    );
-    Ok(())
-}
-
-/// Law (bound): the sender remembers at most `ANNOUNCED_TABLE_CAPACITY` sessions, and the one
-/// referenced least recently is the one it forgets.
-#[test]
-fn test_sender_table_is_bounded_and_forgets_least_recently_referenced() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let first_origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let mut sender = AnnouncedDelegations::new();
-    sent(
-        &mut sender,
-        &relayed_payload(&first_origin, &hop, 0)?,
-        now_ms,
-    )?;
-
-    // `hop` is referenced by every frame, so it stays; `first_origin` is never referenced again.
-    for _ in 0..ANNOUNCED_TABLE_CAPACITY {
-        let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-        sent(&mut sender, &relayed_payload(&origin, &hop, 0)?, now_ms)?;
-    }
-
-    assert_eq!(
-        sender.answer(GENERATION, first_origin.delegation().digest()?, now_ms),
-        LinkControl::Unknown(first_origin.delegation().digest()?)
-    );
-    assert_eq!(
-        sender.answer(GENERATION, hop.delegation().digest()?, now_ms),
-        LinkControl::Announce(hop.delegation())
+        sent_encoding(&mut sender, &payload, now_ms)?,
+        BOTH_REFERENCED
     );
     Ok(())
 }
 
-/// Law (superset, under loss): a frame lost on the link touches the sender's order and not the
-/// receiver's, so the receiver may evict a session the sender still references; that miss is
-/// answered from the sender's table, which still holds the session.
+/// Law (expiry, sending end): a frame is never sent with a session that expires within `Δ`,
+/// and an expired session is absent from the table.
 #[test]
-fn test_loss_drifts_the_orders_and_the_sender_still_answers_the_miss() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let origin_digest = origin.delegation().digest()?;
-    let mut sender = AnnouncedDelegations::new();
-    let mut receiver = receiver();
-    let first = sent(&mut sender, &relayed_payload(&origin, &hop, 0)?, now_ms)?;
-    for digest in arrive_and_deliver(&mut receiver, first, 0, now_ms)? {
-        sender.acknowledge(GENERATION, digest);
-    }
-
-    // Each round delivers one other origin to both ends, then loses a frame that references
-    // `origin`: the sender keeps `origin` most recent, the receiver never sees it touched.
-    for _ in 0..REFERENCED_TABLE_CAPACITY {
-        let other = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-        let delivered = sent(&mut sender, &relayed_payload(&other, &hop, 0)?, now_ms)?;
-        for digest in arrive_and_deliver(&mut receiver, delivered, 1, now_ms)? {
-            sender.acknowledge(GENERATION, digest);
-        }
-        let lost = sent(&mut sender, &relayed_payload(&origin, &hop, 1)?, now_ms)?;
-        assert_eq!(encoding(lost.as_ref()).origin, SlotEncoding::Referenced);
-    }
-
-    // The receiver forgot `origin`; the sender still references it and still answers for it.
-    let late = sent(&mut sender, &relayed_payload(&origin, &hop, 2)?, now_ms)?;
-    assert_eq!(encoding(late.as_ref()).origin, SlotEncoding::Referenced);
-    assert_eq!(
-        expect_held(receiver.arrive(late, 2, now_ms, true)?),
-        digests([origin_digest])
-    );
-    assert_eq!(
-        sender.answer(GENERATION, origin_digest, now_ms),
-        LinkControl::Announce(origin.delegation())
-    );
-    Ok(())
-}
-
-/// Law (bound and superset): the receiver remembers at most `REFERENCED_TABLE_CAPACITY`
-/// sessions, twice the sender's, and forgets the one referenced least recently; over the same
-/// frames the sender forgets a session first, so it goes back to inline before the receiver
-/// could miss, and a reference the receiver resolves refreshes the session on its side.
-#[test]
-fn test_receiver_table_is_bounded_and_outlasts_the_sender_table() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let first_origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let first_digest = first_origin.delegation().digest()?;
-    let mut sender = AnnouncedDelegations::new();
-    let mut receiver = receiver();
-    let first = sent(
-        &mut sender,
-        &relayed_payload(&first_origin, &hop, 0)?,
-        now_ms,
-    )?;
-    for digest in arrive_and_deliver(&mut receiver, first, 0, now_ms)? {
-        sender.acknowledge(GENERATION, digest);
-    }
-
-    // `hop` is referenced by every frame, so both tables keep it; each origin is seen once.
-    let relay_others = |sender: &mut AnnouncedDelegations,
-                        receiver: &mut ReferencedDelegations<u8>,
-                        count: usize|
-     -> Result<()> {
-        for _ in 0..count {
-            let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-            let frame = sent(sender, &relayed_payload(&origin, &hop, 0)?, now_ms)?;
-            assert_eq!(encoding(frame.as_ref()).hop, SlotEncoding::Referenced);
-            for digest in arrive_and_deliver(receiver, frame, 1, now_ms)? {
-                sender.acknowledge(GENERATION, digest);
-            }
-        }
-        Ok(())
-    };
-
-    // After the sender's capacity of other sessions, the sender forgot `first_origin` and
-    // will send it inline again, while the receiver still resolves a reference to it.
-    relay_others(&mut sender, &mut receiver, ANNOUNCED_TABLE_CAPACITY)?;
-    assert_eq!(
-        sender.answer(GENERATION, first_digest, now_ms),
-        LinkControl::Unknown(first_digest)
-    );
-    let late = relayed_payload(&first_origin, &hop, 1)?;
-    expect_resolved(receiver.arrive(origin_referenced(&late)?, 2, now_ms, true)?);
-
-    // That reference refreshed it: the receiver forgets it only once its whole capacity of
-    // other sessions was referenced after it (the hop's session is always among them).
-    relay_others(&mut sender, &mut receiver, REFERENCED_TABLE_CAPACITY)?;
-    assert_eq!(receiver.known_len(), REFERENCED_TABLE_CAPACITY);
-    let stale = relayed_payload(&first_origin, &hop, 2)?;
-    assert_eq!(
-        expect_held(receiver.arrive(origin_referenced(&stale)?, 3, now_ms, true)?),
-        digests([first_digest])
-    );
-    // `hop`, referenced throughout, is kept by both.
-    let hop_only = relayed_payload(&hop, &hop, 0)?;
-    let frame = sent(&mut sender, &hop_only, now_ms)?;
-    assert_eq!(encoding(frame.as_ref()), BOTH_REFERENCED);
-    expect_resolved(receiver.arrive(frame, 4, now_ms, true)?);
-    Ok(())
-}
-
-/// Law (round trip and confirmation): what the receiver resolves is the payload the sender
-/// encoded, inline or by reference; the receiver confirms every inline session it verified;
-/// once both ends have gone through the exchange, frames carry references and resolve.
-#[test]
-fn test_confirmation_exchange_reaches_references_and_resolves() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let mut sender = AnnouncedDelegations::new();
-    let mut receiver = receiver();
-
-    let payload = relayed_payload(&origin, &hop, 0)?;
-    let frame = sent(&mut sender, &payload, now_ms)?;
-    assert_eq!(encoding(frame.as_ref()), BOTH_INLINE);
-    let resolved = expect_resolved(receiver.arrive(frame, 0, now_ms, true)?);
-    assert_eq!(resolved.payload, payload);
-    let confirm = deliver(&mut receiver, resolved, now_ms)?;
-    assert_eq!(
-        confirm,
-        digests([origin.delegation().digest()?, hop.delegation().digest()?])
-    );
-    for digest in confirm {
-        sender.acknowledge(GENERATION, digest);
-    }
-
-    let payload = relayed_payload(&origin, &hop, 1)?;
-    let frame = sent(&mut sender, &payload, now_ms)?;
-    assert_eq!(encoding(frame.as_ref()), BOTH_REFERENCED);
-    let resolved = expect_resolved(receiver.arrive(frame, 1, now_ms, true)?);
-    assert_eq!(resolved.payload, payload);
-    assert_eq!(
-        resolved.payload.transaction.digest()?,
-        payload.transaction.digest()?
-    );
-    assert!(deliver(&mut receiver, resolved, now_ms)?.is_empty());
-    assert_eq!(receiver.known_len(), 2);
-    Ok(())
-}
-
-/// Law (datagram link): with confirmations, loss and reordering of inline frames cost inline
-/// frames, never a miss. The first inline frame is lost; the sender keeps announcing; the
-/// confirmation of a later one switches it; references sent after that resolve, whatever
-/// order they arrive in.
-#[test]
-fn test_loss_and_reordering_before_confirmation_never_miss() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let node = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let digest = node.delegation().digest()?;
-    let mut sender = AnnouncedDelegations::new();
-    let mut receiver = receiver();
-
-    let lost = sent(&mut sender, &relayed_payload(&node, &node, 0)?, now_ms)?;
-    assert_eq!(encoding(lost.as_ref()), BOTH_INLINE);
-    drop(lost);
-    let second = sent(&mut sender, &relayed_payload(&node, &node, 1)?, now_ms)?;
-    let third = sent(&mut sender, &relayed_payload(&node, &node, 2)?, now_ms)?;
-    assert_eq!(encoding(second.as_ref()), BOTH_INLINE);
-    assert_eq!(encoding(third.as_ref()), BOTH_INLINE);
-
-    // The third arrives before the second and is confirmed; the sender switches.
-    let confirm = arrive_and_deliver(&mut receiver, third, 2, now_ms)?;
-    assert_eq!(confirm, digests([digest]));
-    sender.acknowledge(GENERATION, digest);
-    let fourth = sent(&mut sender, &relayed_payload(&node, &node, 3)?, now_ms)?;
-    assert_eq!(encoding(fourth.as_ref()), BOTH_REFERENCED);
-
-    // The reference arrives before the late inline frame, and both resolve.
-    expect_resolved(receiver.arrive(fourth, 3, now_ms, true)?);
-    let confirm_again = arrive_and_deliver(&mut receiver, second, 1, now_ms)?;
-    assert_eq!(confirm_again, digests([digest]));
-    assert_eq!(receiver.held_len(), 0);
-    Ok(())
-}
-
-/// Acceptance (origin miss): a hop whose table does not hold the origin's session holds the
-/// frame, asks for exactly that digest, and releases the frame on the announcement.
-#[test]
-fn test_origin_session_miss_is_repaired_by_announcement() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let payload = relayed_payload(&origin, &hop, 0)?;
-    let mut receiver = receiver();
-
-    assert_eq!(
-        expect_held(receiver.arrive(origin_referenced(&payload)?, 7u8, now_ms, true)?),
-        digests([origin.delegation().digest()?])
-    );
-    assert!(receiver.release_next(now_ms)?.is_none());
-
-    assert!(matches!(
-        receiver.announce(origin.delegation(), now_ms)?,
-        Announcement::Admitted
-    ));
-    assert_eq!(released(&mut receiver, now_ms)?, vec![(7, payload)]);
-    assert_eq!(receiver.held_len(), 0);
-    Ok(())
-}
-
-/// Acceptance (hop miss): the same repair when the missing session is the forwarding hop's.
-#[test]
-fn test_hop_session_miss_is_repaired_by_announcement() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let payload = relayed_payload(&origin, &hop, 0)?;
-    let frame = received(&payload, PerSlot {
-        origin: DelegationRef::inline(&origin.delegation()),
-        hop: by_digest(&hop.delegation())?,
-    })?;
-    let mut receiver = receiver();
-
-    assert_eq!(
-        expect_held(receiver.arrive(frame, 7u8, now_ms, true)?),
-        digests([hop.delegation().digest()?])
-    );
-    assert!(matches!(
-        receiver.announce(hop.delegation(), now_ms)?,
-        Announcement::Admitted
-    ));
-    assert_eq!(released(&mut receiver, now_ms)?, vec![(7, payload)]);
-    Ok(())
-}
-
-/// The whole miss exchange between the two pure ends: the receiver forgot a confirmed
-/// session, its question is answered from the sender's table, and the answer releases the
-/// frame.
-#[test]
-fn test_miss_is_answered_from_the_sender_table() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let node = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let digest = node.delegation().digest()?;
-    let mut sender = AnnouncedDelegations::new();
-    sent(&mut sender, &relayed_payload(&node, &node, 0)?, now_ms)?;
-    sender.acknowledge(GENERATION, digest);
-
-    // The receiver's table is fresh: it forgot what it confirmed.
-    let payload = relayed_payload(&node, &node, 1)?;
-    let frame = sent(&mut sender, &payload, now_ms)?;
-    assert_eq!(encoding(frame.as_ref()), BOTH_REFERENCED);
-    let mut receiver = receiver();
-    let request = expect_held(receiver.arrive(frame, 1u8, now_ms, true)?);
-    assert_eq!(request, digests([digest]));
-    for digest in request {
-        match sender.answer(GENERATION, digest, now_ms) {
-            LinkControl::Announce(session) => {
-                assert!(matches!(
-                    receiver.announce(session, now_ms)?,
-                    Announcement::Admitted
-                ));
-            }
-            answer => panic!("expected an announcement, got {answer:?}"),
-        }
-    }
-    assert_eq!(released(&mut receiver, now_ms)?, vec![(1, payload)]);
-    Ok(())
-}
-
-/// Law (order): a frame that resolves passes whatever is held, and a held frame never waits
-/// for one held before it (the second frame stays while the first and third leave); among the
-/// frames resolvable at one instant, the earliest arrival leaves first.
-#[test]
-fn test_held_frames_never_wait_for_each_other_and_resolvable_ones_leave_earliest_first(
-) -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let first_stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let second_stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let mut receiver = receiver();
-
-    let first = relayed_payload(&first_stranger, &hop, 0)?;
-    let second = relayed_payload(&second_stranger, &hop, 0)?;
-    let third = relayed_payload(&first_stranger, &hop, 1)?;
-    let ready = relayed_payload(&hop, &hop, 0)?;
-    assert_eq!(
-        expect_held(receiver.arrive(origin_referenced(&first)?, 1u8, now_ms, true)?),
-        digests([first_stranger.delegation().digest()?])
-    );
-    assert_eq!(
-        expect_held(receiver.arrive(origin_referenced(&second)?, 2u8, now_ms, true)?),
-        digests([second_stranger.delegation().digest()?])
-    );
-    // The third misses what the first already awaits, and asks again all the same.
-    assert_eq!(
-        expect_held(receiver.arrive(origin_referenced(&third)?, 3u8, now_ms, true)?),
-        digests([first_stranger.delegation().digest()?])
-    );
-    let ready_frame = received(&ready, ready.delegations().map(DelegationRef::inline))?;
-    expect_resolved(receiver.arrive(ready_frame, 4u8, now_ms, true)?);
-    assert_eq!(receiver.held_len(), 3);
-
-    assert!(matches!(
-        receiver.announce(first_stranger.delegation(), now_ms)?,
-        Announcement::Admitted
-    ));
-    assert_eq!(released(&mut receiver, now_ms)?, vec![
-        (1, first),
-        (3, third)
-    ]);
-    assert_eq!(receiver.held_len(), 1);
-    assert!(matches!(
-        receiver.announce(second_stranger.delegation(), now_ms)?,
-        Announcement::Admitted
-    ));
-    assert_eq!(released(&mut receiver, now_ms)?, vec![(2, second)]);
-    Ok(())
-}
-
-/// Law (questions): a frame that finds the hold full is dropped and the oldest held frame's
-/// question is asked again, never the newcomer's.
-#[test]
-fn test_overflow_drops_the_newcomer_and_asks_the_oldest_question_again() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let newcomer_stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let mut receiver = receiver();
-    let digest = stranger.delegation().digest()?;
-
-    for carrier in 0..HOLD_CAPACITY {
-        let payload = relayed_payload(&stranger, &hop, 0)?;
-        assert_eq!(
-            expect_held(receiver.arrive(origin_referenced(&payload)?, carrier, now_ms, true)?),
-            digests([digest])
-        );
-    }
-    let newcomer = relayed_payload(&newcomer_stranger, &hop, 0)?;
-    assert!(matches!(
-        receiver.arrive(origin_referenced(&newcomer)?, HOLD_CAPACITY, now_ms, true)?,
-        FrameArrival::Overflow { carrier, request }
-            if carrier == HOLD_CAPACITY && request == digests([digest])
-    ));
-    assert_eq!(receiver.held_len(), HOLD_CAPACITY);
-    Ok(())
-}
-
-/// Law (node bound): without room in the node's holds, an unresolved frame overflows even into
-/// an empty hold, while a frame that resolves is unaffected, since it is never held.
-#[test]
-fn test_a_frame_without_node_room_overflows_and_a_resolved_frame_is_unaffected() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let mut receiver = receiver();
-    let unresolved = relayed_payload(&stranger, &hop, 0)?;
-
-    assert!(matches!(
-        receiver.arrive(origin_referenced(&unresolved)?, 0, now_ms, false)?,
-        FrameArrival::Overflow { carrier: 0, .. }
-    ));
-    assert_eq!(receiver.held_len(), 0);
-    let inline = relayed_payload(&stranger, &hop, 1)?;
-    let sessions = inline.delegations();
-    let frame = received(&inline, PerSlot {
-        origin: DelegationRef::inline(sessions.origin),
-        hop: DelegationRef::inline(sessions.hop),
-    })?;
-    expect_resolved(receiver.arrive(frame, 1, now_ms, false)?);
-    Ok(())
-}
-
-/// Law (admission): nothing unsolicited is cached, and a disclaimer fails exactly the frames
-/// that await the disclaimed digest.
-#[test]
-fn test_unsolicited_announcement_is_ignored_and_disclaimer_fails_awaiting_frames() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let other = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let mut receiver = receiver();
-
-    assert!(matches!(
-        receiver.announce(stranger.delegation(), now_ms)?,
-        Announcement::Ignored
-    ));
-    assert_eq!(receiver.known_len(), 0);
-
-    let payload = relayed_payload(&stranger, &hop, 0)?;
-    expect_held(receiver.arrive(origin_referenced(&payload)?, 1u8, now_ms, true)?);
-
-    assert!(receiver
-        .unknown(other.delegation().digest()?, now_ms)
-        .is_empty());
-    assert_eq!(receiver.held_len(), 1);
-    assert_eq!(
-        receiver.unknown(stranger.delegation().digest()?, now_ms),
-        vec![1]
-    );
-    assert_eq!(receiver.held_len(), 0);
-    Ok(())
-}
-
-/// Acceptance (expiry, receiving end): expiry evicts the session, a reference to it becomes a
-/// miss that must be re-announced, and re-announcing the expired delegation is refused, so
-/// only a fresh delegation restores the link. The proof is still live throughout, so the
-/// refusal is the session's, as it would be for the same session inline.
-#[test]
-fn test_receiver_expiry_evicts_and_refuses_the_expired_delegation() -> Result<()> {
-    // The session is stamped before `now_ms`, so `now_ms + ttl + 1` is past its expiry.
+fn test_sender_refuses_a_session_that_expires_within_the_margin() -> Result<()> {
+    // The session is stamped before `now_ms`, so `now_ms + ttl - Δ` is within `Δ` of its expiry.
     let node = delegatee_key_with_ttl(SHORT_SESSION_TTL_MS)?;
     let now_ms = get_epoch_ms();
-    let digest = node.delegation().digest()?;
+    let payload = relayed_payload(&node, &node, 0)?;
     let mut sender = AnnouncedDelegations::new();
-    let mut receiver = receiver();
-
-    let first = sent(&mut sender, &relayed_payload(&node, &node, 0)?, now_ms)?;
-    for digest in arrive_and_deliver(&mut receiver, first, 0u8, now_ms)? {
-        sender.acknowledge(GENERATION, digest);
-    }
-    let steady = sent(&mut sender, &relayed_payload(&node, &node, 1)?, now_ms)?;
-    assert_eq!(encoding(steady.as_ref()), BOTH_REFERENCED);
-    expect_resolved(receiver.arrive(steady, 1u8, now_ms, true)?);
-
-    let expired_ms = now_ms + u128::from(SHORT_SESSION_TTL_MS) + 1;
-    let payload = relayed_payload(&node, &node, 2)?;
-    assert!(payload.verification.is_live_at(expired_ms));
-    let stale = received(&payload, PerSlot {
-        origin: DelegationRef::Digest(digest),
-        hop: DelegationRef::Digest(digest),
-    })?;
+    sent(&mut sender, &payload, now_ms)?;
+    lease(&mut sender, &node, now_ms + LEASE_MS)?;
     assert_eq!(
-        expect_held(receiver.arrive(stale, 2u8, expired_ms, true)?),
-        digests([digest])
+        sent_encoding(&mut sender, &payload, now_ms)?,
+        BOTH_REFERENCED
     );
+
+    let expiring_ms = now_ms + u128::from(SHORT_SESSION_TTL_MS) - LEASE_MARGIN_MS;
     assert!(matches!(
-        receiver.announce(node.delegation(), expired_ms)?,
-        Announcement::Refused(ref refused) if refused == &vec![2]
+        sender.encode(GENERATION, &payload, expiring_ms),
+        Err(Error::DelegationExpired)
     ));
-    assert_eq!(receiver.held_len(), 0);
-
-    // A fresh delegation is a different value, hence a different digest: it travels inline.
-    let renewed = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let renewed_payload = relayed_payload(&renewed, &renewed, 0)?;
-    let frame = sent(&mut sender, &renewed_payload, expired_ms)?;
-    assert_eq!(encoding(frame.as_ref()), BOTH_INLINE);
-    arrive_and_deliver(&mut receiver, frame, 3u8, expired_ms)?;
-    assert_eq!(receiver.known_len(), 1);
     Ok(())
 }
 
-/// Law (idempotence): a sender that lost its table (a new generation, a restart) sends a
-/// session its peer already knows inline; the receiver resolves the frame, knows the session
-/// once, and confirms it again so the sender can switch.
+/// Law (lease, receiving end): the receiver leases every inline session of a verified frame,
+/// until `min(expiry, now + LEASE)`, confirms it again on every inline arrival, and resolves a
+/// reference to it.
 #[test]
-fn test_reannouncing_a_known_session_is_idempotent() -> Result<()> {
+fn test_receiver_leases_inline_sessions_and_resolves_references() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let node = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let mut receiver = receiver();
+    let (origin, hop) = (session()?, session()?);
+    let payload = relayed_payload(&origin, &hop, 0)?;
+    let mut sender = AnnouncedDelegations::new();
+    let mut receiver = ReferencedDelegations::new();
 
-    for sequence in 0..2 {
-        let payload = relayed_payload(&node, &node, sequence)?;
-        let frame = sent(&mut AnnouncedDelegations::new(), &payload, now_ms)?;
-        assert_eq!(encoding(frame.as_ref()), BOTH_INLINE);
-        let resolved = expect_resolved(receiver.arrive(frame, 0u8, now_ms, true)?);
-        assert_eq!(resolved.payload, payload);
-        assert_eq!(
-            deliver(&mut receiver, resolved, now_ms)?,
-            digests([node.delegation().digest()?])
-        );
-        assert_eq!(receiver.known_len(), 1);
-    }
-    Ok(())
-}
-
-/// The carriers a sweep dropped, charged and uncharged.
-fn swept(swept: Swept<u8>) -> (Vec<u8>, Vec<u8>) {
-    (swept.unanswered, swept.unasked)
-}
-
-/// Law (bound in time): the sweep drops a held frame once it waited past the hold timeout,
-/// whatever lifetime its proof claims, and one whose proof lapsed sooner; a frame within both
-/// bounds stays. A frame whose question was sent is dropped as unanswered, to be charged.
-#[test]
-fn test_sweep_drops_frames_past_the_hold_timeout_or_their_proof() -> Result<()> {
-    let now_ms = get_epoch_ms();
-    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let mut receiver = receiver();
-
-    let early = relayed_payload(&stranger, &hop, 0)?;
-    let question = expect_held(receiver.arrive(origin_referenced(&early)?, 0u8, now_ms, true)?);
-    receiver.note_asked(question);
-    let later_ms = now_ms + HOLD_TIMEOUT_MS;
-    let late = relayed_payload(&stranger, &hop, 1)?;
-    expect_held(receiver.arrive(origin_referenced(&late)?, 1u8, later_ms, true)?);
-
-    assert_eq!(swept(receiver.sweep(later_ms)), (vec![], vec![]));
-    assert_eq!(swept(receiver.sweep(later_ms + 1)), (vec![0], vec![]));
-    assert_eq!(receiver.held_len(), 1);
-
-    // A hold timeout longer than the proof's lifetime: the proof lapses first.
-    let lapsed_ms = late.verification.ts_ms + u128::from(late.verification.ttl_ms) + 1;
-    let hold_outlasting_the_proof_ms = u128::from(late.verification.ttl_ms).saturating_mul(2);
-    let mut lapsed_receiver: ReferencedDelegations<u8> =
-        ReferencedDelegations::new(HOLD_CAPACITY, hold_outlasting_the_proof_ms);
-    let question =
-        expect_held(lapsed_receiver.arrive(origin_referenced(&late)?, 2u8, now_ms, true)?);
-    lapsed_receiver.note_asked(question);
+    let leases = arrive(&mut receiver, sent(&mut sender, &payload, now_ms)?, now_ms)?;
     assert_eq!(
-        swept(lapsed_receiver.sweep(lapsed_ms - 1)),
-        (vec![], vec![])
+        confirmed(&leases),
+        Digests::from([origin.delegation().digest()?, hop.delegation().digest()?])
     );
-    assert_eq!(swept(lapsed_receiver.sweep(lapsed_ms)), (vec![2], vec![]));
+    assert!(leases
+        .iter()
+        .all(|confirmation| confirmation.until_ms == now_ms + LEASE_MS));
+    // Sent inline again (the confirmation still in flight), it is confirmed again, once.
+    let again = arrive(&mut receiver, sent(&mut sender, &payload, now_ms)?, now_ms)?;
+    assert_eq!(confirmed(&again), confirmed(&leases));
+    assert_eq!(receiver.known_len(), 2);
+
+    for confirmation in leases {
+        sender.acknowledge(GENERATION, confirmation.digest, confirmation.until_ms);
+    }
+    let referenced = sent(&mut sender, &payload, now_ms)?;
+    assert_eq!(arrive(&mut receiver, referenced, now_ms)?, Vec::new());
     Ok(())
 }
 
-/// Law (charging): a held frame whose question this end never sent is swept uncharged, since
-/// the peer never had its round trip; once the question is noted as asked, the same frame is
-/// swept as unanswered. Learning the session clears the question.
+/// Law (lease): a peer's own frame carries one delegation in both slots, and it is confirmed
+/// once, so one frame spends one link-control send on it.
 #[test]
-fn test_sweep_tells_unasked_frames_from_unanswered_ones() -> Result<()> {
+fn test_a_peer_own_frame_confirms_its_delegation_once() -> Result<()> {
     let now_ms = get_epoch_ms();
-    let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let mut receiver = receiver();
-    let stale_ms = now_ms + HOLD_TIMEOUT_MS + 1;
+    let node = session()?;
+    let payload = relayed_payload(&node, &node, 0)?;
+    let mut sender = AnnouncedDelegations::new();
+    let mut receiver = ReferencedDelegations::new();
 
-    let unasked = relayed_payload(&stranger, &hop, 0)?;
-    expect_held(receiver.arrive(origin_referenced(&unasked)?, 0u8, now_ms, true)?);
-    assert_eq!(swept(receiver.sweep(stale_ms)), (vec![], vec![0]));
-
-    let asked = relayed_payload(&stranger, &hop, 1)?;
-    let question = expect_held(receiver.arrive(origin_referenced(&asked)?, 1u8, now_ms, true)?);
-    receiver.note_asked(question);
-    assert_eq!(swept(receiver.sweep(stale_ms)), (vec![1], vec![]));
-
-    // Once the session is learned the question is spent: a later miss on it starts unasked.
-    let again = relayed_payload(&stranger, &hop, 2)?;
-    let question = expect_held(receiver.arrive(origin_referenced(&again)?, 2u8, now_ms, true)?);
-    receiver.note_asked(question);
-    assert!(matches!(
-        receiver.announce(stranger.delegation(), now_ms)?,
-        Announcement::Admitted
-    ));
-    assert_eq!(released(&mut receiver, now_ms)?.len(), 1);
+    let leases = arrive(&mut receiver, sent(&mut sender, &payload, now_ms)?, now_ms)?;
+    assert_eq!(leases, vec![Confirmation {
+        digest: node.delegation().digest()?,
+        until_ms: now_ms + LEASE_MS,
+    }]);
     Ok(())
+}
+
+/// Law (lease, renewal): a reference that finds less than half a lease left renews it, and the
+/// sender learns the longer lease; one that finds more renews nothing.
+#[test]
+fn test_a_reference_renews_a_lease_with_less_than_half_left() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let node = session()?;
+    let digest = node.delegation().digest()?;
+    let payload = relayed_payload(&node, &node, 0)?;
+    let mut sender = AnnouncedDelegations::new();
+    let mut receiver = ReferencedDelegations::new();
+    for confirmation in arrive(&mut receiver, sent(&mut sender, &payload, now_ms)?, now_ms)? {
+        sender.acknowledge(GENERATION, confirmation.digest, confirmation.until_ms);
+    }
+
+    let early_ms = now_ms + LEASE_MS / 2 - 1;
+    let early = sent(&mut sender, &payload, early_ms)?;
+    assert!(resolved(&mut receiver, early, early_ms).renewals.is_empty());
+    let late_ms = now_ms + LEASE_MS / 2 + 1;
+    let late = sent(&mut sender, &payload, late_ms)?;
+    assert_eq!(resolved(&mut receiver, late, late_ms).renewals, vec![
+        Confirmation {
+            digest,
+            until_ms: late_ms + LEASE_MS,
+        }
+    ]);
+    Ok(())
+}
+
+/// Law (lease, grace and repair): a reference resolves up to `G` past its lease, and misses
+/// after; a miss names what it misses and resolves nothing.
+#[test]
+fn test_a_reference_resolves_within_the_grace_and_misses_after() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let node = session()?;
+    let digest = node.delegation().digest()?;
+    let payload = relayed_payload(&node, &node, 0)?;
+    let mut receiver = ReferencedDelegations::new();
+    let inline = received(&payload, payload.delegations().map(DelegationRef::inline))?;
+    arrive(&mut receiver, inline, now_ms)?;
+    let referenced = || -> Result<Box<WirePayload<'static>>> {
+        received(&payload, PerSlot {
+            origin: by_digest(&node.delegation())?,
+            hop: by_digest(&node.delegation())?,
+        })
+    };
+
+    let last_ms = now_ms + LEASE_MS + LEASE_GRACE_MS;
+    resolved(&mut receiver, referenced()?, last_ms);
+    // The reference at `last_ms` found less than half a lease left and renewed it, so judge a
+    // fresh table for the miss past the grace.
+    let mut fresh = ReferencedDelegations::new();
+    let inline = received(&payload, payload.delegations().map(DelegationRef::inline))?;
+    arrive(&mut fresh, inline, now_ms)?;
+    match fresh.resolve(referenced()?, last_ms + 1) {
+        Ok(_) => panic!("a reference past its lease and grace must miss"),
+        Err(missing) => assert_eq!(missing, Digests::from([digest])),
+    }
+    assert_eq!(fresh.known_len(), 0);
+    Ok(())
+}
+
+/// Law (lease, bound): a table full of live leases refuses to lease, and so to confirm, a new
+/// session, never evicting a live one; the origin slot leaves `LINK_PEER_RESERVE` entries to the
+/// hop slot; a lease that ended makes room again.
+#[test]
+fn test_a_full_table_refuses_new_leases_and_keeps_the_peer_reserve() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let hop = session()?;
+    let mut receiver = ReferencedDelegations::new();
+    let inline = |payload: &MessagePayload| {
+        received(payload, payload.delegations().map(DelegationRef::inline))
+    };
+    // The hop takes one entry; origins fill the rest of the origin share.
+    for _ in 0..(REFERENCED_TABLE_CAPACITY - LINK_PEER_RESERVE - 1) {
+        let payload = relayed_payload(&session()?, &hop, 0)?;
+        arrive(&mut receiver, inline(&payload)?, now_ms)?;
+    }
+    assert_eq!(
+        receiver.known_len(),
+        REFERENCED_TABLE_CAPACITY - LINK_PEER_RESERVE
+    );
+
+    let late_origin = session()?;
+    let refused = relayed_payload(&late_origin, &hop, 0)?;
+    let leases = arrive(&mut receiver, inline(&refused)?, now_ms)?;
+    assert!(!confirmed(&leases).contains(&late_origin.delegation().digest()?));
+    // The peer's own sessions still find room in the reserve.
+    let own = session()?;
+    let leases = arrive(
+        &mut receiver,
+        inline(&relayed_payload(&own, &own, 0)?)?,
+        now_ms,
+    )?;
+    assert!(confirmed(&leases).contains(&own.delegation().digest()?));
+
+    // Past every lease and its grace, the table makes room again.
+    let later_ms = now_ms + LEASE_MS + LEASE_GRACE_MS + 1;
+    let leases = arrive(&mut receiver, inline(&refused)?, later_ms)?;
+    assert!(confirmed(&leases).contains(&late_origin.delegation().digest()?));
+    Ok(())
+}
+
+/// Law (lease, soundness) as a seeded walk: a sender and a receiver exchange frames and leases
+/// over a link that loses, duplicates and reorders both, under more sessions than either table
+/// holds and a clock skew, with every transit within `Δ + G` less the skew. Every reference the
+/// sender makes resolves at the receiver: nothing is ever held or missed.
+#[test]
+fn test_an_honest_reference_never_misses_under_loss_reordering_and_pressure() -> Result<()> {
+    /// Sessions in play: more than both tables hold.
+    const ORIGINS: usize = REFERENCED_TABLE_CAPACITY + ANNOUNCED_TABLE_CAPACITY;
+    /// Steps of the walk.
+    const STEPS: usize = 4_000;
+    /// The receiver's clock runs this far ahead of the sender's.
+    const SKEW_MS: u128 = LEASE_GRACE_MS / 2;
+    /// The longest transit, so that transit plus skew stays under `Δ + G`.
+    const MAX_TRANSIT_MS: u128 = LEASE_MARGIN_MS + LEASE_GRACE_MS - SKEW_MS - 1;
+
+    let hop = session()?;
+    let payloads = (0..ORIGINS)
+        .map(|_| relayed_payload(&session()?, &hop, 0))
+        .collect::<Result<Vec<_>>>()?;
+    let start_ms = get_epoch_ms();
+    let mut sender = AnnouncedDelegations::new();
+    let mut receiver = ReferencedDelegations::new();
+    // In flight, toward the receiver and toward the sender, each with its arrival instant on
+    // the sender's clock.
+    let mut frames: Vec<(u128, Box<WirePayload<'static>>)> = Vec::new();
+    let mut leases: Vec<(u128, Confirmation)> = Vec::new();
+    let mut now_ms = start_ms;
+    let mut seed = 0x0908_u64;
+    let mut draw = |bound: u64| {
+        seed = splitmix64(seed);
+        seed % bound
+    };
+
+    for _ in 0..STEPS {
+        now_ms += u128::from(draw(5_000));
+        // Mostly a working set, sometimes a cold session, so both tables churn.
+        let index = if draw(4) == 0 {
+            usize::try_from(draw(ORIGINS as u64)).unwrap_or(0)
+        } else {
+            usize::try_from(draw(16)).unwrap_or(0)
+        };
+        if let Some(payload) = payloads.get(index) {
+            let transit = u128::from(draw(MAX_TRANSIT_MS as u64 + 1));
+            frames.push((now_ms + transit, sent(&mut sender, payload, now_ms)?));
+        }
+        // Deliver what has arrived, earliest first (varying transits reorder the frames), losing
+        // some; the receiver's clock only moves forward.
+        while let Some(position) = earliest_arrived(&frames, now_ms) {
+            let (at, frame) = frames.swap_remove(position);
+            if draw(10) == 0 {
+                continue;
+            }
+            let receiver_ms = at + SKEW_MS;
+            let ResolvedFrame {
+                payload,
+                encoding,
+                renewals,
+            } = match receiver.resolve(frame, receiver_ms) {
+                Ok(resolved) => resolved,
+                Err(missing) => panic!("an honest reference missed {missing:?}"),
+            };
+            let leased = receiver.admit_verified(&payload, encoding, receiver_ms)?;
+            for confirmation in renewals.into_iter().chain(leased) {
+                // A lease may be lost, duplicated, or delayed past later ones.
+                for _ in 0..draw(3) {
+                    let delay = u128::from(draw(MAX_TRANSIT_MS as u64 + 1));
+                    leases.push((at + delay, confirmation));
+                }
+            }
+        }
+        while let Some(position) = earliest_arrived(&leases, now_ms) {
+            let (_, confirmation) = leases.swap_remove(position);
+            sender.acknowledge(GENERATION, confirmation.digest, confirmation.until_ms);
+        }
+    }
+    assert!(receiver.known_len() <= REFERENCED_TABLE_CAPACITY);
+    Ok(())
+}
+
+/// The position of the earliest of `in_flight` that has arrived by `now_ms`.
+fn earliest_arrived<T>(in_flight: &[(u128, T)], now_ms: u128) -> Option<usize> {
+    in_flight
+        .iter()
+        .enumerate()
+        .filter(|(_, (at, _))| *at <= now_ms)
+        .min_by_key(|(_, (at, _))| *at)
+        .map(|(position, _)| position)
 }

@@ -31,41 +31,36 @@ re-encodes the origin slot for its own next link without touching the origin's s
 ## Scope: one link, one direction
 
 A link is one admitted connection generation between two nodes. Each direction keeps one bounded
-table, least recently referenced first out:
+table:
 
 | End | Table | Capacity | Populated by |
 | --- | --- | --- | --- |
-| sender | delegations it sent inline, and which of them the peer confirmed | 64 | its own frames; confirmations from the peer |
-| receiver | delegations this link carried inline | 128 | frames that verified, and solicited announcements whose delegation verified |
+| sender | delegations it sent inline, and the lease the peer granted each | 64 | its own frames; leases from the peer |
+| receiver | delegations this link carried inline, each under a lease it granted | 128 | frames that verified |
 
-The receiver keeps twice as many as the sender under the same least-recently-referenced order
-over the frames both ends saw: the sender touches a delegation on every frame it encodes, the
-receiver on every frame it resolved or verified. On a lossless link the sender therefore stops
-referencing a delegation (and sends it inline again) before the receiver could have forgotten it.
-A frame lost on the link touches the sender's order and not the receiver's, so under loss the
-two drift and the receiver may evict a delegation the sender still references; that miss is
-answered from the sender's table, which still holds it, at the cost of one round trip and no
-charge. A miss the sender cannot answer needs something outside the tables: the two ends
-disagreeing on expiry, or a peer that does not follow the protocol.
+The sender's table is a least-recently-referenced cache: what it forgets travels inline again.
+The receiver's table is not a cache. It never evicts a live lease to make room, and 8 of its
+128 entries are reserved for the link peer's own (hop) delegations, so relayed origins cannot
+push the peer's own session inline. A full table refuses to lease a new delegation, and the
+sender keeps sending it inline, which is always admissible.
 
 Consequences of the scope:
 
 - Only the peer at the other end of a connection can populate a receiver table, and only with
-  its own bounded share. Nothing an unrelated party says is cached, and an announcement nobody
-  asked for is ignored.
+  delegations of its own frames that verified. Nothing an unrelated party says is cached.
 - A relay keeps the origin delegations of the traffic it forwards in the table of each outgoing
   link. A destination that never met the origin gets the origin's delegation inline from its last
-  hop until it confirms it. No node ever asks the origin for anything.
+  hop until it leases it. No node ever asks the origin for anything.
 - Both tables are scoped to the connection generation: the receiver's lives in the callback
   of one connection, the sender's is emptied by the first frame of a newer generation (and
   survives a replacement of the outbound worker under an unchanged generation). A restarted
   node and its peer start from empty tables together; there is no state to resynchronise, and
   a control frame is emitted only on the generation it was judged on, so a late one never
-  confirms or disclaims on a generation whose tables never saw it.
-- Only frames on the link teach the link's table, and what a verified frame teaches is applied
-  (confirmed to the peer, held frames released) before the frame itself is gated for
-  admission. A frame from any other peer, or on a callback bound to no handshake, is judged
-  self-contained: a reference in it is refused, and it teaches nothing.
+  leases or disclaims on a generation whose tables never saw it.
+- Only frames on the link teach the link's table, and what a verified frame teaches is leased
+  and confirmed to the peer before the frame itself is gated for admission. A frame from any
+  other peer, or on a callback bound to no handshake, is judged self-contained: a reference in
+  it is refused, and it teaches nothing.
 
 ## The link is a datagram link
 
@@ -73,80 +68,73 @@ Nothing assumes that frames arrive in order, or at all. WebRTC data channels hap
 reliable and ordered; the protocol does not use that, so a transport built on QUIC datagrams or
 plain UDP would carry it unchanged.
 
-The sender switches a delegation from inline to reference only after the receiver has confirmed it:
+The sender switches a delegation from inline to reference only under a lease the receiver granted:
 
 ```text
 sender                                      receiver
-  frame, delegation s inline        ───────▶   verifies; learns s
-                                 ◀───────   Known(digest(s))
+  frame, delegation s inline        ───────▶   verifies; leases s
+                                 ◀───────   Known(digest(s), until)
   frame, Digest(s)               ───────▶   resolves from its table
 ```
 
-- Until the confirmation arrives, every frame carries `s` inline, and the receiver confirms
-  every inline arrival that verified. A lost inline frame, a lost confirmation, or any
-  reordering costs inline frames, never a stall and never a miss: the reference is sent after
-  the confirmation, which was sent after the delegation was learned.
-- A reference therefore misses only when the receiver has *forgotten* the delegation (capacity
-  eviction, expiry). That is repaired on the link.
+Until the lease arrives, every frame carries `s` inline, and the receiver confirms every inline
+arrival that verified and that it holds. A lost inline frame, a lost lease, or any reordering
+costs inline frames, never a stall.
+
+## Lease
+
+The receiver leases `s` only once `s` is resident in its table, with
+`Known(digest(s), until)`, where `until = min(exp(s), now + 5 min)` on the receiver's clock.
+Write `Δ` and `G` for one delivery bound each (25 s).
+
+- The receiver keeps `s` until `until + G`. `until` never decreases.
+- The sender references `s` only while `now + Δ < until_S`, where `until_S` is the largest
+  `until` it was sent. Otherwise it sends `s` inline.
+- A reference that finds less than half a lease left renews it, and the receiver sends the
+  new `Known`.
+
+The sender learns only values the receiver granted, and a stale `Known` carries an older,
+smaller `until`, so `until_S ≤ until_R`. A reference therefore resolves whenever its transit
+plus the two clocks' skew stays under `Δ + G`, on every interleaving and every loss. An unused
+lease leaves the receiver's table within 5 min plus `G`, which bounds what one link pins.
 
 ## Miss
 
+A reference the receiver does not hold is a miss. On an honest link it can only come from this
+end's clock or a fault, so it is not charged:
+
 ```text
 receiver                                   sender
-  frame references d, d unknown
-  hold the frame; Request(d)   ───────▶   look d up in the sender table
-                               ◀───────   Announce(delegation)  or  Unknown(d)
-  announce: delegation verifies → release the frames that now resolve
-  unknown / refused delegation  → fail the frames that await d
+  frame references d, d not held
+  drop the frame, uncharged; Unknown(d)  ───────▶   d travels inline again
 ```
 
-- Held frames are independent of everything that resolves: a frame that resolves is never
-  queued behind one that does not, and a held frame never waits for one held before it,
-  because the link promises no order to preserve. Among the held frames that resolve at one
-  instant, when a later frame or an announcement teaches the delegation they await, the earliest
-  arrival leaves first; nothing downstream may rely on more than this. In particular, frames of
-  the held frame's traffic class that arrive after it may pass transaction-replay admission
-  first, and a held frame released after a replay window's worth of them is rejected as stale
-  (see [Transaction Replay Protection](transaction-replay.md); removing this loss is tracked in
-  #908).
-- The hold keeps at most 16 frames per connection (half the pre-admission hold, so the two
-  holds together leave a quarter of the transport's per-peer frames for the control frames that
-  release them), each for at most twice the transport's delivery timeout plus one period of the
-  inbound actor's periodic cleanup, which drops what waited longer, or whose proof lapsed: a
-  frame a peer never backs occupies this end for a bounded time whatever lifetime its proof
-  claims.
-- Every held frame asks for its own missing digests once, on arrival, so one lost question is
-  repaired by the next frame that misses the same digest. A frame that finds the hold full is
-  dropped, and the oldest held frame's question is asked again. The sender answers each
-  question with exactly one frame.
-- A frame the peer was asked about and did not back is charged to the peer as a receive
-  failure, as a frame that fails verification is: the peer disclaimed the delegation, announced a
-  delegation that does not verify, let the frame wait past the hold timeout, or the frame
-  failed on release. A frame that finds the hold full is a loss at this end's capacity, like a
-  frame the pre-admission hold cannot take, and is not charged: the peer has not yet had its
-  round trip to answer. Nor is a frame whose question this end never managed to send (the
-  budget below was spent, or the generation ended): it is swept uncharged, since the peer was
-  never asked. A frame released after its connection generation was superseded is dropped,
-  never delivered.
+Nothing is held. A dishonest sender gains nothing by missing: its own frame is dropped. Since no
+frame waits on a repair, the frames of one lane reach the logical stage in their arrival order
+(#908; see [Transaction Replay Protection](transaction-replay.md)).
 
-Link-control frames (`Known`, `Request`, `Announce`, `Unknown`) are unsigned and idempotent.
-They are meaningful only on the authenticated connection generation they arrive on, an
-announced delegation authenticates itself through its account signature, and a digest names a
-value rather than asserting one; a duplicate or a stale one changes nothing. They are emitted
-in a task of their own (refused, never run inline, when no runtime can carry one), never
-awaited by the transport lane whose frame caused them, and never through the transfer lanes. Each inbound
-frame causes at most two of them, and at most 128 are in flight to one peer at a time, twice
-the raw frames that peer may have in flight at this end's transport; a send beyond that budget
-is dropped and repeated by the next frame that misses or teaches the same delegation. So what this
-end spends on a peer's link control is bounded by the frames it accepts from that peer. The
-sender's table and this budget survive a replacement of the outbound worker under an unchanged
-generation.
+Link-control frames (`Known`, `Unknown`) are unsigned and idempotent. They are meaningful only
+on the authenticated connection generation they arrive on, a lease is granted only for a
+delegation that verified, and a digest names a value rather than asserting one; a duplicate or a
+stale one changes nothing. They travel on the DHT-control lane, in a task of their own (refused,
+never run inline, when no runtime can carry one), never awaited by the transport lane whose frame
+caused them. A send waits for its lane's credit at most one delivery bound, and is then dropped:
+a lost lease is granted again by the next inline frame or renewing reference, a lost disclaimer
+is sent again by the next miss. Each inbound frame causes at most two of them, and at most 128
+are in flight to one peer at a time, twice the raw frames that peer may have in flight at this
+end's transport; a send beyond that budget is dropped and repeated by the next frame that misses
+or teaches the same delegation. So what this end spends on a peer's link control is bounded by
+the frames it accepts from that peer. The sender's table and this budget survive a replacement
+of the outbound worker under an unchanged generation.
 
 ## Expiry
 
-An expired delegation is absent from both tables. A reference to it is a miss, and re-announcing
-the expired delegation is refused by the same `Delegation::verify_delegator_authorization_at` that refuses it inline.
-Expiry therefore forces a fresh delegation to be announced; it never resurrects an old one.
+An expired delegation is absent from both tables, and a lease never outlives its delegation.
+The sender refuses to send any frame with a delegation that expires within `Δ`, so no frame needs
+a delegation past its expiry in flight. An origin delegation that expired in flight, within `G`
+of arrival, is refused without charging the hop that carried it: the hop answers only for its
+own delegation. A fresh delegation must travel inline and verify like any other; expiry never
+resurrects an old one.
 
 ## Self-contained contexts
 

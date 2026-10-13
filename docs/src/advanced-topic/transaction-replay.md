@@ -35,12 +35,9 @@ single stream shared by every class did, once one lane's backlog fell behind ano
 and so would one class spread over several channels, once a stalled channel let later sequences
 of the class overtake it by more than the window.
 
-The order holds for frames that resolve on arrival. A frame whose delegation reference misses
-(the receiver forgot the delegation to capacity eviction or expiry) is held for one repair round
-trip and released independently of later frames, because the session link promises no order
-among held frames (see [Delegation References](delegation-references.md)). If a window's worth
-of its class is admitted meanwhile, the released frame is rejected as `Stale`: one frame lost
-and counted, never a false admission. Removing this loss is tracked in #908.
+No frame is held on the way (#908): a frame whose delegation reference misses is dropped, never
+delivered late, so the frames of one lane reach admission in arrival order (see [Delegation
+References](delegation-references.md)).
 
 This assumes a class's transactions reach the scheduler in signing order, as they do from one
 sending task.

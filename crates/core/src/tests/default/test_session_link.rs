@@ -32,6 +32,10 @@ use crate::tests::TEST_NETWORK_ID;
 /// traffic to interleave.
 const SWITCH_WITHIN_MESSAGES: usize = 8;
 
+/// A same-class backlog longer than the replay window (`TRANSACTION_REPLAY_WINDOW`, 32): a
+/// frame overtaken by this many later frames of its class would be refused as stale.
+const BACKLOG_BEYOND_REPLAY_WINDOW: usize = 40;
+
 /// The digests that went by reference on `link` so far, per slot.
 fn referenced_on(link: LinkDirection) -> PerSlot<Vec<DelegationDigest>> {
     referenced_slots_for_test()
@@ -42,13 +46,13 @@ fn referenced_on(link: LinkDirection) -> PerSlot<Vec<DelegationDigest>> {
         })
 }
 
-/// Whether any question was asked on this test thread since `dispatched_before` control frames
-/// had been dispatched.
-fn questions_asked_since(dispatched_before: usize) -> bool {
+/// Whether any reference missed on this test thread since `dispatched_before` control frames had
+/// been dispatched: a miss is answered with a disclaimer.
+fn misses_since(dispatched_before: usize) -> bool {
     dispatched_link_control_for_test()
         .split_off(dispatched_before)
         .iter()
-        .any(|(_, control)| matches!(control, LinkControl::Request(_)))
+        .any(|(_, control)| matches!(control, LinkControl::Unknown(_)))
 }
 
 /// The next custom message at `node` that `origin` signed and that carries `data`, skipping
@@ -67,6 +71,27 @@ async fn next_custom_message_from(node: &Node, origin: Did, data: &[u8]) -> Resu
             return Ok(payload);
         }
     }
+}
+
+/// The data of the next `count` custom messages at `node` that `origin` signed, in arrival
+/// order, skipping the overlay's own traffic.
+async fn custom_data_from(node: &Node, origin: Did, count: usize) -> Result<Vec<Vec<u8>>> {
+    let mut scan = node.message_scan().await;
+    let mut arrived = Vec::with_capacity(count);
+    while arrived.len() < count {
+        let payload = scan.next().await.ok_or_else(|| {
+            Error::InvalidMessage("node inbox closed before the backlog arrived".to_string())
+        })?;
+        if payload.transaction.signer() != origin {
+            continue;
+        }
+        if let Ok(Message::CustomMessage(CustomMessage(custom))) =
+            payload.transaction.data::<Message>()
+        {
+            arrived.push(custom);
+        }
+    }
+    Ok(arrived)
 }
 
 /// Connect `left` and `right` and return once each has admitted the other: the join traffic has
@@ -100,10 +125,10 @@ async fn relay_custom(
 }
 
 /// Acceptance, end to end: two swarms exchange the join traffic and then messages. The link
-/// reaches references on its own (the receiver confirms what it verified, the sender switches),
-/// and no question is ever asked, because nothing was forgotten.
+/// reaches references on its own (the receiver leases what it verified, the sender switches),
+/// and no reference ever misses.
 #[tokio::test]
-async fn test_link_reaches_references_without_a_question() -> Result<()> {
+async fn test_link_reaches_references_without_a_miss() -> Result<()> {
     let left = prepare_node(SecretKey::random()).await;
     let right = prepare_node(SecretKey::random()).await;
     let dispatched_before = dispatched_link_control_for_test().len();
@@ -125,16 +150,16 @@ async fn test_link_reaches_references_without_a_question() -> Result<()> {
         next_custom_message_from(&right, left.did(), b"steady").await?;
         sent += 1;
     }
-    assert!(!questions_asked_since(dispatched_before));
+    assert!(!misses_since(dispatched_before));
     Ok(())
 }
 
 /// The relayed case the design turns on: a destination that never met the origin verifies the
 /// origin's proof at no extra cost, because the last hop sends the origin's session inline until
-/// the destination confirms it, and by reference afterwards. No question is asked anywhere on
-/// the path.
+/// the destination leases it, and by reference afterwards. No reference misses anywhere on the
+/// path.
 #[tokio::test]
-async fn test_relayed_origin_session_needs_no_question() -> Result<()> {
+async fn test_relayed_origin_session_never_misses() -> Result<()> {
     let origin = prepare_node(SecretKey::random()).await;
     let relay = prepare_node(SecretKey::random()).await;
     let destination = prepare_node(SecretKey::random()).await;
@@ -145,7 +170,7 @@ async fn test_relayed_origin_session_needs_no_question() -> Result<()> {
     let first = relay_custom(&origin, &relay, &destination, b"relayed").await?;
     let origin_digest = first.transaction.verification.delegation.digest()?;
 
-    // The relay forwards the origin's session inline until the destination confirms it, then
+    // The relay forwards the origin's session inline until the destination leases it, then
     // by reference: within a few messages a frame on the last hop carries the origin's own
     // session, not one of the relay's, as a digest in its origin slot.
     let mut sent = 1;
@@ -157,6 +182,38 @@ async fn test_relayed_origin_session_needs_no_question() -> Result<()> {
         relay_custom(&origin, &relay, &destination, b"relayed").await?;
         sent += 1;
     }
-    assert!(!questions_asked_since(dispatched_before));
+    assert!(!misses_since(dispatched_before));
+    Ok(())
+}
+
+/// Acceptance (#908): a same-class backlog longer than the replay window, sent back to back
+/// while the last hop switches the origin's new session from inline to a reference, reaches
+/// the destination whole and in order, and no reference misses. Nothing is held on the link,
+/// so no frame of the backlog is overtaken and lost as stale.
+#[tokio::test]
+async fn test_a_backlog_across_a_session_switch_loses_no_frame() -> Result<()> {
+    let origin = prepare_node(SecretKey::random()).await;
+    let relay = prepare_node(SecretKey::random()).await;
+    let destination = prepare_node(SecretKey::random()).await;
+    establish_admitted_link(&origin, &relay).await?;
+    establish_admitted_link(&relay, &destination).await?;
+    let dispatched_before = dispatched_link_control_for_test().len();
+
+    let backlog = (0..BACKLOG_BEYOND_REPLAY_WINDOW)
+        .map(|index| format!("backlog {index}").into_bytes())
+        .collect::<Vec<_>>();
+    for data in &backlog {
+        origin
+            .swarm
+            .transport
+            .protocol_egress()
+            .send_message_by_hop(Message::custom(data)?, destination.did(), relay.did())
+            .await?;
+    }
+    assert_eq!(
+        custom_data_from(&destination, origin.did(), backlog.len()).await?,
+        backlog
+    );
+    assert!(!misses_since(dispatched_before));
     Ok(())
 }

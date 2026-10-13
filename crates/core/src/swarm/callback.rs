@@ -16,7 +16,6 @@ use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::swarm::session_link::ReferencedDelegations;
 use crate::swarm::transport::PendingConnectionAttempt;
-use crate::swarm::transport::SessionHoldPermit;
 use crate::swarm::transport::SwarmTransport;
 
 mod inbound;
@@ -123,16 +122,12 @@ pub(super) struct InboundProcessor {
     /// Verified frames that arrived before this end admitted the connection; bounded by the
     /// per-peer inbound capacity (32 frames). A held frame keeps its transport credit, so this
     /// hold occupies at most half of the raw frames the transport admits from one peer
-    /// ([`INBOUND_PEER_FRAME_CAPACITY`](rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY));
-    /// a frame in the session hold below gives its credit back and is bounded by that hold's
-    /// own capacity and the node's session-hold budget instead.
+    /// ([`INBOUND_PEER_FRAME_CAPACITY`](rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY)).
     pre_admission: Arc<Mutex<PreAdmissionHold<HeldInboundFrame>>>,
-    /// The receiving end of this connection's delegation references: the sessions the peer has
-    /// announced on it and the frames waiting for one. It lives and dies with the connection;
-    /// its hold is bounded by [`SESSION_HOLD_CAPACITY`] frames and by
-    /// [`SESSION_HOLD_TIMEOUT`](crate::swarm::transport::SESSION_HOLD_TIMEOUT), swept by the
-    /// inbound actor's periodic cleanup.
-    session_link: Arc<Mutex<ReferencedDelegations<InboundFrameLease>>>,
+    /// The receiving end of this connection's delegation references: the sessions the peer
+    /// carried inline on it, each under a lease this end granted. It lives and dies with the
+    /// connection, and holds no frame.
+    session_link: Arc<Mutex<ReferencedDelegations>>,
 }
 
 /// What the transport handed over with one frame and takes back when the frame is done: the
@@ -143,8 +138,6 @@ pub(super) struct InboundFrameLease {
     transport_credit: Option<InboundCreditLease>,
     /// The transport lane the frame arrived on, whose credit it took.
     carrier: Option<ChannelLane>,
-    /// The frame's place in the node's session-hold budget, while the session link holds it.
-    held: Option<SessionHoldPermit>,
     /// Test builds: the frame's conservation witness, released with the lease.
     #[cfg(test)]
     in_flight: crate::swarm::transport::FrameInFlight,
@@ -160,41 +153,19 @@ struct HeldInboundFrame {
     lease: InboundFrameLease,
 }
 
-/// Frames one connection may hold for a session the peer has not backed yet: half the
-/// pre-admission hold. A held frame has given its transport credit back (see
-/// `submit_inbound_message`), so the hold never occupies the lane window that carries the
-/// link-control answer releasing it; the holds of every connection together are bounded by the
-/// node's [`SessionHoldBudget`](crate::swarm::transport::SessionHoldBudget).
-pub(super) const SESSION_HOLD_CAPACITY: usize = inbound::peer_capacity() / 2;
-
-/// Where a verified frame comes from, which decides how far its delivery is waited for and
-/// what its learning does.
+/// Where a verified frame comes from, which decides how far its delivery is waited for.
 ///
 /// A frame the transport just handed over is awaited to its logical completion, so the
 /// transport lane that carried it paces this end: the lane's drainer hands over the lane's
-/// next frame only after this one (the transport's read loop itself never waits on core), and
-/// what the frame teaches the link releases the held frames that awaited it. A frame released
-/// from a hold is waited for only until the inbound actor owns it, so releasing many frames at
-/// once does not stall the releasing task behind each one's handlers, and what it teaches is
-/// confirmed but releases nothing itself: the release that freed it re-scans the hold.
+/// next frame only after this one (the transport's read loop itself never waits on core). A
+/// frame released from the pre-admission hold is waited for only until the inbound actor owns
+/// it, so draining the hold does not stall the draining task behind each one's handlers.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum FrameProvenance {
     /// Handed over by the transport just now.
     Arrived,
-    /// Left the pre-admission hold or the session hold.
+    /// Left the pre-admission hold.
     Released,
-}
-
-impl FrameProvenance {
-    /// Whether what the frame teaches the link releases held frames: an arrived frame's
-    /// learning does; a released frame's learning is applied by the release that freed it,
-    /// which re-scans the hold.
-    pub(super) const fn releases_what_it_teaches(self) -> bool {
-        match self {
-            Self::Arrived => true,
-            Self::Released => false,
-        }
-    }
 }
 
 /// How the pending handshake bound to a callback disposes of a frame from `peer`.

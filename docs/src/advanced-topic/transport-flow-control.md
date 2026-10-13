@@ -2,11 +2,9 @@
 
 Every connection carries four lanes, each pinned to one ordered data channel, and every lane
 is credit flow controlled (#924). Receive-side admission is lossless: no honest frame is refused
-for want of credit or mailbox capacity. Overload reaches the sender as backpressure instead. Two
-holds of core are bounded on their own and do drop: a frame that finds the session-link hold full
-(it waits for a delegation the peer has not backed; the holds of every link together keep at most
-256 frames) or the pre-admission hold full (it arrived before this end admitted the connection)
-is dropped, uncharged.
+for want of credit or mailbox capacity. Overload reaches the sender as backpressure instead. One
+hold of core is bounded on its own and does drop: a frame that finds the pre-admission hold full
+(it arrived before this end admitted the connection) is dropped, uncharged.
 
 ## Credit
 
@@ -40,8 +38,7 @@ What a node holds of received frames is bounded twice:
 - **Hard, per connection.** A connection holds at most 4 lanes × 16 frames × 64 KiB = 4 MiB at
   the receiver under credit. Connection admission keeps at most `2 × (160 + successors + 1)`
   connections (328 with the default 3 successors), so a node holds at most about 1.3 GiB, and
-  that only if every connection fills the credit it holds at once. Session-link holds add at
-  most 256 frames (16 MiB) across the node.
+  that only if every connection fills the credit it holds at once.
 - **Soft, per node.** While the frames a node's connections hold together exceed 16 MiB
   (`NODE_RECEIVE_SOFT_LIMIT_BYTES`), no lane but the priority lane advertises new credit; a
   lane that releases a batch meanwhile defers its advertisement, and the release that brings
@@ -89,9 +86,9 @@ checks these laws over credit, lanes, the application inbox and a third peer, an
 design they replace.
 
 A wait that pins one of the sender's budgets is bounded by what that budget is for: a
-link-control frame, which holds a link-control permit, waits at most the session hold, after
-which the frame it would answer is gone, and is then dropped; a scheduled transfer is bounded
-by its own send deadline.
+link-control frame, which holds a link-control permit, waits at most one delivery bound, and
+is then dropped, since the next frame that misses or teaches its delegation repeats it; a
+scheduled transfer is bounded by its own send deadline.
 
 A remote-created data channel is admitted only by the lane its label names, and only once per
 lane.

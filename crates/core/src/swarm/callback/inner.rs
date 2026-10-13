@@ -27,6 +27,7 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::message::MessagePayload;
 use crate::swarm::detached::run_detached_or_inline;
+use crate::swarm::session_link::LEASE_GRACE_MS;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -81,12 +82,6 @@ impl SwarmTransportCallback {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn pre_admission_held_count_for_test(&self) -> usize {
         self.processor.pre_admission().len()
-    }
-
-    /// The frames held until the peer supplies a session they reference.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn session_hold_count_for_test(&self) -> usize {
-        self.processor.session_link().held_len()
     }
 
     /// Test builds: the inbound mailbox, whose probes witness admission, waiting, hand-off and
@@ -310,6 +305,17 @@ impl SwarmTransportCallback {
         payload: MessagePayload,
         wire_len: usize,
     ) -> Result<PreparedInboundFrame, TransportCallbackError> {
+        // Law (expiry in flight): a frame is sent only with delegations that outlive `Δ`, so an
+        // origin delegation that expired less than `G` ago expired in flight, beyond the hop's
+        // control: the frame is refused without charging the hop, which answers only for its
+        // own delegation (see the expiry law of `swarm::session_link`).
+        if origin_expired_in_flight(&payload, self.processor.now_ms()) {
+            tracing::debug!(
+                peer = ?peer,
+                "dropping message; its origin delegation expired in flight"
+            );
+            return Err(Error::DelegationExpired.into());
+        }
         let prepared = prepare_resolved_frame(
             self.processor.logical.transport.network_id,
             peer,
@@ -582,4 +588,14 @@ impl TransportCallback for SwarmTransportCallback {
         self.retire_on_terminal(did, "data-channel close").await?;
         Ok(())
     }
+}
+
+/// Whether `payload`'s origin delegation, not the hop's own, expired within the lease grace of
+/// `now_ms`: what a sender's margin makes possible only by expiry in flight.
+fn origin_expired_in_flight(payload: &MessagePayload, now_ms: u128) -> bool {
+    let delegations = payload.delegations();
+    let expires_at_ms = delegations.origin.expires_at_ms();
+    delegations.origin != delegations.hop
+        && expires_at_ms <= now_ms
+        && now_ms <= expires_at_ms + LEASE_GRACE_MS
 }

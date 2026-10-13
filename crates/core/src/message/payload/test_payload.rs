@@ -362,7 +362,11 @@ fn test_self_contained_decoding_refuses_link_only_frames() -> Result<()> {
         Err(Error::DelegationReferenceUnresolved(digest)) if digest == sessions.origin.digest()?
     ));
 
-    let control = super::LinkControl::Known(sessions.hop.digest()?).to_wire()?;
+    let control = super::LinkControl::Known {
+        digest: sessions.hop.digest()?,
+        until_ms: 0,
+    }
+    .to_wire()?;
     assert!(matches!(
         MessagePayload::from_wire(&control),
         Err(Error::LinkControlOutsideLink)

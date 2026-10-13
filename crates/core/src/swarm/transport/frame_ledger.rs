@@ -31,8 +31,8 @@
 //!
 //! Coverage law: a frame that arrived is `in_flight` from before it is decoded until its lease
 //! is released at the inbound actor's handoff, where the actor's capacity permit already covers
-//! it. A frame dropped anywhere between (malformed, refused, superseded, held and swept) is
-//! released there, so every drop balances and no frame falls between two witnesses.
+//! it. A frame dropped anywhere between (malformed, refused, superseded, missed) is released
+//! there, so every drop balances and no frame falls between two witnesses.
 //!
 //! Every transition records activity, so an activity-woken wait observes each of them.
 

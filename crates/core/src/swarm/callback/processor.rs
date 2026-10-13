@@ -7,7 +7,6 @@ use super::inbound;
 use super::inbound::ReassemblyClock;
 use super::pre_admission::PreAdmissionHold;
 use super::HeldInboundFrame;
-use super::InboundFrameLease;
 use super::InboundGate;
 use super::InboundLane;
 use super::InboundProcessor;
@@ -21,10 +20,8 @@ use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::swarm::session_link::ReferencedDelegations;
-use crate::swarm::session_link::Swept;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
-use crate::swarm::transport::SESSION_HOLD_TIMEOUT;
 
 fn log_inbound_verification_failure(
     peer: Option<Did>,
@@ -46,28 +43,6 @@ fn log_inbound_verification_failure(
     );
 }
 
-/// Why the link stage drops a held frame and charges the peer for it: the peer did not back a
-/// session it referenced. See the charging law of [`link_stage`](super::link_stage).
-#[derive(Clone, Copy, Debug)]
-pub(super) enum HeldFrameDrop {
-    /// The peer disclaimed the session.
-    Disclaimed,
-    /// The peer announced a delegation that does not verify.
-    AnnouncementRefused,
-    /// The peer was asked and did not answer within the hold timeout.
-    HoldTimeout,
-}
-
-impl std::fmt::Display for HeldFrameDrop {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Disclaimed => "the peer disclaimed the session it referenced",
-            Self::AnnouncementRefused => "the peer announced a delegation that does not verify",
-            Self::HoldTimeout => "the peer did not supply the session within the hold timeout",
-        })
-    }
-}
-
 impl InboundProcessor {
     /// The connection stage of one connection over `transport`, judging reassembly timeouts by
     /// `reassembly_clock`, with no connection attempt bound yet and empty holds.
@@ -82,15 +57,12 @@ impl InboundProcessor {
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),
             pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
-            session_link: Arc::new(Mutex::new(ReferencedDelegations::new(
-                super::SESSION_HOLD_CAPACITY,
-                SESSION_HOLD_TIMEOUT.as_millis(),
-            ))),
+            session_link: Arc::new(Mutex::new(ReferencedDelegations::new())),
         }
     }
 
-    /// The instant every link step is judged at: the inbound clock, so a test can drive the
-    /// hold timeout deterministically.
+    /// The instant every link step is judged at: the inbound clock, so a test can drive lease
+    /// and delegation expiry deterministically.
     pub(super) fn now_ms(&self) -> u128 {
         self.reassembly_clock.now_ms()
     }
@@ -115,56 +87,11 @@ impl InboundProcessor {
         self.record_receive_failure(peer, authentication).await;
     }
 
-    /// Charge `peer` one receive failure per frame in `dropped`, all under its authentication
-    /// as of now, each for `reason`: the charging law of [`link_stage`](super::link_stage) in
-    /// one place. Dropping the leases is the other effect.
-    pub(super) async fn charge_dropped_frames(
-        &self,
-        peer: Option<Did>,
-        dropped: Vec<InboundFrameLease>,
-        reason: HeldFrameDrop,
-    ) {
-        let authentication = self.authentication_of(peer);
-        let count = dropped.len();
-        drop(dropped);
-        for _ in 0..count {
-            tracing::debug!(peer = ?peer, "dropping message: {reason}");
-            self.record_receive_failure(peer, authentication).await;
-        }
-    }
-
-    /// Drop every frame held past the session-hold timeout, or whose proof lapsed, as of
-    /// `now_ms`, charging each to the link's peer: it referenced a session it did not back in
-    /// time. The link's peer is the bound handshake's, the one identity every held frame was
-    /// admitted to the hold under (see the link law of
-    /// [`link_stage`](super::link_stage)).
-    pub(super) async fn sweep_session_hold_at(&self, now_ms: u128) {
-        let Swept {
-            unanswered,
-            unasked,
-        } = self.session_link().sweep(now_ms);
-        let peer = self.pending_attempt().map(PendingConnectionAttempt::peer);
-        if !unasked.is_empty() {
-            tracing::debug!(
-                peer = ?peer,
-                dropped = unasked.len(),
-                "dropping messages held for a session this end never managed to ask about"
-            );
-            drop(unasked);
-        }
-        if !unanswered.is_empty() {
-            self.charge_dropped_frames(peer, unanswered, HeldFrameDrop::HoldTimeout)
-                .await;
-        }
-    }
-
     /// The receiving end of this connection's delegation references.
     ///
     /// Lock law: held for one pure step and never across a suspension point; a poisoned lock
     /// still guards a well-formed state, since no step panics between two writes.
-    pub(super) fn session_link(
-        &self,
-    ) -> std::sync::MutexGuard<'_, ReferencedDelegations<InboundFrameLease>> {
+    pub(super) fn session_link(&self) -> std::sync::MutexGuard<'_, ReferencedDelegations> {
         self.session_link
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
