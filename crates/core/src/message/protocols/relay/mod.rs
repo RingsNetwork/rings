@@ -172,11 +172,11 @@ impl MessageRelay {
     /// The carrier `current` sends on toward `self.destination` after the delivery decision
     /// `hop`.
     ///
-    /// Pre: `self` was addressed to `current`; a carrier retracing a path takes exactly its
-    /// [`Self::return_hop`].
+    /// Pre: `self` was addressed to `current`; a carrier retracing a path takes exactly the
+    /// path's next return hop.
     /// Post: `Ok` spends exactly one forward, sets `stage = hop.stage`, and records `current` on
-    /// a signaling path ([`SignalingPath::forwarded`]); `Err(RelayHopBudgetExhausted)` is the
-    /// drop of a payload that has taken every forward it was given.
+    /// a signaling path; `Err(RelayHopBudgetExhausted)` is the drop of a payload that has taken
+    /// every forward it was given.
     pub fn forward(&self, current: Did, hop: NextHop) -> Result<Self> {
         self.validate(current)?;
         if self
