@@ -352,17 +352,21 @@ fn test_self_contained_decoding_refuses_link_only_frames() -> Result<()> {
     let next_hop = SecretKey::random().address().into();
     let payload = new_test_payload(next_hop);
     let sessions = payload.delegations();
-    let referenced = super::WirePayload::view(&payload, super::PerSlot {
-        origin: super::DelegationRef::Digest(sessions.origin.digest()?),
-        hop: super::DelegationRef::Inline(std::borrow::Cow::Borrowed(sessions.hop)),
-    })
+    let referenced = super::WirePayload::encoded(&payload, super::PerSlot {
+        origin: super::SlotEncoding::Referenced,
+        hop: super::SlotEncoding::Inline,
+    })?
     .to_wire()?;
     assert!(matches!(
         MessagePayload::from_wire(&referenced),
         Err(Error::DelegationReferenceUnresolved(digest)) if digest == sessions.origin.digest()?
     ));
 
-    let control = super::LinkControl::Known(sessions.hop.digest()?).to_wire()?;
+    let control = super::LinkControl::Known {
+        digest: sessions.hop.digest()?,
+        remaining_ms: 0,
+    }
+    .to_wire()?;
     assert!(matches!(
         MessagePayload::from_wire(&control),
         Err(Error::LinkControlOutsideLink)

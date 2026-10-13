@@ -123,8 +123,8 @@ type InboundReply = oneshot::Sender<Result<()>>;
 /// stall the others, lane 0 included; the composed liveness model refutes that design
 /// (`HandOffWithoutAwait`). The dummy transport's "delivered = processed" rests on it too.
 ///
-/// A frame released from a hold is submitted with [`Self::LogHeld`] and is not paced: the
-/// holds bound how many are released, once, at admission or when the session is learned.
+/// A frame released from the pre-admission hold is submitted with [`Self::LogHeld`] and is not
+/// paced: the hold bounds how many are released, once, at admission.
 enum InboundCompletion {
     /// Reply with the outcome once the event's logical processing is done.
     Await(InboundReply),
@@ -271,7 +271,6 @@ impl InboundMailbox {
                     bytes,
                     transport_credit,
                     carrier,
-                    held: _,
                     #[cfg(test)]
                     in_flight,
                 },
@@ -667,7 +666,6 @@ impl InboundActor {
     async fn cleanup_expired_reassembly(&mut self) {
         let now_ms = self.reassembly_clock.now_ms();
         self.processor.remove_expired_reassembly_at(now_ms).await;
-        self.processor.sweep_session_hold_at(now_ms).await;
         self.next_reassembly_cleanup = Instant::now() + REASSEMBLY_CLEANUP_INTERVAL;
         self.cleanup_passes.bump();
     }
@@ -814,7 +812,7 @@ async fn process_logical_message(
 }
 
 /// Report an event's logical `result` as its `completion` asks: to the awaiting drainer, or to
-/// the log for a message released from a hold, which nobody awaits.
+/// the log for a message released from the pre-admission hold, which nobody awaits.
 fn finish_completion(completion: InboundCompletion, result: Result<()>) {
     match completion {
         InboundCompletion::Await(reply) => {
@@ -825,7 +823,7 @@ fn finish_completion(completion: InboundCompletion, result: Result<()>) {
                 tracing::warn!(
                     peer = %peer,
                     error = ?error,
-                    "failed to deliver a message released from a hold"
+                    "failed to deliver a message released from the pre-admission hold"
                 );
             }
         }

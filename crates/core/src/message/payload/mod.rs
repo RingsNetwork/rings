@@ -329,9 +329,9 @@ impl MessagePayload {
     /// Deserializes a self-contained `MessagePayload` from the Rings wire encoding: a payload
     /// frame with both sessions inline.
     ///
-    /// A frame that references a session is meaningful only on the link that announced it, and
-    /// is refused here with [`Error::DelegationReferenceUnresolved`]; a link resolves such frames
-    /// before they reach a `MessagePayload`.
+    /// A frame that references a session is meaningful only on the link that carried it inline,
+    /// and is refused here with [`Error::DelegationReferenceUnresolved`]; a link resolves such
+    /// frames before they reach a `MessagePayload`.
     pub fn from_wire(data: &[u8]) -> Result<Self> {
         match LinkFrame::from_wire(data)? {
             LinkFrame::Payload(frame) => frame.into_self_contained(),

@@ -1,6 +1,6 @@
-//! The sessions this end has sent one peer inline: the table the outbound worker encodes frames
-//! against, shared with the inbound side that marks the peer's confirmations and answers its
-//! questions about it.
+//! The sessions this end has sent one peer inline: the lessee table the outbound worker encodes
+//! frames against, shared with the inbound side that records the leases the peer grants and the
+//! sessions it disclaims.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -9,27 +9,26 @@ use std::sync::MutexGuard;
 use bytes::Bytes;
 
 use super::OutboundSchedulers;
-use crate::delegation::DelegationDigest;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::message::LinkControl;
 use crate::message::MessagePayload;
 use crate::message::WirePayload;
-use crate::swarm::session_link::AnnouncedDelegations;
+use crate::swarm::session_link::DelegationLessee;
 
-/// The one handle on a peer's [`AnnouncedDelegations`]: every access is one pure step under the
+/// The one handle on a peer's [`DelegationLessee`]: every access is one pure step under the
 /// lock.
 ///
 /// Lock law: the lock is never held across a suspension point, and a poisoned lock still guards
 /// a well-formed table, since no step panics between two writes. Clone law: clones name the
 /// same table.
 #[derive(Clone)]
-pub(super) struct SharedAnnouncedDelegations(Arc<Mutex<AnnouncedDelegations>>);
+pub(super) struct SharedDelegationLessee(Arc<Mutex<DelegationLessee>>);
 
-impl SharedAnnouncedDelegations {
+impl SharedDelegationLessee {
     /// The table of a peer nothing has been sent to.
     pub(super) fn new() -> Self {
-        Self(Arc::new(Mutex::new(AnnouncedDelegations::new())))
+        Self(Arc::new(Mutex::new(DelegationLessee::new())))
     }
 
     /// Whether `other` names this very table.
@@ -39,14 +38,15 @@ impl SharedAnnouncedDelegations {
     }
 
     /// The table, for one step.
-    fn lock(&self) -> MutexGuard<'_, AnnouncedDelegations> {
+    fn lock(&self) -> MutexGuard<'_, DelegationLessee> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The bytes of `payload` on the link of `generation` at `now_ms`: its delegation slots are
-    /// decided by the table, confirmed sessions by digest and every other session inline.
+    /// decided by the table, sessions leased with more than `Δ` left by digest and every other
+    /// session inline.
     pub(super) fn encode(
         &self,
         generation: u64,
@@ -67,48 +67,17 @@ impl SharedAnnouncedDelegations {
 }
 
 impl OutboundSchedulers {
-    /// Encode `payload` against `peer`'s announced table as the worker would, so a test can
-    /// make this end announce a session without sending a frame.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(in crate::swarm::transport) fn encode_for_test(
+    /// Learn what `peer` said at `now_ms` about the link of `generation`; see
+    /// [`DelegationLessee::observe`]. A peer this end has no link state for was sent nothing.
+    pub(in crate::swarm::transport) fn observe_link_control(
         &self,
         peer: Did,
         generation: u64,
-        payload: &MessagePayload,
+        control: &LinkControl,
         now_ms: u128,
-    ) -> Result<Bytes> {
-        self.handle(peer)?
-            .state
-            .link
-            .announced
-            .encode(generation, payload, now_ms)
-    }
-
-    /// The peer confirmed `digest` on the link of `generation`: later frames to it reference
-    /// the session. A peer this end has no link state for was sent nothing.
-    pub(in crate::swarm::transport) fn acknowledge_session(
-        &self,
-        peer: Did,
-        generation: u64,
-        digest: DelegationDigest,
     ) {
         if let Some(link) = self.link_of(peer) {
-            link.announced.lock().acknowledge(generation, digest);
+            link.lessee.lock().observe(generation, control, now_ms);
         }
-    }
-
-    /// Answer `peer`'s question about `digest` on the link of `generation` at `now_ms`. A peer
-    /// this end has no link state for was sent nothing, so nothing is known to it.
-    pub(in crate::swarm::transport) fn answer_session_request(
-        &self,
-        peer: Did,
-        generation: u64,
-        digest: DelegationDigest,
-        now_ms: u128,
-    ) -> LinkControl {
-        self.link_of(peer)
-            .map_or(LinkControl::Unknown(digest), |link| {
-                link.announced.lock().answer(generation, digest, now_ms)
-            })
     }
 }
