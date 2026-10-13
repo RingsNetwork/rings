@@ -1,0 +1,419 @@
+//! E2E handshake, stream encryption and streaming-decryption tests.
+
+use rand::SeedableRng;
+use rand_hc::Hc128Rng;
+
+use super::*;
+
+/// The fixed identity the test streams are encrypted to.
+fn recipient_key() -> SecretKey {
+    SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0").unwrap()
+}
+
+/// The fixed identity that signs and encrypts the test streams.
+fn sender_key() -> SecretKey {
+    SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54").unwrap()
+}
+
+/// A fresh stream of `payload` from [`sender_key`] to [`recipient_key`] in frames of at most
+/// `frame_len` plaintext bytes, encrypted with the randomness of `seed`: its id and frames.
+fn encrypted(payload: &[u8], frame_len: usize, seed: u64) -> (E2eStreamId, Vec<E2eStreamFrame>) {
+    let stream_id = uuid::Uuid::new_v4();
+    let frames = encrypt_stream_with_rng(
+        payload,
+        stream_id,
+        sender_key().pubkey(),
+        recipient_key().pubkey(),
+        frame_len,
+        &mut Hc128Rng::seed_from_u64(seed),
+    )
+    .unwrap();
+    (stream_id, frames)
+}
+
+/// A stream's public key is accepted only for the DID it hashes to: the key-ownership proof.
+#[test]
+fn test_public_key_must_match_did() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+
+    assert!(ensure_public_key_matches_did(sender.pubkey(), sender.address().into()).is_ok());
+    assert!(matches!(
+        ensure_public_key_matches_did(sender.pubkey(), recipient.address().into()),
+        Err(Error::E2ePublicKeyDidMismatch { .. })
+    ));
+}
+
+/// A handshake verifies only for the DID that owns the key it carries, in both directions.
+#[test]
+fn test_handshake_messages_verify_signed_owner() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let request = E2eHandshakeRequest::new(sender.pubkey());
+    let response = E2eHandshakeResponse::new(recipient.pubkey());
+
+    request.verify_requester(sender.address().into()).unwrap();
+    response
+        .verify_responder(recipient.address().into())
+        .unwrap();
+    assert!(request
+        .verify_requester(recipient.address().into())
+        .is_err());
+    assert!(response.verify_responder(sender.address().into()).is_err());
+}
+
+/// Every payload round-trips through every framing, and the frame count is
+/// `max(1, ⌈len / limit⌉)` (an empty payload still sends its final frame).
+#[test]
+fn test_round_trip_random_binary_payloads_and_frame_sizes() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let mut rng = Hc128Rng::seed_from_u64(608);
+    // Payload lengths at the edges framing can get wrong: empty (one final frame of nothing),
+    // one byte, either side of 16 and 32, and lengths longer than every frame limit, one of
+    // them a byte past 4 KiB so the last frame is a single byte.
+    let payload_lens = [0usize, 1, 15, 16, 17, 31, 32, 255, 1024, 4097];
+    // Frame limits: one byte per frame (the most frames), exactly one ElGamal block, several
+    // blocks with a partial last one, and a large odd limit.
+    const SEVERAL_BLOCKS: usize = 64;
+    const _: () = assert!(
+        SEVERAL_BLOCKS > E2E_PLAINTEXT_BLOCK_LEN
+            && !SEVERAL_BLOCKS.is_multiple_of(E2E_PLAINTEXT_BLOCK_LEN)
+    );
+    let frame_limits = [1usize, E2E_PLAINTEXT_BLOCK_LEN, SEVERAL_BLOCKS, 511];
+
+    for payload_len in payload_lens {
+        for frame_limit in frame_limits {
+            let mut payload = vec![0u8; payload_len];
+            rng.fill_bytes(&mut payload);
+            let stream_id = uuid::Uuid::new_v4();
+
+            let frames = encrypt_stream_with_rng(
+                &payload,
+                stream_id,
+                sender.pubkey(),
+                recipient.pubkey(),
+                frame_limit,
+                &mut rng,
+            )
+            .unwrap();
+            assert_eq!(
+                frames.len(),
+                payload_len.div_ceil(frame_limit.max(1)).max(1)
+            );
+            assert_eq!(
+                decrypt_stream(
+                    &frames,
+                    stream_id,
+                    sender.address().into(),
+                    recipient.clone(),
+                )
+                .unwrap(),
+                payload
+            );
+        }
+    }
+}
+
+/// An empty plaintext is one final frame at sequence 0, which decrypts to nothing.
+#[test]
+fn test_empty_plaintext_sends_final_stream_frame() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+
+    let (stream_id, frames) = encrypted(&[], 8, 7);
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].stream_id, stream_id);
+    assert_eq!(frames[0].sequence, 0);
+    assert!(frames[0].is_final);
+    assert_eq!(
+        decrypt_stream(&frames, stream_id, sender.address().into(), recipient).unwrap(),
+        Vec::<u8>::new()
+    );
+}
+
+/// Frames fed one by one in order release their plaintext as they arrive, and the final
+/// frame completes the stream; arbitrary bytes (`0x00`, `0xFF`) survive.
+#[test]
+fn test_streaming_decryptor_accepts_ordered_final_frame() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let stream_id = uuid::Uuid::new_v4();
+    let mut rng = Hc128Rng::seed_from_u64(42);
+    let mut encryptor =
+        E2eStreamEncryptor::new(stream_id, sender.pubkey(), recipient.pubkey()).unwrap();
+
+    let first = encryptor.encrypt_next(b"\0hello", &mut rng).unwrap();
+    let second = encryptor.encrypt_final(b"\xFFworld", &mut rng).unwrap();
+    let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0);
+
+    let mut plaintext = decryptor.decrypt_next(&first, 0).unwrap();
+    plaintext.extend_from_slice(&decryptor.decrypt_next(&second, 0).unwrap());
+    decryptor.finish().unwrap();
+
+    assert_eq!(plaintext, b"\0hello\xFFworld");
+}
+
+/// A stream missing its final frame is truncated: decrypting it fails.
+#[test]
+fn test_truncation_is_rejected_without_final_frame() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let payload = vec![9u8; 96];
+    let (stream_id, mut frames) = encrypted(&payload, 16, 9);
+
+    frames.pop();
+
+    assert!(matches!(
+        decrypt_stream(&frames, stream_id, sender.address().into(), recipient),
+        Err(Error::E2eMissingFinalFrame)
+    ));
+}
+
+/// Two frames that arrive swapped are buffered and released in order.
+#[test]
+fn test_reordered_frames_are_buffered_until_contiguous() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let payload = vec![10u8; 96];
+    let (stream_id, mut frames) = encrypted(&payload, 16, 10);
+
+    frames.swap(0, 1);
+
+    assert_eq!(
+        decrypt_stream(&frames, stream_id, sender.address().into(), recipient).unwrap(),
+        payload
+    );
+}
+
+/// A frame repeated after its plaintext was released, the final one included, releases
+/// nothing more.
+#[test]
+fn test_replayed_consumed_frame_is_idempotent() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let payload = vec![16u8; 96];
+    let (stream_id, frames) = encrypted(&payload, 16, 16);
+    let final_frame = frames.last().unwrap().clone();
+    let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0);
+    let mut plaintext = Vec::new();
+
+    plaintext.extend_from_slice(&decryptor.decrypt_next(&frames[0], 0).unwrap());
+    assert_eq!(
+        decryptor.decrypt_next(&frames[0], 0).unwrap(),
+        Vec::<u8>::new()
+    );
+
+    for frame in &frames[1..] {
+        plaintext.extend_from_slice(&decryptor.decrypt_next(frame, 0).unwrap());
+    }
+    decryptor.finish().unwrap();
+
+    assert_eq!(
+        decryptor.decrypt_next(&final_frame, 0).unwrap(),
+        Vec::<u8>::new()
+    );
+    assert_eq!(plaintext, payload);
+}
+
+/// A frame repeated while it waits buffered is taken once.
+#[test]
+fn test_replayed_buffered_frame_is_idempotent() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let payload = vec![17u8; 96];
+    let (stream_id, frames) = encrypted(&payload, 16, 17);
+    let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0);
+    let mut plaintext = Vec::new();
+
+    assert_eq!(
+        decryptor.decrypt_next(&frames[1], 0).unwrap(),
+        Vec::<u8>::new()
+    );
+    assert_eq!(
+        decryptor.decrypt_next(&frames[1], 0).unwrap(),
+        Vec::<u8>::new()
+    );
+
+    for frame in &frames {
+        plaintext.extend_from_slice(&decryptor.decrypt_next(frame, 0).unwrap());
+    }
+    decryptor.finish().unwrap();
+
+    assert_eq!(plaintext, payload);
+}
+
+/// A frame further ahead than the reorder window is refused.
+#[test]
+fn test_future_frame_outside_reorder_window_is_rejected() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let (stream_id, frames) = encrypted(&[18u8; 5], 1, 18);
+    let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0)
+        .with_reorder_window(2);
+
+    assert!(matches!(
+        decryptor.decrypt_next(&frames[3], 0),
+        Err(Error::E2eFrameReorderWindowExceeded {
+            next_sequence: 0,
+            actual: 3,
+            window: 2
+        })
+    ));
+}
+
+/// The final frame may arrive first: the stream completes once the frames before it do.
+#[test]
+fn test_final_frame_can_arrive_before_gap_is_filled() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let payload = vec![14u8; 96];
+    let (stream_id, mut frames) = encrypted(&payload, 16, 14);
+    frames.rotate_right(1);
+
+    let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0);
+    let mut plaintext = Vec::new();
+
+    assert_eq!(
+        decryptor.decrypt_next(&frames[0], 0).unwrap(),
+        Vec::<u8>::new()
+    );
+    assert!(matches!(
+        decryptor.finish(),
+        Err(Error::E2eMissingFinalFrame)
+    ));
+
+    for frame in &frames[1..] {
+        plaintext.extend_from_slice(&decryptor.decrypt_next(frame, 0).unwrap());
+    }
+    decryptor.finish().unwrap();
+
+    assert_eq!(plaintext, payload);
+}
+
+/// A frame past a buffered final frame is refused.
+#[test]
+fn test_frame_after_buffered_final_is_rejected() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let (stream_id, frames) = encrypted(&[15u8; 96], 16, 15);
+    let final_frame = frames.last().unwrap();
+    let mut frame_after_final = frames.first().unwrap().clone();
+    frame_after_final.sequence = final_frame.sequence.checked_add(1).unwrap();
+
+    let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0);
+    assert_eq!(
+        decryptor.decrypt_next(final_frame, 0).unwrap(),
+        Vec::<u8>::new()
+    );
+    assert!(matches!(
+        decryptor.decrypt_next(&frame_after_final, 0),
+        Err(Error::E2eFrameAfterFinal)
+    ));
+}
+
+/// A frame of another stream is refused.
+#[test]
+fn test_wrong_stream_id_is_rejected() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let other_stream_id = uuid::Uuid::new_v4();
+    let (_, frames) = encrypted(b"hello", 16, 12);
+
+    assert!(matches!(
+        decrypt_stream(&frames, other_stream_id, sender.address().into(), recipient),
+        Err(Error::E2eStreamIdMismatch { .. })
+    ));
+}
+
+/// A frame carrying a key other than the sender's is refused.
+#[test]
+fn test_wrong_sender_key_is_rejected() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let payload = vec![11u8; 32];
+    let (stream_id, mut frames) = encrypted(&payload, 32, 11);
+    frames[0].sender_public_key = recipient.pubkey();
+
+    assert!(matches!(
+        decrypt_stream(&frames, stream_id, sender.address().into(), recipient),
+        Err(Error::E2ePublicKeyDidMismatch { .. })
+    ));
+}
+
+/// The stall deadline of the stall tests, in milliseconds.
+const STALL_MS: u128 = 1_000;
+
+/// A stream of five frames of `payload`, and a decryptor for it created at time 0 with the
+/// stall deadline [`STALL_MS`].
+fn stalling_stream(payload: &[u8]) -> (Vec<E2eStreamFrame>, E2eStreamDecryptor) {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let (stream_id, frames) = encrypted(payload, 16, 23);
+    assert_eq!(frames.len(), 5);
+    let decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient, 0)
+        .with_stall_deadline(std::time::Duration::from_millis(STALL_MS as u64));
+    (frames, decryptor)
+}
+
+/// A lost first, middle or final frame stalls the stream: the plaintext released is the
+/// prefix before the loss, and the stream fails once it has made no progress for its stall
+/// deadline, whether later frames wait buffered or nothing more arrives.
+#[test]
+fn test_a_lost_frame_stalls_the_stream_after_its_prefix() {
+    let payload: Vec<u8> = (0..80).collect();
+    for lost in 0..5u64 {
+        let (frames, mut decryptor) = stalling_stream(&payload);
+        let mut plaintext = Vec::new();
+        for frame in frames.iter().filter(|frame| frame.sequence != lost) {
+            plaintext.extend(decryptor.decrypt_next(frame, 10).unwrap());
+        }
+        let prefix_len = usize::try_from(lost).unwrap() * 16;
+        assert_eq!(plaintext, payload[..prefix_len], "frame {lost} lost");
+        // Progress is the creation (no frame released) or the frames at time 10.
+        assert!(decryptor.check(STALL_MS).is_ok(), "within its deadline");
+        assert!(
+            matches!(
+                decryptor.check(11 + STALL_MS),
+                Err(Error::E2eStreamStalled { next_sequence, .. }) if next_sequence == lost
+            ),
+            "frame {lost} lost: the stream stalls at it"
+        );
+    }
+}
+
+/// Progress restarts the deadline, a frame that fills a gap in time is no stall, and a
+/// complete stream never stalls.
+#[test]
+fn test_progress_restarts_the_stall_deadline_and_completion_ends_it() {
+    let payload: Vec<u8> = (0..80).collect();
+    let (frames, mut decryptor) = stalling_stream(&payload);
+    let mut plaintext = decryptor.decrypt_next(&frames[0], STALL_MS).unwrap();
+    // Frame 2 overtakes frame 1, which fills the gap just before the deadline.
+    assert!(decryptor
+        .decrypt_next(&frames[2], STALL_MS)
+        .unwrap()
+        .is_empty());
+    plaintext.extend(decryptor.decrypt_next(&frames[1], 2 * STALL_MS).unwrap());
+    // A frame that fills no gap past the deadline finds the stream stalled.
+    let (late, mut stalled) = stalling_stream(&payload);
+    assert!(stalled.decrypt_next(&late[1], 0).unwrap().is_empty());
+    assert!(matches!(
+        stalled.decrypt_next(&late[2], STALL_MS + 1),
+        Err(Error::E2eStreamStalled {
+            next_sequence: 0,
+            buffered: 2,
+            ..
+        })
+    ));
+    for frame in &frames[3..] {
+        plaintext.extend(decryptor.decrypt_next(frame, 2 * STALL_MS).unwrap());
+    }
+    decryptor.finish().unwrap();
+    assert_eq!(plaintext, payload);
+    assert!(
+        decryptor.check(u128::MAX).is_ok(),
+        "a complete stream never stalls"
+    );
+}

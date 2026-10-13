@@ -218,7 +218,7 @@ impl Error {
             | Self::E2eStreamIdMismatch { .. } | Self::E2eFrameSequenceMismatch { .. }
             | Self::E2eFrameReorderWindowExceeded { .. } | Self::E2eFrameSequenceOverflow
             | Self::E2eFrameAfterFinal | Self::E2eMissingFinalFrame
-            | Self::E2ePublicKeyDidMismatch { .. }
+            | Self::E2ePublicKeyDidMismatch { .. } | Self::E2eStreamStalled { .. }
             // transaction streams
             | Self::TransactionSequenceExhausted { .. } | Self::TransactionReplay { .. }
             | Self::TransactionSequenceFork { .. } | Self::TransactionSequenceStale { .. }
@@ -229,7 +229,7 @@ impl Error {
             // accounting and delegation
             | Self::OriginQuota(_) | Self::ServiceReceipt(_) | Self::ProvisionalEvidence(_)
             | Self::UnmarkedFrame | Self::DelegationReferenceUnresolved(_)
-            | Self::DelegationExpired
+            | Self::DelegationExpired | Self::DelegationExpiresWithinMargin
             // link control
             | Self::LinkControlOutsideLink | Self::LinkControlInFlightCapacity(_)
             | Self::DetachedRuntimeUnavailable(_)

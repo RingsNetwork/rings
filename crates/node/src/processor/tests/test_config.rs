@@ -229,7 +229,7 @@ advertise_presence: true
         delegatee_key.dump().unwrap()
     );
 
-    let serialized = serde_yaml::from_str::<ProcessorConfigSerialized>(&yaml).unwrap();
+    let serialized = serde_saphyr::from_str::<ProcessorConfigSerialized>(&yaml).unwrap();
     let config = ProcessorConfig::try_from(serialized).unwrap();
     let builder = ProcessorBuilder::from_config(&config).unwrap();
 
@@ -374,11 +374,11 @@ async fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
 #[test]
 fn test_onion_exit_service_must_be_a_world_facing_symbol() {
     assert_eq!(
-        serde_yaml::from_str::<Vec<OnionServiceName>>("[tcp, https]").ok(),
+        serde_saphyr::from_str::<Vec<OnionServiceName>>("[tcp, https]").ok(),
         Some(vec![OnionServiceName::tcp(), OnionServiceName::https()])
     );
     for outside in ["web", "relay"] {
         assert!(OnionServiceName::parse(outside).is_err());
-        assert!(serde_yaml::from_str::<Vec<OnionServiceName>>(&format!("[{outside}]")).is_err());
+        assert!(serde_saphyr::from_str::<Vec<OnionServiceName>>(&format!("[{outside}]")).is_err());
     }
 }

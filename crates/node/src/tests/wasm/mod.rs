@@ -181,7 +181,7 @@ pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) 
     let key = SecretKey::random();
     let sm = DelegateeKey::new_with_seckey(&key).unwrap();
 
-    let config = serde_yaml::to_string(&ProcessorConfig::new(
+    let config = serde_saphyr::to_string(&ProcessorConfig::new(
         0,
         TEST_ICE_SERVERS.to_string(),
         sm,

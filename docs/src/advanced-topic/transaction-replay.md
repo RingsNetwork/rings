@@ -35,12 +35,11 @@ single stream shared by every class did, once one lane's backlog fell behind ano
 and so would one class spread over several channels, once a stalled channel let later sequences
 of the class overtake it by more than the window.
 
-The order holds for frames that resolve on arrival. A frame whose delegation reference misses
-(the receiver forgot the delegation to capacity eviction or expiry) is held for one repair round
-trip and released independently of later frames, because the session link promises no order
-among held frames (see [Delegation References](delegation-references.md)). If a window's worth
-of its class is admitted meanwhile, the released frame is rejected as `Stale`: one frame lost
-and counted, never a false admission. Removing this loss is tracked in #908.
+No frame is held on the way (#908): a frame whose delegation reference misses is dropped, never
+delivered late, so the frames of one lane reach admission in arrival order. An honest sender's
+reference resolves whenever its transit stays under two delivery bounds, and a frame that waits
+in its lane at the receiver still resolves however long it waited, so a miss needs a late frame
+and a full table at once (see [Delegation References](delegation-references.md)).
 
 This assumes a class's transactions reach the scheduler in signing order, as they do from one
 sending task.
@@ -257,8 +256,7 @@ streams (#898) are the next cutover: the store becomes one record per stream und
 - No cross-account or global order.
 - No claim that a sequence gap identifies loss or a dishonest relay.
 - No retransmission, acknowledgement, or head-of-line blocking protocol for transactions (the
-  link's session confirmations and repairs are about delegation references, not about
-  transactions).
+  link's leases and disclaimers are about delegation references, not about transactions).
 - No exactly-once application side effects.
 - No recognition of messages older than a deliberately deleted replay store.
 - No reputation or slashing consequence for fork evidence.

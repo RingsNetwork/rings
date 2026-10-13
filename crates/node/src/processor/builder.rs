@@ -34,8 +34,7 @@ pub struct ProcessorBuilder {
 impl ProcessorBuilder {
     /// initialize a [ProcessorBuilder] with a serialized [ProcessorConfig].
     pub fn from_serialized(config: &str) -> Result<Self> {
-        let config =
-            serde_yaml::from_str::<ProcessorConfig>(config).map_err(Error::SerdeYamlError)?;
+        let config = serde_saphyr::from_str::<ProcessorConfig>(config)?;
         Self::from_config(&config)
     }
 

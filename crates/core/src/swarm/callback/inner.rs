@@ -26,7 +26,9 @@ use super::TransportCallbackError;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::message::MessagePayload;
+use crate::message::MessageVerificationExt;
 use crate::swarm::detached::run_detached_or_inline;
+use crate::swarm::session_link::expired_within_grace;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -81,12 +83,6 @@ impl SwarmTransportCallback {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn pre_admission_held_count_for_test(&self) -> usize {
         self.processor.pre_admission().len()
-    }
-
-    /// The frames held until the peer supplies a session they reference.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn session_hold_count_for_test(&self) -> usize {
-        self.processor.session_link().held_len()
     }
 
     /// Test builds: the inbound mailbox, whose probes witness admission, waiting, hand-off and
@@ -302,22 +298,28 @@ impl SwarmTransportCallback {
 
 impl SwarmTransportCallback {
     /// Verify one self-contained payload of `wire_len` bytes from `peer`, charging a failure
-    /// to `peer`. Post: the frame, ready for the admission gate; nothing about the link is
-    /// touched, so the link stage decides what, if anything, the frame teaches it.
+    /// to `peer`, except a frame whose only defect is an origin delegation that expired in
+    /// flight, which is dropped uncharged. Post: the frame, ready for the admission gate, or
+    /// `None` if it was dropped; nothing about the link is touched, so the link stage decides
+    /// what, if anything, the frame teaches it.
     pub(super) async fn verify_frame(
         &self,
         peer: Option<Did>,
         payload: MessagePayload,
         wire_len: usize,
-    ) -> Result<PreparedInboundFrame, TransportCallbackError> {
-        let prepared = prepare_resolved_frame(
-            self.processor.logical.transport.network_id,
-            peer,
-            payload,
-            wire_len,
-        );
-        match prepared {
-            Ok(prepared) => Ok(prepared),
+    ) -> Result<Option<PreparedInboundFrame>, TransportCallbackError> {
+        let network_id = self.processor.logical.transport.network_id;
+        // Law (expiry in flight): the hop answers only for its own delegation, so a frame whose
+        // only defect is an origin delegation that expired in flight is not charged to it.
+        if origin_expired_in_flight(network_id, &payload, self.processor.now_ms()) {
+            tracing::debug!(
+                peer = ?peer,
+                "dropping message; its origin delegation expired in flight"
+            );
+            return Ok(None);
+        }
+        match prepare_resolved_frame(network_id, peer, payload, wire_len) {
+            Ok(prepared) => Ok(Some(prepared)),
             Err(error) => {
                 self.processor.record_receive_failure_now(peer).await;
                 Err(error.into())
@@ -325,14 +327,14 @@ impl SwarmTransportCallback {
         }
     }
 
-    /// Pass one verified frame through the pending-connection gate and the pre-admission hold
-    /// to the inbound actor, waiting for its logical completion or not as its provenance says.
+    /// Pass one verified frame that just arrived through the pending-connection gate and the
+    /// pre-admission hold to the inbound actor, waiting for its logical completion when it
+    /// passes; a frame the hold keeps is released, unawaited, once the connection is admitted.
     pub(super) async fn gate_prepared_frame(
         &self,
         peer: Option<Did>,
         prepared: PreparedInboundFrame,
         lease: InboundFrameLease,
-        provenance: FrameProvenance,
     ) -> Result<(), TransportCallbackError> {
         if !prepared.lane.admits_carrier(lease.carrier) {
             self.processor.record_receive_failure_now(peer).await;
@@ -367,7 +369,7 @@ impl SwarmTransportCallback {
         let arrival = self.processor.pre_admission().arrive(frame, admitted);
         match arrival {
             Arrival::Pass(frame) => self
-                .submit_held_frame(frame, provenance)
+                .submit_held_frame(frame, FrameProvenance::Arrived)
                 .await
                 .map_err(Into::into),
             Arrival::Held => {
@@ -584,4 +586,16 @@ impl TransportCallback for SwarmTransportCallback {
         self.retire_on_terminal(did, "data-channel close").await?;
         Ok(())
     }
+}
+
+/// Whether `payload` fails verification at `now_ms` only because its origin delegation, not
+/// the hop's own, expired in flight: at most `G` ago (the expiry law of `swarm::session_link`),
+/// with the hop's proof valid now and the origin's proof valid when its delegation expired.
+fn origin_expired_in_flight(network_id: u32, payload: &MessagePayload, now_ms: u128) -> bool {
+    let delegations = payload.delegations();
+    let expires_at_ms = delegations.origin.expires_at_ms();
+    !delegations.is_diagonal()
+        && expired_within_grace(expires_at_ms, now_ms)
+        && MessageVerificationExt::verify_at(payload, network_id, now_ms)
+        && payload.transaction.verify_at(network_id, expires_at_ms)
 }

@@ -61,7 +61,6 @@ mod delivery;
 pub(crate) mod egress;
 #[cfg(test)]
 mod frame_ledger;
-mod hold_budget;
 #[cfg(test)]
 mod inbound_tap;
 mod link_control;
@@ -94,8 +93,6 @@ pub(crate) use self::frame_ledger::FrameInFlight;
 use self::frame_ledger::FrameLedger;
 #[cfg(test)]
 pub(crate) use self::frame_ledger::FrameSample;
-pub(crate) use self::hold_budget::SessionHoldBudget;
-pub(crate) use self::hold_budget::SessionHoldPermit;
 #[cfg(test)]
 pub(crate) use self::inbound_tap::InboundTap;
 pub(crate) use self::liveness::IssuedProbe;
@@ -108,6 +105,8 @@ pub(crate) use self::liveness::PEER_LIVENESS_PERIOD_MS;
 pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::test_trace::dispatched_link_control_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::test_trace::dispatched_link_control_since;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::test_trace::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -153,7 +152,7 @@ use self::storage_lookup::StorageLookupObservationMap;
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 pub(crate) use self::storage_sync::StorageSyncOutcome;
 pub(crate) use self::timeouts::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
-pub(crate) use self::timeouts::SESSION_HOLD_TIMEOUT;
+pub(crate) use self::timeouts::DELIVERY_BOUND;
 pub(crate) use self::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use self::timeouts::TRANSPORT_TIMEOUT_PROFILE;
 use super::callback::InboundCapacity;
@@ -188,8 +187,6 @@ pub struct SwarmTransport {
     reassembly_limits: ReassemblyLimits,
     reassembly_budget: Arc<ReassemblyBudget>,
     inbound_capacity: Arc<InboundCapacity>,
-    /// The frames every connection's session-link hold keeps, together.
-    session_hold_budget: SessionHoldBudget,
     connection_lifecycle: ConnectionLifecycleBoundary,
     /// Core's side of the application boundary (#935).
     application: ApplicationPort,
@@ -331,7 +328,6 @@ impl SwarmTransport {
             reassembly_limits: settings.reassembly_limits,
             reassembly_budget: Arc::new(ReassemblyBudget::new(settings.reassembly_limits)),
             inbound_capacity: Arc::new(InboundCapacity::new()),
-            session_hold_budget: SessionHoldBudget::new(),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             application: ApplicationPort::new(),
             connection_creation: PeerOperationLocks::new(),
@@ -366,11 +362,6 @@ impl SwarmTransport {
     /// Borrow the configured operational observer for lookup lifecycle reporting.
     pub(crate) fn observer(&self) -> &SharedSwarmObserver {
         &self.observer
-    }
-
-    /// The node-wide budget of the session-link holds.
-    pub(crate) fn session_hold_budget(&self) -> &SessionHoldBudget {
-        &self.session_hold_budget
     }
 
     /// Redundancy used by storage repair and anti-entropy.

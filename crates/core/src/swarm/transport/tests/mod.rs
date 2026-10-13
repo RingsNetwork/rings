@@ -567,7 +567,7 @@ async fn pending_peer_with_key(
 }
 
 /// [`pending_peer_with_key`], with the callback's inbound clock injected when `clock` is
-/// given, so a test drives the session hold's and reassembly's time itself.
+/// given, so a test drives the session leases' and reassembly's time itself.
 #[cfg(feature = "dummy")]
 async fn pending_peer_with(
     transport: &Arc<SwarmTransport>,

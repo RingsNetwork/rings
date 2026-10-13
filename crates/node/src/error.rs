@@ -246,9 +246,10 @@ pub enum Error {
     /// JSON serialization or deserialization failed.
     #[error("Serde json error: {0}")]
     SerdeJsonError(#[from] serde_json::Error) = 1000,
-    /// YAML serialization or deserialization failed.
+    /// YAML deserialization failed. Boxed: the parser's error carries its source location and
+    /// snippet, and would otherwise make every `Result` of this crate as large.
     #[error("Serde yaml error: {0}")]
-    SerdeYamlError(#[from] serde_yaml::Error) = 1001,
+    SerdeYamlError(Box<serde_saphyr::Error>) = 1001,
     /// Cryptographic verification failed.
     #[error("verify error: {0}")]
     VerifyError(String) = 1002,
@@ -353,6 +354,13 @@ impl From<Error> for jsonrpc_core::Error {
             message: e.to_string(),
             data: None,
         }
+    }
+}
+
+impl From<serde_saphyr::Error> for Error {
+    /// Box the parser's error into [`Error::SerdeYamlError`].
+    fn from(error: serde_saphyr::Error) -> Self {
+        Error::SerdeYamlError(Box::new(error))
     }
 }
 

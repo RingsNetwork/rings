@@ -830,7 +830,7 @@ mod tests {
         // A link-control frame is the link's own: its class carries no deadline and it names no
         // transaction.
         let digest = session.delegation().digest().expect("session must digest");
-        let control = crate::message::LinkControl::Request(digest)
+        let control = crate::message::LinkControl::Unknown(digest)
             .to_wire()
             .expect("control frame must encode");
         assert_eq!(

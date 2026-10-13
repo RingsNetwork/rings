@@ -158,7 +158,9 @@ pub enum Error {
     UnmarkedFrame,
 
     /// A payload that travels outside any link referenced a session instead of carrying it.
-    #[error("Delegation reference {0:?} cannot be resolved outside the link that announced it")]
+    #[error(
+        "Delegation reference {0:?} cannot be resolved outside the link that carried it inline"
+    )]
     DelegationReferenceUnresolved(crate::delegation::DelegationDigest),
 
     /// A link-control frame was decoded where a payload was expected: outside any link.
@@ -180,6 +182,20 @@ pub enum Error {
     /// E2E stream is missing the authenticated final frame
     #[error("E2E stream is missing the authenticated final frame")]
     E2eMissingFinalFrame,
+
+    /// E2E stream made no progress for its stall deadline: a frame was lost
+    #[error(
+        "E2E stream stalled at sequence {next_sequence} for {stalled_ms}ms with {buffered} later \
+         frames buffered: a frame was lost"
+    )]
+    E2eStreamStalled {
+        /// The sequence the stream still waits for.
+        next_sequence: u64,
+        /// Later frames buffered behind it.
+        buffered: usize,
+        /// How long the stream has gone without progress.
+        stalled_ms: u128,
+    },
 
     /// E2E public key resolves to {actual}, expected {expected}
     #[error("E2E public key resolves to {actual}, expected {expected}")]
@@ -842,6 +858,11 @@ pub enum Error {
     /// Delegation is expired
     #[error("Delegation is expired")]
     DelegationExpired,
+
+    /// A frame was not sent: a delegation it carries expires within the lease margin, so it
+    /// could expire in flight. Local: nothing reached the peer.
+    #[error("Delegation expires within the lease margin; the frame is not sent")]
+    DelegationExpiresWithinMargin,
 
     /// Transport error: {0}
     #[error("Transport error: {0}")]

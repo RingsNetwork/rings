@@ -15,14 +15,10 @@
 //! not pinned (frames spread over several channels) loses this law, since another channel can
 //! carry later sequences of the class past a stalled one.
 //!
-//! The law covers the frames that resolve on arrival. A frame whose delegation reference misses
-//! (the receiver forgot the delegation to capacity eviction or expiry) is held on the session
-//! link for one repair round trip and released independently of the frames behind it, since
-//! the link promises no order among held frames (see the delegation-references chapter of the
-//! book, `docs/src/advanced-topic/delegation-references.md`). Later frames of its class may
-//! reach this admission first; once a window's worth have, the released frame is rejected as
-//! stale. That is the loss of one frame, counted, never a false admission; removing it is
-//! tracked in #908.
+//! No frame is held on the way: a frame whose delegation reference misses is dropped, never
+//! delivered late, and an honest sender's reference resolves whenever its transit stays under
+//! the lease margin and grace (the lease law of `swarm::session_link`, #908), so the law holds
+//! for every frame that arrives.
 //!
 //! Persistence is one record per stream (see [`store`]): a transition writes only its stream's
 //! record, at most [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`], so the cost of an admission does not
@@ -81,6 +77,7 @@ use std::ops::RangeInclusive;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::lock::Mutex;
 use rings_runtime::MaybeSend;
@@ -100,6 +97,7 @@ use crate::message::OriginQuotaCounters;
 use crate::message::OriginQuotaInstant;
 use crate::message::OriginQuotaKey;
 use crate::storage::KvStorageScan;
+use crate::swarm::transport::DELIVERY_BOUND;
 use crate::utils::Instant;
 
 mod store;
@@ -118,7 +116,21 @@ pub use self::store::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 
 /// Number of out-of-order sequence slots retained for one destination-scoped stream.
 pub const TRANSACTION_REPLAY_WINDOW: usize = 32;
-const TRANSACTION_REPLAY_WINDOW_U64: u64 = 32;
+/// How many later frames of one stream may overtake a frame that still arrives: the replay
+/// window, which refuses a frame further behind. A stream consumer reorders at most this far.
+pub const REORDER_WINDOW: u64 = 32;
+const _: () = assert!(REORDER_WINDOW == TRANSACTION_REPLAY_WINDOW as u64);
+/// How long a frame of one stream may still arrive after a later frame of that stream did.
+///
+/// On one edge a stream's frames arrive in order (the in-class order law). End to end they may
+/// not, when the stream's route, or the connection generation of one of its hops, changes
+/// mid-stream: frames still in flight on the superseded path land later than frames sent on
+/// the new one, each within the delivery bound of every hop it has yet to cross, since every
+/// hop delivers a frame or gives it up within its delivery bound. The deadline allows four such
+/// bounds: a superseded path with at most four hops left to cross. A stream consumer takes a
+/// frame still missing this long after a later one arrived as lost; one that has seen
+/// [`REORDER_WINDOW`] later frames of it has lost it, since the replay window refuses it.
+pub const REORDER_DEADLINE: Duration = DELIVERY_BOUND.saturating_mul(4);
 const TRANSACTION_REPLAY_BACKTRACK: u64 = 31;
 /// Account-to-destination pairs whose four class streams one runtime retains in full.
 const TRANSACTION_REPLAY_PAIR_CAPACITY: usize = 4096;
@@ -137,8 +149,7 @@ pub const TRANSACTION_REPLAY_STREAM_CAPACITY: usize =
 /// backlog in one lane fall behind later-sequenced traffic of another lane and be rejected as
 /// stale. With one stream per class, an honest sender's transactions reach the receiver in
 /// sequence order: the class lane keeps them FIFO with fewer in flight than the replay window,
-/// and the one data channel it is pinned to delivers them in that order (a frame held on a
-/// delegation-reference miss excepted, #908; see the module documentation).
+/// and the one data channel it is pinned to delivers them in that order.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct StreamKey {
     /// Overlay in which the transaction signature is valid.
@@ -239,7 +250,7 @@ impl SequenceState {
 
     fn advance(&mut self, sequence: u64, digest: TransactionDigest) {
         let gap = sequence.saturating_sub(self.high);
-        if gap >= TRANSACTION_REPLAY_WINDOW_U64 {
+        if gap >= REORDER_WINDOW {
             self.accepted.fill(None);
         } else if let Ok(gap) = usize::try_from(gap) {
             self.accepted.rotate_left(gap);
