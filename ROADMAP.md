@@ -68,7 +68,9 @@ The substrate both layers build on:
   in [SECURITY.md](./SECURITY.md#layer-contracts).
 - A path-less relay on the communication layer: the carrier names only the next hop, the
   destination, and a hop budget, so no hop learns the route
-  (`crates/core/src/message/protocols/relay`).
+  (`crates/core/src/message/protocols/relay`). Connect signaling alone records the relays it
+  crosses, so its answer retraces them; its privacy is already spent by the SDP it carries
+  (#947).
 
 **Planned**
 - User-installed zero-knowledge identity and verifiable off-chain compute protocols.

@@ -28,6 +28,24 @@
 
 ### Breaking changes
 
+- Connect signaling returns along its recorded path, so crossing offers always end with an edge
+  (#947, the root cause of the flaky gateway test in #945). A wire cutover:
+  - `MessageRelay` gains the public field `path: Option<SignalingPath>`. `ConnectNodeSend`
+    records the relays it crosses there; its `ConnectNodeReport` answer, and a counter-offer,
+    retrace them. Inbound validation refuses a path on any other message, its absence on
+    connect signaling, and a path that repeats a node.
+  - Of two crossing offers, one still being created yields; of two sent ones the smaller DID's
+    prevails and is sent back as a counter-offer. A DHT answer echoes its offer's transaction
+    and applies only to that offer. `ConnectNodeReport` no longer honours `reply_via`.
+  - `SwarmTransport::answer_remote_connection` returns an `OfferReply` of the answer or the
+    counter-offer, and `Swarm::answer_offer` returns `OfferReply<MessagePayload,
+    MessagePayload>`. The JSON-RPC `answerOffer` (and `rings connect answer`) may return a
+    counter-offer: answer it with the caller's `answerOffer` and return that answer with the
+    peer's `acceptAnswer`.
+  - A WebRTC step of an attempt that lost its slot reports `ConnectionAttemptSuperseded` when the
+    peer's handshake took it, which is what surfaced as `Local connection closed` from a creating
+    offer, and the new `ConnectionAttemptCancelled` when anything else released it.
+
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`
   (core), both defaulting to `false`. For its traffic from the authenticated neighbour that

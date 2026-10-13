@@ -383,7 +383,13 @@ pub(super) async fn prepare_measured_processor() -> Processor {
 #[cfg(feature = "dummy")]
 pub(super) async fn connect_processors(p1: &Processor, p2: &Processor) {
     let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
-    let answer = p2.swarm.answer_offer(offer).await.unwrap();
+    let answer = p2
+        .swarm
+        .answer_offer(offer)
+        .await
+        .unwrap()
+        .answer()
+        .expect("p2 holds no offer of its own, so it answers");
     p1.swarm.accept_answer(answer).await.unwrap();
     wait_processors_connected(p1, p2).await;
 }

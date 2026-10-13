@@ -259,7 +259,10 @@ curl -X POST \
 
 ### answerOffer
 
-Answer an offer for connection
+Answer an offer for connection. The result is the encoded answer, or, when this node's own
+pending overlay offer to the offering peer prevails on the DID tie-break, that offer as a
+counter-offer: the caller answers it with its own `answerOffer` and returns that answer with
+this node's `acceptAnswer`.
 
 #### REQUEST
 

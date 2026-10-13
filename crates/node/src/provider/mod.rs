@@ -25,6 +25,7 @@ use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::Backend;
+use crate::extension::BackendObserver;
 use crate::measure::EvidenceCollectorIdentity;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
@@ -314,7 +315,17 @@ impl Provider {
     /// custom messages are decoded as [`Envelope`](crate::extension::ext::Envelope)s and
     /// routed to their namespace's protocol. Call once after registering protocols.
     pub fn set_backend(&self) -> Result<()> {
-        let backend = Backend::new(Arc::new(self.clone()));
+        self.install_backend(Backend::new(Arc::new(self.clone())))
+    }
+
+    /// [`Self::set_backend`] with `observer` receiving the backend's lookup reports,
+    /// admissions and retirements.
+    pub fn set_backend_observed_by(&self, observer: Arc<dyn BackendObserver>) -> Result<()> {
+        self.install_backend(Backend::new(Arc::new(self.clone())).observed_by(observer))
+    }
+
+    /// Install `backend` as the swarm's callback.
+    fn install_backend(&self, backend: Backend) -> Result<()> {
         self.processor
             .swarm
             .set_callback(Arc::new(backend))

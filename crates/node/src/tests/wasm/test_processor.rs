@@ -150,7 +150,14 @@ async fn create_connection(p1: &ObservedProcessor, p2: &ObservedProcessor) {
         .unwrap();
 
     console_log!("answer_offer");
-    let answer = p2.processor.swarm.answer_offer(offer).await.unwrap();
+    let answer = p2
+        .processor
+        .swarm
+        .answer_offer(offer)
+        .await
+        .unwrap()
+        .answer()
+        .expect("p2 holds no offer of its own, so it answers");
 
     console_log!("accept_answer");
     p1.processor.swarm.accept_answer(answer).await.unwrap();

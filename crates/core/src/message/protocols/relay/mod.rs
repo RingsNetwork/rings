@@ -12,11 +12,14 @@
 //!
 //! so the budget component walks the finite chain `MAX > … > 1 > 0` and never climbs it; a report
 //! is a fresh carrier, not a continuation: its stage is derived from the signed request alone
-//! (its `reply_via`), never from the request's carrier. The stage `σ` is the delivery automaton's
-//! state (see [`RouteStage`]): the route's aim and whether it was handed past that aim. The
+//! (its `reply_via`), never from the request's carrier, except that a connect-signaling reply
+//! retraces the path its request's carrier recorded. The stage `σ` is the delivery automaton's
+//! state (see [`RouteStage`]): the route's aim and whether it was handed past that aim. A pathless
 //! carrier records nothing about the hops already taken: each hop learns its predecessor from the
 //! transport edge it received on and its successor from `next_hop`, and the destination learns
-//! only the last hop. Delivery is bounded by its own progress law
+//! only the last hop. Connect signaling alone carries a [`SignalingPath`] (#947): it records the
+//! relays it crosses, and its reply retraces them (see the `signaling_path` module). Delivery
+//! is bounded by its own progress law
 //! ([`delivery`](crate::dht::delivery)): no route cycles, so a route outruns its budget only when
 //! a correct route is longer than the budget (a ring larger than it whose finger table does not
 //! span the identifier space), and budget exhaustion is the witness that replaces any
@@ -35,6 +38,12 @@ use crate::dht::delivery::RouteStage;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+
+mod signaling_path;
+pub use self::signaling_path::OutboundPath;
+pub use self::signaling_path::RelayPath;
+pub use self::signaling_path::ReturnPath;
+pub use self::signaling_path::SignalingPath;
 
 /// The number of forwards a payload may still take.
 ///
@@ -102,6 +111,9 @@ pub struct MessageRelay {
 
     /// The delivery stage: the route's aim, and whether it was handed past that aim.
     pub stage: RouteStage,
+
+    /// The recorded path of connect signaling; `None` for every other, pathless, carrier.
+    pub path: Option<SignalingPath>,
 }
 
 impl MessageRelay {
@@ -112,28 +124,83 @@ impl MessageRelay {
             destination,
             hop_budget,
             stage: hop.stage,
+            path: None,
+        }
+    }
+
+    /// The same carrier recording its path as `path` (connect signaling only, #947).
+    pub(crate) fn with_signaling_path(self, path: SignalingPath) -> Self {
+        Self {
+            path: Some(path),
+            ..self
+        }
+    }
+
+    /// The hop this carrier must take next when it retraces a recorded path; `None` when the
+    /// DHT routes it (a pathless or outbound carrier).
+    pub(crate) fn return_hop(&self) -> Option<Did> {
+        self.path
+            .as_ref()
+            .and_then(|path| path.return_hop(self.destination))
+    }
+
+    /// [`Self::return_hop`], refused as [`Error::RelayPathHopUnlinked`] unless `linked` holds
+    /// for it: a return takes only a direct link of the hop that sends it on (#947).
+    pub(crate) fn linked_return_hop(&self, linked: impl Fn(Did) -> bool) -> Result<Option<Did>> {
+        self.return_hop()
+            .map(|hop| {
+                if linked(hop) {
+                    Ok(hop)
+                } else {
+                    Err(Error::RelayPathHopUnlinked { hop })
+                }
+            })
+            .transpose()
+    }
+
+    /// Refuse a carrier whose path does not match its message: a path is carried exactly by
+    /// connect signaling (`is_connect_signaling`), and a carried path obeys `Law (Distinct)` at
+    /// the node it is addressed to ([`SignalingPath::validate_at`]).
+    pub(crate) fn validate_signaling_path(&self, is_connect_signaling: bool) -> Result<()> {
+        match (&self.path, is_connect_signaling) {
+            (Some(path), true) => path.validate_at(self.next_hop, self.destination),
+            (None, false) => Ok(()),
+            (Some(_), false) | (None, true) => Err(Error::RelaySignalingPathMismatch),
         }
     }
 
     /// The carrier `current` sends on toward `self.destination` after the delivery decision
     /// `hop`.
     ///
-    /// Pre: `self` was addressed to `current`.
-    /// Post: `Ok` spends exactly one forward and sets `stage = hop.stage`;
-    /// `Err(RelayHopBudgetExhausted)` is the drop of a payload that has taken every forward it
-    /// was given.
+    /// Pre: `self` was addressed to `current`; a carrier retracing a path takes exactly its
+    /// [`Self::return_hop`].
+    /// Post: `Ok` spends exactly one forward, sets `stage = hop.stage`, and records `current` on
+    /// a signaling path ([`SignalingPath::forwarded`]); `Err(RelayHopBudgetExhausted)` is the
+    /// drop of a payload that has taken every forward it was given.
     pub fn forward(&self, current: Did, hop: NextHop) -> Result<Self> {
         self.validate(current)?;
+        if self
+            .return_hop()
+            .is_some_and(|expected| expected != hop.peer)
+        {
+            return Err(Error::InvalidNextHop);
+        }
         let hop_budget = self
             .hop_budget
             .spend()
             .ok_or(Error::RelayHopBudgetExhausted)?;
+        let path = self
+            .path
+            .as_ref()
+            .map(|path| path.forwarded(current))
+            .transpose()?;
 
         Ok(Self {
             next_hop: hop.peer,
             destination: self.destination,
             hop_budget,
             stage: hop.stage,
+            path,
         })
     }
 
@@ -146,6 +213,26 @@ impl MessageRelay {
         self.validate(current)?;
 
         Ok(Self::new(hop, destination, HopBudget::MAX))
+    }
+
+    /// The fresh carrier of the reply `current` sends along the path this carrier recorded;
+    /// [`Error::RelaySignalingPathMismatch`] when it recorded none. Its first hop is the reply
+    /// path's [`return_hop`](ReturnPath::return_hop), which the caller must hold a link to.
+    ///
+    /// Pre: `self` was addressed to `current`.
+    /// Law: the reply retraces `self`'s crossed relays toward `destination` (`Law (Retrace)`).
+    pub(crate) fn reply_along_path(&self, current: Did, destination: Did) -> Result<Self> {
+        self.validate(current)?;
+        let reply = self
+            .path
+            .as_ref()
+            .ok_or(Error::RelaySignalingPathMismatch)?
+            .reply();
+        let first = reply.return_hop(destination);
+        Ok(
+            Self::new(NextHop::toward(first), destination, HopBudget::MAX)
+                .with_signaling_path(SignalingPath::Return(reply.departed())),
+        )
     }
 
     /// The same carrier aimed at `destination`.

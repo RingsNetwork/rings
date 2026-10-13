@@ -31,7 +31,11 @@
 //! (We can modify web-sys to support it, it may be easy, but it still won't work in Firefox.)
 //! So the best solution for message relay is to create a similar protocol to MSRP.
 //!
-//! The message relay protocol is similar to MSRP(RFC8873), except that it carries no hop history.
+//! The message relay protocol is similar to MSRP(RFC8873), except that it carries no hop history,
+//! with one exception: connect signaling (`ConnectNodeSend`, `ConnectNodeReport`) records the
+//! relays it crosses, outside every signature and bounded by the hop budget, so its reply
+//! retraces them; inbound validation refuses a path on any other message, and a path that names
+//! a node twice (#947).
 //! Every relayed message carries a relay carrier `next_hop`, `destination`, `hop_budget`. A relay
 //! node X that is the `next_hop` of a message for Z picks the next hop toward Z from its own
 //! finger table, spends one unit of the hop budget, and re-signs the envelope; a message whose

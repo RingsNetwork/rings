@@ -9,6 +9,9 @@ use rings_core::dht::Chord;
 use rings_core::dht::PeerRingAction;
 #[cfg(feature = "dummy")]
 use rings_core::dht::PeerRingRemoteAction;
+#[cfg(feature = "dummy")]
+use rings_core::message::e2e;
+use rings_core::message::e2e::E2eStreamFrame;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::callback::SwarmEvent;
@@ -34,6 +37,8 @@ mod test_config;
 // The gateway tests reach a real public network by design; the `dummy` build has none.
 #[cfg(all(rings_native, not(feature = "dummy")))]
 mod test_gateway;
+#[cfg(all(feature = "dummy", rings_native))]
+mod test_http_handshake;
 mod test_network;
 mod test_onion;
 mod test_registry;

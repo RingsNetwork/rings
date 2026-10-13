@@ -100,6 +100,12 @@ Here we will get answer responses by `Node 2`:
 {"jsonrpc":"2.0","result":"<b58 encoded answer>","id":1}
 ```
 
+The result is a counter-offer instead of an answer when `Node 2` already holds its own pending
+overlay offer to `Node 1` and that offer prevails on the DID tie-break (the smaller DID's offer
+prevails). The encoded payload then carries a `ConnectNodeSend` rather than a `ConnectNodeReport`:
+pass it to `Node 1`'s `answerOffer`, and the answer it returns to `Node 2`'s `acceptAnswer`. The
+edge is then `Node 2`'s handshake, and `Node 1`'s own offer is released.
+
 ### Accept Answer
 
 Finally, we send the answer to Node 1 to finish handshake:
