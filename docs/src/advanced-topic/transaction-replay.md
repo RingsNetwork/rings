@@ -36,8 +36,10 @@ and so would one class spread over several channels, once a stalled channel let 
 of the class overtake it by more than the window.
 
 No frame is held on the way (#908): a frame whose delegation reference misses is dropped, never
-delivered late, so the frames of one lane reach admission in arrival order (see [Delegation
-References](delegation-references.md)).
+delivered late, so the frames of one lane reach admission in arrival order. An honest sender's
+reference resolves whenever its transit stays under two delivery bounds, and a frame that waits
+in its lane at the receiver still resolves however long it waited, so a miss needs a late frame
+and a full table at once (see [Delegation References](delegation-references.md)).
 
 This assumes a class's transactions reach the scheduler in signing order, as they do from one
 sending task.
@@ -254,8 +256,7 @@ streams (#898) are the next cutover: the store becomes one record per stream und
 - No cross-account or global order.
 - No claim that a sequence gap identifies loss or a dishonest relay.
 - No retransmission, acknowledgement, or head-of-line blocking protocol for transactions (the
-  link's session confirmations and repairs are about delegation references, not about
-  transactions).
+  link's leases and disclaimers are about delegation references, not about transactions).
 - No exactly-once application side effects.
 - No recognition of messages older than a deliberately deleted replay store.
 - No reputation or slashing consequence for fork evidence.

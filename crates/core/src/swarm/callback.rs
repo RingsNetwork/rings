@@ -14,7 +14,7 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
-use crate::swarm::session_link::ReferencedDelegations;
+use crate::swarm::session_link::DelegationLessor;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -125,9 +125,10 @@ pub(super) struct InboundProcessor {
     /// ([`INBOUND_PEER_FRAME_CAPACITY`](rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY)).
     pre_admission: Arc<Mutex<PreAdmissionHold<HeldInboundFrame>>>,
     /// The receiving end of this connection's delegation references: the sessions the peer
-    /// carried inline on it, each under a lease this end granted. It lives and dies with the
-    /// connection, and holds no frame.
-    session_link: Arc<Mutex<ReferencedDelegations>>,
+    /// carried inline on it, each under a lease this end granted. A lease that ended stays
+    /// resident until its slot is needed for a new one (the residence law of
+    /// `swarm::session_link`). It lives and dies with the connection, and holds no frame.
+    session_link: Arc<Mutex<DelegationLessor>>,
 }
 
 /// What the transport handed over with one frame and takes back when the frame is done: the
@@ -153,7 +154,8 @@ struct HeldInboundFrame {
     lease: InboundFrameLease,
 }
 
-/// Where a verified frame comes from, which decides how far its delivery is waited for.
+/// Where a verified frame comes from on its way past the admission gate, which decides how far
+/// its delivery is waited for.
 ///
 /// A frame the transport just handed over is awaited to its logical completion, so the
 /// transport lane that carried it paces this end: the lane's drainer hands over the lane's

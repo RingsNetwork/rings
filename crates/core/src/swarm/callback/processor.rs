@@ -19,7 +19,7 @@ use crate::message::Message;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
-use crate::swarm::session_link::ReferencedDelegations;
+use crate::swarm::session_link::DelegationLessor;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -57,7 +57,7 @@ impl InboundProcessor {
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),
             pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
-            session_link: Arc::new(Mutex::new(ReferencedDelegations::new())),
+            session_link: Arc::new(Mutex::new(DelegationLessor::new())),
         }
     }
 
@@ -91,7 +91,7 @@ impl InboundProcessor {
     ///
     /// Lock law: held for one pure step and never across a suspension point; a poisoned lock
     /// still guards a well-formed state, since no step panics between two writes.
-    pub(super) fn session_link(&self) -> std::sync::MutexGuard<'_, ReferencedDelegations> {
+    pub(super) fn session_link(&self) -> std::sync::MutexGuard<'_, DelegationLessor> {
         self.session_link
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

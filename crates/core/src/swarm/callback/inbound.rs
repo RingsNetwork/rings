@@ -812,7 +812,7 @@ async fn process_logical_message(
 }
 
 /// Report an event's logical `result` as its `completion` asks: to the awaiting drainer, or to
-/// the log for a message released from a hold, which nobody awaits.
+/// the log for a message released from the pre-admission hold, which nobody awaits.
 fn finish_completion(completion: InboundCompletion, result: Result<()>) {
     match completion {
         InboundCompletion::Await(reply) => {
@@ -823,7 +823,7 @@ fn finish_completion(completion: InboundCompletion, result: Result<()>) {
                 tracing::warn!(
                     peer = %peer,
                     error = ?error,
-                    "failed to deliver a message released from a hold"
+                    "failed to deliver a message released from the pre-admission hold"
                 );
             }
         }

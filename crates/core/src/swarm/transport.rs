@@ -105,6 +105,8 @@ pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::dispatched_link_control_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::dispatched_link_control_since;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::referenced_slots_for_test;

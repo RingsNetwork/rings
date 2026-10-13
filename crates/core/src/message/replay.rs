@@ -15,8 +15,10 @@
 //! not pinned (frames spread over several channels) loses this law, since another channel can
 //! carry later sequences of the class past a stalled one.
 //!
-//! No frame is held on the way: a delegation reference an honest sender makes always resolves
-//! on arrival (the lease law of `swarm::session_link`, #908), so the law holds for every frame.
+//! No frame is held on the way: a frame whose delegation reference misses is dropped, never
+//! delivered late, and an honest sender's reference resolves whenever its transit stays under
+//! the lease margin and grace (the lease law of `swarm::session_link`, #908), so the law holds
+//! for every frame that arrives.
 //!
 //! Persistence is one record per stream (see [`store`]): a transition writes only its stream's
 //! record, at most [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`], so the cost of an admission does not
@@ -123,10 +125,11 @@ const _: () = assert!(REORDER_WINDOW == TRANSACTION_REPLAY_WINDOW as u64);
 /// On one edge a stream's frames arrive in order (the in-class order law). End to end they may
 /// not, when the stream's route, or the connection generation of one of its hops, changes
 /// mid-stream: frames still in flight on the superseded path land later than frames sent on
-/// the new one, each within the delivery bound of every hop it has yet to cross. The deadline
-/// allows four such bounds. A stream consumer that still misses a frame this long after a
-/// later one arrived, or that has seen [`REORDER_WINDOW`] later frames of it, has lost it: the
-/// replay window refuses a frame that late.
+/// the new one, each within the delivery bound of every hop it has yet to cross, since every
+/// hop delivers a frame or gives it up within its delivery bound. The deadline allows four such
+/// bounds: a superseded path with at most four hops left to cross. A stream consumer takes a
+/// frame still missing this long after a later one arrived as lost; one that has seen
+/// [`REORDER_WINDOW`] later frames of it has lost it, since the replay window refuses it.
 pub const REORDER_DEADLINE: Duration = DELIVERY_BOUND.saturating_mul(4);
 const TRANSACTION_REPLAY_BACKTRACK: u64 = 31;
 /// Account-to-destination pairs whose four class streams one runtime retains in full.

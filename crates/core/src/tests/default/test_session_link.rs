@@ -1,6 +1,8 @@
 //! Delegation references between real swarms over the dummy transport's immediate delivery.
 //! Every wait is the arrival of a message at a node's inbound tap.
 
+use rings_test_support::with_hang_guard;
+
 use crate::delegation::DelegationDigest;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
@@ -13,14 +15,18 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::message::PerSlot;
+use crate::message::TRANSACTION_REPLAY_WINDOW;
 use crate::swarm::application::ApplicationData;
 use crate::swarm::transport::dispatched_link_control_for_test;
+use crate::swarm::transport::dispatched_link_control_since;
+use crate::swarm::transport::hold_first_frame_deadlines_for_test;
 use crate::swarm::transport::referenced_slots_for_test;
 use crate::swarm::transport::LinkDirection;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
+use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::manually_establish_connection;
 use crate::tests::TEST_NETWORK_ID;
 
@@ -32,9 +38,9 @@ use crate::tests::TEST_NETWORK_ID;
 /// traffic to interleave.
 const SWITCH_WITHIN_MESSAGES: usize = 8;
 
-/// A same-class backlog longer than the replay window (`TRANSACTION_REPLAY_WINDOW`, 32): a
-/// frame overtaken by this many later frames of its class would be refused as stale.
-const BACKLOG_BEYOND_REPLAY_WINDOW: usize = 40;
+/// A same-class backlog longer than the replay window: a frame overtaken by this many later
+/// frames of its class would be refused as stale.
+const BACKLOG_BEYOND_REPLAY_WINDOW: usize = TRANSACTION_REPLAY_WINDOW + 8;
 
 /// The digests that went by reference on `link` so far, per slot.
 fn referenced_on(link: LinkDirection) -> PerSlot<Vec<DelegationDigest>> {
@@ -49,49 +55,76 @@ fn referenced_on(link: LinkDirection) -> PerSlot<Vec<DelegationDigest>> {
 /// Whether any reference missed on this test thread since `dispatched_before` control frames had
 /// been dispatched: a miss is answered with a disclaimer.
 fn misses_since(dispatched_before: usize) -> bool {
-    dispatched_link_control_for_test()
-        .split_off(dispatched_before)
+    dispatched_link_control_since(dispatched_before)
         .iter()
         .any(|(_, control)| matches!(control, LinkControl::Unknown(_)))
 }
 
-/// The next custom message at `node` that `origin` signed and that carries `data`, skipping
-/// the overlay's own traffic.
-async fn next_custom_message_from(node: &Node, origin: Did, data: &[u8]) -> Result<MessagePayload> {
+/// The next `count` custom messages at `node` that `origin` signed and whose data `wanted`
+/// accepts, in arrival order. Everything else is put back in the node's inbox, in order, when
+/// the scan ends. Each message must arrive within [`TEST_HANG_GUARD`] of the one before it.
+async fn scan_custom_from(
+    node: &Node,
+    origin: Did,
+    count: usize,
+    wanted: impl Fn(&[u8]) -> bool,
+) -> Result<Vec<MessagePayload>> {
     let mut scan = node.message_scan().await;
-    loop {
-        let payload = scan.next().await.ok_or_else(|| {
-            Error::InvalidMessage("node inbox closed before the message arrived".to_string())
-        })?;
-        let carries_data = matches!(
-            payload.transaction.data::<Message>(),
-            Ok(Message::CustomMessage(CustomMessage(custom))) if custom == data
+    let mut found = Vec::with_capacity(count);
+    while found.len() < count {
+        let label = format!(
+            "custom message {} of {count} from {origin}",
+            found.len() + 1
         );
-        if carries_data && payload.transaction.signer() == origin {
-            return Ok(payload);
+        let payload = with_hang_guard(&label, TEST_HANG_GUARD, scan.next())
+            .await
+            .ok_or_else(|| Error::InvalidMessage(format!("node inbox closed before {label}")))?;
+        let accepted = payload.transaction.signer() == origin
+            && matches!(
+                payload.transaction.data::<Message>(),
+                Ok(Message::CustomMessage(CustomMessage(custom))) if wanted(&custom)
+            );
+        if accepted {
+            found.push(payload);
+        } else {
+            scan.skip(payload);
         }
+    }
+    Ok(found)
+}
+
+/// The data of `payload`'s custom message; empty for any other message.
+fn custom_data(payload: &MessagePayload) -> Vec<u8> {
+    match payload.transaction.data::<Message>() {
+        Ok(Message::CustomMessage(CustomMessage(custom))) => custom,
+        _ => Vec::new(),
     }
 }
 
+/// The next custom message at `node` that `origin` signed and that carries `data`.
+async fn next_custom_message_from(node: &Node, origin: Did, data: &[u8]) -> Result<MessagePayload> {
+    scan_custom_from(node, origin, 1, |custom| custom == data)
+        .await?
+        .pop()
+        .ok_or_else(|| Error::InvalidMessage("scan returned no message".to_string()))
+}
+
 /// The data of the next `count` custom messages at `node` that `origin` signed, in arrival
-/// order, skipping the overlay's own traffic.
+/// order.
 async fn custom_data_from(node: &Node, origin: Did, count: usize) -> Result<Vec<Vec<u8>>> {
-    let mut scan = node.message_scan().await;
-    let mut arrived = Vec::with_capacity(count);
-    while arrived.len() < count {
-        let payload = scan.next().await.ok_or_else(|| {
-            Error::InvalidMessage("node inbox closed before the backlog arrived".to_string())
-        })?;
-        if payload.transaction.signer() != origin {
-            continue;
-        }
-        if let Ok(Message::CustomMessage(CustomMessage(custom))) =
-            payload.transaction.data::<Message>()
-        {
-            arrived.push(custom);
-        }
-    }
-    Ok(arrived)
+    let found = scan_custom_from(node, origin, count, |_| true).await?;
+    Ok(found.iter().map(custom_data).collect())
+}
+
+/// Send `data` from `sender` to `destination` with `relay` as its first hop.
+async fn send_by_hop(sender: &Node, relay: &Node, destination: &Node, data: &[u8]) -> Result<()> {
+    sender
+        .swarm
+        .transport
+        .protocol_egress()
+        .send_message_by_hop(Message::custom(data)?, destination.did(), relay.did())
+        .await
+        .map(drop)
 }
 
 /// Connect `left` and `right` and return once each has admitted the other: the join traffic has
@@ -111,12 +144,7 @@ async fn relay_custom(
     destination: &Node,
     data: &[u8],
 ) -> Result<MessagePayload> {
-    sender
-        .swarm
-        .transport
-        .protocol_egress()
-        .send_message_by_hop(Message::custom(data)?, destination.did(), relay.did())
-        .await?;
+    send_by_hop(sender, relay, destination, data).await?;
     let delivered = next_custom_message_from(destination, sender.did(), data).await?;
     assert_eq!(delivered.transaction.destination, destination.did());
     assert_eq!(delivered.signer(), relay.did());
@@ -190,6 +218,13 @@ async fn test_relayed_origin_session_never_misses() -> Result<()> {
 /// while the last hop switches the origin's new session from inline to a reference, reaches
 /// the destination whole and in order, and no reference misses. Nothing is held on the link,
 /// so no frame of the backlog is overtaken and lost as stale.
+///
+/// The backlog outruns a lane's credit window, so most of it waits in the sender's queue for
+/// credit. The protocol egress drops a payload whose first frame is not admitted within the
+/// first-frame deadline, as local backpressure its origin's retry covers, and the dummy
+/// profile's deadline is shorter than a debug build takes to relay the window. That loss is
+/// the egress's, not the link's, and this law is not about it, so the test holds the deadline:
+/// every frame of the backlog waits for credit instead.
 #[tokio::test]
 async fn test_a_backlog_across_a_session_switch_loses_no_frame() -> Result<()> {
     let origin = prepare_node(SecretKey::random()).await;
@@ -198,17 +233,13 @@ async fn test_a_backlog_across_a_session_switch_loses_no_frame() -> Result<()> {
     establish_admitted_link(&origin, &relay).await?;
     establish_admitted_link(&relay, &destination).await?;
     let dispatched_before = dispatched_link_control_for_test().len();
+    let _waits_for_credit = hold_first_frame_deadlines_for_test();
 
     let backlog = (0..BACKLOG_BEYOND_REPLAY_WINDOW)
         .map(|index| format!("backlog {index}").into_bytes())
         .collect::<Vec<_>>();
     for data in &backlog {
-        origin
-            .swarm
-            .transport
-            .protocol_egress()
-            .send_message_by_hop(Message::custom(data)?, destination.did(), relay.did())
-            .await?;
+        send_by_hop(&origin, &relay, &destination, data).await?;
     }
     assert_eq!(
         custom_data_from(&destination, origin.did(), backlog.len()).await?,

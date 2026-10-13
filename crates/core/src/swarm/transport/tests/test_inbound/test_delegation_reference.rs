@@ -3,36 +3,62 @@
 //! the bounds on those control frames. Every wait is on the application inbox's delivery event
 //! or on an activity probe.
 
-use super::*;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use super::super::default_transport;
+use super::super::failed_receive_count;
+use super::super::pending_peer;
+use super::super::pending_peer_with;
+use super::super::pending_peer_with_key;
+use super::super::transport_with_measure;
+use super::super::ApplicationRecorder;
+use super::super::PendingPeer;
+use super::super::RecordingMeasure;
+use crate::delegation::DelegateeKey;
 use crate::delegation::DelegationDigest;
-use crate::message::DelegationRef;
+use crate::dht::Did;
+use crate::ecc::SecretKey;
+use crate::error::Error;
+use crate::error::Result;
+use crate::measure::MeasurementEvent;
 use crate::message::LinkControl;
 use crate::message::MessagePayload;
 use crate::message::PerSlot;
+use crate::message::SlotEncoding;
 use crate::message::WirePayload;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::transport::dispatched_link_control_for_test;
+use crate::swarm::transport::dispatched_link_control_since;
+use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::LINK_CONTROL_IN_FLIGHT_CAPACITY;
 use crate::tests::default::dummy_hooks::PausedDispatchGuard;
 use crate::tests::delegatee_key_with_ttl;
 
-/// The typed refusal of a referenced frame outside a link, from the callback's boxed error.
-fn unresolved_reference(refusal: &(dyn std::error::Error + 'static)) -> Option<DelegationDigest> {
-    match refusal.downcast_ref::<Error>() {
-        Some(Error::DelegationReferenceUnresolved(digest)) => Some(*digest),
-        _ => None,
-    }
+/// Both slots by reference.
+const BOTH_REFERENCED: PerSlot<SlotEncoding> = PerSlot {
+    origin: SlotEncoding::Referenced,
+    hop: SlotEncoding::Referenced,
+};
+
+/// The origin slot inline and the hop slot by reference: a mix only a link can carry.
+const HOP_REFERENCED: PerSlot<SlotEncoding> = PerSlot {
+    origin: SlotEncoding::Inline,
+    hop: SlotEncoding::Referenced,
+};
+
+/// The frame bytes of `payload` with its slots travelling as `encoding` says.
+fn wire(payload: &MessagePayload, encoding: PerSlot<SlotEncoding>) -> Result<Vec<u8>> {
+    Ok(WirePayload::encoded(payload, encoding)?.to_wire()?.to_vec())
 }
 
-/// Whether the callback's boxed error is the refusal of an origin delegation that expired.
-fn refused_as_expired(refusal: &(dyn std::error::Error + 'static)) -> bool {
-    matches!(
-        refusal.downcast_ref::<Error>(),
-        Some(Error::DelegationExpired)
-    )
+/// The typed error behind the callback's boxed refusal, if it is one.
+fn refusal_error<'a>(refusal: &'a (dyn std::error::Error + 'static)) -> Option<&'a Error> {
+    refusal.downcast_ref::<Error>()
 }
 
-/// Whether `dispatched` is a lease on `digest` granted to `peer`, whatever its end: the end
-/// reads the clock, the law is about which session is confirmed to whom.
+/// Whether `dispatched` is a lease on `digest` granted to `peer`, whatever is left of it: the
+/// law is about which session is confirmed to whom.
 fn confirms(dispatched: &(Did, LinkControl), peer: Did, digest: DelegationDigest) -> bool {
     matches!(
         dispatched,
@@ -45,25 +71,6 @@ fn charged(measure: &RecordingMeasure, peer: Did) -> Result<bool> {
     Ok(measure
         .snapshot_counters()?
         .contains(&(peer, MeasurementEvent::FailedToReceive)))
-}
-
-/// The frame bytes of `payload` with its hop session sent by reference, and its origin session
-/// by reference too when `origin_by_reference` holds, inline otherwise: inline origin and
-/// referenced hop is a slot mix only a link can carry.
-fn referenced_wire(payload: &MessagePayload, origin_by_reference: bool) -> Result<Vec<u8>> {
-    let sessions = payload.delegations();
-    let origin = if origin_by_reference {
-        DelegationRef::Digest(sessions.origin.digest()?)
-    } else {
-        DelegationRef::inline(sessions.origin)
-    };
-    let references = PerSlot {
-        origin,
-        hop: DelegationRef::Digest(sessions.hop.digest()?),
-    };
-    WirePayload::view(payload, references)
-        .to_wire()
-        .map(|wire| wire.to_vec())
 }
 
 /// Steady state: once a verified frame carried a session inline, later frames that reference
@@ -79,7 +86,7 @@ async fn test_referenced_session_resolves_after_a_verified_inline_frame() -> Res
         .receive(&pending.custom_message_wire(&transport, b"inline")?)
         .await?;
     let steady = pending.custom_payload(&transport, b"referenced")?;
-    pending.receive(&referenced_wire(&steady, true)?).await?;
+    pending.receive(&wire(&steady, BOTH_REFERENCED)?).await?;
     application.wait_for_inbounds_at_least(2).await;
 
     assert_eq!(application.inbound_custom_data(), vec![
@@ -110,14 +117,11 @@ async fn test_a_missed_origin_reference_is_dropped_uncharged_and_disclaimed() ->
 
     let stranger = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let missed = pending.relayed_custom_payload(&transport, &stranger, b"missed")?;
-    pending.receive(&referenced_wire(&missed, true)?).await?;
-    assert_eq!(
-        dispatched_link_control_for_test().split_off(dispatched_before),
-        vec![(
-            pending.peer,
-            LinkControl::Unknown(stranger.delegation().digest()?)
-        )]
-    );
+    pending.receive(&wire(&missed, BOTH_REFERENCED)?).await?;
+    assert_eq!(dispatched_link_control_since(dispatched_before), vec![(
+        pending.peer,
+        LinkControl::Unknown(stranger.delegation().digest()?)
+    )]);
 
     pending
         .receive(&pending.custom_message_wire(&transport, b"passing")?)
@@ -147,11 +151,11 @@ async fn test_a_missed_hop_reference_is_dropped_uncharged_and_disclaimed() -> Re
 
     let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let missed = pending.relayed_custom_payload(&transport, &origin, b"hop-missed")?;
-    pending.receive(&referenced_wire(&missed, false)?).await?;
-    assert_eq!(
-        dispatched_link_control_for_test().split_off(dispatched_before),
-        vec![(pending.peer, LinkControl::Unknown(hop_digest))]
-    );
+    pending.receive(&wire(&missed, HOP_REFERENCED)?).await?;
+    assert_eq!(dispatched_link_control_since(dispatched_before), vec![(
+        pending.peer,
+        LinkControl::Unknown(hop_digest)
+    )]);
 
     pending
         .receive(&pending.custom_message_wire(&transport, b"passing")?)
@@ -186,11 +190,11 @@ async fn test_receiver_table_does_not_outlive_the_connection_generation() -> Res
     let digest = next.session.delegation().digest()?;
     let dispatched_before = dispatched_link_control_for_test().len();
     let referenced = next.custom_payload(&transport, b"referenced-on-the-next-generation")?;
-    next.receive(&referenced_wire(&referenced, true)?).await?;
-    assert_eq!(
-        dispatched_link_control_for_test().split_off(dispatched_before),
-        vec![(next.peer, LinkControl::Unknown(digest))]
-    );
+    next.receive(&wire(&referenced, BOTH_REFERENCED)?).await?;
+    assert_eq!(dispatched_link_control_since(dispatched_before), vec![(
+        next.peer,
+        LinkControl::Unknown(digest)
+    )]);
 
     next.receive(&next.custom_message_wire(&transport, b"inline-again")?)
         .await?;
@@ -253,7 +257,7 @@ async fn test_control_frames_never_pace_the_read_loop() -> Result<()> {
         .receive(&pending.custom_message_wire(&transport, b"delivered-anyway")?)
         .await?;
     application.wait_for_inbounds_at_least(1).await;
-    let dispatched = dispatched_link_control_for_test().split_off(dispatched_before);
+    let dispatched = dispatched_link_control_since(dispatched_before);
     assert!(matches!(
         dispatched.as_slice(),
         [confirmation] if confirms(confirmation, pending.peer, digest)
@@ -298,7 +302,7 @@ async fn test_control_sends_beyond_the_in_flight_budget_are_refused() -> Result<
         .receive(&pending.custom_message_wire(&transport, b"within-the-budget-again")?)
         .await?;
     application.wait_for_inbounds_at_least(2).await;
-    let dispatched = dispatched_link_control_for_test().split_off(dispatched_before);
+    let dispatched = dispatched_link_control_since(dispatched_before);
     assert!(matches!(
         dispatched.as_slice(),
         [confirmation] if confirms(confirmation, pending.peer, digest)
@@ -321,15 +325,16 @@ async fn test_referenced_frame_on_an_unbound_callback_is_refused() -> Result<()>
     let refused = unbound
         .on_admitted_message_for_test(
             &pending.peer.to_string(),
-            &referenced_wire(&referenced, true)?,
+            &wire(&referenced, BOTH_REFERENCED)?,
         )
         .await;
 
     let refusal = refused.expect_err("a reference resolves only on a link");
-    assert_eq!(
-        unresolved_reference(refusal.as_ref()),
-        Some(pending.session.delegation().digest()?)
-    );
+    assert!(matches!(
+        refusal_error(refusal.as_ref()),
+        Some(Error::DelegationReferenceUnresolved(digest))
+            if *digest == pending.session.delegation().digest()?
+    ));
     assert_eq!(dispatched_link_control_for_test().len(), dispatched_before);
     assert_eq!(application.inbounds(), 0);
     Ok(())
@@ -352,14 +357,15 @@ async fn test_frames_from_a_peer_other_than_the_bound_one_are_off_the_link() -> 
         .callback
         .on_admitted_message_for_test(
             &stranger_did.to_string(),
-            &referenced_wire(&referenced, true)?,
+            &wire(&referenced, BOTH_REFERENCED)?,
         )
         .await;
     let refusal = refused.expect_err("a reference resolves only on the bound link");
-    assert_eq!(
-        unresolved_reference(refusal.as_ref()),
-        Some(pending.session.delegation().digest()?)
-    );
+    assert!(matches!(
+        refusal_error(refusal.as_ref()),
+        Some(Error::DelegationReferenceUnresolved(digest))
+            if *digest == pending.session.delegation().digest()?
+    ));
     assert_eq!(dispatched_link_control_for_test().len(), dispatched_before);
     assert_eq!(application.inbounds(), 0);
     transport.disconnect(pending.peer).await?;
@@ -381,7 +387,7 @@ async fn test_a_frame_teaches_the_link_before_it_is_gated() -> Result<()> {
         .await?;
     let referenced = pending.custom_payload(&transport, b"referenced-before-admission")?;
     pending
-        .receive(&referenced_wire(&referenced, true)?)
+        .receive(&wire(&referenced, BOTH_REFERENCED)?)
         .await?;
 
     assert_eq!(pending.callback.pre_admission_held_count_for_test(), 2);
@@ -397,46 +403,123 @@ async fn test_a_frame_teaches_the_link_before_it_is_gated() -> Result<()> {
     Ok(())
 }
 
-/// Law (expiry in flight): an origin delegation that verified on one frame, and expired less
-/// than `LEASE_GRACE_MS` before the next frame carrying it arrives, expired in flight, beyond
-/// the hop's control: that frame is refused as expired, not delivered, and not charged to the
-/// hop. The inbound clock is injected, so advancing it past the delegation's end is the whole
-/// event; the delegation's lifetime outlasts the test under the system clock.
-#[tokio::test]
-async fn test_an_origin_expired_in_flight_is_refused_uncharged() -> Result<()> {
+/// A transport charging into a recording measure, a peer admitted on it whose callback reads
+/// the injected inbound clock, the application's recorder, and an origin `pending` relays that
+/// lives `LIFETIME_MS`.
+struct ExpiryScene {
+    measure: Arc<RecordingMeasure>,
+    transport: Arc<SwarmTransport>,
+    application: ApplicationRecorder,
+    pending: PendingPeer,
+    origin: DelegateeKey,
+    now_ms: Arc<Mutex<u128>>,
+}
+
+impl ExpiryScene {
+    /// The origin's lifetime: it outlasts the test under the system clock.
     const LIFETIME_MS: u64 = 60_000;
-    let measure = Arc::new(RecordingMeasure::default());
-    let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let origin = delegatee_key_with_ttl(LIFETIME_MS)?;
-    let now_ms = Arc::new(Mutex::new(crate::utils::get_epoch_ms()));
-    let application = ApplicationRecorder::attach(&transport)?;
-    let pending =
-        pending_peer_with(&transport, SecretKey::random(), Some(Arc::clone(&now_ms))).await?;
-    pending.admit(&transport).await?;
 
-    let live = pending.relayed_custom_payload(&transport, &origin, b"while-the-origin-lives")?;
-    pending.receive(live.to_wire()?.as_ref()).await?;
-    application.wait_for_inbounds_at_least(1).await;
+    /// The scene, after one frame from the origin was delivered while it lived.
+    async fn new() -> Result<Self> {
+        let measure = Arc::new(RecordingMeasure::default());
+        let transport = Arc::new(transport_with_measure(measure.clone())?);
+        let origin = delegatee_key_with_ttl(Self::LIFETIME_MS)?;
+        let now_ms = Arc::new(Mutex::new(crate::utils::get_epoch_ms()));
+        let application = ApplicationRecorder::attach(&transport)?;
+        let pending =
+            pending_peer_with(&transport, SecretKey::random(), Some(Arc::clone(&now_ms))).await?;
+        pending.admit(&transport).await?;
+        let live =
+            pending.relayed_custom_payload(&transport, &origin, b"while-the-origin-lives")?;
+        pending.receive(live.to_wire()?.as_ref()).await?;
+        application.wait_for_inbounds_at_least(1).await;
+        Ok(Self {
+            measure,
+            transport,
+            application,
+            pending,
+            origin,
+            now_ms,
+        })
+    }
 
-    *now_ms.lock().map_err(|_| Error::LockPoisoned)? = origin.delegation().expires_at_ms() + 1;
-    let late = pending.relayed_custom_payload(&transport, &origin, b"expired-in-flight")?;
-    let refused = pending
+    /// Set the inbound clock just past the origin's expiry, within the grace, and return a
+    /// frame of `data` from the origin.
+    fn just_expired(&self, data: &[u8]) -> Result<MessagePayload> {
+        *self.now_ms.lock().map_err(|_| Error::LockPoisoned)? =
+            self.origin.delegation().expires_at_ms() + 1;
+        self.pending
+            .relayed_custom_payload(&self.transport, &self.origin, data)
+    }
+
+    /// Deliver `payload` from the peer, whatever the callback says of it.
+    async fn deliver(&self, payload: &MessagePayload) -> Result<()> {
+        let _verdict = self
+            .pending
+            .callback
+            .on_admitted_message_for_test(&self.pending.peer.to_string(), &payload.to_wire()?)
+            .await;
+        Ok(())
+    }
+}
+
+/// Law (expiry in flight): an origin delegation that verified on one frame, and expired less
+/// than `G` before the next frame carrying it arrives, under a valid hop proof, expired in
+/// flight, beyond the hop's control: that frame is dropped without an error, not delivered,
+/// and not charged to the hop. The inbound clock is injected, so advancing it past the
+/// delegation's end is the whole event.
+#[tokio::test]
+async fn test_an_origin_expired_in_flight_is_dropped_uncharged() -> Result<()> {
+    let scene = ExpiryScene::new().await?;
+    let pending = &scene.pending;
+
+    let late = scene.just_expired(b"expired-in-flight")?;
+    pending
         .callback
         .on_admitted_message_for_test(&pending.peer.to_string(), late.to_wire()?.as_ref())
-        .await;
-    let refusal = refused.expect_err("an origin expired in flight is refused");
-    assert!(refused_as_expired(refusal.as_ref()));
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
     pending
-        .receive(&pending.custom_message_wire(&transport, b"passing")?)
+        .receive(&pending.custom_message_wire(&scene.transport, b"passing")?)
         .await?;
-    application.wait_for_inbounds_at_least(2).await;
-    assert_eq!(application.inbound_custom_data(), vec![
+    scene.application.wait_for_inbounds_at_least(2).await;
+    assert_eq!(scene.application.inbound_custom_data(), vec![
         b"while-the-origin-lives".to_vec(),
         b"passing".to_vec(),
     ]);
-    assert!(!charged(&measure, pending.peer)?);
-    transport.disconnect(pending.peer).await?;
+    assert!(!charged(&scene.measure, pending.peer)?);
+    scene.transport.disconnect(pending.peer).await?;
+    Ok(())
+}
+
+/// Law (expiry in flight, soundness): the waiver covers only a frame whose sole defect is its
+/// origin's expiry in flight. With the origin expired within `G` but the hop's proof invalid,
+/// a tampered hop signature or a hop delegation that did not sign, the frame is charged to
+/// the hop like any forgery.
+#[tokio::test]
+async fn test_an_origin_expired_in_flight_under_an_invalid_hop_proof_is_charged() -> Result<()> {
+    let scene = ExpiryScene::new().await?;
+    let pending = &scene.pending;
+
+    let mut tampered = scene.just_expired(b"tampered-hop-signature")?;
+    if let Some(byte) = tampered.verification.sig.first_mut() {
+        *byte ^= 1;
+    }
+    scene.deliver(&tampered).await?;
+    assert!(charged(&scene.measure, pending.peer)?);
+    let charges = failed_receive_count(&scene.measure, pending.peer)?;
+
+    let mut garbage = scene.just_expired(b"garbage-hop-delegation")?;
+    garbage.verification.delegation =
+        DelegateeKey::new_with_seckey(&SecretKey::random())?.delegation();
+    scene.deliver(&garbage).await?;
+    assert_eq!(
+        failed_receive_count(&scene.measure, pending.peer)?,
+        charges + 1
+    );
+    assert_eq!(scene.application.inbounds(), 1);
+    scene.transport.disconnect(pending.peer).await?;
     Ok(())
 }
 

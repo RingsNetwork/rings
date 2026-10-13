@@ -25,9 +25,10 @@
 //!   inline frame or renewing reference, a lost disclaimer is sent again by the next miss, and
 //!   a peer that grants no credit is liveness's to judge.
 //! - Bound law: nothing here reserves lane or memory capacity. Each inbound frame causes at
-//!   most two of these frames (a lease or a disclaimer per delegation slot of a frame this end
-//!   verified or dropped as a miss), and at most `LINK_CONTROL_IN_FLIGHT_CAPACITY` of them,
-//!   twice the raw frames the peer may have in flight at this end's transport
+//!   most two of these frames, one per distinct delegation slot: a lease or renewal per
+//!   distinct delegation of a frame this end verified, or a disclaimer per distinct digest of a
+//!   frame it dropped as a miss. At most `LINK_CONTROL_IN_FLIGHT_CAPACITY` of them, twice the
+//!   raw frames the peer may have in flight at this end's transport
 //!   ([`INBOUND_PEER_FRAME_CAPACITY`](rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY)),
 //!   are in flight to one peer at a time: a send beyond that budget is refused, and repeated by
 //!   the next frame that misses or teaches the same session. So what this end spends on a
@@ -35,7 +36,8 @@
 //!   time.
 //!
 //! The sender's table is judged on the system clock, like every outbound step; the receiver's
-//! on the inbound clock. They are one clock outside tests.
+//! on the inbound clock. They are one clock outside tests. The clocks of the two ends of a link
+//! are never compared: a lease travels as a remaining duration.
 
 use bytes::Bytes;
 use futures::future::select;
@@ -52,13 +54,13 @@ use super::AdmittedConnection;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
 use super::DELIVERY_BOUND;
-use crate::delegation::DelegationDigest;
 use crate::error::DetachedWork;
 use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopToken;
 use crate::message::LinkControl;
 use crate::swarm::detached::spawn_detached;
+use crate::utils::get_epoch_ms;
 use crate::utils::sleep;
 
 /// The send context every link-control frame is logged and judged under.
@@ -172,29 +174,18 @@ impl SwarmTransport {
         Ok(())
     }
 
-    /// `attempt`'s peer leased `digest` until `until_ms` on its clock: frames to it may
-    /// reference the session while the lease lasts.
-    pub(crate) fn acknowledge_session(
+    /// Learn what `attempt`'s peer said about its link, on the system clock the sender's
+    /// table is judged on.
+    pub(crate) fn observe_link_control(
         &self,
         attempt: PendingConnectionAttempt,
-        digest: DelegationDigest,
-        until_ms: u128,
+        control: &LinkControl,
     ) {
-        self.outbound_schedulers.acknowledge_session(
+        self.outbound_schedulers.observe_link_control(
             attempt.peer(),
             attempt.generation(),
-            digest,
-            until_ms,
+            control,
+            get_epoch_ms(),
         );
-    }
-
-    /// `attempt`'s peer does not hold `digest`: frames to it carry the session inline again.
-    pub(crate) fn disclaimed_session(
-        &self,
-        attempt: PendingConnectionAttempt,
-        digest: DelegationDigest,
-    ) {
-        self.outbound_schedulers
-            .disclaimed_session(attempt.peer(), attempt.generation(), digest);
     }
 }

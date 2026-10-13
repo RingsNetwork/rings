@@ -39,10 +39,11 @@ table:
 | receiver | delegations this link carried inline, each under a lease it granted | 128 | frames that verified |
 
 The sender's table is a least-recently-referenced cache: what it forgets travels inline again.
-The receiver's table is not a cache. It never evicts a live lease to make room, and 8 of its
-128 entries are reserved for the link peer's own (hop) delegations, so relayed origins cannot
-push the peer's own session inline. A full table refuses to lease a new delegation, and the
-sender keeps sending it inline, which is always admissible.
+The receiver's table is not a cache. It never reclaims a lease before its grace ends (see
+[Lease](#lease)), and 8 of its 128 entries are reserved for the link peer's own (hop)
+delegations, so relayed origins cannot push the peer's own session inline. A table full of
+leases still within their grace refuses to lease a new delegation, and the sender keeps sending
+it inline, which is always admissible.
 
 Consequences of the scope:
 
@@ -73,7 +74,7 @@ The sender switches a delegation from inline to reference only under a lease the
 ```text
 sender                                      receiver
   frame, delegation s inline        ───────▶   verifies; leases s
-                                 ◀───────   Known(digest(s), until)
+                                 ◀───────   Known(digest(s), r)
   frame, Digest(s)               ───────▶   resolves from its table
 ```
 
@@ -83,25 +84,40 @@ costs inline frames, never a stall.
 
 ## Lease
 
-The receiver leases `s` only once `s` is resident in its table, with
-`Known(digest(s), until)`, where `until = min(exp(s), now + 5 min)` on the receiver's clock.
-Write `Δ` and `G` for one delivery bound each (25 s).
+Write `Δ` (the margin) and `G` (the grace) for one delivery bound each: 25 s in production.
 
-- The receiver keeps `s` until `until + G`. `until` never decreases.
-- The sender references `s` only while `now + Δ < until_S`, where `until_S` is the largest
-  `until` it was sent. Otherwise it sends `s` inline.
-- A reference that finds less than half a lease left renews it, and the receiver sends the
-  new `Known`.
+The receiver leases `s` only once a frame carrying it inline verified and `s` is resident in its
+table. It sends `Known(digest(s), r)`, where `r = until − now` and
+`until = min(exp(s), now + 5 min)` on the receiver's clock. `r` is a remaining duration, not an
+instant, so no clock is ever compared with another:
 
-The sender learns only values the receiver granted, and a stale `Known` carries an older,
-smaller `until`, so `until_S ≤ until_R`. A reference therefore resolves whenever its transit
-plus the two clocks' skew stays under `Δ + G`, on every interleaving and every loss. An unused
-lease leaves the receiver's table within 5 min plus `G`, which bounds what one link pins.
+- The sender, receiving `Known(digest(s), r)` at `t_S` on its own clock, records
+  `until_S = t_S + r`, keeping the largest such value it received. In real time, whatever the
+  two clocks read, `until_S` exceeds the receiver's `until` by exactly the transit `c` of the
+  `Known` it came from; a stale `Known` counts from its own, older grant and never lengthens a
+  newer one.
+- The sender references `s` only while `now + Δ < until_S`. Otherwise it sends `s` inline.
+- The receiver never reclaims a lease before `until + G`, and `until` never decreases.
+
+A reference of transit `t` therefore resolves whenever `c + t ≤ Δ + G`, the confirmation and
+the reference each within one delivery bound, on every interleaving and every loss.
+
+**Residence.** Whether a reference resolves depends only on whether the delegation is resident
+in the receiver's table, never on when the frame arrived or how long it waited. A lease that
+ended, grace included, is reclaimed lazily: only when its slot is needed for a new lease. Until
+then a reference to it still resolves, so a frame that waits in its lane at the receiver
+resolves however long it waited, unless the table filled up meanwhile. An unused lease becomes
+reclaimable 5 min plus `G` after its last grant or renewal, which bounds what one link pins.
+
+**Renewal.** Only a frame that verified renews a lease. When a verified frame references a
+delegation with less than half a lease left, the receiver renews it, if that lengthens it, and
+sends the new `Known`. A verified frame causes at most one lease or renewal per distinct
+delegation it carries: a peer's own frame, whose origin is its hop, carries one.
 
 ## Miss
 
-A reference the receiver does not hold is a miss. On an honest link it can only come from this
-end's clock or a fault, so it is not charged:
+A reference the receiver does not hold is a miss. On an honest link it can only come from a
+confirmation and a reference whose transits together exceed `Δ + G`, under a full table, or a fault at this end, so it is not charged:
 
 ```text
 receiver                                   sender
@@ -111,30 +127,47 @@ receiver                                   sender
 
 Nothing is held. A dishonest sender gains nothing by missing: its own frame is dropped. Since no
 frame waits on a repair, the frames of one lane reach the logical stage in their arrival order
-(#908; see [Transaction Replay Protection](transaction-replay.md)).
+(#908; see [Transaction Replay Protection](transaction-replay.md)). A stale `Unknown` that
+overtakes a newer `Known` costs inline frames until the next lease, never a miss.
 
 Link-control frames (`Known`, `Unknown`) are unsigned and idempotent. They are meaningful only
 on the authenticated connection generation they arrive on, a lease is granted only for a
-delegation that verified, and a digest names a value rather than asserting one; a duplicate or a
-stale one changes nothing. They travel on the DHT-control lane, in a task of their own (refused,
-never run inline, when no runtime can carry one), never awaited by the transport lane whose frame
-caused them. A send waits for its lane's credit at most one delivery bound, and is then dropped:
-a lost lease is granted again by the next inline frame or renewing reference, a lost disclaimer
-is sent again by the next miss. Each inbound frame causes at most two of them, and at most 128
-are in flight to one peer at a time, twice the raw frames that peer may have in flight at this
-end's transport; a send beyond that budget is dropped and repeated by the next frame that misses
-or teaches the same delegation. So what this end spends on a peer's link control is bounded by
-the frames it accepts from that peer. The sender's table and this budget survive a replacement
-of the outbound worker under an unchanged generation.
+delegation that verified, and a digest names a value rather than asserting one; a duplicate
+changes nothing. They travel on the DHT-control lane, in a task of their own (refused, never
+run inline, when no runtime can carry one), never awaited by the transport lane whose frame
+caused them. A send waits for its lane's credit at most one delivery bound, and is then
+dropped: a lost lease is granted again by the next inline frame or renewing reference, a lost
+disclaimer is sent again by the next miss. Each inbound frame causes at most two of them, one
+per distinct delegation slot, and at most 128 are in flight to one peer at a time, twice the
+raw frames that peer may have in flight at this end's transport; a send beyond that budget is
+dropped and repeated by the next frame that misses or teaches the same delegation. So what this
+end spends on a peer's link control is bounded by the frames it accepts from that peer. The
+sender's table and this budget survive a replacement of the outbound worker under an unchanged
+generation.
 
 ## Expiry
 
-An expired delegation is absent from both tables, and a lease never outlives its delegation.
-The sender refuses to send any frame with a delegation that expires within `Δ`, so no frame needs
-a delegation past its expiry in flight. An origin delegation that expired in flight, within `G`
-of arrival, is refused without charging the hop that carried it: the hop answers only for its
-own delegation. A fresh delegation must travel inline and verify like any other; expiry never
-resurrects an old one.
+The sender's table holds no expired delegation, and a receiver's lease never outlives its
+delegation. The delegation itself may outlive its lease at the receiver: it stays resident
+through the grace `G`, and after that until its slot is needed (the residence law). Residence
+grants nothing, though: verification refuses an expired delegation, so a frame that resolves to
+one is refused like any other expired frame. A fresh delegation must travel inline and verify
+like any other; expiry never resurrects an old one.
+
+The sender refuses to send a frame with a delegation that expires within `Δ`, so no frame needs
+a delegation past its expiry in flight. The refusal is the local error
+`DelegationExpiresWithinMargin`: nothing reached the peer, so it is not charged to the next hop.
+
+An origin delegation can still expire in flight, after the hop that carried the frame checked
+it. Such a frame is dropped without charging that hop, since the hop answers only for its own
+delegation, but only when all of these hold:
+
+- the origin is not the hop;
+- the origin delegation expired at most `G` before arrival;
+- the hop's proof verifies now;
+- the origin's proof verifies at the instant its delegation expired.
+
+Any other failure, a forged or otherwise invalid frame included, is charged as before.
 
 ## Self-contained contexts
 
@@ -151,6 +184,11 @@ link, and is judged as self-contained.
 and link-control frames with `RINGS-LINK`; a frame with neither, including every frame of
 0.27.x and earlier, is rejected before deserialization. There is no dual decoder, negotiation,
 or downgrade path.
+
+#908 changes the link-control tags again: `Request` and `Announce` are removed, and `Known`
+carries the remaining duration of a lease (`remaining_ms`) instead of an instant on the
+receiver's clock. A link-control frame of the previous encoding is not decoded; both ends of a
+link upgrade together.
 
 The protocol is not versioned before 1.0. Markers, signing domains, AEAD namespaces, and storage
 keys carry no version suffix: each of them names one domain, and a change to a domain is a

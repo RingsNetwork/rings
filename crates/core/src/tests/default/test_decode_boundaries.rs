@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -11,10 +12,8 @@ use crate::chunk::MessageReassembler;
 use crate::chunk::ReassemblyLimits;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::delegation::DelegateeKey;
-use crate::delegation::Delegation;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
-use crate::message::DelegationRef;
 use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::LinkControl;
@@ -24,11 +23,13 @@ use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::MessageVerificationExt;
 use crate::message::PerSlot;
+use crate::message::SlotEncoding;
 use crate::message::WirePayload;
-use crate::swarm::session_link::ReferencedDelegations;
+use crate::swarm::session_link::DelegationLessor;
+use crate::swarm::session_link::Resolution;
 use crate::swarm::session_link::LEASE_GRACE_MS;
 use crate::swarm::session_link::LEASE_MS;
-use crate::swarm::session_link::REFERENCED_TABLE_CAPACITY;
+use crate::swarm::session_link::LESSOR_TABLE_CAPACITY;
 use crate::tests::splitmix64;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
@@ -36,9 +37,9 @@ use crate::utils::get_epoch_ms;
 const SEED_ENV: &str = "RINGS_DECODE_BOUNDARY_SEED";
 const CASES_ENV: &str = "RINGS_DECODE_BOUNDARY_CASES";
 const DEFAULT_CASES: usize = 128;
-/// Sessions the generator remembers as referenced, so later frames reference what earlier ones
-/// carried inline.
-const REMEMBERED_SESSIONS: usize = 4;
+/// Payloads the generator remembers from inline frames, so later frames reference what earlier
+/// ones carried inline.
+const REMEMBERED_PAYLOADS: usize = 4;
 
 #[test]
 fn generated_message_decode_boundary_inputs_are_total() {
@@ -91,22 +92,22 @@ fn generated_chunk_decode_boundary_sequences_respect_bounds() {
 /// Law (bound, under arbitrary input): whatever frames a peer sends, the receiving end of its
 /// link holds no frame and at most its table capacity in leases, and no step fails other than
 /// by a typed error. Inputs are valid link frames (inline, referenced, and control) with
-/// generated mutations, so the decoder is exercised past its marker.
+/// generated mutations, so the decoder is exercised past its marker; referenced frames re-send
+/// payloads an earlier inline frame carried, so the lease and renewal paths run, not only the
+/// misses.
 #[test]
-fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
+fn test_generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
     let mut generator = DecodeBoundaryGenerator::named("core-link-frame");
     let cases = generated_case_count();
-    let mut receiver = ReferencedDelegations::new();
-    // Sessions earlier frames carried: a later frame references one of them, so the lease and
-    // renewal paths run under generated input, not only the misses.
-    let mut referenced: Vec<Delegation> = Vec::new();
+    let mut receiver = DelegationLessor::new();
+    let mut carried: VecDeque<MessagePayload> = VecDeque::new();
     eprintln!(
         "{SEED_ENV}={} {CASES_ENV}={cases} target=core-link-frame",
         generator.seed()
     );
 
     for _ in 0..cases {
-        let Some(wire) = generated_link_frame(&mut generator, &mut referenced) else {
+        let Some(wire) = generated_link_frame(&mut generator, &mut carried) else {
             continue;
         };
         let wire = generator.mutated(wire);
@@ -114,11 +115,12 @@ fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
         match LinkFrame::from_wire(&wire) {
             Ok(LinkFrame::Payload(frame)) => {
                 // Now and then, a frame judged long after the leases were granted.
-                let at_ms = match generator.one_in(7) {
-                    true => now_ms + LEASE_MS + LEASE_GRACE_MS + 1,
-                    false => now_ms,
+                let at_ms = if generator.one_in(7) {
+                    now_ms + LEASE_MS + LEASE_GRACE_MS + 1
+                } else {
+                    now_ms
                 };
-                if let Ok(resolved) = receiver.resolve(frame, at_ms) {
+                if let Resolution::Resolved(resolved) = receiver.resolve(frame) {
                     judge_payload(&resolved.payload);
                     if resolved
                         .payload
@@ -134,36 +136,48 @@ fn generated_link_frame_decode_boundary_inputs_keep_the_receiver_bounded() {
             Ok(LinkFrame::Control(LinkControl::Known { .. } | LinkControl::Unknown(_)))
             | Err(_) => {}
         }
-        assert!(receiver.known_len() <= REFERENCED_TABLE_CAPACITY);
+        assert!(receiver.leased_len() <= LESSOR_TABLE_CAPACITY);
     }
 }
 
-/// One valid link frame: a payload with generated slot encodings, or a control frame. An
-/// announcement names a session some earlier referenced frame awaits when there is one.
+/// One valid link frame: a control frame, a fresh payload inline (remembered in `carried`),
+/// or a payload an earlier inline frame carried, re-sent with generated slot encodings.
 fn generated_link_frame(
     generator: &mut DecodeBoundaryGenerator,
-    referenced: &mut Vec<Delegation>,
+    carried: &mut VecDeque<MessagePayload>,
 ) -> Option<Vec<u8>> {
-    let payload = generated_payload(generator)?;
-    let sessions = payload.delegations();
     let wire = match generator.usize(4) {
-        0 => LinkControl::Unknown(sessions.origin.digest().ok()?).to_wire(),
-        1 => LinkControl::Known {
-            digest: sessions.origin.digest().ok()?,
-            until_ms: get_epoch_ms() + LEASE_MS,
+        0 => {
+            let payload = generated_payload(generator)?;
+            LinkControl::Unknown(payload.delegations().origin.digest().ok()?).to_wire()
         }
-        .to_wire(),
-        2 => payload.to_wire(),
-        _ => {
-            let references = PerSlot {
-                origin: DelegationRef::Digest(sessions.origin.digest().ok()?),
-                hop: DelegationRef::Digest(sessions.hop.digest().ok()?),
-            };
-            referenced.push(sessions.origin.clone());
-            if referenced.len() > REMEMBERED_SESSIONS {
-                referenced.remove(0);
+        1 => {
+            let payload = generated_payload(generator)?;
+            LinkControl::Known {
+                digest: payload.delegations().origin.digest().ok()?,
+                remaining_ms: LEASE_MS,
             }
-            WirePayload::view(&payload, references).to_wire()
+            .to_wire()
+        }
+        2 => {
+            let payload = generated_payload(generator)?;
+            let wire = payload.to_wire();
+            carried.push_back(payload);
+            if carried.len() > REMEMBERED_PAYLOADS {
+                carried.pop_front();
+            }
+            wire
+        }
+        _ => {
+            let payload = match carried.get(generator.usize(carried.len())) {
+                Some(payload) => payload.clone(),
+                None => generated_payload(generator)?,
+            };
+            let encoding = PerSlot {
+                origin: generator.slot_encoding(),
+                hop: generator.slot_encoding(),
+            };
+            WirePayload::encoded(&payload, encoding).ok()?.to_wire()
         }
     };
     wire.ok().map(|wire| wire.to_vec())
@@ -254,6 +268,15 @@ impl DecodeBoundaryGenerator {
 
     fn one_in(&mut self, modulus: u64) -> bool {
         self.next_u64().is_multiple_of(modulus.max(1))
+    }
+
+    /// A slot encoding, by reference three times in four.
+    fn slot_encoding(&mut self) -> SlotEncoding {
+        if self.one_in(4) {
+            SlotEncoding::Inline
+        } else {
+            SlotEncoding::Referenced
+        }
     }
 
     fn bytes(&mut self, max_len: usize) -> Vec<u8> {

@@ -4,7 +4,11 @@ Every connection carries four lanes, each pinned to one ordered data channel, an
 is credit flow controlled (#924). Receive-side admission is lossless: no honest frame is refused
 for want of credit or mailbox capacity. Overload reaches the sender as backpressure instead. One
 hold of core is bounded on its own and does drop: a frame that finds the pre-admission hold full
-(it arrived before this end admitted the connection) is dropped, uncharged.
+(it arrived before this end admitted the connection) is dropped, uncharged. Two link-level
+verdicts drop a frame too, uncharged and never for want of capacity: a frame whose delegation
+reference misses (for an honest sender only past two delivery bounds of transit under a full
+table), and a frame whose origin delegation expired in flight (see [Delegation references on a
+link](delegation-references.md)).
 
 ## Credit
 
@@ -135,7 +139,8 @@ waiting) at its own pace, and no inbound lane ever waits for it to read:
   full inbox is dropped, counted (`ApplicationInbox::dropped`) and logged at `warn`, as a
   best-effort network drops it, and nothing tells its sender. A protocol that needs a
   reliable stream detects loss end to end: the TCP relay numbers its segments and resets a
-  stream whose gap outlives `REORDER_DEADLINE` or the replay window, closing the local socket
+  stream whose gap outlives `REORDER_DEADLINE` (four delivery bounds: a superseded path with
+  at most four hops left to cross) or the replay window, closing the local socket
   abortively, and the E2E stream decryptor fails a stream that made no progress for its stall
   deadline (#939). The bound,
   `APPLICATION_INBOX_WEIGHT` (64 MiB), weighs each message by its own size plus the byte

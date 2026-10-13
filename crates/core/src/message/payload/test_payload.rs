@@ -352,10 +352,10 @@ fn test_self_contained_decoding_refuses_link_only_frames() -> Result<()> {
     let next_hop = SecretKey::random().address().into();
     let payload = new_test_payload(next_hop);
     let sessions = payload.delegations();
-    let referenced = super::WirePayload::view(&payload, super::PerSlot {
-        origin: super::DelegationRef::Digest(sessions.origin.digest()?),
-        hop: super::DelegationRef::Inline(std::borrow::Cow::Borrowed(sessions.hop)),
-    })
+    let referenced = super::WirePayload::encoded(&payload, super::PerSlot {
+        origin: super::SlotEncoding::Referenced,
+        hop: super::SlotEncoding::Inline,
+    })?
     .to_wire()?;
     assert!(matches!(
         MessagePayload::from_wire(&referenced),
@@ -364,7 +364,7 @@ fn test_self_contained_decoding_refuses_link_only_frames() -> Result<()> {
 
     let control = super::LinkControl::Known {
         digest: sessions.hop.digest()?,
-        until_ms: 0,
+        remaining_ms: 0,
     }
     .to_wire()?;
     assert!(matches!(
