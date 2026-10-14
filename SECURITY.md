@@ -111,7 +111,11 @@ Every hop, and the destination, learns from a relayed message:
   `destination`, a hop budget that every forward spends, and the delivery stage (the
   aim, which is the destination or a report's `reply_via`, and whether the route has
   been handed past it), so a hop learns its predecessor and successor and whether the
-  route has crossed its aim; the destination learns only the last hop.
+  route has crossed its aim; the destination learns only the last hop. Connect
+  signaling is the one exception (#947): a `ConnectNodeSend`, its `ConnectNodeReport`
+  answer, and a tie-break counter-offer carry the relays they crossed, so the reply
+  retraces them, and every hop and both ends learn that path. Its privacy is already
+  spent, since the two ends exchange addresses in their SDP.
 
 Confidentiality on this layer is opt-in by construction, not by policy. A DID is the
 160-bit keccak digest of the account public key, so a Chord lookup by DID yields a
@@ -125,9 +129,10 @@ rather than key digests, which is a different identifier design, not a relay cha
 
 The obligations of this layer are leak-minimization obligations:
 
-- no hop history on the wire, and no cycles. Every greedy hop moves strictly closer
-  to its aim without passing it, and a route crosses its aim at most once, by a marked
-  handoff after which the receiver routes greedily again but refuses a second crossing,
+- no hop history on the wire outside connect signaling, and no cycles. Every greedy
+  hop moves strictly closer to its aim without passing it, and a route crosses its aim
+  at most once, by a marked handoff after which the receiver routes greedily again but
+  refuses a second crossing,
   ending the route with a typed error (`dht::delivery`). A route therefore takes at most
   `2|V|` hops (two greedy runs joined by one handoff, and the final hop from a
   `reply_via` peer), and a message for a node no view reaches fails fast instead of
@@ -137,13 +142,20 @@ The obligations of this layer are leak-minimization obligations:
   the budget (`2|V| > MAX_RELAY_HOPS`), not a loop. The carrier is outside every signature, so the budget bounds the work honest
   hops do for one message and is not a promise a dishonest hop keeps;
 - a bounded reflection through `reply_via`: a request names one peer, and a responder
-  routes at most one successor or connection answer (`FindSuccessorReport`,
-  `ConnectNodeReport`) toward it; that peer receives the answer whole and hands it on
-  only over a direct link to the origin. Every other report, such as `FoundEntry`
-  with its entry data, is routed straight to the origin, so a small request cannot be
-  turned into a large report aimed at a third party;
+  routes at most one successor answer (`FindSuccessorReport`) toward it; that peer
+  receives the answer whole and hands it on only over a direct link to the origin.
+  Every other report, such as `FoundEntry` with its entry data, is routed straight to
+  the origin, so a small request cannot be turned into a large report aimed at a third
+  party;
+- a checked path for connect signaling only: inbound validation refuses a carrier whose
+  path is present on any other message or absent on connect signaling, and a path that
+  names a node twice or names the node holding it or its destination, since no honest
+  route revisits a node. The path is bounded by `MAX_RELAY_HOPS`, and every hop of a
+  reply retracing it must be a direct link of the hop that sends it on; a forged or
+  truncated path can only misdeliver that one reply, which equals dropping it;
 - no telemetry in the envelope beyond what routing needs: the next hop, the
-  destination, the hop budget, and the delivery stage;
+  destination, the hop budget, and the delivery stage, plus the recorded path of
+  connect signaling;
 - payload bytes encrypted to the destination's account key once the E2E handshake
   has completed, with the signed envelope supplying the integrity that the
   malleable ElGamal frames lack on their own;

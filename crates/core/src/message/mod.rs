@@ -98,4 +98,8 @@ pub use protocols::MessageRelay;
 pub use protocols::MessageSigner;
 pub use protocols::MessageVerification;
 pub use protocols::MessageVerificationExt;
+pub use protocols::OutboundPath;
+pub use protocols::RelayPath;
+pub use protocols::ReturnPath;
+pub use protocols::SignalingPath;
 pub use protocols::SigningDomain;

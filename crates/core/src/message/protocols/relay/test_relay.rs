@@ -142,3 +142,118 @@ fn test_decoding_rejects_a_budget_above_the_cap() -> Result<()> {
     assert_eq!(HopBudget::try_from(MAX_RELAY_HOPS)?, HopBudget::MAX);
     Ok(())
 }
+
+/// A carrier retracing a recorded path takes exactly the path's return hop: any other hop is
+/// refused, and the right one records the forwarding node.
+#[test]
+fn test_return_carrier_takes_only_its_return_hop() -> Result<()> {
+    let (origin, relay, destination) = (did(1), did(2), did(9));
+    let offer = MessageRelay::new(NextHop::toward(relay), destination, FIXTURE_BUDGET)
+        .with_signaling_path(SignalingPath::outbound())
+        .forward(relay, NextHop::toward(destination))?;
+    assert_eq!(
+        offer.path.as_ref().map(|path| path.crossed().hops()),
+        Some(&[relay][..])
+    );
+
+    let reply = offer.reply_along_path(destination, origin)?;
+    assert_eq!(
+        reply.next_hop, relay,
+        "the reply's first hop is the relay the offer crossed"
+    );
+    assert_eq!(reply.return_hop(), Some(origin));
+    assert!(matches!(
+        reply.forward(relay, NextHop::toward(did(7))),
+        Err(Error::InvalidNextHop)
+    ));
+    let delivered = reply.forward(relay, NextHop::toward(origin))?;
+    assert_eq!(delivered.next_hop, origin);
+    assert_eq!(
+        delivered.path.as_ref().map(|path| path.crossed().hops()),
+        Some(&[relay][..])
+    );
+    Ok(())
+}
+
+/// A pathless carrier has no reply path, and an unlinked return hop is refused.
+#[test]
+fn test_reply_needs_a_path_and_a_linked_return_hop() -> Result<()> {
+    let (origin, relay, destination) = (did(1), did(2), did(9));
+    let pathless = MessageRelay::new(NextHop::toward(destination), destination, FIXTURE_BUDGET);
+    assert!(matches!(
+        pathless.reply_along_path(destination, origin),
+        Err(Error::RelaySignalingPathMismatch)
+    ));
+    assert_eq!(pathless.linked_return_hop(|_| false)?, None);
+
+    let offer = MessageRelay::new(NextHop::toward(relay), destination, FIXTURE_BUDGET)
+        .with_signaling_path(SignalingPath::outbound())
+        .forward(relay, NextHop::toward(destination))?;
+    let reply = offer.reply_along_path(destination, origin)?;
+    let at_relay = MessageRelay {
+        next_hop: relay,
+        ..reply
+    };
+    assert_eq!(
+        at_relay.linked_return_hop(|peer| peer == origin)?,
+        Some(origin)
+    );
+    assert!(matches!(
+        at_relay.linked_return_hop(|_| false),
+        Err(Error::RelayPathHopUnlinked { hop }) if hop == origin
+    ));
+    Ok(())
+}
+
+/// The hop budget and the recorded path move together: every forward spends one unit and
+/// records one hop, so the budget runs out before the path can pass `MAX_RELAY_HOPS`.
+#[test]
+fn test_budget_and_path_move_together() -> Result<()> {
+    let destination = did(1_000);
+    let mut current = did(1);
+    let mut relay = MessageRelay::new(NextHop::toward(current), destination, HopBudget::MAX)
+        .with_signaling_path(SignalingPath::outbound());
+    let mut forwards = 0_usize;
+    loop {
+        let next = did(u32::try_from(forwards).unwrap_or(u32::MAX) + 2);
+        match relay.forward(current, NextHop::toward(next)) {
+            Ok(forwarded) => {
+                forwards += 1;
+                let recorded = forwarded
+                    .path
+                    .as_ref()
+                    .map_or(0, |path| path.crossed().hops().len());
+                assert_eq!(recorded, forwards);
+                assert_eq!(
+                    usize::from(forwarded.hop_budget.remaining()) + forwards,
+                    usize::from(MAX_RELAY_HOPS)
+                );
+                relay = forwarded;
+                current = next;
+            }
+            Err(Error::RelayHopBudgetExhausted) => break,
+            Err(error) => return Err(error),
+        }
+    }
+    assert_eq!(forwards, usize::from(MAX_RELAY_HOPS));
+    Ok(())
+}
+
+/// A path is carried exactly by connect signaling.
+#[test]
+fn test_signaling_path_matches_the_message() -> Result<()> {
+    let destination = did(9);
+    let pathless = MessageRelay::new(NextHop::toward(destination), destination, FIXTURE_BUDGET);
+    let recorded = pathless
+        .clone()
+        .with_signaling_path(SignalingPath::outbound());
+    pathless.validate_signaling_path(false)?;
+    recorded.validate_signaling_path(true)?;
+    for (relay, is_connect_signaling) in [(&pathless, true), (&recorded, false)] {
+        assert!(matches!(
+            relay.validate_signaling_path(is_connect_signaling),
+            Err(Error::RelaySignalingPathMismatch)
+        ));
+    }
+    Ok(())
+}

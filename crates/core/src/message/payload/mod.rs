@@ -36,6 +36,7 @@ use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::Message;
+use crate::message::MessageKind;
 
 mod wire;
 
@@ -506,11 +507,11 @@ pub trait PayloadSender {
     /// Send the report `msg` for the request carried by `payload`: a fresh payload routed to
     /// the request's origin under the same transaction id.
     ///
-    /// A successor or connection answer (`FindSuccessorReport`, `ConnectNodeReport`) starts in
-    /// stage `(via reply_via, ⊥)` when the signed request names one; every other report routes
-    /// straight toward the origin, so a request can reflect at most one bounded report toward
-    /// the peer it names. The first stage depends on the signed request alone, never on the
-    /// request's carrier.
+    /// A successor answer (`FindSuccessorReport`) starts in stage `(via reply_via, ⊥)` when
+    /// the signed request names one; every other report routes straight toward the origin, so
+    /// a request can reflect at most one bounded report toward the peer it names. The first
+    /// stage depends on the signed request alone, never on the request's carrier. Connect
+    /// signaling replies do not come here: they retrace the request's recorded path (#947).
     async fn send_report_message(&self, payload: &MessagePayload, msg: Message) -> Result<()> {
         let origin = payload.transaction.origin();
         let reply_via = payload
@@ -519,23 +520,28 @@ pub trait PayloadSender {
             .filter(|_| msg.returns_through_reply_via());
         let hop = self.next_hop_toward(origin, RouteStage::replying_via(reply_via))?;
         let relay = payload.relay.report(self.dht().did, origin, hop)?;
+        self.send_reply(payload, relay, payload.transaction.tx_id, msg)
+            .await
+    }
 
+    /// Send `msg` back to the origin of `request` under the fresh carrier `relay`, as a
+    /// transaction `tx_id` this node signs: the common tail of every reply.
+    async fn send_reply(
+        &self,
+        request: &MessagePayload,
+        relay: MessageRelay,
+        tx_id: uuid::Uuid,
+        msg: Message,
+    ) -> Result<()> {
+        let origin = request.transaction.origin();
         let signer = self.message_signer();
         let sequence = *self
             .reserve_transaction_sequences(origin, NonZeroU64::MIN)
             .await?
             .start();
-        let transaction = Transaction::new(
-            origin,
-            payload.transaction.tx_id,
-            sequence,
-            None,
-            msg,
-            signer,
-        )?;
-
-        let pl = MessagePayload::new(transaction, signer, relay)?;
-        self.send_payload(pl).await
+        let transaction = Transaction::new(origin, tx_id, sequence, None, msg, signer)?;
+        let payload = MessagePayload::new(transaction, signer, relay)?;
+        self.send_payload(payload).await
     }
 
     /// Forward a payload message by relay.
@@ -548,18 +554,29 @@ pub trait PayloadSender {
 
     /// Forward a payload one hop on toward its relay destination.
     ///
-    /// With `next_hop = None` the hop is the delivery decision for the carrier's stage (see
-    /// [`Self::next_hop_toward`]). A fixed `next_hop` is taken as given, as the owner-lookup
-    /// protocols choose it from `find_successor`, unless the destination is directly linked;
-    /// the stage is then carried unchanged.
+    /// Connect signaling retracing a recorded path takes the path's return hop, which must be
+    /// linked here (#947); no other message consults a path. Otherwise, with `next_hop = None`
+    /// the hop is the delivery decision for the carrier's stage (see [`Self::next_hop_toward`]).
+    /// A fixed `next_hop` is taken as given, as the owner-lookup protocols choose it from
+    /// `find_successor`, unless the destination is directly linked; the stage is then carried
+    /// unchanged.
     async fn forward_payload(&self, payload: &MessagePayload, next_hop: Option<Did>) -> Result<()> {
         let (local, destination) = (self.dht().did, payload.relay.destination);
-        let hop = match next_hop {
-            None => self.next_hop_toward(destination, payload.relay.stage)?,
-            Some(_) if self.is_connected(destination) => {
+        let return_hop =
+            if MessageKind::from_wire(&payload.transaction.data)?.carries_signaling_path() {
+                payload
+                    .relay
+                    .linked_return_hop(|peer| self.is_connected(peer))?
+            } else {
+                None
+            };
+        let hop = match (return_hop, next_hop) {
+            (Some(hop), _) => NextHop::new(hop, payload.relay.stage),
+            (None, None) => self.next_hop_toward(destination, payload.relay.stage)?,
+            (None, Some(_)) if self.is_connected(destination) => {
                 NextHop::new(destination, payload.relay.stage)
             }
-            Some(next_hop) => NextHop::new(next_hop, payload.relay.stage),
+            (None, Some(next_hop)) => NextHop::new(next_hop, payload.relay.stage),
         };
         let relay = payload.relay.forward(local, hop)?;
         self.forward_by_relay(payload, relay).await

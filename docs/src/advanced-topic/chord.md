@@ -56,9 +56,20 @@ name peers a stabilization report introduced before any connection to them exist
 A node without a predecessor is the one case that cannot wait for convergence: a joiner needs the
 answers to its own join lookup and connection offer to converge at all. Whenever a node has no
 predecessor, its requests carry a signed `reply_via` naming its nearest linked successor, which is
-its bootstrap during a join. Successor and connection answers (`FindSuccessorReport`,
-`ConnectNodeReport`) then travel to that peer, which hands them over its direct link. Every other
-report goes straight to the origin, so `reply_via` reflects at most one bounded answer per request.
+its bootstrap during a join. Successor answers (`FindSuccessorReport`) then travel to that peer,
+which hands them over its direct link. Every other report goes straight to the origin, so
+`reply_via` reflects at most one bounded answer per request. A connection answer needs neither:
+it retraces the path its offer recorded, as the next paragraph describes.
+
+Connect signaling does not wait for convergence either (#947). A `ConnectNodeSend` records the
+relays it crosses, outside every signature and bounded by the hop budget, and its answer retraces
+them, each hop a link the offer itself just crossed, instead of being routed afresh over a view
+that may have just dead-ended. When two nodes offer to each other at once, an offer still being
+created yields, since nothing has crossed yet. Of two sent offers the smaller DID's prevails: the
+larger DID abandons its own and answers, and the smaller DID refuses the larger's and sends its
+own offer back along the refused offer's path, under the transaction it first left under. The
+answer echoes that transaction and applies only to the offer that left under it. The edge is
+therefore established whenever either overlay offer is delivered.
 
 ## Finger-table convergence
 

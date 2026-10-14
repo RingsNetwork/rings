@@ -17,6 +17,7 @@ use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::storage::MemStorage;
+use rings_core::swarm::OfferReply;
 use rings_node::extension::protocols::relay::RelayHandle;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
@@ -64,10 +65,23 @@ pub async fn spawn_node() -> (Arc<Processor>, Arc<Provider>, RelayHandle) {
 
 /// Establish an overlay link between two nodes via the offer/answer handshake, then
 /// wait until the connection reports `connected` (or time out).
+///
+/// `b` answers `a`'s offer, unless `b` holds its own unanswered offer to `a` that prevails on
+/// the tie-break: then `b` replies with that counter-offer, which `a` answers instead.
 pub async fn connect(a: &Arc<Processor>, b: &Arc<Processor>) -> Result<()> {
     let offer = a.swarm.create_offer(b.swarm.did()).await?;
-    let answer = b.swarm.answer_offer(offer).await?;
-    a.swarm.accept_answer(answer).await?;
+    match b.swarm.answer_offer(offer).await? {
+        OfferReply::Answer(answer) => a.swarm.accept_answer(answer).await?,
+        OfferReply::CounterOffer(counter_offer) => {
+            let answer = a
+                .swarm
+                .answer_offer(counter_offer)
+                .await?
+                .answer()
+                .ok_or("a counter-offer must be answered, not countered again")?;
+            b.swarm.accept_answer(answer).await?;
+        }
+    }
 
     if !wait_connected(a, b.swarm.did(), Duration::from_secs(30)).await {
         return Err("peers did not reach the connected state in time".into());

@@ -10,9 +10,6 @@ use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
-use rings_core::ecc::PublicKey;
-use rings_core::ecc::SecretKey;
-use rings_core::error::Error as CoreError;
 use rings_core::inspect::DHTInspect;
 use rings_core::lifecycle::StopSource;
 use rings_core::lifecycle::StopToken;
@@ -24,22 +21,14 @@ use rings_core::measure::MeasureImpl;
 use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerMeasurementPage;
 use rings_core::measure::PeerQuality;
-use rings_core::message::e2e;
-use rings_core::message::e2e::E2eHandshakeRequest;
-use rings_core::message::e2e::E2eHandshakeResponse;
-use rings_core::message::e2e::E2eStreamDecryptor;
-use rings_core::message::e2e::E2eStreamFrame;
-use rings_core::message::Decoder;
 use rings_core::message::DhtProtocolMode;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::Message;
-use rings_core::message::MessagePayload;
 use rings_core::message::OriginQuotaConfig;
 use rings_core::message::OriginQuotaCounters;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::MemStorage;
-use rings_core::swarm::ConnectionAttempt;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_core::utils::get_epoch_ms;
@@ -101,19 +90,23 @@ use crate::registration::validate_online_node_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
-use crate::remote_endpoint::remote_rpc_client;
-use crate::remote_endpoint::RemoteRpcEndpoint;
 
 const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 mod builder;
 mod config;
+/// End-to-end encrypted streams to a DID.
+mod e2e_stream;
+/// Handshakes: by DID over the overlay, and over a peer's HTTP endpoint.
+pub(crate) mod handshake;
 
 pub use builder::ProcessorBuilder;
 #[cfg(feature = "node")]
 pub(crate) use config::parse_webrtc_udp_port_range;
 pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
+pub(crate) use handshake::HandshakeFailure;
+pub(crate) use handshake::HandshakePeer;
 
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
@@ -140,61 +133,6 @@ async fn sleep_registration_interval_with_stop(
             Ok(true)
         }
         futures::future::Either::Right(((), _)) => Ok(false),
-    }
-}
-
-/// Which node a handshake over HTTP must end up connected to.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HandshakePeer {
-    /// Whatever DID the endpoint answers as.
-    Any,
-    /// Only this DID; any other answer is refused before an offer is created.
-    Pinned(Did),
-}
-
-/// Why a handshake over HTTP did not reach an accepted answer.
-#[derive(Debug)]
-pub(crate) enum HandshakeFailure {
-    /// The peer's slot is owned by another attempt (a handshake in flight, whichever side
-    /// started it, or an admission not yet announced): refused before any request when the
-    /// local core already holds an unadmitted handshake, or by the local core during the
-    /// exchange. Nothing is wrong; a later attempt may succeed.
-    InFlight {
-        /// The peer whose slot is owned.
-        peer: Did,
-    },
-    /// The handshake failed.
-    Failed(Error),
-}
-
-impl HandshakeFailure {
-    /// Sort a core refusal of one handshake stage: an offer refused because the peer already
-    /// holds a record, or an attempt superseded by the peer's own offer, is `InFlight`; any
-    /// other error is `Failed` under the stage's wrapper.
-    fn from_stage(peer: Did, stage: fn(CoreError) -> Error, error: CoreError) -> Self {
-        match error {
-            CoreError::AlreadyConnected | CoreError::ConnectionAttemptSuperseded { .. } => {
-                Self::InFlight { peer }
-            }
-            other => Self::Failed(stage(other)),
-        }
-    }
-}
-
-impl From<Error> for HandshakeFailure {
-    /// Every error that is not a core refusal of a handshake stage is a failure.
-    fn from(error: Error) -> Self {
-        Self::Failed(error)
-    }
-}
-
-impl From<HandshakeFailure> for Error {
-    /// A refusal is reported as `HandshakeInFlight`; a failure as itself.
-    fn from(failure: HandshakeFailure) -> Self {
-        match failure {
-            HandshakeFailure::InFlight { peer } => Error::HandshakeInFlight { peer },
-            HandshakeFailure::Failed(error) => error,
-        }
     }
 }
 
@@ -645,111 +583,6 @@ impl Processor {
         Ok(())
     }
 
-    /// Connect peer with web3 did.
-    /// There are 3 peers: PeerA, PeerB, PeerC.
-    /// 1. PeerA has a connection with PeerB.
-    /// 2. PeerC has a connection with PeerB.
-    /// 3. PeerC can connect PeerA with PeerA's web3 address.
-    ///
-    /// This operation is idempotent: if topology convergence already produced
-    /// the direct connection, the requested connection is satisfied.
-    pub async fn connect_with_did(&self, did: Did) -> Result<()> {
-        match self.swarm.connect(did).await {
-            Ok(()) | Err(rings_core::error::Error::AlreadyConnected) => Ok(()),
-            Err(error) => Err(Error::ConnectError(error)),
-        }
-    }
-
-    /// Handshake with the node behind `endpoint` over its public HTTP API: learn its DID, and
-    /// when `peer` is pinned refuse before any request if the local core already holds an
-    /// unadmitted handshake to it, and before any offer if the endpoint answers as another
-    /// node; then create, exchange and accept the offer. Returns the generation the offer
-    /// reserved once the answer is accepted; admission of the resulting transport completes
-    /// asynchronously and is reported through the swarm callback. The exchange is pinned to
-    /// that generation, so a handshake the peer started meanwhile is neither answered nor
-    /// cancelled by this one; a failure after the offer was created cancels the generation iff
-    /// it is still pending.
-    pub(crate) async fn connect_peer_via_http(
-        &self,
-        endpoint: &RemoteRpcEndpoint,
-        api_token: Option<&str>,
-        peer: HandshakePeer,
-    ) -> std::result::Result<ConnectionAttempt, HandshakeFailure> {
-        if let HandshakePeer::Pinned(pinned) = peer {
-            if self
-                .swarm
-                .has_unadmitted_connection(pinned)
-                .map_err(Error::ConnectError)?
-            {
-                return Err(HandshakeFailure::InFlight { peer: pinned });
-            }
-        }
-        let learned = async {
-            let client = remote_rpc_client(endpoint, api_token).await?;
-            let answered = client.node_did(&NodeDidRequest {}).await?.did;
-            let actual =
-                Did::from_str(answered.as_str()).map_err(|_| Error::InvalidDid(answered))?;
-            if let HandshakePeer::Pinned(expected) = peer {
-                if actual != expected {
-                    tracing::error!(
-                        %endpoint,
-                        %expected,
-                        %actual,
-                        "endpoint answered as another node; handshake refused"
-                    );
-                    return Err(Error::HandshakePeerMismatch { expected, actual });
-                }
-            }
-            Ok((client, actual))
-        };
-        let (client, actual) = learned.await?;
-        let (attempt, offer) = self
-            .swarm
-            .offer_connection(actual)
-            .await
-            .map_err(|error| HandshakeFailure::from_stage(actual, Error::CreateOffer, error))?;
-        let exchange = async {
-            let offer = offer.encode().map_err(|_| Error::EncodeError)?;
-            let answer = client
-                .answer_offer(&AnswerOfferRequest {
-                    offer: offer.to_string(),
-                })
-                .await
-                .map_err(Error::from)?
-                .answer;
-            let answer = MessagePayload::from_encoded(&Encoded::from(answer))
-                .map_err(|_| Error::DecodeError)?;
-            self.swarm
-                .accept_answer_for(attempt, answer)
-                .await
-                .map_err(|error| HandshakeFailure::from_stage(actual, Error::AcceptAnswer, error))
-        };
-        match exchange.await {
-            Ok(()) => Ok(attempt),
-            Err(failure) => {
-                self.abandon_handshake(attempt).await;
-                Err(failure)
-            }
-        }
-    }
-
-    /// Cancel the generation `attempt` reserved iff it is still pending, that is, no data
-    /// channel has opened on it; one admitting, admitted or superseded meanwhile is left alone,
-    /// and a failure to cancel is logged since the core expires an unadmitted attempt on its
-    /// own.
-    pub(crate) async fn abandon_handshake(&self, attempt: ConnectionAttempt) {
-        if let Err(error) = self.swarm.cancel_pending_connection_attempt(attempt).await {
-            tracing::warn!(?attempt, %error, "failed to cancel the abandoned handshake");
-        }
-    }
-
-    /// Whether a seed document owes `peer` a dial: it is not this node and its admission was
-    /// not announced. A peer with a handshake in flight is dialed and refused by the core,
-    /// which `connect seed` reads as the peer being taken care of.
-    pub(crate) fn owes_seed_dial(&self, peer: Did) -> Result<bool> {
-        Ok(peer != self.swarm.did() && !self.swarm.is_peer_admitted(peer)?)
-    }
-
     /// Disconnect a peer with web3 did.
     pub async fn disconnect(&self, did: Did) -> Result<()> {
         self.swarm
@@ -783,128 +616,6 @@ impl Processor {
             .send_direct_message(msg, destination)
             .await
             .map_err(Error::SendMessage)
-    }
-
-    /// Send an E2E handshake request to a DID.
-    ///
-    /// The negotiated key is the peer's account/identity secp256k1 key, not
-    /// the ephemeral delegatee key.
-    pub async fn send_e2e_handshake(&self, destination: Did) -> Result<uuid::Uuid> {
-        let public_key = self.swarm.delegator_pubkey().map_err(Error::SendMessage)?;
-        self.swarm
-            .send_message(
-                Message::E2eHandshakeRequest(E2eHandshakeRequest::new(public_key)),
-                destination,
-            )
-            .await
-            .map_err(Error::SendMessage)
-    }
-
-    /// Send an ElGamal-encrypted E2E message to a DID with a verified recipient key.
-    ///
-    /// Returns the stream id shared by all emitted E2E stream frames.
-    pub async fn send_e2e_message(
-        &self,
-        destination: Did,
-        recipient_public_key: PublicKey<33>,
-        msg: &[u8],
-    ) -> Result<uuid::Uuid> {
-        self.send_e2e_message_with_frame_len(
-            destination,
-            recipient_public_key,
-            msg,
-            e2e::DEFAULT_E2E_PLAINTEXT_FRAME_LEN,
-        )
-        .await
-    }
-
-    /// Send an ElGamal-encrypted E2E stream with an explicit plaintext frame size.
-    ///
-    /// Returns the stream id shared by all emitted E2E stream frames.
-    pub async fn send_e2e_message_with_frame_len(
-        &self,
-        destination: Did,
-        recipient_public_key: PublicKey<33>,
-        msg: &[u8],
-        max_plaintext_frame_len: usize,
-    ) -> Result<uuid::Uuid> {
-        e2e::ensure_public_key_matches_did(recipient_public_key, destination)
-            .map_err(Error::SendMessage)?;
-        let sender_public_key = self.swarm.delegator_pubkey().map_err(Error::SendMessage)?;
-        let stream_id = uuid::Uuid::new_v4();
-        let frames = e2e::encrypt_stream_frames(
-            msg,
-            stream_id,
-            sender_public_key,
-            recipient_public_key,
-            max_plaintext_frame_len,
-        )
-        .map_err(Error::SendMessage)?
-        .collect::<rings_core::error::Result<Vec<_>>>()
-        .map_err(Error::SendMessage)?;
-
-        for frame in frames {
-            self.swarm
-                .send_message(Message::E2eStreamFrame(frame), destination)
-                .await
-                .map_err(Error::SendMessage)?;
-        }
-
-        Ok(stream_id)
-    }
-
-    /// Verify an E2E handshake request and return the requester's identity public key.
-    pub fn verify_e2e_handshake_request(
-        &self,
-        requester: Did,
-        request: &E2eHandshakeRequest,
-    ) -> Result<PublicKey<33>> {
-        request
-            .verify_requester(requester)
-            .map_err(Error::CoreError)?;
-        Ok(request.requester_public_key)
-    }
-
-    /// Verify an E2E handshake response and return the responder's identity public key.
-    pub fn verify_e2e_handshake_response(
-        &self,
-        responder: Did,
-        response: &E2eHandshakeResponse,
-    ) -> Result<PublicKey<33>> {
-        response
-            .verify_responder(responder)
-            .map_err(Error::CoreError)?;
-        Ok(response.responder_public_key)
-    }
-
-    /// Create an E2E stream decryptor with this node's identity/signing secret key.
-    ///
-    /// The ciphertext is encrypted to the DID/account key negotiated by the
-    /// handshake. A session private key cannot decrypt it unless the delegatee key
-    /// is also the account key, so callers must supply the local identity key
-    /// explicitly.
-    pub fn e2e_stream_decryptor(
-        &self,
-        expected_sender: Did,
-        stream_id: e2e::E2eStreamId,
-        recipient_identity_key: SecretKey,
-    ) -> Result<E2eStreamDecryptor> {
-        e2e::ensure_public_key_matches_did(recipient_identity_key.pubkey(), self.did())
-            .map_err(Error::CoreError)?;
-        Ok(E2eStreamDecryptor::new(
-            stream_id,
-            expected_sender,
-            recipient_identity_key,
-        ))
-    }
-
-    /// Decrypt one E2E stream frame with an already-created stream decryptor.
-    pub fn decrypt_e2e_stream_frame(
-        &self,
-        decryptor: &mut E2eStreamDecryptor,
-        frame: &E2eStreamFrame,
-    ) -> Result<Vec<u8>> {
-        decryptor.decrypt_next(frame).map_err(Error::CoreError)
     }
 
     /// Send a namespaced [`Envelope`](crate::extension::ext::Envelope) to a did over the

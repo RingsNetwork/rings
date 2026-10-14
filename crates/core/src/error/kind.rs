@@ -399,6 +399,16 @@ pub enum Error {
     #[error("Pending WebRTC connection generation is exhausted")]
     PendingConnectionGenerationExhausted,
 
+    /// Connection attempt {generation} for {peer} was released (expired, cancelled or
+    /// disconnected) before setup completed, by anything but the peer's own handshake.
+    #[error("Connection attempt {generation} for {peer} was cancelled")]
+    ConnectionAttemptCancelled {
+        /// Peer whose connection generation was released.
+        peer: crate::dht::Did,
+        /// Generation that was released.
+        generation: u64,
+    },
+
     /// Connection attempt {generation} for {peer} was replaced before setup completed.
     #[error("Connection attempt {generation} for {peer} was superseded")]
     ConnectionAttemptSuperseded {
@@ -661,6 +671,32 @@ pub enum Error {
     /// A relay carrier claimed more forwards than any fresh carrier holds
     #[error("Relay hop budget {0} is above the maximum a carrier can hold")]
     RelayHopBudgetAboveMax(u8),
+
+    /// A recorded connect-signaling path claimed more hops than any carrier can take (#947)
+    #[error("Recorded relay path of {0} hops is above the maximum a carrier can take")]
+    RelayPathAboveMax(usize),
+
+    /// A connect-signaling reply cannot retrace its recorded path: this node has no link to the
+    /// path's next hop, so the reply ends here and the initiator's pending timeout covers it
+    /// (#947).
+    #[error("Recorded relay path hop {hop} is not linked to this node")]
+    RelayPathHopUnlinked {
+        /// The hop the recorded path names next.
+        hop: crate::dht::Did,
+    },
+
+    /// A recorded connect-signaling path names a node twice, or names the node holding it or
+    /// its destination: no honest route revisits a node, so the path is forged (#947)
+    #[error("Recorded relay path repeats hop {hop}")]
+    RelayPathRepeatedHop {
+        /// The repeated hop.
+        hop: crate::dht::Did,
+    },
+
+    /// A carrier's recorded path does not match its message: a path is carried exactly by
+    /// connect signaling (#947)
+    #[error("Relay path present on a message that is not connect signaling, or absent on one")]
+    RelaySignalingPathMismatch,
 
     /// Delivery toward a node cannot continue from this hop: no linked known peer makes
     /// progress toward its aim, and the route has already crossed that aim once, or this node
