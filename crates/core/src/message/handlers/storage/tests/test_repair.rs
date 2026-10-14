@@ -31,12 +31,14 @@ use crate::message::MessageVerificationExt;
 use crate::storage::MemStorage;
 use crate::swarm::transport::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 use crate::swarm::SwarmBuilder;
+use crate::tests::activity::probe_on_activity;
 use crate::tests::default::assert_no_more_msg;
 #[cfg(feature = "dummy")]
 use crate::tests::default::dummy_hooks::PendingSendGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::Node;
+use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::fixed_secret_keys;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
@@ -293,23 +295,16 @@ async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() 
             .map(|stored| stored.did),
         Some(entry.did)
     );
-    assert_eq!(
-        remote_replica_owner
-            .dht()
-            .storage
-            .get(&replica.to_string())
-            .await?
-            .map(|stored| stored.did),
-        Some(entry.did)
-    );
-    assert_eq!(
-        remote_replica_owner
-            .dht()
-            .storage
-            .get(&primary.to_string())
-            .await?,
-        None
-    );
+    // The tap observes a payload before its handler runs (`InboundTap`), so wait for the
+    // replica's write rather than read storage at once: the handler's inbound release is the
+    // activity that wakes the probe once it has joined the entry.
+    let replica_storage = &remote_replica_owner.dht().storage;
+    probe_on_activity("the remote replica is stored", TEST_HANG_GUARD, || async {
+        let stored = replica_storage.get(&replica.to_string()).await?;
+        Ok(stored.filter(|stored| stored.did == entry.did).map(|_| ()))
+    })
+    .await?;
+    assert_eq!(replica_storage.get(&primary.to_string()).await?, None);
     assert_no_more_msg([&node1, &node2]).await;
     Ok(())
 }
