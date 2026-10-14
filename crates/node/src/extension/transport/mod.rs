@@ -197,12 +197,13 @@ pub enum TransportKind {
 ///
 /// Law (no silent gap). A TCP direction's `Data` frames carry `seq = 0, 1, 2, …` and its
 /// `Shutdown` carries the number `sent` of them. The receiver writes bytes to its local socket
-/// in `seq` order only, reordering at most [`REORDER_WINDOW`] frames ahead, so the
-/// local stream is always a prefix of what the peer sent. A frame missing for
-/// [`REORDER_DEADLINE`], or more than the window behind, can never arrive (the replay window
-/// refuses it), so the receiver resets the session: the peer gets `Close`, and the local socket
-/// an abortive close. A `Shutdown` is applied only once every one of its `sent` frames was
-/// written, so a lost last frame is a reset, never a clean end of stream.
+/// in `seq` order only, reordering at most [`REORDER_WINDOW`] frames ahead, so the local
+/// stream is always a prefix of what the peer sent. A frame missing for [`REORDER_DEADLINE`] is
+/// past the delivery bounds of its path, and one more than the window behind can never arrive
+/// (the replay window refuses it), so either way the receiver resets the session: the peer gets
+/// `Close`, and the local socket an abortive close. A `Shutdown` is applied only once every one
+/// of its `sent` frames was written, so a lost last frame is a reset, never a clean end of
+/// stream.
 ///
 /// [`REORDER_WINDOW`]: rings_core::message::REORDER_WINDOW
 /// [`REORDER_DEADLINE`]: rings_core::message::REORDER_DEADLINE

@@ -554,7 +554,7 @@ async fn test_worker_drop_allows_registry_to_replace_the_stopped_generation() {
 
     assert!(!Arc::ptr_eq(&stale.state, &replacement.state));
     assert!(!replacement.state.stop.is_stop_requested());
-    // The link's tables outlive the worker: what the stale one announced stays answerable.
+    // The link's tables outlive the worker: the leases the stale one held stay held.
     assert!(replacement.state.link.is_same_link(&stale.state.link));
     schedulers.shutdown(peer);
 }

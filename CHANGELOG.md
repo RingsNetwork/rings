@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- A delegation reference is a bounded, renewable lease, and nothing is held (#908). A frame
+  whose reference missed was held for a repair round trip and released out of order, so later
+  frames of its class could pass replay admission first and the released frame was lost as
+  stale; the hold also had its own node-wide budget and sweep. Breaking changes:
+  - Wire cutover: `LinkControl::{Request, Announce}` are removed, and the tags change.
+    `Known { digest, remaining_ms }` grants a lease of `min(exp, now + 5 min) − now` and
+    carries it as a remaining duration, so no clock is compared with another; the sender
+    counts it from the instant it receives it. `Unknown(digest)` is a stateless disclaimer.
+    The laws are in
+    [Delegation references on a link](docs/src/advanced-topic/delegation-references.md).
+  - The receiver keeps at most 128 leases per link, 8 of them reserved for the link peer's own
+    delegation. It never reclaims a lease before its grace (one delivery bound past its end)
+    ends, and reclaims ended ones only when it needs room for a new lease, so a frame that
+    waits in its lane still resolves. When every lease is still in its grace it refuses a new
+    one, and the sender keeps sending that delegation inline.
+  - Only a frame that verified grants or renews a lease. A reference that finds less than half
+    a lease left renews it.
+  - Core: the session-link hold, its sweep, its release task and the node-wide hold budget are
+    removed. The frames of one lane reach the logical stage in arrival order. A link-control
+    send waits for credit at most one delivery bound.
+  - A miss is dropped uncharged, and the sender told `Unknown(digest)`, after which it sends
+    the delegation inline again.
+  - The sender refuses to send a frame with a delegation that expires within one delivery
+    bound (25 s), with the new local error `Error::DelegationExpiresWithinMargin`, which is not
+    charged to the next hop. An origin delegation that expired in flight, within one delivery
+    bound of arrival, is dropped without charging the hop that carried it, only when the rest
+    of the frame verifies: the hop's proof now, and the origin's proof at its expiry.
+  - `message::REORDER_DEADLINE` is re-derived as four delivery bounds, assuming at most four
+    hops left to cross on a superseded path when a route or a hop's connection generation
+    changes mid-stream; its value is unchanged (100 s).
+
 - Read and write the node's YAML configuration with `serde-saphyr` instead of the deprecated
   `serde_yaml`, whose `unsafe-libyaml` RustSec now lists as unmaintained (RUSTSEC-2024-0449).
   Configuration documents are unchanged. `Error::SerdeYamlError` wraps a boxed `serde_saphyr::Error`.
@@ -29,8 +60,8 @@
     middle or the final one. The default reorder window is `REORDER_WINDOW`, 32, and
     `DEFAULT_E2E_REORDER_WINDOW_FRAMES` (64) is removed. Node: `Processor::check_e2e_stream` polls a stream with the node's clock.
   - Core: `message::REORDER_WINDOW` (the replay window) bounds how many later frames of one
-    stream may overtake a frame that still arrives, and `message::REORDER_DEADLINE` (twice
-    `SESSION_HOLD_TIMEOUT`) how late it may arrive after a later one.
+    stream may overtake a frame that still arrives, and `message::REORDER_DEADLINE` (four
+    delivery bounds, 100 s) how late it may arrive after a later one.
   - Cutover: a relay wire change, incompatible with the previous release.
 
 - Core never calls, awaits or consults application code (#935). Since 2022 core awaited

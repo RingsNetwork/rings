@@ -70,6 +70,19 @@ pub(crate) fn dispatched_link_control_for_test() -> Vec<(Did, LinkControl)> {
     DISPATCHED_LINK_CONTROL.with(|dispatched| dispatched.borrow().clone())
 }
 
+/// The link-control frames dispatched on this test thread after its first `before`, in
+/// dispatch order: what a scenario that read the count `before` dispatched since.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn dispatched_link_control_since(before: usize) -> Vec<(Did, LinkControl)> {
+    DISPATCHED_LINK_CONTROL.with(|dispatched| {
+        dispatched
+            .borrow()
+            .get(before..)
+            .map(<[_]>::to_vec)
+            .unwrap_or_default()
+    })
+}
+
 /// The digest a slot was sent as, if it went by reference.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 fn referenced_digest(slot: &DelegationRef<'_>) -> Option<DelegationDigest> {

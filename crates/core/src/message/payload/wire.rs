@@ -21,10 +21,11 @@
 //!
 //! A frame is either a payload or a [`LinkControl`]; the two are told apart by a marker before
 //! any decoding. A control frame is unsigned: it is meaningful only on the authenticated edge it
-//! arrives on, an announced session authenticates itself (its account signature), and a digest
-//! names a value rather than asserting one. The link is treated as a datagram link: control
-//! frames and payload frames may arrive in any order or not at all, and every control frame is
-//! idempotent, so a duplicate or a stale one changes nothing.
+//! arrives on, and a digest names a value rather than asserting one. The link is treated as a
+//! datagram link: control frames and payload frames may arrive in any order or not at all, and
+//! every control frame is idempotent, so a duplicate changes nothing: a stale `Known` never
+//! shortens the lease held, and a stale `Unknown` costs only inline frames until the next
+//! lease (see the laws of `swarm::session_link`).
 
 use std::borrow::Cow;
 
@@ -41,7 +42,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::protocols::MessageRelay;
 use crate::message::protocols::MessageVerification;
-use crate::message::protocols::ProofLifetime;
 
 /// Marker of a payload frame. A frame without it is refused before any decoding; there is no
 /// version behind the marker, because the protocol is not versioned before 1.0: every wire
@@ -54,7 +54,7 @@ const LINK_CONTROL_FRAME_MARKER: &[u8] = b"RINGS-LINK\0";
 
 /// The two delegation slots of a payload, as a product: `PerSlot<T> ≅ T × T`.
 ///
-/// Every per-slot quantity (a reference, a lookup, a staged announcement) is carried in this
+/// Every per-slot quantity (a reference, an encoding, a room) is carried in this
 /// one shape, so the slots are always handled together and in the same order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PerSlot<T> {
@@ -83,6 +83,14 @@ impl<T> PerSlot<T> {
     /// Both slots in order, origin first.
     pub(crate) fn into_array(self) -> [T; 2] {
         [self.origin, self.hop]
+    }
+}
+
+impl<T: PartialEq> PerSlot<T> {
+    /// Whether both slots hold the same value: the image of the diagonal `T → T × T`, as on a
+    /// frame whose origin is its own hop.
+    pub(crate) fn is_diagonal(&self) -> bool {
+        self.origin == self.hop
     }
 }
 
@@ -117,6 +125,14 @@ impl DelegationRef<'_> {
         match self {
             Self::Inline(_) => SlotEncoding::Inline,
             Self::Digest(_) => SlotEncoding::Referenced,
+        }
+    }
+
+    /// The digest this slot references, if it travelled by reference.
+    pub(crate) const fn digest(&self) -> Option<DelegationDigest> {
+        match self {
+            Self::Inline(_) => None,
+            Self::Digest(digest) => Some(*digest),
         }
     }
 }
@@ -221,6 +237,25 @@ impl<'a> WirePayload<'a> {
         Self::view(payload, payload.delegations().map(DelegationRef::inline))
     }
 
+    /// View `payload` with each slot travelling as `encoding` says: the session inline, or its
+    /// digest. `encoded(p, (Inline, Inline)) = inline(p)`.
+    #[cfg(test)]
+    pub(crate) fn encoded(
+        payload: &'a MessagePayload,
+        encoding: PerSlot<SlotEncoding>,
+    ) -> Result<Self> {
+        let slot = |(session, encoding): (&'a Delegation, SlotEncoding)| match encoding {
+            SlotEncoding::Inline => Ok(DelegationRef::inline(session)),
+            SlotEncoding::Referenced => session.digest().map(DelegationRef::Digest),
+        };
+        let slots = payload.delegations().zip(encoding);
+        let sessions = PerSlot {
+            origin: slot(slots.origin)?,
+            hop: slot(slots.hop)?,
+        };
+        Ok(Self::view(payload, sessions))
+    }
+
     /// The payload, with every slot required inline: the self-contained reading, valid outside
     /// any link. A slot sent by reference is refused as
     /// [`Error::DelegationReferenceUnresolved`].
@@ -250,12 +285,6 @@ impl<'a> WirePayload<'a> {
             origin: &self.transaction.verification.delegation,
             hop: &self.verification.delegation,
         }
-    }
-
-    /// The hop proof's lifetime, readable before the slots are resolved. It is unauthenticated
-    /// until the payload verifies, so it may only bound how long an unresolved frame is kept.
-    pub(crate) const fn hop_proof_lifetime(&self) -> ProofLifetime {
-        ProofLifetime::new(self.verification.ts_ms, self.verification.ttl_ms)
     }
 
     /// The encoded message, readable before the slots are resolved.
@@ -303,18 +332,28 @@ impl<'a> WirePayload<'a> {
 /// documentation for why these are unsigned.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) enum LinkControl {
-    /// "A frame of yours carried this session inline and it verified: you may reference it."
-    Known(DelegationDigest),
-    /// "A frame of yours references this digest and I cannot resolve it."
-    Request(DelegationDigest),
-    /// "This is a session you asked for." The receiver recomputes the digest; it is never
-    /// taken from the sender.
-    Announce(Delegation),
-    /// "I no longer hold the session you asked for": frames waiting on it cannot be resolved.
+    /// "A frame of yours carried this session inline and it verified: you may reference it for
+    /// `remaining_ms` more." A duration, so that no clock is compared with another; see the
+    /// lease law of `swarm::session_link`.
+    Known {
+        /// The session leased.
+        digest: DelegationDigest,
+        /// What is left of the lease when the end that sent this frame granted or renewed it.
+        remaining_ms: u128,
+    },
+    /// "A frame of yours referenced this digest and I do not hold it: the frame was dropped;
+    /// send the session inline."
     Unknown(DelegationDigest),
 }
 
 impl LinkControl {
+    /// The session this frame is about.
+    pub(crate) const fn digest(&self) -> DelegationDigest {
+        match self {
+            Self::Known { digest, .. } | Self::Unknown(digest) => *digest,
+        }
+    }
+
     /// The frame bytes: the control marker, then the encoded body.
     pub(crate) fn to_wire(&self) -> Result<Bytes> {
         let body = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;

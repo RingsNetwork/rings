@@ -132,6 +132,15 @@ and expire, but a party with many identities can try to hold several positions o
   that withholds the control lane's credit is evicted whatever else it sends. The node-wide
   receive bound is soft (#934).
   [Details](docs/src/advanced-topic/transport-flow-control.md).
+- **Delegation references.** A link references a delegation only under a bounded lease its
+  receiver granted to a frame that verified, sent as a remaining duration, so no two clocks
+  are compared. The receiver pins at most 128 delegations per link, 8 of them reserved for
+  the link peer's own, and refuses a new lease while every slot is still in its grace; the
+  sender then sends inline. A frame
+  whose reference misses is dropped uncharged, never held, so a lane's frames reach admission
+  in arrival order (#908). An origin delegation that expired in flight is not charged to the
+  hop that carried it, and only when the rest of the frame verifies. An unrelated party
+  cannot populate a link's tables. [Details](docs/src/advanced-topic/delegation-references.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.
 - **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures
@@ -148,8 +157,6 @@ and expire, but a party with many identities can try to hold several positions o
 
 ## Known Limitations
 
-- #908: a frame held on an unresolved delegation reference can be lost as stale, never
-  admitted twice.
 - #912: the browser replay store uses IndexedDB's default durability hint.
 - #915: a missing replay record restarts its stream from the first sequence.
 - #916: durable replay writes cap a node near 50 transitions per second on macOS.

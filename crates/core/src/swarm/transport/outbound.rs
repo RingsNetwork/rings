@@ -71,6 +71,8 @@ pub(crate) use link_state::LINK_CONTROL_IN_FLIGHT_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::dispatched_link_control_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use test_trace::dispatched_link_control_since;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use test_trace::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(super) use test_trace::record_dispatched_link_control;
@@ -117,7 +119,7 @@ pub(crate) use queue::OUTBOUND_CONTROL_BURST;
 pub(crate) use queue::OUTBOUND_LANE_WINDOW;
 pub(super) use sender_bounded::SenderBound;
 use sender_bounded::SenderBounded;
-use session_encoding::SharedAnnouncedDelegations;
+use session_encoding::SharedDelegationLessee;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
 pub(super) use transfer::ChunkedFrameSource;
@@ -349,8 +351,8 @@ impl OutboundSchedulers {
             return Ok(handle.clone());
         }
         // A worker replaced under an unchanged connection generation keeps the link's tables:
-        // what the old worker announced stays answerable, and the sends still in flight stay
-        // counted. A newer generation empties the announced table by itself on its first frame.
+        // the leases the peer granted stay held, and the sends still in flight stay counted. A
+        // newer generation empties the lessee table by itself on its first frame.
         let link = match registry.peers.remove(&peer) {
             Some(stopped) => {
                 let link = stopped.state.link.clone();
@@ -500,7 +502,7 @@ struct OutboundWorker {
     receiver: MailboxReceiver<OutboundCommand>,
     ready: TransferQueues<QueuedTransfer>,
     active: Option<RunnableTransfer<QueuedTransfer>>,
-    announced: SharedAnnouncedDelegations,
+    lessee: SharedDelegationLessee,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     /// The transport credit of each class's lane.
     credits: PerClass<ClassCredit>,
@@ -536,7 +538,7 @@ impl OutboundWorker {
             receiver,
             ready: TransferQueues::default(),
             active: None,
-            announced: link.announced,
+            lessee: link.lessee,
             deliveries: FuturesUnordered::new(),
             credits: PerClass::from_fn(|_| ClassCredit::Idle),
             credit_waits: FuturesUnordered::new(),
@@ -774,11 +776,11 @@ impl OutboundWorker {
         }
         let before_first_frame = transfer.is_before_first_frame();
         let generation = transfer.admitted.attempt().generation();
-        let announced = &self.announced;
+        let lessee = &self.lessee;
         let encoded = transfer.next_frame().and_then(|frame| {
             frame
                 .map(|(payload, context)| {
-                    announced
+                    lessee
                         .encode(generation, payload.as_ref(), get_epoch_ms())
                         .map(|bytes| (bytes, context))
                 })

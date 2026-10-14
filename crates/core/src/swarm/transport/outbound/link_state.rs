@@ -1,5 +1,5 @@
 //! The state of one peer's link that the sending end keeps across its outbound workers: the
-//! announced-delegation table and the budget of link-control sends in flight. A worker is
+//! delegation lessee table and the budget of link-control sends in flight. A worker is
 //! replaced under an unchanged connection generation without losing either; a newer
 //! generation empties the table by itself on its first frame.
 
@@ -9,21 +9,21 @@ use std::sync::Arc;
 
 use rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY;
 
-use super::session_encoding::SharedAnnouncedDelegations;
+use super::session_encoding::SharedDelegationLessee;
 use super::OutboundSchedulers;
 use crate::dht::Did;
 
 /// Link-control sends this end keeps in flight to one peer at most: two per frame the peer may
-/// have in flight at this end's transport, since each inbound frame causes at most two of
-/// them. A send beyond it is refused; the frame is idempotent, and the next frame that misses
-/// or teaches the same session repeats it.
+/// have in flight at this end's transport, since each inbound frame causes at most one per
+/// distinct delegation slot, so at most two. A send beyond it is refused; the frame is
+/// idempotent, and the next frame that misses or teaches the same session repeats it.
 pub(crate) const LINK_CONTROL_IN_FLIGHT_CAPACITY: usize = 2 * INBOUND_PEER_FRAME_CAPACITY;
 
 /// One peer's link state as the sending end keeps it. Clone law: clones name the same link.
 #[derive(Clone)]
 pub(super) struct PeerLinkState {
-    /// The sessions sent inline and which of them the peer confirmed.
-    pub(super) announced: SharedAnnouncedDelegations,
+    /// The sessions sent inline and the lease the peer granted each.
+    pub(super) lessee: SharedDelegationLessee,
     /// The link-control sends in flight to the peer.
     pub(super) control_budget: LinkControlBudget,
 }
@@ -32,7 +32,7 @@ impl PeerLinkState {
     /// The link state of a peer nothing has been sent to.
     pub(super) fn new() -> Self {
         Self {
-            announced: SharedAnnouncedDelegations::new(),
+            lessee: SharedDelegationLessee::new(),
             control_budget: LinkControlBudget::new(),
         }
     }
@@ -40,7 +40,7 @@ impl PeerLinkState {
     /// Whether `other` names the same link: the same tables, not equal ones.
     #[cfg(all(test, not(target_family = "wasm")))]
     pub(super) fn is_same_link(&self, other: &Self) -> bool {
-        self.announced.is_same_table(&other.announced)
+        self.lessee.is_same_table(&other.lessee)
             && Arc::ptr_eq(&self.control_budget.0, &other.control_budget.0)
     }
 }
