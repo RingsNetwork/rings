@@ -18,6 +18,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rings_core::lifecycle::StopToken;
+use rings_core::swarm::OfferReply;
 #[cfg(target_os = "linux")]
 use rings_gateway::bindings::NativePacketIo;
 #[cfg(target_os = "linux")]
@@ -51,6 +53,8 @@ use super::*;
 use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::NativeOnionGatewayConnector;
+use crate::tests::activity::probe_on_activity;
+use crate::tests::activity::AdmissionActivity;
 use crate::tests::native::prepare_processor_with_onion_role;
 
 const PUBLIC_HTTP_PORT: u16 = 80;
@@ -192,33 +196,72 @@ async fn receive_tcp(
     .expect("gateway TCP response deadline")
 }
 
-/// Connect `first` to `second` and wait until both admit the edge.
-///
-/// Stabilization connects overlay neighbours by itself once some edges exist, so an edge the
-/// overlay already opened (`AlreadyConnected` at either handshake step) satisfies the request.
-async fn connect_gateway_edge(first: &Processor, second: &Processor, label: &str) {
-    match first.swarm.create_offer(second.did()).await {
-        Ok(offer) => match second.swarm.answer_offer(offer).await {
-            Ok(answer) => first
+/// Whether `error` refuses a manual handshake because a concurrent handshake owns the edge: an
+/// attempt is under way or admitted, or the peer's handshake took this one's slot (#947). The
+/// edge then forms from that handshake.
+fn refused_by_concurrent_handshake(error: &rings_core::error::Error) -> bool {
+    matches!(
+        error,
+        rings_core::error::Error::AlreadyConnected
+            | rings_core::error::Error::ConnectionAttemptSuperseded { .. }
+    )
+}
+
+/// One manual handshake from `first` to `second`. `second` replies with an answer, or, when
+/// its own sent overlay offer prevails on the tie-break, with that offer, which `first`
+/// answers (#947).
+async fn exchange_edge_signaling(
+    first: &Processor,
+    second: &Processor,
+) -> std::result::Result<(), rings_core::error::Error> {
+    let (attempt, offer) = first.swarm.offer_connection(second.did()).await?;
+    match second.swarm.answer_offer(offer).await? {
+        OfferReply::Answer(answer) => first.swarm.accept_answer_for(attempt, answer).await,
+        OfferReply::CounterOffer(counter_offer) => {
+            let answer = first
                 .swarm
-                .accept_answer(answer)
-                .await
-                .expect("accept gateway edge answer"),
-            Err(rings_core::error::Error::AlreadyConnected) => {}
-            Err(error) => panic!("answer gateway edge offer: {error:?}"),
-        },
-        Err(rings_core::error::Error::AlreadyConnected) => {}
-        Err(error) => panic!("create gateway edge offer: {error:?}"),
-    }
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while !processor_has_admitted_peer(first, second.did())
-            || !processor_has_admitted_peer(second, first.did())
-        {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+                .answer_offer(counter_offer)
+                .await?
+                .answer()
+                .ok_or(rings_core::error::Error::AlreadyConnected)?;
+            second.swarm.accept_answer(answer).await
         }
-    })
+    }
+}
+
+/// Connect `first` to `second` and await, on admission activity, both admitting the edge.
+///
+/// Stabilization connects overlay neighbours by itself once some edges exist, so the manual
+/// handshake may meet the overlay's own: a refusal because that handshake owns the edge
+/// ([`refused_by_concurrent_handshake`]) satisfies the request, and the tie-break guarantees
+/// the crossing handshakes end with one edge (#947).
+async fn connect_gateway_edge(first: &Processor, second: &Processor, label: &str) {
+    match exchange_edge_signaling(first, second).await {
+        Ok(()) => {}
+        Err(error) if refused_by_concurrent_handshake(&error) => {}
+        Err(error) => panic!("gateway WebRTC edge {label} handshake: {error:?}"),
+    }
+    probe_on_activity(
+        &format!("gateway WebRTC edge {label} admitted on both ends"),
+        PROCESSOR_TEST_HANG_GUARD,
+        || {
+            let admitted = processor_has_admitted_peer(first, second.did())
+                && processor_has_admitted_peer(second, first.did());
+            async move { Ok(admitted.then_some(())) }
+        },
+    )
     .await
-    .unwrap_or_else(|_| panic!("gateway WebRTC edge {label} did not connect"));
+    .unwrap_or_else(|error| panic!("gateway WebRTC edge {label} did not connect: {error:?}"));
+}
+
+/// Serve `provider`'s application inbox with the extension backend on a detached task, with
+/// [`AdmissionActivity`] observing it, so an edge awaited by [`connect_gateway_edge`] wakes its
+/// probe on every admission and retirement.
+fn serve_observing_admissions(provider: &Provider) -> Result<()> {
+    let service =
+        provider.application_service(Some(Arc::new(AdmissionActivity)), StopToken::never())?;
+    rings_runtime::spawn_detached(service)
+        .map_err(|_| Error::ExtensionError("no runtime to serve the application inbox".to_owned()))
 }
 
 /// Relays of the gateway fixture besides the exit: an onion loop over one symbol has
@@ -272,10 +315,10 @@ async fn prepare_onion_loop_public_gateway(
         NativeOnionCircuitHandle::install(&provider.extensions())?;
     }
     NativeOnionCircuitHandle::install(&exit_provider.extensions())?;
-    client_provider.set_backend()?;
-    exit_provider.set_backend()?;
+    serve_observing_admissions(&client_provider)?;
+    serve_observing_admissions(&exit_provider)?;
     for provider in relay_providers.iter() {
-        provider.set_backend()?;
+        serve_observing_admissions(provider)?;
     }
 
     for (index, relay) in relays.iter().enumerate() {

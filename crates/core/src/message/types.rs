@@ -461,6 +461,12 @@ macro_rules! define_message_model {
                 matches!(self, Self::Chunk)
             }
 
+            /// Whether this is connect signaling, the one family whose carrier records its
+            /// path (#947): the offer, and the answer or counter-offer that retraces it.
+            pub(crate) const fn carries_signaling_path(self) -> bool {
+                matches!(self, Self::ConnectNodeSend | Self::ConnectNodeReport)
+            }
+
             pub(crate) const fn requires_storage_route(self) -> bool {
                 match self {
                     $(Self::$variant => message_requires_storage_route!($storage_route)),+
@@ -558,19 +564,17 @@ impl Message {
         Ok(Message::CustomMessage(CustomMessage(msg.to_vec())))
     }
 
-    /// Whether this report honours its request's signed `reply_via`: exactly the reports a
-    /// node needs while no node is known to route to it (the successor answer of its join and
-    /// finger lookups, and the answer to its connection offer).
+    /// Whether this report honours its request's signed `reply_via`: exactly the report a node
+    /// needs while no node is known to route to it, the successor answer of its join and
+    /// finger lookups. The answer to its connection offer retraces the offer's recorded path
+    /// instead (#947).
     ///
     /// Law (reflection bound): a request names one peer and can make a responder route at most
     /// one of these bounded reports toward it; every other report, such as `FoundEntry` with
     /// its entry data, routes straight toward the origin, so `reply_via` cannot turn a small
     /// request into a large report aimed at a third party.
     pub(crate) const fn returns_through_reply_via(&self) -> bool {
-        matches!(
-            self,
-            Self::FindSuccessorReport(_) | Self::ConnectNodeReport(_)
-        )
+        matches!(self, Self::FindSuccessorReport(_))
     }
 }
 

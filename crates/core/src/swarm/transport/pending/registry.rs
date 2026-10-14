@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use super::handshake::Handshake;
+use super::handshake::OfferPhase;
 use super::PendingConnectionAttempt;
 use super::PENDING_CONNECTION_TIMEOUT_MS;
 use crate::dht::Did;
@@ -195,6 +197,10 @@ impl ReservationVerdict {
 /// `Active` belongs to the admitted projection; send-terminal generations are
 /// excluded from the routable projection until retirement removes them.
 ///
+/// Invariant (Signaling): `dom(handshakes) = { p | peers[p] = Pending(_) }`. A pending record
+/// carries its signaling state ([`Handshake`]); `reserve_for` creates both and every transition
+/// out of `Pending` drops both, so neither outlives the other.
+///
 /// Invariant: `|Pending ∪ Admitting| <= bounds.pending()` and `|State| <= bounds.total()`.
 /// Preservation: `reserve` is the only transition that grows the map and it
 /// checks both bounds; every other transition keeps or shrinks the map, so an
@@ -209,6 +215,8 @@ pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry {
     bounds: LifecycleBounds,
     next_generation: u64,
     peers: BTreeMap<Did, PeerConnectionLifecycle>,
+    /// The signaling state of every pending record (`Invariant (Signaling)`).
+    handshakes: BTreeMap<Did, Handshake>,
     send_terminal: BTreeSet<PendingConnectionAttempt>,
 }
 
@@ -219,14 +227,32 @@ impl ConnectionLifecycleRegistry {
             bounds,
             next_generation: 0,
             peers: BTreeMap::new(),
+            handshakes: BTreeMap::new(),
             send_terminal: BTreeSet::new(),
         }
     }
 
+    /// Reserve a pending generation for `peer` with a test-default signaling state: an
+    /// external offer still being created.
+    #[cfg(test)]
     pub(in crate::swarm::transport) fn reserve(
         &mut self,
         peer: Did,
         now_ms: i64,
+    ) -> Result<PendingConnectionAttempt> {
+        self.reserve_for(
+            peer,
+            now_ms,
+            Handshake::offering(super::handshake::OfferOwner::External),
+        )
+    }
+
+    /// Reserve a pending generation for `peer` whose signaling starts in `handshake`.
+    pub(in crate::swarm::transport) fn reserve_for(
+        &mut self,
+        peer: Did,
+        now_ms: i64,
+        handshake: Handshake,
     ) -> Result<PendingConnectionAttempt> {
         match self.reservation_verdict(peer) {
             ReservationVerdict::AlreadyConnected => return Err(Error::AlreadyConnected),
@@ -251,6 +277,7 @@ impl ConnectionLifecycleRegistry {
             peer,
             generation: self.next_generation,
         };
+        self.handshakes.insert(peer, handshake);
         self.peers.insert(peer, PeerConnectionLifecycle::Pending {
             attempt,
             started_at_ms: now_ms,
@@ -432,6 +459,7 @@ impl ConnectionLifecycleRegistry {
             attempt,
             started_at_ms,
         };
+        self.handshakes.remove(&attempt.peer);
         true
     }
 
@@ -467,6 +495,21 @@ impl ConnectionLifecycleRegistry {
         true
     }
 
+    /// Apply `Pending(attempt) -> Absent` iff `attempt`'s signaling state is still `observed`:
+    /// a release decided on one state never applies to a later one (`Law (Decided state)` of
+    /// the handshake).
+    pub(in crate::swarm::transport) fn remove_pending_in(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        observed: &Handshake,
+    ) -> bool {
+        if self.handshake(attempt) != Some(observed) {
+            return false;
+        }
+        self.remove_record(attempt.peer);
+        true
+    }
+
     /// Apply `Pending(attempt) -> Absent`.
     pub(in crate::swarm::transport) fn remove_pending(
         &mut self,
@@ -481,7 +524,7 @@ impl ConnectionLifecycleRegistry {
         ) {
             return false;
         }
-        self.peers.remove(&attempt.peer);
+        self.remove_record(attempt.peer);
         true
     }
 
@@ -493,7 +536,7 @@ impl ConnectionLifecycleRegistry {
         if self.unadmitted_attempt(attempt.peer) != Some(attempt) {
             return false;
         }
-        self.peers.remove(&attempt.peer);
+        self.remove_record(attempt.peer);
         true
     }
 
@@ -513,7 +556,7 @@ impl ConnectionLifecycleRegistry {
         let Some(value) = action(&self.active_connections())? else {
             return Ok(RetirementOutcome::Declined);
         };
-        self.peers.remove(&attempt.peer);
+        self.remove_record(attempt.peer);
         self.send_terminal.remove(&attempt);
         Ok(RetirementOutcome::Retired(value))
     }
@@ -528,7 +571,7 @@ impl ConnectionLifecycleRegistry {
         if !self.owns_active_slot(attempt) {
             return false;
         }
-        self.peers.remove(&attempt.peer);
+        self.remove_record(attempt.peer);
         self.send_terminal.remove(&attempt);
         true
     }
@@ -569,9 +612,155 @@ impl ConnectionLifecycleRegistry {
             })
             .collect::<Vec<_>>();
         for expired in &expired {
-            self.peers.remove(&expired.attempt.peer);
+            self.remove_record(expired.attempt.peer);
         }
         expired
+    }
+
+    /// Remove `peer`'s record together with its signaling state (`Invariant (Signaling)`).
+    fn remove_record(&mut self, peer: Did) {
+        self.peers.remove(&peer);
+        self.handshakes.remove(&peer);
+    }
+
+    /// The signaling state of `attempt`, iff it is `peer`'s pending generation.
+    pub(in crate::swarm::transport) fn handshake(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Option<&Handshake> {
+        (self.pending_attempt(attempt.peer) == Some(attempt))
+            .then(|| self.handshakes.get(&attempt.peer))
+            .flatten()
+    }
+
+    /// Apply `step` to the signaling state of `attempt` iff it is the pending generation and
+    /// `step` accepts the state; returns whether it did.
+    fn advance_handshake(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        step: impl FnOnce(&Handshake) -> Option<Handshake>,
+    ) -> bool {
+        if self.pending_attempt(attempt.peer) != Some(attempt) {
+            return false;
+        }
+        let Some(current) = self.handshakes.get_mut(&attempt.peer) else {
+            return false;
+        };
+        match step(current) {
+            Some(next) => {
+                *current = next;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Apply `Offering(o, Creating) -> Offering(o, Sent(sdp, tx_id))`.
+    pub(in crate::swarm::transport) fn mark_offer_sent(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        sdp: String,
+        tx_id: uuid::Uuid,
+    ) -> bool {
+        self.advance_handshake(attempt, |current| match current {
+            Handshake::Offering {
+                owner,
+                phase: OfferPhase::Creating,
+            } => Some(Handshake::Offering {
+                owner: *owner,
+                phase: OfferPhase::Sent { sdp, tx_id },
+            }),
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+        })
+    }
+
+    /// Apply `Offering(o, Sent(_, t)) -> Offering(o, Answered)` for an answer echoing `t`
+    /// (`tx_id = Some(t)`); an answer carried out of band (`tx_id = None`) also accepts an
+    /// offer still `Creating`, whose owner holds it.
+    pub(in crate::swarm::transport) fn mark_offer_answered(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        tx_id: Option<uuid::Uuid>,
+    ) -> bool {
+        self.advance_handshake(attempt, |current| match current {
+            Handshake::Offering {
+                owner,
+                phase: OfferPhase::Sent { tx_id: sent, .. },
+            } if tx_id.is_none_or(|tx_id| tx_id == *sent) => Some(Handshake::Offering {
+                owner: *owner,
+                phase: OfferPhase::Answered,
+            }),
+            Handshake::Offering {
+                owner,
+                phase: OfferPhase::Creating,
+            } if tx_id.is_none() => Some(Handshake::Offering {
+                owner: *owner,
+                phase: OfferPhase::Answered,
+            }),
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+        })
+    }
+
+    /// Apply `Answering(false) -> Answering(true)`.
+    pub(in crate::swarm::transport) fn mark_reply_sent(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+    ) -> bool {
+        self.advance_handshake(attempt, |current| match current {
+            Handshake::Answering { reply_sent: false } => {
+                Some(Handshake::Answering { reply_sent: true })
+            }
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+        })
+    }
+
+    /// The pending generation of `peer` whose sent, unanswered offer left under `tx_id`: the
+    /// only generation an answer echoing `tx_id` may be applied to.
+    pub(in crate::swarm::transport) fn offer_sent_under(
+        &self,
+        peer: Did,
+        tx_id: uuid::Uuid,
+    ) -> Option<PendingConnectionAttempt> {
+        let attempt = self.pending_attempt(peer)?;
+        matches!(
+            self.handshakes.get(&peer),
+            Some(Handshake::Offering {
+                phase: OfferPhase::Sent { tx_id: sent, .. },
+                ..
+            }) if *sent == tx_id
+        )
+        .then_some(attempt)
+    }
+
+    /// Whether another handshake took `attempt`'s slot: the slot holds another generation
+    /// that answers the peer's offer, or one already past the handshake. The latter is most
+    /// often the peer's handshake, and may be a later one of this node's own after `attempt`
+    /// was released; either way an edge is being established, which is what a caller treating
+    /// supersession as satisfied relies on.
+    pub(in crate::swarm::transport) fn superseded_by_peer(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> bool {
+        match self.state(attempt.peer) {
+            Some(PeerConnectionLifecycle::Pending {
+                attempt: current, ..
+            }) => {
+                current != attempt
+                    && matches!(
+                        self.handshakes.get(&attempt.peer),
+                        Some(Handshake::Answering { .. })
+                    )
+            }
+            Some(
+                PeerConnectionLifecycle::Admitting {
+                    attempt: current, ..
+                }
+                | PeerConnectionLifecycle::Active {
+                    attempt: current, ..
+                },
+            ) => current != attempt,
+            None => false,
+        }
     }
 
     /// Count all incomplete admissions against the bounded handshake capacity.

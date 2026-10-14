@@ -258,6 +258,7 @@ impl Error {
             | Self::PeerMaxMessageSizeTooSmall(_)
             // connection lifecycle
             | Self::PromiseStateTimeout | Self::AlreadyConnected
+            | Self::ConnectionAttemptCancelled { .. }
             | Self::PendingConnectionCapacityExceeded { .. }
             | Self::ConnectionCapacityExceeded { .. } | Self::PendingConnectionGenerationExhausted
             | Self::NotifyPredecessorOriginMismatch { .. }
@@ -280,6 +281,8 @@ impl Error {
             | Self::SuccessorIndexOutOfBounds { .. } | Self::FailedToWriteSuccessors
             | Self::PeerRingUnexpectedAction(_) | Self::InvalidNextHop
             | Self::RelayHopBudgetExhausted | Self::RelayHopBudgetAboveMax(_)
+            | Self::RelayPathAboveMax(_) | Self::RelayPathHopUnlinked { .. }
+            | Self::RelayPathRepeatedHop { .. } | Self::RelaySignalingPathMismatch
             | Self::RelayDestinationUnreachable { .. }
             | Self::ReroutingExhausted { .. } | Self::SingleAttemptRefused { .. }
             | Self::ReroutingStopped

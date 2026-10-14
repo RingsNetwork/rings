@@ -237,6 +237,28 @@
 
 ### Breaking changes
 
+- Connect signaling returns along its recorded path, so crossing offers always end with an edge
+  (#947, the root cause of the flaky gateway test in #945). A wire cutover:
+  - `MessageRelay` gains the public field `path: Option<SignalingPath>`. `ConnectNodeSend`
+    records the relays it crosses there; its `ConnectNodeReport` answer, and a counter-offer,
+    retrace them. Inbound validation refuses a path on any other message, its absence on
+    connect signaling, and a path that repeats a node.
+  - Of two crossing offers, one still being created yields; of two sent ones the smaller DID's
+    prevails and is sent back as a counter-offer. A DHT answer echoes its offer's transaction
+    and applies only to that offer. `ConnectNodeReport` no longer honours `reply_via`.
+  - `SwarmTransport::answer_remote_connection` returns an `OfferReply` of the answer or the
+    counter-offer, and `Swarm::answer_offer` returns `OfferReply<MessagePayload,
+    MessagePayload>`. The JSON-RPC `answerOffer` (and `rings connect answer`) may return a
+    counter-offer: answer it with the caller's `answerOffer` and return that answer with the
+    peer's `acceptAnswer`.
+  - A WebRTC step of an attempt that lost its slot reports `ConnectionAttemptSuperseded` when the
+    peer's handshake took it, which is what surfaced as `Local connection closed` from a creating
+    offer, and the new `ConnectionAttemptCancelled` when anything else released it.
+  - The envelope reserves account for the path: `MAX_CHUNK_ENVELOPE_OVERHEAD` is 912 (a chunk
+    frame carries no path, one byte for its absence) and `MAX_PAYLOAD_ENVELOPE_OVERHEAD` is 3697,
+    which covers the widest path an honest connect-signaling carrier records (a full hop budget
+    of relays); a whole payload within about 2.7 KB of the data-channel limit is now chunked.
+
 - `FileStorage`'s `KvStorageInterface<V>` (and its new `KvStorageScan<V>`) require `V: Send` as
   well as `Sync` (#909), since values cross to the blocking pool; `RecordAuthority` is
   `#[non_exhaustive]`.

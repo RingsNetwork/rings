@@ -61,6 +61,7 @@ mod delivery;
 pub(crate) mod egress;
 #[cfg(test)]
 mod frame_ledger;
+mod handshake;
 #[cfg(test)]
 mod inbound_tap;
 mod link_control;
@@ -73,7 +74,6 @@ mod pending;
 mod readiness;
 mod rerouting;
 mod retention;
-mod signaling;
 mod storage_lookup;
 mod storage_sync;
 mod transaction_replay;
@@ -93,6 +93,9 @@ pub(crate) use self::frame_ledger::FrameInFlight;
 use self::frame_ledger::FrameLedger;
 #[cfg(test)]
 pub(crate) use self::frame_ledger::FrameSample;
+pub(crate) use self::handshake::CounterOffer;
+pub(crate) use self::handshake::CreatedAnswer;
+pub use self::handshake::OfferReply;
 #[cfg(test)]
 pub(crate) use self::inbound_tap::InboundTap;
 pub(crate) use self::liveness::IssuedProbe;
@@ -134,6 +137,7 @@ pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 pub(crate) use self::payload_send::hold_first_frame_deadlines_for_test;
 use self::peer_operation::PeerOperationLocks;
 use self::pending::ConnectionLifecycleBoundary;
+pub(crate) use self::pending::OfferOwner;
 pub(crate) use self::pending::PendingConnectionAttempt;
 use self::pending::PendingFingerUpdates;
 use self::pending::SharedConnectionLifecycles;
@@ -222,13 +226,6 @@ type MeasuredDisconnectMap = BTreeMap<Did, MeasuredDisconnect>;
 struct MeasuredDisconnect {
     generation: u64,
     disconnected_since_ms: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum IncomingOfferAdmittedPeer {
-    Vacant,
-    Routable,
-    Unroutable(PendingConnectionAttempt),
 }
 
 /// Runtime settings used by [`SwarmTransport`].
@@ -385,24 +382,6 @@ impl SwarmTransport {
     /// Atomically claim the currently pending storage repair work.
     pub(crate) fn claim_storage_repair(&self) -> bool {
         self.storage_repair_requested.swap(false, Ordering::AcqRel)
-    }
-
-    fn incoming_offer_admitted_peer(&self, peer: Did) -> Result<IncomingOfferAdmittedPeer> {
-        self.with_connection_lifecycle(|| {
-            let Some(attempt) = self.active_attempt(peer)? else {
-                return Ok(IncomingOfferAdmittedPeer::Vacant);
-            };
-            if self.peer_lifecycles()?.sendable_attempt(peer) != Some(attempt) {
-                return Ok(IncomingOfferAdmittedPeer::Unroutable(attempt));
-            }
-            let Some(connection) = self.get_raw_connection(peer) else {
-                return Ok(IncomingOfferAdmittedPeer::Unroutable(attempt));
-            };
-            if connection.readiness().can_make_progress() {
-                return Ok(IncomingOfferAdmittedPeer::Routable);
-            }
-            Ok(IncomingOfferAdmittedPeer::Unroutable(attempt))
-        })
     }
 
     /// Select the next fair window over stable, ordered repair delivery keys.

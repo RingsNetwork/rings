@@ -1,9 +1,8 @@
-//! Tests of the connection and successor-report handlers.
-
+//! Tests of the connection handlers: relayed connects, crossing topologies and successor hints.
 use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::time::timeout;
 
-use super::topology_view::connect_successor_hint;
+use super::connect_successor_hint;
 use crate::dht::TopoInfo;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
@@ -551,10 +550,12 @@ async fn test_fourth_node_connection() -> Result<()> {
 
     let node4 = prepare_node(key4).await;
 
-    // Unless we use a fixed did value, we cannot fully predict the communication order between node4 and the nodes,
-    // because we do not know the distance between node4 and each node.
+    // Unless we use a fixed did value, we cannot fully predict the communication order
+    // between node4 and the nodes, because we do not know the distance between node4 and
+    // each node.
     //
-    // Therefore, here we only guarantee that messages can be processed correctly without checking the specific message order.
+    // Therefore, here we only guarantee that messages can be processed correctly without
+    // checking the specific message order.
     //
     // In addition, we check the final state to ensure the entire process meets expectations.
 

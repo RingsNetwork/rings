@@ -62,9 +62,15 @@ readable by every hop and by a storage owner holding them for an offline recipie
 
 Routes are loop-free and take at most `2|V|` hops. While an origin has no predecessor, its
 requests may name one of its links in a signed `reply_via`, which receives at most one
-successor or connection answer and forwards it only over a direct link. The hop budget is
-unsigned: it bounds honest work, not a dishonest hop. A leak here is a communication-layer
-bug; circuits inherit whatever the relay exposes.
+successor answer and forwards it only over a direct link. The hop budget is unsigned: it
+bounds honest work, not a dishonest hop. A leak here is a communication-layer bug; circuits
+inherit whatever the relay exposes.
+
+The carrier records no hop history, with one exception (#947): connect signaling (an offer,
+its answer, and a tie-break counter-offer) carries the relays it crossed, so the reply
+retraces them, each hop a direct link of the one before. Every hop and both ends learn that
+path; its privacy is already spent, since the two ends exchange addresses in their SDP.
+Inbound validation refuses a path on any other message and a path that names a node twice.
 
 ### Privacy layer
 

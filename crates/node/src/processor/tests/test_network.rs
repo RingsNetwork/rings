@@ -329,7 +329,13 @@ async fn test_processor_create_offer() {
     let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
     assert!(p1.swarm.peers().is_empty());
 
-    let answer = p2.swarm.answer_offer(offer).await.unwrap();
+    let answer = p2
+        .swarm
+        .answer_offer(offer)
+        .await
+        .unwrap()
+        .answer()
+        .expect("p2 holds no offer of its own, so it answers");
     p1.swarm.accept_answer(answer).await.unwrap();
     wait_processors_connected(&p1, &p2).await;
 
@@ -362,7 +368,13 @@ async fn test_processor_handshake_msg() {
     let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
     assert!(p1.swarm.peers().is_empty());
 
-    let answer = p2.swarm.answer_offer(offer).await.unwrap();
+    let answer = p2
+        .swarm
+        .answer_offer(offer)
+        .await
+        .unwrap()
+        .answer()
+        .expect("p2 holds no offer of its own, so it answers");
     p1.swarm.accept_answer(answer).await.unwrap();
     wait_processors_connected(&p1, &p2).await;
 

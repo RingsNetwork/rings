@@ -15,7 +15,8 @@ directly. *In progress* and *Planned* items are direction, not commitments.
 ## Shipped
 
 - **Overlay:** Chord DHT with DID addressing, `network_id` isolation, and a path-less relay
-  whose carrier names only the next hop, destination, and hop budget (`crates/core`).
+  whose carrier names only the next hop, destination, and hop budget (`crates/core`); connect
+  signaling alone records the relays it crosses, so its answer retraces them (#947).
 - **Transport:** WebRTC datachannels, native and browser, browser to browser included
   (`crates/transport`).
 - **Identity:** DIDs over secp256k1, secp256r1, ed25519, BLS, and bip137 keys; E2E ElGamal

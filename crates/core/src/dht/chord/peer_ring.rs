@@ -16,8 +16,8 @@
 //!
 //! All three run under one lock, `topology_transition`, so transitions are
 //! totally ordered: a snapshot never mixes fields from two states, and each
-//! commit is visible to the next snapshot. Read-only views take the same lock
-//! for the same reason.
+//! commit is visible to the next snapshot. Read-only views (the `views`
+//! module) assemble their snapshot under the same lock for the same reason.
 //!
 //! A commit that changes the routes (`TopologyState::routes_equal` is false) advances the
 //! topology epoch, the event a data-plane operation deferred on a stale hop waits for:
@@ -32,8 +32,8 @@
 //! reporter is a successor, so the transition core prunes the tokens of
 //! departed reporters whenever a commit changes the successor list.
 //!
-//! The `impl` blocks below are grouped by concern: construction, read-only
-//! views, the transition core, membership, finger convergence, stabilization
+//! The `impl` blocks below are grouped by concern: construction, the
+//! transition core, membership, finger convergence, stabilization
 //! rounds, successor-list synchronization, and test hooks.
 
 use std::sync::Arc;
@@ -46,10 +46,6 @@ use futures::lock::Mutex as FuturesMutex;
 use super::PeerRingAction;
 use super::RemoteAction;
 use crate::consts::LOCAL_CACHE_CAPACITY;
-use crate::dht::delivery;
-use crate::dht::delivery::NextHop;
-use crate::dht::delivery::Origination;
-use crate::dht::delivery::RouteStage;
 use crate::dht::entry::Entry;
 use crate::dht::finger::FingerApplyOutcome;
 use crate::dht::finger::FingerConvergenceStatus;
@@ -77,6 +73,8 @@ use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::utils::new_uuid;
 use crate::utils::Instant;
+
+mod views;
 
 /// Storage accepted by [`PeerRing::new_with_storage`].
 pub type EntryStorage = Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<Entry>)>;
@@ -189,117 +187,6 @@ impl PeerRing {
             topology_epoch: Epoch::default(),
             did,
         }
-    }
-}
-
-/// Read-only views.
-///
-/// Every view observes one committed state and mutates nothing.
-impl PeerRing {
-    /// Return the successor sequence.
-    pub fn successors(&self) -> SuccessorSeq {
-        self.successor_seq.clone()
-    }
-
-    /// The overlay this ring belongs to; every stored value is admitted inside it.
-    pub const fn network_id(&self) -> u32 {
-        self.storage_virtual_node_config.network_id()
-    }
-
-    /// Storage virtual-node configuration used by the DHT storage layer.
-    pub(in crate::dht) const fn storage_virtual_node_config(&self) -> VirtualNodeConfig {
-        self.storage_virtual_node_config
-    }
-
-    /// The epoch of committed route changes (`Law (Epoch)` in the module documentation): a
-    /// waiter that listens before routing is notified by every later route change.
-    pub(crate) const fn topology_epoch(&self) -> &Epoch {
-        &self.topology_epoch
-    }
-
-    /// An owned copy of the current topology state.
-    pub(crate) fn topology_state(&self) -> Result<TopologyState> {
-        self.with_topology_state(Clone::clone)
-    }
-
-    /// Run a pure observation `TopologyState → T` against one coherent snapshot.
-    ///
-    /// The transition lock is held while the snapshot is assembled, so
-    /// `observe` sees exactly the state the next transition would start from,
-    /// never a torn view in which one field has already moved on. `observe`
-    /// must be pure: it borrows the snapshot, cannot reach the ring, and must
-    /// not block, because every transition waits behind the lock while it
-    /// runs. Prefer this over [`Self::topology_state`] when the answer is
-    /// smaller than the state, since it avoids copying the finger table.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a backing lock is poisoned.
-    pub(crate) fn with_topology_state<T>(
-        &self,
-        observe: impl FnOnce(&TopologyState) -> T,
-    ) -> Result<T> {
-        let _transition = self.lock_transition()?;
-        let state = self.snapshot_unlocked()?;
-        Ok(observe(&state))
-    }
-
-    /// Whether this node is the Chord successor of the position `did`, i.e.
-    /// `did ∈ (predecessor, self]`. With no known predecessor the node is responsible only when
-    /// it stands alone: a node that has successors but has not yet learned its predecessor is
-    /// merely uninformed, not responsible for the whole ring. A message addressed to an
-    /// unreachable `did` in this interval has reached the node that must hold it.
-    pub(crate) fn is_responsible_for(&self, did: Did) -> Result<bool> {
-        self.with_topology_state(|state| topology::is_responsible_for(state, did))
-    }
-
-    /// The node this owner routes the position `destination` to, when its own view answers:
-    /// the only node whose holds for `destination` this owner admits (see the `inbox` module).
-    pub(crate) fn inbox_hold_authority(&self, destination: Did) -> Result<Option<Did>> {
-        self.with_topology_state(|state| match topology::find_successor(state, destination) {
-            FindSuccessorStep::Local(responsible) => Some(responsible),
-            FindSuccessorStep::Remote { .. } => None,
-        })
-    }
-
-    /// The delivery decision for a payload addressed to the node `destination` whose carrier
-    /// is in `stage`, against one coherent snapshot; see [`delivery::delivery_step`] for the
-    /// step and its laws. `linked` is the transport's direct-link predicate.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a backing lock is poisoned.
-    pub(crate) fn delivery_step(
-        &self,
-        destination: Did,
-        stage: RouteStage,
-        linked: impl Fn(Did) -> bool,
-    ) -> Result<Option<NextHop>> {
-        self.with_topology_state(|view| delivery::delivery_step(view, destination, stage, linked))
-    }
-
-    /// The peer this node names for its answers while no node is known to route to it, among
-    /// the peers `linked` holds; see [`delivery::reply_via`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a backing lock is poisoned.
-    pub(crate) fn reply_via(&self, linked: impl Fn(Did) -> bool) -> Result<Option<Did>> {
-        self.with_topology_state(|view| delivery::reply_via(view, linked))
-    }
-
-    /// The first hop and the `reply_via` of a request this node originates toward
-    /// `destination`, from one coherent snapshot; see [`delivery::origination`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a backing lock is poisoned.
-    pub(crate) fn origination(
-        &self,
-        destination: Did,
-        linked: impl Fn(Did) -> bool,
-    ) -> Result<Origination> {
-        self.with_topology_state(|view| delivery::origination(view, destination, linked))
     }
 }
 
