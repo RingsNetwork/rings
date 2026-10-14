@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::FlowTransitionError;
+use crate::GatewayError;
 
 /// Stable identity of one captured TCP flow.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -86,6 +87,49 @@ impl FlowState {
     /// Return whether no further flow transition is permitted.
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Closed(_) | Self::Failed(_))
+    }
+}
+
+/// Cause of one captured flow being reset.
+///
+/// Every runtime reset carries one value of this type, so a reset without a cause cannot be
+/// constructed. Variants carry no packet contents and no flow addresses.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "kind", content = "detail")]
+pub enum FlowResetReason {
+    /// The TCP handshake did not complete within the flow timeout.
+    HandshakeExpired,
+    /// No client segment arrived within the flow idle timeout.
+    IdleTimeout,
+    /// The captured client reset the connection.
+    ClientReset,
+    /// The TCP endpoint closed before both byte directions shut down.
+    UngracefulClose,
+    /// The Onion stream could not be opened; carries the node-layer diagnostic.
+    OnionOpenFailed(String),
+    /// The open Onion stream failed while carrying bytes.
+    StreamFailed(String),
+    /// The byte bridge stopped accepting commands before the flow closed.
+    BridgeClosed,
+    /// Gateway shutdown reset the flow.
+    GatewayStopped,
+}
+
+impl FlowResetReason {
+    /// Classify a failure reported by a flow's byte bridge.
+    ///
+    /// Stream errors keep their operation label; every other bridge failure happened while the
+    /// connector was opening the stream. Flow addresses are not copied into the reason.
+    pub fn from_bridge_failure(error: &GatewayError) -> Self {
+        match error {
+            GatewayError::StreamIo {
+                operation, message, ..
+            } => Self::StreamFailed(format!("{operation}: {message}")),
+            GatewayError::OnionUnavailable { message, .. } => {
+                Self::OnionOpenFailed(message.clone())
+            }
+            other => Self::OnionOpenFailed(other.to_string()),
+        }
     }
 }
 

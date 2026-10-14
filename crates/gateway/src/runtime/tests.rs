@@ -16,6 +16,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::*;
 use crate::BoxGatewayDuplex;
+use crate::ExitAvailability;
 use crate::GatewayHealth;
 use crate::GatewayPlan;
 use crate::Mtu;
@@ -411,6 +412,12 @@ fn pending_handshake_exit_clock_releases_flow_capacity() {
         .reconcile_all(Duration::from_secs(2))
         .expect("expired handshake is released");
     assert_eq!(runtime.status_handle().snapshot().active_flows, 0);
+    // The SYN also armed smoltcp's idle clock for the same deadline, and the tick polls the
+    // stack before reading the runtime exit clock, so the stack's timeout names the reset.
+    assert_eq!(
+        runtime.status_handle().snapshot().last_flow_reset,
+        Some(FlowResetReason::IdleTimeout)
+    );
     assert_eq!(runtime.tcp.flow_count(), 0);
 }
 
@@ -422,7 +429,7 @@ fn stream_io_failure_is_flow_scoped_not_exit_scoped() {
     runtime
         .activate("memory-tun".to_string())
         .expect("activate runtime");
-    runtime.set_exit_availability(ExitAvailability::Available, None);
+    runtime.set_exit_availability(ExitObservation::Available);
     let outcome = runtime
         .ingest_packet(
             client_packet(TcpControl::Syn, TcpSeqNumber(7), None),
@@ -452,6 +459,79 @@ fn stream_io_failure_is_flow_scoped_not_exit_scoped() {
     assert_eq!(status.exit_availability, ExitAvailability::Available);
     assert_eq!(status.reason, None);
     assert_eq!(status.active_flows, 0);
+    assert_eq!(
+        status.last_flow_reset,
+        Some(FlowResetReason::StreamFailed(
+            "read: test stream reset".to_string()
+        ))
+    );
+}
+
+/// An Onion EOF that arrives before any response half-closes the client direction; when the
+/// client then stays silent past the idle timeout, the stack's timeout reset is reported as an
+/// idle timeout, never mistaken for the client finishing (#950).
+#[tokio::test]
+async fn test_idle_timeout_after_onion_eof_is_a_named_reset() {
+    let (opened_tx, _opened_rx) = mpsc::channel(1);
+    let connector = Arc::new(RecordingConnector { opened: opened_tx });
+    let mut candidate = config();
+    candidate.flow_idle_timeout = Duration::from_secs(1);
+    let mut runtime = GatewayRuntime::new(candidate, connector, 47).expect("valid runtime");
+    runtime
+        .activate("memory-tun".to_string())
+        .expect("activate runtime");
+    let flow = match runtime
+        .ingest_packet(
+            client_packet(TcpControl::Syn, TcpSeqNumber(7), None),
+            Duration::ZERO,
+        )
+        .expect("capture flow")
+    {
+        PacketOutcome::Consumed(flow) => flow,
+        _ => panic!("SYN was not consumed"),
+    };
+    let syn_ack = runtime
+        .tcp
+        .take_egress()
+        .into_iter()
+        .next()
+        .expect("SYN-ACK");
+    runtime
+        .ingest_packet(handshake_ack(&syn_ack), Duration::from_millis(1))
+        .expect("complete handshake");
+    runtime
+        .reconcile_flow(flow, Duration::from_millis(1))
+        .expect("bridge starts on an established flow");
+    for event in [BridgeEvent::Opened(flow), BridgeEvent::PeerClosed(flow)] {
+        runtime
+            .handle_bridge_event(event, Duration::from_millis(2))
+            .expect("Onion stream opens and ends without a response");
+    }
+    runtime
+        .reconcile_flow(flow, Duration::from_millis(2))
+        .expect("Onion EOF half-closes the client direction");
+    assert!(runtime
+        .tcp
+        .take_egress()
+        .iter()
+        .any(|packet| TcpObservation::parse(packet).fin));
+
+    let scope = runtime
+        .process_input(LoopInput::Tick, &[], Duration::from_secs(2))
+        .expect("idle timeout is processed");
+    assert!(matches!(scope, ReconcileScope::All));
+    runtime
+        .reconcile_all(Duration::from_secs(2))
+        .expect("timed-out flow is released");
+
+    let status = runtime.status_handle().snapshot();
+    assert_eq!(status.active_flows, 0);
+    assert_eq!(status.last_flow_reset, Some(FlowResetReason::IdleTimeout));
+    assert!(runtime
+        .tcp
+        .take_egress()
+        .iter()
+        .any(|packet| TcpObservation::parse(packet).rst));
 }
 
 fn handshake_ack(syn_ack: &[u8]) -> Vec<u8> {
@@ -526,7 +606,7 @@ async fn runtime_opens_onion_only_after_tcp_handshake_and_stops_cleanly() {
     runtime
         .activate("memory-tun".to_string())
         .expect("activate runtime");
-    runtime.set_exit_availability(ExitAvailability::Available, None);
+    runtime.set_exit_availability(ExitObservation::Available);
     let stop = Arc::new(AtomicBool::new(false));
     let task_stop = Arc::clone(&stop);
     let task = tokio::spawn(async move {
@@ -622,7 +702,7 @@ async fn runtime_bridges_tcp_payload_and_both_half_closes() {
     runtime
         .activate("memory-tun".to_string())
         .expect("activate runtime");
-    runtime.set_exit_availability(ExitAvailability::Available, None);
+    runtime.set_exit_availability(ExitObservation::Available);
     let status = runtime.status_handle();
     let stop = Arc::new(AtomicBool::new(false));
     let task_stop = Arc::clone(&stop);
@@ -768,6 +848,10 @@ async fn onion_open_failure_resets_captured_flow_without_fallback() {
         .reason
         .as_deref()
         .is_some_and(|reason| reason.contains("test route unavailable")));
+    assert!(matches!(
+        failed.last_flow_reset,
+        Some(FlowResetReason::OnionOpenFailed(message)) if message.contains("test route unavailable")
+    ));
     stop.store(true, Ordering::Release);
     let (runtime, result) = tokio::time::timeout(Duration::from_secs(1), task)
         .await
@@ -818,14 +902,23 @@ fn exit_loss_and_recovery_preserve_active_lifecycle() {
     runtime
         .activate("test-ingress".to_string())
         .expect("activate");
-    for (availability, health) in [
-        (ExitAvailability::Available, GatewayHealth::Active),
-        (ExitAvailability::Unavailable, GatewayHealth::Degraded),
-        (ExitAvailability::Unknown, GatewayHealth::Degraded),
-        (ExitAvailability::Available, GatewayHealth::Active),
+    for (exit, health) in [
+        (ExitObservation::Available, GatewayHealth::Active),
+        (
+            ExitObservation::Unavailable("no exit".to_string()),
+            GatewayHealth::Degraded,
+        ),
+        (
+            ExitObservation::Unknown("discovery failed".to_string()),
+            GatewayHealth::Degraded,
+        ),
+        (ExitObservation::Available, GatewayHealth::Active),
     ] {
-        runtime.set_exit_availability(availability, None);
-        assert_eq!(runtime.status_handle().snapshot().health, health);
+        let reason = exit.reason().map(str::to_string);
+        runtime.set_exit_availability(exit);
+        let status = runtime.status_handle().snapshot();
+        assert_eq!(status.health, health);
+        assert_eq!(status.reason, reason);
         assert_eq!(runtime.server.state(), GatewayState::Active);
         assert!(runtime.server.state().admits_packets());
     }

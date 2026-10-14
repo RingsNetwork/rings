@@ -13,10 +13,11 @@ use crate::bridge::spawn_bridge;
 use crate::bridge::BridgeCommand;
 use crate::bridge::BridgeEvent;
 use crate::bridge::BridgeHandle;
-use crate::ExitAvailability;
+use crate::ExitObservation;
 use crate::FlowEvent;
 use crate::FlowId;
 use crate::FlowRejectReason;
+use crate::FlowResetReason;
 use crate::FlowState;
 use crate::FlowTableError;
 use crate::GatewayConfig;
@@ -41,10 +42,7 @@ const EVENTS_PER_FLOW: usize = 3;
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 
 enum RuntimeControl {
-    ExitAvailability {
-        availability: ExitAvailability,
-        reason: Option<String>,
-    },
+    ExitAvailability(ExitObservation),
 }
 
 /// Cloneable control capability for dependencies observed outside the packet loop.
@@ -55,16 +53,9 @@ pub struct GatewayControlHandle {
 
 impl GatewayControlHandle {
     /// Update compatible Onion-exit availability without sharing mutable runtime state.
-    pub async fn set_exit_availability(
-        &self,
-        availability: ExitAvailability,
-        reason: Option<String>,
-    ) -> Result<(), GatewayError> {
+    pub async fn set_exit_availability(&self, exit: ExitObservation) -> Result<(), GatewayError> {
         self.sender
-            .send(RuntimeControl::ExitAvailability {
-                availability,
-                reason,
-            })
+            .send(RuntimeControl::ExitAvailability(exit))
             .await
             .map_err(|error| GatewayError::Platform {
                 operation: "gateway-control",
@@ -214,12 +205,8 @@ impl GatewayRuntime {
     }
 
     /// Update compatible Onion exit availability independently from process health.
-    pub fn set_exit_availability(
-        &mut self,
-        availability: ExitAvailability,
-        reason: Option<String>,
-    ) {
-        self.server.set_exit_availability(availability, reason);
+    pub fn set_exit_availability(&mut self, exit: ExitObservation) {
+        self.server.set_exit_availability(exit);
         self.publish_status();
     }
 
@@ -362,11 +349,8 @@ impl GatewayRuntime {
                 operation: "bridge-events",
                 message: "gateway bridge event channel closed".to_string(),
             })),
-            LoopInput::Control(Some(RuntimeControl::ExitAvailability {
-                availability,
-                reason,
-            })) => {
-                self.server.set_exit_availability(availability, reason);
+            LoopInput::Control(Some(RuntimeControl::ExitAvailability(exit))) => {
+                self.server.set_exit_availability(exit);
                 self.publish_status();
                 Ok(ReconcileScope::None)
             }
@@ -378,7 +362,7 @@ impl GatewayRuntime {
                     .expired_pending_flows(elapsed)
                     .map_err(GatewayFatal::gateway)?;
                 for flow in expired {
-                    self.fail_flow(flow, elapsed)
+                    self.fail_flow(flow, FlowResetReason::HandshakeExpired, elapsed)
                         .map_err(GatewayFatal::gateway)?;
                 }
                 Ok(ReconcileScope::All)
@@ -496,10 +480,10 @@ impl GatewayRuntime {
                 if !self.flows.contains_key(&flow) {
                     return Ok(ReconcileScope::None);
                 }
-                self.fail_flow(flow, elapsed)?;
+                self.fail_flow(flow, FlowResetReason::from_bridge_failure(&error), elapsed)?;
                 if matches!(error, GatewayError::OnionUnavailable { .. }) {
                     self.server
-                        .set_exit_availability(ExitAvailability::Unknown, Some(error.to_string()));
+                        .set_exit_availability(ExitObservation::Unknown(error.to_string()));
                 }
                 self.publish_status();
                 Ok(ReconcileScope::None)
@@ -604,7 +588,7 @@ impl GatewayRuntime {
                     }
                 },
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    self.fail_flow(flow, elapsed)?;
+                    self.fail_flow(flow, FlowResetReason::BridgeClosed, elapsed)?;
                     return Ok(());
                 }
             }
@@ -612,7 +596,7 @@ impl GatewayRuntime {
             self.runtime_flow_mut(flow)?.client_to_onion_buffer = Some(buffer);
         }
 
-        if !self.tcp.client_read_open(flow)? {
+        if self.tcp.client_finished(flow)? {
             let should_close = self
                 .flows
                 .get(&flow)
@@ -632,7 +616,7 @@ impl GatewayRuntime {
                     }
                     Err(mpsc::error::TrySendError::Full(_)) => {}
                     Err(mpsc::error::TrySendError::Closed(_)) => {
-                        self.fail_flow(flow, elapsed)?;
+                        self.fail_flow(flow, FlowResetReason::BridgeClosed, elapsed)?;
                     }
                 }
             }
@@ -711,7 +695,8 @@ impl GatewayRuntime {
             .get(&flow)
             .is_some_and(|runtime| runtime.client_eof_sent && runtime.onion_eof_seen);
         if !graceful {
-            return self.fail_flow(flow, elapsed);
+            let reason = self.tcp.ungraceful_close_reason(flow, elapsed)?;
+            return self.fail_flow(flow, reason, elapsed);
         }
         if let Some(runtime) = self.flows.remove(&flow) {
             if let Some(bridge) = runtime.bridge {
@@ -724,15 +709,22 @@ impl GatewayRuntime {
         Ok(())
     }
 
-    fn fail_flow(&mut self, flow: FlowId, elapsed: Duration) -> Result<(), GatewayError> {
+    /// Reset one captured flow for `reason`: stop its bridge, fail its lifecycle, and abort its
+    /// TCP endpoint. Every reset path passes through here, so every reset is logged with a cause.
+    fn fail_flow(
+        &mut self,
+        flow: FlowId,
+        reason: FlowResetReason,
+        elapsed: Duration,
+    ) -> Result<(), GatewayError> {
+        // The reason carries no packet contents or flow addresses.
+        tracing::info!(?reason, "gateway reset captured flow");
         if let Some(runtime) = self.flows.remove(&flow) {
             if let Some(bridge) = runtime.bridge {
                 bridge.abort();
             }
         }
-        if self.server.flow_state(flow).is_some() {
-            self.server.transition_flow(flow, FlowEvent::Fail)?;
-        }
+        self.server.reset_flow(flow, reason)?;
         match self.tcp.endpoint_state(flow) {
             Ok(_) => self.tcp.abort_flow(flow, elapsed)?,
             Err(TcpStackError::UnknownFlow(_)) => {}
@@ -766,7 +758,10 @@ impl GatewayRuntime {
         }
         let flows = self.flows.keys().copied().collect::<Vec<_>>();
         for flow in flows {
-            record_first_error(&mut first_error, self.fail_flow(flow, elapsed));
+            record_first_error(
+                &mut first_error,
+                self.fail_flow(flow, FlowResetReason::GatewayStopped, elapsed),
+            );
         }
         record_first_error(&mut first_error, self.flush_egress(device).await);
         if self.server.state() == GatewayState::Stopping {

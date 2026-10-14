@@ -33,10 +33,12 @@ The rest of this page is the operator guide from the `rings-gateway` crate.
 ### Health and rejection diagnostics
 
 Packet admission lifecycle and exit availability are independent. An active gateway with no
-usable exit reports degraded health; discovery recovery changes the health projection without
-restarting the packet interface. Inspect the shared status handle for current health.
+usable exit reports degraded health together with its reason; discovery recovery changes the
+health projection without restarting the packet interface. Inspect the shared status handle for
+current health.
 
-Enable debug tracing for `rings_gateway::runtime` to see typed packet-drop and flow-rejection
-reasons. These events contain neither packet bodies nor destination addresses. Configuration
+Every captured-flow reset names its cause in `last_flow_reset` and in an info-level
+`rings_gateway::runtime` event. Enable debug tracing for `rings_gateway::runtime` to also see typed
+packet-drop and flow-rejection reasons. These events contain neither packet bodies nor destination addresses. Configuration
 is checked at runtime construction before resource allocation; standalone server and TCP stack
 construction also reject invalid configuration.

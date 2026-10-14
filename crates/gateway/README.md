@@ -199,8 +199,9 @@ The loopback-only internal API exposes gateway status when configured:
 GET /gateway/status
 ```
 
-It reports interface, lifecycle, normalized capture routes, active-flow count, last error, and
-Onion-exit availability without granting route mutation authority.
+It reports interface, lifecycle, normalized capture routes, active-flow count, Onion-exit
+availability with the reason it is not available, and the cause of the most recent flow reset,
+without granting route mutation authority.
 
 <!-- ANCHOR_END: operator-guide -->
 ## Library model API
@@ -242,9 +243,16 @@ These evidence classes are reported separately; none is described as a complete 
 ### Lifecycle and ownership boundaries
 
 `GatewayState::Active` means packet admission is enabled. Exit availability is a separate
-input to `GatewayStatus`: unknown or unavailable exits project to `GatewayHealth::Degraded`,
-and recovery projects back to active without a second lifecycle transition. Status readers
-use `GatewayStatusHandle::snapshot()`.
+input to `GatewayStatus`, an `ExitObservation` in which every unknown or unavailable exit owns its
+reason: such exits project to `GatewayHealth::Degraded` with that reason, so a degraded status
+always names its cause, and recovery projects back to active without a second lifecycle
+transition. Status readers use `GatewayStatusHandle::snapshot()`.
+
+Every flow reset carries a typed `FlowResetReason` (handshake expiry, idle timeout, client reset,
+ungraceful close, Onion open or stream failure, closed bridge, or gateway stop). The runtime logs
+it at info level and records it as `GatewayStatus::last_flow_reset`. A half-close is forwarded only
+after the client's FIN, so an endpoint closed by reset or idle timeout is reported as a reset, never
+as a graceful close.
 
 Flow capture binds the immutable `FlowId::target` and creates `TargetBound` directly. TCP
 endpoints are the sole ownership index for smoltcp handles; insertion and removal update
