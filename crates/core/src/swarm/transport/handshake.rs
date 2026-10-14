@@ -202,8 +202,12 @@ impl SwarmTransport {
 
     /// Reserve an overlay connection generation for `peer` and produce its offer without
     /// sending it, so a test can deliver it by hand; see
-    /// [`Self::prepare_connection_offer_owned_by`].
-    #[cfg(test)]
+    /// [`Self::prepare_connection_offer_owned_by`]. Compiled for the tests that call it: the
+    /// transport tests (outside the browser build) and the dummy-transport conformance model.
+    #[cfg(all(
+        test,
+        any(feature = "dummy", not(all(feature = "wasm", target_family = "wasm")))
+    ))]
     pub(in crate::swarm) async fn prepare_connection_offer_with_attempt(
         &self,
         peer: Did,
