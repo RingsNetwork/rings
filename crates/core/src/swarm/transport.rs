@@ -96,7 +96,6 @@ pub(crate) use self::frame_ledger::FrameSample;
 pub(crate) use self::handshake::CounterOffer;
 pub(crate) use self::handshake::CreatedAnswer;
 pub use self::handshake::OfferReply;
-pub(crate) use self::handshake::SignalingReply;
 use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

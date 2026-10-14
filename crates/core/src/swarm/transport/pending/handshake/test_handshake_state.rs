@@ -1,4 +1,5 @@
-//! The crossing-offer decision table (`Law (Crossing offer)`, `Law (Tie-break)`).
+//! The crossing-offer decision table (`Law (Crossing offer)`, `Law (Tie-break)`), and the
+//! release a yield applies only in the state it was decided on (`Law (Decided state)`).
 
 use super::crossing_offer_verdict;
 use super::CrossingOfferVerdict;
@@ -6,6 +7,9 @@ use super::Handshake;
 use super::OfferOwner;
 use super::OfferPhase;
 use crate::dht::Did;
+use crate::error::Result;
+use crate::swarm::transport::pending::ConnectionLifecycleRegistry;
+use crate::swarm::transport::pending::LifecycleBounds;
 
 /// The two DIDs in ascending order.
 fn ordered() -> (Did, Did) {
@@ -94,4 +98,26 @@ fn test_answered_and_answering_attempts_refuse() {
             );
         }
     }
+}
+
+/// A yield decided while the offer was `Creating` does not release it once it left as `Sent`:
+/// the release is refused, the attempt keeps its slot, and a release decided on the current
+/// state still applies.
+#[test]
+fn test_a_yield_releases_only_the_state_it_was_decided_on() -> Result<()> {
+    let (_, peer) = ordered();
+    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 1));
+    let attempt = registry.reserve_for(peer, 0, Handshake::offering(OfferOwner::Overlay))?;
+    let decided = Handshake::offering(OfferOwner::Overlay);
+
+    let tx_id = uuid::Uuid::new_v4();
+    assert!(registry.mark_offer_sent(attempt, "offer".to_string(), tx_id));
+    assert!(!registry.remove_pending_in(attempt, &decided));
+    assert_eq!(registry.pending_attempt(peer), Some(attempt));
+
+    let current = sent(OfferOwner::Overlay, tx_id);
+    assert!(registry.remove_pending_in(attempt, &current));
+    assert_eq!(registry.pending_attempt(peer), None);
+    assert_eq!(registry.handshake(attempt), None);
+    Ok(())
 }

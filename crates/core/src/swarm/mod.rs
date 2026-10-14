@@ -53,7 +53,6 @@ use crate::swarm::transport::CreatedAnswer;
 use crate::swarm::transport::OfferOwner;
 pub use crate::swarm::transport::OfferReply;
 use crate::swarm::transport::PendingConnectionAttempt;
-use crate::swarm::transport::SignalingReply;
 use crate::swarm::transport::SwarmTransport;
 
 /// How a successor lookup was decided: from the local topology, or routed under a
@@ -394,39 +393,35 @@ impl Swarm {
             .await?;
 
         let peer = offer_payload.transaction.origin();
-        // `shape` keeps the answering generation, if any; `reply` is the message to wrap.
-        let (shape, reply) = match self
+        // The reply payload has a fake next_hop; the invoker fixes it before sending.
+        match self
             .transport
             .answer_remote_connection(peer, self.inner_callback()?, &msg)
             .await?
         {
             OfferReply::Answer(CreatedAnswer { attempt, report }) => {
-                (OfferReply::Answer(attempt), SignalingReply::Answer(report))
-            }
-            OfferReply::CounterOffer(CounterOffer { offer, .. }) => (
-                OfferReply::CounterOffer(()),
-                SignalingReply::CounterOffer(offer),
-            ),
-        };
-
-        // This payload has fake next_hop.
-        // The invoker should fix it before sending.
-        let wrapped = self
-            .transport
-            .originate(Message::from(reply), peer, Some(self.did()))
-            .await;
-        match (shape, wrapped) {
-            (OfferReply::Answer(attempt), Ok(payload)) => {
-                self.transport.mark_reply_sent(attempt)?;
-                Ok(OfferReply::Answer(payload))
-            }
-            (OfferReply::Answer(attempt), Err(error)) => {
-                self.transport
-                    .abandon_pending_connection(attempt, "wrapping connection answer")
+                let wrapped = self
+                    .transport
+                    .originate(Message::ConnectNodeReport(report), peer, Some(self.did()))
                     .await;
-                Err(error)
+                match wrapped {
+                    Ok(payload) => {
+                        self.transport.mark_reply_sent(attempt)?;
+                        Ok(OfferReply::Answer(payload))
+                    }
+                    Err(error) => {
+                        self.transport
+                            .abandon_pending_connection(attempt, "wrapping connection answer")
+                            .await;
+                        Err(error)
+                    }
+                }
             }
-            (OfferReply::CounterOffer(()), wrapped) => wrapped.map(OfferReply::CounterOffer),
+            OfferReply::CounterOffer(CounterOffer { offer, .. }) => self
+                .transport
+                .originate(Message::ConnectNodeSend(offer), peer, Some(self.did()))
+                .await
+                .map(OfferReply::CounterOffer),
         }
     }
 

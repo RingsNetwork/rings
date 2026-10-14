@@ -510,6 +510,21 @@ impl ConnectionLifecycleRegistry {
         true
     }
 
+    /// Apply `Pending(attempt) -> Absent` iff `attempt`'s signaling state is still `observed`:
+    /// a release decided on one state never applies to a later one (`Law (Decided state)` of
+    /// the handshake).
+    pub(in crate::swarm::transport) fn remove_pending_in(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        observed: &Handshake,
+    ) -> bool {
+        if self.handshake(attempt) != Some(observed) {
+            return false;
+        }
+        self.remove_record(attempt.peer);
+        true
+    }
+
     /// Apply `Pending(attempt) -> Absent`.
     pub(in crate::swarm::transport) fn remove_pending(
         &mut self,
@@ -771,9 +786,11 @@ impl ConnectionLifecycleRegistry {
         .then_some(attempt)
     }
 
-    /// Whether the peer's own handshake took `attempt`'s slot: the slot holds another
-    /// generation that answers the peer's offer, or one already past the handshake, which
-    /// only such an answer can have produced while `attempt` held the slot.
+    /// Whether another handshake took `attempt`'s slot: the slot holds another generation
+    /// that answers the peer's offer, or one already past the handshake. The latter is most
+    /// often the peer's handshake, and may be a later one of this node's own after `attempt`
+    /// was released; either way an edge is being established, which is what a caller treating
+    /// supersession as satisfied relies on.
     pub(in crate::swarm::transport) fn superseded_by_peer(
         &self,
         attempt: PendingConnectionAttempt,

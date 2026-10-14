@@ -3,6 +3,7 @@
 
 use rings_transport::core::transport::TransportInterface;
 
+use super::Handshake;
 use super::PendingConnectionAttempt;
 use super::SwarmConnection;
 use super::SwarmTransport;
@@ -18,6 +19,8 @@ enum CancellationScope {
     Pending,
     /// `Pending` or `Admitting`.
     Unadmitted,
+    /// `Pending` while its signaling state is still the one observed.
+    PendingIn(Handshake),
 }
 
 struct RetiredPendingConnection {
@@ -42,6 +45,18 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
         self.cancel_connection(attempt, CancellationScope::Unadmitted)
+            .await
+    }
+
+    /// Withdraw `attempt` in favour of a crossing offer iff its signaling state is still
+    /// `observed`, the state the verdict was decided on, and release its transport object;
+    /// `false` when the attempt moved on (or was released) meanwhile.
+    pub(in crate::swarm::transport) async fn withdraw_pending_in(
+        &self,
+        attempt: PendingConnectionAttempt,
+        observed: Handshake,
+    ) -> Result<bool> {
+        self.cancel_connection(attempt, CancellationScope::PendingIn(observed))
             .await
     }
 
@@ -93,6 +108,9 @@ impl SwarmTransport {
             match scope {
                 CancellationScope::Pending => lifecycles.remove_pending(attempt),
                 CancellationScope::Unadmitted => lifecycles.remove_unadmitted(attempt),
+                CancellationScope::PendingIn(observed) => {
+                    lifecycles.remove_pending_in(attempt, &observed)
+                }
             }
         };
         if !removed {

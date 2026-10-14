@@ -55,7 +55,9 @@ pub(crate) enum Handshake {
         /// How far the offer has got.
         phase: OfferPhase,
     },
-    /// This node answers the peer's offer.
+    /// This node answers the peer's offer. Any further offer from the peer is refused while
+    /// the answer is in flight (a copy of the answered offer included): the slot is that
+    /// handshake's until it is admitted, released, or expires.
     Answering {
         /// Whether the answer was handed to its carrier.
         reply_sent: bool,
@@ -101,7 +103,7 @@ pub(crate) enum CrossingOfferVerdict {
 ///                                ──▶ Refuse               if o = External
 /// Offering(_, Sent(_)),    l > p ──▶ Yield            the smaller DID's offer prevails
 /// Offering(_, Answered)          ──▶ Refuse           an answer is being applied
-/// Answering(_)                   ──▶ Refuse           a copy of an offer already answered
+/// Answering(_)                   ──▶ Refuse           the slot answers the peer's own offer
 /// ```
 ///
 /// Law (Tie-break): of two crossing unanswered offers exactly one side yields, the larger DID,

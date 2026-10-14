@@ -32,7 +32,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
-use crate::message::Message;
 use crate::swarm::callback::InnerSwarmCallback;
 
 /// The DHT signaling of the handshake: offers and replies over recorded paths (#947).
@@ -78,18 +77,6 @@ impl<T> OfferReply<T, T> {
     pub fn into_inner(self) -> T {
         match self {
             Self::Answer(reply) | Self::CounterOffer(reply) => reply,
-        }
-    }
-}
-
-/// An offer reply as the two signaling messages.
-pub(crate) type SignalingReply = OfferReply<ConnectNodeReport, ConnectNodeSend>;
-
-impl From<SignalingReply> for Message {
-    fn from(reply: SignalingReply) -> Self {
-        match reply {
-            OfferReply::Answer(answer) => Message::ConnectNodeReport(answer),
-            OfferReply::CounterOffer(offer) => Message::ConnectNodeSend(offer),
         }
     }
 }
@@ -315,25 +302,34 @@ impl SwarmTransport {
             }
         }
 
-        match self.unadmitted_record(peer)? {
-            None => {}
-            Some((_, None)) => return Err(Error::AlreadyConnected),
-            Some((attempt, Some(handshake))) => {
-                match crossing_offer_verdict(&handshake, self.dht.did, peer) {
-                    CrossingOfferVerdict::Refuse => return Err(Error::AlreadyConnected),
-                    CrossingOfferVerdict::CounterOffer { sdp, tx_id } => {
-                        return Ok(Some(CounterOffer {
-                            offer: ConnectNodeSend {
-                                sdp,
-                                dht_protocol_mode: self.dht_protocol_mode(),
-                            },
-                            tx_id,
-                        }));
-                    }
-                    CrossingOfferVerdict::Yield => {
-                        if !self.cancel_unadmitted_connection(attempt).await? {
-                            return Err(Error::AlreadyConnected);
-                        }
+        // Law (Decided state): a yield releases the attempt only in the signaling state its
+        // verdict read. Between the read and the release the attempt may move on (an offer still
+        // `Creating` may leave as `Sent`), and a yield decided on the earlier state would then
+        // cancel an offer already on its way, while the peer, meeting that offer, yields too:
+        // both ends would release the edge. A release that finds the state moved on decides
+        // again on the new state. Each retry follows a transition of the attempt, whose phases
+        // only advance (`Creating ≺ Sent ≺ Answered`) until it is released, so the loop ends.
+        loop {
+            let Some((attempt, handshake)) = self.unadmitted_record(peer)? else {
+                break;
+            };
+            let Some(handshake) = handshake else {
+                return Err(Error::AlreadyConnected);
+            };
+            match crossing_offer_verdict(&handshake, self.dht.did, peer) {
+                CrossingOfferVerdict::Refuse => return Err(Error::AlreadyConnected),
+                CrossingOfferVerdict::CounterOffer { sdp, tx_id } => {
+                    return Ok(Some(CounterOffer {
+                        offer: ConnectNodeSend {
+                            sdp,
+                            dht_protocol_mode: self.dht_protocol_mode(),
+                        },
+                        tx_id,
+                    }));
+                }
+                CrossingOfferVerdict::Yield => {
+                    if self.withdraw_pending_in(attempt, handshake).await? {
+                        break;
                     }
                 }
             }
