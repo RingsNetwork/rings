@@ -111,48 +111,68 @@ fn test_origin_is_the_account_behind_the_signing_session() -> Result<()> {
     Ok(())
 }
 
-/// The sender cuts chunk data at `max_message_size - (MAX_CHUNK_ENVELOPE_OVERHEAD +
-/// TRANSPORT_CUSTOM_OVERHEAD)`. This pins that those reserves are large enough by measuring the
-/// *exact* bytes the data channel carries: a full-size chunk, re-wrapped in its `MessagePayload`
-/// **and** the outer `TransportMessage::Custom` frame (what `send_data` actually serializes),
-/// stays at or below `MAX_DATA_CHANNEL_MESSAGE_SIZE`. If either envelope grows past its reserve,
-/// this fails instead of silently producing oversized frames the channel would reject.
+/// Witness of [`MAX_PAYLOAD_ENVELOPE_OVERHEAD`], with equality: a whole payload with every
+/// envelope field at its widest (both delegation slots with [`Delegation::widest_for_test`],
+/// `reply_via` and the relay aim present and handed off, the hop budget full, the widest
+/// recorded signaling path, every sequence,
+/// timestamp and lifetime at its type's maximum) encodes to exactly its message's own encoding
+/// plus the reserve, for a message whose length prefix is the widest a data-channel frame has.
+///
+/// [`MAX_PAYLOAD_ENVELOPE_OVERHEAD`]: crate::consts::MAX_PAYLOAD_ENVELOPE_OVERHEAD
+/// [`Delegation::widest_for_test`]: crate::delegation::Delegation::widest_for_test
 #[test]
-fn test_chunk_envelope_fits_reserve() {
-    use rings_transport::core::transport::TransportMessage;
+fn test_payload_envelope_reserve_is_the_widest_envelope() -> Result<()> {
     use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
-    use crate::chunk::Chunk;
-    use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
-    use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
+    use crate::consts::MAX_PAYLOAD_ENVELOPE_OVERHEAD;
+    use crate::consts::MAX_RELAY_HOPS;
+    use crate::delegation::Delegation;
+    use crate::dht::delivery::RouteStage;
+    use crate::message::protocols::HopBudget;
+    use crate::message::SignalingPath;
 
-    let next_hop = SecretKey::random().address().into();
-    let chunk_size =
-        MAX_DATA_CHANNEL_MESSAGE_SIZE - (MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD);
-    let data: Bytes = vec![0xab; chunk_size].into();
-    let chunk = Chunk::stream(data, chunk_size).next().expect("one chunk");
+    let peer: Did = SecretKey::random().address().into();
+    let message = Message::custom(&vec![u8::MAX; MAX_DATA_CHANNEL_MESSAGE_SIZE / 2])?;
+    let message_bytes =
+        usize::try_from(rings_codec::serialized_size(&message).map_err(Error::CodecSerialize)?)
+            .map_err(|_| Error::MessageSizeOverflow)?;
+    let mut payload = new_payload(message, peer);
+    payload.transaction.sequence = u64::MAX;
+    payload.transaction.reply_via = Some(peer);
+    payload.relay.hop_budget = HopBudget::MAX;
+    payload.relay.stage = RouteStage::replying_via(Some(peer)).handed_off();
+    // The widest recorded path an honest carrier holds (`Law (Bound)` of the signaling path):
+    // a return retracing a full hop budget of distinct relays, none of them crossed yet.
+    let mut recorded = SignalingPath::outbound();
+    for hop in 0..u32::from(MAX_RELAY_HOPS) {
+        recorded = recorded.forwarded(Did::from(hop))?;
+    }
+    payload.relay = payload
+        .relay
+        .with_signaling_path(SignalingPath::Return(recorded.reply()));
+    for verification in [
+        &mut payload.transaction.verification,
+        &mut payload.verification,
+    ] {
+        verification.delegation = Delegation::widest_for_test();
+        verification.ttl_ms = u64::MAX;
+        verification.ts_ms = u128::MAX;
+    }
 
-    // The bytes actually handed to SCTP: rings codec(Custom(rings codec(MessagePayload))).
-    let payload_bytes = new_payload(Message::Chunk(chunk), next_hop)
-        .to_wire()
-        .unwrap();
-    let wire = rings_codec::serialize(&TransportMessage::Custom(payload_bytes)).unwrap();
-
-    assert!(
-        wire.len() <= MAX_DATA_CHANNEL_MESSAGE_SIZE,
-        "wrapped chunk frame is {} bytes, exceeds limit {}; raise the reserves",
-        wire.len(),
-        MAX_DATA_CHANNEL_MESSAGE_SIZE,
+    assert_eq!(
+        payload.to_wire()?.len(),
+        message_bytes + MAX_PAYLOAD_ENVELOPE_OVERHEAD
     );
+    Ok(())
 }
 
 /// The other framing boundary: a payload [`WireReserves::plan`] keeps `Whole`, once wrapped in
-/// the outer `TransportMessage::Custom` frame, stays within the limit — pinning that
+/// the outer custom frame (`custom_frame_wire`), stays within the limit — pinning that
 /// `WireReserves::PRODUCTION.whole` is enough for the whole-message path (not just the chunk
 /// path), and that one byte past the boundary switches to chunked.
 #[test]
 fn test_whole_message_boundary_fits_custom_wrapper() {
-    use rings_transport::core::transport::TransportMessage;
+    use rings_transport::core::transport::custom_frame_wire;
     use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
     use crate::chunk::Framing;
@@ -164,11 +184,7 @@ fn test_whole_message_boundary_fits_custom_wrapper() {
     let payload_len = limit - reserves.whole;
     assert_eq!(reserves.plan(payload_len, limit), Some(Framing::Whole));
 
-    let wire = rings_codec::serialize(&TransportMessage::Custom(Bytes::from(vec![
-        0u8;
-        payload_len
-    ])))
-    .unwrap();
+    let wire = custom_frame_wire(Bytes::from(vec![0u8; payload_len])).unwrap();
     assert!(
         wire.len() <= limit,
         "whole wire {} exceeds limit {}",
@@ -348,17 +364,21 @@ fn test_self_contained_decoding_refuses_link_only_frames() -> Result<()> {
     let next_hop = SecretKey::random().address().into();
     let payload = new_test_payload(next_hop);
     let sessions = payload.delegations();
-    let referenced = super::WirePayload::view(&payload, super::PerSlot {
-        origin: super::DelegationRef::Digest(sessions.origin.digest()?),
-        hop: super::DelegationRef::Inline(std::borrow::Cow::Borrowed(sessions.hop)),
-    })
+    let referenced = super::WirePayload::encoded(&payload, super::PerSlot {
+        origin: super::SlotEncoding::Referenced,
+        hop: super::SlotEncoding::Inline,
+    })?
     .to_wire()?;
     assert!(matches!(
         MessagePayload::from_wire(&referenced),
         Err(Error::DelegationReferenceUnresolved(digest)) if digest == sessions.origin.digest()?
     ));
 
-    let control = super::LinkControl::Known(sessions.hop.digest()?).to_wire()?;
+    let control = super::LinkControl::Known {
+        digest: sessions.hop.digest()?,
+        remaining_ms: 0,
+    }
+    .to_wire()?;
     assert!(matches!(
         MessagePayload::from_wire(&control),
         Err(Error::LinkControlOutsideLink)

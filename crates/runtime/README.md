@@ -8,6 +8,7 @@ browser's JavaScript event loop.
 | [`sleep`] | `futures-timer`; never fails | chained `setTimeout` on the window, worker or service-worker scope; fails with [`TimerError`] |
 | [`Spawner`] / [`spawn_detached`] | current Tokio runtime (`tokio` feature); [`RuntimeUnavailable`] outside one | `spawn_local`; always available |
 | [`run_detached`] | awaited work owned by the runtime | same |
+| `run_blocking` | blocking work on Tokio's blocking pool, owned by the runtime; [`RuntimeUnavailable`] outside one | absent (no blocking pool) |
 | [`MaybeSend`] / [`MaybeSendSync`] | `Send` / `Send + Sync` | no bound |
 
 The crate carries no Rings protocol vocabulary; it sits below `rings-transport`, so every

@@ -46,7 +46,8 @@ impl Error {
             | Self::DetachedPayloadCleanupTimeout { .. }
             | Self::DataChannelSendCompletionTimeout { .. }
             | Self::DataChannelDeliveryTimeout { .. }
-            | Self::TrackedPayloadCleanupTimeout { .. } => false,
+            | Self::TrackedPayloadCleanupTimeout { .. }
+            | Self::DelegationExpiresWithinMargin => false,
             Self::Transport(rings_transport::error::Error::SendPermitRevoked) => false,
             Self::TransportNotReady { state, .. } => matches!(
                 state,

@@ -56,4 +56,4 @@ wasm-pack build --scope ringsnetwork -t web --no-default-features --features bro
 For core-only development, `cargo wasm` and `cargo test-wasm` select `rings-core`
 with its `wasm` feature and no default features. Both aliases work from the
 repository root or `crates/core`. The root `.cargo/config.toml` also supplies the
-WASM test runner, timeout, and WebTransport configuration to both locations.
+WASM test runner and timeout to both locations.

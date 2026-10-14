@@ -2,11 +2,15 @@
 //!
 //! # Why these are *not* three protocols
 //!
-//! The rings overlay (DHT + swarm + backend envelopes) already provides a **reliable,
-//! ordered, bidirectional message channel between two DIDs** — call it the *virtual
-//! circuit*. TCP / HTTP / UDP "services" are all the **same thing**: a *relay* that
-//! maps a local I/O resource (a socket) onto that virtual circuit. They differ only in
-//! the shape of the local resource, along three axes:
+//! The rings overlay (DHT + swarm + backend envelopes) provides an **authenticated,
+//! bidirectional message channel between two DIDs** — call it the *virtual circuit*. It is
+//! best effort: a full application inbox or namespace queue drops a message, counted, and a
+//! frame held on an unresolved delegation reference may be overtaken by later frames of its
+//! stream. A relay that promises a reliable byte stream therefore sequences its frames and
+//! resets the stream on a loss it cannot repair (see [`Frame::Data`]). TCP / HTTP / UDP
+//! "services" are all the **same thing**: a *relay* that maps a local I/O resource (a
+//! socket) onto that virtual circuit. They differ only in the shape of the local resource,
+//! along three axes:
 //!
 //! ```text
 //!   axis                     TCP                 HTTP                    UDP
@@ -54,14 +58,10 @@
 
 // The relay's imperative resource tables are private to the relay interpreter — not a public
 // API. Reachable in-crate by the relay extension only.
-#[cfg(rings_native)]
 pub(crate) mod engine;
-#[cfg(rings_browser)]
-pub(crate) mod wt;
 
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-#[cfg(rings_native)]
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -70,7 +70,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Maximum silence before an abandoned local socket/flow is reclaimed.
-#[cfg(rings_native)]
 pub(crate) const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Allocate one counter value without ever wrapping back to a live ABA-equivalent value.
@@ -131,88 +130,6 @@ pub(crate) enum SlotRegistration<T> {
     Failed,
 }
 
-/// Maximum number of ordered peer-to-local operations retained by a browser transport session.
-#[cfg(any(test, rings_browser))]
-pub(crate) const MAX_OUTBOUND_QUEUE_OPS: usize = 1024;
-
-/// Maximum aggregate payload retained by a browser transport session.
-#[cfg(any(test, rings_browser))]
-pub(crate) const MAX_OUTBOUND_QUEUE_BYTES: usize = 8 * 1024 * 1024;
-
-/// Pure resource account for a browser transport's deferred operation trace.
-///
-/// Invariant: `operations <= MAX_OUTBOUND_QUEUE_OPS` and
-/// `data_bytes <= MAX_OUTBOUND_QUEUE_BYTES` after every successful reservation.
-#[derive(Default)]
-#[cfg(any(test, rings_browser))]
-pub(crate) struct OutboundQueueBudget {
-    operations: usize,
-    data_bytes: usize,
-}
-
-/// Pure ownership state for the single browser writer-drain task.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg(any(test, rings_browser))]
-pub(crate) enum OutboundDrainState {
-    /// No task owns the queue; the next successful enqueue must start one.
-    #[default]
-    Idle,
-    /// Exactly one task owns the queue and will observe later enqueues.
-    Active,
-}
-
-#[cfg(any(test, rings_browser))]
-impl OutboundDrainState {
-    /// Claim an idle queue. Returns whether the caller acquired drain ownership.
-    pub(crate) fn claim(&mut self) -> bool {
-        match self {
-            Self::Idle => {
-                *self = Self::Active;
-                true
-            }
-            Self::Active => false,
-        }
-    }
-
-    /// Release drain ownership after observing an empty queue.
-    pub(crate) fn release(&mut self) {
-        *self = Self::Idle;
-    }
-}
-
-#[cfg(any(test, rings_browser))]
-impl OutboundQueueBudget {
-    /// Reserve one operation carrying `data_bytes`, or leave the budget unchanged.
-    pub(crate) fn try_reserve(&mut self, data_bytes: usize) -> bool {
-        let Some(operations) = self.operations.checked_add(1) else {
-            return false;
-        };
-        let Some(total_bytes) = self.data_bytes.checked_add(data_bytes) else {
-            return false;
-        };
-        if operations > MAX_OUTBOUND_QUEUE_OPS || total_bytes > MAX_OUTBOUND_QUEUE_BYTES {
-            return false;
-        }
-        self.operations = operations;
-        self.data_bytes = total_bytes;
-        true
-    }
-
-    /// Release one previously reserved operation, or leave the budget unchanged when the
-    /// supplied values do not refine the current state.
-    pub(crate) fn release(&mut self, data_bytes: usize) -> bool {
-        let Some(operations) = self.operations.checked_sub(1) else {
-            return false;
-        };
-        let Some(total_bytes) = self.data_bytes.checked_sub(data_bytes) else {
-            return false;
-        };
-        self.operations = operations;
-        self.data_bytes = total_bytes;
-        true
-    }
-}
-
 /// A relay session's full identity — the unit used to key live sessions and to address
 /// transport effects.
 ///
@@ -269,11 +186,27 @@ pub enum TransportKind {
 
 /// The relay's overlay wire message — the payload carried under a transport namespace.
 ///
-/// One vocabulary for both kinds (TCP connections and UDP flows):
+/// One vocabulary for both kinds (TCP connections and UDP flows), differing only in how the
+/// bytes travel:
 ///
 /// ```text
-///   Open(session, service) → Data(session, bytes)* → Close(session)
+///   TCP   Open(session, service) → Data(session, seq, bytes)* → Shutdown(session, sent)
+///                                                                     → Close(session)
+///   UDP   Open(session, service) → Datagram(session, bytes)*        → Close(session)
 /// ```
+///
+/// Law (no silent gap). A TCP direction's `Data` frames carry `seq = 0, 1, 2, …` and its
+/// `Shutdown` carries the number `sent` of them. The receiver writes bytes to its local socket
+/// in `seq` order only, reordering at most [`REORDER_WINDOW`] frames ahead, so the local
+/// stream is always a prefix of what the peer sent. A frame missing for [`REORDER_DEADLINE`] is
+/// past the delivery bounds of its path, and one more than the window behind can never arrive
+/// (the replay window refuses it), so either way the receiver resets the session: the peer gets
+/// `Close`, and the local socket an abortive close. A `Shutdown` is applied only once every one
+/// of its `sent` frames was written, so a lost last frame is a reset, never a clean end of
+/// stream.
+///
+/// [`REORDER_WINDOW`]: rings_core::message::REORDER_WINDOW
+/// [`REORDER_DEADLINE`]: rings_core::message::REORDER_DEADLINE
 ///
 /// `Open` is always sent by the session's opener. `Data`/`Shutdown`/`Close` flow in both
 /// directions over the *same* opener-assigned id, so they carry `from_opener` — whether the
@@ -288,23 +221,36 @@ pub enum Frame {
         /// Local service name to connect to.
         service: String,
     },
-    /// Bytes on an open session (one datagram per frame for UDP).
+    /// A segment of a TCP session's byte stream, in its direction's `seq` order.
     Data {
         /// Relay session the bytes belong to.
         session: RelaySessionId,
         /// Whether the sender of this frame opened the session.
         from_opener: bool,
+        /// The segment's position in its direction: the sender's count of earlier `Data`.
+        seq: u64,
         /// Payload bytes.
         bytes: Bytes,
     },
-    /// Half-close: the sender has no more `Data` this direction (a TCP FIN). The
-    /// receiver shuts down its local write side but keeps the reverse direction open.
-    /// Ignored by UDP (datagram flows have no half-close).
+    /// One datagram of a UDP flow; datagrams carry no order and may be lost.
+    Datagram {
+        /// Relay flow the datagram belongs to.
+        session: RelaySessionId,
+        /// Whether the sender of this frame opened the flow.
+        from_opener: bool,
+        /// The datagram.
+        bytes: Bytes,
+    },
+    /// Half-close: the sender has no more `Data` this direction (a TCP FIN). The receiver shuts
+    /// down its local write side once all `sent` segments are written, and keeps the reverse
+    /// direction open. Ignored by UDP (datagram flows have no half-close).
     Shutdown {
         /// Relay session being half-closed.
         session: RelaySessionId,
         /// Whether the sender of this frame opened the session.
         from_opener: bool,
+        /// How many `Data` frames the sender sent this direction.
+        sent: u64,
     },
     /// Close a session/flow (full teardown, both directions).
     Close {
@@ -318,52 +264,6 @@ pub enum Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_outbound_budget_preserves_both_operation_and_byte_bounds() {
-        let mut operation_bound = OutboundQueueBudget::default();
-        for _ in 0..MAX_OUTBOUND_QUEUE_OPS {
-            assert!(operation_bound.try_reserve(0));
-        }
-        assert!(!operation_bound.try_reserve(0));
-
-        let mut byte_bound = OutboundQueueBudget::default();
-        assert!(byte_bound.try_reserve(MAX_OUTBOUND_QUEUE_BYTES));
-        assert!(!byte_bound.try_reserve(1));
-    }
-
-    #[test]
-    fn test_rejected_outbound_budget_reservation_does_not_consume_capacity() {
-        let mut budget = OutboundQueueBudget::default();
-        assert!(!budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES + 1));
-        assert!(budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES));
-    }
-
-    #[test]
-    fn test_released_outbound_budget_can_be_reserved_again() {
-        let mut budget = OutboundQueueBudget::default();
-        assert!(budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES));
-        assert!(budget.release(MAX_OUTBOUND_QUEUE_BYTES));
-        assert!(budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES));
-    }
-
-    #[test]
-    fn test_invalid_outbound_budget_release_is_total_and_does_not_mutate() {
-        let mut budget = OutboundQueueBudget::default();
-        assert!(budget.try_reserve(4));
-        assert!(!budget.release(5));
-        assert!(budget.release(4));
-        assert!(!budget.release(0));
-    }
-
-    #[test]
-    fn test_outbound_drain_has_exactly_one_owner_until_empty() {
-        let mut drain = OutboundDrainState::Idle;
-        assert!(drain.claim());
-        assert!(!drain.claim());
-        drain.release();
-        assert!(drain.claim());
-    }
 
     #[test]
     fn test_non_reusing_allocator_is_total_at_exhaustion() {

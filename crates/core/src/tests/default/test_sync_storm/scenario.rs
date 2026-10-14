@@ -42,7 +42,7 @@ async fn run_storm_and_recovery(
     expected_endpoints: &BTreeMap<String, (String, String)>,
     driver: &mut TraceDriver,
 ) -> u128 {
-    let idle_ms = u64::try_from(PEER_LIVENESS_IDLE_MS)
+    let idle_ms = u64::try_from(PEER_LIVENESS_PERIOD_MS)
         .expect("liveness idle interval must be positive")
         .saturating_add(1);
     runtime

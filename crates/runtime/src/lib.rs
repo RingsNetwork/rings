@@ -28,6 +28,8 @@ mod timer;
 with_executor! {
     mod task;
 
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+    pub use task::run_blocking;
     pub use task::run_detached;
     pub use task::spawn_detached;
     pub use task::Abandoned;

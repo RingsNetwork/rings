@@ -1,11 +1,9 @@
-//! Generic transport-relay protocol — one pure server-side state machine for TCP and UDP,
-//! native and browser.
+//! Generic transport-relay protocol — one pure server-side state machine for TCP and UDP.
 //!
-//! The pure model is generic over the **target** `T` a service resolves to: a
-//! `SocketAddr` natively, a WebTransport `Url` (string) in the browser. The same `step`,
-//! state, duplicate-`Open` rejection and owner-rejection serve both — only the
-//! *interpreter* differs (native `NativeRelay` over OS sockets, browser `WtRelay` over
-//! WebTransport). This is the code realization of "TCP/UDP/native/browser are one relay".
+//! The pure model is generic over the **target** `T` a service resolves to; the native
+//! interpreter `NativeRelay` resolves it to a `SocketAddr` and runs the effects over OS
+//! sockets. TCP and UDP share the same `step`, state, duplicate-`Open` rejection and
+//! owner-rejection: they are one relay.
 //!
 //! Every session is identified by the **owner-scoped key** `(from, namespace, session,
 //! initiator)` ([`SessionKey`]). `from` is the authenticated sender (owner rejection: a peer
@@ -15,6 +13,9 @@
 //!
 //! The reducer is the **sole authority** over the session set: `Data`/`Shutdown`/`Close`
 //! emit an effect only for a session in `sessions` (the engine never adjudicates liveness).
+//! The order of a TCP direction's segments and its FIN is the session task's, which owns the
+//! socket they are written to (`engine::reorder`): a repeated FIN, or a segment past its count,
+//! resets the session there.
 //!
 //! ```text
 //!   S = (services : Name ⇀ T, sessions : ℘ SessionKey, next : ℕ)
@@ -26,9 +27,9 @@
 //!   step (Frame(from, Open s n)) | k∈sessions   ↦ (S, ε)                  (live duplicate)
 //!                                | n∈services    ↦ (S∪{k}, [Connect k t kind])
 //!                                | otherwise     ↦ (S, [SendClose s])
-//!   step (Frame(from, Data s b)) | k∈sessions∖shutdown ↦ (S, [Write k b]) else (S, ε)
-//!   step (Frame(from, FIN s))    | TCP ∧ k∈sessions    ↦ (S∪shutdown(k), [Shutdown k])
-//!                                                   repeated/UDP ↦ (S, ε)
+//!   step (Frame(from, Data s q b))   | TCP ∧ k∈sessions ↦ (S, [Write k q b])        else (S, ε)
+//!   step (Frame(from, FIN s n))      | TCP ∧ k∈sessions ↦ (S, [Shutdown k n])       else (S, ε)
+//!   step (Frame(from, Datagram s b)) | UDP ∧ k∈sessions ↦ (S, [SendDatagram k b])   else (S, ε)
 //!   step (Frame(from, Close s))  | k∈sessions          ↦ (S∖{k}, [Close k]) else (S, ε)
 //!   invariant                    |sessions| ≤ 1024 ∧ ∀peer. sessions(peer) ≤ 64
 //! ```
@@ -45,15 +46,14 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::extension::ext::Ctx;
-#[cfg(any(rings_native, rings_browser))]
 use crate::extension::ext::EffectScope;
-#[cfg(any(rings_native, rings_browser))]
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
 use crate::extension::ext::Scope;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
+use crate::extension::transport::engine::Outbound;
 use crate::extension::transport::EffectEnqueue;
 use crate::extension::transport::Frame;
 use crate::extension::transport::Initiator;
@@ -62,11 +62,9 @@ use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
 use crate::peer_quota::PeerQuota;
 
-#[cfg(any(rings_native, rings_browser))]
 mod control_outbox;
-#[cfg(any(rings_native, rings_browser))]
 use self::control_outbox::ControlOutbox;
-#[cfg(all(test, rings_native))]
+#[cfg(test)]
 pub(crate) use self::control_outbox::ControlSendTestHook;
 
 /// Namespace for the TCP relay.
@@ -87,7 +85,7 @@ pub enum RelayCommand<T> {
     RegisterService {
         /// Service name.
         name: String,
-        /// Local target (`SocketAddr` natively, WebTransport URL in browser).
+        /// Local target (a `SocketAddr` for the native interpreter).
         target: T,
     },
     /// Engine→protocol feedback: a local connection/datagram-flow was accepted, pending
@@ -139,7 +137,7 @@ pub enum RelayEvent<T> {
     },
 }
 
-/// The relay's own effect algebra (interpreted by `NativeRelay` / `WtRelay`).
+/// The relay's own effect algebra (interpreted by `NativeRelay`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RelayEffect<T> {
     /// Open a local backend session to `target` and relay it (peer opened a session).
@@ -151,17 +149,29 @@ pub enum RelayEffect<T> {
         /// Stream (TCP) or datagram (UDP).
         kind: TransportKind,
     },
-    /// Write peer bytes to a session's local stream.
+    /// Write a peer segment to a session's local stream, in its `seq` order.
     Write {
         /// Target session.
         key: SessionKey,
+        /// The segment's position in the peer's direction.
+        seq: u64,
         /// Bytes.
         bytes: Bytes,
     },
-    /// Half-close a session's local write side (peer FIN).
+    /// Send a peer datagram on a flow's local socket.
+    SendDatagram {
+        /// Target flow.
+        key: SessionKey,
+        /// The datagram.
+        bytes: Bytes,
+    },
+    /// Half-close a session's local write side once the peer's `sent` segments are written
+    /// (peer FIN).
     Shutdown {
         /// Target session.
         key: SessionKey,
+        /// How many segments the peer sent this direction.
+        sent: u64,
     },
     /// Close a session (full teardown).
     Close {
@@ -198,7 +208,7 @@ pub enum RelayEffect<T> {
 }
 
 /// Relay state: the service registry and the set of live sessions in both directions. The live
-/// OS/WebTransport resources are the interpreter's engine table; this is the protocol's view
+/// OS resources are the interpreter's engine table; this is the protocol's view
 /// used for admission, ownership checks, and duplicate-`Open` rejection.
 #[derive(Clone)]
 pub struct RelayState<T> {
@@ -212,11 +222,6 @@ pub struct RelayState<T> {
     /// absent. Keeping the projection in the pure state makes admission O(1) without giving the
     /// interpreter a second source of truth.
     session_quota: Arc<PeerQuota>,
-    /// TCP sessions whose peer-to-local direction consumed its affine FIN.
-    ///
-    /// Invariant: `peer_shutdown` is a subset of `sessions`. The reverse direction remains live
-    /// until `Close`, but no later peer `Data` can escape the pure reducer into a backend writer.
-    peer_shutdown: Arc<HashSet<SessionKey>>,
     /// Monotonic allocator for client-side session ids. Lives in the **pure** state so the
     /// core (not the engine) mints session identities — `Event → step → Effect` is the sole
     /// authority for both the session set and its ids.
@@ -232,7 +237,6 @@ impl<T> Default for RelayState<T> {
                 MAX_RELAY_SESSIONS,
                 MAX_RELAY_SESSIONS_PER_PEER,
             )),
-            peer_shutdown: Arc::new(HashSet::new()),
             next_session: 0,
         }
     }
@@ -253,11 +257,11 @@ impl<T> RelayState<T> {
         {
             return false;
         }
-        if Arc::make_mut(&mut self.sessions).insert(key.clone()) {
-            Arc::make_mut(&mut self.peer_shutdown).remove(&key);
+        let peer = key.peer;
+        if Arc::make_mut(&mut self.sessions).insert(key) {
             true
         } else {
-            let rolled_back = Arc::make_mut(&mut self.session_quota).release(key.peer);
+            let rolled_back = Arc::make_mut(&mut self.session_quota).release(peer);
             debug_assert!(rolled_back);
             false
         }
@@ -271,22 +275,9 @@ impl<T> RelayState<T> {
             debug_assert!(false, "session quota missing admitted peer {}", key.peer);
             return false;
         }
-        Arc::make_mut(&mut self.peer_shutdown).remove(key);
         let removed = Arc::make_mut(&mut self.sessions).remove(key);
         debug_assert!(removed);
         removed
-    }
-
-    fn peer_can_send(&self, key: &SessionKey) -> bool {
-        self.sessions.contains(key) && !self.peer_shutdown.contains(key)
-    }
-
-    /// Consume the peer-to-local FIN exactly once for a live TCP stream.
-    fn shutdown_peer(&mut self, key: &SessionKey, kind: TransportKind) -> bool {
-        kind == TransportKind::Tcp
-            && self.sessions.contains(key)
-            && !self.peer_shutdown.contains(key)
-            && Arc::make_mut(&mut self.peer_shutdown).insert(key.clone())
     }
 }
 
@@ -332,16 +323,7 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSendSync + 'static
     }
 
     fn init(&self) -> RelayState<T> {
-        RelayState {
-            services: Arc::new(HashMap::new()),
-            sessions: Arc::new(HashSet::new()),
-            session_quota: Arc::new(PeerQuota::new(
-                MAX_RELAY_SESSIONS,
-                MAX_RELAY_SESSIONS_PER_PEER,
-            )),
-            peer_shutdown: Arc::new(HashSet::new()),
-            next_session: 0,
-        }
+        RelayState::default()
     }
 
     fn decode(&self, wire: Wire<'_>) -> Result<RelayEvent<T>, Reject> {
@@ -482,26 +464,33 @@ fn step_frame<T: Clone>(
         Frame::Data {
             session,
             from_opener,
+            seq,
             bytes,
         } => {
             let key = SessionKey::new(from, namespace, session, opener_to_initiator(from_opener));
-            if state.peer_can_send(&key) {
-                Transition::with(state.clone(), vec![RelayEffect::Write { key, bytes }])
-            } else {
-                Transition::pure(state.clone())
-            }
+            to_live_session(state, kind, TransportKind::Tcp, key, |key| {
+                RelayEffect::Write { key, seq, bytes }
+            })
         }
         Frame::Shutdown {
             session,
             from_opener,
+            sent,
         } => {
             let key = SessionKey::new(from, namespace, session, opener_to_initiator(from_opener));
-            let mut next = state.clone();
-            if next.shutdown_peer(&key, kind) {
-                Transition::with(next, vec![RelayEffect::Shutdown { key }])
-            } else {
-                Transition::pure(next)
-            }
+            to_live_session(state, kind, TransportKind::Tcp, key, |key| {
+                RelayEffect::Shutdown { key, sent }
+            })
+        }
+        Frame::Datagram {
+            session,
+            from_opener,
+            bytes,
+        } => {
+            let key = SessionKey::new(from, namespace, session, opener_to_initiator(from_opener));
+            to_live_session(state, kind, TransportKind::Udp, key, |key| {
+                RelayEffect::SendDatagram { key, bytes }
+            })
         }
         Frame::Close {
             session,
@@ -530,6 +519,22 @@ fn rejected_open<T>(
         // The peer opened it; this endpoint did not.
         from_opener: false,
     }])
+}
+
+/// Hand the session `key` its `effect` iff the relay's `kind` is the frame's `carrier` and the
+/// session is live; any other frame changes nothing.
+fn to_live_session<T: Clone>(
+    state: &RelayState<T>,
+    kind: TransportKind,
+    carrier: TransportKind,
+    key: SessionKey,
+    effect: impl FnOnce(SessionKey) -> RelayEffect<T>,
+) -> Transition<RelayState<T>, RelayEffect<T>> {
+    if kind == carrier && state.sessions.contains(&key) {
+        Transition::with(state.clone(), vec![effect(key)])
+    } else {
+        Transition::pure(state.clone())
+    }
 }
 
 /// Map a frame's `from_opener` (the **sender** opened the session) to our own [`Initiator`].
@@ -561,13 +566,11 @@ pub(crate) fn close_frame(
 /// Native relay interpreter: runs [`RelayEffect`]s over the OS-socket engine it owns. The
 /// engine uses the namespace-scoped [`Scope`] capability for both overlay sends and lifecycle
 /// feedback (`Accepted`/`Untrack`), so the engine has no `Processor` of its own.
-#[cfg(rings_native)]
 pub(crate) struct NativeRelay {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
     control_outbox: ControlOutbox,
 }
 
-#[cfg(rings_native)]
 impl NativeRelay {
     /// Build over a shared engine.
     pub(crate) fn new(engine: Arc<crate::extension::transport::engine::TransportSessions>) -> Self {
@@ -577,7 +580,7 @@ impl NativeRelay {
         }
     }
 
-    #[cfg(all(test, rings_native))]
+    #[cfg(test)]
     pub(crate) fn new_with_control_send_test_hook(
         engine: Arc<crate::extension::transport::engine::TransportSessions>,
         hook: Arc<ControlSendTestHook>,
@@ -589,7 +592,14 @@ impl NativeRelay {
     }
 }
 
-#[cfg(rings_native)]
+impl NativeRelay {
+    /// Deliver `outbound` to the session `key`'s local socket, as the reducer's feedback.
+    fn deliver(&self, key: SessionKey, outbound: Outbound) -> crate::error::Result<Vec<Bytes>> {
+        let admission = self.engine.deliver(&key, outbound);
+        enqueue_feedback::<std::net::SocketAddr>(key, admission)
+    }
+}
+
 #[async_trait::async_trait]
 impl Interpret for NativeRelay {
     type Effect = RelayEffect<std::net::SocketAddr>;
@@ -607,13 +617,14 @@ impl Interpret for NativeRelay {
                         .connect(scope.lifecycle(), key.clone(), target, kind);
                 return enqueue_feedback::<std::net::SocketAddr>(key, admission);
             }
-            RelayEffect::Write { key, bytes } => {
-                let admission = self.engine.write(&key, bytes);
-                return enqueue_feedback::<std::net::SocketAddr>(key, admission);
+            RelayEffect::Write { key, seq, bytes } => {
+                return self.deliver(key, Outbound::Segment { seq, bytes });
             }
-            RelayEffect::Shutdown { key } => {
-                let admission = self.engine.shutdown(&key);
-                return enqueue_feedback::<std::net::SocketAddr>(key, admission);
+            RelayEffect::SendDatagram { key, bytes } => {
+                return self.deliver(key, Outbound::Datagram(bytes));
+            }
+            RelayEffect::Shutdown { key, sent } => {
+                return self.deliver(key, Outbound::Shutdown { sent });
             }
             RelayEffect::Close { key } => {
                 self.engine.close_for_effect(&key);
@@ -688,79 +699,6 @@ fn enqueue_feedback<T: Serialize>(
     }
 }
 
-// ── Browser interpreter (WebTransport) ────────────────────────────────────────────────
-
-/// Browser relay interpreter: runs [`RelayEffect`]s over the WebTransport engine it owns.
-#[cfg(rings_browser)]
-pub(crate) struct WtRelay {
-    engine: Arc<crate::extension::transport::wt::WtSessions>,
-    control_outbox: ControlOutbox,
-}
-
-#[cfg(rings_browser)]
-impl WtRelay {
-    /// Build over a shared WebTransport engine.
-    pub(crate) fn new(engine: Arc<crate::extension::transport::wt::WtSessions>) -> Self {
-        Self {
-            engine,
-            control_outbox: ControlOutbox::default(),
-        }
-    }
-}
-
-#[cfg(rings_browser)]
-#[async_trait::async_trait(?Send)]
-impl Interpret for WtRelay {
-    type Effect = RelayEffect<String>;
-
-    async fn run(
-        &self,
-        scope: &EffectScope,
-        effect: RelayEffect<String>,
-    ) -> crate::error::Result<Vec<Bytes>> {
-        match effect {
-            RelayEffect::Connect { key, target, kind } => {
-                let admission =
-                    self.engine
-                        .clone()
-                        .connect(scope.lifecycle(), key.clone(), target, kind);
-                return enqueue_feedback::<String>(key, admission);
-            }
-            RelayEffect::Write { key, bytes } => {
-                let admission = self.engine.write(scope.lifecycle(), key.clone(), bytes);
-                return enqueue_feedback::<String>(key, admission);
-            }
-            RelayEffect::Shutdown { key } => {
-                let admission = self.engine.shutdown(scope.lifecycle(), key.clone());
-                return enqueue_feedback::<String>(key, admission);
-            }
-            RelayEffect::Close { key } => {
-                self.engine.close_for_effect(&key);
-            }
-            RelayEffect::SendClose {
-                to,
-                session,
-                from_opener,
-            } => {
-                self.control_outbox.enqueue(
-                    scope.lifecycle(),
-                    to,
-                    close_frame(session, from_opener)?,
-                )?;
-            }
-            // The browser relay is server-side only (no local listener), so it never reports
-            // an `Accepted` and thus never receives `OpenAccepted`.
-            RelayEffect::OpenAccepted { .. } => {
-                tracing::warn!("browser relay received OpenAccepted; it has no local listener");
-            }
-            RelayEffect::RejectAccepted { .. } => {
-                tracing::warn!("browser relay received RejectAccepted; it has no local listener");
-            }
-        }
-        Ok(Vec::new())
-    }
-}
-
 // ── Client-side relay handle ──────────────────────────────────────────────────────────
 
 /// Client-facing handle to the relay extension's live engine: open local tunnels and register
@@ -770,7 +708,6 @@ impl Interpret for WtRelay {
 /// Cloneable; every clone drives the same shared engine and pure [`Relay`] state.
 /// Holds the two per-namespace scoped capabilities (`tcp` / `udp`); each method picks one and
 /// can only act within it, so the handle cannot address an arbitrary namespace even internally.
-#[cfg(rings_native)]
 #[derive(Clone)]
 pub struct RelayHandle {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
@@ -778,7 +715,6 @@ pub struct RelayHandle {
     udp: Scope,
 }
 
-#[cfg(rings_native)]
 impl RelayHandle {
     /// Install the relay into an extension registry: register the TCP and UDP interpreters
     /// over a fresh, relay-owned OS-socket engine and return the client handle. Errors if the
@@ -876,65 +812,11 @@ impl RelayHandle {
 
 /// Map a service `name` → `target` by self-injecting a `RegisterService` command into the
 /// scope's own namespace (provenance = self).
-#[cfg(any(rings_native, rings_browser))]
 async fn register_service<T>(scope: &Scope, name: String, target: T) -> crate::error::Result<()>
 where T: Serialize {
     let command = RelayCommand::RegisterService { name, target };
     let payload = rings_codec::serialize(&command).map_err(|_| crate::error::Error::EncodeError)?;
     scope.inject(Bytes::from(payload)).await
-}
-
-/// Client-facing handle to the browser relay extension's live WebTransport engine. It owns the
-/// two per-namespace scoped capabilities (`tcp` / `udp`) and registers services, but exposes no
-/// tunnel-open surface because the browser relay is server-side only. Cloneable; see the native
-/// [`RelayHandle`].
-#[cfg(rings_browser)]
-#[derive(Clone)]
-pub struct RelayHandle {
-    tcp: Scope,
-    udp: Scope,
-}
-
-#[cfg(rings_browser)]
-impl RelayHandle {
-    /// Install the browser relay into an extension registry: register the TCP and UDP
-    /// interpreters over a fresh, relay-owned WebTransport engine and return the client handle.
-    /// Errors if the `tcp`/`udp` namespaces are already taken. Call once per node, after
-    /// constructing the provider — the relay is opt-in, not a `Provider` invariant.
-    ///
-    /// This is a **Rust-wasm-facing** surface: there is no `wasm_bindgen` install/handle for JS
-    /// yet (unlike `provider.on(...)`), so browser relay is reachable only from Rust-wasm apps.
-    /// A JS-facing extension install API can be added when a JS consumer needs WebTransport
-    /// relay; it must not put these methods back on the generic `Provider`.
-    pub fn install(extensions: &crate::extension::ext::Extensions) -> crate::error::Result<Self> {
-        let engine = Arc::new(crate::extension::transport::wt::WtSessions::new());
-        // Atomic: both namespaces register together, or neither (no half-installed relay).
-        extensions.register_many(vec![
-            (Relay::tcp(), WtRelay::new(engine.clone())),
-            (Relay::udp(), WtRelay::new(engine)),
-        ])?;
-        let core = extensions.core();
-        Ok(Self {
-            tcp: Scope::new(core.clone(), TCP.to_string()),
-            udp: Scope::new(core, UDP.to_string()),
-        })
-    }
-
-    /// Register a WebTransport-backed service for the browser **TCP** relay, mapping
-    /// `name` → WebTransport `url` (under the `tcp` namespace).
-    pub async fn register_wt_service(&self, name: String, url: String) -> crate::error::Result<()> {
-        register_service(&self.tcp, name, url).await
-    }
-
-    /// Register a WebTransport-backed service for the browser **UDP** relay (datagrams),
-    /// mapping `name` → WebTransport `url` (under the `udp` namespace).
-    pub async fn register_wt_udp_service(
-        &self,
-        name: String,
-        url: String,
-    ) -> crate::error::Result<()> {
-        register_service(&self.udp, name, url).await
-    }
 }
 
 #[cfg(test)]

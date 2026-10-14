@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -7,6 +6,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use bytes::Bytes;
+use futures::lock::Mutex as FuturesMutex;
 use rings_transport::connection_ref::ConnectionRef;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use rings_transport::connections::DummyConnection as ConnectionOwner;
@@ -26,9 +26,10 @@ use rings_transport::connections::WebrtcConnection as ConnectionOwner;
     not(feature = "dummy")
 ))]
 use rings_transport::connections::WebrtcTransport as Transport;
+use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::LaneCreditReservation;
 use rings_transport::core::transport::SendPermit;
-use rings_transport::core::transport::TransportMessage;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
@@ -42,7 +43,6 @@ use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::StorageSyncDeliveryCursor;
 use crate::dht::VirtualNodeConfig;
-use crate::error::CallbackError;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::MeasureImpl;
@@ -51,23 +51,25 @@ use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::DhtProtocolMode;
 use crate::message::TransactionReplay;
-use crate::swarm::callback::SwarmCallbackSlot;
-use crate::swarm::callback::SwarmEvent;
+use crate::swarm::application::ApplicationPort;
 use crate::swarm::observer::MessageObservation;
 use crate::swarm::observer::SharedSwarmObserver;
 use crate::utils::get_epoch_ms_i64;
 
 mod connection;
 mod delivery;
-mod event_delivery;
+pub(crate) mod egress;
 #[cfg(test)]
 mod frame_ledger;
 mod handshake;
+#[cfg(test)]
+mod inbound_tap;
 mod link_control;
 mod liveness;
 mod measurement;
 mod outbound;
 mod payload_send;
+mod peer_operation;
 mod pending;
 mod readiness;
 mod rerouting;
@@ -82,11 +84,9 @@ pub(crate) use storage_sync::StorageSyncBatchStep;
 mod timeouts;
 pub(crate) use self::connection::AdmittedConnection;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::delivery::delivery_stall_deadline_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::delivery::SendCompletionOutcome;
-use self::event_delivery::PeerOperationLocks;
-use self::event_delivery::SwarmEventDeliveryLock;
-use self::event_delivery::SwarmEventDeliveryLocks;
-pub(crate) use self::event_delivery::SwarmEventDeliveryTurn;
 #[cfg(test)]
 pub(crate) use self::frame_ledger::FrameInFlight;
 #[cfg(test)]
@@ -96,24 +96,31 @@ pub(crate) use self::frame_ledger::FrameSample;
 pub(crate) use self::handshake::CounterOffer;
 pub(crate) use self::handshake::CreatedAnswer;
 pub use self::handshake::OfferReply;
+#[cfg(test)]
+pub(crate) use self::inbound_tap::InboundTap;
+pub(crate) use self::liveness::IssuedProbe;
 use self::liveness::PeerLivenessMap;
-pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
+pub(crate) use self::liveness::ProbePass;
+pub(crate) use self::liveness::ProbeWork;
+#[cfg(all(test, feature = "dummy"))]
+pub(crate) use self::liveness::PEER_LIVENESS_PERIOD_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::dispatched_link_control_for_test;
+pub(crate) use self::outbound::test_trace::dispatched_link_control_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::outbound_submit_count_for_test;
+pub(crate) use self::outbound::test_trace::dispatched_link_control_since;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::referenced_slots_for_test;
+pub(crate) use self::outbound::test_trace::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::reset_outbound_submit_count_for_test;
+pub(crate) use self::outbound::test_trace::referenced_slots_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::LinkDirection;
+pub(crate) use self::outbound::test_trace::reset_outbound_submit_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::test_trace::LinkDirection;
 use self::outbound::OutboundSchedulers;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::LINK_CONTROL_IN_FLIGHT_CAPACITY;
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_CONTROL_BURST;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -123,13 +130,16 @@ pub(crate) use self::outbound::OUTBOUND_DATA_TRANSFER_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_LANE_WINDOW;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
-pub(crate) use self::pending::ConnectionEventDisposition;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::payload_send::hold_first_frame_deadlines_for_test;
+use self::peer_operation::PeerOperationLocks;
 use self::pending::ConnectionLifecycleBoundary;
 pub(crate) use self::pending::OfferOwner;
 pub(crate) use self::pending::PendingConnectionAttempt;
 use self::pending::PendingFingerUpdates;
-use self::pending::Retirement;
 use self::pending::SharedConnectionLifecycles;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 use self::pending::PENDING_CONNECTION_TIMEOUT_MS;
@@ -140,12 +150,13 @@ pub(crate) use self::rerouting::Placement;
 pub(crate) use self::rerouting::Route;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::retention::UNREFERENCED_CONNECTION_GRACE_MS;
+use self::storage_lookup::StorageAnswerClock;
 use self::storage_lookup::StorageLookupObservationMap;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 pub(crate) use self::storage_sync::StorageSyncOutcome;
 pub(crate) use self::timeouts::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
-pub(crate) use self::timeouts::SESSION_HOLD_TIMEOUT;
+pub(crate) use self::timeouts::DELIVERY_BOUND;
 pub(crate) use self::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use self::timeouts::TRANSPORT_TIMEOUT_PROFILE;
 use super::callback::InboundCapacity;
@@ -166,8 +177,6 @@ pub(crate) struct SwarmTransportParts {
     pub(crate) transaction_replay: Arc<TransactionReplay>,
     /// Storage, virtual-node and reassembly settings.
     pub(crate) settings: SwarmTransportSettings,
-    /// The application callback slot; see `SwarmTransport::callback_slot`.
-    pub(crate) callback: SwarmCallbackSlot,
     /// Bounded synchronous sink for privacy-safe operational observations.
     pub(crate) observer: SharedSwarmObserver,
 }
@@ -183,18 +192,25 @@ pub struct SwarmTransport {
     reassembly_budget: Arc<ReassemblyBudget>,
     inbound_capacity: Arc<InboundCapacity>,
     connection_lifecycle: ConnectionLifecycleBoundary,
-    swarm_event_delivery: SwarmEventDeliveryLocks,
-    callback: SwarmCallbackSlot,
+    /// Core's side of the application boundary (#935).
+    application: ApplicationPort,
     connection_creation: PeerOperationLocks,
     peer_lifecycles: SharedConnectionLifecycles,
     pending_finger_updates: Mutex<PendingFingerUpdates>,
     peer_liveness: Mutex<PeerLivenessMap>,
+    /// The exclusive right to run a probe pass; see [`ProbePass`].
+    probe_pass: FuturesMutex<()>,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
+    /// The reply marker of storage lookups; see [`StorageAnswerClock`].
+    storage_answer_clock: StorageAnswerClock,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     storage_repair_requested: AtomicBool,
     /// Test builds: the frames this node sent and received; see [`FrameLedger`].
     #[cfg(test)]
     frames: Arc<FrameLedger>,
+    /// Test builds: every payload entering the logical inbound stage; see [`InboundTap`].
+    #[cfg(test)]
+    inbound_tap: InboundTap,
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
     outbound_schedulers: OutboundSchedulers,
     measured_disconnects: Mutex<MeasuredDisconnectMap>,
@@ -292,7 +308,6 @@ impl SwarmTransport {
             measure,
             transaction_replay,
             settings,
-            callback,
             observer,
         } = parts;
         let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
@@ -311,19 +326,22 @@ impl SwarmTransport {
             reassembly_budget: Arc::new(ReassemblyBudget::new(settings.reassembly_limits)),
             inbound_capacity: Arc::new(InboundCapacity::new()),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
-            swarm_event_delivery: SwarmEventDeliveryLocks::new(),
-            callback,
+            application: ApplicationPort::new(),
             connection_creation: PeerOperationLocks::new(),
             peer_lifecycles: Arc::new(Mutex::new(self::pending::ConnectionLifecycleRegistry::new(
                 lifecycle_bounds,
             ))),
             pending_finger_updates: Mutex::new(BTreeMap::new()),
             peer_liveness: Mutex::new(PeerLivenessMap::new()),
+            probe_pass: FuturesMutex::new(()),
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
+            storage_answer_clock: StorageAnswerClock::default(),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             storage_repair_requested: AtomicBool::new(false),
             #[cfg(test)]
             frames: Arc::default(),
+            #[cfg(test)]
+            inbound_tap: InboundTap::default(),
             storage_repair_cursor: Mutex::new(None),
             outbound_schedulers: OutboundSchedulers::new(measure.clone()),
             measured_disconnects: Mutex::new(BTreeMap::new()),
@@ -467,75 +485,21 @@ impl SwarmTransport {
         &self.frames
     }
 
+    /// Test builds: every payload entering the logical inbound stage; see [`InboundTap`].
+    #[cfg(test)]
+    pub(crate) fn inbound_tap_for_test(&self) -> &InboundTap {
+        &self.inbound_tap
+    }
+
     #[cfg(test)]
     pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
         self.inbound_capacity.admitted_count_for_test()
     }
 
-    fn swarm_event_delivery_lock(&self, peer: Did) -> SwarmEventDeliveryLock {
-        self.swarm_event_delivery.lock(peer)
-    }
-
-    /// The application callback slot this transport delivers swarm events through; the swarm
-    /// shares it so `Swarm::set_callback` replaces the target of both.
-    pub(super) fn callback_slot(&self) -> &SwarmCallbackSlot {
-        &self.callback
-    }
-
-    /// Announce a retirement through `turn`, the peer's ordered delivery turn acquired before
-    /// the record was retired: [`SwarmEvent::PeerRetired`] is delivered iff the admission it
-    /// ends was announced, so the application sees one retirement per admission it saw, in
-    /// the order the swarm decided them. A failing application callback is logged, never
-    /// propagated: the retirement has already happened.
-    async fn announce_retirement(
-        &self,
-        turn: SwarmEventDeliveryTurn,
-        peer: Did,
-        retirement: Retirement,
-    ) {
-        if !retirement.announced_admission() {
-            return;
-        }
-        if let Err(error) = self.deliver_retirement(turn, peer).await {
-            tracing::error!(%peer, %error, "peer retirement callback failed");
-        }
-    }
-
-    /// Start [`SwarmEvent::PeerRetired`] for `peer` on the current application callback under
-    /// `turn`.
-    async fn deliver_retirement(
-        &self,
-        turn: SwarmEventDeliveryTurn,
-        peer: Did,
-    ) -> std::result::Result<(), CallbackError> {
-        let callback = self.callback.current()?;
-        turn.poll_once_then_release(callback.on_event(&SwarmEvent::PeerRetired { peer }))
-            .await
-    }
-
-    /// Run `deliver` under `peer`'s ordered delivery turn: the turn is acquired before `deliver`
-    /// runs, and the turn's sequence is pruned once it returns, whatever it returns.
-    pub(crate) async fn with_delivery_turn<T, Fut>(
-        &self,
-        peer: Did,
-        deliver: impl FnOnce(SwarmEventDeliveryTurn) -> Fut,
-    ) -> T
-    where
-        Fut: Future<Output = T>,
-    {
-        let delivery = self.swarm_event_delivery_lock(peer);
-        let outcome = deliver(delivery.acquire().await).await;
-        self.prune_swarm_event_delivery_lock(peer, &delivery);
-        outcome
-    }
-
-    fn prune_swarm_event_delivery_lock(&self, peer: Did, delivery: &SwarmEventDeliveryLock) {
-        self.swarm_event_delivery
-            .prune(peer, delivery, self.connection_epoch_exists(peer));
-    }
-
-    fn connection_epoch_exists(&self, peer: Did) -> bool {
-        self.has_connection_attempt(peer).unwrap_or(false)
+    /// Core's side of the application boundary: the inbox it writes, the lookups it answers
+    /// and the delegations it reads.
+    pub(crate) fn application(&self) -> &ApplicationPort {
+        &self.application
     }
 
     /// Record that `peer` reached an open data channel.
@@ -681,14 +645,30 @@ impl SwarmConnection {
         self.connection.dummy_generation_id().map_err(Into::into)
     }
 
-    /// Hand one frame to the transport; the sole send of every frame to another node.
-    async fn send_data(&self, data: Bytes, permit: SendPermit) -> Result<DeliveryFuture> {
+    /// Wait for one credit to send a frame on `lane`: the receiver's backpressure, untimed (see
+    /// `rings_transport::core::credit`). The wait owns the lane's credit state only, so it
+    /// keeps no connection alive however long it lasts.
+    fn reserve_send_credit(
+        &self,
+        lane: ChannelLane,
+    ) -> impl std::future::Future<Output = Result<LaneCreditReservation>> + 'static {
+        let wait = self.connection.reserve_send_credit(lane);
+        async move { wait.await.map_err(Into::into) }
+    }
+
+    /// Hand one frame to the transport on `lane`; the sole send of every frame to another node.
+    async fn send_data(
+        &self,
+        data: Bytes,
+        lane: ChannelLane,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
         // Test builds: a send dropped before the transport committed to it ends uncounted.
         #[cfg(test)]
         let frame_send = self.frames.begin_send(permit.acceptance());
         let delivery: Result<DeliveryFuture> = self
             .connection
-            .send_message_with_permit(TransportMessage::Custom(data), permit)
+            .send_message_with_permit(data, lane, permit)
             .await
             .map_err(Into::into);
         #[cfg(test)]

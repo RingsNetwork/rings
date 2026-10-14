@@ -1,37 +1,39 @@
 //! Rings native node command-line entrypoint.
 
-use std::env;
 // The `dummy` feature selects rings-core's in-memory test transport, over which a node cannot
 // reach any peer; it exists for the node's own test suite only.
 #[cfg(all(feature = "dummy", not(test)))]
 compile_error!("the `dummy` test transport cannot run a node; build `rings` without it");
 
+use std::env;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::ArgAction;
-use clap::Args;
 use clap::Parser;
-use clap::Subcommand;
-use clap::ValueEnum;
+use cli::payload_arg_or_stdin;
+use cli::Cli;
+use cli::ClientArgs;
+use cli::Command;
+use cli::ConnectCommand;
+use cli::PeerCommand;
+use cli::RunCommand;
+use cli::SendCommand;
+use cli::ServiceCommand;
 use futures::pin_mut;
 use futures::StreamExt;
-use rings_node::extension::Backend;
+use rings_gateway::GatewayStatusHandle;
 use rings_node::logging::init_logging;
-use rings_node::logging::LogLevel;
 use rings_node::measure::EvidenceCollectorIdentity;
 use rings_node::measure::PeriodicMeasure;
-use rings_node::native::api_auth::load_api_token;
 use rings_node::native::api_auth::load_api_token_file;
 use rings_node::native::api_auth::load_or_create_api_token;
 use rings_node::native::api_auth::ApiSecurity;
 use rings_node::native::bootstrap::BootstrapSupervisor;
 use rings_node::native::bootstrap::BootstrapTargets;
-use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api_with_gateway;
@@ -41,19 +43,16 @@ use rings_node::onion::proxy::http::run_onion_http_proxy;
 use rings_node::onion::proxy::http::OnionHttpProxyOptions;
 use rings_node::onion::OnionEntryGuardStorage;
 use rings_node::onion::OnionExitTarget;
-use rings_node::onion::OnionServiceName;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
-use rings_node::prelude::rings_core::dht::Did;
-use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::file::FileStorage;
-use rings_node::prelude::DelegationBuilder;
+use rings_node::prelude::rings_core::storage::RecordAuthority;
 use rings_node::prelude::StopSource;
+use rings_node::prelude::StopToken;
+use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
 use rings_node::seed::Seed;
-use rings_node::util::ensure_parent_dir;
-use rings_node::util::expand_home;
 use rings_node::util::loader::ResourceLoader;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
@@ -63,7 +62,12 @@ use tokio::task::JoinSet;
 
 const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
-const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 16 * 1024 * 1024;
+/// Byte budget of the native replay store: every record of a full store
+/// (`rings_core::message::TRANSACTION_REPLAY_STORE_MAX_BYTES`, about 27 MiB), with room left
+/// for the former shared-stream snapshot until the first load after the #898 upgrade deletes
+/// it. The store is authoritative and evicts nothing: a write beyond the budget fails, which
+/// fails that transition closed, so the budget must never be reached.
+const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 40 * 1024 * 1024;
 
 fn onion_entry_guard_storage_path(data_storage_path: &str) -> String {
     let data_path = Path::new(data_storage_path);
@@ -101,616 +105,21 @@ fn provisional_evidence_storage_path(measure_storage_path: &str) -> String {
         .to_string()
 }
 
-#[derive(Parser, Debug)]
-#[command(about, version, author)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
+/// The command line: the top-level parser, its subcommands and their arguments.
+mod cli;
 
-    #[arg(long, default_value_t = LogLevel::default(), value_enum, env)]
-    log_level: LogLevel,
-
-    #[arg(
-        long,
-        value_enum,
-        default_value = "multi-thread",
-        env,
-        help = "Tokio runtime scheduler for this process"
-    )]
-    runtime: RuntimeFlavor,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum RuntimeFlavor {
-    MultiThread,
-    CurrentThread,
-}
-
-impl RuntimeFlavor {
-    fn build(self) -> std::io::Result<tokio::runtime::Runtime> {
-        match self {
-            Self::MultiThread => tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build(),
-            Self::CurrentThread => tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build(),
-        }
+/// Run `service`, the application inbox's server stopping on `stop`, to completion; the swarm
+/// going away first, which no running node reaches, is an error.
+async fn serve_application(
+    service: impl Future<Output = ()>,
+    stop: StopToken,
+) -> anyhow::Result<()> {
+    service.await;
+    if stop.should_stop() {
+        Ok(())
+    } else {
+        anyhow::bail!("application inbox closed unexpectedly")
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum ReassemblyProfile {
-    Production,
-    Constrained,
-}
-
-impl ReassemblyProfile {
-    fn limits(self) -> ReassemblyLimits {
-        match self {
-            Self::Production => ReassemblyLimits::production(),
-            Self::Constrained => ReassemblyLimits::constrained(),
-        }
-    }
-}
-
-/// Parse a singular onion-exit service name from the run command.
-fn parse_onion_exit_service(raw: &str) -> Result<OnionServiceName, String> {
-    OnionServiceName::parse(raw).map_err(|error| error.to_string())
-}
-
-/// Parse a canonical service name for client-side onion proxy options.
-fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
-    OnionServiceName::parse(raw).map_err(|error| error.to_string())
-}
-
-/// Resolves a handshake payload argument that may be `-`, meaning "read it from stdin".
-///
-/// The base58-check offer/answer strings are long and awkward to pass inline, so the
-/// manual-handshake subcommands accept `-` and consume stdin (trimmed) instead.
-fn payload_arg_or_stdin(value: &str) -> anyhow::Result<String> {
-    if value != "-" {
-        return Ok(value.to_string());
-    }
-
-    let mut buf = String::new();
-    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
-        .context("failed to read handshake payload from stdin")?;
-    Ok(buf.trim().to_string())
-}
-
-#[derive(Subcommand, Debug)]
-#[command(rename_all = "kebab-case")]
-enum Command {
-    #[command(about = "Initializes a node with the given configuration.")]
-    Init(InitCommand),
-    #[command(about = "Creates a new delegatee signing key.")]
-    NewDelegation(NewDelegationCommand),
-    #[command(about = "Runs a foreground, composable Rings node.")]
-    Run(Box<RunCommand>),
-    #[command(about = "Provides chat room-like functionality on the Rings Network.")]
-    Pubsub(PubsubCommand),
-    #[command(about = "Connects to a remote peer.", subcommand)]
-    Connect(ConnectCommand),
-    #[command(about = "Manages peers on the network.", subcommand)]
-    Peer(PeerCommand),
-    #[command(about = "Sends a message to another peer.", subcommand)]
-    Send(SendCommand),
-    #[command(about = "Registers or looks up a service on the network.", subcommand)]
-    Service(ServiceCommand),
-    #[command(
-        about = "Show information of swarm. Include transport table, successors, predecessor, and finger table."
-    )]
-    Inspect(InspectCommand),
-}
-
-#[derive(Args, Debug)]
-struct ConfigArgs {
-    #[arg(
-        long,
-        short = 'c',
-        env,
-        default_value = "~/.rings/config.yaml",
-        help = "Config file location"
-    )]
-    pub config: String,
-}
-
-#[derive(Args, Debug)]
-struct InitCommand {
-    #[command(flatten)]
-    delegation_args: DelegationArgs,
-
-    #[arg(
-        long,
-        default_value = "~/.rings/config.yaml",
-        help = "The location of config file"
-    )]
-    pub location: String,
-}
-
-#[derive(Args, Debug)]
-struct NewDelegationCommand {
-    #[command(flatten)]
-    delegation_args: DelegationArgs,
-}
-
-#[derive(Args, Debug)]
-struct RunCommand {
-    #[arg(
-        long,
-        action = ArgAction::SetTrue,
-        help = "Start the native TUN gateway from the config's gateway section for this run; the section alone never starts it (rings init writes it with enabled: false)",
-        env
-    )]
-    pub gateway: bool,
-
-    #[arg(
-        long,
-        help = "Rings node external api listen address. If not provided, use external_api_addr in config file or 127.0.0.1:50001",
-        env
-    )]
-    pub external_api_addr: Option<String>,
-
-    #[arg(
-        long,
-        help = "Rings node internal api listen port. If not provided, use internal_api_port in config file or 50000"
-    )]
-    pub internal_api_port: Option<u16>,
-
-    #[arg(
-        long,
-        help = "API Bearer token file guarding the internal API and the external status and registry reads; the external handshake (nodeDid, answerOffer) is public. Relative paths are resolved next to the node config file",
-        env
-    )]
-    pub api_token_path: Option<String>,
-
-    #[arg(
-        long = "api-allowed-origin",
-        action = ArgAction::Append,
-        help = "Exact browser origin permitted to call the authenticated API; repeat as needed",
-        env,
-        value_delimiter = ','
-    )]
-    pub api_allowed_origins: Vec<String>,
-
-    #[arg(
-        long,
-        action = ArgAction::SetTrue,
-        help = "Explicitly permit external_api_addr to bind a non-loopback address",
-        env
-    )]
-    pub allow_remote_external_api: bool,
-
-    #[arg(
-        long,
-        help = "ICE server list. If not provided, use ice_servers in config file or stun://stun.l.google.com:19302",
-        env
-    )]
-    pub ice_servers: Option<String>,
-
-    #[arg(
-        long,
-        help = "Stabilization interval in seconds. If not provided, use stabilize_interval in config file or 15",
-        env
-    )]
-    pub stabilize_interval: Option<u64>,
-
-    #[arg(
-        long,
-        help = "Seed document URL (file:// or http(s)://) whose peers join the managed bootstrap targets of the config's bootstrap section; the run redials each target through its HTTP endpoint whenever it stops being reachable through the overlay",
-        env
-    )]
-    pub bootstrap_seed: Option<String>,
-
-    #[arg(long, help = "external ip address", env)]
-    pub external_ip: Option<String>,
-
-    #[arg(
-        long,
-        help = "Minimum UDP port used by native WebRTC ICE gathering. Must be paired with --webrtc-udp-port-max.",
-        env
-    )]
-    pub webrtc_udp_port_min: Option<u16>,
-
-    #[arg(
-        long,
-        help = "Maximum UDP port used by native WebRTC ICE gathering. Must be paired with --webrtc-udp-port-min.",
-        env
-    )]
-    pub webrtc_udp_port_max: Option<u16>,
-
-    #[arg(
-        long,
-        help = "Storage files location. If not provided, use storage.path in config file or ~/.local/share/rings",
-        env
-    )]
-    pub storage_path: Option<String>,
-
-    #[arg(
-        long,
-        default_value = "200000000",
-        help = "Storage capacity. If not provider, use storage.capacity in config file or 200000000",
-        env
-    )]
-    pub storage_capacity: Option<u32>,
-
-    #[arg(
-        long,
-        value_enum,
-        default_value = "production",
-        env,
-        help = "Inbound chunk reassembly memory profile"
-    )]
-    pub reassembly_profile: ReassemblyProfile,
-
-    #[arg(
-        long,
-        action = ArgAction::SetTrue,
-        help = "Advertise this node as an onion relay in the online-node registry",
-        env
-    )]
-    pub advertise_onion_relay: bool,
-
-    #[arg(
-        long,
-        action = ArgAction::SetTrue,
-        help = concat!(
-            "Publish this node as an onion exit in the application-layer exit registry; ",
-            "requires --advertise-onion-relay",
-        ),
-        env
-    )]
-    pub advertise_onion_exit: bool,
-
-    #[arg(
-        long,
-        value_parser = parse_onion_exit_service,
-        help = "Onion exit service to serve: tcp or https. May be repeated.",
-        env
-    )]
-    pub onion_exit_service: Vec<OnionServiceName>,
-
-    #[arg(
-        long,
-        help = "Allow-list target for onion exit policy. May be repeated.",
-        env
-    )]
-    pub onion_exit_allow_target: Vec<String>,
-
-    #[arg(
-        long,
-        help = "Deny-list target for onion exit policy. May be repeated.",
-        env
-    )]
-    pub onion_exit_deny_target: Vec<String>,
-
-    #[arg(long, help = "Maximum onion circuits this exit will serve", env)]
-    pub onion_exit_max_circuits: Option<u32>,
-
-    #[arg(
-        long,
-        help = "Maximum streams per onion circuit this exit will serve",
-        env
-    )]
-    pub onion_exit_max_streams_per_circuit: Option<u32>,
-
-    #[arg(long, help = "Maximum bytes per minute this exit will serve", env)]
-    pub onion_exit_max_bytes_per_minute: Option<u64>,
-
-    #[arg(long, help = "Onion-exit registry heartbeat interval in seconds", env)]
-    pub onion_exit_heartbeat_interval_secs: Option<u64>,
-
-    #[arg(long, help = "Onion-exit registry descriptor TTL in seconds", env)]
-    pub onion_exit_ttl_secs: Option<u64>,
-
-    #[arg(
-        long,
-        help = "Bind a local HTTP CONNECT proxy that routes client TCP streams through onion exits, e.g. 127.0.0.1:18080",
-        env
-    )]
-    pub onion_http_proxy_addr: Option<String>,
-
-    #[arg(
-        long,
-        value_parser = parse_onion_service_name,
-        help = "Onion exit service used by the local HTTP CONNECT proxy: tcp or https",
-        env
-    )]
-    pub onion_http_proxy_service: Option<OnionServiceName>,
-
-    #[arg(
-        long,
-        help = "Maximum seconds to wait for one HTTP CONNECT header",
-        env
-    )]
-    pub onion_http_proxy_header_timeout_secs: Option<u64>,
-
-    #[arg(
-        long,
-        help = "Maximum concurrent local HTTP CONNECT proxy connections",
-        env
-    )]
-    pub onion_http_proxy_max_connections: Option<usize>,
-
-    #[command(flatten)]
-    config_args: ConfigArgs,
-}
-
-#[derive(Args, Debug)]
-struct ClientArgs {
-    #[arg(
-        long,
-        short = 'u',
-        help = "rings-node endpoint url. If not provided, use endpoint_url in config file or http://127.0.0.1:50000",
-        env
-    )]
-    endpoint_url: Option<String>,
-
-    #[arg(
-        long,
-        help = "API Bearer token file of the local node's internal API. Relative paths are resolved next to the node config file",
-        env
-    )]
-    api_token_path: Option<String>,
-
-    #[command(flatten)]
-    config_args: ConfigArgs,
-}
-
-impl ClientArgs {
-    async fn new_client(&self) -> anyhow::Result<Client> {
-        let c = config::Config::read_fs(&self.config_args.config)?;
-        let endpoint_url = self.endpoint_url.as_ref().unwrap_or(&c.endpoint_url);
-        let configured_path = self
-            .api_token_path
-            .as_deref()
-            .or(c.api_token_path.as_deref());
-        let token = load_api_token(&self.config_args.config, configured_path)?;
-        Client::with_api_token(endpoint_url, token.into_secret())
-    }
-}
-
-#[derive(Args, Debug)]
-struct DelegationArgs {
-    #[arg(
-        long,
-        short = 's',
-        default_value = "~/.rings/delegatee_key",
-        help = "The location of delegatee_key file"
-    )]
-    pub delegatee_key: String,
-
-    #[arg(
-        long,
-        short = 'k',
-        help = "Your ecdsa_key. If not provided, a random key will be used"
-    )]
-    pub ecdsa_key: Option<SecretKey>,
-
-    #[arg(
-        long = "key-file",
-        value_name = "FILE",
-        conflicts_with = "ecdsa_key",
-        help = "Read your ECDSA key from a file instead of passing it on the command line"
-    )]
-    pub ecdsa_key_file: Option<String>,
-
-    #[arg(
-        long,
-        default_value = "2592000",
-        help = "The ttl of delegation file in seconds"
-    )]
-    pub ttl: u64,
-}
-
-impl DelegationArgs {
-    fn new_delegation_then_write_to_fs(&self) -> anyhow::Result<&std::path::Path> {
-        let key = self.load_or_create_key()?;
-        let key_did: Did = key.address().into();
-
-        let ssk_builder = DelegationBuilder::new(key_did.to_string(), "secp256k1".to_string())
-            .set_ttl(self.ttl * 1000);
-        let unsigned_proof = ssk_builder.unsigned_proof();
-
-        let sig = key.sign(&unsigned_proof)?.to_vec();
-        let ssk_builder = ssk_builder.set_delegator_signature(sig);
-
-        let ssk = ssk_builder.build()?;
-        let ssk_dump = ssk.dump()?;
-
-        let ssk_path = std::path::Path::new(&self.delegatee_key);
-        ensure_parent_dir(ssk_path)?;
-        std::fs::write(expand_home(ssk_path)?, ssk_dump)?;
-        println!(
-            "Your delegatee_key file has saved to: {}",
-            ssk_path.display()
-        );
-
-        Ok(ssk_path)
-    }
-
-    fn load_or_create_key(&self) -> anyhow::Result<SecretKey> {
-        if let Some(key) = &self.ecdsa_key {
-            return Ok(key.clone());
-        }
-
-        if let Some(key_file) = &self.ecdsa_key_file {
-            return read_secret_key_file(key_file);
-        }
-
-        let rand_key = SecretKey::random();
-        println!("Your random ecdsa key is: {}", rand_key.to_string());
-        Ok(rand_key)
-    }
-}
-
-fn read_secret_key_file(path: &str) -> anyhow::Result<SecretKey> {
-    let path = expand_home(path)?;
-    let raw = std::fs::read_to_string(path)?;
-    let Some(key) = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-    else {
-        anyhow::bail!("ECDSA key file contains no key entries");
-    };
-    let key = key.strip_prefix("0x").unwrap_or(key);
-    SecretKey::from_str(key).map_err(|_| anyhow::anyhow!("ECDSA key file contains an invalid key"))
-}
-
-#[derive(Subcommand, Debug)]
-#[command(rename_all = "kebab-case")]
-enum ConnectCommand {
-    #[command(about = "Connects to a node using its URL.")]
-    Node(ConnectUrlCommand),
-    #[command(about = "Connects to a node using its DID via DHT.")]
-    Did(ConnectWithDidCommand),
-    #[command(about = "Connects to a node using its seed from a URL or file.")]
-    Seed(ConnectWithSeedCommand),
-    #[command(
-        about = "Creates a manual-handshake offer targeting a peer DID; prints the encoded offer."
-    )]
-    Offer(ConnectOfferCommand),
-    #[command(
-        about = "Answers a peer's offer; prints the encoded answer to return to the offerer."
-    )]
-    Answer(ConnectAnswerCommand),
-    #[command(about = "Accepts a peer's answer, completing the manual handshake.")]
-    Accept(ConnectAcceptCommand),
-}
-
-#[derive(Args, Debug)]
-struct ConnectUrlCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    node_url: String,
-
-    #[arg(
-        long,
-        help = "Bearer token file for a remote peer that gates its handshake behind its token; not needed by default, since the external handshake (nodeDid, answerOffer) is public",
-        env = "RINGS_REMOTE_API_TOKEN_FILE"
-    )]
-    remote_api_token_file: Option<String>,
-}
-
-#[derive(Args, Debug)]
-struct ConnectWithDidCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    did: String,
-}
-
-#[derive(Args, Debug)]
-struct ConnectWithSeedCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    source: String,
-}
-
-#[derive(Args, Debug)]
-struct ConnectOfferCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    /// DID of the peer this offer targets.
-    did: String,
-}
-
-#[derive(Args, Debug)]
-struct ConnectAnswerCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    /// Encoded offer produced by the peer's `connect offer`, or `-` to read it from stdin.
-    offer: String,
-}
-
-#[derive(Args, Debug)]
-struct ConnectAcceptCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    /// Encoded answer produced by the peer's `connect answer`, or `-` to read it from stdin.
-    answer: String,
-}
-
-#[derive(Subcommand, Debug)]
-#[command(rename_all = "kebab-case")]
-enum PeerCommand {
-    #[command(about = "List peers")]
-    List(PeerListCommand),
-    #[command(about = "Disconnect peer")]
-    Disconnect(PeerDisconnectCommand),
-}
-
-#[derive(Args, Debug)]
-struct PeerListCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-}
-
-#[derive(Args, Debug)]
-struct PeerDisconnectCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    address: String,
-}
-
-#[derive(Subcommand, Debug)]
-#[command(rename_all = "kebab-case")]
-enum SendCommand {
-    #[command(about = "Sends a namespaced message to a peer.")]
-    Message(SendMessageCommand),
-}
-
-#[derive(Args, Debug)]
-struct PubsubCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-    topic: String,
-}
-
-#[derive(Args, Debug)]
-struct SendMessageCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-    to_did: String,
-    namespace: String,
-    data: String,
-}
-
-#[derive(Subcommand, Debug)]
-#[command(rename_all = "kebab-case")]
-enum ServiceCommand {
-    Register(ServiceRegisterCommand),
-    Lookup(ServiceLookupCommand),
-}
-
-#[derive(Args, Debug)]
-struct ServiceRegisterCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    name: String,
-}
-
-#[derive(Args, Debug)]
-struct ServiceLookupCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    name: String,
-}
-
-#[derive(Args, Debug)]
-struct InspectCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
 }
 
 /// Environment variables of the run options removed by the onion loop cutover (#834 D5). Clap
@@ -734,16 +143,107 @@ fn reject_removed_onion_route_env(is_set: impl Fn(&str) -> bool) -> anyhow::Resu
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
+/// Run the node in the foreground until a signal or a service stops it.
+async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
     reject_removed_onion_route_env(|name| env::var_os(name).is_some())?;
     let config_path = args.config_args.config.clone();
     let mut c = config::Config::read_fs(&config_path)?;
+    apply_run_overrides(&mut c, &mut args, &config_path).await?;
+    let pc = ProcessorConfig::try_from(c.clone())?;
+    let api_security = configure_api_security(
+        &config_path,
+        &mut c,
+        args.api_token_path,
+        args.api_allowed_origins,
+        args.allow_remote_external_api,
+    )?;
+    let onion_http_proxy = onion_http_proxy_options(&c)?;
+    let (data_storage, measure_storage) =
+        run_storage_configs(args.storage_path, args.storage_capacity, &c);
+    let processor = build_processor(
+        &pc,
+        data_storage,
+        measure_storage,
+        args.reassembly_profile.limits(),
+    )
+    .await?;
+    println!("Did: {}", processor.swarm.did());
+    let provider = Arc::new(Provider::from_processor(processor.clone()));
+    // The relay is an opt-in extension owning its own engine; install it so the daemon can
+    // serve TCP/UDP tunnels. The handle is unused server-side — the engine lives on inside the
+    // registered interpreters.
+    let _relay =
+        rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
+    let onion = NativeOnionCircuitHandle::install(&provider.extensions())?;
+    let gateway_runner = c
+        .enabled_gateway()
+        .cloned()
+        .map(|config| NativeGatewayRunner::new(processor.clone(), onion.clone(), config))
+        .transpose()?;
+    let gateway_status = gateway_runner
+        .as_ref()
+        .map(NativeGatewayRunner::status_handle);
+    // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
+    // with the other run-owned tasks below and its evidence is the backend's observer.
+    let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap, processor.did())?;
+    let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
+    let stop = StopSource::new();
+    // The Backend decodes inbound custom messages as namespaced envelopes and routes them to
+    // the protocol registry. Its inbox is claimed here, before the processor listens, so no
+    // application data is discarded unclaimed.
+    let application = provider.application_service(
+        bootstrap.as_ref().map(BootstrapSupervisor::observer),
+        stop.token(),
+    )?;
+    let gateway_configured = gateway_runner.is_some();
+    let gateway_task = start_gateway(gateway_runner, stop.token()).await?;
 
-    if let Some(ice_servers) = args.ice_servers {
+    let mut tasks = JoinSet::new();
+    tasks.spawn(serve_application(application, stop.token()));
+    let processor_task = spawn_processor(processor.clone(), stop.token());
+    spawn_apis(
+        &mut tasks,
+        c.internal_api_port,
+        c.external_api_addr,
+        processor.clone(),
+        gateway_status,
+        api_security,
+    );
+    if let Some(supervisor) = bootstrap {
+        let bootstrap_stop = stop.token();
+        tasks.spawn(async move {
+            // Returns only on stop, which the select below requests before aborting the set.
+            supervisor.run(bootstrap_stop).await;
+            Ok(())
+        });
+    }
+    if let Some(proxy_options) = onion_http_proxy {
+        tasks.spawn(async move {
+            run_onion_http_proxy(proxy_options, processor, onion)
+                .await
+                .context("Onion HTTP proxy stopped")
+        });
+    }
+    await_foreground_exit(
+        stop,
+        tasks,
+        gateway_task,
+        processor_task,
+        gateway_configured,
+    )
+    .await
+}
+
+/// Apply the run's command-line overrides to the configuration read from `config_path`.
+async fn apply_run_overrides(
+    c: &mut config::Config,
+    args: &mut RunCommand,
+    config_path: &str,
+) -> anyhow::Result<()> {
+    if let Some(ice_servers) = args.ice_servers.take() {
         c.ice_servers = ice_servers;
     }
-    if let Some(external_ip) = args.external_ip {
+    if let Some(external_ip) = args.external_ip.take() {
         c.external_ip = Some(external_ip);
     }
     if args.webrtc_udp_port_min.is_some() {
@@ -752,19 +252,19 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     if args.webrtc_udp_port_max.is_some() {
         c.webrtc_udp_port_max = args.webrtc_udp_port_max;
     }
-    if let Some(stabilize_interval) = args.stabilize_interval {
+    if let Some(stabilize_interval) = args.stabilize_interval.take() {
         c.stabilize_interval = stabilize_interval;
     }
-    if let Some(source) = args.bootstrap_seed {
+    if let Some(source) = args.bootstrap_seed.take() {
         let seed = Seed::load(source.as_str())
             .await
             .with_context(|| format!("loading bootstrap seed {source}"))?;
         c.bootstrap.peers.extend(seed.peers);
     }
-    if let Some(external_api_addr) = args.external_api_addr {
+    if let Some(external_api_addr) = args.external_api_addr.take() {
         c.external_api_addr = external_api_addr;
     }
-    if let Some(internal_api_port) = args.internal_api_port {
+    if let Some(internal_api_port) = args.internal_api_port.take() {
         c.internal_api_port = internal_api_port;
     }
     if args.advertise_onion_relay {
@@ -774,40 +274,41 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         c.advertise_onion_exit = true;
     }
     if !args.onion_exit_service.is_empty() {
-        c.onion_exit_services = args.onion_exit_service;
+        c.onion_exit_services = std::mem::take(&mut args.onion_exit_service);
     }
     if !args.onion_exit_allow_target.is_empty() {
         c.onion_exit_policy.allowed_targets =
-            parse_onion_exit_targets(args.onion_exit_allow_target)?;
+            parse_onion_exit_targets(std::mem::take(&mut args.onion_exit_allow_target))?;
     }
     if !args.onion_exit_deny_target.is_empty() {
-        c.onion_exit_policy.denied_targets = parse_onion_exit_targets(args.onion_exit_deny_target)?;
+        c.onion_exit_policy.denied_targets =
+            parse_onion_exit_targets(std::mem::take(&mut args.onion_exit_deny_target))?;
     }
-    if let Some(max_circuits) = args.onion_exit_max_circuits {
+    if let Some(max_circuits) = args.onion_exit_max_circuits.take() {
         c.onion_exit_policy.max_circuits = max_circuits;
     }
-    if let Some(max_streams_per_circuit) = args.onion_exit_max_streams_per_circuit {
+    if let Some(max_streams_per_circuit) = args.onion_exit_max_streams_per_circuit.take() {
         c.onion_exit_policy.max_streams_per_circuit = max_streams_per_circuit;
     }
-    if let Some(max_bytes_per_minute) = args.onion_exit_max_bytes_per_minute {
+    if let Some(max_bytes_per_minute) = args.onion_exit_max_bytes_per_minute.take() {
         c.onion_exit_policy.max_bytes_per_minute = max_bytes_per_minute;
     }
-    if let Some(interval_secs) = args.onion_exit_heartbeat_interval_secs {
+    if let Some(interval_secs) = args.onion_exit_heartbeat_interval_secs.take() {
         c.onion_exit_heartbeat_interval_secs = interval_secs;
     }
-    if let Some(ttl_secs) = args.onion_exit_ttl_secs {
+    if let Some(ttl_secs) = args.onion_exit_ttl_secs.take() {
         c.onion_exit_ttl_secs = ttl_secs;
     }
-    if let Some(addr) = args.onion_http_proxy_addr {
+    if let Some(addr) = args.onion_http_proxy_addr.take() {
         c.onion_http_proxy_addr = Some(addr);
     }
-    if let Some(service) = args.onion_http_proxy_service {
+    if let Some(service) = args.onion_http_proxy_service.take() {
         c.onion_http_proxy_service = service;
     }
-    if let Some(timeout_secs) = args.onion_http_proxy_header_timeout_secs {
+    if let Some(timeout_secs) = args.onion_http_proxy_header_timeout_secs.take() {
         c.onion_http_proxy_header_timeout_secs = timeout_secs;
     }
-    if let Some(max_connections) = args.onion_http_proxy_max_connections {
+    if let Some(max_connections) = args.onion_http_proxy_max_connections.take() {
         c.onion_http_proxy_max_connections = max_connections;
     }
     if args.gateway {
@@ -820,36 +321,35 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         };
         gateway.enabled = true;
     }
-    let pc = ProcessorConfig::try_from(c.clone())?;
-    let api_security = configure_api_security(
-        &config_path,
-        &mut c,
-        args.api_token_path,
-        args.api_allowed_origins,
-        args.allow_remote_external_api,
-    )?;
+    Ok(())
+}
 
-    let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
-    let onion_http_proxy_service = c.onion_http_proxy_service.clone();
-    let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
-    let onion_http_proxy_max_connections = c.onion_http_proxy_max_connections;
-    let gateway_config = c.enabled_gateway().cloned();
-
-    let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
-        let storage_path = Path::new(&storage_path);
-        let data_path = storage_path.join("data").to_string_lossy().to_string();
-        let measure_path = storage_path.join("measure").to_string_lossy().to_string();
-        let capacity = args
-            .storage_capacity
-            .unwrap_or(config::DEFAULT_STORAGE_CAPACITY);
-        (
-            config::StorageConfig::new(&data_path, capacity),
-            config::StorageConfig::new(&measure_path, capacity),
-        )
-    } else {
-        (c.data_storage, c.measure_storage)
+/// The data and measure storage of the run: under `storage_path` when given, else as configured.
+fn run_storage_configs(
+    storage_path: Option<String>,
+    storage_capacity: Option<u32>,
+    c: &config::Config,
+) -> (config::StorageConfig, config::StorageConfig) {
+    let Some(storage_path) = storage_path else {
+        return (c.data_storage.clone(), c.measure_storage.clone());
     };
+    let storage_path = Path::new(&storage_path);
+    let data_path = storage_path.join("data").to_string_lossy().to_string();
+    let measure_path = storage_path.join("measure").to_string_lossy().to_string();
+    let capacity = storage_capacity.unwrap_or(config::DEFAULT_STORAGE_CAPACITY);
+    (
+        config::StorageConfig::new(&data_path, capacity),
+        config::StorageConfig::new(&measure_path, capacity),
+    )
+}
 
+/// Open the run's stores and build its processor over them.
+async fn build_processor(
+    pc: &ProcessorConfig,
+    data_storage: config::StorageConfig,
+    measure_storage: config::StorageConfig,
+    reassembly_limits: ReassemblyLimits,
+) -> anyhow::Result<Arc<Processor>> {
     let per_data_storage = Box::new(
         FileStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path.clone())
             .await?,
@@ -871,10 +371,13 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         )
         .await?,
     );
+    // The replay store is the only copy of its streams' state: its writes are flushed and an
+    // undecodable record is reported and kept, so replay fails closed on it (#909).
     let per_transaction_replay_storage = Box::new(
-        FileStorage::new_with_cap_and_path(
+        FileStorage::new_with_cap_path_and_authority(
             TRANSACTION_REPLAY_STORAGE_CAPACITY,
             transaction_replay_storage_path(&data_storage.path),
+            RecordAuthority::Authoritative,
         )
         .await?,
     );
@@ -888,111 +391,96 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     )
     .await?;
 
-    let processor = Arc::new(
-        ProcessorBuilder::from_config(&pc)?
+    Ok(Arc::new(
+        ProcessorBuilder::from_config(pc)?
             .storage(per_data_storage)
             .onion_entry_guard_storage(per_onion_entry_guard_storage)
             .replay_storage(per_transaction_replay_storage)
             .measure(measure)
-            .reassembly_limits(args.reassembly_profile.limits())
+            .reassembly_limits(reassembly_limits)
             .build()?,
-    );
-    println!("Did: {}", processor.swarm.did());
-    let provider = Arc::new(Provider::from_processor(processor.clone()));
-    // The relay is an opt-in extension owning its own engine; install it so the daemon can
-    // serve TCP/UDP tunnels. The handle is unused server-side — the engine lives on inside the
-    // registered interpreters.
-    let _relay =
-        rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
-    let onion = NativeOnionCircuitHandle::install(&provider.extensions())?;
-    let gateway_runner = gateway_config
-        .map(|config| NativeGatewayRunner::new(processor.clone(), onion.clone(), config))
-        .transpose()?;
-    let gateway_status = gateway_runner
-        .as_ref()
-        .map(NativeGatewayRunner::status_handle);
-    // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
-    // with the other run-owned tasks below and its evidence is the backend's observer.
-    let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap, processor.did())?;
-    let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
-    // The Backend decodes inbound custom messages as namespaced envelopes and routes
-    // them to the protocol registry.
-    let backend = Backend::new(provider);
-    let backend = match bootstrap.as_ref() {
-        Some(supervisor) => backend.observed_by(supervisor.observer()),
-        None => backend,
-    };
-    processor.swarm.set_callback(Arc::new(backend))?;
+    ))
+}
 
-    let stop = StopSource::new();
-    let gateway_configured = gateway_runner.is_some();
-    let gateway_stop = stop.token();
-    let (gateway_started, gateway_startup) = tokio::sync::oneshot::channel();
-    let mut gateway_task = tokio::spawn(async move {
-        match gateway_runner {
-            Some(runner) => {
-                runner
-                    .run_with_startup_barrier(gateway_stop, gateway_started)
-                    .await
-            }
+/// The onion HTTP proxy the configuration asks for, if any.
+fn onion_http_proxy_options(c: &config::Config) -> anyhow::Result<Option<OnionHttpProxyOptions>> {
+    let Some(addr) = c.onion_http_proxy_addr.as_deref() else {
+        return Ok(None);
+    };
+    Ok(Some(OnionHttpProxyOptions {
+        listen_addr: addr.parse::<SocketAddr>()?,
+        service: c.onion_http_proxy_service.clone(),
+        max_connections: c.onion_http_proxy_max_connections,
+        header_timeout: Duration::from_secs(c.onion_http_proxy_header_timeout_secs),
+    }))
+}
+
+/// Start the gateway task, if one is configured, and wait for its startup barrier.
+async fn start_gateway(
+    runner: Option<NativeGatewayRunner>,
+    stop: StopToken,
+) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
+    let configured = runner.is_some();
+    let (started, startup) = tokio::sync::oneshot::channel();
+    let mut task = tokio::spawn(async move {
+        match runner {
+            Some(runner) => runner.run_with_startup_barrier(stop, started).await,
             None => std::future::pending::<anyhow::Result<()>>().await,
         }
     });
-    await_gateway_startup(gateway_configured, gateway_startup, &mut gateway_task).await?;
+    await_gateway_startup(configured, startup, &mut task).await?;
+    Ok(task)
+}
 
-    let mut tasks = JoinSet::new();
-    let processor_task = processor.clone();
-    let processor_stop = stop.token();
-    let mut processor_task = tokio::spawn(async move {
-        processor_task.listen_with(processor_stop.clone()).await;
-        if processor_stop.should_stop() {
-            Ok(())
-        } else {
-            anyhow::bail!("node processor listener stopped unexpectedly")
-        }
-    });
+/// Serve the internal API on port `internal` and the external API at `external`.
+fn spawn_apis(
+    tasks: &mut JoinSet<anyhow::Result<()>>,
+    internal: u16,
+    external: String,
+    processor: Arc<Processor>,
+    gateway_status: Option<GatewayStatusHandle>,
+    api_security: Arc<ApiSecurity>,
+) {
     let internal_processor = processor.clone();
-    let internal_gateway = gateway_status.clone();
     let internal_security = api_security.clone();
     tasks.spawn(async move {
         run_internal_api_with_gateway(
-            c.internal_api_port,
+            internal,
             internal_processor,
-            internal_gateway,
+            gateway_status,
             internal_security,
         )
         .await
         .context("internal API stopped")
     });
-    let external_processor = processor.clone();
     tasks.spawn(async move {
-        run_external_api(c.external_api_addr, external_processor, api_security)
+        run_external_api(external, processor, api_security)
             .await
             .context("external API stopped")
     });
-    if let Some(supervisor) = bootstrap {
-        let bootstrap_stop = stop.token();
-        tasks.spawn(async move {
-            // Returns only on stop, which the select below requests before aborting the set.
-            supervisor.run(bootstrap_stop).await;
-            Ok(())
-        });
-    }
-    if let Some(onion_http_proxy_addr) = onion_http_proxy_addr {
-        let onion_http_proxy_addr = onion_http_proxy_addr.parse::<SocketAddr>()?;
-        let proxy_options = OnionHttpProxyOptions {
-            listen_addr: onion_http_proxy_addr,
-            service: onion_http_proxy_service,
-            max_connections: onion_http_proxy_max_connections,
-            header_timeout: Duration::from_secs(onion_http_proxy_header_timeout_secs),
-        };
-        tasks.spawn(async move {
-            run_onion_http_proxy(proxy_options, processor, onion)
-                .await
-                .context("Onion HTTP proxy stopped")
-        });
-    }
+}
 
+/// Run the processor's listener until `stop`; stopping before it is an error.
+fn spawn_processor(processor: Arc<Processor>, stop: StopToken) -> JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move {
+        processor.listen_with(stop.clone()).await;
+        if stop.should_stop() {
+            Ok(())
+        } else {
+            anyhow::bail!("node processor listener stopped unexpectedly")
+        }
+    })
+}
+
+/// Wait for a signal or the first service to exit, then stop everything: the services at once,
+/// the gateway and the processor through their cleanup.
+async fn await_foreground_exit(
+    stop: StopSource,
+    mut tasks: JoinSet<anyhow::Result<()>>,
+    mut gateway_task: JoinHandle<anyhow::Result<()>>,
+    mut processor_task: JoinHandle<anyhow::Result<()>>,
+    gateway_configured: bool,
+) -> anyhow::Result<()> {
     enum ForegroundExit {
         Signal(anyhow::Result<()>),
         Service(Option<Result<anyhow::Result<()>, JoinError>>),
@@ -1342,6 +830,7 @@ mod tests {
     use clap::CommandFactory;
     use clap::FromArgMatches;
     use rings_node::logging::LogLevel;
+    use rings_node::prelude::rings_core::message::TRANSACTION_REPLAY_STORE_MAX_BYTES;
 
     use super::await_gateway_startup;
     use super::await_task_cleanup;
@@ -1351,6 +840,7 @@ mod tests {
     use super::transaction_replay_storage_path;
     use super::Cli;
     use super::REMOVED_ONION_ROUTE_ENV;
+    use super::TRANSACTION_REPLAY_STORAGE_CAPACITY;
 
     /// A set environment variable of a removed route-length option is rejected by name; an
     /// environment without one passes.
@@ -1419,6 +909,20 @@ mod tests {
             onion_entry_guard_storage_path("/tmp/rings/data"),
             "/tmp/rings/onion-entry-guards"
         );
+    }
+
+    /// A full replay store always fits the native replay store's budget, so the stream-count bound,
+    /// not the store's budget, is what fails closed.
+    #[test]
+    fn test_transaction_replay_storage_holds_a_full_store() -> Result<(), std::num::TryFromIntError>
+    {
+        // The shared-stream snapshot a pre-#898 node left: 4096 streams, each a 91-byte key
+        // with its 10-byte last sequence and a 91-byte key with its 1066-byte window, plus
+        // length prefixes, and its file record's key framing.
+        const SHARED_STREAM_SNAPSHOT_MAX_BYTES: usize = 12 + 4096 * (2 * 91 + 10 + 1066) + 64;
+        let capacity = usize::try_from(TRANSACTION_REPLAY_STORAGE_CAPACITY)?;
+        assert!(TRANSACTION_REPLAY_STORE_MAX_BYTES + SHARED_STREAM_SNAPSHOT_MAX_BYTES <= capacity);
+        Ok(())
     }
 
     #[test]

@@ -2,6 +2,215 @@
 
 ## Unreleased
 
+- A delegation reference is a bounded, renewable lease, and nothing is held (#908). A frame
+  whose reference missed was held for a repair round trip and released out of order, so later
+  frames of its class could pass replay admission first and the released frame was lost as
+  stale; the hold also had its own node-wide budget and sweep. Breaking changes:
+  - Wire cutover: `LinkControl::{Request, Announce}` are removed, and the tags change.
+    `Known { digest, remaining_ms }` grants a lease of `min(exp, now + 5 min) − now` and
+    carries it as a remaining duration, so no clock is compared with another; the sender
+    counts it from the instant it receives it. `Unknown(digest)` is a stateless disclaimer.
+    The laws are in
+    [Delegation references on a link](docs/src/advanced-topic/delegation-references.md).
+  - The receiver keeps at most 128 leases per link, 8 of them reserved for the link peer's own
+    delegation. It never reclaims a lease before its grace (one delivery bound past its end)
+    ends, and reclaims ended ones only when it needs room for a new lease, so a frame that
+    waits in its lane still resolves. When every lease is still in its grace it refuses a new
+    one, and the sender keeps sending that delegation inline.
+  - Only a frame that verified grants or renews a lease. A reference that finds less than half
+    a lease left renews it.
+  - Core: the session-link hold, its sweep, its release task and the node-wide hold budget are
+    removed. The frames of one lane reach the logical stage in arrival order. A link-control
+    send waits for credit at most one delivery bound.
+  - A miss is dropped uncharged, and the sender told `Unknown(digest)`, after which it sends
+    the delegation inline again.
+  - The sender refuses to send a frame with a delegation that expires within one delivery
+    bound (25 s), with the new local error `Error::DelegationExpiresWithinMargin`, which is not
+    charged to the next hop. An origin delegation that expired in flight, within one delivery
+    bound of arrival, is dropped without charging the hop that carried it, only when the rest
+    of the frame verifies: the hop's proof now, and the origin's proof at its expiry.
+  - `message::REORDER_DEADLINE` is re-derived as four delivery bounds, assuming at most four
+    hops left to cross on a superseded path when a route or a hop's connection generation
+    changes mid-stream; its value is unchanged (100 s).
+
+- Read and write the node's YAML configuration with `serde-saphyr` instead of the deprecated
+  `serde_yaml`, whose `unsafe-libyaml` RustSec now lists as unmaintained (RUSTSEC-2024-0449).
+  Configuration documents are unchanged. `Error::SerdeYamlError` wraps a boxed `serde_saphyr::Error`.
+
+- The built-in stream consumers detect a lost message instead of passing on a stream with a
+  silent gap (#939). Since #935 application delivery is lossy by design, so the TCP relay
+  wrote a byte stream with a hole in it and an E2E stream waited forever for a lost frame.
+  Breaking changes:
+  - Relay wire: a TCP `Frame::Data` carries its direction's `seq`, and `Frame::Shutdown` the
+    number `sent` of segments before it; a UDP datagram travels as the new `Frame::Datagram`.
+    A TCP receiver writes segments to its local socket in `seq` order only, reordering at most
+    `REORDER_WINDOW` segments ahead, and applies a FIN once every segment it
+    counted is written. A gap still open after `REORDER_DEADLINE`, a segment past the window,
+    or segments that contradict the stream reset the session: the peer gets `Close`, and the
+    local socket an abortive close. Every abrupt end (a reset, an overlay or socket failure, a
+    peer `Close`, idleness) now closes the local socket abortively (RST) instead of with a FIN,
+    so a local client sees a clean end of stream only once it received every byte. UDP flows
+    stay unsequenced and lossy. `RelayEffect::Write` gains `seq`, `RelayEffect::Shutdown` gains
+    `sent`, and `RelayEffect::SendDatagram` is new.
+  - E2E: `E2eStreamDecryptor::new` takes the creation time `now_ms` and `with_reorder_window`
+    becomes a builder; `decrypt_next` takes the frame's arrival time, and the new
+    `check(now_ms)` reports a stream
+    that made no progress for its stall deadline (`REORDER_DEADLINE`, or
+    `with_stall_deadline`) as `Error::E2eStreamStalled`, whether the lost frame is the first, a
+    middle or the final one. The default reorder window is `REORDER_WINDOW`, 32, and
+    `DEFAULT_E2E_REORDER_WINDOW_FRAMES` (64) is removed. Node: `Processor::check_e2e_stream` polls a stream with the node's clock.
+  - Core: `message::REORDER_WINDOW` (the replay window) bounds how many later frames of one
+    stream may overtake a frame that still arrives, and `message::REORDER_DEADLINE` (four
+    delivery bounds, 100 s) how late it may arrive after a later one.
+  - Cutover: a relay wire change, incompatible with the previous release.
+
+- Core never calls, awaits or consults application code (#935). Since 2022 core awaited
+  application hooks inside its own processing (`custom_message`/`builtin_message`, then
+  `SwarmCallback::on_validate`/`on_inbound`/`on_event` under a 30 s per-payload deadline on every
+  lane, lane 0 included), and since #924's lossless credit an application stall held the sender's
+  credit, coupling nodes through the application. Breaking changes:
+  - `SwarmCallback`, `SharedSwarmCallback`, `Swarm::set_callback` and `SwarmBuilder::callback`
+    are removed, with the application validation veto, the inbound callback deadline and its
+    errors (`InboundValidationFailed`, `InboundValidationTimeout`, `InboundCallbackFailed`,
+    `InboundProcessingTimeout`, `InboundTimerUnavailable`) and the callbacks' error type
+    `error::CallbackError`.
+  - New `swarm::application`: `Swarm::application_inbox()` claims, once, a bounded ordered inbox
+    of `ApplicationDelivery` items: `Message(ApplicationMessage)`, only application data
+    (`ApplicationData::{Custom, E2eHandshakeRequest, E2eHandshakeResponse, E2eStreamFrame}`),
+    and `Event(SwarmEvent)`. No control message has a representation there. The application
+    reads it with `ApplicationInbox::next`, or `try_next` without waiting.
+  - Application delivery is lossy by design. Core never waits on the application, not even
+    through a full inbox: a live application message that does not fit is dropped, counted
+    (`ApplicationInbox::dropped`) and logged at `warn`, as a best-effort network drops it, and
+    no inbound lane waits for the application to read. Nothing tells the sender: a protocol
+    that needs a reliable stream must detect and recover loss end to end (#939). The bound,
+    `APPLICATION_INBOX_WEIGHT` (64 MiB), weighs each message by its own size plus the byte
+    length of its data, one rule for every kind, so empty messages are bounded too. Before the
+    application claims the inbox, live messages are discarded and peer facts kept.
+  - Relay-inbox mail is offered to the application only through a reservation of room in the
+    inbox, and retired from storage once the application has taken it from the inbox. Taking
+    ends core's custody: what the application does with the message afterwards is its own,
+    and the node `Backend` may drop it beyond its own namespace queues, counted. Delivery is at
+    least once within a run; a restart between the taking and the retirement loses the mail,
+    as the replay window refuses its redelivery (#936). Mail that finds no room or no reader
+    stays stored for a later pass, as does mail whose origin's quota is spent for now (that
+    origin's later mail is skipped and other origins' still offered) and mail whose admission
+    failed in the local replay store. A drain pass verifies only the elements it has not
+    handed over yet and retires every element it is done with by one removal. An element
+    whose witness fails for any reason but the clock gate is logged at `warn` and left
+    stored.
+  - `Swarm::send_message` and `Swarm::send_direct_message` take `ApplicationData` instead of
+    any `Message`, so the application cannot originate core's protocol messages; `Message`
+    implements `From<ApplicationData>`, the inverse of the inbound projection, and
+    `ApplicationData::custom` builds a custom message.
+  - `SwarmEvent` carries only logical facts, `PeerAdmitted` and `PeerRetired`;
+    `ConnectionStateChange`, `PeerTransition` and `peer_transition` are removed. Messages and
+    facts share the inbox's one queue, in the order core produced them, and an unread
+    `PeerAdmitted` is withdrawn by its `PeerRetired`. A connection's admission is announced in
+    the critical section that activates it and its retirement in the one that removes it, so
+    every admitted generation is announced both ways, in the order decided, and the per-peer
+    delivery turns are removed. `Swarm::is_peer_admitted` reads the active record.
+  - `Swarm::lookup_successor` returns `SuccessorLookup::Routed(SuccessorReport)`, a handle that
+    resolves to the reported successor; a report no live handle awaits is dropped by core.
+    `SuccessorReport::tx_id`, `FindSuccessorReport::is_application_lookup` and the unused
+    `FindSuccessorReportHandler::CustomCallback` are removed.
+  - Delegated admission is data: `Swarm::set_admission_delegation(prefix, MessageLimit)`
+    registers an encoded namespace prefix as `Delegated` (or `Enforced` again), which core
+    matches on admission; the node publishes each protocol's declaration when it installs the
+    protocol.
+  - Node: `Backend::serve(inbox, stop)` consumes the inbox until the swarm is gone or `stop` is
+    requested; `Backend::handle` is removed. The backend dispatches each registered namespace on
+    its own queue, bounded by 256 envelopes and by 16 MiB of encoded envelopes (an empty queue
+    admits any one envelope), in arrival order, so one slow protocol holds back neither another
+    namespace nor the peer facts. An envelope that cannot be decoded, names no registered
+    namespace, finds its queue full or its namespace unserved is dropped, logged at `warn` and
+    counted by reason: `Provider::dispatch_drop_counters` and the FFI request
+    `dispatchDropCounters` read the counts. Facts and E2E messages reach the `BackendObserver`
+    at once, so they may overtake custom messages still queued for a namespace. Register
+    protocols before claiming the inbox: from the claim on, an envelope of a namespace not yet
+    registered is dropped. `Provider::application_service(observer, stop)` claims the inbox and
+    returns the future that serves it with the `Backend`; `Provider::set_backend` runs that
+    future on a detached task, never stopped. `BackendObserver`'s methods have default bodies;
+    it loses `lookup_report` (the bootstrap probe awaits its `SuccessorReport`) and gains
+    `e2e_message`. The FFI provider serves the inbox with the extension `Backend` on its runtime
+    until the handle is destroyed, and retains at most 4096 E2E events for its caller, dropping
+    further ones, counted (`takeE2eEvents` reports the cumulative `dropped`).
+
+- Refuse a delegation signature that is not its algorithm's exact length (#933). BIP-137
+  recovery sliced the first 65 bytes of a peer-supplied signature and panicked on a shorter one;
+  it now converts exactly. Every signer refuses any length but its algorithm's
+  (`SignatureAlgorithm::signature_len`) by one gate: recovering a key from a recoverable
+  signature (Secp256k1, EIP-191, BIP-137), and taking an explicit key from a signature, fail
+  with the new error `InvalidSignatureLength`, while verifying a Secp256r1, Ed25519 or
+  BLS12-381 signature returns `false`. So a verified delegation's signature is at most
+  96 bytes.
+
+- Remove the WebTransport-backed browser relay (#805). The browser `RelayHandle` with
+  `register_wt_service` and `register_wt_udp_service`, its interpreter, and its session engine are
+  gone, and the relay protocol and `extension::transport` now build for native targets only, where
+  their one interpreter runs. Native TCP/UDP relay, WebRTC transport, and browser onion HTTPS are
+  unchanged. Wasm builds no longer set `--cfg=web_sys_unstable_apis`, and `rings-node` drops the
+  WebTransport and stream `web-sys` features.
+
+- Rewrite SECURITY.md, README.md, ROADMAP.md, and llms.txt to be short and current: SECURITY.md
+  adds private vulnerability reporting and states the Sybil boundary once (#780); README.md leads
+  with what Rings offers, how to try it, and the pre-1.0 status; ROADMAP.md states the 1.0 and 2.0
+  milestones; llms.txt gains a Status section. Install commands name the pinned toolchain with
+  `--locked`, because the workspace denies warnings.
+
+- Fail a bad transaction replay record closed on its own stream only, and restore the replay store
+  once (#910). A record that does not restore (torn, corrupt, unreadable, misplaced, or holding an
+  invalid window) used to leave the whole replay store unloaded: every later reservation and
+  admission re-read the whole store (up to 32,768 records) under the replay lock and failed again,
+  so the node could neither sign nor accept traffic. Now the store is restored from one scan and
+  cached; each bad record is kept, logged once, and counted (`ReplayCounters::unrestorable_record`),
+  and only the stream it is filed as refuses reservation and admission, with
+  `Error::TransactionReplayStreamUnavailable { key, record }` (counted in
+  `ReplayCounters::unavailable_stream`). Every other stream in the store runs normally; each bad
+  record holds one slot of both tables' stream bounds. An operator clears one stream by removing the
+  named record with the node stopped (see the replay chapter). An absent record still restarts its
+  stream from `First` (#915), as does a stream whose record was moved or renamed away; the file it
+  lands in is undecodable for its own name. Each reservation and admission now runs detached from
+  its caller (`rings_runtime::run_detached`): a caller cancelled mid-transition no longer lets a
+  stale record write land after a newer one, and its transition commits (its admission is charged
+  and its sequence consumed) exactly as if the caller had dropped the verdict.
+
+- Open the native transaction replay store as an authoritative `FileStorage` (#909). On unix its
+  `put` flushes the temporary file before the rename and the directory after it (removals, and the
+  store's directory and its ancestors at open, are flushed too), so a crash leaves each record whole
+  at its previous or its new value; the write and removal plans are data the store interprets, and a
+  model checks every crash point of them. A record file that cannot be read or is not the whole
+  record of its own key is reported (`Error::StorageRecordUndecodable`, naming its file; a scan
+  reports each record as `ScannedRecord::Filed` or `Undecodable`) and never deleted, so replay fails
+  closed on it instead of reopening its stream. A disposable store now also retires a record holding
+  another key's record on the read that finds it, instead of returning it from `get_all`. An
+  authoritative store evicts nothing: a write beyond its budget, or an open under a lowered one,
+  fails with `Error::StorageBudgetExhausted`. The flush bounds replay transitions to about 50 per
+  second on an Apple M1 Max SSD (`F_FULLFSYNC`), against about 4,500 unflushed; group commit is
+  tracked in #916. `FileStorage::new_with_cap_and_path` keeps the disposable behaviour (no flush,
+  oldest records evicted, undecodable records retired) for the DHT, measurement, evidence and onion
+  entry-guard stores (the entry-guard store's policy is #911);
+  `FileStorage::new_with_cap_path_and_authority` opens a store of either `RecordAuthority`.
+
+- `rings_runtime::run_blocking` (#919): fallible scheduling on the native blocking pool, with the
+  ownership law of `run_detached` (the work starts at the call and outlives a dropped waiter);
+  `Unavailable` outside a runtime, `Abandoned` when the work panicked or its runtime shut down
+  first.
+
+- Keep up to `OUTBOUND_LANE_WINDOW` (8) transfers in flight per outbound class lane instead of
+  waiting for each delivery before the next (#899). On native, a delivery is the peer's SCTP
+  SACK, which the receiver delays by up to 200 ms; a stop-and-wait lane paid that per message.
+  On native loopback, 512 awaited 16 KiB sends go from 13.9 to about 1360 messages/s with no
+  send over 150 ms. Each class lane is pinned to one data channel, so a class's frames arrive in
+  lane order, and the window stays below the 32-sequence replay window. Transfers still start in
+  FIFO order, chunked transfers stay contiguous, and each transfer keeps its capacity permit and
+  delivery outcome. The window pipelines whole transfers: a chunked message still admits its
+  next frame only once the previous one is delivered, so it pays the per-frame delayed-ACK tail
+  and holds its lane's wire until its last frame is admitted. A frame's delivery deadline now
+  measures a stall: it expires only after a full deadline with no confirmed delivery on the
+  connection since its admission, so a slow link draining a full window never expires the frames
+  queued behind the head.
+
 - Confirm WebRTC delivery on the data channel's `bufferedamountlow`, `close` and `error`
   events instead of polling `bufferedAmount` every 300 ms (#887). Each channel multiplexes its
   single low-water threshold over every pending send, so an awaited send resolves on the event
@@ -45,6 +254,183 @@
   - A WebRTC step of an attempt that lost its slot reports `ConnectionAttemptSuperseded` when the
     peer's handshake took it, which is what surfaced as `Local connection closed` from a creating
     offer, and the new `ConnectionAttemptCancelled` when anything else released it.
+  - The envelope reserves account for the path: `MAX_CHUNK_ENVELOPE_OVERHEAD` is 912 (a chunk
+    frame carries no path, one byte for its absence) and `MAX_PAYLOAD_ENVELOPE_OVERHEAD` is 3697,
+    which covers the widest path an honest connect-signaling carrier records (a full hop budget
+    of relays); a whole payload within about 2.7 KB of the data-channel limit is now chunked.
+
+- `FileStorage`'s `KvStorageInterface<V>` (and its new `KvStorageScan<V>`) require `V: Send` as
+  well as `Sync` (#909), since values cross to the blocking pool; `RecordAuthority` is
+  `#[non_exhaustive]`.
+- The native daemon's replay store flushes every write (#909), so the node-wide ceiling of replay
+  transitions (every inbound admission and every sender reservation) falls from about 4,500 to about
+  50 per second on an Apple M1 Max SSD (`F_FULLFSYNC`); group commit is tracked in #916.
+- `ReplayCounters` gains the public fields `unrestorable_record` and `unavailable_stream` (#910); it
+  is not `#[non_exhaustive]`, so a downstream struct literal or exhaustive pattern must add them.
+- `ReplayStorage` boxes a `KvStorageScan<ReplayRecord>` (#910), a new trait over
+  `KvStorageInterface` with two required methods: `scan` (every record as a `ScannedRecord`,
+  `Filed` under its own key's name or `Undecodable` for the name it was found under; deleting
+  nothing) and `record_name` (the name a key's record is filed under), bound by the agreement law
+  on the trait. `MemStorage`, `FileStorage` and `IdbStorage` implement it; a custom replay storage
+  passed to `SwarmBuilder::replay_storage` or `ProcessorBuilder::replay_storage` must implement it
+  too.
+- Every `FileStorage` operation, disposable stores' included, runs its file I/O on the runtime's
+  blocking pool (#909, #919) and fails with `Error::StorageWorkUnscheduled` outside a Tokio
+  runtime.
+
+- Pin each outbound class lane to one data channel of a connection (#906). The transport pool
+  selects a channel by lane, `channel(lane) = pool[lane mod |pool|]`, instead of rotating over
+  the channels, so the messages of one lane reach the remote handler in send order and a
+  receiver handler stalled on one channel holds only that channel's lane. Core sends DHT control
+  (and link control), storage, end-to-end and application traffic on lanes 0 to 3.
+  `ConnectionInterface::send_message_with_permit` takes a `ChannelLane`; `send_message` uses the
+  default lane. `RoundRobin` and `RoundRobinPool` become `LanePool` and `ChannelPool`, `select`
+  takes the lane, and `Error::RoundRobinPoolEmpty` becomes `Error::ChannelPoolEmpty`. No wire
+  change.
+
+- Key transaction replay by traffic class: `StreamKey = (network, origin, destination, class)`
+  (#898). One stream shared by every class let DHT control traffic overtake an application
+  backlog by more than the replay window, so honest transactions were rejected as
+  `TransactionSequenceStale`. The class is implied by each transaction's signed message, so the
+  wire format is unchanged, but replay is not interoperable across the upgrade: an upgraded
+  sender's per-class sequences are stale to a node that has not upgraded. **This release is a
+  mandatory network-wide upgrade, seeds included.** The replay store keeps one record per stream
+  under `rings-core:transaction-replay:stream:{sender|receiver}:<key>` instead of one snapshot, so
+  an admission writes only its stream's record (at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`,
+  1161 bytes) rather than rewriting every stream; `ReplayStorage` stores the opaque
+  `ReplayRecord`, which replaces `ReplaySnapshot`. The first load deletes the former
+  `rings-core:transaction-replay` snapshot without decoding it, resetting every replay window
+  once as deleting the store does; the deletion is best effort (a failure is counted and logged,
+  admission continues, and the next load retries it). Each replay table now holds
+  `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 × 4096 streams, every class stream of 4096
+  account-destination pairs; a full store is at most `TRANSACTION_REPLAY_STORE_MAX_RECORDS`
+  records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (about 27 MiB), and the native file store's
+  budget (40 MiB) and the browser store's row capacity are sized so they never evict a replay
+  record. `StreamKey::new` takes the class, `Transaction::stream_key` returns a `Result`,
+  `Transaction::class` is new, and `PayloadSender`'s send and originate methods take a `Message`
+  instead of any `Serialize` value, with `reserve_transaction_sequences` taking the class.
+
+- Collect data-topic tombstones at a retention horizon and remove compaction (#867, #872, #874,
+  #871). Each data-topic element now expires on its own, a value is kept only by writing it again,
+  a removal wins over every earlier write of its value, and removals are collected by the clock
+  instead of by a compaction. The rule is stated once, in the DHT chapter's
+  [data-topic storage](docs/src/advanced-topic/chord.md#data-topic-storage) section, and in
+  `dht::entry::retention`.
+  - `Entry::retired_at` applies the rule on every read and stored value, a read serves that
+    projection while it is live, and `SyncedEntryAck::confirms_local_value` takes the clock it
+    compares at.
+  - `EntryOperation::CompactData`, `Entry::compact_data` and `storage_compact_data` (core and
+    node) are removed: a compaction floor erased concurrent adds its owner never received (#867).
+    Both registries are bounded by the horizon alone (#871).
+  - `EntryTombstone` holds a Keccak-256 `ElementDigest` and the greatest dot it covers, at most
+    one per value (#874).
+  - A carrier past its bound answers lookups as absent, from a replica and from a fetch cache,
+    and a read that retires part of a stored carrier writes the projection back. The new
+    `Swarm::storage_fetch_mark` and `Swarm::storage_fetch_answered_since` are the fetch's
+    reply marker: a fetcher reads a mark before fetching and learns when its key was answered
+    after it, which a projected cache value cannot show.
+  - `PeerRing::storage` and `PeerRing::cache` are crate-private, so every read outside core goes
+    through the projection (`Swarm` lookups, `inspect`).
+  - Registry heartbeat intervals must be below 595 s; a node configured above it refuses to
+    start (see [config.yaml](docs/src/advanced-topic/config.yaml.md#presence-and-onion-registries)).
+  - `RecordAuthority` moves from `rings_core::storage::file` to `rings_core::storage`, one type
+    whose shared law is the decode law. IndexedDB stores take one too:
+    `IdbStorage::new_with_cap_and_name` is disposable and the new
+    `IdbStorage::new_with_cap_name_and_authority` takes the authority; the browser replay store
+    is authoritative, as on native (#909). An IndexedDB `scan` deletes nothing.
+  - Cutover: the storage wire format changes, so a network upgrades together. It is
+    incompatible with 0.32.x; this targets 0.33.0.
+    - Native: an old carrier holding a tombstone no longer decodes and is retired on first
+      read. One without still decodes, its elements read as the bytes of their old base58
+      text. A data topic serves those as values until the element horizon, `lookupService` and
+      `fetchTopicMessages` included. A relay inbox's held messages fail its witness: they are
+      never delivered, and their carrier is never accepted by a hand-off. Core keeps no code
+      for stores from before the cutover, so **operators clear each native node's DHT data
+      store before upgrading**: the `data_storage` path of the configuration, or the `data`
+      directory under `rings run --storage-path` when that flag overrides it. Data topics and
+      registries are repopulated by their next writes, and every message held at the upgrade
+      is lost. The same clear is due on every later change of the codec of `HeldMessage`,
+      `MessagePayload` or `Message`: core keeps no compatibility code, and a held message
+      under another codec fails its witness for good.
+    - Browser: every non-empty old carrier is refused and retired on first read.
+    - A storage hand-off now skips an entry the receiver cannot admit, without acknowledging
+      it, instead of rejecting its batch; only a placement outside the entry's replica set
+      rejects the batch. So an old carrier holds back no other entry.
+
+- Make receive-side admission lossless with per-lane credit flow control in the transport (#924).
+  The transport's node-wide raw-frame gate (256 frames, blind to traffic class) silently dropped
+  frames once full, so a storage burst could drop liveness probes and falsely disconnect healthy
+  peers (38 of 49 probes in the N=50 hotspot sync storm). Now each of a connection's four lanes is
+  credit flow controlled: no honest frame is refused, overload reaches the sender as
+  backpressure, and both waits (a sender's for credit, an arrival's for the mailbox) are logged
+  at `warn`. Liveness judges peers by probes alone, and an inbound lane's progress depends only
+  on local resources, so a peer that withholds credit is evicted and costs no other link. The
+  node-wide receive bound is soft; a hard one needs credit that can be taken back (#934). The
+  laws, deadlines and bounds are stated once, in
+  [Transport flow control](docs/src/advanced-topic/transport-flow-control.md). Breaking changes:
+  - Wire: the new `TransportMessage::Credit(u64)` carries a lane's cumulative credit. A frame
+    beyond the advertised credit is refused and reported as invalid, as is a frame whose content
+    belongs to another lane than the one it arrived on (`AdmittedInboundMessage::lane`,
+    `Error::InboundLaneMismatch`; a chunked message's chunks must share its lane, and
+    `MessageCategory::channel_lane` is the one category-to-lane mapping). A remote-created data
+    channel is admitted only by its lane label, once per lane.
+  - Transport: `ConnectionInterface::reserve_send_credit`, `SendPermit::with_credit` and
+    `SendCreditWait` let a caller wait for credit apart from a send; a wait fails with
+    `LinkCreditClosed` when the connection generation ends, a send carrying another connection's
+    credit with `ForeignCredit`, and a native connection that cannot spawn its credit pump with
+    `CreditPumpUnavailable`. `LANE_CREDIT_WINDOW`, `NodeReceiveLoad` and
+    `ChannelLane::PRIORITY` are new. `TransportMessage` is no longer public, so only the
+    transport builds a credit frame: `ConnectionInterface::send_message` and
+    `send_message_with_permit` take the payload `Bytes`, and `custom_frame_wire` encodes the
+    frame a custom send puts on the channel, for callers that size or replay frames.
+    `InboundFrameCapacity`, its
+    node-wide bounds and `TransportInterface::inbound_frame_capacity` are removed;
+    `InboundFrameAdmission::CapacityExceeded` becomes `CreditExceeded` and gains a `Credit`
+    variant; `admit_inbound_frame` and `prepare_inbound_frame` take the frame's lane;
+    `InnerTransportCallback::for_transport` becomes `InnerTransportCallback::new`, taking the
+    `NodeReceiveLoad`; `InboundFrameCapacityLease` becomes `InboundCreditLease`.
+  - Core: `PEER_LIVENESS_IDLE_MS` is renamed `PEER_LIVENESS_PERIOD_MS`. `SwarmTransport` is no
+    `PayloadSender`; every sender is an `Egress` of one discipline, and the waiting
+    (application) egress is constructible only inside `crate::swarm` (the Swarm API, including
+    the storage API, which moves to `swarm::storage_api`).
+    `SwarmTransport::send_storage_sync_or_defer` sends under the egress it is given. A send a
+    handler or maintenance makes is dropped as local backpressure when its connection is not
+    ready, it lacks outbound capacity, or its first frame waits past its deadline; a send
+    through the Swarm API still returns once its first frame is admitted. `fix_fingers` and
+    `correct_stabilize` now queue their queries, and a connection a handler starts
+    (`connect_detached`) or answers is negotiated and sent on a detached task.
+  - Tests: the sync-storm scenarios derive their backlogs from the credit law, the
+    barrier-exemption ablation no longer violates its proposition (#927 evaluates removing the
+    layer), and new boundary and effect witnesses cover a saturated lane and a peer withholding
+    credit from a relay.
+  - Cutover: a wire change and part of the storage-entry cutover above: incompatible with
+    0.32.x, targeting 0.33.0.
+
+- Store and send data-topic and relay-inbox elements as bytes, not base58-check text (#926).
+  `Entry::data` is `Vec<Bytes>`; an element is the application's own bytes, and its
+  `ElementDigest` is the Keccak-256 of those bytes. A held relay message is its wire encoding
+  (`HeldMessage::to_element`), and an online-node or onion-exit descriptor its codec encoding
+  (the node-internal `RegistryElement`). The `Encoder`/`Decoder` impls of `OnlineNodeDescriptor`
+  and `OnionExitDescriptor` are removed. `storage_append_data` and `storage_tombstone_data`
+  (core `ChordStorageInterface` and node `Processor`) take `Bytes`, and the entry constructor
+  `(String, Encoded)` becomes `(String, Bytes)`. `ENTRY_PAYLOAD_MAX_BYTES` now bounds element
+  bytes. JSON-RPC `publishMessageToTopic`, `fetchTopicMessages` and `lookupService` still
+  exchange strings, now as the elements' UTF-8. The inspect `StorageValue.data` lists each
+  element as base64 instead of its base58-check text. The browser
+  `Provider.storage_check_cache` returns the whole serialized `Entry`, so its `data` elements
+  are now byte arrays instead of base58 strings, and each of its removes (`crdt.tombstones`),
+  formerly a bare dot, is an `EntryTombstone` of the removed element's `ElementDigest` and its
+  dot. What an element written before this change becomes on each backend is stated in the
+  storage-entry wire cutover above.
+
+- Derive the chunk envelope reserve from the widest frame (#925). `MAX_CHUNK_ENVELOPE_OVERHEAD`
+  drops from a 4096-byte guess to 911 bytes, and `TRANSPORT_CUSTOM_OVERHEAD` from 64 to 4: each
+  is the supremum of what the chunk framer emits, with every field it leaves free at its widest
+  (both delegation slots inline with the widest account and signature, every varint at its
+  maximum), witnessed with equality through the framer itself. The new
+  `MAX_PAYLOAD_ENVELOPE_OVERHEAD` (941) bounds a whole payload's envelope, `reply_via` and the
+  relay aim included, and is the storage hand-off batch's headroom. At a negotiated 8 KiB limit,
+  a chunk now carries about 7.3 KB of data instead of 4032 bytes. The wire format is unchanged.
 
 - Add delegated admission of direct-edge application traffic (#888). A namespace declares it
   through the new `Protocol::delegates_admission` (node) or `SwarmCallback::delegates_admission`

@@ -1,30 +1,25 @@
 //! Browser Provider implementation
 #![allow(non_snake_case, non_upper_case_globals, clippy::ptr_offset_with_cast)]
-use std::collections::BTreeSet;
 use std::convert::TryFrom;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use js_sys;
 use js_sys::Uint8Array;
 use rings_core::dht::entry;
-use rings_core::dht::entry::Entry;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 use rings_core::ecc::PublicKey;
-use rings_core::measure::PeerQuality;
-use rings_core::message::DhtProtocolMode;
 use rings_core::message::MessageSigner;
 use rings_core::message::ReplayStorage;
+use rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 use rings_core::storage::idb::IdbStorage;
+use rings_core::storage::RecordAuthority;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
-use rings_rpc::jsonrpc::Client as RpcClient;
 use rings_rpc::protos::rings_node::*;
-use rings_runtime::sleep;
 use wasm_bindgen;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures;
@@ -36,33 +31,20 @@ use crate::error::Result as NodeResult;
 use crate::extension::ext::Scope;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
-use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
-use crate::onion::directory;
-use crate::onion::directory::OnionDirectoryReader;
 use crate::onion::https::BrowserOnionCircuitHandler;
-use crate::onion::https::OnionHttpsClient;
-use crate::onion::https::OnionHttpsClientRequest;
-use crate::onion::https::OnionHttpsResponse;
 use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::https_onion_exit_services;
 use crate::onion::proxy::OnionProxyConfig;
-use crate::onion::proxy::OnionProxyRoute;
-use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::OnionEntryGuardStorage;
-use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionRole;
-use crate::onion::OnionRouteError;
-use crate::online::OnlineNodeDescriptor;
-use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
 use crate::provider::Provider;
-use crate::provider::RemoteRpcEndpoint;
 use crate::provider::Signer;
 
 /// Browser listener lifecycle handle and serialized `listen` entrypoint.
@@ -70,6 +52,8 @@ mod listener;
 /// Browser onion-proxy helpers exposed by the provider API.
 mod onion_proxy;
 pub use listener::ProviderListener;
+pub use onion_proxy::BrowserOnionProxy;
+pub use onion_proxy::BrowserOnionProxyResponse;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -91,275 +75,6 @@ impl ProviderRef {
     /// get wrapped arc, this is useful for wasm case
     pub fn inner(&self) -> Arc<Provider> {
         self.inner.clone()
-    }
-}
-
-/// Browser-compatible onion proxy handle.
-///
-/// The proxy is target-agnostic: callers create it once with route-selection options, then send
-/// absolute HTTPS URLs through it.
-#[derive(Clone)]
-#[wasm_export]
-pub struct BrowserOnionProxy {
-    processor: Arc<Processor>,
-    scope: Scope,
-    config: OnionProxyConfig,
-    client: Arc<OnionHttpsClient>,
-    directory_endpoint: Option<RemoteRpcEndpoint>,
-}
-
-/// Typed response from a cancellable browser onion HTTPS request.
-pub struct BrowserOnionProxyResponse {
-    /// HTTP response returned by the selected onion exit.
-    pub response: OnionHttpsResponse,
-    /// Onion route used for the request.
-    pub route: OnionProxyRoute,
-}
-
-/// Browser-facing projection of an internally selected onion route.
-///
-/// This is intentionally separate from the removed `buildOnionRoute` JSON-RPC request and
-/// response. Browser proxy methods still return the route they actually used so their caller can
-/// render and audit the result.
-#[derive(serde::Serialize)]
-struct BrowserOnionRouteInfo {
-    /// DIDs of the hops the circuit uses, `g, r₀,₂, exit`: until #834 Phase 2a-4 the return
-    /// segment of the selected loop is unused and not reported.
-    hops: Vec<String>,
-    /// Canonical service selected by the route.
-    service: String,
-    /// Signed exit descriptor selected by the route.
-    exit: OnionExitDescriptorInfo,
-}
-
-/// Project a selected route into the browser API without recreating the removed RPC method.
-fn browser_onion_route_info(route: &crate::onion::OnionRoute) -> NodeResult<BrowserOnionRouteInfo> {
-    Ok(BrowserOnionRouteInfo {
-        hops: route
-            .circuit_hops()
-            .map(|hop| hop.did.to_string())
-            .collect(),
-        service: route.service().to_string(),
-        exit: crate::rpc_dto::onion_exit_descriptor_info(route.exit().clone())?,
-    })
-}
-
-#[derive(Clone)]
-enum BrowserOnionDirectorySource {
-    Local,
-    Remote(RemoteRpcEndpoint),
-}
-
-struct BrowserOnionDirectoryReader {
-    processor: Arc<Processor>,
-    source: BrowserOnionDirectorySource,
-}
-
-impl BrowserOnionDirectoryReader {
-    fn local(processor: Arc<Processor>) -> Self {
-        Self {
-            processor,
-            source: BrowserOnionDirectorySource::Local,
-        }
-    }
-
-    fn remote(processor: Arc<Processor>, endpoint: RemoteRpcEndpoint) -> Self {
-        Self {
-            processor,
-            source: BrowserOnionDirectorySource::Remote(endpoint),
-        }
-    }
-
-    fn direct_peer_dids(&self) -> BTreeSet<Did> {
-        let local = self.processor.did();
-        self.processor
-            .swarm
-            .peer_dids()
-            .into_iter()
-            .filter(|did| *did != local)
-            .collect()
-    }
-
-    fn route_first_hop_is_direct(&self, route: &OnionProxyRoute) -> bool {
-        let first_hop = route_first_hop(&route.route);
-        first_hop != self.processor.did() && self.direct_peer_dids().contains(&first_hop)
-    }
-
-    async fn read_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {
-        match &self.source {
-            BrowserOnionDirectorySource::Local => self.processor.lookup_online_nodes(false).await,
-            BrowserOnionDirectorySource::Remote(endpoint) => {
-                let response = authenticated_rpc_client(endpoint)?
-                    .lookup_online_nodes(&LookupOnlineNodesRequest {
-                        include_expired: false,
-                    })
-                    .await
-                    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
-                Ok(crate::rpc_dto::online_node_descriptors_from_infos(
-                    response.nodes,
-                    self.processor.swarm.network_id(),
-                ))
-            }
-        }
-    }
-
-    async fn read_onion_exits(&self, service: &str) -> NodeResult<Vec<OnionExitDescriptor>> {
-        match &self.source {
-            BrowserOnionDirectorySource::Local => {
-                self.processor.lookup_onion_exits(service, false).await
-            }
-            BrowserOnionDirectorySource::Remote(endpoint) => {
-                let response = authenticated_rpc_client(endpoint)?
-                    .lookup_onion_exits(&LookupOnionExitsRequest {
-                        service: service.to_string(),
-                        include_expired: false,
-                    })
-                    .await
-                    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
-                Ok(crate::rpc_dto::onion_exit_descriptors_from_infos(
-                    response.exits,
-                    self.processor.swarm.network_id(),
-                ))
-            }
-        }
-    }
-}
-
-/// Builds a directory RPC client under the shared credential transport policy.
-fn authenticated_rpc_client(endpoint: &RemoteRpcEndpoint) -> NodeResult<RpcClient> {
-    let client = RpcClient::new(endpoint.url.as_str())
-        .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
-    match &endpoint.api_token {
-        Some(token) => client
-            .with_bearer_token(token.to_string())
-            .map_err(|error| Error::RemoteRpcError(error.to_string())),
-        None => Ok(client),
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl OnionDirectoryReader for BrowserOnionDirectoryReader {
-    fn local_did(&self) -> Did {
-        self.processor.did()
-    }
-
-    fn dht_protocol_mode(&self) -> DhtProtocolMode {
-        self.processor.swarm.dht_protocol_mode()
-    }
-
-    async fn live_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {
-        self.read_online_nodes().await
-    }
-
-    async fn live_onion_exits(&self, service: &str) -> NodeResult<Vec<OnionExitDescriptor>> {
-        self.read_onion_exits(service).await
-    }
-
-    async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
-        self.processor
-            .peer_measurements()
-            .await
-            .into_iter()
-            .map(|measurement| (measurement.did, measurement.quality))
-            .collect()
-    }
-
-    fn onion_entry_guards(&self) -> &crate::onion::OnionEntryGuards {
-        self.processor.onion_entry_guards()
-    }
-}
-
-async fn build_browser_route_from_reader(
-    reader: &BrowserOnionDirectoryReader,
-    config: OnionProxyConfig,
-    target: OnionProxyTarget,
-) -> NodeResult<OnionProxyRoute> {
-    let direct_peers = reader.direct_peer_dids();
-    let route =
-        directory::build_onion_proxy_route_with_first_hop(reader, config, target, move |did| {
-            direct_peers.contains(&did)
-        })
-        .await?;
-    if reader.route_first_hop_is_direct(&route) {
-        return Ok(route);
-    }
-    Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
-}
-
-async fn build_browser_onion_proxy_route(
-    processor: Arc<Processor>,
-    config: OnionProxyConfig,
-    target: OnionProxyTarget,
-    directory_endpoint: Option<RemoteRpcEndpoint>,
-) -> NodeResult<OnionProxyRoute> {
-    if let Some(endpoint) = directory_endpoint {
-        let remote_reader = BrowserOnionDirectoryReader::remote(processor.clone(), endpoint);
-        match build_browser_route_from_reader(&remote_reader, config.clone(), target.clone()).await
-        {
-            Ok(route) => return Ok(route),
-            Err(remote_error) => {
-                let local_reader = BrowserOnionDirectoryReader::local(processor);
-                return build_browser_route_from_reader(&local_reader, config, target)
-                    .await
-                    .map_err(|_| remote_error);
-            }
-        }
-    }
-
-    let local_reader = BrowserOnionDirectoryReader::local(processor);
-    build_browser_route_from_reader(&local_reader, config, target).await
-}
-
-#[wasm_export]
-impl BrowserOnionProxy {
-    /// Return the exit service class this proxy selects.
-    pub fn exit_service(&self) -> String {
-        self.config.exit_service().to_string()
-    }
-
-    /// Build an HTTPS-over-TCP onion proxy route for `target_authority` (`host:port`).
-    pub fn route(&self, target_authority: String) -> js_sys::Promise {
-        let proxy = self.clone();
-        future_to_promise(async move {
-            let route = proxy
-                .route_http(&target_authority)
-                .await
-                .map_err(JsError::from)?;
-            let response = browser_onion_route_info(&route.route).map_err(JsError::from)?;
-            let value = js_value::serialize(&response).map_err(JsError::from)?;
-            Ok(value)
-        })
-    }
-
-    /// Send one HTTPS request through this onion proxy.
-    ///
-    /// `url` is an absolute `https://` URL. `request` is an object with optional `method`,
-    /// `headers`, `body`, and `path` override fields. The returned Promise resolves to
-    /// `{ status, headers, body }`.
-    pub fn request(&self, url: String, request: JsValue) -> js_sys::Promise {
-        let proxy = self.clone();
-        future_to_promise(async move {
-            let request = if request.is_null() || request.is_undefined() {
-                OnionHttpsClientRequest {
-                    method: "GET".to_string(),
-                    path: None,
-                    headers: Vec::new(),
-                    body: Vec::new(),
-                }
-            } else {
-                js_value::deserialize::<OnionHttpsClientRequest>(request).map_err(JsError::from)?
-            };
-            let response = proxy
-                .request_http(url.as_str(), request)
-                .await
-                .map_err(JsError::from)?;
-            let route_response =
-                browser_onion_route_info(&response.route.route).map_err(JsError::from)?;
-            let route_value = js_value::serialize(&route_response).map_err(JsError::from)?;
-            let value = js_value::serialize(&response.response).map_err(JsError::from)?;
-            js_sys::Reflect::set(&value, &JsValue::from_str("route"), &route_value)?;
-            Ok(value)
-        })
     }
 }
 
@@ -390,6 +105,8 @@ fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
     )
 }
 
+/// Open the browser DHT entry store. It is disposable, so it retires rows it cannot decode: a
+/// carrier written by an earlier wire format must not fail every storage scan.
 async fn open_browser_entry_storage(storage_name: &str) -> NodeResult<EntryStorage> {
     IdbStorage::new_with_cap_and_name(50000, storage_name)
         .await
@@ -452,14 +169,23 @@ async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEnt
     }
 }
 
+/// Open the browser replay store under a row capacity of every record of a full store
+/// ([`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]) and one row for the former shared-stream snapshot,
+/// until the first load after the #898 upgrade deletes it. IndexedDB evicts its least recently
+/// used row beyond the capacity, and an evicted replay record would reopen replay for its
+/// stream, so the capacity must never be reached. The store is authoritative: a record it cannot
+/// decode is reported and kept, never retired.
 async fn open_browser_replay_storage(storage_name: &str) -> NodeResult<ReplayStorage> {
-    IdbStorage::new_with_cap_and_name(2, storage_name)
+    let open_error = |source| Error::BrowserStorageOpen {
+        name: storage_name.to_string(),
+        source,
+    };
+    let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS + 1)
+        .map_err(|_| open_error(rings_core::error::Error::InvalidCapacity))?;
+    IdbStorage::new_with_cap_name_and_authority(rows, storage_name, RecordAuthority::Authoritative)
         .await
         .map(|storage| Box::new(storage) as ReplayStorage)
-        .map_err(|source| Error::BrowserStorageOpen {
-            name: storage_name.to_string(),
-            source,
-        })
+        .map_err(open_error)
 }
 
 impl Provider {
@@ -493,10 +219,10 @@ impl Provider {
             Some(replay_storage),
         )
         .await?;
-        provider.set_backend()?;
         if provider.processor.onion_role().registers_relay() {
             provider.install_onion_https_protocol()?;
         }
+        provider.set_backend()?;
         Ok(provider)
     }
 }
@@ -607,10 +333,10 @@ impl Provider {
             )
             .await?;
 
-            provider.set_backend().map_err(JsError::from)?;
             provider
                 .install_onion_https_protocol()
                 .map_err(JsError::from)?;
+            provider.set_backend().map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
         })
@@ -619,7 +345,7 @@ impl Provider {
     /// Create new provider instance with serialized config (yaml/json)
     pub fn new_provider_with_serialized_config(config: String) -> js_sys::Promise {
         future_to_promise(async move {
-            let cfg: ProcessorConfig = serde_yaml::from_str(&config).map_err(JsError::from)?;
+            let cfg: ProcessorConfig = serde_saphyr::from_str(&config).map_err(JsError::from)?;
             JsFuture::from(Self::new_provider_with_config(cfg)).await
         })
     }
@@ -847,6 +573,8 @@ impl Provider {
     ///
     /// The explicit topic/value pair preserves the content-derived identity of
     /// this browser API without a separate single-string entry constructor.
+    /// The stored element expires by the element lifetime rule of the DHT storage
+    /// chapter (`docs/src/advanced-topic/chord.md`) unless it is stored again.
     pub fn storage_store(&self, data: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -863,28 +591,14 @@ impl Provider {
         let p = self.processor.clone();
 
         future_to_promise(async move {
-            let entry_key = Entry::gen_did(&name).map_err(JsError::from)?;
-
-            tracing::debug!("browser lookup_service storage_fetch: {}", entry_key);
-            p.storage_fetch(entry_key).await.map_err(JsError::from)?;
-            tracing::debug!("browser lookup_service finish storage_fetch: {}", entry_key);
-            sleep(Duration::from_millis(500))
+            let dids = p
+                .fetch_text_elements(&name, 0)
                 .await
-                .map_err(JsError::from)?;
-            let result = p.storage_check_cache(entry_key).await;
-
-            if let Some(entry) = result {
-                let dids = entry
-                    .data
-                    .iter()
-                    .map(|v| v.decode())
-                    .filter_map(|v| v.ok())
-                    .map(|x: String| JsValue::from_str(x.as_str()))
-                    .collect::<js_sys::Array>();
-                Ok(JsValue::from(dids))
-            } else {
-                Ok(JsValue::from(js_sys::Array::new()))
-            }
+                .map_err(JsError::from)?
+                .into_iter()
+                .map(JsValue::from)
+                .collect::<js_sys::Array>();
+            Ok(JsValue::from(dids))
         })
     }
 }

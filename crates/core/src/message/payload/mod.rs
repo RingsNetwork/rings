@@ -36,6 +36,7 @@ use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::Message;
+use crate::message::MessageCategory;
 use crate::message::MessageKind;
 
 mod wire;
@@ -219,9 +220,22 @@ impl Transaction {
         self.signer()
     }
 
-    /// Destination-scoped stream identity under the receiver's overlay.
-    pub fn stream_key(&self, network_id: u32) -> StreamKey {
-        StreamKey::new(network_id, self.origin(), self.destination)
+    /// Traffic class implied by this transaction's signed data: the class of the message
+    /// kind it carries. Sender and receiver both derive a stream's class this way, so the
+    /// class needs no field of its own on the wire.
+    pub fn class(&self) -> Result<MessageCategory> {
+        MessageKind::from_wire(&self.data).map(MessageKind::class)
+    }
+
+    /// Destination-scoped stream identity under the receiver's overlay: one sequence stream
+    /// per `(origin, destination, class)`.
+    pub fn stream_key(&self, network_id: u32) -> Result<StreamKey> {
+        Ok(StreamKey::new(
+            network_id,
+            self.origin(),
+            self.destination,
+            self.class()?,
+        ))
     }
 
     /// Digest of this exact signed transaction, including its delegation and signature.
@@ -282,10 +296,17 @@ impl MessagePayload {
     where
         T: Serialize,
     {
+        // Tests also sign data that is not a `Message`; it implies no class, and its sequence
+        // comes from the Application stream.
+        let class = rings_codec::serialize(&data)
+            .ok()
+            .and_then(|bytes| MessageKind::from_wire(&bytes).ok())
+            .map_or(MessageCategory::Application, MessageKind::class);
         let sequence = next_test_transaction_sequence(StreamKey::new(
             signer.network_id(),
             signer.delegator_did(),
             destination,
+            class,
         ))?;
         Self::new_send_with_sequence(
             data,
@@ -308,9 +329,9 @@ impl MessagePayload {
     /// Deserializes a self-contained `MessagePayload` from the Rings wire encoding: a payload
     /// frame with both sessions inline.
     ///
-    /// A frame that references a session is meaningful only on the link that announced it, and
-    /// is refused here with [`Error::DelegationReferenceUnresolved`]; a link resolves such frames
-    /// before they reach a `MessagePayload`.
+    /// A frame that references a session is meaningful only on the link that carried it inline,
+    /// and is refused here with [`Error::DelegationReferenceUnresolved`]; a link resolves such
+    /// frames before they reach a `MessagePayload`.
     pub fn from_wire(data: &[u8]) -> Result<Self> {
         match LinkFrame::from_wire(data)? {
             LinkFrame::Payload(frame) => frame.into_self_contained(),
@@ -396,10 +417,12 @@ pub trait PayloadSender {
     /// Whether `did` is a directly linked peer.
     fn is_connected(&self, did: Did) -> bool;
 
-    /// Persistently reserve sender sequences for one final destination before signing.
+    /// Persistently reserve sender sequences of `class` for one final destination before
+    /// signing. Each class has its own stream, because only a class lane preserves order.
     async fn reserve_transaction_sequences(
         &self,
         destination: Did,
+        class: MessageCategory,
         count: NonZeroU64,
     ) -> Result<std::ops::RangeInclusive<u64>>;
 
@@ -429,15 +452,12 @@ pub trait PayloadSender {
     /// successor" holds for all of them. That includes a manually signalled connection answer,
     /// which names the hint harmlessly: no report is ever sent for it, and its only reader is
     /// the peer it is sent to.
-    async fn originate<T>(
+    async fn originate(
         &self,
-        msg: T,
+        msg: Message,
         destination: Did,
         next_hop: Option<Did>,
-    ) -> Result<MessagePayload>
-    where
-        T: Serialize + Send,
-    {
+    ) -> Result<MessagePayload> {
         let (hop, reply_via) = match next_hop {
             Some(peer) => (
                 NextHop::toward(peer),
@@ -453,8 +473,9 @@ pub trait PayloadSender {
                 (hop, origination.reply_via)
             }
         };
+        let class = MessageKind::from_message(&msg).class();
         let sequence = *self
-            .reserve_transaction_sequences(destination, NonZeroU64::MIN)
+            .reserve_transaction_sequences(destination, class, NonZeroU64::MIN)
             .await?
             .start();
         MessagePayload::new_send_with_sequence(
@@ -473,15 +494,12 @@ pub trait PayloadSender {
     }
 
     /// Send a message to a specified destination by specified next hop.
-    async fn send_message_by_hop<T>(
+    async fn send_message_by_hop(
         &self,
-        msg: T,
+        msg: Message,
         destination: Did,
         next_hop: Did,
-    ) -> Result<uuid::Uuid>
-    where
-        T: Serialize + Send,
-    {
+    ) -> Result<uuid::Uuid> {
         let payload = self.originate(msg, destination, Some(next_hop)).await?;
         let tx_id = payload.transaction.tx_id;
         self.send_payload(payload).await?;
@@ -489,8 +507,7 @@ pub trait PayloadSender {
     }
 
     /// Send a message to a specified destination.
-    async fn send_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
-    where T: Serialize + Send {
+    async fn send_message(&self, msg: Message, destination: Did) -> Result<uuid::Uuid> {
         let payload = self.originate(msg, destination, None).await?;
         let tx_id = payload.transaction.tx_id;
         self.send_payload(payload).await?;
@@ -498,8 +515,7 @@ pub trait PayloadSender {
     }
 
     /// Send a direct message to a specified destination.
-    async fn send_direct_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
-    where T: Serialize + Send {
+    async fn send_direct_message(&self, msg: Message, destination: Did) -> Result<uuid::Uuid> {
         self.send_message_by_hop(msg, destination, destination)
             .await
     }
@@ -535,8 +551,9 @@ pub trait PayloadSender {
     ) -> Result<()> {
         let origin = request.transaction.origin();
         let signer = self.message_signer();
+        let class = MessageKind::from_message(&msg).class();
         let sequence = *self
-            .reserve_transaction_sequences(origin, NonZeroU64::MIN)
+            .reserve_transaction_sequences(origin, class, NonZeroU64::MIN)
             .await?
             .start();
         let transaction = Transaction::new(origin, tx_id, sequence, None, msg, signer)?;

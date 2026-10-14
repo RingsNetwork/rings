@@ -100,10 +100,12 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 sdp_bytes = msg.sdp.len(),
                 "CONNECT_NODE offer answer start"
             );
-            // The reply, an answer or a counter-offer, retraces the offer's path (#947).
+            // The reply, an answer or a counter-offer, retraces the offer's path (#947); the
+            // answer waits on ICE gathering, so it is negotiated and sent apart from this inbound
+            // event (inbound locality).
             let answered = self
                 .transport
-                .answer_signaled_offer(ctx, msg, self.inner_callback())
+                .answer_signaled_offer(self.inner_callback(), ctx, msg)
                 .await;
             match drop_unlinked_return(answered, "CONNECT_NODE offer reply") {
                 Ok(()) => {
@@ -276,7 +278,15 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
             FindSuccessorReportHandler::Connect if msg.reports_remote_successor(self.dht.did) => {
                 self.connect_dht_peer(msg.did).await?;
             }
-            _ => {}
+            FindSuccessorReportHandler::Connect => {}
+            // An application lookup: resolve the handle the application awaits. A report no
+            // live lookup awaits is unsolicited and dropped here; the application never sees it.
+            FindSuccessorReportHandler::None => {
+                self.transport
+                    .application()
+                    .lookups
+                    .answer(ctx.transaction.tx_id, msg.did);
+            }
         }
 
         Ok(())

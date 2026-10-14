@@ -10,7 +10,6 @@ use rings_core::message::MessagePayload;
 
 use super::common::network_test_guard;
 use super::common::prepare_processor_with_identity_key;
-use super::common::test_callback;
 use super::common::wait_processors_connected;
 use crate::error::Error;
 use crate::error::Result;
@@ -66,14 +65,6 @@ async fn test_http_counter_offer_completes_the_edge() -> Result<()> {
     let (smaller, larger) = ordered_keys();
     let peer = Arc::new(prepare_processor_with_identity_key(smaller).await);
     let dialer = prepare_processor_with_identity_key(larger).await;
-    peer.swarm
-        .set_callback(test_callback())
-        .map_err(Error::InternalError)?;
-    dialer
-        .swarm
-        .set_callback(test_callback())
-        .map_err(Error::InternalError)?;
-
     let (_, own_offer) = peer
         .swarm
         .offer_connection(dialer.did())

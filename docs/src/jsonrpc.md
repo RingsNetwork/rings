@@ -551,6 +551,9 @@ curl -X POST \
 
 Publish data message to specific topic
 
+A published message is a data-topic element: it expires by the element lifetime rule of
+[DHT storage](advanced-topic/chord.md#data-topic-storage) unless it is published again.
+
 #### REQUEST
 
 `POST http://127.0.0.1:50000`
@@ -628,6 +631,10 @@ curl -X POST \
 ### registerService
 
 Register custom service to rings network
+
+A registration is one element of the service's data topic: it expires by the element lifetime
+rule of [DHT storage](advanced-topic/chord.md#data-topic-storage) unless the service registers
+again.
 
 #### REQUEST
 

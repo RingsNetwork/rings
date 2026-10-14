@@ -12,6 +12,7 @@ use super::frame_chunk;
 use super::AdmittedConnection;
 use super::ChunkSendPermit;
 use super::DetachedAdmission;
+use super::FrameRemainder;
 use super::OutboundCompletion;
 use super::SendCompletionOutcome;
 use super::TransferClass;
@@ -40,6 +41,8 @@ pub(in crate::swarm::transport) struct ChunkedFrameSource {
     signer: MessageSigner<DelegateeKey>,
     chunks: ChunkFrames,
     logical_sequence: u64,
+    /// Whether the chunk marked last of its transfer (`position + 1 = total`) was emitted.
+    emitted_last: bool,
 }
 
 impl ChunkedFrameSource {
@@ -52,11 +55,26 @@ impl ChunkedFrameSource {
             signer: signer.owned(),
             chunks,
             logical_sequence,
+            emitted_last: false,
         }
     }
 }
 
 impl FrameSource {
+    /// Whether frames remain after those already emitted. A chunked source answers from the
+    /// chunk header, so the answer holds before the iterator is polled past its end.
+    fn remainder(&self) -> FrameRemainder {
+        let more = match self {
+            Self::Whole(frame) => frame.is_some(),
+            Self::Chunked(source) => !source.emitted_last,
+        };
+        if more {
+            FrameRemainder::More
+        } else {
+            FrameRemainder::Final
+        }
+    }
+
     /// The next payload of this source; the worker encodes it for the link just before sending,
     /// so its delegation slots follow the order frames are accepted in.
     fn next_frame(&mut self, did: Did) -> Result<Option<(Box<MessagePayload>, &'static str)>> {
@@ -66,11 +84,13 @@ impl FrameSource {
                 signer,
                 chunks,
                 logical_sequence,
+                emitted_last,
             }) => {
                 let Some(chunk) = chunks.next() else {
                     return Ok(None);
                 };
-                let [position, _total] = chunk.chunk;
+                let [position, total] = chunk.chunk;
+                *emitted_last = position.saturating_add(1) >= total;
                 let context = if position == 0 {
                     "chunked_first"
                 } else {
@@ -258,6 +278,11 @@ impl OutboundTransfer {
 
     pub(super) fn next_frame(&mut self) -> Result<Option<(Box<MessagePayload>, &'static str)>> {
         self.source.next_frame(self.did)
+    }
+
+    /// Whether frames remain after those this transfer already emitted.
+    pub(super) fn remainder(&self) -> FrameRemainder {
+        self.source.remainder()
     }
 
     pub(super) fn is_before_first_frame(&self) -> bool {

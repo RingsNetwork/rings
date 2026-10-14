@@ -1,127 +1,250 @@
+//! Overlay liveness of admitted peers, judged by probes alone.
+//!
+//! Each admitted generation carries a [`ProbeClock`], a pure state machine over the probe's
+//! challenge `c`:
+//!
+//! ```text
+//!   Idle(last) ──issue(c, t)  [t − last ≥ PERIOD]──▶ Outstanding(c, t, unsent)
+//!   Outstanding(c, t, unsent) ──queued(c)─────────▶ Outstanding(c, t, queued)
+//!   Outstanding(c, t, _) ──answer(c)──────────────▶ Idle(t)
+//!   Outstanding(c, t, _) ──now − t ≥ TIMEOUT──────▶ expired: the peer is evicted
+//! ```
+//!
+//! Laws:
+//! - **One outstanding.** `issue` is refused while a probe is outstanding, so a later probe
+//!   never makes an earlier answer unacceptable.
+//! - **Deadline from issue.** The deadline counts from the instant the probe is issued; nothing
+//!   extends it, and nothing waits for the probe to leave the queue.
+//! - **Answer only.** Only the answer carrying the outstanding challenge clears it; a peer's
+//!   other inbound traffic proves only that it sends, not that it takes this end's control
+//!   traffic. Inbound traffic is recorded for retention alone.
+//! - **Credit-blind.** No flow-control state is read. A peer that withholds its control lane's
+//!   credit keeps the probe in its own queue, so the probe goes unanswered and the peer is
+//!   evicted by the ordinary rule; a peer slow on a data lane answers on lane 0 and is kept.
+//! - **Probe slot.** A transfer of an outstanding probe is an [`IssuedProbe`], which only this
+//!   module builds; it takes no shared outbound capacity (the law of `outbound::sender_bounded`),
+//!   and it waits for credit until the answer deadline itself.
+//! - **Unsent is resent, never withdrawn.** A probe that did not reach the queue (no ready
+//!   connection, or a step cut short) stays outstanding with its deadline, and is sent again on
+//!   the next pass: the same challenge, signed anew under a fresh transaction, so its sequence
+//!   is never one its peer's replay window has passed. A peer that keeps its connection unready
+//!   at each pass gains nothing: its deadline runs from the first issue.
+//! - **Single flight.** Probes are issued and sent only within a [`ProbePass`], of which at
+//!   most one runs at a time, so two passes never send one unsent probe twice. A pass cut short
+//!   releases its right with the probe still unsent, for the next pass.
+//! - **Pinned.** A probe rides only the connection of the generation it judges
+//!   (`SenderBound::Probe`): after a reconnect, the successor's clock would not know its answer.
+
 use std::collections::BTreeMap;
 use std::sync::MutexGuard;
+use std::time::Duration;
+
+use futures::lock::MutexGuard as FuturesMutexGuard;
 
 use super::pending::ActiveConnectionSet;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::MessagePayload;
 use crate::message::ProbeRequest;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms_i64;
 
-/// Idle interval after which an admitted peer needs an overlay liveness probe.
-pub(crate) const PEER_LIVENESS_IDLE_MS: i64 = 15_000;
-/// Maximum age of an unanswered liveness probe before the peer is evicted.
+/// Interval between two probes of one peer, counted from the earlier probe's issue.
+pub(crate) const PEER_LIVENESS_PERIOD_MS: i64 = 15_000;
+/// Deadline of a probe's answer, counted from its issue, after which the peer is evicted.
 pub(crate) const PEER_LIVENESS_TIMEOUT_MS: i64 = 45_000;
 
-#[derive(Clone, Copy, Debug)]
-struct PeerLiveness {
-    generation: u64,
-    connected_at_ms: i64,
-    last_inbound_ms: i64,
-    last_probe_ms: Option<i64>,
-    unanswered_probe_since_ms: Option<i64>,
-    pending_probe: Option<PendingProbe>,
+/// The outstanding probe of a generation: its challenge, its issue instant, and whether it
+/// reached its peer's queue. The challenge is the probe's identity: a probe sent again is
+/// signed anew, under a fresh transaction and sequence, and its answer still carries it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct Outstanding {
+    /// The challenge the answer must carry.
+    pub(crate) request: ProbeRequest,
+    /// When the probe was issued: its deadline counts from here.
+    pub(crate) issued_ms: i64,
+    /// Whether a transfer of it reached the peer's queue; until then it is sent again.
+    pub(crate) queued: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PendingProbe {
-    tx_id: uuid::Uuid,
-    request: ProbeRequest,
+/// The probe clock of one admitted generation; see the module laws.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ProbeClock {
+    /// When the latest probe was issued, or the generation was admitted before any probe.
+    last_issued_ms: i64,
+    /// The outstanding probe, if one is.
+    outstanding: Option<Outstanding>,
 }
 
-#[derive(Clone, Copy)]
-enum PeerLivenessObservation {
-    Connected,
-    Inbound,
-}
-
-impl PeerLivenessObservation {
-    fn apply(self, liveness: &mut PeerLivenessMap, peer: Did, generation: u64, now_ms: i64) {
-        match self {
-            Self::Connected => liveness.mark_connected(peer, generation, now_ms),
-            Self::Inbound => liveness.mark_inbound(peer, generation, now_ms),
-        }
-    }
-}
-
-impl PeerLiveness {
-    fn new(generation: u64, now_ms: i64) -> Self {
+impl ProbeClock {
+    /// The clock of a generation admitted at `admitted_ms`: its first probe is due a period
+    /// later.
+    pub(crate) const fn admitted_at(admitted_ms: i64) -> Self {
         Self {
-            generation,
-            connected_at_ms: now_ms,
-            last_inbound_ms: now_ms,
-            last_probe_ms: None,
-            unanswered_probe_since_ms: None,
-            pending_probe: None,
+            last_issued_ms: admitted_ms,
+            outstanding: None,
         }
     }
 
-    fn mark_inbound(&mut self, now_ms: i64) {
-        self.last_inbound_ms = now_ms;
-        self.unanswered_probe_since_ms = None;
+    /// Whether a probe is due at `now_ms`: none is outstanding and a period has passed since
+    /// the latest issue.
+    pub(crate) fn due(&self, now_ms: i64) -> bool {
+        self.outstanding.is_none()
+            && now_ms.saturating_sub(self.last_issued_ms) >= PEER_LIVENESS_PERIOD_MS
     }
 
-    fn should_probe(&self, now_ms: i64) -> bool {
-        now_ms.saturating_sub(self.last_inbound_ms) >= PEER_LIVENESS_IDLE_MS
-            && self
-                .last_probe_ms
-                .map(|last_probe_ms| now_ms.saturating_sub(last_probe_ms) >= PEER_LIVENESS_IDLE_MS)
-                .unwrap_or(true)
-    }
-
-    fn mark_probe_sent(&mut self, now_ms: i64) {
-        self.last_probe_ms = Some(now_ms);
-        self.unanswered_probe_since_ms.get_or_insert(now_ms);
-    }
-
-    fn set_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) {
-        self.pending_probe = Some(PendingProbe { tx_id, request });
-    }
-
-    fn mark_matching_probe_sent(
-        &mut self,
-        now_ms: i64,
-        tx_id: uuid::Uuid,
-        request: ProbeRequest,
-    ) -> bool {
-        if self.pending_probe != Some(PendingProbe { tx_id, request }) {
+    /// Issue the probe of challenge `request` at `now_ms`. Refused (`false`) while another
+    /// probe is outstanding.
+    pub(crate) fn issue(&mut self, request: ProbeRequest, now_ms: i64) -> bool {
+        if self.outstanding.is_some() {
             return false;
         }
-        self.mark_probe_sent(now_ms);
+        self.outstanding = Some(Outstanding {
+            request,
+            issued_ms: now_ms,
+            queued: false,
+        });
+        self.last_issued_ms = now_ms;
         true
     }
 
-    fn cancel_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) {
-        if self.pending_probe == Some(PendingProbe { tx_id, request }) {
-            self.pending_probe = None;
+    /// The challenge of the outstanding probe while no transfer of it reached the queue: the
+    /// probe to send again.
+    pub(crate) fn unsent(&self) -> Option<ProbeRequest> {
+        self.outstanding
+            .filter(|outstanding| !outstanding.queued)
+            .map(|outstanding| outstanding.request)
+    }
+
+    /// Record that a transfer of the probe of challenge `request` reached the peer's queue.
+    pub(crate) fn queued(&mut self, request: ProbeRequest) {
+        if let Some(outstanding) = self.outstanding.as_mut() {
+            outstanding.queued |= outstanding.request == request;
         }
     }
 
-    fn consume_pending_probe(&mut self, tx_id: uuid::Uuid, request: ProbeRequest) -> bool {
-        if self.pending_probe != Some(PendingProbe { tx_id, request }) {
+    /// How long the outstanding probe has left before its deadline, at `now_ms`.
+    pub(crate) fn remaining_ms(&self, now_ms: i64) -> Option<i64> {
+        self.outstanding_since_ms().map(|issued_ms| {
+            issued_ms
+                .saturating_add(PEER_LIVENESS_TIMEOUT_MS)
+                .saturating_sub(now_ms)
+                .max(0)
+        })
+    }
+
+    /// Clear the outstanding probe on its answer carrying `request`. Returns whether that probe
+    /// was the outstanding one.
+    pub(crate) fn answer(&mut self, request: ProbeRequest) -> bool {
+        if self.outstanding.map(|outstanding| outstanding.request) != Some(request) {
             return false;
         }
-        self.pending_probe = None;
+        self.outstanding = None;
         true
     }
 
-    fn expiry(&self, now_ms: i64) -> Option<PeerLivenessExpiry> {
-        let unanswered_since_ms = self.unanswered_probe_since_ms?;
-        let unanswered_for_ms = now_ms.saturating_sub(unanswered_since_ms);
+    /// When the outstanding probe was issued, if one is.
+    pub(crate) fn outstanding_since_ms(&self) -> Option<i64> {
+        self.outstanding.map(|outstanding| outstanding.issued_ms)
+    }
+
+    /// The expiry evidence at `now_ms`: the outstanding probe is `TIMEOUT` old.
+    pub(crate) fn expiry(&self, now_ms: i64) -> Option<PeerLivenessExpiry> {
+        let unanswered_for_ms = now_ms.saturating_sub(self.outstanding_since_ms()?);
         (unanswered_for_ms >= PEER_LIVENESS_TIMEOUT_MS).then_some(PeerLivenessExpiry {
             unanswered_for_ms,
             timeout_ms: PEER_LIVENESS_TIMEOUT_MS,
         })
     }
+}
 
-    fn connected_for_ms(&self, now_ms: i64) -> i64 {
-        now_ms.saturating_sub(self.connected_at_ms)
+/// One transfer of a probe its generation's clock issued and holds outstanding: built only
+/// here, by [`SwarmTransport::issue_liveness_probe`] and [`SwarmTransport::resend_liveness_probe`],
+/// which is what lets its transfer bypass the shared outbound capacity. Its fields are private,
+/// so no other code can forge one. It is an owned value: an answer or an eviction while it is
+/// in flight leaves it to be sent and ignored.
+pub(crate) struct IssuedProbe {
+    attempt: PendingConnectionAttempt,
+    request: ProbeRequest,
+    payload: MessagePayload,
+    /// How long the transfer may wait for credit: what is left of the answer deadline.
+    deadline: Duration,
+}
+
+impl IssuedProbe {
+    /// The generation the probe judges.
+    pub(crate) fn attempt(&self) -> PendingConnectionAttempt {
+        self.attempt
     }
 
-    fn idle_for_ms(&self, now_ms: i64) -> i64 {
-        now_ms.saturating_sub(self.last_inbound_ms)
+    /// The probe's challenge, its identity.
+    pub(crate) fn request(&self) -> ProbeRequest {
+        self.request
+    }
+
+    /// The generation, payload and transfer deadline the egress sends.
+    pub(super) fn into_send(self) -> (PendingConnectionAttempt, MessagePayload, Duration) {
+        (self.attempt, self.payload, self.deadline)
+    }
+}
+
+/// One step of a probe pass.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ProbeWork {
+    /// Issue a fresh probe of this generation.
+    Issue(PendingConnectionAttempt),
+    /// Sign again, under a fresh transaction, and send the outstanding probe of challenge
+    /// `request` that has not reached the queue: a payload kept from its issue would carry a
+    /// sequence its peer's replay window may have passed meanwhile.
+    Resend {
+        attempt: PendingConnectionAttempt,
+        request: ProbeRequest,
+    },
+}
+
+/// One probe pass: the exclusive right to issue and send this node's probes, held for the
+/// pass, and the work it found. The right is released when the pass is dropped, completed or
+/// cut short.
+pub(crate) struct ProbePass<'transport> {
+    _exclusive: FuturesMutexGuard<'transport, ()>,
+    work: Vec<ProbeWork>,
+}
+
+impl ProbePass<'_> {
+    /// What the pass must do; see [`ProbeWork`].
+    pub(crate) fn work(&self) -> &[ProbeWork] {
+        &self.work
+    }
+}
+
+/// What is left of `clock`'s outstanding probe deadline at `now_ms`, as a transfer deadline.
+fn remaining(clock: &ProbeClock, now_ms: i64) -> Duration {
+    let remaining_ms = clock.remaining_ms(now_ms).unwrap_or(0);
+    Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(0))
+}
+
+/// One admitted generation's liveness record.
+#[derive(Clone, Debug)]
+struct PeerLiveness {
+    generation: u64,
+    connected_at_ms: i64,
+    /// The latest authenticated inbound payload, read by retention, never by liveness.
+    last_inbound_ms: i64,
+    clock: ProbeClock,
+}
+
+impl PeerLiveness {
+    /// The liveness of `generation`, admitted at `now_ms`: its clock starts, nothing is
+    /// outstanding.
+    fn new(generation: u64, now_ms: i64) -> Self {
+        Self {
+            generation,
+            connected_at_ms: now_ms,
+            last_inbound_ms: now_ms,
+            clock: ProbeClock::admitted_at(now_ms),
+        }
     }
 }
 
@@ -150,7 +273,7 @@ impl PeerLivenessMap {
     fn mark_inbound(&mut self, peer: Did, generation: u64, now_ms: i64) {
         match self.peers.get_mut(&peer) {
             Some(liveness) if liveness.generation == generation => {
-                liveness.mark_inbound(now_ms);
+                liveness.last_inbound_ms = now_ms;
             }
             _ => self.mark_connected(peer, generation, now_ms),
         }
@@ -158,6 +281,20 @@ impl PeerLivenessMap {
 
     pub(super) fn remove(&mut self, peer: Did) {
         self.peers.remove(&peer);
+    }
+
+    /// The record of `peer`'s `generation`, if it is the one recorded.
+    fn generation(&self, peer: Did, generation: u64) -> Option<&PeerLiveness> {
+        self.peers
+            .get(&peer)
+            .filter(|liveness| liveness.generation == generation)
+    }
+
+    /// [`Self::generation`], mutably.
+    fn generation_mut(&mut self, peer: Did, generation: u64) -> Option<&mut PeerLiveness> {
+        self.peers
+            .get_mut(&peer)
+            .filter(|liveness| liveness.generation == generation)
     }
 
     fn retain_active(&mut self, active: &ActiveConnectionSet) {
@@ -168,147 +305,37 @@ impl PeerLivenessMap {
         });
     }
 
-    fn probe_candidates(
-        &mut self,
-        active: &ActiveConnectionSet,
-        now_ms: i64,
-    ) -> Vec<PendingConnectionAttempt> {
+    /// What the probe pass must do at `now_ms`: issue a probe of every active generation that
+    /// is due one, and send again every outstanding probe that has not reached the queue.
+    fn probe_work(&mut self, active: &ActiveConnectionSet, now_ms: i64) -> Vec<ProbeWork> {
         self.retain_active(active);
         for attempt in active.iter() {
             self.peers
                 .entry(attempt.peer)
                 .or_insert_with(|| PeerLiveness::new(attempt.generation, now_ms));
         }
-
         active
             .iter()
-            .filter(|attempt| {
-                self.peers
-                    .get(&attempt.peer)
-                    .is_some_and(|liveness| liveness.should_probe(now_ms))
+            .filter_map(|attempt| {
+                let liveness = self.peers.get(&attempt.peer)?;
+                if liveness.clock.due(now_ms) {
+                    return Some(ProbeWork::Issue(attempt));
+                }
+                let request = liveness.clock.unsent()?;
+                Some(ProbeWork::Resend { attempt, request })
             })
             .collect()
     }
 
-    fn register_probe(
-        &mut self,
-        peer: Did,
-        generation: u64,
-        tx_id: uuid::Uuid,
-        request: ProbeRequest,
-    ) {
-        match self.peers.get_mut(&peer) {
-            Some(liveness) if liveness.generation == generation => {
-                liveness.set_pending_probe(tx_id, request);
-            }
-            _ => {
-                // The active generation is registered before probe candidates are
-                // returned, so a missing/mismatched entry is a superseded attempt.
-            }
-        }
-    }
-
-    fn mark_probe_sent(
-        &mut self,
-        peer: Did,
-        generation: u64,
-        now_ms: i64,
-        tx_id: uuid::Uuid,
-        request: ProbeRequest,
-    ) -> bool {
-        self.peers
-            .get_mut(&peer)
-            .filter(|liveness| liveness.generation == generation)
-            .is_some_and(|liveness| liveness.mark_matching_probe_sent(now_ms, tx_id, request))
-    }
-
-    fn cancel_pending_probe(
-        &mut self,
-        peer: Did,
-        generation: u64,
-        tx_id: uuid::Uuid,
-        request: ProbeRequest,
-    ) {
-        if let Some(liveness) = self
-            .peers
-            .get_mut(&peer)
-            .filter(|liveness| liveness.generation == generation)
-        {
-            liveness.cancel_pending_probe(tx_id, request);
-        }
-    }
-
-    fn consume_pending_probe(
-        &mut self,
-        peer: Did,
-        generation: u64,
-        tx_id: uuid::Uuid,
-        request: ProbeRequest,
-    ) -> bool {
-        self.peers
-            .get_mut(&peer)
-            .filter(|liveness| liveness.generation == generation)
-            .is_some_and(|liveness| liveness.consume_pending_probe(tx_id, request))
-    }
-
-    fn expiry(&self, peer: Did, generation: u64, now_ms: i64) -> Option<PeerLivenessExpiry> {
-        let liveness = self.peers.get(&peer)?;
-        (liveness.generation == generation)
-            .then(|| liveness.expiry(now_ms))
-            .flatten()
-    }
-
     pub(super) fn connected_for_ms(&self, peer: Did, generation: u64, now_ms: i64) -> Option<i64> {
-        let liveness = self.peers.get(&peer)?;
-        (liveness.generation == generation).then(|| liveness.connected_for_ms(now_ms))
+        self.generation(peer, generation)
+            .map(|liveness| now_ms.saturating_sub(liveness.connected_at_ms))
     }
 
     /// Time since the last authenticated inbound payload on this generation.
     pub(super) fn idle_for_ms(&self, peer: Did, generation: u64, now_ms: i64) -> Option<i64> {
-        let liveness = self.peers.get(&peer)?;
-        (liveness.generation == generation).then(|| liveness.idle_for_ms(now_ms))
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    fn unanswered_probe_since_ms(&self, peer: Did, generation: u64) -> Option<i64> {
-        let liveness = self.peers.get(&peer)?;
-        (liveness.generation == generation)
-            .then_some(liveness.unanswered_probe_since_ms)
-            .flatten()
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    fn force_probe_sent_at(&mut self, peer: Did, generation: u64, sent_at_ms: i64) {
-        let mut liveness = PeerLiveness::new(generation, sent_at_ms);
-        liveness.mark_probe_sent(sent_at_ms);
-        self.peers.insert(peer, liveness);
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    fn force_last_inbound_at(&mut self, peer: Did, generation: u64, last_inbound_ms: i64) -> bool {
-        let Some(liveness) = self
-            .peers
-            .get_mut(&peer)
-            .filter(|liveness| liveness.generation == generation)
-        else {
-            return false;
-        };
-        liveness.last_inbound_ms = last_inbound_ms;
-        true
-    }
-
-    /// Override one generation's admission time for native retention tests.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    fn force_connected_at(&mut self, peer: Did, generation: u64, connected_at_ms: i64) -> bool {
-        let Some(liveness) = self
-            .peers
-            .get_mut(&peer)
-            .filter(|liveness| liveness.generation == generation)
-        else {
-            return false;
-        };
-        liveness.connected_at_ms = connected_at_ms;
-        true
+        self.generation(peer, generation)
+            .map(|liveness| now_ms.saturating_sub(liveness.last_inbound_ms))
     }
 }
 
@@ -319,6 +346,25 @@ pub(crate) struct PeerLivenessExpiry {
     pub(crate) unanswered_for_ms: i64,
     /// Configured timeout for unanswered probes.
     pub(crate) timeout_ms: i64,
+}
+
+/// What one liveness observation records.
+#[derive(Clone, Copy)]
+enum PeerLivenessObservation {
+    /// The generation was admitted: its clock starts.
+    Connected,
+    /// An authenticated inbound payload arrived; retention reads it, liveness does not.
+    Inbound,
+}
+
+impl PeerLivenessObservation {
+    /// Record this observation of `peer`'s `generation` at `now_ms`.
+    fn apply(self, liveness: &mut PeerLivenessMap, peer: Did, generation: u64, now_ms: i64) {
+        match self {
+            Self::Connected => liveness.mark_connected(peer, generation, now_ms),
+            Self::Inbound => liveness.mark_inbound(peer, generation, now_ms),
+        }
+    }
 }
 
 impl SwarmTransport {
@@ -368,83 +414,113 @@ impl SwarmTransport {
         }
     }
 
-    pub(crate) fn liveness_probe_candidates(
-        &self,
-        now_ms: i64,
-    ) -> Result<Vec<PendingConnectionAttempt>> {
-        self.with_connection_lifecycle(|| {
+    /// Open the probe pass at `now_ms`, with what it must do. `None` while another pass runs:
+    /// that pass does the work.
+    pub(crate) fn liveness_probe_pass(&self, now_ms: i64) -> Result<Option<ProbePass<'_>>> {
+        let Some(exclusive) = self.probe_pass.try_lock() else {
+            return Ok(None);
+        };
+        let work = self.with_connection_lifecycle(|| {
             let active = self.active_connections()?;
-            Ok(self.peer_liveness()?.probe_candidates(&active, now_ms))
-        })
+            Ok(self.peer_liveness()?.probe_work(&active, now_ms))
+        })?;
+        Ok(Some(ProbePass {
+            _exclusive: exclusive,
+            work,
+        }))
     }
 
-    pub(crate) fn register_pending_liveness_probe(
+    /// Issue `payload`, carrying `request`, as `attempt`'s probe at `now_ms`: its deadline
+    /// starts now, and it is sent again until a transfer reaches the queue. `None` when the
+    /// generation is no longer active or a probe is outstanding.
+    pub(crate) fn issue_liveness_probe(
         &self,
+        _pass: &ProbePass<'_>,
         attempt: PendingConnectionAttempt,
-        tx_id: uuid::Uuid,
+        payload: MessagePayload,
         request: ProbeRequest,
-    ) -> Result<bool> {
-        self.with_active_slot(attempt, || {
-            self.peer_liveness()?
-                .register_probe(attempt.peer, attempt.generation, tx_id, request);
-            Ok(())
-        })
-        .map(|registered| registered.is_some())
-    }
-
-    pub(crate) fn record_peer_liveness_probe_sent(
-        &self,
-        attempt: PendingConnectionAttempt,
         now_ms: i64,
-        tx_id: uuid::Uuid,
-        request: ProbeRequest,
-    ) -> Result<bool> {
-        self.with_active_slot(attempt, || {
-            Ok(self.peer_liveness()?.mark_probe_sent(
-                attempt.peer,
-                attempt.generation,
-                now_ms,
-                tx_id,
-                request,
-            ))
+    ) -> Result<Option<IssuedProbe>> {
+        self.liveness_probe_transfer(attempt, payload, request, now_ms, |clock| {
+            clock.issue(request, now_ms)
         })
-        .map(|recorded| recorded.unwrap_or(false))
     }
 
-    pub(crate) fn cancel_pending_liveness_probe(
+    /// Send `payload`, the outstanding probe of challenge `request` signed anew, as `attempt`'s
+    /// probe at `now_ms`, under the deadline of its first issue. `None` when the generation is
+    /// no longer active, or the probe was answered or reached the queue meanwhile.
+    pub(crate) fn resend_liveness_probe(
+        &self,
+        _pass: &ProbePass<'_>,
+        attempt: PendingConnectionAttempt,
+        payload: MessagePayload,
+        request: ProbeRequest,
+        now_ms: i64,
+    ) -> Result<Option<IssuedProbe>> {
+        self.liveness_probe_transfer(attempt, payload, request, now_ms, |clock| {
+            clock.unsent() == Some(request)
+        })
+    }
+
+    /// One transfer of `attempt`'s probe of challenge `request`, if `admits` admits it on the
+    /// generation's clock, under what is left of the probe's deadline at `now_ms`.
+    fn liveness_probe_transfer(
         &self,
         attempt: PendingConnectionAttempt,
-        tx_id: uuid::Uuid,
+        payload: MessagePayload,
+        request: ProbeRequest,
+        now_ms: i64,
+        admits: impl FnOnce(&mut ProbeClock) -> bool,
+    ) -> Result<Option<IssuedProbe>> {
+        let deadline = self.with_active_slot(attempt, || {
+            let mut liveness = self.peer_liveness()?;
+            let Some(record) = liveness.generation_mut(attempt.peer, attempt.generation) else {
+                return Ok(None);
+            };
+            Ok(admits(&mut record.clock).then(|| remaining(&record.clock, now_ms)))
+        })?;
+        Ok(deadline.flatten().map(|deadline| IssuedProbe {
+            attempt,
+            request,
+            payload,
+            deadline,
+        }))
+    }
+
+    /// Record that a transfer of `attempt`'s probe of challenge `request` reached the peer's
+    /// queue: it is not sent again.
+    pub(crate) fn liveness_probe_queued(
+        &self,
+        attempt: PendingConnectionAttempt,
         request: ProbeRequest,
     ) -> Result<()> {
         self.with_active_slot(attempt, || {
-            self.peer_liveness()?.cancel_pending_probe(
-                attempt.peer,
-                attempt.generation,
-                tx_id,
-                request,
-            );
+            if let Some(record) = self
+                .peer_liveness()?
+                .generation_mut(attempt.peer, attempt.generation)
+            {
+                record.clock.queued(request);
+            }
             Ok(())
         })
         .map(|_| ())
     }
 
-    pub(crate) fn consume_pending_probe(
+    /// Clear `provider`'s outstanding probe on its answer carrying `request`. Returns whether
+    /// that probe was the outstanding one.
+    pub(crate) fn answer_liveness_probe(
         &self,
         provider: Did,
-        tx_id: uuid::Uuid,
         request: ProbeRequest,
     ) -> Result<bool> {
         self.with_connection_lifecycle(|| {
             let Some(attempt) = self.active_attempt(provider)? else {
                 return Ok(false);
             };
-            Ok(self.peer_liveness()?.consume_pending_probe(
-                provider,
-                attempt.generation,
-                tx_id,
-                request,
-            ))
+            Ok(self
+                .peer_liveness()?
+                .generation_mut(provider, attempt.generation)
+                .is_some_and(|liveness| liveness.clock.answer(request)))
         })
     }
 
@@ -456,7 +532,8 @@ impl SwarmTransport {
         self.with_active_slot(attempt, || {
             Ok(self
                 .peer_liveness()?
-                .expiry(attempt.peer, attempt.generation, now_ms))
+                .generation(attempt.peer, attempt.generation)
+                .and_then(|liveness| liveness.clock.expiry(now_ms)))
         })
         .map(Option::flatten)
     }
@@ -488,106 +565,169 @@ impl SwarmTransport {
         self.with_connection_lifecycle(|| Ok(self.peer_liveness()?.peers.len()))
     }
 
+    /// Run `edit` on the liveness record of `peer`'s active generation.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn peer_liveness_unanswered_since_for_test(&self, peer: Did) -> Result<Option<i64>> {
+    fn edit_peer_liveness_for_test<T>(
+        &self,
+        peer: Did,
+        edit: impl FnOnce(&mut PeerLiveness) -> T,
+    ) -> Result<T> {
         self.with_connection_lifecycle(|| {
-            let Some(attempt) = self.active_attempt(peer)? else {
-                return Ok(None);
-            };
-            Ok(self
-                .peer_liveness()?
-                .unanswered_probe_since_ms(peer, attempt.generation))
+            let attempt = self
+                .active_attempt(peer)?
+                .ok_or(Error::SwarmMissDidInTable(peer))?;
+            let mut liveness = self.peer_liveness()?;
+            let record = liveness
+                .generation_mut(peer, attempt.generation)
+                .ok_or(Error::SwarmMissDidInTable(peer))?;
+            Ok(edit(record))
         })
     }
 
+    /// When `peer`'s outstanding probe was issued, if one is.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn force_peer_liveness_probe_sent_at(
+    pub(crate) fn peer_liveness_outstanding_since_for_test(
         &self,
         peer: Did,
-        sent_at_ms: i64,
+    ) -> Result<Option<i64>> {
+        self.edit_peer_liveness_for_test(peer, |liveness| liveness.clock.outstanding_since_ms())
+    }
+
+    /// Whether a probe of `peer` is due now.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn peer_liveness_probe_due_for_test(&self, peer: Did) -> Result<bool> {
+        let now_ms = get_epoch_ms_i64();
+        self.edit_peer_liveness_for_test(peer, |liveness| liveness.clock.due(now_ms))
+    }
+
+    /// Whether `peer`'s outstanding probe reached its queue.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn peer_liveness_probe_queued_for_test(&self, peer: Did) -> Result<bool> {
+        self.edit_peer_liveness_for_test(peer, |liveness| {
+            liveness
+                .clock
+                .outstanding
+                .is_some_and(|outstanding| outstanding.queued)
+        })
+    }
+
+    /// Make `peer`'s active generation carry an outstanding probe issued at `issued_ms`, which no
+    /// answer matches, recording the generation if liveness has not yet.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn force_peer_liveness_probe_issued_at(
+        &self,
+        peer: Did,
+        issued_ms: i64,
     ) -> Result<()> {
+        let epoch = crate::message::ProvisionalEpoch::from_unix_seconds(0);
+        let request = ProbeRequest::random_for_epoch(epoch);
         self.with_connection_lifecycle(|| {
-            let Some(attempt) = self.active_attempt(peer)? else {
-                return Ok(());
-            };
-            self.peer_liveness()?
-                .force_probe_sent_at(peer, attempt.generation, sent_at_ms);
+            let attempt = self
+                .active_attempt(peer)?
+                .ok_or(Error::SwarmMissDidInTable(peer))?;
+            let mut liveness = PeerLiveness::new(attempt.generation, issued_ms);
+            liveness.clock.issue(request, issued_ms);
+            self.peer_liveness()?.peers.insert(peer, liveness);
             Ok(())
         })
     }
 
+    /// Restart `peer`'s probe clock with nothing outstanding, as if its latest probe was answered
+    /// `ago_ms` before now: a probe is due iff `ago_ms` is a period or more.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn restart_peer_liveness_period_for_test(
+        &self,
+        peer: Did,
+        ago_ms: i64,
+    ) -> Result<()> {
+        let issued_ms = get_epoch_ms_i64() - ago_ms;
+        self.edit_peer_liveness_for_test(peer, |liveness| {
+            liveness.clock = ProbeClock::admitted_at(issued_ms);
+        })
+    }
+
+    /// Make a probe of `peer` due now: [`Self::restart_peer_liveness_period_for_test`] a period
+    /// ago.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn force_peer_liveness_probe_due(&self, peer: Did) -> Result<()> {
+        self.restart_peer_liveness_period_for_test(peer, PEER_LIVENESS_PERIOD_MS)
+    }
+
+    /// Age `peer`'s latest authenticated inbound payload, for retention fixtures.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn force_peer_last_inbound_at(&self, peer: Did, last_inbound_ms: i64) -> Result<()> {
-        self.with_connection_lifecycle(|| {
-            let Some(attempt) = self.active_attempt(peer)? else {
-                return Err(Error::InvalidMessage(format!(
-                    "cannot age missing active peer {peer}"
-                )));
-            };
-            if self.peer_liveness()?.force_last_inbound_at(
-                peer,
-                attempt.generation,
-                last_inbound_ms,
-            ) {
-                Ok(())
-            } else {
-                Err(Error::InvalidMessage(format!(
-                    "cannot age missing liveness generation for peer {peer}"
-                )))
-            }
+        self.edit_peer_liveness_for_test(peer, |liveness| {
+            liveness.last_inbound_ms = last_inbound_ms;
         })
     }
 
     /// Age the current generation for native retention and liveness fixtures.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn force_peer_connected_at(&self, peer: Did, connected_at_ms: i64) -> Result<()> {
-        self.with_connection_lifecycle(|| {
-            let Some(attempt) = self.active_attempt(peer)? else {
-                return Err(Error::InvalidMessage(format!(
-                    "cannot age missing active peer {peer}"
-                )));
-            };
-            if self
-                .peer_liveness()?
-                .force_connected_at(peer, attempt.generation, connected_at_ms)
-            {
-                Ok(())
-            } else {
-                Err(Error::InvalidMessage(format!(
-                    "cannot age missing liveness generation for peer {peer}"
-                )))
-            }
+        self.edit_peer_liveness_for_test(peer, |liveness| {
+            liveness.connected_at_ms = connected_at_ms;
         })
     }
 }
 
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_composed_model;
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::ProbeClock;
+    use super::PEER_LIVENESS_PERIOD_MS;
+    use super::PEER_LIVENESS_TIMEOUT_MS;
+    use crate::message::ProbeRequest;
+    use crate::message::ProvisionalEpoch;
 
-    #[test]
-    fn response_before_send_completion_consumes_the_registered_probe_once() {
-        let request = crate::message::test_probe_request(9);
-        let tx_id = uuid::Uuid::new_v4();
-        let mut liveness = PeerLiveness::new(1, 10);
-
-        liveness.set_pending_probe(tx_id, request);
-        assert!(liveness.consume_pending_probe(tx_id, request));
-        assert!(!liveness.mark_matching_probe_sent(11, tx_id, request));
-        assert_eq!(liveness.unanswered_probe_since_ms, None);
-        assert!(!liveness.consume_pending_probe(tx_id, request));
+    /// A fresh probe challenge, as production issues one.
+    fn probe() -> ProbeRequest {
+        ProbeRequest::random_for_epoch(ProvisionalEpoch::from_unix_seconds(0))
     }
 
+    /// One outstanding: a second issue is refused, so the first answer stays acceptable.
     #[test]
-    fn failed_send_cancels_only_its_matching_registered_probe() {
-        let request = crate::message::test_probe_request(10);
-        let replacement = crate::message::test_probe_request(11);
-        let tx_id = uuid::Uuid::new_v4();
-        let replacement_tx_id = uuid::Uuid::new_v4();
-        let mut liveness = PeerLiveness::new(1, 10);
+    fn test_a_probe_is_never_issued_over_an_outstanding_one() {
+        let (first, second) = (probe(), probe());
+        let mut clock = ProbeClock::admitted_at(0);
+        assert!(!clock.due(PEER_LIVENESS_PERIOD_MS - 1));
+        assert!(clock.due(PEER_LIVENESS_PERIOD_MS));
+        assert!(clock.issue(first, PEER_LIVENESS_PERIOD_MS));
+        assert!(!clock.due(3 * PEER_LIVENESS_PERIOD_MS));
+        assert!(!clock.issue(second, 3 * PEER_LIVENESS_PERIOD_MS));
+        assert!(!clock.answer(second));
+        assert!(clock.answer(first));
+        assert_eq!(clock.outstanding_since_ms(), None);
+    }
 
-        liveness.set_pending_probe(replacement_tx_id, replacement);
-        liveness.cancel_pending_probe(tx_id, request);
-        assert!(liveness.consume_pending_probe(replacement_tx_id, replacement));
+    /// Deadline from issue: the outstanding probe expires `TIMEOUT` after its issue, whatever
+    /// happens meanwhile, and only its answer clears it.
+    #[test]
+    fn test_the_deadline_counts_from_issue_and_only_the_answer_clears_it() {
+        let outstanding = probe();
+        let mut clock = ProbeClock::admitted_at(0);
+        assert!(clock.issue(outstanding, 10));
+        assert!(clock.expiry(10 + PEER_LIVENESS_TIMEOUT_MS - 1).is_none());
+        assert!(clock.expiry(10 + PEER_LIVENESS_TIMEOUT_MS).is_some());
+        assert!(!clock.answer(probe()));
+        assert!(clock.answer(outstanding));
+        assert!(clock.expiry(10 + PEER_LIVENESS_TIMEOUT_MS).is_none());
+    }
+
+    /// Unsent is resent, never withdrawn: until its answer, an issued probe stays outstanding
+    /// with its deadline from issue, however long it takes to reach the queue.
+    #[test]
+    fn test_an_unanswered_probe_keeps_its_deadline_from_issue() {
+        let mut clock = ProbeClock::admitted_at(0);
+        assert!(clock.issue(probe(), PEER_LIVENESS_PERIOD_MS));
+        assert!(!clock.due(3 * PEER_LIVENESS_PERIOD_MS));
+        assert_eq!(
+            clock.remaining_ms(PEER_LIVENESS_PERIOD_MS),
+            Some(PEER_LIVENESS_TIMEOUT_MS)
+        );
+        assert!(clock
+            .expiry(PEER_LIVENESS_PERIOD_MS + PEER_LIVENESS_TIMEOUT_MS)
+            .is_some());
     }
 }

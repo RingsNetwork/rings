@@ -7,20 +7,18 @@
 //!
 //! ```text
 //!   reachable(t)  ⟺  is_peer_admitted(t)
-//!                  ∨  lookup_successor(t) = Routed(tx) ∧ report(tx).successor = t
+//!                  ∨  lookup_successor(t) = Routed(report) ∧ await(report) = t
 //! ```
 //!
-//! Two cases are decided without any network round trip. A target admitted as the application
-//! sees it is reachable: ready or recovering, its transport is the swarm's to heal or retire,
-//! its retirement will be reported, and a dial would be refused as already connected. A lookup
-//! the local topology decides, `Local(head)`, never confirms: either `head ≠ t`, so `t` is
-//! absent from the interval; or `head` is this node, which has no successor and is not `t`; or
-//! `head = t` is in the local successor list without an announced admission at the first read,
-//! because it is admitted but not yet announced (the dial that follows is refused as already
-//! connected and settles as a miss until the announcement lands) or because stabilization
+//! Two cases are decided without any network round trip. An admitted target is reachable:
+//! ready or recovering, its transport is the swarm's to heal or retire, its retirement will be
+//! reported, and a dial would be refused as already connected. A lookup the local topology
+//! decides, `Local(head)`, never confirms: either `head ≠ t`, so `t` is absent from the
+//! interval; or `head` is this node, which has no successor and is not `t`; or `head = t` is in
+//! the local successor list without an admission at the first read, because stabilization
 //! adopted it from a report without an edge (the dial proceeds and creates the edge Chord's own
 //! stabilization seeks). Otherwise the lookup is routed toward `t` and `t` is reachable iff the
-//! report that returns under the same transaction id names `t`. A partition that lost `t`
+//! report its handle resolves to names `t`. A partition that lost `t`
 //! answers with the node now succeeding `t`'s position.
 //!
 //! The report returns Chord-routed to this node, so it also needs this node to be adopted by
@@ -49,7 +47,6 @@ use rings_core::dht::Did;
 use rings_core::swarm::SuccessorLookup;
 use rings_core::swarm::Swarm;
 
-use super::evidence::LookupReportLedger;
 use super::evidence::ReachabilityEvidence;
 use super::BootstrapPort;
 use super::DialFailure;
@@ -74,7 +71,7 @@ pub(crate) struct ProcessorPort {
 }
 
 impl ProcessorPort {
-    /// A port whose probes and dials rendezvous with the swarm's reports in `evidence`.
+    /// A port whose dials rendezvous with the admissions recorded in `evidence`.
     pub(crate) fn new(processor: Arc<Processor>, evidence: Arc<ReachabilityEvidence>) -> Self {
         Self {
             processor,
@@ -95,12 +92,12 @@ impl From<HandshakeFailure> for DialFailure {
 
 #[async_trait]
 impl BootstrapPort for ProcessorPort {
-    /// An announced admission short-circuits; otherwise the lookup decides.
+    /// An admission short-circuits; otherwise the lookup decides.
     async fn reachable(&self, target: Did) -> bool {
         let swarm = &self.processor.swarm;
         match swarm.is_peer_admitted(target) {
             Ok(true) => true,
-            Ok(false) => lookup_reaches(swarm, self.evidence.reports(), target).await,
+            Ok(false) => lookup_reaches(swarm, target).await,
             Err(error) => {
                 tracing::error!(peer = %target, %error, "connection records unavailable");
                 false
@@ -136,11 +133,11 @@ impl BootstrapPort for ProcessorPort {
 }
 
 impl ProcessorPort {
-    /// Whether `peer`'s admission is announced within [`DIAL_ADMISSION_TIMEOUT`]. The waiter is
-    /// registered before the record is checked, which closes the window: an admission announced
-    /// before the check is seen by it, one announced after resolves the waiter. A closed waiter
-    /// is unreachable under one turn per target; it reads as the timeout it would otherwise
-    /// become.
+    /// Whether `peer` is admitted within [`DIAL_ADMISSION_TIMEOUT`]. The waiter is registered
+    /// before the record is checked, which closes the window: an admission committed before the
+    /// check is seen by it, one committed after is announced and resolves the waiter. A closed
+    /// waiter is unreachable under one turn per target; it reads as the timeout it would
+    /// otherwise become.
     async fn await_admission(&self, peer: Did) -> Result<bool> {
         let waiter = self.evidence.admissions().wait_for(peer)?;
         if self
@@ -161,24 +158,17 @@ impl ProcessorPort {
 /// Whether a successor lookup for `target` answers `target` itself: a lookup the local topology
 /// decides is refuted (see the module doc), a routed one must report within
 /// [`LOOKUP_PROBE_TIMEOUT`].
-async fn lookup_reaches(swarm: &Swarm, reports: &LookupReportLedger, target: Did) -> bool {
-    let tx_id = match swarm.lookup_successor(target).await {
-        Ok(SuccessorLookup::Routed(tx_id)) => tx_id,
+async fn lookup_reaches(swarm: &Swarm, target: Did) -> bool {
+    let report = match swarm.lookup_successor(target).await {
+        Ok(SuccessorLookup::Routed(report)) => report,
         Ok(SuccessorLookup::Local(_)) => return false,
         Err(error) => {
             tracing::debug!(peer = %target, %error, "bootstrap lookup could not be issued");
             return false;
         }
     };
-    let waiter = match reports.wait_for(tx_id) {
-        Ok(waiter) => waiter,
-        Err(error) => {
-            tracing::error!(peer = %target, %error, "bootstrap lookup record unavailable");
-            return false;
-        }
-    };
     matches!(
-        tokio::time::timeout(LOOKUP_PROBE_TIMEOUT, waiter).await,
+        tokio::time::timeout(LOOKUP_PROBE_TIMEOUT, report).await,
         Ok(Ok(successor)) if successor == target
     )
 }

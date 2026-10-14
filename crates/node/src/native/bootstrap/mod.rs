@@ -17,9 +17,9 @@
 //! - [`BootstrapSupervisor`] — the shell: wakes on deadlines, target losses and finished turns;
 //!   runs at most one turn per target; exits on the run's stop token.
 //! - `evidence::ReachabilityEvidence` (crate-private) — what the swarm reports about the
-//!   targets: lookup reports for the probe, admissions the dial waits for, and retirements the
-//!   supervisor reads as losses; written by the [`Backend`] through [`BackendObserver`], which
-//!   the supervisor hands out as [`BootstrapSupervisor::observer`].
+//!   targets: admissions the dial waits for and retirements the supervisor reads as losses;
+//!   written by the [`Backend`] through [`BackendObserver`], which the supervisor hands out as
+//!   [`BootstrapSupervisor::observer`].
 //!
 //! ```text
 //!                    ┌────────────────────────── run loop ──────────────────────────┐
@@ -112,7 +112,7 @@ impl BootstrapTargets {
 #[derive(Debug)]
 pub(crate) enum DialFailure {
     /// The target's slot is owned by another attempt (a handshake in flight, whichever side
-    /// started it, or an admission not yet announced): refused before any request when the
+    /// started it, or an admission being committed): refused before any request when the
     /// local core already holds an unadmitted handshake, or by the local core during the
     /// exchange. A refusal by the remote core arrives as an RPC error and is a failure.
     InFlight,

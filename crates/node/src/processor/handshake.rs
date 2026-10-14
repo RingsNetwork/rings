@@ -78,9 +78,9 @@ enum HttpExchange {
 #[derive(Debug)]
 pub(crate) enum HandshakeFailure {
     /// The peer's slot is owned by another attempt (a handshake in flight, whichever side
-    /// started it, or an admission not yet announced): refused before any request when the
-    /// local core already holds an unadmitted handshake, or by the local core during the
-    /// exchange. Nothing is wrong; a later attempt may succeed.
+    /// started it): refused before any request when the local core already holds an unadmitted
+    /// handshake, or by the local core during the exchange. Nothing is wrong; a later attempt may
+    /// succeed.
     InFlight {
         /// The peer whose slot is owned.
         peer: Did,
@@ -141,7 +141,8 @@ impl Processor {
     /// unadmitted handshake to it, and before any offer if the endpoint answers as another
     /// node; then create, exchange and accept the offer. Returns the generation the offer
     /// reserved once the answer is accepted; admission of the resulting transport completes
-    /// asynchronously and is reported through the swarm callback. The answer is pinned to that
+    /// asynchronously and reaches the [`Backend`](crate::extension::Backend) as an item of the
+    /// core's `ApplicationInbox`. The answer is pinned to that
     /// generation, so it is never applied to a handshake the peer started meanwhile; a failure
     /// after the offer was created cancels the generation iff it is still pending.
     ///

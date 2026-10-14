@@ -38,8 +38,6 @@ pub(crate) struct AdmissionActivity;
 
 #[cfg(all(rings_native, not(feature = "dummy")))]
 impl crate::extension::BackendObserver for AdmissionActivity {
-    fn lookup_report(&self, _tx_id: uuid::Uuid, _successor: rings_core::dht::Did) {}
-
     fn peer_admitted(&self, _peer: rings_core::dht::Did) {
         record_activity();
     }

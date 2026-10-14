@@ -7,17 +7,12 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::message::Message;
 use crate::message::MessageSigner;
-use crate::swarm::callback::SwarmCallback;
 use crate::swarm::Swarm;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
 use crate::tests::TEST_NETWORK_ID;
-
-struct NoopCallback;
-
-impl SwarmCallback for NoopCallback {}
 
 fn notify_context(origin: &SecretKey, destination: crate::dht::Did) -> Result<MessagePayload> {
     let session = DelegateeKey::new_with_seckey(origin)?;
@@ -35,7 +30,7 @@ async fn test_notify_predecessor_rejects_origin_mismatch_without_mutating_topolo
     let origin = SecretKey::random();
     let spoofed = SecretKey::random().address().into();
     let context = notify_context(&origin, node.did())?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
 
     let result = handler
         .handle(&context, &NotifyPredecessorSend { did: spoofed })
@@ -59,7 +54,7 @@ async fn test_notify_predecessor_rejects_unadmitted_origin_without_mutating_topo
     let origin = SecretKey::random();
     let origin_did = origin.address().into();
     let context = notify_context(&origin, node.did())?;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node.swarm.transport.clone());
 
     let result = handler
         .handle(&context, &NotifyPredecessorSend { did: origin_did })

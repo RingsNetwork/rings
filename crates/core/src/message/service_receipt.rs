@@ -40,7 +40,7 @@ pub enum ServiceKind {
 }
 
 /// Coarse wall-clock slot used only for live provisional collection.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ProvisionalEpoch {
     /// Unix-time slice number.
     pub slot: u64,
@@ -341,7 +341,7 @@ impl ProvisionalServiceReceipt {
 }
 
 /// Beneficiary request initiating Probe.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ProbeRequest {
     /// Provisional collection slot proposed by the beneficiary.
     pub epoch: ProvisionalEpoch,

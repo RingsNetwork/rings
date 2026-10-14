@@ -144,7 +144,8 @@ rings pubsub <topic>
 ```
 
 Opens a chat-room loop on `topic`: each line you type is published to the topic, and messages
-other peers publish to it are printed as they arrive.
+other peers publish to it are printed as they arrive. Each message expires by the element
+lifetime rule of [DHT storage](advanced-topic/chord.md#data-topic-storage).
 
 ## Services
 
@@ -154,7 +155,9 @@ rings service lookup <name>
 ```
 
 `register` publishes this node as a provider of `name` in the DHT; `lookup` returns the DIDs
-currently providing it. [Decentralized services](features/decentralized-services.md) describes
+currently providing it. A registration expires by the element lifetime rule of
+[DHT storage](advanced-topic/chord.md#data-topic-storage), so a provider runs `register` again
+periodically to stay listed. [Decentralized services](features/decentralized-services.md) describes
 the model.
 
 ## Inspect

@@ -4,6 +4,7 @@ mod interface;
 mod send;
 mod state;
 
+pub use interface::custom_frame_wire;
 pub use interface::effective_max_message_size;
 #[cfg(any(
     feature = "dummy",
@@ -15,7 +16,8 @@ pub(crate) use interface::BorrowedTransportMessage;
 pub use interface::BoxedTransport;
 pub use interface::ConnectionInterface;
 pub use interface::TransportInterface;
-pub use interface::TransportMessage;
+#[cfg(any(test, rings_transport_backend))]
+pub(crate) use interface::TransportMessage;
 pub use interface::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 #[cfg(any(feature = "dummy", test))]
 pub(crate) use send::IrrevocableSendGuard;
@@ -29,6 +31,8 @@ pub use send::IRREVOCABLE_SEND_COMPLETION_TIMEOUT;
 pub(crate) use state::ConnectionStateCell;
 pub use state::ConnectionStateSnapshot;
 pub use state::WebrtcConnectionState;
+
+pub use crate::callback::link_credit::LaneCreditReservation;
 
 #[cfg(test)]
 mod tests;

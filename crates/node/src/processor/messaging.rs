@@ -1,5 +1,5 @@
-//! End-to-end encrypted streams of the processor: the handshake request, stream frames, and
-//! their verification and decryption.
+//! Messages a processor sends: plain and direct custom messages, extension envelopes, and the
+//! end-to-end encrypted handshake and stream.
 
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
@@ -9,12 +9,37 @@ use rings_core::message::e2e::E2eHandshakeRequest;
 use rings_core::message::e2e::E2eHandshakeResponse;
 use rings_core::message::e2e::E2eStreamDecryptor;
 use rings_core::message::e2e::E2eStreamFrame;
-use rings_core::message::Message;
+use rings_core::swarm::application::ApplicationData;
+use rings_core::utils::get_epoch_ms;
 
 use super::Processor;
 use crate::error::Error;
 use crate::error::Result;
+
 impl Processor {
+    /// Send custom message to a did.
+    pub async fn send_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
+        tracing::trace!(size = msg.len(), %destination, "send_message");
+
+        self.swarm
+            .send_message(ApplicationData::custom(msg), destination)
+            .await
+            .map_err(Error::SendMessage)
+    }
+
+    /// Send a custom message to an already connected peer without Chord routing.
+    ///
+    /// Protocols with their own authenticated hop selection, such as onion circuits, use this
+    /// to keep the core transport from replacing their selected next hop.
+    pub async fn send_direct_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
+        tracing::trace!(size = msg.len(), %destination, "send_direct_message");
+
+        self.swarm
+            .send_direct_message(ApplicationData::custom(msg), destination)
+            .await
+            .map_err(Error::SendMessage)
+    }
+
     /// Send an E2E handshake request to a DID.
     ///
     /// The negotiated key is the peer's account/identity secp256k1 key, not
@@ -23,7 +48,7 @@ impl Processor {
         let public_key = self.swarm.delegator_pubkey().map_err(Error::SendMessage)?;
         self.swarm
             .send_message(
-                Message::E2eHandshakeRequest(E2eHandshakeRequest::new(public_key)),
+                ApplicationData::E2eHandshakeRequest(E2eHandshakeRequest::new(public_key)),
                 destination,
             )
             .await
@@ -75,7 +100,7 @@ impl Processor {
 
         for frame in frames {
             self.swarm
-                .send_message(Message::E2eStreamFrame(frame), destination)
+                .send_message(ApplicationData::E2eStreamFrame(frame), destination)
                 .await
                 .map_err(Error::SendMessage)?;
         }
@@ -107,7 +132,8 @@ impl Processor {
         Ok(response.responder_public_key)
     }
 
-    /// Create an E2E stream decryptor with this node's identity/signing secret key.
+    /// Create an E2E stream decryptor with this node's identity/signing secret key; its stall
+    /// deadline runs from now.
     ///
     /// The ciphertext is encrypted to the DID/account key negotiated by the
     /// handshake. A session private key cannot decrypt it unless the delegatee key
@@ -125,15 +151,50 @@ impl Processor {
             stream_id,
             expected_sender,
             recipient_identity_key,
+            get_epoch_ms(),
         ))
     }
 
-    /// Decrypt one E2E stream frame with an already-created stream decryptor.
+    /// Decrypt one E2E stream frame arriving now with an already-created stream decryptor.
+    /// Fails with `E2eStreamStalled` once the stream has made no progress for its stall
+    /// deadline: a frame of it was lost.
     pub fn decrypt_e2e_stream_frame(
         &self,
         decryptor: &mut E2eStreamDecryptor,
         frame: &E2eStreamFrame,
     ) -> Result<Vec<u8>> {
-        decryptor.decrypt_next(frame).map_err(Error::CoreError)
+        decryptor
+            .decrypt_next(frame, get_epoch_ms())
+            .map_err(Error::CoreError)
+    }
+
+    /// Whether an E2E stream is still live now; poll it while no frame of the stream arrives,
+    /// so a lost frame (the final one included) is reported rather than waited for.
+    pub fn check_e2e_stream(&self, decryptor: &E2eStreamDecryptor) -> Result<()> {
+        decryptor.check(get_epoch_ms()).map_err(Error::CoreError)
+    }
+
+    /// Send a namespaced [`Envelope`](crate::extension::ext::Envelope) to a did over the
+    /// P2P transport (the wire codec
+    /// of the extension layer). `send_envelope : (Did, Envelope) → IO TxId`.
+    pub async fn send_envelope(
+        &self,
+        destination: Did,
+        envelope: &crate::extension::ext::Envelope,
+    ) -> Result<uuid::Uuid> {
+        let msg_bytes = envelope.encode()?;
+        self.send_message(destination, &msg_bytes).await
+    }
+
+    /// Send a namespaced envelope directly to an already connected peer.
+    ///
+    /// This bypasses Chord routing while retaining the normal custom-message envelope codec.
+    pub async fn send_direct_envelope(
+        &self,
+        destination: Did,
+        envelope: &crate::extension::ext::Envelope,
+    ) -> Result<uuid::Uuid> {
+        let msg_bytes = envelope.encode()?;
+        self.send_direct_message(destination, &msg_bytes).await
     }
 }

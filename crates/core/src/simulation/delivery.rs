@@ -20,10 +20,9 @@ pub(crate) enum ScheduledDeliveryClass {
     Lifecycle,
     /// Chord or liveness control payload.
     Control,
-    /// A link-control frame of the delegation references (a confirmation, question or answer):
-    /// a frame of the link itself, belonging to no transaction and to no transfer lane. A
-    /// delayed confirmation costs inline frames and a delayed answer costs the held frame,
-    /// never a stall of anything that resolves, so it carries no deadline.
+    /// A link-control frame of the delegation references (a lease or a disclaimer): a frame of
+    /// the link itself, belonging to no transaction and to no transfer lane. A delayed lease or
+    /// disclaimer costs inline frames, never a stall, so it carries no deadline.
     LinkControl,
     /// Storage synchronization payload.
     Storage,

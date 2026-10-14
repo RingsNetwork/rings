@@ -6,6 +6,8 @@ use bytes::Bytes;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
+use rings_transport::core::pool::ChannelLane;
+use rings_transport::core::transport::LaneCreditReservation;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::delivery::DeliveryFuture;
 
@@ -36,6 +38,7 @@ use crate::message::MessageRelay;
 use crate::message::MessageSigner;
 use crate::message::Transaction;
 use crate::utils::sleep;
+use crate::utils::Instant;
 
 pub(super) const DATA_CHANNEL_SEND_ACCEPT_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.send_accept;
 
@@ -45,6 +48,54 @@ const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 const DATA_CHANNEL_DELIVERY_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.delivery;
+
+/// Stall law of a frame's delivery wait: expired once
+/// `now − max(admitted, last_settled) ≥ deadline`, i.e. no delivery to the peer settled for a
+/// whole `deadline` while the frame was outstanding.
+///
+/// With several transfers in flight per lane (#899), a frame admitted behind others waits for
+/// all the bytes ahead of it. A deadline counted from its own admission would then expire on a
+/// slow but healthy link as soon as the bytes in flight took longer than `deadline` to drain.
+/// Counting from the last progress on the peer expires only a link that stopped delivering, so
+/// the slowest rate a link may sustain is one frame per `deadline` whatever the window.
+pub(super) fn delivery_stalled(
+    admitted: Instant,
+    last_settled: Option<Instant>,
+    now: Instant,
+    deadline: Duration,
+) -> bool {
+    let reference = last_settled.map_or(admitted, |settled| settled.max(admitted));
+    now.saturating_duration_since(reference) >= deadline
+}
+
+/// The stall deadline of a frame's delivery wait in this build.
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) const fn delivery_stall_deadline_for_test() -> Duration {
+    DATA_CHANNEL_DELIVERY_TIMEOUT
+}
+
+/// When a delivery to one peer last settled: the reference of that peer's stall deadline.
+/// Cloning shares the record; the outbound worker hands one to each delivery wait.
+#[derive(Clone, Debug, Default)]
+pub(super) struct DeliveryProgress(Arc<std::sync::Mutex<Option<Instant>>>);
+
+impl DeliveryProgress {
+    /// Record that a delivery settled now.
+    fn record(&self) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+    }
+
+    /// When a delivery last settled, if one has.
+    fn last_settled(&self) -> Option<Instant> {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
 
 #[derive(Debug)]
 pub(super) enum ChunkSendCancelReason {
@@ -226,19 +277,45 @@ impl ChunkSendPermit {
     }
 }
 
+/// Where one frame goes and how it is reported: the peer, the connection lane it is pinned to,
+/// and the context its log and error lines name.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FrameTarget {
+    /// The peer the frame is sent to.
+    pub(super) did: Did,
+    /// The lane of the connection the frame travels on.
+    pub(super) lane: ChannelLane,
+    /// The context named in logs and errors.
+    pub(super) context: &'static str,
+}
+
+/// Send one frame under `credit`, its lane's transport credit, timing only the transport's
+/// acceptance.
+///
+/// Pre: `credit` was reserved by the scheduler ahead of the send, so the receiver's
+/// backpressure is never charged to the accept timeout. Without one (its connection could not
+/// grant credit) the transport reserves itself and fails as the connection does.
 pub(super) async fn send_data_with_timeout(
     admitted: &AdmittedConnection,
     data: Bytes,
+    credit: Option<LaneCreditReservation>,
     permit: &ChunkSendPermit,
     stop: &TransferStop,
     detached_admission: Option<&DetachedAdmission>,
-    did: Did,
-    context: &'static str,
+    target: FrameTarget,
 ) -> ChunkSendProgress<Result<DeliveryFuture>> {
+    let FrameTarget { did, lane, context } = target;
     let bytes = data.len();
     let send_permit = build_transport_send_permit(admitted, permit, stop, detached_admission);
+    let send_permit = match credit {
+        Some(credit) => send_permit.with_credit(credit),
+        None => send_permit,
+    };
     let acceptance = send_permit.acceptance();
-    let send = admitted.connection().send_data(data, send_permit).fuse();
+    let send = admitted
+        .connection()
+        .send_data(data, lane, send_permit)
+        .fuse();
     let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_TIMEOUT).fuse();
     pin_mut!(send, timeout);
 
@@ -463,6 +540,9 @@ fn log_chunk_send_cancel(did: Did, phase: &'static str, reason: &ChunkSendCancel
     );
 }
 
+/// Await one admitted frame's delivery, cancelling it with its transfer and expiring it by the
+/// peer's stall law ([`delivery_stalled`]). A settled delivery refreshes `progress`, which the
+/// peer's other outstanding frames count from.
 pub(super) async fn await_delivery_or_cancel(
     delivery: DeliveryFuture,
     admitted: &AdmittedConnection,
@@ -470,16 +550,32 @@ pub(super) async fn await_delivery_or_cancel(
     stop: &TransferStop,
     did: Did,
     phase: &'static str,
+    progress: &DeliveryProgress,
 ) -> ChunkSendProgress<Result<()>> {
     let delivery = delivery.fuse();
-    let timeout = sleep(DATA_CHANNEL_DELIVERY_TIMEOUT).fuse();
-    pin_mut!(delivery, timeout);
+    pin_mut!(delivery);
+    let admitted_at = Instant::now();
 
     loop {
         if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
             return cancel_accepted_delivery(admitted, did, phase, reason).await;
         }
+        if delivery_stalled(
+            admitted_at,
+            progress.last_settled(),
+            Instant::now(),
+            DATA_CHANNEL_DELIVERY_TIMEOUT,
+        ) {
+            terminate_accepted_connection(admitted, "delivery_timeout").await;
+            return ChunkSendProgress::Ready(Err(Error::DataChannelDeliveryTimeout {
+                peer: did,
+                timeout_ms: DATA_CHANNEL_DELIVERY_TIMEOUT.as_millis(),
+                context: phase,
+            }));
+        }
 
+        // The stall law is checked on every permit poll, so it expires within one poll
+        // interval of its deadline.
         let poll = sleep(CHUNK_SEND_PERMIT_POLL_INTERVAL).fuse();
         pin_mut!(poll);
         select! {
@@ -488,16 +584,10 @@ pub(super) async fn await_delivery_or_cancel(
                     if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
                         return cancel_accepted_delivery(admitted, did, phase, reason).await;
                     }
+                } else {
+                    progress.record();
                 }
                 return ChunkSendProgress::Ready(result.map_err(Error::Transport));
-            },
-            _ = timeout => {
-                terminate_accepted_connection(admitted, "delivery_timeout").await;
-                return ChunkSendProgress::Ready(Err(Error::DataChannelDeliveryTimeout {
-                    peer: did,
-                    timeout_ms: DATA_CHANNEL_DELIVERY_TIMEOUT.as_millis(),
-                    context: phase,
-                }));
             },
             _ = poll => {}
         }
@@ -600,6 +690,65 @@ mod tests {
         assert!(closed.load(std::sync::atomic::Ordering::Acquire));
     }
 
+    /// Witness of the chunk reserves of `consts`, with equality: the widest frame
+    /// [`frame_chunk`] can emit, with every field it leaves free at its widest (the signer's
+    /// delegation in both slots, [`Delegation::widest_for_test`]; the sequence, timestamps and
+    /// lifetimes at their types' maxima; the chunk header at the most chunks one message is cut
+    /// into; `MAX_DATA_CHANNEL_MESSAGE_SIZE` data bytes), encodes to exactly its chunk data plus
+    /// [`MAX_CHUNK_ENVELOPE_OVERHEAD`], and the transport wrapper adds exactly
+    /// [`TRANSPORT_CUSTOM_OVERHEAD`]. The fields `frame_chunk` fixes (no `reply_via`, the
+    /// relay aim toward the receiver, an exhausted hop budget) are taken as it fixes them.
+    ///
+    /// [`Delegation::widest_for_test`]: crate::delegation::Delegation::widest_for_test
+    /// [`MAX_CHUNK_ENVELOPE_OVERHEAD`]: crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD
+    /// [`TRANSPORT_CUSTOM_OVERHEAD`]: crate::consts::TRANSPORT_CUSTOM_OVERHEAD
+    #[test]
+    fn test_chunk_envelope_reserves_are_the_widest_framed_chunk() -> Result<()> {
+        use rings_transport::core::transport::custom_frame_wire;
+        use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+
+        use crate::chunk::ChunkMeta;
+        use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
+        use crate::consts::MIN_CHUNK_DATA;
+        use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
+        use crate::consts::TRANSPORT_MAX_SIZE;
+        use crate::delegation::Delegation;
+
+        let key = Delegation::widest_key_for_test();
+        let most_chunks = TRANSPORT_MAX_SIZE.div_ceil(MIN_CHUNK_DATA);
+        let chunk = Chunk {
+            chunk: [most_chunks, most_chunks],
+            data: bytes::Bytes::from(vec![u8::MAX; MAX_DATA_CHANNEL_MESSAGE_SIZE]),
+            meta: ChunkMeta {
+                id: uuid::Uuid::from_u128(u128::MAX),
+                ts_ms: u128::MAX,
+                ttl_ms: u64::MAX,
+            },
+        };
+        let mut payload = frame_chunk(
+            MessageSigner::new(&key, u32::MAX),
+            Did::from(u32::MAX),
+            chunk,
+            u64::MAX,
+        )?;
+        for verification in [
+            &mut payload.transaction.verification,
+            &mut payload.verification,
+        ] {
+            verification.ttl_ms = u64::MAX;
+            verification.ts_ms = u128::MAX;
+        }
+
+        let frame = payload.to_wire()?;
+        let wire = custom_frame_wire(frame.clone()).map_err(Error::CodecSerialize)?;
+        assert_eq!(
+            frame.len(),
+            MAX_DATA_CHANNEL_MESSAGE_SIZE + MAX_CHUNK_ENVELOPE_OVERHEAD
+        );
+        assert_eq!(wire.len(), frame.len() + TRANSPORT_CUSTOM_OVERHEAD);
+        Ok(())
+    }
+
     #[test]
     fn test_initial_cancel_reports_generation_revocation_explicitly() {
         let attempt = PendingConnectionAttempt {
@@ -629,5 +778,54 @@ mod tests {
             ChunkSendCancelReason::RouteCheckFailed(error).resolve_initial(),
             Err(Error::InvalidMessage(_))
         ));
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_delivery_stall {
+    use std::time::Duration;
+
+    use super::delivery_stalled;
+    use crate::utils::Instant;
+
+    /// The stall law over a grid of admission, last-progress and observation times: expired
+    /// exactly when no delivery settled for a whole deadline since the later of the frame's
+    /// admission and the last progress.
+    #[test]
+    fn test_a_frame_expires_only_after_a_deadline_without_progress() {
+        let base = Instant::now();
+        let deadline = Duration::from_millis(10);
+        let at = |millis: u64| base + Duration::from_millis(millis);
+        for admitted in 0..30 {
+            for settled in [None, Some(0), Some(5), Some(12), Some(25)] {
+                for now in admitted..45 {
+                    let reference = settled.map_or(admitted, |settled: u64| settled.max(admitted));
+                    let expected = now.saturating_sub(reference) >= 10;
+                    assert_eq!(
+                        delivery_stalled(at(admitted), settled.map(at), at(now), deadline),
+                        expected,
+                        "admitted {admitted}, settled {settled:?}, now {now}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A frame admitted behind a long queue on a slow link never expires while deliveries
+    /// keep settling within the deadline, however long the queue takes to drain.
+    #[test]
+    fn test_a_slow_link_that_keeps_delivering_never_expires() {
+        let base = Instant::now();
+        let deadline = Duration::from_millis(10);
+        let at = |millis: u64| base + Duration::from_millis(millis);
+        for step in 1..=100_u64 {
+            let last_settled = at((step - 1) * 9);
+            assert!(!delivery_stalled(
+                at(0),
+                Some(last_settled),
+                at(step * 9),
+                deadline
+            ));
+        }
     }
 }

@@ -3,7 +3,7 @@
 //! composes with the rerouting automaton.
 //!
 //! `storage_fetch` sends one `SearchEntry` and `operate_entry` (store, append, tombstone,
-//! compact, relay-inbox writes) one `OperateEntry` per remote placement. Each instance supplies
+//! relay-inbox writes) one `OperateEntry` per remote placement. Each instance supplies
 //! the per-placement `Compute`, the same DHT function the whole operation used to plan it
 //! ([`PeerRing::lookup_placement`], [`PeerRing::operate_route`]), so a rerouted placement goes
 //! where a fresh operation would, and the local settlement a recomputed route may reach. A
@@ -23,7 +23,6 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryLookupKey;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
-use crate::dht::ChordStorageCache;
 use crate::dht::OperateRoute;
 use crate::dht::PeerRing;
 use crate::dht::PlacementLookup;
@@ -84,7 +83,14 @@ impl Placement for LookupPlacement {
     async fn settle(&self, transport: &Arc<SwarmTransport>, local: LookupSettlement) -> Result<()> {
         match local {
             LookupSettlement::Found(entry) => {
-                transport.dht.local_cache_put(entry.clone()).await?;
+                // As every reply: counted as the round's answer only once the cache serves it.
+                super::cache_lookup_reply(
+                    transport,
+                    self.query.resource,
+                    self.redundancy,
+                    entry.clone(),
+                )
+                .await?;
                 super::repair_observed_storage_misses(transport.clone(), entry, self.redundancy)
                     .await
             }

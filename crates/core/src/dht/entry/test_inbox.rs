@@ -2,6 +2,7 @@ use super::inbox::inbox_destination;
 use super::inbox::inbox_key;
 use super::inbox::relocates_from_predecessor;
 use super::inbox::HeldMessage;
+use super::inbox::InboxElement;
 use super::Entry;
 use super::EntryKind;
 use super::EntryOperation;
@@ -19,7 +20,6 @@ use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::Encoder;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
@@ -310,7 +310,7 @@ fn test_witness_refuses_a_delta_larger_than_the_inbox_before_verifying() -> Resu
     for _ in 0..RELAY_INBOX_MAX_LEN {
         delta
             .data
-            .push(held_by(&holder, destination, TEST_NETWORK_ID)?.encode()?);
+            .push(held_by(&holder, destination, TEST_NETWORK_ID)?.to_element()?);
     }
     assert_eq!(delta.data.len(), RELAY_INBOX_MAX_LEN + 1);
     assert!(matches!(
@@ -362,9 +362,7 @@ fn test_hold_law_admits_only_the_responsible_holder_of_a_live_message() -> Resul
         &held_by(&holder, destination, TEST_NETWORK_ID)?,
         stale_now,
     )?);
-    stale
-        .entry()
-        .validate_admissible_at(stale_now, TEST_NETWORK_ID)?;
+    stale.validate_admissible_at(stale_now, TEST_NETWORK_ID)?;
     assert!(matches!(
         stale.validate_inbox_write(responsible, Some(responsible), stale_now, TEST_NETWORK_ID),
         Err(Error::RelayMessageHoldStale)
@@ -394,17 +392,13 @@ fn test_removal_authority_is_the_recipient_alone_and_nothing_else_is_allowed() -
         ),
         Err(Error::RelayInboxWriterNotRecipient)
     ));
-    for op in [
-        EntryOperation::Overwrite(carrier.clone()),
-        EntryOperation::CompactData(carrier.clone()),
-    ] {
-        assert!(matches!(
-            op.validate_inbox_write(destination, Some(responsible), now_ms, TEST_NETWORK_ID),
-            Err(Error::RelayInboxOperationNotAllowed)
-        ));
-    }
     assert!(matches!(
-        carrier.compact_data(now_ms, carrier.clone(), destination),
+        EntryOperation::Overwrite(carrier.clone()).validate_inbox_write(
+            destination,
+            Some(responsible),
+            now_ms,
+            TEST_NETWORK_ID
+        ),
         Err(Error::RelayInboxOperationNotAllowed)
     ));
     Ok(())
@@ -422,54 +416,52 @@ fn test_relocation_is_accepted_from_the_predecessor_alone() {
 }
 
 #[test]
-fn test_partition_pairs_each_witnessed_element_with_its_dot_and_retires_the_rest() -> Result<()> {
+fn test_each_deliverable_element_is_paired_with_the_dot_that_retires_it() -> Result<()> {
     let now_ms = get_epoch_ms();
     let holder = session()?;
     let destination: Did = SecretKey::random().address().into();
     let actor = holder.delegator_did();
     let first = held_by(&holder, destination, TEST_NETWORK_ID)?;
     let second = held_by(&holder, destination, TEST_NETWORK_ID)?;
-    let junk = held_by(&holder, destination, TEST_NETWORK_ID + 1)?;
 
     let carrier = Entry::new(inbox_key(destination), Vec::new(), EntryKind::RelayMessage)
         .extend(now_ms, Entry::inbox_delta(&first)?, actor)?
-        .extend(now_ms + 1, Entry::inbox_delta(&second)?, actor)?
-        .extend(now_ms + 2, Entry::inbox_delta(&junk)?, actor)?;
-    assert_eq!(carrier.data.len(), 3);
+        .extend(now_ms + 1, Entry::inbox_delta(&second)?, actor)?;
 
-    let drain = carrier.partition_inbox(now_ms + 3, TEST_NETWORK_ID);
+    let deliverable = carrier.stored_inbox_elements();
+    assert!(deliverable
+        .iter()
+        .all(|element| element.is_deliverable_at(now_ms + 2, TEST_NETWORK_ID)));
     assert_eq!(
-        drain
-            .deliverable
+        deliverable
             .iter()
-            .map(|element| element.payload.transaction.tx_id)
+            .map(InboxElement::tx_id)
             .collect::<Vec<_>>(),
         vec![
             first.payload.transaction.tx_id,
             second.payload.transaction.tx_id
         ]
     );
-    let delivered_dots = drain
-        .deliverable
-        .iter()
-        .map(|element| element.dot)
-        .chain(drain.rejected.crdt.dots.iter().copied())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(delivered_dots, carrier.crdt.dots.iter().copied().collect());
-    assert_eq!(drain.rejected.crdt.dots.len(), 1);
+    assert_eq!(
+        deliverable
+            .iter()
+            .map(|element| element.dot)
+            .collect::<Vec<_>>(),
+        carrier.crdt.dots
+    );
 
     // Retiring by dot removes exactly the named element, a stale copy cannot resurrect it, and
     // an element held afterwards is untouched.
     let stale = carrier.clone();
-    let mut retired = carrier.tombstone(drain.rejected)?;
-    for element in &drain.deliverable {
+    let mut retired = carrier.clone();
+    for element in &deliverable {
         retired = retired.tombstone(carrier.removal_of([element.dot]))?;
     }
     assert!(retired.data.is_empty());
     assert!(retired.join(stale)?.data.is_empty());
     let third = held_by(&holder, destination, TEST_NETWORK_ID)?;
     let after = retired.extend(now_ms + 4, Entry::inbox_delta(&third)?, actor)?;
-    assert_eq!(after.data, vec![third.encode()?]);
+    assert_eq!(after.data, vec![third.to_element()?]);
     Ok(())
 }
 
@@ -488,7 +480,7 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
         let mut newest = None;
         for _ in 0..RELAY_INBOX_MAX_LEN + 1 {
             let held = held_by(&holder, destination, TEST_NETWORK_ID)?;
-            newest = Some(held.encode()?);
+            newest = Some(held.to_element()?);
             carrier = carrier.extend(get_epoch_ms(), Entry::inbox_delta(&held)?, actor)?;
         }
         assert_eq!(carrier.data.len(), RELAY_INBOX_MAX_LEN);
@@ -496,8 +488,12 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
         if round == 0 {
             first_round_dots = carrier.crdt.dots.clone();
         }
-        let drained = carrier.partition_inbox(get_epoch_ms(), TEST_NETWORK_ID);
-        let removal = carrier.removal_of(drained.deliverable.iter().map(|element| element.dot));
+        let removal = carrier.removal_of(
+            carrier
+                .stored_inbox_elements()
+                .iter()
+                .map(|element| element.dot),
+        );
         carrier = carrier.tombstone(removal)?;
         assert!(carrier.data.is_empty());
     }
@@ -507,8 +503,32 @@ fn test_inbox_keeps_the_newest_elements_and_bounds_its_tombstones() -> Result<()
         .crdt
         .tombstones
         .iter()
-        .copied()
+        .map(|tombstone| tombstone.dot)
         .collect::<std::collections::BTreeSet<_>>();
     assert!(first_round_dots.iter().all(|dot| !kept.contains(dot)));
+    Ok(())
+}
+
+/// Law (clock gate): after this clock steps back, an element held ahead of it by more than σ
+/// is not delivered, and it is delivered once the clock catches up.
+#[test]
+fn test_an_element_held_ahead_of_a_stepped_back_clock_is_kept_for_a_later_pass() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let holder = session()?;
+    let destination: Did = SecretKey::random().address().into();
+    let held = held_by(&holder, destination, TEST_NETWORK_ID)?;
+    let carrier = Entry::new(inbox_key(destination), Vec::new(), EntryKind::RelayMessage).extend(
+        now_ms,
+        Entry::inbox_delta(&held)?,
+        holder.delegator_did(),
+    )?;
+
+    let stepped_back = now_ms - TS_OFFSET_TOLERANCE_MS - 1;
+    let [element] = carrier
+        .stored_inbox_elements()
+        .try_into()
+        .expect("one element");
+    assert!(!element.is_deliverable_at(stepped_back, TEST_NETWORK_ID));
+    assert!(element.is_deliverable_at(now_ms, TEST_NETWORK_ID));
     Ok(())
 }

@@ -16,6 +16,8 @@
 //!
 //! [`classify_step_failure`]: SwarmTransport::classify_step_failure
 
+use std::future::Future;
+
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
 
@@ -25,6 +27,7 @@ use super::pending::CrossingOfferVerdict;
 use super::pending::Handshake;
 use super::pending::OfferOwner;
 use super::pending::PendingConnectionAttempt;
+use super::pending::PendingTransportConnection;
 use super::pending::RawConnectionOwner;
 use super::SwarmTransport;
 use crate::dht::Did;
@@ -32,7 +35,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
-use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SwarmTransportCallback;
 
 /// The DHT signaling of the handshake: offers and replies over recorded paths (#947).
 mod signaling;
@@ -197,12 +200,18 @@ impl SwarmTransport {
         self.with_connection_lifecycle(|| Ok(self.peer_lifecycles()?.mark_reply_sent(attempt)))
     }
 
-    /// Reserve an overlay connection generation for `peer` and produce its offer; see
-    /// [`Self::prepare_connection_offer_owned_by`].
+    /// Reserve an overlay connection generation for `peer` and produce its offer without
+    /// sending it, so a test can deliver it by hand; see
+    /// [`Self::prepare_connection_offer_owned_by`]. Compiled for the tests that call it: the
+    /// transport tests (outside the browser build) and the dummy-transport conformance model.
+    #[cfg(all(
+        test,
+        any(feature = "dummy", not(all(feature = "wasm", target_family = "wasm")))
+    ))]
     pub(in crate::swarm) async fn prepare_connection_offer_with_attempt(
         &self,
         peer: Did,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
     ) -> Result<(PendingConnectionAttempt, ConnectNodeSend)> {
         self.prepare_connection_offer_owned_by(peer, callback, OfferOwner::Overlay)
             .await
@@ -211,77 +220,112 @@ impl SwarmTransport {
     /// Reserve a connection generation for `peer`, driven by `owner`, and produce its offer;
     /// the attempt names the generation so the caller can accept or cancel exactly what it
     /// reserved. The attempt stays `Creating` until its owner marks the offer sent.
+    pub(in crate::swarm) async fn prepare_connection_offer_owned_by(
+        &self,
+        peer: Did,
+        callback: SwarmTransportCallback,
+        owner: OfferOwner,
+    ) -> Result<(PendingConnectionAttempt, ConnectNodeSend)> {
+        let pending = self
+            .open_pending_connection(peer, callback, Handshake::offering(owner))
+            .await?;
+        let offer = self.create_offer(&pending).await?;
+        Ok((pending.attempt(), offer))
+    }
+
+    /// Reserve a generation for `peer` whose signaling starts in `handshake`, and create its
+    /// transport connection: local work only.
+    pub(super) async fn open_pending_connection(
+        &self,
+        peer: Did,
+        callback: SwarmTransportCallback,
+        handshake: Handshake,
+    ) -> Result<PendingTransportConnection> {
+        let attempt = self.reserve_pending_connection_for(peer, handshake).await?;
+        let callback = callback.with_pending_connection_attempt(attempt);
+        self.new_pending_connection(attempt, callback).await
+    }
+
+    /// Create the offer of `pending`, which waits on ICE gathering.
     ///
     /// A crossing offer that arrives while this one is created takes the slot (there is no tie
     /// yet); the failure is then `ConnectionAttemptSuperseded`, not the transport error the
     /// interrupted ICE gathering surfaced as.
-    pub(in crate::swarm) async fn prepare_connection_offer_owned_by(
+    pub(super) async fn create_offer(
         &self,
-        peer: Did,
-        callback: InnerSwarmCallback,
-        owner: OfferOwner,
-    ) -> Result<(PendingConnectionAttempt, ConnectNodeSend)> {
-        let attempt = self
-            .reserve_pending_connection_for(peer, Handshake::offering(owner))
-            .await?;
-        let callback = callback.with_pending_connection_attempt(attempt);
-        let pending_connection = self.new_pending_connection(attempt, callback).await?;
-        let attempt = pending_connection.attempt();
-        let conn = pending_connection.connection();
+        pending: &PendingTransportConnection,
+    ) -> Result<ConnectNodeSend> {
+        let offer = pending.connection().connection.webrtc_create_offer();
+        Ok(ConnectNodeSend {
+            sdp: self.negotiate_sdp(pending, "offer", offer).await?,
+            dht_protocol_mode: self.dht_protocol_mode(),
+        })
+    }
 
+    /// Create the answer of `pending` to `offer`, which waits on ICE gathering.
+    pub(super) async fn create_answer(
+        &self,
+        pending: &PendingTransportConnection,
+        offer: String,
+    ) -> Result<ConnectNodeReport> {
+        let answer = pending.connection().connection.webrtc_answer_offer(offer);
+        Ok(ConnectNodeReport {
+            sdp: self.negotiate_sdp(pending, "answer", answer).await?,
+            dht_protocol_mode: self.dht_protocol_mode(),
+        })
+    }
+
+    /// Run `negotiate`, which produces the `side` ("offer" or "answer") of `pending` and waits on
+    /// ICE gathering, and serialize its description. A failure reports why
+    /// ([`Self::classify_step_failure`]): a generation that lost its slot meanwhile says how,
+    /// and a current one is abandoned.
+    async fn negotiate_sdp<T, E>(
+        &self,
+        pending: &PendingTransportConnection,
+        side: &'static str,
+        negotiate: impl Future<Output = std::result::Result<T, E>>,
+    ) -> Result<String>
+    where
+        T: serde::Serialize,
+        E: std::fmt::Debug + Into<Error>,
+    {
+        let attempt = pending.attempt();
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
-            peer = %peer,
+            peer = %attempt.peer,
             generation = attempt.generation,
-            state = ?conn.webrtc_connection_state(),
-            "connection offer create start"
+            state = ?pending.connection().webrtc_connection_state(),
+            side,
+            "connection description create start"
         );
-        let offer = match conn.connection.webrtc_create_offer().await {
-            Ok(offer) => offer,
+        let description = match negotiate.await {
+            Ok(description) => description,
             Err(error) => {
                 tracing::warn!(
                     target: "rings_core::swarm::transport::handshake",
                     local = %self.dht.did,
-                    peer = %peer,
+                    peer = %attempt.peer,
                     generation = attempt.generation,
                     error = ?error,
-                    "connection offer create failed"
+                    side,
+                    "connection description create failed"
                 );
+                let operation = format!("creating connection {side}");
                 return Err(self
-                    .classify_step_failure(
-                        attempt,
-                        Error::Transport(error),
-                        "creating connection offer",
-                    )
+                    .classify_step_failure(attempt, error.into(), &operation)
                     .await?);
             }
         };
-        tracing::trace!(
-            target: "rings_core::swarm::transport::handshake",
-            local = %self.dht.did,
-            peer = %peer,
-            generation = attempt.generation,
-            sdp_bytes = offer.len(),
-            state = ?conn.webrtc_connection_state(),
-            "connection offer create complete"
-        );
-        let sdp = match serde_json::to_string(&offer) {
-            Ok(sdp) => sdp,
+        match serde_json::to_string(&description) {
+            Ok(serialized) => Ok(serialized),
             Err(_) => {
-                return Err(self
-                    .classify_step_failure(
-                        attempt,
-                        Error::SerializeToString,
-                        "serializing connection offer",
-                    )
-                    .await?);
+                let operation = format!("serializing connection {side}");
+                Err(self
+                    .classify_step_failure(attempt, Error::SerializeToString, &operation)
+                    .await?)
             }
-        };
-        Ok((attempt, ConnectNodeSend {
-            sdp,
-            dht_protocol_mode: self.dht_protocol_mode(),
-        }))
+        }
     }
 
     /// Decide what an offer from `peer` meets here: `None` when the offer may take the slot
@@ -295,7 +339,7 @@ impl SwarmTransport {
             IncomingOfferAdmittedPeer::Routable => return Err(Error::AlreadyConnected),
             IncomingOfferAdmittedPeer::Unroutable(attempt) => {
                 if self.disconnect_unavailable(attempt).await?.is_none()
-                    && self.has_active_connection(peer)
+                    && self.active_attempt(peer)?.is_some()
                 {
                     return Err(Error::AlreadyConnected);
                 }
@@ -371,109 +415,56 @@ impl SwarmTransport {
         })
     }
 
-    async fn create_connection_answer(
+    /// Validate `offer_msg` from `peer` and decide it against the peer's slot: local work only.
+    /// Either the answering generation is opened, returned with the decoded offer, or this
+    /// node's own prevailing offer is returned to send back (`Law (Tie-break)`).
+    pub(super) async fn open_answer(
         &self,
         peer: Did,
-        callback: InnerSwarmCallback,
-        offer: String,
-    ) -> Result<CreatedAnswer> {
-        let attempt = self
-            .reserve_pending_connection_for(peer, Handshake::answering())
-            .await?;
-        let callback = callback.with_pending_connection_attempt(attempt);
-        let pending_connection = self.new_pending_connection(attempt, callback).await?;
-        let attempt = pending_connection.attempt();
-        let conn = pending_connection.connection();
-
-        tracing::trace!(
-            target: "rings_core::swarm::transport::handshake",
-            local = %self.dht.did,
-            peer = %peer,
-            generation = attempt.generation,
-            offer_sdp_bytes = offer.len(),
-            state = ?conn.webrtc_connection_state(),
-            "connection answer create start"
-        );
-        let answer = match conn.connection.webrtc_answer_offer(offer).await {
-            Ok(answer) => answer,
-            Err(error) => {
-                tracing::warn!(
-                    target: "rings_core::swarm::transport::handshake",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    generation = attempt.generation,
-                    error = ?error,
-                    "connection answer create failed"
-                );
-                return Err(self
-                    .classify_step_failure(
-                        attempt,
-                        Error::Transport(error),
-                        "creating connection answer",
-                    )
-                    .await?);
-            }
-        };
-        tracing::trace!(
-            target: "rings_core::swarm::transport::handshake",
-            local = %self.dht.did,
-            peer = %peer,
-            generation = attempt.generation,
-            answer_sdp_bytes = answer.len(),
-            state = ?conn.webrtc_connection_state(),
-            "connection answer create complete"
-        );
-        let sdp = match serde_json::to_string(&answer) {
-            Ok(sdp) => sdp,
-            Err(_) => {
-                return Err(self
-                    .classify_step_failure(
-                        attempt,
-                        Error::SerializeToString,
-                        "serializing connection answer",
-                    )
-                    .await?);
-            }
-        };
-        Ok(CreatedAnswer {
-            attempt,
-            report: ConnectNodeReport {
-                sdp,
-                dht_protocol_mode: self.dht_protocol_mode(),
-            },
-        })
-    }
-
-    /// Reply to the offer of remote connection: answer it, or send back this node's own
-    /// prevailing offer (`Law (Tie-break)`). The caller marks a delivered answer sent
-    /// ([`Self::mark_reply_sent`]) or abandons its generation.
-    pub(crate) async fn answer_remote_connection(
-        &self,
-        peer: Did,
-        callback: InnerSwarmCallback,
+        callback: SwarmTransportCallback,
         offer_msg: &ConnectNodeSend,
-    ) -> Result<OfferOutcome> {
+    ) -> Result<OfferReply<(PendingTransportConnection, String), CounterOffer>> {
         if !self.accepts_connection_offer(offer_msg) {
             return Err(Error::InvalidMessage(
                 "connection offer DHT protocol mismatch".to_string(),
             ));
         }
         let offer: String = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
-        match self.reconcile_incoming_offer_peer(peer).await? {
-            None => self
-                .create_connection_answer(peer, callback, offer)
-                .await
-                .map(OfferReply::Answer),
-            Some(counter_offer) => {
-                tracing::debug!(
-                    target: "rings_core::swarm::transport::handshake",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    tx_id = %counter_offer.tx_id,
-                    "crossing connection offer refused on the tie-break; counter-offer"
-                );
-                Ok(OfferReply::CounterOffer(counter_offer))
+        if let Some(counter_offer) = self.reconcile_incoming_offer_peer(peer).await? {
+            tracing::debug!(
+                target: "rings_core::swarm::transport::handshake",
+                local = %self.dht.did,
+                peer = %peer,
+                tx_id = %counter_offer.tx_id,
+                "crossing connection offer refused on the tie-break; counter-offer"
+            );
+            return Ok(OfferReply::CounterOffer(counter_offer));
+        }
+        let pending = self
+            .open_pending_connection(peer, callback, Handshake::answering())
+            .await?;
+        Ok(OfferReply::Answer((pending, offer)))
+    }
+
+    /// Reply to the offer of remote connection, waiting on ICE gathering (the application
+    /// boundary): answer it, or return this node's own prevailing offer (`Law (Tie-break)`).
+    /// The caller marks a delivered answer sent ([`Self::mark_reply_sent`]) or abandons its
+    /// generation.
+    pub(in crate::swarm) async fn answer_remote_connection(
+        &self,
+        peer: Did,
+        callback: SwarmTransportCallback,
+        offer_msg: &ConnectNodeSend,
+    ) -> Result<OfferOutcome> {
+        match self.open_answer(peer, callback, offer_msg).await? {
+            OfferReply::Answer((pending, offer)) => {
+                let report = self.create_answer(&pending, offer).await?;
+                Ok(OfferReply::Answer(CreatedAnswer {
+                    attempt: pending.attempt(),
+                    report,
+                }))
             }
+            OfferReply::CounterOffer(counter_offer) => Ok(OfferReply::CounterOffer(counter_offer)),
         }
     }
 

@@ -11,6 +11,3 @@ WASM_BINDGEN_TEST_TIMEOUT = { value = "120", force = false }
 
 [target.wasm32-unknown-unknown]
 runner = 'wasm-bindgen-test-runner'
-# Required by `web-sys`'s WebTransport bindings (still unstable). Applies to all
-# wasm32 builds (the browser relay endpoint, crates/node/src/backend/transport/wt.rs).
-rustflags = ["--cfg=web_sys_unstable_apis"]

@@ -1,4 +1,5 @@
-use super::CallbackError;
+use std::fmt::Display;
+use std::fmt::Formatter;
 
 /// Errors collections in ring-core.
 #[derive(thiserror::Error, Debug)]
@@ -114,7 +115,19 @@ pub enum Error {
         capacity: usize,
     },
 
-    /// The versioned replay snapshot violates its structural bounds.
+    /// A replay stream whose stored record does not restore refuses every transition until an
+    /// operator clears that record.
+    #[error(
+        "Transaction replay stream {key:?} is unavailable: its record {record} does not restore"
+    )]
+    TransactionReplayStreamUnavailable {
+        /// The stream that fails closed.
+        key: crate::message::StreamKey,
+        /// Storage record name of the stream's unrestorable record, the one to clear.
+        record: String,
+    },
+
+    /// Replay state violates an invariant of the replay runtime.
     #[error("Transaction replay state is invalid")]
     TransactionReplayStateInvalid,
 
@@ -145,16 +158,18 @@ pub enum Error {
     UnmarkedFrame,
 
     /// A payload that travels outside any link referenced a session instead of carrying it.
-    #[error("Delegation reference {0:?} cannot be resolved outside the link that announced it")]
+    #[error(
+        "Delegation reference {0:?} cannot be resolved outside the link that carried it inline"
+    )]
     DelegationReferenceUnresolved(crate::delegation::DelegationDigest),
 
     /// A link-control frame was decoded where a payload was expected: outside any link.
     #[error("Link-control frame is meaningful only on the connection it arrived on")]
     LinkControlOutsideLink,
 
-    /// No runtime is current to carry a link-control send detached from the read loop.
-    #[error("Link-control send needs a runtime to run detached")]
-    LinkControlRuntimeUnavailable,
+    /// No runtime is current to run the named work detached from its caller.
+    #[error("{0} needs a runtime to run detached")]
+    DetachedRuntimeUnavailable(DetachedWork),
 
     /// The peer already has the most link-control sends this end keeps in flight for it.
     #[error("Link-control sends in flight to {0} are at capacity")]
@@ -167,6 +182,20 @@ pub enum Error {
     /// E2E stream is missing the authenticated final frame
     #[error("E2E stream is missing the authenticated final frame")]
     E2eMissingFinalFrame,
+
+    /// E2E stream made no progress for its stall deadline: a frame was lost
+    #[error(
+        "E2E stream stalled at sequence {next_sequence} for {stalled_ms}ms with {buffered} later \
+         frames buffered: a frame was lost"
+    )]
+    E2eStreamStalled {
+        /// The sequence the stream still waits for.
+        next_sequence: u64,
+        /// Later frames buffered behind it.
+        buffered: usize,
+        /// How long the stream has gone without progress.
+        stalled_ms: u128,
+    },
 
     /// E2E public key resolves to {actual}, expected {expected}
     #[error("E2E public key resolves to {actual}, expected {expected}")]
@@ -295,6 +324,13 @@ pub enum Error {
     /// A scalar is zero where `Z_n^*` is required
     #[error("scalar is zero")]
     ZeroScalar,
+    /// The application inbox was already claimed
+    #[error("The application inbox was already claimed")]
+    ApplicationInboxClaimed,
+
+    /// The swarm stopped before the awaited answer arrived
+    #[error("The swarm stopped before the awaited answer arrived")]
+    SwarmStopped,
 
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
@@ -368,6 +404,17 @@ pub enum Error {
     /// ECDSA Invalid recover Id {0}
     #[error("ECDSA Invalid recover Id {0}")]
     InvalidRecoverId(u8),
+
+    /// A signature is not the exact length its algorithm's signatures have.
+    #[error("A {algorithm} signature has {expected} bytes, not {actual}")]
+    InvalidSignatureLength {
+        /// The signature algorithm.
+        algorithm: &'static str,
+        /// The length its signatures have.
+        expected: usize,
+        /// The length received.
+        actual: usize,
+    },
 
     /// Signature encoding is valid but not in its canonical form.
     #[error("Signature is not canonical")]
@@ -559,6 +606,10 @@ pub enum Error {
     #[error("Inbound actor state invariant violated")]
     InboundActorInvariantViolation,
 
+    /// A frame arrived on a transport lane its content does not belong to.
+    #[error("Inbound frame arrived on a lane its content does not belong to")]
+    InboundLaneMismatch,
+
     /// A reassembled chunk payload attempted to contain another chunk envelope.
     #[error("Nested chunk messages are not allowed")]
     NestedChunkMessage,
@@ -566,49 +617,6 @@ pub enum Error {
     /// A chunk was rejected for an invalid remote wire shape or metadata.
     #[error("Invalid chunk message")]
     InvalidChunkMessage,
-
-    /// The application rejected an inbound message during validation.
-    #[error("Inbound message validation failed: {source}")]
-    InboundValidationFailed {
-        /// Original application validation error.
-        #[source]
-        source: CallbackError,
-    },
-
-    /// An application validation callback did not complete within its deadline.
-    #[error("Inbound validation for {peer:?} timed out after {timeout_ms}ms")]
-    InboundValidationTimeout {
-        /// Peer associated with the inbound connection, when its DID parsed successfully.
-        peer: Option<crate::dht::Did>,
-        /// Callback deadline in milliseconds.
-        timeout_ms: u128,
-    },
-
-    /// An application callback failed after core inbound handling.
-    #[error("Inbound message callback failed: {source}")]
-    InboundCallbackFailed {
-        /// Original application callback error.
-        #[source]
-        source: CallbackError,
-    },
-
-    /// Inbound handling and its application callback did not complete within the deadline.
-    #[error("Inbound processing for {peer:?} timed out after {timeout_ms}ms")]
-    InboundProcessingTimeout {
-        /// Peer associated with the inbound connection, when its DID parsed successfully.
-        peer: Option<crate::dht::Did>,
-        /// Processing deadline in milliseconds.
-        timeout_ms: u128,
-    },
-
-    /// The browser runtime could not schedule an inbound deadline timer.
-    #[error("Inbound {operation} timer unavailable for {peer:?}")]
-    InboundTimerUnavailable {
-        /// Peer associated with the inbound connection, when its DID parsed successfully.
-        peer: Option<crate::dht::Did>,
-        /// Inbound phase whose deadline could not be scheduled.
-        operation: &'static str,
-    },
 
     /// Recv message through channel failed {0}
     #[error("Recv message through channel failed {0}")]
@@ -738,6 +746,32 @@ pub enum Error {
         capacity: u64,
     },
 
+    /// An authoritative storage is full: it evicts nothing, so a write that does not fit, or an
+    /// open over a lowered budget, fails and changes nothing.
+    #[error("Authoritative storage holds {used} of {capacity} bytes; {required} more do not fit")]
+    StorageBudgetExhausted {
+        /// Bytes the stored records occupy.
+        used: u64,
+        /// Bytes the write needs (zero at open).
+        required: u64,
+        /// Total byte budget of the storage.
+        capacity: u64,
+    },
+
+    /// A storage could not run its blocking file work: no runtime was current, or the work
+    /// ended without publishing its result.
+    #[error("Storage file work did not run: {0}")]
+    StorageWorkUnscheduled(rings_runtime::DetachedError),
+
+    /// A replay transition could not run detached from its caller: no runtime was current, or
+    /// the transition ended without publishing its result.
+    #[error("Transaction replay transition did not run: {0}")]
+    TransactionReplayUnscheduled(rings_runtime::DetachedError),
+
+    /// A storage holds a record it cannot read or decode; the record is kept, never deleted.
+    #[error("Storage cannot decode {0}")]
+    StorageRecordUndecodable(crate::storage::UndecodableRecord),
+
     /// Message invalid: {0}
     #[error("Message invalid: {0}")]
     InvalidMessage(String),
@@ -861,6 +895,11 @@ pub enum Error {
     #[error("Delegation is expired")]
     DelegationExpired,
 
+    /// A frame was not sent: a delegation it carries expires within the lease margin, so it
+    /// could expire in flight. Local: nothing reached the peer.
+    #[error("Delegation expires within the lease margin; the frame is not sent")]
+    DelegationExpiresWithinMargin,
+
     /// Transport error: {0}
     #[error("Transport error: {0}")]
     Transport(#[from] rings_transport::error::Error),
@@ -868,4 +907,23 @@ pub enum Error {
     /// External Javascript error: {0}
     #[error("External Javascript error: {0}")]
     JsError(String),
+}
+
+/// Work the swarm runs detached from its caller and refuses when no runtime is current to
+/// carry it (see `swarm::detached`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DetachedWork {
+    /// A handshake negotiated in a protocol handler's context.
+    ProtocolHandshake,
+    /// A link-control send.
+    LinkControlSend,
+}
+
+impl Display for DetachedWork {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ProtocolHandshake => "a protocol-context handshake",
+            Self::LinkControlSend => "a link-control send",
+        })
+    }
 }

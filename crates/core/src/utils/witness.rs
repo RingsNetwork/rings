@@ -97,19 +97,6 @@ impl Witness<bool> {
     }
 }
 
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-impl Witness<usize> {
-    /// Increment and return the previous value.
-    pub(crate) fn increment(&self) -> usize {
-        let mut previous = 0;
-        self.modify(|count| {
-            previous = *count;
-            *count += 1;
-        });
-        previous
-    }
-}
-
 impl<T: Default> Default for Witness<T> {
     fn default() -> Self {
         Self::new(T::default())

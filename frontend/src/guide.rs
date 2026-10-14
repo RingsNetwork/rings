@@ -179,7 +179,7 @@ const STEPS: [Step; 3] = [
         title: "Run a native node",
         summary: "Install the CLI, write the default configuration, and start the daemon. Then join the overlay through a seed node and list the peers it found.",
         code: concat!(
-            "cargo install rings-node\n",
+            "cargo +1.97.0 install --locked rings-node\n",
             "rings init   # writes ~/.rings/config.yaml\n",
             "rings run    # foreground; JSON-RPC on 127.0.0.1:50000\n",
             "\n",

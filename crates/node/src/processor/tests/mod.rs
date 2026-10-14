@@ -13,11 +13,10 @@ use rings_core::dht::PeerRingRemoteAction;
 use rings_core::message::e2e;
 use rings_core::message::e2e::E2eStreamFrame;
 use rings_core::storage::MemStorage;
-use rings_core::swarm::callback::SwarmCallback;
-use rings_core::swarm::callback::SwarmEvent;
+use rings_core::swarm::application::ApplicationData;
+use rings_core::swarm::application::ApplicationDelivery;
 #[cfg(feature = "dummy")]
 use rings_rpc::method::Method;
-use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::sync::Mutex as AsyncTestMutex;
 
 use super::*;

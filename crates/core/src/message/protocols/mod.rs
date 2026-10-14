@@ -11,5 +11,4 @@ pub use self::verify::DomainTag;
 pub use self::verify::MessageSigner;
 pub use self::verify::MessageVerification;
 pub use self::verify::MessageVerificationExt;
-pub(crate) use self::verify::ProofLifetime;
 pub use self::verify::SigningDomain;

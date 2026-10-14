@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::future::join_all;
 use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
@@ -22,9 +23,6 @@ use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerMeasurementPage;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
-use rings_core::message::Encoded;
-use rings_core::message::Encoder;
-use rings_core::message::Message;
 use rings_core::message::OriginQuotaConfig;
 use rings_core::message::OriginQuotaCounters;
 use rings_core::message::ReplayStorage;
@@ -37,8 +35,9 @@ use rings_runtime::sleep;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 use serde::Deserialize;
 use serde::Serialize;
-use uuid;
 
+#[cfg(all(test, feature = "node"))]
+use crate::descriptor::RegistryElement;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
@@ -62,7 +61,6 @@ use crate::onion::directory::OnionDirectoryReader;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
-use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionEntryGuardStorage;
 use crate::onion::OnionEntryGuards;
 use crate::onion::OnionExitDescriptor;
@@ -86,7 +84,7 @@ use crate::registration::default_advertise_presence;
 use crate::registration::default_online_node_heartbeat_interval_secs;
 use crate::registration::default_online_node_ttl_secs;
 use crate::registration::default_online_node_type;
-use crate::registration::validate_online_node_registration_timing;
+use crate::registration::validate_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
@@ -95,10 +93,9 @@ const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 mod builder;
 mod config;
-/// End-to-end encrypted streams to a DID.
-mod e2e_stream;
 /// Handshakes: by DID over the overlay, and over a peer's HTTP endpoint.
 pub(crate) mod handshake;
+mod messaging;
 
 pub use builder::ProcessorBuilder;
 #[cfg(feature = "node")]
@@ -108,8 +105,22 @@ pub use config::ProcessorConfigSerialized;
 pub(crate) use handshake::HandshakeFailure;
 pub(crate) use handshake::HandshakePeer;
 
+/// The pause between two reads of the fetch cache while a DHT fetch waits for its reply.
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
+/// The number of fetch-cache reads a DHT fetch makes before it gives up on a reply; with
+/// [`DHT_LOOKUP_CACHE_POLL_INTERVAL`] it fixes [`dht_lookup_poll_budget`], the `P` term of the
+/// registry refresh bound.
+const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: u32 = 40;
+
+/// Whether the fetch-cache read numbered `attempt` (from 0) is a DHT fetch's last one.
+const fn is_final_lookup_poll(attempt: u32) -> bool {
+    attempt.saturating_add(1) >= DHT_LOOKUP_CACHE_POLL_ATTEMPTS
+}
+
+/// The longest a DHT fetch polls the cache for its reply: its attempts times their interval.
+pub(crate) const fn dht_lookup_poll_budget() -> Duration {
+    DHT_LOOKUP_CACHE_POLL_INTERVAL.saturating_mul(DHT_LOOKUP_CACHE_POLL_ATTEMPTS)
+}
 
 async fn sleep_registration_interval_with_stop(
     interval: Duration,
@@ -211,37 +222,19 @@ impl Processor {
             .descriptor_at(&self.registration_context(), now_ms)
     }
 
-    fn online_node_descriptors_from_entry(entry: &entry::Entry) -> Vec<OnlineNodeDescriptor> {
-        OnlineNodeRegistration::descriptors_from_entry(entry)
-    }
-
-    fn onion_exit_descriptors_from_entry(entry: &entry::Entry) -> Vec<OnionExitDescriptor> {
-        OnionExitRegistration::descriptors_from_entry(entry)
-    }
-
+    /// The registry entry under `topic` whose elements are `descriptors`.
     #[cfg(all(test, feature = "node"))]
-    fn online_node_registry_entry(descriptors: Vec<OnlineNodeDescriptor>) -> Result<entry::Entry> {
+    fn registry_entry<D: RegistryElement>(
+        topic: &str,
+        descriptors: Vec<D>,
+    ) -> Result<entry::Entry> {
         let data = descriptors
             .into_iter()
-            .map(|descriptor| descriptor.encode().map_err(Error::CoreError))
+            .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(entry::Entry::new(
-            entry::Entry::gen_did(ONLINE_NODES_TOPIC)?,
-            data,
-            entry::EntryKind::Data,
-        ))
-    }
-
-    #[cfg(all(test, feature = "node"))]
-    fn onion_exit_registry_entry(descriptors: Vec<OnionExitDescriptor>) -> Result<entry::Entry> {
-        let data = descriptors
-            .into_iter()
-            .map(|descriptor| descriptor.encode().map_err(Error::CoreError))
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(entry::Entry::new(
-            entry::Entry::gen_did(ONION_EXITS_TOPIC)?,
+            entry::Entry::gen_did(topic)?,
             data,
             entry::EntryKind::Data,
         ))
@@ -270,7 +263,7 @@ impl Processor {
             return Ok(vec![]);
         };
 
-        let descriptors = Self::online_node_descriptors_from_entry(&entry)
+        let descriptors = OnlineNodeRegistration::descriptors_from_entry(&entry)
             .into_iter()
             .filter(|descriptor| descriptor.matches_dht_protocol(self.swarm.dht_protocol_mode()));
 
@@ -297,21 +290,8 @@ impl Processor {
         let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(vec![]);
         };
-        let exits = self.select_onion_exits_from_entry(&entry, service, include_expired);
-        if include_expired
-            || !exits.is_empty()
-            || !self.entry_has_expired_onion_exit_service(&entry, service)
-        {
-            return Ok(exits);
-        }
 
-        let Some(refreshed_entry) = self
-            .fetch_storage_entry_after_cache_refresh(entry_key, &entry)
-            .await?
-        else {
-            return Ok(exits);
-        };
-        Ok(self.select_onion_exits_from_entry(&refreshed_entry, service, include_expired))
+        Ok(self.select_onion_exits_from_entry(&entry, service.trim(), include_expired))
     }
 
     /// Select the newest live exit registration per `(DID, service)` of `entry` offering
@@ -323,7 +303,7 @@ impl Processor {
         include_expired: bool,
     ) -> Vec<OnionExitDescriptor> {
         OnionExitDescriptor::latest_valid_by_service_did(
-            Self::onion_exit_descriptors_from_entry(entry),
+            OnionExitRegistration::descriptors_from_entry(entry),
             get_epoch_ms(),
             self.swarm.network_id(),
             include_expired,
@@ -338,12 +318,22 @@ impl Processor {
         self.fetch_storage_entry_with_stop(entry_key, &stop).await
     }
 
-    /// Fetch `entry_key` and answer from the cache, the join of every reply observed (#864).
+    /// Fetch `entry_key` and read the cache once the fetch is answered, stopping early on
+    /// `stop`; the cache holds the join of every reply observed (#864).
+    ///
+    /// A reply is recognised by the fetch's reply marker
+    /// ([`Swarm::storage_fetch_answered_since`] the mark read before the fetch), not by the
+    /// cache holding a value: the cache may hold a value from before this fetch, and a cached
+    /// value is projected at the clock of each read, so it changes with no reply when an element
+    /// crosses its horizon.
     ///
     /// A failed fetch is the empty read ([`Self::answer_failed_fetch`]). This serves the
     /// directory lookups and the registration publisher alike: a publisher whose fetch fails
     /// chooses what to tombstone from its cached observation instead of abandoning the attempt,
     /// and its own replaced values are still caught by its record of what it published.
+    ///
+    /// Post: the cache read after the reply, or, if none arrives within the fetch-poll budget,
+    /// the cache read at its end.
     pub(crate) async fn fetch_storage_entry_with_stop(
         &self,
         entry_key: Did,
@@ -352,6 +342,7 @@ impl Processor {
         if stop.should_stop() {
             return Err(Error::RegistrationStopped);
         }
+        let mark = self.swarm.storage_fetch_mark();
         match self
             .swarm
             .scoped_storage(stop.clone())
@@ -368,26 +359,16 @@ impl Processor {
             if stop.should_stop() {
                 return Err(Error::RegistrationStopped);
             }
-            if let Some(entry) = self.storage_check_cache(entry_key).await {
-                return Ok(Some(entry));
-            }
-            if attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            let answered = self
+                .swarm
+                .storage_fetch_answered_since(entry_key, mark)
+                .map_err(Error::EntryError)?;
+            if answered || is_final_lookup_poll(attempt) {
                 break;
             }
             sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
         }
-        Ok(None)
-    }
-
-    fn entry_has_expired_onion_exit_service(&self, entry: &entry::Entry, service: &str) -> bool {
-        let now_ms = get_epoch_ms();
-        Self::onion_exit_descriptors_from_entry(entry)
-            .into_iter()
-            .any(|descriptor| {
-                (service.is_empty() || descriptor.offers_service(service))
-                    && descriptor.verify_signature(self.swarm.network_id())
-                    && descriptor.is_expired_at(now_ms)
-            })
+        Ok(self.storage_check_cache(entry_key).await)
     }
 
     /// Answer a fetch of `entry_key` that failed with `error` as the empty read,
@@ -402,30 +383,6 @@ impl Processor {
             tracing::debug!(%entry_key, %error, "storage fetch failed; answering from the cache");
         }
         cached.map(Some).ok_or(error)
-    }
-
-    /// Fetch `entry_key` again and wait for the cached carrier to move past `previous_entry`.
-    ///
-    /// A failed fetch is the empty read ([`Self::answer_failed_fetch`]): nothing new arrived, so
-    /// the cached carrier is the answer.
-    async fn fetch_storage_entry_after_cache_refresh(
-        &self,
-        entry_key: Did,
-        previous_entry: &entry::Entry,
-    ) -> Result<Option<entry::Entry>> {
-        if let Err(error) = self.storage_fetch(entry_key).await {
-            return self.answer_failed_fetch(entry_key, error).await;
-        }
-        for _ in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
-            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
-            let Some(entry) = self.storage_check_cache(entry_key).await else {
-                continue;
-            };
-            if &entry != previous_entry {
-                return Ok(Some(entry));
-            }
-        }
-        Ok(self.storage_check_cache(entry_key).await)
     }
 
     /// Build an onion proxy route for a client target through a target-agnostic proxy config.
@@ -591,57 +548,6 @@ impl Processor {
             .map_err(Error::CloseConnectionError)
     }
 
-    /// Send custom message to a did.
-    pub async fn send_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
-        tracing::trace!("send_message, message size: {:?}", msg.len());
-
-        let msg = Message::custom(msg).map_err(Error::SendMessage)?;
-
-        self.swarm
-            .send_message(msg, destination)
-            .await
-            .map_err(Error::SendMessage)
-    }
-
-    /// Send a custom message to an already connected peer without Chord routing.
-    ///
-    /// Protocols with their own authenticated hop selection, such as onion circuits, use this
-    /// to keep the core transport from replacing their selected next hop.
-    pub async fn send_direct_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
-        tracing::trace!("send_direct_message, message size: {:?}", msg.len());
-
-        let msg = Message::custom(msg).map_err(Error::SendMessage)?;
-
-        self.swarm
-            .send_direct_message(msg, destination)
-            .await
-            .map_err(Error::SendMessage)
-    }
-
-    /// Send a namespaced [`Envelope`](crate::extension::ext::Envelope) to a did over the
-    /// P2P transport (the wire codec
-    /// of the extension layer). `send_envelope : (Did, Envelope) → IO TxId`.
-    pub async fn send_envelope(
-        &self,
-        destination: Did,
-        envelope: &crate::extension::ext::Envelope,
-    ) -> Result<uuid::Uuid> {
-        let msg_bytes = envelope.encode()?;
-        self.send_message(destination, &msg_bytes).await
-    }
-
-    /// Send a namespaced envelope directly to an already connected peer.
-    ///
-    /// This bypasses Chord routing while retaining the normal custom-message envelope codec.
-    pub async fn send_direct_envelope(
-        &self,
-        destination: Did,
-        envelope: &crate::extension::ext::Envelope,
-    ) -> Result<uuid::Uuid> {
-        let msg_bytes = envelope.encode()?;
-        self.send_direct_message(destination, &msg_bytes).await
-    }
-
     /// check local cache of dht
     pub async fn storage_check_cache(&self, entry_key: Did) -> Option<entry::Entry> {
         self.swarm.storage_check_cache(entry_key).await
@@ -651,7 +557,7 @@ impl Processor {
     ///
     /// # Rerouting
     ///
-    /// Every DHT operation of this processor (fetch, store, append, tombstone, compact, and the
+    /// Every DHT operation of this processor (fetch, store, append, tombstone, and the
     /// registry lookups and writes built on them) is rerouted as core's [`ChordStorageInterface`]
     /// documents (#859): refusals before acceptance are retried on events within a budget, and
     /// no placement is applied twice. A caller that must bound the wait drops the operation.
@@ -662,7 +568,10 @@ impl Processor {
             .map_err(Error::EntryError)
     }
 
-    /// Store an entry on DHT storage
+    /// Store an entry on DHT storage, replacing its payloads.
+    ///
+    /// Each stored payload expires by the element lifetime rule of [`ChordStorageInterface`]
+    /// unless it is written again.
     ///
     /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn storage_store(&self, entry: entry::Entry) -> Result<()> {
@@ -672,32 +581,58 @@ impl Processor {
             .map_err(Error::EntryError)
     }
 
-    /// Append data to an entry on DHT storage
+    /// Append data to an entry on DHT storage.
+    ///
+    /// The appended element expires by the element lifetime rule of [`ChordStorageInterface`],
+    /// even while other writes keep the topic alive, unless it is appended again.
     ///
     /// Rerouted as [`Self::storage_fetch`] documents.
-    pub async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
+    pub async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         self.swarm
             .storage_append_data(topic, data)
             .await
             .map_err(Error::EntryError)
     }
 
-    /// Tombstone observed data in an entry on DHT storage.
-    ///
-    /// Rerouted as [`Self::storage_fetch`] documents.
-    pub async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        self.swarm
-            .storage_tombstone_data(topic, data)
-            .await
-            .map_err(Error::EntryError)
+    /// Append `text` to the data topic `topic` as one UTF-8 element: the encoding
+    /// [`Self::fetch_text_elements`] decodes.
+    pub(crate) async fn append_text_element(&self, topic: &str, text: String) -> Result<()> {
+        self.storage_append_data(topic, Bytes::from(text)).await
     }
 
-    /// Compact observed data in an entry on DHT storage.
+    /// The elements of the data topic `topic` past the first `skip`, decoded as UTF-8 text; an
+    /// element that is not UTF-8 is omitted, and a topic not found has no elements.
+    ///
+    /// Law: `append_text_element(t, x)` then `fetch_text_elements(t, 0)` contains `x` while the
+    /// element is live.
+    pub(crate) async fn fetch_text_elements(
+        &self,
+        topic: &str,
+        skip: usize,
+    ) -> Result<Vec<String>> {
+        let Some(entry) = self
+            .fetch_storage_entry(entry::Entry::gen_did(topic)?)
+            .await?
+        else {
+            return Ok(vec![]);
+        };
+        Ok(entry
+            .data
+            .iter()
+            .skip(skip)
+            .filter_map(|element| String::from_utf8(element.to_vec()).ok())
+            .collect())
+    }
+
+    /// Tombstone observed data in an entry on DHT storage.
+    ///
+    /// The removal covers every dot of `data` the storage owner holds, including earlier dots
+    /// forgotten under a later one, and is collected once every add it covers has expired.
     ///
     /// Rerouted as [`Self::storage_fetch`] documents.
-    pub async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
+    pub async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()> {
         self.swarm
-            .storage_compact_data(topic, removals)
+            .storage_tombstone_data(topic, data)
             .await
             .map_err(Error::EntryError)
     }
@@ -751,14 +686,12 @@ impl Processor {
         self.swarm.origin_quota_counters()
     }
 
-    /// register service
+    /// Register this node under the service name `name`.
+    ///
+    /// The registration is one appended element, so it expires by the element lifetime rule of
+    /// [`ChordStorageInterface`] unless it is registered again.
     pub async fn register_service(&self, name: &str) -> Result<()> {
-        let encoded_did = self
-            .did()
-            .to_string()
-            .encode()
-            .map_err(Error::ServiceRegisterError)?;
-        self.storage_append_data(name, encoded_did)
+        self.append_text_element(name, self.did().to_string())
             .await
             .map_err(|error| match error {
                 Error::EntryError(error) => Error::ServiceRegisterError(error),

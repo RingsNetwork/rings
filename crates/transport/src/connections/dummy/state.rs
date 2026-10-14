@@ -7,6 +7,7 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tokio::sync::Notify;
@@ -14,6 +15,7 @@ use tokio::sync::Notify;
 use super::controlled;
 use super::DeliveryGate;
 use super::Event;
+use super::HeldDeliveries;
 
 thread_local! {
     /// Per-(test-)thread controlled-delivery state. Thread-local on purpose: a
@@ -22,6 +24,14 @@ thread_local! {
     /// Ordered callbacks withheld for explicit delivery by the owning test.
     pub(super) static DELIVERY: RefCell<ControlledDeliveryState> = const {
         RefCell::new(ControlledDeliveryState::new())
+    };
+    /// Notified whenever an event joins [`DELIVERY`], so a test waits for the next event
+    /// instead of polling the queue.
+    pub(super) static DELIVERY_ENQUEUED: Arc<Notify> = Arc::new(Notify::new());
+    /// Connection generations whose credit pumps grant nothing: a receiver that withholds
+    /// credit, for tests of what its senders' ends do.
+    pub(super) static WITHHELD_CREDIT: RefCell<BTreeSet<String>> = const {
+        RefCell::new(BTreeSet::new())
     };
     /// Messages accepted by this thread's dummy backend.
     pub(super) static SENT_COUNT: Cell<usize> = const { Cell::new(0) };
@@ -58,6 +68,9 @@ thread_local! {
     pub(super) static NEXT_DELIVERY_GATE: RefCell<Option<Arc<DeliveryGate>>> = const { RefCell::new(None) };
     /// Completion gate retained by the delivery currently being executed.
     pub(super) static ACTIVE_DELIVERY_GATE: RefCell<Option<Arc<DeliveryGate>>> = const { RefCell::new(None) };
+    /// Completion gate that every delivery accepted while it is installed waits on.
+    pub(super) static HELD_DELIVERY_GATE: RefCell<Option<Arc<HeldDeliveries>>> =
+        const { RefCell::new(None) };
     /// Accept sends while dropping their receiver-side message callbacks.
     pub(super) static DROP_MESSAGES: Cell<bool> = const { Cell::new(false) };
     /// Seeded dummy delay and identifier state for deterministic simulations.
@@ -102,6 +115,7 @@ impl ControlledDeliveryState {
             enqueued_virtual_ms,
         });
         self.advance_generation();
+        DELIVERY_ENQUEUED.with(|signal| signal.notify_waiters());
     }
 
     pub(super) fn remove(&mut self, index: usize) -> Option<ControlledDeliveryEntry> {

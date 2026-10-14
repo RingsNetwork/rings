@@ -1,7 +1,6 @@
 use std::str::FromStr;
-#[cfg(feature = "dummy")]
-use std::sync::Arc;
 
+use bytes::Bytes;
 #[cfg(feature = "dummy")]
 use rings_transport::connections::dummy_controlled;
 use rings_transport::core::transport::WebrtcConnectionState;
@@ -26,7 +25,6 @@ use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::message;
-use crate::message::Encoder;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
@@ -34,8 +32,6 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 #[cfg(feature = "dummy")]
 use crate::message::MessageVerificationExt;
-#[cfg(feature = "dummy")]
-use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]
 use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
 #[cfg(feature = "dummy")]
@@ -52,12 +48,6 @@ use crate::tests::default::Node;
 #[cfg(feature = "dummy")]
 use crate::tests::fixed_secret_keys;
 use crate::tests::manually_establish_connection;
-
-#[cfg(feature = "dummy")]
-struct NoopCallback;
-
-#[cfg(feature = "dummy")]
-impl SwarmCallback for NoopCallback {}
 
 /// Deliver every queued controlled event, each to a live connection; see [`deliver_until`].
 #[cfg(feature = "dummy")]
@@ -159,7 +149,7 @@ async fn test_handle_dht_notify_remote_action_sends_predecessor_to_target() -> R
     // explicit handler action below.
     dummy_controlled::enable(false);
 
-    let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
+    let handler = MessageHandler::new(node1.swarm.transport.clone());
     handler
         .handle_dht_events(&PeerRingAction::RemoteAction(
             node2.did(),
@@ -411,7 +401,7 @@ async fn test_handle_notify_predecessor() -> Result<()> {
     wait_for_successor(&node2, node1.did()).await?;
     node1
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::NotifyPredecessorSend(message::NotifyPredecessorSend { did: node1.did() }),
             node2.did(),
         )
@@ -439,7 +429,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     wait_for_successor(&node2, node1.did()).await?;
     node1
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::NotifyPredecessorSend(message::NotifyPredecessorSend { did: node1.did() }),
             node2.did(),
         )
@@ -451,7 +441,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     println!("node1: {:?}, node2: {:?}", node1.did(), node2.did());
     node2
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::FindSuccessorSend(message::FindSuccessorSend {
                 did: node2.did(),
                 then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
@@ -487,7 +477,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     wait_for_finger(&node2, node1.did()).await?;
     node1
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::NotifyPredecessorSend(message::NotifyPredecessorSend { did: node1.did() }),
             node2.did(),
         )
@@ -498,7 +488,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     println!("node1: {:?}, node2: {:?}", node1.did(), node2.did());
     node2
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::FindSuccessorSend(message::FindSuccessorSend {
                 did: node2.did(),
                 then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
@@ -543,7 +533,7 @@ async fn test_handle_storage() -> Result<()> {
     wait_for_successor(&node2, node1.did()).await?;
     node1
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::NotifyPredecessorSend(message::NotifyPredecessorSend { did: node1.did() }),
             node2.did(),
         )
@@ -554,12 +544,11 @@ async fn test_handle_storage() -> Result<()> {
 
     assert!(node2.dht().storage.count().await.unwrap() == 0);
     let message = String::from("this is a test string");
-    let encoded_message = message.encode().unwrap();
     // the entry_key is hash of string
-    let entry: Entry = (message.clone(), encoded_message).try_into().unwrap();
+    let entry: Entry = (message.clone(), message.clone()).try_into().unwrap();
     node1
         .swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::OperateEntry(PlacedEntryOperation {
                 placement: entry.did,
                 op: EntryOperation::Overwrite(entry.clone()),
@@ -571,6 +560,6 @@ async fn test_handle_storage() -> Result<()> {
     let data = wait_for_storage_entry(&node2, StorageKey::new(EntryKind::Data, entry.did)).await?;
     assert!(node1.dht().storage.count().await.unwrap() == 0);
     assert!(node2.dht().storage.count().await.unwrap() > 0);
-    assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
+    assert_eq!(data.data[0], Bytes::from(message));
     Ok(())
 }

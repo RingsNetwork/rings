@@ -105,6 +105,23 @@ impl Drop for PendingDeliveryGuard {
     }
 }
 
+/// Holds the delivery future of every send accepted while it lives, releasing them all on
+/// drop, so a whole in-flight window stays pending.
+pub(super) struct HeldDeliveryGuard;
+
+impl HeldDeliveryGuard {
+    pub(super) fn new() -> Self {
+        dummy_controlled::hold_delivery_futures();
+        Self
+    }
+}
+
+impl Drop for HeldDeliveryGuard {
+    fn drop(&mut self) {
+        dummy_controlled::release_held_delivery_futures();
+    }
+}
+
 pub(super) struct PendingCloseGuard;
 
 impl PendingCloseGuard {

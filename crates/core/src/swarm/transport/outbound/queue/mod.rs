@@ -1,114 +1,255 @@
 use std::collections::VecDeque;
 
+use super::model::PerClass;
 use super::model::TransferClass;
 
 /// Four control frames followed by one lower-class frame gives control at most
 /// 80% of frame admissions under sustained mixed load.
 pub(crate) const OUTBOUND_CONTROL_BURST: usize = 4;
+/// The classes below control, in their round-robin order.
 const LOWER_CLASSES: [TransferClass; 3] = [
     TransferClass::Storage,
     TransferClass::E2e,
     TransferClass::Application,
 ];
+/// Every class, control first: `[DhtControl] ++ LOWER_CLASSES`.
+pub(super) const CLASSES: [TransferClass; TransferClass::COUNT] = {
+    let [storage, e2e, application] = LOWER_CLASSES;
+    [TransferClass::DhtControl, storage, e2e, application]
+};
 
-macro_rules! lane_for_class {
-    ($lanes:expr, $class:expr) => {{
-        let [control, storage, e2e, application] = $lanes;
-        match $class {
-            TransferClass::DhtControl => control,
-            TransferClass::Storage => storage,
-            TransferClass::E2e => e2e,
-            TransferClass::Application => application,
-        }
-    }};
+/// Transfers of one class lane that may be in flight at once (#899).
+///
+/// A lane no longer waits for each delivery before its next transfer: up to this many
+/// transfers hold a window slot, so consecutive frames reach the peer back to back and its SCTP
+/// SACKs pair up instead of waiting out the delayed-ACK timer. The lane sends on the one data
+/// channel it is pinned to, so its frames arrive in the order it admitted them; the window stays
+/// strictly below `TRANSACTION_REPLAY_WINDOW`, so even a reordering of the frames in flight would
+/// stay inside the receiver's replay window.
+///
+/// The window pipelines whole transfers, not the frames of one: a chunked transfer admits its
+/// next frame only once the previous one is delivered (it waits in its slot with a
+/// [`FrameRemainder::More`] remainder), so a message larger than one frame still pays the
+/// per-frame delayed-ACK tail and holds its lane's wire until its last frame is admitted.
+pub(crate) const OUTBOUND_LANE_WINDOW: usize = 8;
+
+const _: () = assert!(OUTBOUND_LANE_WINDOW > 0);
+const _: () = assert!(OUTBOUND_LANE_WINDOW < crate::message::TRANSACTION_REPLAY_WINDOW);
+
+/// Whether an admitted frame was its transfer's last.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FrameRemainder {
+    /// The transfer has admitted every frame; only its last delivery is outstanding.
+    Final,
+    /// The transfer still has frames to admit.
+    More,
 }
 
-enum TransferLaneState<T> {
-    Idle,
-    Runnable(T),
-    WaitingDelivery { id: u64, item: T },
+/// State of one transfer that holds a window slot.
+enum SlotState<T> {
+    /// Ready for its next frame; `fresh` until its first frame is admitted.
+    Runnable {
+        /// The transfer.
+        item: T,
+        /// Whether no frame of the transfer has been admitted yet.
+        fresh: bool,
+    },
+    /// Taken by the worker, which is admitting one of its frames.
+    Sending,
+    /// One frame admitted; the transfer waits for that frame's delivery `delivery`.
+    Waiting {
+        /// Identity of the delivery future the transfer waits on.
+        delivery: u64,
+        /// Whether frames remain after the one in flight.
+        remainder: FrameRemainder,
+        /// The waiting transfer.
+        item: T,
+    },
 }
 
+impl<T> SlotState<T> {
+    /// Whether this transfer waits on the delivery `delivery`.
+    fn waits_on(&self, delivery: u64) -> bool {
+        matches!(self, Self::Waiting { delivery: waiting, .. } if *waiting == delivery)
+    }
+
+    /// Whether this transfer has frames it has not admitted yet, while one is in flight: a
+    /// fresh transfer behind it must not start, so its frames stay contiguous on the wire.
+    fn holds_the_wire(&self) -> bool {
+        matches!(self, Self::Waiting {
+            remainder: FrameRemainder::More,
+            ..
+        })
+    }
+}
+
+/// One class lane: a window of at most `window` in-flight transfers, oldest first, and the
+/// FIFO backlog behind it.
+///
+/// Laws, over every sequence of operations:
+/// - **Bound.** `slots.len() ≤ window`: at most `window` transfers are in flight.
+/// - **FIFO.** Transfers enter the window in push order, and `take_runnable` always takes the
+///   oldest runnable slot, so first frames are admitted in push order and each transfer's
+///   frames stay in order.
+/// - **Contiguity.** A fresh transfer is not started while an earlier one still has frames to
+///   admit, so the frames of one lane's chunked transfers never interleave on the wire. Only
+///   transfers whose last frame is in flight overlap: single-frame transfers pipeline freely.
+/// - **Attribution.** A slot is addressed only by its own token or its own delivery identity,
+///   so every outcome settles the transfer it belongs to.
 struct TransferLane<T> {
-    state: TransferLaneState<T>,
+    /// In-flight transfers in admission order, each with its lane-local slot token.
+    slots: VecDeque<(u64, SlotState<T>)>,
+    /// Transfers waiting for a window slot, in push order.
     queued: VecDeque<T>,
+    /// The next slot token to issue.
+    next_slot: u64,
 }
 
 impl<T> Default for TransferLane<T> {
     fn default() -> Self {
         Self {
-            state: TransferLaneState::Idle,
+            slots: VecDeque::new(),
             queued: VecDeque::new(),
+            next_slot: 0,
         }
     }
 }
 
 impl<T> TransferLane<T> {
-    fn enqueue(&mut self, item: T) {
-        if matches!(self.state, TransferLaneState::Idle) {
-            self.state = TransferLaneState::Runnable(item);
-        } else {
-            self.queued.push_back(item);
+    /// Give `item` a window slot if one is free, else queue it behind the others.
+    fn enqueue(&mut self, item: T, window: usize) {
+        self.queued.push_back(item);
+        self.refill(window);
+    }
+
+    /// Move queued transfers into free window slots, oldest first.
+    fn refill(&mut self, window: usize) {
+        while self.slots.len() < window {
+            let Some(item) = self.queued.pop_front() else {
+                return;
+            };
+            let slot = self.next_slot;
+            self.next_slot = self.next_slot.wrapping_add(1);
+            self.slots
+                .push_back((slot, SlotState::Runnable { item, fresh: true }));
         }
     }
 
+    /// Position of the oldest slot that may admit a frame now: a runnable slot, unless it is
+    /// fresh and an earlier transfer still holds the wire.
+    fn runnable_position(&self) -> Option<usize> {
+        let mut wire_held = false;
+        for (position, (_, state)) in self.slots.iter().enumerate() {
+            match state {
+                SlotState::Runnable { fresh: false, .. } => return Some(position),
+                SlotState::Runnable { fresh: true, .. } if !wire_held => return Some(position),
+                state => wire_held |= state.holds_the_wire(),
+            }
+        }
+        None
+    }
+
+    /// Whether some in-flight transfer may admit a frame now.
     fn is_runnable(&self) -> bool {
-        matches!(self.state, TransferLaneState::Runnable(_))
+        self.runnable_position().is_some()
     }
 
-    fn take_runnable(&mut self) -> Option<T> {
-        match std::mem::replace(&mut self.state, TransferLaneState::Idle) {
-            TransferLaneState::Runnable(item) => Some(item),
-            state => {
-                self.state = state;
+    /// The transfer at [`Self::runnable_position`], left where it is.
+    fn runnable(&self) -> Option<&T> {
+        let position = self.runnable_position()?;
+        match self.slots.get(position) {
+            Some((_, SlotState::Runnable { item, .. })) => Some(item),
+            _ => None,
+        }
+    }
+
+    /// Take the transfer at [`Self::runnable_position`], leaving its slot `Sending`.
+    fn take_runnable(&mut self) -> Option<(u64, T)> {
+        let position = self.runnable_position()?;
+        let (slot, state) = self.slots.get_mut(position)?;
+        match std::mem::replace(state, SlotState::Sending) {
+            SlotState::Runnable { item, .. } => Some((*slot, item)),
+            other => {
+                *state = other;
                 None
             }
         }
     }
 
-    fn wait_for_delivery(&mut self, id: u64, item: T) {
-        debug_assert!(matches!(self.state, TransferLaneState::Idle));
-        self.state = TransferLaneState::WaitingDelivery { id, item };
+    /// The state of the slot `slot`, if it is still in flight.
+    fn state_mut(&mut self, slot: u64) -> Option<&mut SlotState<T>> {
+        self.slots
+            .iter_mut()
+            .find(|(token, _)| *token == slot)
+            .map(|(_, state)| state)
     }
 
-    fn take_waiting(&mut self, id: u64) -> Option<T> {
-        match std::mem::replace(&mut self.state, TransferLaneState::Idle) {
-            TransferLaneState::WaitingDelivery {
-                id: waiting_id,
-                item,
-            } if waiting_id == id => Some(item),
-            state => {
-                self.state = state;
+    /// Park a sent transfer on its frame's delivery `delivery`.
+    fn wait_for_delivery(&mut self, slot: u64, delivery: u64, remainder: FrameRemainder, item: T) {
+        match self.state_mut(slot) {
+            Some(state @ SlotState::Sending) => {
+                *state = SlotState::Waiting {
+                    delivery,
+                    remainder,
+                    item,
+                }
+            }
+            _ => debug_assert!(false, "only a sending slot can wait for delivery"),
+        }
+    }
+
+    /// Take the transfer waiting on `delivery`, leaving its slot `Sending`.
+    fn take_waiting(&mut self, delivery: u64) -> Option<(u64, T)> {
+        let (slot, state) = self
+            .slots
+            .iter_mut()
+            .find(|(_, state)| state.waits_on(delivery))?;
+        match std::mem::replace(state, SlotState::Sending) {
+            SlotState::Waiting { item, .. } => Some((*slot, item)),
+            other => {
+                *state = other;
                 None
             }
         }
     }
 
-    fn make_runnable(&mut self, item: T) {
-        debug_assert!(matches!(self.state, TransferLaneState::Idle));
-        self.state = TransferLaneState::Runnable(item);
+    /// Return a sending transfer to its slot, ready for its next frame.
+    fn make_runnable(&mut self, slot: u64, item: T) {
+        match self.state_mut(slot) {
+            Some(state @ SlotState::Sending) => *state = SlotState::Runnable { item, fresh: false },
+            _ => debug_assert!(false, "only a sending slot can become runnable again"),
+        }
     }
 
-    fn finish_current(&mut self) {
-        self.state = self
-            .queued
-            .pop_front()
-            .map_or(TransferLaneState::Idle, TransferLaneState::Runnable);
+    /// Release the slot of a finished transfer and admit the next queued one.
+    fn finish(&mut self, slot: u64, window: usize) {
+        self.slots.retain(|(token, _)| *token != slot);
+        self.refill(window);
     }
 
+    /// Every transfer the lane still owns: runnable and waiting slots, then the backlog.
+    /// A `Sending` slot's transfer is owned by the worker.
     fn drain_transfers(&mut self) -> Vec<T> {
-        let mut transfers = Vec::with_capacity(self.queued.len().saturating_add(1));
-        match std::mem::replace(&mut self.state, TransferLaneState::Idle) {
-            TransferLaneState::Runnable(item) | TransferLaneState::WaitingDelivery { item, .. } => {
-                transfers.push(item)
+        let mut transfers = Vec::with_capacity(self.slots.len().saturating_add(self.queued.len()));
+        for (_, state) in self.slots.drain(..) {
+            match state {
+                SlotState::Runnable { item, .. } | SlotState::Waiting { item, .. } => {
+                    transfers.push(item)
+                }
+                SlotState::Sending => {}
             }
-            TransferLaneState::Idle => {}
         }
         transfers.extend(self.queued.drain(..));
         transfers
     }
 
-    fn remove_ready_where(&mut self, predicate: &mut impl FnMut(&T) -> bool) -> Vec<T> {
+    /// Remove queued and runnable transfers matching `predicate`, leaving every transfer
+    /// whose delivery future is still active, then refill the freed slots.
+    fn remove_ready_where(
+        &mut self,
+        predicate: &mut impl FnMut(&T) -> bool,
+        window: usize,
+    ) -> Vec<T> {
         let mut removed = Vec::new();
         let mut retained = VecDeque::with_capacity(self.queued.len());
         while let Some(item) = self.queued.pop_front() {
@@ -120,24 +261,33 @@ impl<T> TransferLane<T> {
         }
         self.queued = retained;
 
-        let state = std::mem::replace(&mut self.state, TransferLaneState::Idle);
-        self.state = match state {
-            TransferLaneState::Runnable(item) if predicate(&item) => {
-                removed.push(item);
-                self.queued
-                    .pop_front()
-                    .map_or(TransferLaneState::Idle, TransferLaneState::Runnable)
+        let mut slots = VecDeque::with_capacity(self.slots.len());
+        for (slot, state) in self.slots.drain(..) {
+            match state {
+                SlotState::Runnable { item, .. } if predicate(&item) => removed.push(item),
+                state => slots.push_back((slot, state)),
             }
-            state => state,
-        };
+        }
+        self.slots = slots;
+        self.refill(window);
         removed
+    }
+
+    /// Transfers holding a window slot.
+    #[cfg(test)]
+    fn in_flight(&self) -> usize {
+        self.slots.len()
     }
 }
 
-/// Runnable lane head whose class was selected by this queue.
+/// A transfer taken from its lane's window by this queue, with the slot it holds.
 #[must_use]
 pub(super) struct RunnableTransfer<T> {
+    /// The lane the transfer belongs to.
     class: TransferClass,
+    /// The window slot the transfer holds while the worker owns it.
+    slot: u64,
+    /// The transfer.
     item: T,
 }
 
@@ -157,37 +307,70 @@ impl<T> RunnableTransfer<T> {
     pub(super) fn into_parts(self) -> (TransferClass, T) {
         (self.class, self.item)
     }
-
-    #[cfg(test)]
-    pub(super) fn into_item(self) -> T {
-        self.item
-    }
 }
 
+/// The class lanes of one peer, scheduled by bounded control priority and round robin.
+///
+/// Law (credit gate). A class whose lane holds no transport credit is not runnable: `pop`
+/// chooses among the classes its caller reports credited only, so a lane waiting for its
+/// receiver's credit never takes the worker from another lane, and the classes stay isolated as
+/// their transport lanes are.
 pub(super) struct TransferQueues<T> {
-    lanes: [TransferLane<T>; TransferClass::COUNT],
+    lanes: PerClass<TransferLane<T>>,
     lower_cursor: usize,
     consecutive_control: usize,
+    /// In-flight transfers allowed per lane.
+    window: usize,
 }
 
 impl<T> Default for TransferQueues<T> {
     fn default() -> Self {
-        Self {
-            lanes: std::array::from_fn(|_| TransferLane::default()),
-            lower_cursor: 0,
-            consecutive_control: 0,
-        }
+        Self::with_window(OUTBOUND_LANE_WINDOW)
     }
 }
 
 impl<T> TransferQueues<T> {
-    pub(super) fn push(&mut self, class: TransferClass, item: T) {
-        self.lane_mut(class).enqueue(item);
+    /// Queues whose lanes each keep at most `window` transfers in flight.
+    fn with_window(window: usize) -> Self {
+        Self {
+            lanes: PerClass::from_fn(|_| TransferLane::default()),
+            lower_cursor: 0,
+            consecutive_control: 0,
+            window,
+        }
     }
 
-    pub(super) fn pop(&mut self) -> Option<RunnableTransfer<T>> {
-        let has_control = self.is_runnable(TransferClass::DhtControl);
-        let has_lower = self.has_lower();
+    /// The transfer of `class` that would admit the next frame, credit aside.
+    pub(super) fn next_of(&self, class: TransferClass) -> Option<&T> {
+        self.lane(class).runnable()
+    }
+
+    /// Queues with a small window, so that tests reach the bound.
+    #[cfg(test)]
+    pub(super) fn with_window_for_test(window: usize) -> Self {
+        Self::with_window(window)
+    }
+
+    /// Transfers of `class` holding a window slot.
+    #[cfg(test)]
+    pub(super) fn in_flight(&self, class: TransferClass) -> usize {
+        self.lane(class).in_flight()
+    }
+
+    pub(super) fn push(&mut self, class: TransferClass, item: T) {
+        let window = self.window;
+        self.lane_mut(class).enqueue(item, window);
+    }
+
+    /// Take the next transfer to admit a frame, among the classes `credited` reports holding a
+    /// transport credit (the credit gate).
+    pub(super) fn pop(
+        &mut self,
+        credited: impl Fn(TransferClass) -> bool,
+    ) -> Option<RunnableTransfer<T>> {
+        let runnable = |class| credited(class) && self.lane(class).is_runnable();
+        let has_control = runnable(TransferClass::DhtControl);
+        let has_lower = LOWER_CLASSES.iter().copied().any(runnable);
         let selected = if has_control
             && (!bounded_control_burst_enabled()
                 || self.consecutive_control < OUTBOUND_CONTROL_BURST
@@ -195,7 +378,7 @@ impl<T> TransferQueues<T> {
         {
             Some(TransferClass::DhtControl)
         } else {
-            self.next_lower_class()
+            self.next_lower_class(runnable)
         }?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         if selected == TransferClass::DhtControl
@@ -206,17 +389,33 @@ impl<T> TransferQueues<T> {
                 crate::simulation::ProtectionLayer::BoundedControlBurst,
             );
         }
-        self.take(selected).map(|item| RunnableTransfer {
-            class: selected,
-            item,
-        })
+        self.lane_mut(selected)
+            .take_runnable()
+            .map(|(slot, item)| RunnableTransfer {
+                class: selected,
+                slot,
+                item,
+            })
     }
 
-    pub(super) fn wait_for_delivery(&mut self, id: u64, transfer: RunnableTransfer<T>) {
-        self.lane_mut(transfer.class)
-            .wait_for_delivery(id, transfer.item);
+    /// Park a transfer whose frame was admitted on that frame's delivery `id`. Its slot stays
+    /// taken; once its last frame is in flight (`remainder` is `Final`) the lane may start the
+    /// next transfers meanwhile.
+    pub(super) fn wait_for_delivery(
+        &mut self,
+        id: u64,
+        remainder: FrameRemainder,
+        transfer: RunnableTransfer<T>,
+    ) {
+        self.lane_mut(transfer.class).wait_for_delivery(
+            transfer.slot,
+            id,
+            remainder,
+            transfer.item,
+        );
     }
 
+    /// Take the transfer of `class` waiting on delivery `id`.
     pub(super) fn take_waiting(
         &mut self,
         class: TransferClass,
@@ -224,11 +423,13 @@ impl<T> TransferQueues<T> {
     ) -> Option<RunnableTransfer<T>> {
         self.lane_mut(class)
             .take_waiting(id)
-            .map(|item| RunnableTransfer { class, item })
+            .map(|(slot, item)| RunnableTransfer { class, slot, item })
     }
 
+    /// Return a delivered transfer to its slot, ready for its next frame.
     pub(super) fn make_runnable(&mut self, transfer: RunnableTransfer<T>) {
-        self.lane_mut(transfer.class).make_runnable(transfer.item);
+        self.lane_mut(transfer.class)
+            .make_runnable(transfer.slot, transfer.item);
     }
 
     pub(super) fn record_frame_admitted(&mut self, class: TransferClass) {
@@ -249,70 +450,54 @@ impl<T> TransferQueues<T> {
         }
     }
 
-    pub(super) fn finish_current(&mut self, class: TransferClass) {
-        self.lane_mut(class).finish_current();
-    }
-
+    /// Release a finished transfer's slot to the next queued transfer of its lane.
     pub(super) fn finish_transfer(&mut self, transfer: RunnableTransfer<T>) -> T {
-        let (class, item) = transfer.into_parts();
-        self.finish_current(class);
+        let RunnableTransfer { class, slot, item } = transfer;
+        let window = self.window;
+        self.lane_mut(class).finish(slot, window);
         item
     }
 
+    /// Release a failed transfer's slot, charging its lane one scheduling turn.
     pub(super) fn fail_attempt(&mut self, transfer: RunnableTransfer<T>) -> T {
-        let (class, item) = transfer.into_parts();
-        self.advance_fairness(class);
-        self.finish_current(class);
-        item
+        self.advance_fairness(transfer.class);
+        self.finish_transfer(transfer)
     }
 
     pub(super) fn drain_transfers(&mut self) -> Vec<T> {
         self.lanes
-            .iter_mut()
+            .values_mut()
             .flat_map(TransferLane::drain_transfers)
             .collect()
     }
 
     /// Remove runnable and queued items matching `predicate` without disturbing
-    /// a lane head whose delivery future is still active.
+    /// any transfer whose delivery future is still active.
     pub(super) fn remove_ready_where(&mut self, mut predicate: impl FnMut(&T) -> bool) -> Vec<T> {
+        let window = self.window;
         self.lanes
-            .iter_mut()
-            .flat_map(|lane| lane.remove_ready_where(&mut predicate))
+            .values_mut()
+            .flat_map(|lane| lane.remove_ready_where(&mut predicate, window))
             .collect()
     }
 
-    fn is_runnable(&self, class: TransferClass) -> bool {
-        self.lane(class).is_runnable()
-    }
-
-    fn has_lower(&self) -> bool {
-        LOWER_CLASSES
-            .iter()
-            .copied()
-            .any(|class| self.is_runnable(class))
-    }
-
-    fn take(&mut self, class: TransferClass) -> Option<T> {
-        self.lane_mut(class).take_runnable()
-    }
-
     fn lane(&self, class: TransferClass) -> &TransferLane<T> {
-        lane_for_class!(&self.lanes, class)
+        &self.lanes[class]
     }
 
     fn lane_mut(&mut self, class: TransferClass) -> &mut TransferLane<T> {
-        lane_for_class!(&mut self.lanes, class)
+        &mut self.lanes[class]
     }
 
-    fn next_lower_class(&self) -> Option<TransferClass> {
+    /// The next lower class, round robin from the cursor, that `runnable` admits.
+    fn next_lower_class(&self, runnable: impl Fn(TransferClass) -> bool) -> Option<TransferClass> {
         LOWER_CLASSES
             .iter()
             .copied()
             .cycle()
             .skip(self.lower_cursor)
             .take(LOWER_CLASSES.len())
-            .find(|class| self.is_runnable(*class))
+            .find(|class| runnable(*class))
     }
 }
 

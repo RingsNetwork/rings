@@ -12,6 +12,7 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::message::SignalingPath;
+use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::transport::pending::Handshake;
 use crate::swarm::transport::pending::OfferOwner;
 use crate::swarm::transport::pending::OfferPhase;
@@ -130,7 +131,10 @@ async fn test_crossing_offers_with_lost_winner_offer_end_admitted() -> Result<()
     let (winner, offer) = node1
         .swarm
         .transport
-        .prepare_connection_offer_with_attempt(node3.did(), node1.swarm.inner_callback()?)
+        .prepare_connection_offer_with_attempt(
+            node3.did(),
+            SwarmTransportCallback::new(node1.swarm.transport.clone()),
+        )
         .await?;
     node1
         .swarm
@@ -164,7 +168,7 @@ async fn test_crossing_offers_with_lost_winner_offer_end_admitted() -> Result<()
     let dht_hop = node1
         .dht()
         .delivery_step(node3.did(), RouteStage::TOWARD, |peer| {
-            node1.swarm.transport.is_connected(peer)
+            node1.swarm.transport.get_connection(peer).is_some()
         })?
         .map(|hop| hop.peer);
     assert_ne!(
@@ -186,7 +190,10 @@ async fn test_creating_offer_yields_in_both_did_orders() -> Result<()> {
         let (creating, _) = local
             .swarm
             .transport
-            .prepare_connection_offer_with_attempt(remote.did(), local.swarm.inner_callback()?)
+            .prepare_connection_offer_with_attempt(
+                remote.did(),
+                SwarmTransportCallback::new(local.swarm.transport.clone()),
+            )
             .await?;
         assert_eq!(
             handshake_of(local, remote.did())?,
@@ -235,7 +242,10 @@ async fn test_answered_and_answering_generations_refuse_a_delayed_offer() -> Res
     let (sent, offer) = smaller
         .swarm
         .transport
-        .prepare_connection_offer_with_attempt(larger.did(), smaller.swarm.inner_callback()?)
+        .prepare_connection_offer_with_attempt(
+            larger.did(),
+            SwarmTransportCallback::new(smaller.swarm.transport.clone()),
+        )
         .await?;
     let tx_id = uuid::Uuid::new_v4();
     smaller
@@ -263,6 +273,7 @@ async fn test_answered_and_answering_generations_refuse_a_delayed_offer() -> Res
     let duplicate = first
         .swarm
         .transport
+        .protocol_egress()
         .originate(
             Message::ConnectNodeSend(ConnectNodeSend {
                 sdp: offer
@@ -308,7 +319,7 @@ async fn test_unretraceable_offer_reserves_nothing_and_a_retry_succeeds() -> Res
         node1
             .swarm
             .transport
-            .answer_signaled_offer(&broken, &offer, node1.swarm.inner_callback()?)
+            .answer_signaled_offer(SwarmTransportCallback::new(node1.swarm.transport.clone()), &broken, &offer)
             .await,
         Err(Error::RelayPathHopUnlinked { hop }) if hop == stranger
     ));
@@ -341,7 +352,11 @@ async fn test_unretraceable_offer_reserves_nothing_and_a_retry_succeeds() -> Res
     node1
         .swarm
         .transport
-        .answer_signaled_offer(&retry, &offer, node1.swarm.inner_callback()?)
+        .answer_signaled_offer(
+            SwarmTransportCallback::new(node1.swarm.transport.clone()),
+            &retry,
+            &offer,
+        )
         .await?;
     wait_until_result("n1 and n3 admit each other", || {
         Ok(node1.swarm.is_peer_admitted(node3.did())?
@@ -359,13 +374,19 @@ async fn test_late_answer_is_not_applied_to_a_newer_generation() -> Result<()> {
     let [node1, node2] = ring_nodes::<2>()?;
     let transport = &node1.swarm.transport;
     let (released, first_offer) = transport
-        .prepare_connection_offer_with_attempt(node2.did(), node1.swarm.inner_callback()?)
+        .prepare_connection_offer_with_attempt(
+            node2.did(),
+            SwarmTransportCallback::new(node1.swarm.transport.clone()),
+        )
         .await?;
     let first_tx = uuid::Uuid::new_v4();
     transport.mark_offer_sent(released, &first_offer, first_tx)?;
     assert!(transport.cancel_unadmitted_connection(released).await?);
     let (newer, second_offer) = transport
-        .prepare_connection_offer_with_attempt(node2.did(), node1.swarm.inner_callback()?)
+        .prepare_connection_offer_with_attempt(
+            node2.did(),
+            SwarmTransportCallback::new(node1.swarm.transport.clone()),
+        )
         .await?;
     let second_tx = uuid::Uuid::new_v4();
     transport.mark_offer_sent(newer, &second_offer, second_tx)?;
@@ -373,7 +394,11 @@ async fn test_late_answer_is_not_applied_to_a_newer_generation() -> Result<()> {
     let OfferReply::Answer(late) = node2
         .swarm
         .transport
-        .answer_remote_connection(node1.did(), node2.swarm.inner_callback()?, &first_offer)
+        .answer_remote_connection(
+            node1.did(),
+            SwarmTransportCallback::new(node2.swarm.transport.clone()),
+            &first_offer,
+        )
         .await?
     else {
         return Err(Error::InvalidMessage("expected an answer".to_string()));
@@ -404,14 +429,20 @@ async fn test_released_generation_drops_its_signaling_state() -> Result<()> {
     let [node1, node2] = ring_nodes::<2>()?;
     let transport = &node1.swarm.transport;
     let (released, offer) = transport
-        .prepare_connection_offer_with_attempt(node2.did(), node1.swarm.inner_callback()?)
+        .prepare_connection_offer_with_attempt(
+            node2.did(),
+            SwarmTransportCallback::new(node1.swarm.transport.clone()),
+        )
         .await?;
     transport.mark_offer_sent(released, &offer, uuid::Uuid::new_v4())?;
     assert!(transport.cancel_unadmitted_connection(released).await?);
     assert_eq!(handshake_of(&node1, node2.did())?, None);
 
     let (fresh, _) = transport
-        .prepare_connection_offer_with_attempt(node2.did(), node1.swarm.inner_callback()?)
+        .prepare_connection_offer_with_attempt(
+            node2.did(),
+            SwarmTransportCallback::new(node1.swarm.transport.clone()),
+        )
         .await?;
     assert_ne!(fresh, released);
     assert_eq!(
@@ -459,7 +490,10 @@ async fn test_step_failure_classification() -> Result<()> {
     let (creating, _) = node1
         .swarm
         .transport
-        .prepare_connection_offer_with_attempt(node2.did(), node1.swarm.inner_callback()?)
+        .prepare_connection_offer_with_attempt(
+            node2.did(),
+            SwarmTransportCallback::new(node1.swarm.transport.clone()),
+        )
         .await?;
     let (_, crossing) = node2.swarm.offer_connection(node1.did()).await?;
     assert!(node1.swarm.answer_offer(crossing).await?.answer().is_some());
@@ -487,6 +521,7 @@ async fn test_inbound_refuses_a_path_on_the_wrong_message() -> Result<()> {
     let mut custom = node1
         .swarm
         .transport
+        .protocol_egress()
         .originate(
             Message::custom(b"pathless only")?,
             node2.did(),

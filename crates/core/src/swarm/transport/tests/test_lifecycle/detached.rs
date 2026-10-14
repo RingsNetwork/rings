@@ -14,7 +14,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::Message;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::swarm::transport::SendCompletionOutcome;
 
 /// Where the dummy backend parks the send when the worker is lost.

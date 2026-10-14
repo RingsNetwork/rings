@@ -16,7 +16,6 @@ use crate::connection_ref::ConnectionRef;
 use crate::core::callback::TransportCallback;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
-use crate::core::transport::TransportMessage;
 use crate::error::Result;
 
 /// Hang guard: a failure bound on a test that waits only on events, never a pacing.
@@ -66,10 +65,10 @@ async fn connect_loopback() -> Result<Loopback> {
 }
 
 /// One test cell tagged with its index.
-fn cell(index: usize) -> TransportMessage {
+fn cell(index: usize) -> Bytes {
     let mut payload = vec![0u8; CELL_BYTES];
     payload[..8].copy_from_slice(&(index as u64).to_be_bytes());
-    TransportMessage::Custom(Bytes::from(payload))
+    Bytes::from(payload)
 }
 
 /// Awaited sends back to back: each delivery future resolves `Ok` on the

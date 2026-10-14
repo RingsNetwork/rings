@@ -18,6 +18,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rings_core::lifecycle::StopToken;
 use rings_core::swarm::OfferReply;
 #[cfg(target_os = "linux")]
 use rings_gateway::bindings::NativePacketIo;
@@ -253,6 +254,16 @@ async fn connect_gateway_edge(first: &Processor, second: &Processor, label: &str
     .unwrap_or_else(|error| panic!("gateway WebRTC edge {label} did not connect: {error:?}"));
 }
 
+/// Serve `provider`'s application inbox with the extension backend on a detached task, with
+/// [`AdmissionActivity`] observing it, so an edge awaited by [`connect_gateway_edge`] wakes its
+/// probe on every admission and retirement.
+fn serve_observing_admissions(provider: &Provider) -> Result<()> {
+    let service =
+        provider.application_service(Some(Arc::new(AdmissionActivity)), StopToken::never())?;
+    rings_runtime::spawn_detached(service)
+        .map_err(|_| Error::ExtensionError("no runtime to serve the application inbox".to_owned()))
+}
+
 /// Relays of the gateway fixture besides the exit: an onion loop over one symbol has
 /// `H − 1 = 4` distinct hops, the exit included (#834 D5).
 const GATEWAY_FIXTURE_RELAYS: usize = 3;
@@ -304,10 +315,10 @@ async fn prepare_onion_loop_public_gateway(
         NativeOnionCircuitHandle::install(&provider.extensions())?;
     }
     NativeOnionCircuitHandle::install(&exit_provider.extensions())?;
-    client_provider.set_backend_observed_by(Arc::new(AdmissionActivity))?;
-    exit_provider.set_backend_observed_by(Arc::new(AdmissionActivity))?;
+    serve_observing_admissions(&client_provider)?;
+    serve_observing_admissions(&exit_provider)?;
     for provider in relay_providers.iter() {
-        provider.set_backend_observed_by(Arc::new(AdmissionActivity))?;
+        serve_observing_admissions(provider)?;
     }
 
     for (index, relay) in relays.iter().enumerate() {
@@ -320,7 +331,8 @@ async fn prepare_onion_loop_public_gateway(
 
     let now_ms = get_epoch_ms();
     client
-        .storage_store(Processor::online_node_registry_entry(
+        .storage_store(Processor::registry_entry(
+            ONLINE_NODES_TOPIC,
             relays
                 .iter()
                 .chain([&exit])
@@ -329,7 +341,7 @@ async fn prepare_onion_loop_public_gateway(
         )?)
         .await?;
     client
-        .storage_store(Processor::onion_exit_registry_entry(vec![
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
             onion_exit_descriptor_for_processor_with_service(
                 &exit,
                 OnionServiceName::tcp(),

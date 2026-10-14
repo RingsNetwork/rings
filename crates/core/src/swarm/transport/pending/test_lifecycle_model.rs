@@ -1,66 +1,7 @@
+use super::finger::finger_candidate_admission;
+use super::finger::FingerCandidateAdmission;
 use super::*;
 use crate::ecc::SecretKey;
-
-#[test]
-fn test_event_disposition_is_defined_by_the_active_generation_only() -> Result<()> {
-    let peer = SecretKey::random().address().into();
-    let source = PendingConnectionAttempt {
-        peer,
-        generation: 1,
-    };
-    let replacement = PendingConnectionAttempt {
-        peer,
-        generation: 2,
-    };
-
-    assert_eq!(
-        event_disposition(None, source),
-        ConnectionEventDisposition::Deliver
-    );
-    assert_eq!(
-        event_disposition(
-            Some(PeerConnectionLifecycle::Pending {
-                attempt: replacement,
-                started_at_ms: 0,
-            }),
-            source,
-        ),
-        ConnectionEventDisposition::Deliver
-    );
-    assert_eq!(
-        event_disposition(
-            Some(PeerConnectionLifecycle::Admitting {
-                attempt: replacement,
-                started_at_ms: 0,
-            }),
-            source,
-        ),
-        ConnectionEventDisposition::Deliver
-    );
-    assert_eq!(
-        event_disposition(
-            Some(PeerConnectionLifecycle::Active {
-                attempt: replacement,
-                announced: false
-            }),
-            source,
-        ),
-        ConnectionEventDisposition::Suppress {
-            active: replacement
-        }
-    );
-    assert_eq!(
-        event_disposition(
-            Some(PeerConnectionLifecycle::Active {
-                attempt: source,
-                announced: false
-            }),
-            source
-        ),
-        ConnectionEventDisposition::Deliver
-    );
-    Ok(())
-}
 
 #[test]
 fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
@@ -105,18 +46,12 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
             FingerCandidateAdmission::Queue(attempt),
         ),
         (
-            Some(PeerConnectionLifecycle::Active {
-                attempt,
-                announced: false,
-            }),
+            Some(PeerConnectionLifecycle::Active { attempt }),
             false,
             FingerCandidateAdmission::Unroutable,
         ),
         (
-            Some(PeerConnectionLifecycle::Active {
-                attempt,
-                announced: false,
-            }),
+            Some(PeerConnectionLifecycle::Active { attempt }),
             true,
             FingerCandidateAdmission::Apply,
         ),
@@ -406,7 +341,7 @@ impl LifecycleImplementation {
             Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => {
                 PeerLifecycle::Admitting(attempt.generation)
             }
-            Some(PeerConnectionLifecycle::Active { attempt, .. }) => {
+            Some(PeerConnectionLifecycle::Active { attempt }) => {
                 PeerLifecycle::Active(attempt.generation)
             }
             None => PeerLifecycle::Absent,

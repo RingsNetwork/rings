@@ -50,8 +50,6 @@ impl HandleMsg<CustomMessage> for MessageHandler {
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::delegation::DelegateeKey;
     use crate::ecc::SecretKey;
@@ -60,17 +58,12 @@ mod tests {
     use crate::message::Message;
     use crate::message::MessagePayload;
     use crate::message::MessageSigner;
-    use crate::swarm::callback::SwarmCallback;
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::prepare_node;
     use crate::tests::default::wait_for_msgs;
     use crate::tests::default::Node;
     use crate::tests::manually_establish_connection;
     use crate::tests::TEST_NETWORK_ID;
-
-    struct NoopCallback;
-
-    impl SwarmCallback for NoopCallback {}
 
     /// An application payload from a stranger, addressed through `relay` to `destination`.
     fn payload_through(
@@ -100,7 +93,7 @@ mod tests {
         manually_establish_connection(&relay.swarm, &destination.swarm).await;
         wait_for_msgs([&relay, &destination]).await;
         assert_no_more_msg([&relay, &destination]).await;
-        let handler = MessageHandler::new(relay.swarm.transport.clone(), Arc::new(NoopCallback));
+        let handler = MessageHandler::new(relay.swarm.transport.clone());
 
         let (exhausted, message) = payload_through(&relay, &destination, HopBudget::EXHAUSTED)?;
         assert!(matches!(

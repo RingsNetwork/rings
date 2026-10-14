@@ -6,6 +6,7 @@ use rings_core::message::OriginQuotaLaneConfig;
 use super::common::*;
 use super::*;
 use crate::processor::config::parse_webrtc_udp_port_range;
+use crate::registration::registry_refresh_bound;
 
 #[test]
 fn test_webrtc_udp_port_range_absent_by_default() {
@@ -86,6 +87,62 @@ fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enable
             if message.contains("online_node_heartbeat_interval")
                 && message.contains("online_node_ttl")
     ));
+}
+
+/// Both registries accept a heartbeat interval just below `L − σ − P` and refuse one at it, at
+/// which a sole registrant's descriptor could lapse between heartbeats. The bound is pinned to
+/// the 595 s the configuration documentation states, so dropping or adding any of the three
+/// terms fails.
+#[test]
+fn test_registry_heartbeat_must_refresh_before_a_descriptor_expires() -> Result<()> {
+    let key = SecretKey::random();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
+    let bound = registry_refresh_bound();
+    assert_eq!(bound, Duration::from_secs(595));
+    let below = bound - Duration::from_millis(1);
+
+    let presence = |interval: Duration| {
+        let mut config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            delegatee_key.clone(),
+            3,
+        );
+        config.online_node_heartbeat_interval = interval;
+        config.online_node_ttl = bound * 2;
+        ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build)
+    };
+    assert!(presence(below).is_ok());
+    assert!(matches!(
+        presence(bound),
+        Err(Error::InvalidConfig(message))
+            if message.contains("online_node_heartbeat_interval")
+                && message.contains("lifetime of a registry write")
+    ));
+
+    let exit = |interval: Duration| -> Result<_> {
+        let mut config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            delegatee_key.clone(),
+            3,
+        )
+        .onion_role(OnionRole::Exit(OnionExitOffer::new(
+            [OnionServiceName::tcp()],
+            onion_policy(&["example.com:443"], &[])?,
+        )?));
+        config.onion_exit_heartbeat_interval = interval;
+        config.onion_exit_ttl = bound * 2;
+        Ok(ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build))
+    };
+    assert!(exit(below)?.is_ok());
+    assert!(matches!(
+        exit(bound)?,
+        Err(Error::InvalidConfig(message))
+            if message.contains("onion_exit_heartbeat_interval")
+                && message.contains("lifetime of a registry write")
+    ));
+    Ok(())
 }
 
 #[test]
@@ -172,7 +229,7 @@ advertise_presence: true
         delegatee_key.dump().unwrap()
     );
 
-    let serialized = serde_yaml::from_str::<ProcessorConfigSerialized>(&yaml).unwrap();
+    let serialized = serde_saphyr::from_str::<ProcessorConfigSerialized>(&yaml).unwrap();
     let config = ProcessorConfig::try_from(serialized).unwrap();
     let builder = ProcessorBuilder::from_config(&config).unwrap();
 
@@ -317,11 +374,11 @@ async fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
 #[test]
 fn test_onion_exit_service_must_be_a_world_facing_symbol() {
     assert_eq!(
-        serde_yaml::from_str::<Vec<OnionServiceName>>("[tcp, https]").ok(),
+        serde_saphyr::from_str::<Vec<OnionServiceName>>("[tcp, https]").ok(),
         Some(vec![OnionServiceName::tcp(), OnionServiceName::https()])
     );
     for outside in ["web", "relay"] {
         assert!(OnionServiceName::parse(outside).is_err());
-        assert!(serde_yaml::from_str::<Vec<OnionServiceName>>(&format!("[{outside}]")).is_err());
+        assert!(serde_saphyr::from_str::<Vec<OnionServiceName>>(&format!("[{outside}]")).is_err());
     }
 }

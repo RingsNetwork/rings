@@ -15,12 +15,9 @@ use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::measure::MeasureImpl;
 use crate::message::OriginQuotaConfig;
-use crate::message::ReplaySnapshot;
+use crate::message::ReplayRecord;
 use crate::message::ReplayStorage;
 use crate::message::TransactionReplay;
-use crate::swarm::callback::DefaultCallback;
-use crate::swarm::callback::SharedSwarmCallback;
-use crate::swarm::callback::SwarmCallbackSlot;
 use crate::swarm::observer::NoopSwarmObserver;
 use crate::swarm::observer::SharedSwarmObserver;
 use crate::swarm::transport::SwarmTransport;
@@ -46,7 +43,6 @@ pub struct SwarmBuilder {
     delegatee_key: DelegateeKey,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
-    callback: Option<SharedSwarmCallback>,
     /// Optional bounded sink for privacy-safe operational observations.
     observer: Option<SharedSwarmObserver>,
 }
@@ -70,12 +66,11 @@ impl SwarmBuilder {
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             reassembly_limits: default_reassembly_limits(),
             dht_storage,
-            replay_storage: Box::new(crate::storage::MemStorage::<ReplaySnapshot>::new()),
+            replay_storage: Box::new(crate::storage::MemStorage::<ReplayRecord>::new()),
             origin_quota: OriginQuotaConfig::default(),
             delegatee_key,
             session_ttl: None,
             measure: None,
-            callback: None,
             observer: None,
         }
     }
@@ -148,12 +143,6 @@ impl SwarmBuilder {
         self
     }
 
-    /// Bind callback for Swarm.
-    pub fn callback(mut self, callback: SharedSwarmCallback) -> Self {
-        self.callback = Some(callback);
-        self
-    }
-
     /// Bind a synchronous, non-blocking observer for operational telemetry.
     pub fn observer(mut self, observer: SharedSwarmObserver) -> Self {
         self.observer = Some(observer);
@@ -188,8 +177,6 @@ impl SwarmBuilder {
             ),
         );
 
-        let callback =
-            SwarmCallbackSlot::new(self.callback.unwrap_or_else(|| Arc::new(DefaultCallback)));
         let observer = self.observer.unwrap_or_else(|| Arc::new(NoopSwarmObserver));
         let transport = Arc::new(SwarmTransport::new(SwarmTransportParts {
             network_id: self.network_id,
@@ -210,7 +197,6 @@ impl SwarmBuilder {
                 storage_virtual_node_config,
                 self.reassembly_limits,
             ),
-            callback,
             observer,
         }));
 

@@ -110,7 +110,7 @@ async fn test_topology_predecessor_discovery_after_rejoin_delivers_held_inbox() 
     // Deliver a real authenticated notify to peer's selected head, without
     // starting an unrelated successor-sync or finger-discovery round at peer.
     peer.swarm
-        .send_message(
+        .send_core_message_for_test(
             Message::NotifyPredecessorSend(crate::message::NotifyPredecessorSend {
                 did: peer.did(),
             }),

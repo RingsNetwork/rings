@@ -1,5 +1,5 @@
-//! Emission of link-control frames: the confirmations, questions and answers of the session
-//! references on one link (see [`crate::swarm::session_link`]).
+//! Emission of link-control frames: the leases and disclaimers of the session references on
+//! one link (see [`crate::swarm::session_link`]).
 //!
 //! A link-control frame is a link-layer signal, not a message: it is unsigned, idempotent,
 //! belongs to no transaction, and is answered by nothing this end waits for. Three laws follow
@@ -11,43 +11,57 @@
 //!   newer generation of the same peer, where it would confirm or disclaim what that generation's
 //!   tables never saw.
 //! - Detachment law: the sender never waits for the data channel. The frames are emitted from
-//!   the transport's inbound callback, which the read loop awaits; a send that waited there for
-//!   the peer's receive window would stall this end's reading, and so the peer's sending, on a
-//!   link both ends are still using. The send runs in a task of its own, refused when no
+//!   the transport's inbound callback, which the drainer of the frame's transport lane awaits
+//!   before handing over the lane's next frame; a send that waited there for the peer's receive
+//!   window would stall that lane at this end, and so the peer's sending on it, on a link both
+//!   ends are still using. The send runs in a task of its own, refused when no
 //!   runtime can carry one, bounded by the same accept timeout as every frame, and judged as
 //!   every frame is: a send that became irrevocable and timed out retires the connection
-//!   through the transport's termination path, never by dropping the send.
+//!   through the transport's termination path, never by dropping the send. Like every frame it
+//!   is charged to its lane's transport credit, which the task reserves before the timed send;
+//!   the peer's backpressure delays the task for at most one
+//!   [`DELIVERY_BOUND`](super::DELIVERY_BOUND), after which the frame is dropped and the
+//!   connection kept: the frame is idempotent, a lost lease is granted again by the next
+//!   inline frame or renewing reference, a lost disclaimer is sent again by the next miss, and
+//!   a peer that grants no credit is liveness's to judge.
 //! - Bound law: nothing here reserves lane or memory capacity. Each inbound frame causes at
-//!   most two of these frames (a confirmation or question per delegation slot of a frame this
-//!   end verified, held, or dropped for want of room, or one answer per question), and at
-//!   most `LINK_CONTROL_IN_FLIGHT_CAPACITY` of them, twice the raw frames the peer may have in
-//!   flight at this end's transport
+//!   most two of these frames, one per distinct delegation slot: a lease or renewal per
+//!   distinct delegation of a frame this end verified, or a disclaimer per distinct digest of a
+//!   frame it dropped as a miss. At most `LINK_CONTROL_IN_FLIGHT_CAPACITY` of them, twice the
+//!   raw frames the peer may have in flight at this end's transport
 //!   ([`INBOUND_PEER_FRAME_CAPACITY`](rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY)),
-//!   are in flight to one peer at a time: a
-//!   send beyond that budget is refused, and repeated by the next frame that misses or
-//!   teaches the same session. So what this end spends on a peer's link control is bounded
-//!   by the frames it accepts from that peer, in flight and over time.
+//!   are in flight to one peer at a time: a send beyond that budget is refused, and repeated by
+//!   the next frame that misses or teaches the same session. So what this end spends on a
+//!   peer's link control is bounded by the frames it accepts from that peer, in flight and over
+//!   time.
 //!
 //! The sender's table is judged on the system clock, like every outbound step; the receiver's
-//! on the inbound clock. They are one clock outside tests.
+//! on the inbound clock. They are one clock outside tests. The clocks of the two ends of a link
+//! are never compared: a lease travels as a remaining duration.
 
 use bytes::Bytes;
+use futures::future::select;
+use futures::future::Either;
 
 use super::delivery::send_data_with_timeout;
 use super::delivery::ChunkSendPermit;
 use super::delivery::ChunkSendProgress;
+use super::delivery::FrameTarget;
 use super::delivery::TransferStop;
 use super::outbound::LinkControlPermit;
+use super::outbound::TransferClass;
 use super::AdmittedConnection;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
-use crate::delegation::DelegationDigest;
+use super::DELIVERY_BOUND;
+use crate::error::DetachedWork;
 use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopToken;
 use crate::message::LinkControl;
 use crate::swarm::detached::spawn_detached;
 use crate::utils::get_epoch_ms;
+use crate::utils::sleep;
 
 /// The send context every link-control frame is logged and judged under.
 const LINK_CONTROL_SEND_CONTEXT: &str = "link_control";
@@ -64,14 +78,38 @@ async fn deliver_link_control(
 ) {
     let peer = admitted.attempt().peer();
     let stop = TransferStop::new(StopToken::never());
+    // Link control travels on the DHT-control lane. It needs no order against data frames: a
+    // lease is granted only for a delegation this end already holds, and nothing waits for it.
+    let lane = TransferClass::DhtControl.channel_lane();
+    // Law (bounded by its purpose): the frame holds its link-control permit while it waits for
+    // credit, so the wait is bounded by one `DELIVERY_BOUND`. The frame is then lost, as a
+    // datagram may be, and the lease law repairs a lost link-control frame; nothing is
+    // retired, since a slow receiver is backpressure, not a dead peer.
+    let reserve = std::pin::pin!(admitted.connection().reserve_send_credit(lane));
+    let expiry = std::pin::pin!(sleep(DELIVERY_BOUND));
+    let credit = match select(reserve, expiry).await {
+        Either::Left((Ok(credit), _)) => credit,
+        Either::Left((Err(error), _)) => {
+            tracing::debug!(peer = %peer, error = ?error, "link control found no credit");
+            return;
+        }
+        Either::Right(_) => {
+            tracing::debug!(peer = %peer, "link control waited past its delivery bound for credit");
+            return;
+        }
+    };
     let progress = send_data_with_timeout(
         &admitted,
         frame,
+        Some(credit),
         &ChunkSendPermit::Always,
         &stop,
         None,
-        peer,
-        LINK_CONTROL_SEND_CONTEXT,
+        FrameTarget {
+            did: peer,
+            lane,
+            context: LINK_CONTROL_SEND_CONTEXT,
+        },
     )
     .await;
     match progress {
@@ -94,7 +132,7 @@ impl SwarmTransport {
     /// [`Error::ConnectionAttemptSuperseded`] for a generation no longer current,
     /// [`Error::SwarmMissDidInTable`] for a peer with no admitted connection,
     /// [`Error::LinkControlInFlightCapacity`] when the peer's budget is spent, and
-    /// [`Error::LinkControlRuntimeUnavailable`] when no runtime can carry the task.
+    /// [`Error::DetachedRuntimeUnavailable`] when no runtime can carry the task.
     pub(crate) async fn send_link_control(
         &self,
         attempt: PendingConnectionAttempt,
@@ -127,36 +165,27 @@ impl SwarmTransport {
             Some(Some(Some(permit))) => permit,
         };
         if spawn_detached(Box::pin(deliver_link_control(admitted, frame, permit))).is_err() {
-            return Err(Error::LinkControlRuntimeUnavailable);
+            return Err(Error::DetachedRuntimeUnavailable(
+                DetachedWork::LinkControlSend,
+            ));
         }
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        super::outbound::record_dispatched_link_control(peer, control);
+        super::outbound::test_trace::record_dispatched_link_control(peer, control);
         Ok(())
     }
 
-    /// `attempt`'s peer confirmed `digest`: frames to it may reference the session from now on.
-    pub(crate) fn acknowledge_session(
+    /// Learn what `attempt`'s peer said about its link, on the system clock the sender's
+    /// table is judged on.
+    pub(crate) fn observe_link_control(
         &self,
         attempt: PendingConnectionAttempt,
-        digest: DelegationDigest,
+        control: &LinkControl,
     ) {
-        self.outbound_schedulers
-            .acknowledge_session(attempt.peer(), attempt.generation(), digest);
-    }
-
-    /// Answer the question `attempt`'s peer asked about `digest`: exactly one link-control
-    /// frame per question, taken from what this generation announced, sent on this generation.
-    pub(crate) async fn answer_session_request(
-        &self,
-        attempt: PendingConnectionAttempt,
-        digest: DelegationDigest,
-    ) -> Result<()> {
-        let answer = self.outbound_schedulers.answer_session_request(
+        self.outbound_schedulers.observe_link_control(
             attempt.peer(),
             attempt.generation(),
-            digest,
+            control,
             get_epoch_ms(),
         );
-        self.send_link_control(attempt, &answer).await
     }
 }
