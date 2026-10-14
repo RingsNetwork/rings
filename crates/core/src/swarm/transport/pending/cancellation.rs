@@ -19,8 +19,6 @@ enum CancellationScope {
     Pending,
     /// `Pending` or `Admitting`.
     Unadmitted,
-    /// `Pending` while its signaling state is still the one observed.
-    PendingIn(Handshake),
 }
 
 struct RetiredPendingConnection {
@@ -48,16 +46,45 @@ impl SwarmTransport {
             .await
     }
 
-    /// Withdraw `attempt` in favour of a crossing offer iff its signaling state is still
-    /// `observed`, the state the verdict was decided on, and release its transport object;
-    /// `false` when the attempt moved on (or was released) meanwhile.
-    pub(in crate::swarm::transport) async fn withdraw_pending_in(
+    /// Yield `attempt` to a crossing offer iff its signaling state is still `observed`, the
+    /// state the verdict was decided on: its record is replaced by the peer's answering
+    /// generation in one lifecycle transition (`Law (Atomic yield)`), then its transport object
+    /// is closed. Returns the answering generation, or `None` when the attempt moved on (or was
+    /// released) meanwhile.
+    pub(in crate::swarm::transport) async fn yield_pending_in(
         &self,
         attempt: PendingConnectionAttempt,
         observed: Handshake,
-    ) -> Result<bool> {
-        self.cancel_connection(attempt, CancellationScope::PendingIn(observed))
-            .await
+    ) -> Result<Option<PendingConnectionAttempt>> {
+        let (answering, connection) = {
+            let _lifecycle = self.connection_lifecycle()?;
+            let answering = self.peer_lifecycles()?.replace_pending_in(
+                attempt,
+                &observed,
+                get_epoch_ms_i64(),
+            )?;
+            let Some(answering) = answering else {
+                return Ok(None);
+            };
+            self.cancel_pending_finger_updates(attempt)?;
+            (answering, self.get_raw_connection(attempt.peer))
+        };
+        tracing::debug!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %attempt.peer,
+            generation = attempt.generation,
+            answering = answering.generation,
+            "pending connection yielded to a crossing offer"
+        );
+        // The answering generation has no transport yet, so the raw connection is the yielded one.
+        if let Some(connection) = connection {
+            self.transport
+                .close_connection_if_current(&connection.connection)
+                .await
+                .map_err(Error::Transport)?;
+        }
+        Ok(Some(answering))
     }
 
     /// Cancel `attempt` iff it is still pending, that is, no data channel has opened on it, and
@@ -108,9 +135,6 @@ impl SwarmTransport {
             match scope {
                 CancellationScope::Pending => lifecycles.remove_pending(attempt),
                 CancellationScope::Unadmitted => lifecycles.remove_unadmitted(attempt),
-                CancellationScope::PendingIn(observed) => {
-                    lifecycles.remove_pending_in(attempt, &observed)
-                }
             }
         };
         if !removed {

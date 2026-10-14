@@ -12,7 +12,9 @@
 //! `ConnectionAttemptSuperseded` when the peer's own handshake took the slot, and
 //! `ConnectionAttemptCancelled` when anything else released it. On native WebRTC the first is
 //! what surfaced as `Local connection closed` from an offer whose ICE gathering the tie-break
-//! interrupted (#945).
+//! interrupted (#945). A yield replaces the yielding generation with the answering one in one
+//! lifecycle transition (`Law (Atomic yield)`), so the slot is never vacant in between and a
+//! yielded offer always reports `ConnectionAttemptSuperseded` (#954).
 //!
 //! [`classify_step_failure`]: SwarmTransport::classify_step_failure
 
@@ -115,6 +117,18 @@ enum IncomingOfferAdmittedPeer {
     /// An admitted generation that can no longer route; it is retired before the offer
     /// proceeds, unless retirement keeps it.
     Unroutable(PendingConnectionAttempt),
+}
+
+/// What an incoming offer's reconciliation leaves in the peer's slot.
+#[derive(Clone, Debug)]
+enum IncomingOfferSlot {
+    /// No record: the answering generation is still to be reserved.
+    Vacant,
+    /// This node's creating or sent offer yielded; the answering generation already owns the
+    /// slot (`Law (Atomic yield)`).
+    Yielded(PendingConnectionAttempt),
+    /// This node's own offer prevails and is sent back (`Law (Tie-break)`).
+    CounterOffer(CounterOffer),
 }
 
 impl SwarmTransport {
@@ -242,6 +256,16 @@ impl SwarmTransport {
         handshake: Handshake,
     ) -> Result<PendingTransportConnection> {
         let attempt = self.reserve_pending_connection_for(peer, handshake).await?;
+        self.open_reserved_connection(attempt, callback).await
+    }
+
+    /// Create the transport connection of the already reserved generation `attempt`: local
+    /// work only.
+    async fn open_reserved_connection(
+        &self,
+        attempt: PendingConnectionAttempt,
+        callback: SwarmTransportCallback,
+    ) -> Result<PendingTransportConnection> {
         let callback = callback.with_pending_connection_attempt(attempt);
         self.new_pending_connection(attempt, callback).await
     }
@@ -328,11 +352,11 @@ impl SwarmTransport {
         }
     }
 
-    /// Decide what an offer from `peer` meets here: `None` when the offer may take the slot
-    /// (to be answered), or `Some` of this node's own prevailing offer to send back; any record
-    /// the offer must not displace refuses it as `AlreadyConnected`. A pending attempt is
-    /// decided by `Law (Crossing offer)`.
-    async fn reconcile_incoming_offer_peer(&self, peer: Did) -> Result<Option<CounterOffer>> {
+    /// Decide what an offer from `peer` meets here: a vacant slot or a yielded one whose
+    /// answering generation is already reserved (to be answered), or this node's own prevailing
+    /// offer to send back; any record the offer must not displace refuses it as
+    /// `AlreadyConnected`. A pending attempt is decided by `Law (Crossing offer)`.
+    async fn reconcile_incoming_offer_peer(&self, peer: Did) -> Result<IncomingOfferSlot> {
         self.expire_pending_connections().await?;
         match self.incoming_offer_admitted_peer(peer)? {
             IncomingOfferAdmittedPeer::Vacant => {}
@@ -346,13 +370,14 @@ impl SwarmTransport {
             }
         }
 
-        // Law (Decided state): a yield releases the attempt only in the signaling state its
+        // Law (Decided state): a yield replaces the attempt only in the signaling state its
         // verdict read. Between the read and the release the attempt may move on (an offer still
         // `Creating` may leave as `Sent`), and a yield decided on the earlier state would then
         // cancel an offer already on its way, while the peer, meeting that offer, yields too:
         // both ends would release the edge. A release that finds the state moved on decides
         // again on the new state. Each retry follows a transition of the attempt, whose phases
         // only advance (`Creating ≺ Sent ≺ Answered`) until it is released, so the loop ends.
+        let mut answering = None;
         loop {
             let Some((attempt, handshake)) = self.unadmitted_record(peer)? else {
                 break;
@@ -363,7 +388,7 @@ impl SwarmTransport {
             match crossing_offer_verdict(&handshake, self.dht.did, peer) {
                 CrossingOfferVerdict::Refuse => return Err(Error::AlreadyConnected),
                 CrossingOfferVerdict::CounterOffer { sdp, tx_id } => {
-                    return Ok(Some(CounterOffer {
+                    return Ok(IncomingOfferSlot::CounterOffer(CounterOffer {
                         offer: ConnectNodeSend {
                             sdp,
                             dht_protocol_mode: self.dht_protocol_mode(),
@@ -372,11 +397,18 @@ impl SwarmTransport {
                     }));
                 }
                 CrossingOfferVerdict::Yield => {
-                    if self.withdraw_pending_in(attempt, handshake).await? {
+                    answering = self.yield_pending_in(attempt, handshake).await?;
+                    if answering.is_some() {
                         break;
                     }
                 }
             }
+        }
+
+        if let Some(answering) = answering {
+            // The yield closed the yielded generation's transport, the only raw connection the
+            // slot held, and the answering generation owns the slot.
+            return Ok(IncomingOfferSlot::Yielded(answering));
         }
 
         // A raw connection without a lifecycle owner is stale physical state and is removed
@@ -398,7 +430,7 @@ impl SwarmTransport {
                 }
             }
         }
-        Ok(None)
+        Ok(IncomingOfferSlot::Vacant)
     }
 
     /// `peer`'s unadmitted generation, if any, with its signaling state when it is pending
@@ -430,19 +462,25 @@ impl SwarmTransport {
             ));
         }
         let offer: String = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
-        if let Some(counter_offer) = self.reconcile_incoming_offer_peer(peer).await? {
-            tracing::debug!(
-                target: "rings_core::swarm::transport::handshake",
-                local = %self.dht.did,
-                peer = %peer,
-                tx_id = %counter_offer.tx_id,
-                "crossing connection offer refused on the tie-break; counter-offer"
-            );
-            return Ok(OfferReply::CounterOffer(counter_offer));
-        }
-        let pending = self
-            .open_pending_connection(peer, callback, Handshake::answering())
-            .await?;
+        let pending = match self.reconcile_incoming_offer_peer(peer).await? {
+            IncomingOfferSlot::CounterOffer(counter_offer) => {
+                tracing::debug!(
+                    target: "rings_core::swarm::transport::handshake",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    tx_id = %counter_offer.tx_id,
+                    "crossing connection offer refused on the tie-break; counter-offer"
+                );
+                return Ok(OfferReply::CounterOffer(counter_offer));
+            }
+            IncomingOfferSlot::Yielded(answering) => {
+                self.open_reserved_connection(answering, callback).await?
+            }
+            IncomingOfferSlot::Vacant => {
+                self.open_pending_connection(peer, callback, Handshake::answering())
+                    .await?
+            }
+        };
         Ok(OfferReply::Answer((pending, offer)))
     }
 

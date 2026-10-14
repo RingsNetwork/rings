@@ -1,6 +1,7 @@
 //! The handshake on the dummy transport (#945, #947): crossing offers in every signaling
 //! phase, recorded-path replies, answers bound to their offer, and step-failure classification.
 
+use super::IncomingOfferSlot;
 use crate::dht::delivery::RouteStage;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
@@ -501,6 +502,56 @@ async fn test_step_failure_classification() -> Result<()> {
         .swarm
         .transport
         .classify_step_failure(creating, closed(), "creating connection offer")
+        .await?;
+    assert!(
+        matches!(
+            failure,
+            Error::ConnectionAttemptSuperseded { peer, generation }
+                if peer == node2.did() && generation == creating.generation
+        ),
+        "{failure:?}"
+    );
+    Ok(())
+}
+
+/// A creating offer that yields to a crossing offer, and whose SDP step then fails, reports
+/// `ConnectionAttemptSuperseded` as soon as the yield is applied, before the answer is
+/// created: the yield hands the slot to the answering generation in one transition, so the
+/// classification never reads a vacant slot (`Law (Atomic yield)`, #954).
+#[tokio::test]
+async fn test_yielded_offer_is_superseded_before_the_answer_is_created() -> Result<()> {
+    let [node1, node2] = ring_nodes::<2>()?;
+    let transport = &node1.swarm.transport;
+    let (creating, _) = transport
+        .prepare_connection_offer_with_attempt(
+            node2.did(),
+            SwarmTransportCallback::new(node1.swarm.transport.clone()),
+        )
+        .await?;
+
+    let IncomingOfferSlot::Yielded(answering) =
+        transport.reconcile_incoming_offer_peer(node2.did()).await?
+    else {
+        return Err(Error::InvalidMessage(
+            "a creating offer yields to a crossing offer".to_string(),
+        ));
+    };
+    assert_ne!(answering, creating);
+    assert_eq!(
+        handshake_of(&node1, node2.did())?,
+        Some(Handshake::answering())
+    );
+
+    let failure = transport
+        .classify_step_failure(
+            creating,
+            Error::Transport(
+                rings_transport::error::Error::WebrtcLocalSdpGenerationError(
+                    "Local connection closed".to_string(),
+                ),
+            ),
+            "creating connection offer",
+        )
         .await?;
     assert!(
         matches!(

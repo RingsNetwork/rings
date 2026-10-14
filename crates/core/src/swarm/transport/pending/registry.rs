@@ -269,20 +269,36 @@ impl ConnectionLifecycleRegistry {
             ReservationVerdict::Admissible => {}
         }
 
+        let attempt = self.next_attempt(peer)?;
+        self.insert_pending(attempt, now_ms, handshake);
+        Ok(attempt)
+    }
+
+    /// Allocate the next generation for `peer`; generations are never reused.
+    fn next_attempt(&mut self, peer: Did) -> Result<PendingConnectionAttempt> {
         self.next_generation = self
             .next_generation
             .checked_add(1)
             .ok_or(Error::PendingConnectionGenerationExhausted)?;
-        let attempt = PendingConnectionAttempt {
+        Ok(PendingConnectionAttempt {
             peer,
             generation: self.next_generation,
-        };
-        self.handshakes.insert(peer, handshake);
-        self.peers.insert(peer, PeerConnectionLifecycle::Pending {
-            attempt,
-            started_at_ms: now_ms,
-        });
-        Ok(attempt)
+        })
+    }
+
+    /// Install `attempt` as its peer's pending record in `handshake`.
+    fn insert_pending(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        now_ms: i64,
+        handshake: Handshake,
+    ) {
+        self.handshakes.insert(attempt.peer, handshake);
+        self.peers
+            .insert(attempt.peer, PeerConnectionLifecycle::Pending {
+                attempt,
+                started_at_ms: now_ms,
+            });
     }
 
     pub(in crate::swarm::transport) fn contains(&self, peer: Did) -> bool {
@@ -495,19 +511,27 @@ impl ConnectionLifecycleRegistry {
         true
     }
 
-    /// Apply `Pending(attempt) -> Absent` iff `attempt`'s signaling state is still `observed`:
-    /// a release decided on one state never applies to a later one (`Law (Decided state)` of
-    /// the handshake).
-    pub(in crate::swarm::transport) fn remove_pending_in(
+    /// Apply `Pending(attempt, observed) -> Pending(answering, Answering)` iff `attempt`'s
+    /// signaling state is still `observed`, returning the answering generation: the yield of an
+    /// offer to a crossing one.
+    ///
+    /// Law (Atomic yield): the yielded generation is replaced by the peer's answering
+    /// generation in one transition, so the slot is never vacant between them; whoever reads
+    /// the slot after the yield finds the peer's handshake (`superseded_by_peer`). A yield
+    /// decided on one state never applies to a later one (`Law (Decided state)` of the
+    /// handshake). One pending record replaces another, so no bound is consulted.
+    pub(in crate::swarm::transport) fn replace_pending_in(
         &mut self,
         attempt: PendingConnectionAttempt,
         observed: &Handshake,
-    ) -> bool {
+        now_ms: i64,
+    ) -> Result<Option<PendingConnectionAttempt>> {
         if self.handshake(attempt) != Some(observed) {
-            return false;
+            return Ok(None);
         }
-        self.remove_record(attempt.peer);
-        true
+        let answering = self.next_attempt(attempt.peer)?;
+        self.insert_pending(answering, now_ms, Handshake::answering());
+        Ok(Some(answering))
     }
 
     /// Apply `Pending(attempt) -> Absent`.
