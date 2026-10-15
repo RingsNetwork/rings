@@ -526,6 +526,14 @@ pub enum Error {
         timeout_ms: u128,
     },
 
+    /// A send under the application discipline was cancelled before any of its frames was
+    /// claimed: its generation was superseded, or its readiness, route, or scheduler revoked it.
+    #[error("Outbound transfer to {peer} was cancelled before its first frame was admitted")]
+    OutboundTransferCancelled {
+        /// Next hop the transfer was queued for.
+        peer: crate::dht::Did,
+    },
+
     /// A detached transfer did not admit its first frame before its deadline.
     #[error("Timed out after {timeout_ms}ms waiting to admit the first outbound frame for {peer}")]
     OutboundFirstFrameAdmissionTimeout {

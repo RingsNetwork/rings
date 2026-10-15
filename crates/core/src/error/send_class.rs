@@ -65,6 +65,9 @@
 //! - `OutboundTransferCapacityExceeded`, `OutboundTransferMemoryCapacityExceeded`,
 //!   `OutboundTransferAdmissionTimeout`: produced by `reserve_outbound_capacity`, before
 //!   `submit`.
+//! - `OutboundTransferCancelled`: produced by `Egress::do_send_payload` for an `Ok(Cancelled)` of
+//!   the waiting discipline, which reached the caller through `do_send_payload_detached_until`,
+//!   so no frame of the transfer was ever claimed by (P).
 //! - `OutboundFirstFrameAdmissionTimeout`: produced by `do_send_payload_detached_until` when
 //!   preparation timed out before `submit`, or when the detached admission was cancelled from
 //!   `Pending`, after which no claim can succeed.
@@ -188,7 +191,9 @@ impl Error {
     pub(crate) const fn send_class(&self) -> SendClass {
         match self {
             Self::ConnectionAttemptSuperseded { .. } | Self::TransportNotReady { .. }
-            | Self::SwarmMissDidInTable(_) => SendClass::Deferrable(DeferralTrigger::LinkChange),
+            | Self::SwarmMissDidInTable(_) | Self::OutboundTransferCancelled { .. } => {
+                SendClass::Deferrable(DeferralTrigger::LinkChange)
+            }
             Self::OutboundTransferCapacityExceeded { .. }
             | Self::OutboundTransferMemoryCapacityExceeded { .. }
             | Self::OutboundTransferAdmissionTimeout { .. } => {
