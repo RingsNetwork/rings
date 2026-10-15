@@ -20,6 +20,11 @@ pub(super) enum OnionWireMessage {
     Backward(OnionBackwardFrame),
     /// One-hop link padding. It is authenticated to the immediate neighbor and never forwarded.
     Cover,
+    /// The circuit the sender knows as `circuit_id` on this link is destroyed (#963). It is
+    /// authenticated to the immediate neighbor, which carries it on away from the sender.
+    Destroy {
+        circuit_id: OnionCircuitId,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -37,10 +42,17 @@ pub(super) enum OnionLocalMessage {
         circuit_id: OnionCircuitId,
         layer: OnionForwardLayer,
     },
+    /// This node's outbox refused a relayed cell of the circuit `to` knows as `circuit_id`.
+    CellRefused { to: Did, circuit_id: OnionCircuitId },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum OnionCircuitInput {
+    /// The link generation to `peer` retired: every circuit adjacent to it is destroyed.
+    PeerRetired { peer: Did },
+    /// This node could not carry a cell of the circuit `to` knows as `circuit_id`: the circuit
+    /// is destroyed at this node, toward both neighbours (#963).
+    CellRefused { to: Did, circuit_id: OnionCircuitId },
     CellObserved {
         from: Did,
         bucket: OnionCellBucket,
@@ -138,6 +150,9 @@ fn decode_local_message(payload: &[u8]) -> std::result::Result<OnionCircuitEvent
             circuit_id,
             layer,
         },
+        OnionLocalMessage::CellRefused { to, circuit_id } => {
+            OnionCircuitInput::CellRefused { to, circuit_id }
+        }
     };
     Ok(OnionCircuitEvent { input })
 }

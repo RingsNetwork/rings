@@ -16,6 +16,10 @@
 //!   [`NAMESPACE_QUEUE_WEIGHT`] encoded bytes queued or in dispatch. A queue holding no bytes
 //!   admits any envelope, so a namespace holds at most `max(NAMESPACE_QUEUE_WEIGHT, one
 //!   envelope)`, and the largest envelope the transport carries still gets through.
+//! - A peer's retirement is a fact, not an envelope: it is queued behind the envelopes that
+//!   preceded it in the inbox, outside both bounds, and never dropped, so a protocol keeping
+//!   per-link state learns of every retirement in inbox order (#963). Retirements are bounded by
+//!   the admissions the core announced.
 //! - Every envelope that is not dispatched is counted by its [`DispatchDrop`] reason, and logged
 //!   at `warn`.
 //! - The workers end once the stop of the [`Backend::serve`](super::Backend::serve) that started
@@ -117,19 +121,52 @@ impl DispatchDrops {
     }
 }
 
-/// One envelope waiting for its namespace's worker.
-struct Queued {
-    route: Route,
-    from: Did,
-    payload: Bytes,
-    /// The encoded envelope's length, released once its dispatch ends.
-    weight: usize,
+/// One item waiting for its namespace's worker.
+enum Queued {
+    /// An envelope from `from`, holding `weight` encoded bytes until its dispatch ends.
+    Envelope {
+        route: Route,
+        from: Did,
+        payload: Bytes,
+        weight: usize,
+    },
+    /// The retirement of `peer`'s link generation.
+    PeerRetired { route: Route, peer: Did },
 }
 
-/// One namespace's queue: the sender into it, and the bytes it holds, queued or in dispatch.
+/// What one namespace's queue holds, queued or in dispatch.
+#[derive(Default)]
+struct Held {
+    /// Envelopes; retirements are not counted.
+    envelopes: AtomicUsize,
+    /// Encoded envelope bytes.
+    weight: AtomicUsize,
+}
+
+impl Held {
+    /// Whether this queue admits one more envelope of `weight` bytes.
+    fn admits(&self, weight: usize) -> bool {
+        self.envelopes.load(Ordering::Acquire) < NAMESPACE_QUEUE_CAPACITY
+            && admits(self.weight.load(Ordering::Acquire), weight)
+    }
+
+    /// Take one envelope of `weight` bytes.
+    fn take(&self, weight: usize) {
+        self.envelopes.fetch_add(1, Ordering::AcqRel);
+        self.weight.fetch_add(weight, Ordering::AcqRel);
+    }
+
+    /// Release one envelope of `weight` bytes.
+    fn release(&self, weight: usize) {
+        self.envelopes.fetch_sub(1, Ordering::AcqRel);
+        self.weight.fetch_sub(weight, Ordering::AcqRel);
+    }
+}
+
+/// One namespace's queue: the sender into it, and what it holds.
 struct NamespaceQueue {
-    sender: mpsc::Sender<Queued>,
-    weight: Arc<AtomicUsize>,
+    sender: mpsc::UnboundedSender<Queued>,
+    held: Arc<Held>,
 }
 
 /// Whether a queue holding `held` bytes admits an envelope of `weight` more: always when it
@@ -169,33 +206,47 @@ impl NamespaceQueues {
             self.drops.record(DispatchDrop::Unregistered);
             return;
         };
-        let stop = &self.stop;
-        let queue = self
-            .queues
-            .entry(envelope.namespace)
-            .or_insert_with(|| spawn_worker(stop.clone()));
+        let queue = self.queue(envelope.namespace);
         let weight = bytes.len();
-        if !admits(queue.weight.load(Ordering::Acquire), weight) {
+        if !queue.held.admits(weight) {
             self.drops.record(DispatchDrop::QueueFull);
             return;
         }
-        // Only this reader adds weight; the worker only releases it, so the check holds.
-        queue.weight.fetch_add(weight, Ordering::AcqRel);
-        let queued = Queued {
+        // Only this reader takes; the worker only releases, so the check holds.
+        queue.held.take(weight);
+        let queued = Queued::Envelope {
             route,
             from,
             payload: envelope.payload,
             weight,
         };
-        if let Err(error) = queue.sender.try_send(queued) {
-            queue.weight.fetch_sub(weight, Ordering::AcqRel);
-            let reason = if error.is_full() {
-                DispatchDrop::QueueFull
-            } else {
-                DispatchDrop::Unserved
-            };
-            self.drops.record(reason);
+        if queue.sender.unbounded_send(queued).is_err() {
+            queue.held.release(weight);
+            self.drops.record(DispatchDrop::Unserved);
         }
+    }
+
+    /// Queue the retirement of `peer`'s link generation for every registered namespace, behind
+    /// the envelopes already queued. Never waits and never refuses for room.
+    pub(super) fn submit_retirement(&mut self, peer: Did) {
+        for (namespace, route) in self.core.routes() {
+            let queue = self.queue(namespace);
+            if queue
+                .sender
+                .unbounded_send(Queued::PeerRetired { route, peer })
+                .is_err()
+            {
+                tracing::error!(%peer, "no worker to deliver a peer retirement");
+            }
+        }
+    }
+
+    /// The queue of `namespace`, starting its worker on first use.
+    fn queue(&mut self, namespace: String) -> &NamespaceQueue {
+        let stop = &self.stop;
+        self.queues
+            .entry(namespace)
+            .or_insert_with(|| spawn_worker(stop.clone()))
     }
 }
 
@@ -203,9 +254,9 @@ impl NamespaceQueues {
 /// dropped or `stop` is requested. Without a runtime to run it, the queue is returned closed,
 /// so every envelope is dropped and counted.
 fn spawn_worker(stop: StopToken) -> NamespaceQueue {
-    let (sender, receiver) = mpsc::channel::<Queued>(NAMESPACE_QUEUE_CAPACITY);
-    let weight = Arc::new(AtomicUsize::new(0));
-    let drain = drain(receiver, Arc::clone(&weight));
+    let (sender, receiver) = mpsc::unbounded::<Queued>();
+    let held = Arc::new(Held::default());
+    let drain = drain(receiver, Arc::clone(&held));
     let worker = async move {
         let stopped = stop.stopped().fuse();
         let drain = drain.fuse();
@@ -218,17 +269,29 @@ fn spawn_worker(stop: StopToken) -> NamespaceQueue {
     if rings_runtime::spawn_detached(worker).is_err() {
         tracing::error!("no runtime to run a namespace dispatch worker");
     }
-    NamespaceQueue { sender, weight }
+    NamespaceQueue { sender, held }
 }
 
-/// Dispatch every envelope of `receiver` in order, releasing each one's weight from `held` once
-/// its dispatch ends.
-async fn drain(mut receiver: mpsc::Receiver<Queued>, held: Arc<AtomicUsize>) {
+/// Dispatch every item of `receiver` in order, releasing each envelope from `held` once its
+/// dispatch ends.
+async fn drain(mut receiver: mpsc::UnboundedReceiver<Queued>, held: Arc<Held>) {
     while let Some(queued) = receiver.next().await {
-        if let Err(error) = queued.route.dispatch(queued.from, queued.payload).await {
+        let dispatched = match queued {
+            Queued::Envelope {
+                route,
+                from,
+                payload,
+                weight,
+            } => {
+                let dispatched = route.dispatch(from, payload).await;
+                held.release(weight);
+                dispatched
+            }
+            Queued::PeerRetired { route, peer } => route.retire_peer(peer).await,
+        };
+        if let Err(error) = dispatched {
             tracing::warn!(error = ?error, "protocol dispatch failed");
         }
-        held.fetch_sub(queued.weight, Ordering::AcqRel);
     }
 }
 
@@ -238,6 +301,8 @@ mod tests {
     use super::DispatchDrop;
     use super::DispatchDropCounters;
     use super::DispatchDrops;
+    use super::Held;
+    use super::NAMESPACE_QUEUE_CAPACITY;
     use super::NAMESPACE_QUEUE_WEIGHT;
 
     #[test]
@@ -252,6 +317,20 @@ mod tests {
             queue_full: 2,
             unserved: 0,
         });
+    }
+
+    /// Law: a queue admits an envelope iff it holds fewer than `NAMESPACE_QUEUE_CAPACITY`
+    /// envelopes within its weight; a release makes room again.
+    #[test]
+    fn test_a_queue_admits_envelopes_up_to_its_capacity() {
+        let held = Held::default();
+        for _ in 0..NAMESPACE_QUEUE_CAPACITY {
+            assert!(held.admits(1));
+            held.take(1);
+        }
+        assert!(!held.admits(1));
+        held.release(1);
+        assert!(held.admits(1));
     }
 
     #[test]

@@ -655,3 +655,68 @@ async fn test_saturated_peer_control_lane_does_not_block_another_peer() -> Resul
     .map_err(|_| Error::ExtensionError("blocked peer lane did not resume".to_string()))??;
     Ok(())
 }
+
+/// A protocol that records the retirements it is told of as effects.
+struct RetirementProtocol;
+
+impl Protocol for RetirementProtocol {
+    type State = ();
+    type Event = Did;
+    type Effect = Did;
+
+    fn namespace(&self) -> &str {
+        "retirements"
+    }
+
+    fn init(&self) -> Self::State {}
+
+    fn decode(&self, _wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
+        Err(Reject("retirements decode no envelope".to_string()))
+    }
+
+    fn step(&self, _ctx: Ctx<'_, Self::State>, peer: Self::Event) -> Transition<(), Did> {
+        Transition::with((), vec![peer])
+    }
+
+    fn peer_retired(&self, peer: Did) -> Option<Self::Event> {
+        Some(peer)
+    }
+}
+
+/// The interpreter of [`RetirementProtocol`]: it records each retired peer.
+struct RetirementRecorder {
+    retired: Arc<Mutex<Vec<Did>>>,
+}
+
+#[async_trait]
+impl Interpret for RetirementRecorder {
+    type Effect = Did;
+
+    async fn run(&self, _scope: &EffectScope, peer: Did) -> Result<Vec<Bytes>> {
+        lock(&self.retired)?.push(peer);
+        Ok(Vec::new())
+    }
+}
+
+/// Law (#963): a retirement routed to a protocol steps its `peer_retired` event as a turn of its
+/// own; a protocol that keeps no link state is left untouched.
+#[tokio::test]
+async fn test_a_retirement_steps_only_protocols_that_map_it() -> Result<()> {
+    let extensions = extensions()?;
+    let retired = Arc::new(Mutex::new(Vec::new()));
+    extensions.register(RetirementProtocol, RetirementRecorder {
+        retired: Arc::clone(&retired),
+    })?;
+    extensions.register(
+        DelegatingProtocol { delegates: false },
+        Arc::new(FailingOrderedInterpreter::default()),
+    )?;
+    let peer = Did::from(41_u32);
+
+    for (_, route) in extensions.core().routes() {
+        route.retire_peer(peer).await?;
+    }
+
+    assert_eq!(*lock(&retired)?, vec![peer]);
+    Ok(())
+}

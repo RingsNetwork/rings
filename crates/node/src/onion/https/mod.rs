@@ -55,6 +55,8 @@ use crate::onion::circuit::OnionCircuitExitFrame;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
+#[cfg(rings_browser)]
+use crate::onion::circuit::OnionCircuitTeardown;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::circuit::OnionForwardSequence;
 use crate::onion::circuit::OnionInterpretation;
@@ -330,6 +332,10 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
             None => tracing::debug!(%from, "dropping unclaimed onion HTTPS backward payload"),
         }
         Ok(())
+    }
+
+    async fn teardown(&self, _scope: &Scope, teardown: OnionCircuitTeardown) -> Result<()> {
+        self.https.client().teardown(teardown)
     }
 }
 

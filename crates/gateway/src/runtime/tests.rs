@@ -15,11 +15,13 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use super::*;
+use crate::unreported_end;
 use crate::BoxGatewayDuplex;
 use crate::ExitAvailability;
 use crate::GatewayHealth;
 use crate::GatewayPlan;
 use crate::Mtu;
+use crate::OnionStreamEnd;
 
 struct ChannelPacketIo {
     ingress: mpsc::Receiver<Vec<u8>>,
@@ -85,7 +87,7 @@ impl OnionStreamConnector for RecordingConnector {
         &self,
         flow: FlowId,
         mut stream: BoxGatewayDuplex,
-    ) -> Result<(), GatewayError> {
+    ) -> Result<OnionStreamEnd, GatewayError> {
         self.opened
             .send(flow)
             .await
@@ -97,7 +99,7 @@ impl OnionStreamConnector for RecordingConnector {
             let mut buffer = [0_u8; 64];
             while matches!(stream.read(&mut buffer).await, Ok(length) if length > 0) {}
         });
-        Ok(())
+        Ok(unreported_end())
     }
 }
 
@@ -111,7 +113,7 @@ impl OnionStreamConnector for EchoConnector {
         &self,
         flow: FlowId,
         mut stream: BoxGatewayDuplex,
-    ) -> Result<(), GatewayError> {
+    ) -> Result<OnionStreamEnd, GatewayError> {
         self.opened
             .send(flow)
             .await
@@ -138,7 +140,7 @@ impl OnionStreamConnector for EchoConnector {
                 }
             }
         });
-        Ok(())
+        Ok(unreported_end())
     }
 }
 
@@ -152,7 +154,7 @@ impl OnionStreamConnector for FailingConnector {
         &self,
         flow: FlowId,
         _stream: BoxGatewayDuplex,
-    ) -> Result<(), GatewayError> {
+    ) -> Result<OnionStreamEnd, GatewayError> {
         self.attempted
             .send(flow)
             .await
@@ -863,6 +865,9 @@ async fn onion_open_failure_resets_captured_flow_without_fallback() {
 
 #[path = "late_events_tests.rs"]
 mod late_events_tests;
+
+#[path = "stream_reset_tests.rs"]
+mod stream_reset_tests;
 
 /// All public construction paths reject the same invalid inputs before allocating TCP state.
 #[test]

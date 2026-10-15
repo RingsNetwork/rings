@@ -56,6 +56,7 @@ use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionAuthenticatedPayload;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
+use crate::onion::circuit::OnionCircuitTeardown;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::OnionLink;
 use crate::onion::circuit::OnionLinkSender;
@@ -316,6 +317,29 @@ impl OnionHttpsClient {
             }
             Entry::Occupied(_) | Entry::Vacant(_) => None,
         })
+    }
+
+    /// Fail every pending request on a circuit `teardown` names with `CircuitDestroyed`.
+    ///
+    /// Post: no request `teardown` ends remains pending; each waiter received its failure.
+    pub(crate) fn teardown(&self, teardown: OnionCircuitTeardown) -> Result<()> {
+        let mut pending = lock(&self.pending)?;
+        let destroyed = pending
+            .iter()
+            .filter(|(circuit_id, request)| {
+                teardown.ends(request.expected_return_peer, **circuit_id)
+            })
+            .map(|(circuit_id, _)| *circuit_id)
+            .collect::<Vec<_>>();
+        for circuit_id in destroyed {
+            if let Some(request) = pending.remove(&circuit_id) {
+                // A closed receiver means the waiter was dropped; nobody observes it.
+                let _ = request.sender.send(Err(Error::OnionRouteError(
+                    OnionRouteError::CircuitDestroyed,
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Number of circuits awaiting a terminal outcome.

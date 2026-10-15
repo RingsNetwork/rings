@@ -249,7 +249,9 @@ always names its cause, and recovery projects back to active without a second li
 transition. Status readers use `GatewayStatusHandle::snapshot()`.
 
 Every flow reset carries a typed `FlowResetReason` (handshake expiry, idle timeout, client reset,
-ungraceful close, Onion open or stream failure, closed bridge, or gateway stop). The runtime logs
+ungraceful close, Onion open or stream failure, Onion stream reset, closed bridge, or gateway
+stop). A connector reports an abortive end of an open stream, such as its circuit's destruction,
+through the `OnionStreamEnd` it returns, and the flow is reset rather than half-closed. The runtime logs
 it at info level and records it as `GatewayStatus::last_flow_reset`. A half-close is forwarded only
 after the client's FIN, so an endpoint closed by reset or idle timeout is reported as a reset, never
 as a graceful close.

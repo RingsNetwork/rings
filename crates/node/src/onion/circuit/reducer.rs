@@ -42,6 +42,8 @@ pub(super) struct RelayReturnEdge {
     pub(super) previous_hop: Did,
     pub(super) previous_circuit_id: OnionCircuitId,
     pub(super) previous_delegatee_public_key: PublicKey<33>,
+    /// The next hop's delegatee key, which seals a `Destroy` carried toward the exit.
+    pub(super) next_delegatee_public_key: PublicKey<33>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +51,7 @@ struct RelayReturnEntry {
     previous_hop: Did,
     previous_circuit_id: OnionCircuitId,
     previous_delegatee_public_key: PublicKey<33>,
+    next_delegatee_public_key: PublicKey<33>,
     expires_at_ms: u128,
 }
 
@@ -113,6 +116,8 @@ pub enum OnionCircuitEffect {
         bucket: OnionCellBucket,
         /// Encoded direction and frame protected by the cell AEAD.
         encoded_message: Bytes,
+        /// What the cell is, which decides how the outbox admits it.
+        cell: OnionRelayedCell,
     },
     /// A forward frame reached the exit.
     Exit {
@@ -133,6 +138,8 @@ pub enum OnionCircuitEffect {
         /// Application payload.
         payload: OnionCircuitPayload,
     },
+    /// Tear down the local endpoint of a destroyed circuit at the shell boundary.
+    Teardown(OnionCircuitTeardown),
     /// Decrypt a backward frame for this local client at the shell boundary.
     DecryptClient {
         /// Authenticated immediate sender.
@@ -142,6 +149,47 @@ pub enum OnionCircuitEffect {
         /// AEAD payload encrypted to the client session public key.
         payload: AeadCiphertext,
     },
+}
+
+/// What one sealed cell is to the outbox (#963).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnionRelayedCell {
+    /// A relayed data cell of the circuit `to` knows as `circuit_id`, held to the outbox bounds;
+    /// a refusal destroys the circuit (`CellRefused`).
+    Data {
+        /// Edge-local circuit id on the link to the cell's next hop.
+        circuit_id: OnionCircuitId,
+    },
+    /// A `Destroy`, exempt from the outbox bounds.
+    Destroy,
+}
+
+/// The local endpoints of destroyed circuits, as the shell finds them (#963).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnionCircuitTeardown {
+    /// Every circuit whose adjacent hop is `peer`, whose link generation retired.
+    Peer(Did),
+    /// The circuit `circuit_id` whose adjacent hop `from` destroyed it.
+    Circuit {
+        /// Adjacent hop that sent the `Destroy`.
+        from: Did,
+        /// Edge-local circuit id on the link from `from`.
+        circuit_id: OnionCircuitId,
+    },
+}
+
+impl OnionCircuitTeardown {
+    /// Whether this teardown ends a local endpoint whose circuit is `circuit_id` on its link to
+    /// the adjacent hop `adjacent`.
+    pub fn ends(self, adjacent: Did, circuit_id: OnionCircuitId) -> bool {
+        match self {
+            Self::Peer(peer) => peer == adjacent,
+            Self::Circuit {
+                from,
+                circuit_id: destroyed,
+            } => from == adjacent && destroyed == circuit_id,
+        }
+    }
 }
 
 /// Pure state relation for onion circuits.
@@ -154,7 +202,18 @@ pub enum OnionCircuitEffect {
 /// CellReady(backward match)    -> state' with refreshed edge, [SealAndSend previous]
 /// CellReady(backward no match) -> state, [DecryptClient]
 /// CellReady(cover)             -> state, []
+/// CellRefused(to, c)           -> state' without the edge, [SealAndSend Destroy to both neighbours]
+/// PeerRetired(p)               -> state' without p's edges, [SealAndSend Destroy away from p]
+///                                 ++ [Teardown(Peer p)]
+/// CellReady(Destroy c, from x) -> state' without the edge, [SealAndSend Destroy away from x]
+///                                 or [Teardown(Circuit x c)] when no relay edge matches
 /// ```
+///
+/// Law (Circuit fate, #963): after `PeerRetired(p)` no return edge adjacent to `p` remains, and
+/// each removed edge sends exactly one `Destroy`, to its neighbour other than `p`; a relay that
+/// receives `Destroy` treats it as the retirement of that one circuit on the sender's side. So a
+/// destruction observed on either side of a link reaches both endpoints of every circuit it
+/// carries, through the circuit's own links.
 ///
 /// The layer variant is the symbol it applies: a `Relay` layer applies `relay`, evaluated here, in
 /// the pure core, as `relay = id` (peel, record the return edge, forward the inner layer
@@ -181,6 +240,17 @@ impl OnionCircuitReducer {
     ) -> Transition<OnionCircuitState, OnionCircuitEffect> {
         let mut state = state.clone();
         let effect = match input {
+            OnionCircuitInput::PeerRetired { peer } => {
+                let mut effects = destroy_adjacent(&mut state, peer);
+                effects.push(OnionCircuitEffect::Teardown(OnionCircuitTeardown::Peer(
+                    peer,
+                )));
+                return Transition::with(state, effects);
+            }
+            OnionCircuitInput::CellRefused { to, circuit_id } => {
+                let effects = refuse_circuit(&mut state, to, circuit_id);
+                return Transition::with(state, effects);
+            }
             OnionCircuitInput::CellObserved {
                 from,
                 bucket,
@@ -242,6 +312,9 @@ impl OnionCircuitReducer {
                 .advance_backward(from, received_at_ms, bucket, frame, state)
                 .map(Some),
             OnionWireMessage::Cover => Ok(None),
+            OnionWireMessage::Destroy { circuit_id } => {
+                destroy_circuit(state, from, circuit_id).map(Some)
+            }
         }
     }
 
@@ -279,6 +352,7 @@ impl OnionCircuitReducer {
                         previous_hop: from,
                         previous_circuit_id: circuit_id,
                         previous_delegatee_public_key: return_delegatee_public_key,
+                        next_delegatee_public_key,
                     },
                     received_at_ms,
                 )?;
@@ -291,6 +365,9 @@ impl OnionCircuitReducer {
                     recipient: next_delegatee_public_key,
                     bucket,
                     encoded_message,
+                    cell: OnionRelayedCell::Data {
+                        circuit_id: next_circuit_id,
+                    },
                 })
             }
             OnionForwardLayer::Exit {
@@ -361,6 +438,9 @@ impl OnionCircuitReducer {
                 recipient: previous_delegatee_public_key,
                 bucket,
                 encoded_message,
+                cell: OnionRelayedCell::Data {
+                    circuit_id: previous_circuit_id,
+                },
             });
         }
 
@@ -394,6 +474,7 @@ pub(super) fn remember_return_hop(
         previous_hop,
         previous_circuit_id,
         previous_delegatee_public_key,
+        next_delegatee_public_key,
     } = edge;
     purge_expired_return_hops(state, now_ms);
     let table = Arc::make_mut(&mut state.relay_returns);
@@ -424,11 +505,153 @@ pub(super) fn remember_return_hop(
                 previous_hop,
                 previous_circuit_id,
                 previous_delegatee_public_key,
+                next_delegatee_public_key,
                 expires_at_ms: now_ms.saturating_add(ttl_ms),
             });
         }
     }
     Ok(())
+}
+
+/// A `Destroy` of the circuit known as `circuit_id` on the link to `to`, sealed for it.
+fn destroy_toward(
+    to: Did,
+    recipient: PublicKey<33>,
+    circuit_id: OnionCircuitId,
+) -> Result<OnionCircuitEffect> {
+    encode_message(&OnionWireMessage::Destroy { circuit_id }).map(|encoded_message| {
+        OnionCircuitEffect::SealAndSend {
+            to,
+            recipient,
+            bucket: OnionCellBucket::KiB4,
+            encoded_message,
+            cell: OnionRelayedCell::Destroy,
+        }
+    })
+}
+
+/// The `Destroy` that carries the end of the circuit of `(key, entry)` away from `from`: toward
+/// the exit when `from` is the previous hop, toward the client otherwise.
+fn destroy_away_from(
+    from: Did,
+    key: RelayReturnKey,
+    entry: RelayReturnEntry,
+) -> Result<OnionCircuitEffect> {
+    if entry.previous_hop == from {
+        destroy_toward(
+            key.next_hop,
+            entry.next_delegatee_public_key,
+            key.circuit_id,
+        )
+    } else {
+        destroy_toward(
+            entry.previous_hop,
+            entry.previous_delegatee_public_key,
+            entry.previous_circuit_id,
+        )
+    }
+}
+
+/// Remove every return edge adjacent to `peer` and destroy its circuit on the other side.
+///
+/// Post: no edge with `key.next_hop = peer` or `previous_hop = peer` remains, and the effects
+/// hold one `Destroy` per removed edge, sent to the neighbour other than `peer`.
+fn destroy_adjacent(state: &mut OnionCircuitState, peer: Did) -> Vec<OnionCircuitEffect> {
+    let adjacent = state
+        .relay_returns
+        .iter()
+        .filter(|(key, entry)| key.next_hop == peer || entry.previous_hop == peer)
+        .map(|(key, entry)| (*key, *entry))
+        .collect::<Vec<_>>();
+    if adjacent.is_empty() {
+        return Vec::new();
+    }
+    let table = Arc::make_mut(&mut state.relay_returns);
+    adjacent
+        .into_iter()
+        .filter_map(|(key, entry)| {
+            table.remove(&key);
+            destroy_away_from(peer, key, entry)
+                .inspect_err(|error| tracing::debug!("drop onion destroy: {error}"))
+                .ok()
+        })
+        .collect()
+}
+
+/// Remove the return edge of the circuit `to` knows as `circuit_id`, whose cell this node's outbox
+/// refused, and destroy the circuit toward both neighbours: the `Destroy` toward `to` is exempt
+/// from the bound that refused the cell, so it follows the queued cells there.
+fn refuse_circuit(
+    state: &mut OnionCircuitState,
+    to: Did,
+    circuit_id: OnionCircuitId,
+) -> Vec<OnionCircuitEffect> {
+    let Some((key, entry)) = adjacent_edge(state, to, circuit_id) else {
+        return Vec::new();
+    };
+    Arc::make_mut(&mut state.relay_returns).remove(&key);
+    [
+        destroy_toward(
+            key.next_hop,
+            entry.next_delegatee_public_key,
+            key.circuit_id,
+        ),
+        destroy_toward(
+            entry.previous_hop,
+            entry.previous_delegatee_public_key,
+            entry.previous_circuit_id,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|effect| {
+        effect
+            .inspect_err(|error| tracing::debug!("drop onion destroy: {error}"))
+            .ok()
+    })
+    .collect()
+}
+
+/// The return edge of the circuit `neighbour` knows as `circuit_id`, from either side.
+fn adjacent_edge(
+    state: &OnionCircuitState,
+    neighbour: Did,
+    circuit_id: OnionCircuitId,
+) -> Option<(RelayReturnKey, RelayReturnEntry)> {
+    let from_next = RelayReturnKey {
+        circuit_id,
+        next_hop: neighbour,
+    };
+    state
+        .relay_returns
+        .get(&from_next)
+        .map(|entry| (from_next, *entry))
+        .or_else(|| {
+            state
+                .relay_returns
+                .iter()
+                .find(|(_, entry)| {
+                    entry.previous_hop == neighbour && entry.previous_circuit_id == circuit_id
+                })
+                .map(|(key, entry)| (*key, *entry))
+        })
+}
+
+/// Remove the return edge of the circuit `from` knows as `circuit_id` and carry the `Destroy`
+/// on to its other neighbour; with no such relay edge, this node is an endpoint of the circuit.
+fn destroy_circuit(
+    state: &mut OnionCircuitState,
+    from: Did,
+    circuit_id: OnionCircuitId,
+) -> Result<OnionCircuitEffect> {
+    match adjacent_edge(state, from, circuit_id) {
+        Some((key, entry)) => {
+            Arc::make_mut(&mut state.relay_returns).remove(&key);
+            destroy_away_from(from, key, entry)
+        }
+        None => Ok(OnionCircuitEffect::Teardown(
+            OnionCircuitTeardown::Circuit { from, circuit_id },
+        )),
+    }
 }
 
 /// Reserve at most one sixteenth of the global relay-return capacity for any

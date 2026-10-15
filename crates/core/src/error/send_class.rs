@@ -183,6 +183,15 @@ impl fmt::Display for SendDeferral {
 }
 
 impl Error {
+    /// Whether the send that returned this error was refused before any of its frames could be
+    /// accepted, so sending the payload again cannot duplicate it.
+    ///
+    /// Post: `true` iff `send_class() = Deferrable(_)`, which by `Law (S1-class)` implies
+    /// `PreAcceptance`.
+    pub fn is_refused_before_acceptance(&self) -> bool {
+        matches!(self.send_class(), SendClass::Deferrable(_))
+    }
+
     /// The acceptance class of this error (module table); total over every variant.
     ///
     /// A table, one row per class and, for `Fatal`, one group per error domain; it is laid out

@@ -162,6 +162,10 @@ pub enum OnionRouteError {
     /// An HTTPS response channel closed before the exit's outcome was delivered.
     #[error("onion HTTPS response channel closed")]
     HttpsResponseClosed,
+    /// The circuit carrying a request was destroyed before its answer: a link it crossed
+    /// retired (#963).
+    #[error("onion circuit was destroyed")]
+    CircuitDestroyed,
     /// A TCP open response channel closed before an answer.
     #[error("onion TCP open response channel closed")]
     TcpOpenResponseClosed,

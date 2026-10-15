@@ -51,6 +51,10 @@ pub(crate) trait Handler {
     /// Decode → step (pure, committed) → run the protocol's effects and synchronous
     /// feedback. `handle : (from, payload) → IO ()`.
     async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<()>;
+
+    /// Step the protocol's [`Protocol::peer_retired`] event for `peer`, if it makes one, as a
+    /// turn of its own. `retire_peer : Did → IO ()`.
+    async fn retire_peer(&self, core: &Core, peer: Did) -> Result<()>;
 }
 
 /// The router-internal capability. Cloneable and `'static` so a long-running engine task can
@@ -137,6 +141,22 @@ impl Core {
         }
     }
 
+    /// The route to every registered namespace's protocol, with its namespace.
+    pub(crate) fn routes(&self) -> Vec<(String, Route)> {
+        let Ok(handlers) = self.handlers.read() else {
+            return Vec::new();
+        };
+        handlers
+            .iter()
+            .map(|(namespace, handler)| {
+                (namespace.clone(), Route {
+                    core: self.clone(),
+                    handler: Arc::clone(handler),
+                })
+            })
+            .collect()
+    }
+
     /// The route to `namespace`'s protocol, or `None` when no protocol is registered under it.
     pub(crate) fn route(&self, namespace: &str) -> Option<Route> {
         let handler = self.handlers.read().ok()?.get(namespace).map(Arc::clone)?;
@@ -168,6 +188,12 @@ impl Route {
     /// message's verified signer, which only the [`Backend`](crate::extension::Backend) has.
     pub(crate) async fn dispatch(&self, from: Did, payload: Bytes) -> Result<()> {
         self.handler.handle(&self.core, from, payload).await
+    }
+
+    /// Run the resolved protocol on the retirement of `peer`'s link generation, a fact only the
+    /// [`Backend`](crate::extension::Backend) reads off the core's inbox.
+    pub(crate) async fn retire_peer(&self, peer: Did) -> Result<()> {
+        self.handler.retire_peer(&self.core, peer).await
     }
 }
 
@@ -213,6 +239,15 @@ impl Scope {
         self.core
             .send_direct(to, self.namespace.as_str(), payload)
             .await
+    }
+
+    /// Whether `peer`'s link generation is admitted now.
+    pub(crate) fn peer_admitted(&self, peer: Did) -> bool {
+        self.core
+            .processor
+            .swarm
+            .is_peer_admitted(peer)
+            .unwrap_or(false)
     }
 
     /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).
@@ -313,7 +348,27 @@ where
         if let Some(observe) = self.after_decode_for_test.as_ref() {
             observe();
         }
+        self.run_turn(core, event).await
+    }
 
+    async fn retire_peer(&self, core: &Core, peer: Did) -> Result<()> {
+        match self.protocol.peer_retired(peer) {
+            Some(event) => self.run_turn(core, event).await,
+            None => Ok(()),
+        }
+    }
+}
+
+impl<P, I> Runner<P, I>
+where
+    P: Protocol + MaybeSendSync + 'static,
+    P::State: MaybeSendSync + 'static,
+    P::Effect: MaybeSendSync,
+    I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
+{
+    /// One turn of `event`: under the transition gate, step it, then run its effects and the
+    /// synchronous feedback fixpoint they produce.
+    async fn run_turn(&self, core: &Core, event: P::Event) -> Result<()> {
         // The transition gate establishes the protocol's linearization order for state commit
         // and its resulting effect trace. Decode remains outside that order: it has no state or
         // effects by contract. Holding the gate through interpretation preserves:

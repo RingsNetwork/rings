@@ -6,9 +6,11 @@ use rings_gateway::BoxGatewayDuplex;
 use rings_gateway::FlowId;
 use rings_gateway::GatewayError;
 use rings_gateway::OnionStreamConnector;
+use rings_gateway::OnionStreamEnd;
 
 use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::tcp::TcpStreamEnd;
 use crate::onion::OnionProxyTarget;
 use crate::processor::Processor;
 
@@ -47,7 +49,7 @@ impl OnionStreamConnector for NativeOnionGatewayConnector {
         &self,
         flow: FlowId,
         stream: BoxGatewayDuplex,
-    ) -> Result<(), GatewayError> {
+    ) -> Result<OnionStreamEnd, GatewayError> {
         let target = OnionProxyTarget::parse_authority(&flow.target.to_string())
             .map_err(|error| Self::onion_error(flow, error))?;
         let route = self
@@ -60,7 +62,16 @@ impl OnionStreamConnector for NativeOnionGatewayConnector {
             .open_tcp_stream(route.route, route.target)
             .await
             .map_err(|error| Self::onion_error(flow, error))?;
-        opened.relay(stream);
-        Ok(())
+        let (end, report) = tokio::sync::oneshot::channel();
+        opened.relay_reporting(stream, move |ended| {
+            if let TcpStreamEnd::Aborted(abort) = ended {
+                // A dropped report means the gateway already released the flow.
+                let _ = end.send(Err(GatewayError::OnionStreamReset {
+                    target: flow.target,
+                    message: abort.to_string(),
+                }));
+            }
+        });
+        Ok(report)
     }
 }

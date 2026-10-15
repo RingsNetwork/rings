@@ -45,6 +45,8 @@ pub use protocol::OnionCircuitCapabilities;
 pub use protocol::OnionCircuitProtocol;
 pub use reducer::OnionCircuitEffect;
 pub use reducer::OnionCircuitState;
+pub use reducer::OnionCircuitTeardown;
+pub use reducer::OnionRelayedCell;
 use rings_core::dht::Did;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
 use rings_core::ecc::PublicKey;

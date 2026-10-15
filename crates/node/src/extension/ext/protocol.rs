@@ -122,4 +122,13 @@ pub trait Protocol {
     fn delegates_admission(&self) -> bool {
         false
     }
+
+    /// The event this protocol makes of the retirement of `peer`'s link generation, or `None`
+    /// when the protocol keeps no state about links. `peer_retired : Did ⇀ Event`.
+    ///
+    /// A retirement reaches the protocol in its namespace's queue, in the order the core
+    /// announced it relative to the envelopes around it, and is never dropped (#963).
+    fn peer_retired(&self, _peer: Did) -> Option<Self::Event> {
+        None
+    }
 }

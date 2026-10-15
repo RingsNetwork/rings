@@ -53,10 +53,12 @@ use crate::sync_lock::lock;
 mod client;
 mod duplex;
 mod exit;
+mod fate;
 mod inbound;
 mod pump;
 
 use client::spawn_client_stream;
+use client::ClientStreamTask;
 use client::TcpBackwardRoute;
 #[cfg(test)]
 use duplex::TcpDuplexState;
@@ -66,6 +68,7 @@ use exit::open_response_deadline;
 use exit::spawn_exit_stream;
 use exit::ExitStreamTask;
 use inbound::TcpInbound;
+pub(crate) use pump::TcpStreamEnd;
 
 const TCP_BUF: usize = 30_000;
 const TCP_OPEN_TIMEOUT_SECS: u64 = 30;
@@ -118,14 +121,27 @@ impl NativeOnionOpenStream {
     /// Relay `stream` through this already-open onion TCP stream.
     pub fn relay<S>(self, stream: S)
     where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static {
+        self.relay_reporting(stream, |_| {});
+    }
+
+    /// Relay `stream` through this already-open onion TCP stream, and hand `on_end` how the
+    /// stream ended once its pump stops: an abortive end is never folded into the duplex EOF.
+    pub(crate) fn relay_reporting<S, F>(self, stream: S, on_end: F)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+        F: FnOnce(TcpStreamEnd) + Send + 'static,
+    {
         spawn_client_stream(
-            self.runtime,
-            self.scope,
-            self.key,
+            ClientStreamTask {
+                runtime: self.runtime,
+                scope: self.scope,
+                key: self.key,
+                path: self.path,
+                client_return: self.client_return,
+                rx: self.rx,
+            },
             stream,
-            self.path,
-            self.client_return,
-            self.rx,
+            on_end,
         );
     }
 }

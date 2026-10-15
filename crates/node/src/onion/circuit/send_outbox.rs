@@ -34,6 +34,8 @@ use super::cell::seal_message;
 use super::cell::sealed_cell_bucket;
 use super::codec::OnionWireMessage;
 use super::OnionCellBucket;
+#[cfg(rings_native)]
+use super::OnionCircuitId;
 use super::OnionLink;
 use crate::error::OnionQueueAdmissionReason;
 use crate::error::OnionQueueKind;
@@ -103,10 +105,46 @@ struct CoverSpec {
     bucket: OnionCellBucket,
 }
 
+/// What one queued item holds of the outbox bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Charge {
+    /// A data cell: one quota slot and its bytes.
+    Bounded(usize),
+    /// A `Destroy`: exempt from both bounds, so a circuit can always be torn down, even through
+    /// the queue whose bound refused its data (`Law (Circuit fate)`, #963). At most one per
+    /// circuit is ever sent on a link, so the exemption is bounded by the circuit table.
+    Exempt,
+}
+
+impl Charge {
+    /// The bytes this item holds of the bounds.
+    const fn bytes(self) -> usize {
+        match self {
+            Self::Bounded(bytes) => bytes,
+            Self::Exempt => 0,
+        }
+    }
+
+    /// Whether this item holds a quota slot.
+    const fn is_bounded(self) -> bool {
+        matches!(self, Self::Bounded(_))
+    }
+}
+
 struct PeerLane<T> {
-    in_flight_bytes: Option<usize>,
-    queued: VecDeque<(T, usize)>,
+    in_flight: Option<Charge>,
+    queued: VecDeque<(T, Charge)>,
     pending_bytes: usize,
+}
+
+impl<T> PeerLane<T> {
+    /// The queued items holding a quota slot.
+    fn bounded_len(&self) -> usize {
+        self.queued
+            .iter()
+            .filter(|(_, charge)| charge.is_bounded())
+            .count()
+    }
 }
 
 struct OrderedSendState<T> {
@@ -126,11 +164,12 @@ impl<T> Default for OrderedSendState<T> {
 }
 
 impl<T> OrderedSendState<T> {
-    /// Reserve one frame and return whether its peer needs a new drain task.
+    /// Reserve one data frame and return whether its peer needs a new drain task.
     ///
-    /// Invariant: `quota.total()`/`pending_bytes` equal queued work plus the optional in-flight item in
-    /// every lane. No lane has more than one in-flight item, which is the serialization witness
-    /// for per-peer order. Cover cells are generated just in time and are never retained here.
+    /// Invariant: `quota.total()`/`pending_bytes` equal the bounded queued work plus the
+    /// optional bounded in-flight item in every lane; exempt items hold neither. No lane has more
+    /// than one in-flight item, which is the serialization witness for per-peer order. Cover cells
+    /// are generated just in time and are never retained here.
     fn enqueue(
         &mut self,
         peer: Did,
@@ -154,31 +193,43 @@ impl<T> OrderedSendState<T> {
         }
         self.quota.reserve(peer)?;
         self.pending_bytes = next_pending_bytes;
+        Ok(self.push(peer, item, Charge::Bounded(item_bytes), next_peer_bytes))
+    }
+
+    /// Queue one exempt `Destroy` behind the peer's queued work and return whether its peer
+    /// needs a new drain task. Never refused.
+    fn enqueue_exempt(&mut self, peer: Did, item: T) -> bool {
+        let peer_pending_bytes = self.lanes.get(&peer).map_or(0, |lane| lane.pending_bytes);
+        self.push(peer, item, Charge::Exempt, peer_pending_bytes)
+    }
+
+    /// Append `item` to `peer`'s lane, whose pending bytes become `peer_bytes`.
+    fn push(&mut self, peer: Did, item: T, charge: Charge, peer_bytes: usize) -> bool {
         match self.lanes.entry(peer) {
             Entry::Occupied(mut lane) => {
                 let lane = lane.get_mut();
-                lane.queued.push_back((item, item_bytes));
-                lane.pending_bytes = next_peer_bytes;
-                Ok(false)
+                lane.queued.push_back((item, charge));
+                lane.pending_bytes = peer_bytes;
+                false
             }
             Entry::Vacant(lane) => {
                 lane.insert(PeerLane {
-                    in_flight_bytes: None,
-                    queued: VecDeque::from([(item, item_bytes)]),
-                    pending_bytes: item_bytes,
+                    in_flight: None,
+                    queued: VecDeque::from([(item, charge)]),
+                    pending_bytes: peer_bytes,
                 });
-                Ok(true)
+                true
             }
         }
     }
 
     fn take_next(&mut self, peer: Did) -> Option<T> {
         let lane = self.lanes.get_mut(&peer)?;
-        if lane.in_flight_bytes.is_some() {
+        if lane.in_flight.is_some() {
             return None;
         }
-        let (item, item_bytes) = lane.queued.pop_front()?;
-        lane.in_flight_bytes = Some(item_bytes);
+        let (item, charge) = lane.queued.pop_front()?;
+        lane.in_flight = Some(charge);
         Some(item)
     }
 
@@ -194,16 +245,15 @@ impl<T> OrderedSendState<T> {
     /// for `peer` is removed together; an inconsistent predecessor leaves state unchanged.
     fn cancel_queued_lane(&mut self, peer: Did) -> Option<Vec<T>> {
         let lane = self.lanes.get(&peer)?;
-        if lane.in_flight_bytes.is_some()
+        let bounded = lane.bounded_len();
+        if lane.in_flight.is_some()
             || lane.queued.is_empty()
-            || lane.queued.len() != self.quota.peer_total(peer)
+            || bounded != self.quota.peer_total(peer)
         {
             return None;
         }
         let next_pending_bytes = self.pending_bytes.checked_sub(lane.pending_bytes)?;
-        let queued_count = lane.queued.len();
-        let released = self.quota.release_peer(peer)?;
-        if released != queued_count {
+        if bounded > 0 && self.quota.release_peer(peer)? != bounded {
             return None;
         }
         let lane = self.lanes.remove(&peer)?;
@@ -214,13 +264,14 @@ impl<T> OrderedSendState<T> {
     /// Complete one in-flight frame and return whether the lane has more work.
     fn complete(&mut self, peer: Did) -> Option<bool> {
         let lane = self.lanes.get_mut(&peer)?;
-        let completed_bytes = lane.in_flight_bytes?;
+        let completed = lane.in_flight?;
+        let completed_bytes = completed.bytes();
         let next_pending_bytes = self.pending_bytes.checked_sub(completed_bytes)?;
         let next_lane_bytes = lane.pending_bytes.checked_sub(completed_bytes)?;
-        if !self.quota.release(peer) {
+        if completed.is_bounded() && !self.quota.release(peer) {
             return None;
         }
-        lane.in_flight_bytes = None;
+        lane.in_flight = None;
         lane.pending_bytes = next_lane_bytes;
         self.pending_bytes = next_pending_bytes;
         if lane.queued.is_empty() {
@@ -252,31 +303,47 @@ impl Default for OnionSendOutbox {
     }
 }
 
+/// Whether a queued cell holds the outbox bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CellAdmission {
+    /// A data cell, refused when its peer's share or the node's bound is full.
+    Bounded,
+    /// A `Destroy`, never refused (`Charge::Exempt`).
+    Exempt,
+}
+
 impl OnionSendOutbox {
     fn enqueue(
         &self,
         scope: Scope,
-        to: Did,
-        recipient: PublicKey<33>,
+        link: OnionLink,
         bucket: OnionCellBucket,
         payload: Bytes,
         completion: Option<oneshot::Sender<Result<()>>>,
+        admission: CellAdmission,
     ) -> Result<()> {
         // Acquired before the lane is claimed, so a missing runtime leaves no lane undrained.
         let spawner = Spawner::current()?;
+        let to = link.peer;
         let item_bytes = payload.len();
-        let should_spawn = lock(&self.state)?
-            .enqueue(
-                to,
-                OverlaySend {
-                    scope,
-                    payload,
-                    cover: CoverSpec { recipient, bucket },
-                    completion,
-                },
-                item_bytes,
-            )
-            .map_err(|reason| OnionQueueKind::CircuitData.admission(to, reason))?;
+        let item = OverlaySend {
+            scope,
+            payload,
+            cover: CoverSpec {
+                recipient: link.recipient,
+                bucket,
+            },
+            completion,
+        };
+        let should_spawn = {
+            let mut state = lock(&self.state)?;
+            match admission {
+                CellAdmission::Bounded => state
+                    .enqueue(to, item, item_bytes)
+                    .map_err(|reason| OnionQueueKind::CircuitData.admission(to, reason))?,
+                CellAdmission::Exempt => state.enqueue_exempt(to, item),
+            }
+        };
         if should_spawn {
             let state = Arc::clone(&self.state);
             let pacing = Arc::clone(&self.pacing);
@@ -325,7 +392,39 @@ impl OnionLinkSender {
     ) -> Result<()> {
         let bucket = sealed_cell_bucket(&payload)?;
         self.outbox
-            .enqueue(scope, link.peer, link.recipient, bucket, payload, None)
+            .enqueue(scope, link, bucket, payload, None, CellAdmission::Bounded)
+    }
+
+    /// Destroy the circuit `peer` knows as `circuit_id`: seal a `Destroy` for `recipient` and
+    /// queue it exempt from the outbox bounds. An endpoint uses it when its own stream ends for a
+    /// local cause the far endpoint cannot otherwise learn (`Law (Circuit fate)`, #963).
+    #[cfg(rings_native)]
+    pub(crate) fn destroy(
+        &self,
+        scope: Scope,
+        peer: Did,
+        recipient: PublicKey<33>,
+        circuit_id: OnionCircuitId,
+    ) -> Result<()> {
+        let payload = seal_message(
+            &OnionWireMessage::Destroy { circuit_id },
+            recipient,
+            Some(OnionCellBucket::KiB4),
+        )?;
+        self.enqueue_destroy(scope, OnionLink::new(peer, recipient), payload)
+    }
+
+    /// Queue a sealed `Destroy` to `link`, behind the cells already queued for it and exempt
+    /// from the outbox bounds, so a circuit can always be torn down (`Law (Circuit fate)`, #963).
+    pub(crate) fn enqueue_destroy(
+        &self,
+        scope: Scope,
+        link: OnionLink,
+        payload: Bytes,
+    ) -> Result<()> {
+        let bucket = sealed_cell_bucket(&payload)?;
+        self.outbox
+            .enqueue(scope, link, bucket, payload, None, CellAdmission::Exempt)
     }
 
     pub(crate) async fn send_sealed(
@@ -338,11 +437,11 @@ impl OnionLinkSender {
         let (completion, completed) = oneshot::channel();
         self.outbox.enqueue(
             scope,
-            link.peer,
-            link.recipient,
+            link,
             bucket,
             payload,
             Some(completion),
+            CellAdmission::Bounded,
         )?;
         completed.await.map_err(|_| {
             crate::error::Error::OnionRouteError(crate::onion::OnionRouteError::LinkSendCancelled)
@@ -401,7 +500,7 @@ async fn drain_peer(
             }
             // `peer` is the circuit's exact physical next hop. Overlay routing could select a
             // different Chord path and would invalidate both adjacency and per-link cover shape.
-            let send_result = scope.send_direct(peer, payload).await;
+            let send_result = send_until_settled(&scope, peer, payload, pacing.as_ref()).await;
             match completion {
                 Some(completion) => {
                     let _ = completion.send(send_result);
@@ -459,6 +558,35 @@ async fn drain_peer(
                 return;
             }
             break;
+        }
+    }
+}
+
+/// Send one real cell to `peer` until it leaves, its send fails after acceptance may have begun,
+/// or `peer` is no longer admitted.
+///
+/// Law: a refusal before acceptance is a delay, never a loss. The cell has not left, so sending
+/// it again cannot duplicate it, and the lane's FIFO order is kept because the lane holds it in
+/// flight meanwhile. A cell is lost only with its link's admission, whose retirement destroys the
+/// circuit at both ends (`Law (Circuit fate)`, #963). Retries are paced by the lane's own jitter.
+async fn send_until_settled(
+    scope: &Scope,
+    peer: Did,
+    payload: Bytes,
+    pacing: &dyn OnionSendPacing,
+) -> Result<()> {
+    loop {
+        let sent = scope.send_direct(peer, payload.clone()).await;
+        match &sent {
+            Err(error)
+                if error.is_send_refused_before_acceptance() && scope.peer_admitted(peer) =>
+            {
+                tracing::debug!(%peer, ?error, "onion cell refused before acceptance; resending");
+                if sleep(pacing.delay_before_batch()).await.is_err() {
+                    return sent;
+                }
+            }
+            _ => return sent,
         }
     }
 }
@@ -577,7 +705,7 @@ mod tests {
 
         assert_eq!(state.complete(peer), None);
         let lane = state.lanes.get(&peer).expect("in-flight lane is retained");
-        assert_eq!(lane.in_flight_bytes, Some(7));
+        assert_eq!(lane.in_flight, Some(Charge::Bounded(7)));
         assert_eq!(lane.pending_bytes, 7);
         assert_eq!(state.pending_bytes, 7);
     }
@@ -626,6 +754,49 @@ mod tests {
             Err(OnionQueueAdmissionReason::PeerFull)
         );
         assert_eq!(state.enqueue(other, 201, 1), Ok(true));
+    }
+
+    /// Law (#963): a full peer share refuses data but never a `Destroy`, which queues behind the
+    /// data in FIFO order and holds no quota slot or byte, so completing it releases nothing.
+    #[test]
+    fn test_a_destroy_queues_behind_a_full_share_without_holding_the_bounds() {
+        let peer = Did::from(21_u32);
+        let mut state = OrderedSendState::default();
+        for value in 0..MAX_PENDING_ONION_SENDS_PER_PEER {
+            assert!(state.enqueue(peer, value, 1).is_ok());
+        }
+        assert_eq!(
+            state.enqueue(peer, 900, 1),
+            Err(OnionQueueAdmissionReason::PeerFull)
+        );
+        assert!(!state.enqueue_exempt(peer, 901));
+        assert_eq!(
+            state.quota.peer_total(peer),
+            MAX_PENDING_ONION_SENDS_PER_PEER
+        );
+
+        for value in 0..MAX_PENDING_ONION_SENDS_PER_PEER {
+            assert_eq!(state.take_next(peer), Some(value));
+            assert!(state.complete(peer).is_some());
+        }
+        assert_eq!(state.quota.peer_total(peer), 0);
+        assert_eq!(state.pending_bytes, 0);
+        assert_eq!(state.take_next(peer), Some(901));
+        assert_eq!(state.complete(peer), Some(false));
+        assert_eq!(state.quota.total(), 0);
+    }
+
+    /// A lane holding a `Destroy` among its data still cancels atomically: only the bounded
+    /// items return their quota slots.
+    #[test]
+    fn test_cancelling_a_lane_with_a_destroy_releases_only_bounded_items() {
+        let peer = Did::from(22_u32);
+        let mut state = OrderedSendState::default();
+        assert_eq!(state.enqueue(peer, 1, 7), Ok(true));
+        assert!(!state.enqueue_exempt(peer, 2));
+        assert_eq!(state.cancel_queued_lane(peer), Some(vec![1, 2]));
+        assert_eq!(state.quota.total(), 0);
+        assert_eq!(state.pending_bytes, 0);
     }
 
     #[test]

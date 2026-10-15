@@ -46,6 +46,7 @@ use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
+use crate::onion::circuit::OnionCircuitTeardown;
 use crate::onion::circuit::OnionInterpretation;
 use crate::onion::circuit::OnionLinkSender;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
@@ -277,6 +278,11 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
                     .await
             }
         }
+    }
+
+    async fn teardown(&self, _scope: &Scope, teardown: OnionCircuitTeardown) -> Result<()> {
+        self.https.client().teardown(teardown)?;
+        self.tcp.teardown(teardown)
     }
 }
 

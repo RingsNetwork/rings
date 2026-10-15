@@ -101,8 +101,9 @@ impl Backend {
         }
     }
 
-    /// Route one item of the application inbox: a custom message to its namespace's queue,
-    /// everything else to the observer. Never waits.
+    /// Route one item of the application inbox: a custom message to its namespace's queue, a
+    /// peer's retirement to every namespace's queue (#963), and every fact to the observer.
+    /// Never waits.
     fn route(&self, namespaces: &mut dispatch::NamespaceQueues, delivery: ApplicationDelivery) {
         match delivery {
             ApplicationDelivery::Message(ApplicationMessage {
@@ -116,6 +117,9 @@ impl Backend {
                 }
             }
             ApplicationDelivery::Event(event) => {
+                if let SwarmEvent::PeerRetired { peer } = event {
+                    namespaces.submit_retirement(peer);
+                }
                 if let Some(observer) = self.observer.as_deref() {
                     match event {
                         SwarmEvent::PeerAdmitted { peer } => observer.peer_admitted(peer),

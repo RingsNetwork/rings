@@ -4,6 +4,7 @@ use rings_core::message::MessageSigner;
 use super::super::*;
 use crate::extension::ext::Extensions;
 use crate::onion::circuit::OnionCircuitHandler;
+use crate::onion::circuit::OnionCircuitTeardown;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::native::native_onion_runtimes;
 use crate::onion::native::NativeOnionCircuitHandler;
@@ -552,5 +553,67 @@ async fn test_native_client_dispatch_hands_tcp_circuits_past_the_https_client() 
 
     assert!(matches!(rx.try_recv(), Ok(TcpInbound::Close)));
     assert_eq!(https.client().pending_len(), 0);
+    Ok(())
+}
+
+/// Law (#963): a teardown of a peer ends every client stream adjacent to it at once, an open
+/// still awaiting its answer included, and leaves streams on other links untouched; a teardown
+/// of one circuit ends only that stream.
+#[test]
+fn test_teardown_ends_exactly_the_streams_on_its_link() -> Result<()> {
+    let runtime = runtime();
+    let retired = did();
+    let other = did();
+    let exit = session();
+    let (open_tx, mut open_rx) = tokio::sync::oneshot::channel();
+    let (opening_tx, _opening_rx) = mpsc::channel(4);
+    let opening = runtime.insert_client_stream(
+        OnionServiceName::tcp(),
+        retired,
+        exit_descriptor(&exit),
+        OnionReturnId::new([31; 16]),
+        open_tx,
+        opening_tx,
+    )?;
+    let (open_stream_tx, mut open_stream_rx) = mpsc::channel(4);
+    let open = insert_test_client_stream(
+        &runtime,
+        retired,
+        exit_descriptor(&exit),
+        OnionReturnId::new([32; 16]),
+        open_stream_tx,
+    )?;
+    let (kept_tx, mut kept_rx) = mpsc::channel(4);
+    let kept = insert_test_client_stream(
+        &runtime,
+        other,
+        exit_descriptor(&exit),
+        OnionReturnId::new([33; 16]),
+        kept_tx,
+    )?;
+
+    runtime.teardown(OnionCircuitTeardown::Peer(retired))?;
+
+    let streams = lock(&runtime.client_streams)?;
+    assert!(!streams.contains_key(&opening));
+    assert!(!streams.contains_key(&open));
+    assert!(streams.contains_key(&kept));
+    drop(streams);
+    assert!(matches!(
+        open_stream_rx.try_recv(),
+        Ok(TcpInbound::Destroyed)
+    ));
+    assert!(matches!(
+        open_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    assert!(kept_rx.try_recv().is_err());
+
+    runtime.teardown(OnionCircuitTeardown::Circuit {
+        from: other,
+        circuit_id: kept.circuit_id,
+    })?;
+    assert!(!lock(&runtime.client_streams)?.contains_key(&kept));
+    assert!(matches!(kept_rx.try_recv(), Ok(TcpInbound::Destroyed)));
     Ok(())
 }
