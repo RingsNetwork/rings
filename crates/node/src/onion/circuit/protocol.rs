@@ -1,5 +1,8 @@
+use rings_core::dht::Did;
+
 use super::codec::decode_event;
 use super::codec::OnionCircuitEvent;
+use super::codec::OnionCircuitInput;
 use super::reducer::OnionCircuitEffect;
 use super::reducer::OnionCircuitReducer;
 use super::reducer::OnionCircuitState;
@@ -65,5 +68,12 @@ impl Protocol for OnionCircuitProtocol {
         event: Self::Event,
     ) -> Transition<Self::State, Self::Effect> {
         self.reducer.apply(ctx.state, event.input)
+    }
+
+    /// A retired link destroys every circuit that rides it (`Law (Circuit fate)`, #963).
+    fn peer_retired(&self, peer: Did) -> Option<Self::Event> {
+        Some(OnionCircuitEvent {
+            input: OnionCircuitInput::PeerRetired { peer },
+        })
     }
 }

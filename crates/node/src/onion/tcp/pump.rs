@@ -41,11 +41,75 @@ pub(super) async fn pump_tcp_duplex<S, E>(
     stream: S,
     inbound: mpsc::Receiver<TcpInbound>,
     effects: &mut E,
-) where
+) -> TcpStreamEnd
+where
     S: AsyncRead + AsyncWrite + Unpin,
     E: TcpDuplexEffects,
 {
-    pump_tcp_duplex_with_idle(stream, inbound, effects, RELAY_IDLE_TIMEOUT).await;
+    pump_tcp_duplex_with_idle(stream, inbound, effects, RELAY_IDLE_TIMEOUT).await
+}
+
+/// Why a stream ended before both of its halves closed.
+#[derive(Debug)]
+pub(crate) enum TcpStreamAbort {
+    /// A frame of the stream could not be sent on its circuit.
+    SendFailed,
+    /// The local socket failed a read.
+    ReadFailed,
+    /// The local socket failed a write.
+    WriteFailed,
+    /// Byte accounting refused a chunk.
+    AdmissionRefused,
+    /// The far side ended the stream, or its inbound lane closed, while a half was open.
+    RemoteClosed,
+    /// The far side reported a failure.
+    RemoteFailed(OnionExitFailure),
+    /// The stream's circuit was destroyed (#963).
+    CircuitDestroyed,
+    /// No traffic for the relay idle timeout.
+    Idle,
+}
+
+impl TcpStreamAbort {
+    /// Whether this end caused the abort, so the far endpoint learns of it only if this end
+    /// destroys the circuit; a far-side close, failure or destruction is already known there.
+    pub(crate) const fn originates_here(&self) -> bool {
+        matches!(
+            self,
+            Self::SendFailed
+                | Self::ReadFailed
+                | Self::WriteFailed
+                | Self::AdmissionRefused
+                | Self::Idle
+        )
+    }
+}
+
+impl std::fmt::Display for TcpStreamAbort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SendFailed => formatter.write_str("a frame could not be sent on the circuit"),
+            Self::ReadFailed => formatter.write_str("the local socket failed a read"),
+            Self::WriteFailed => formatter.write_str("the local socket failed a write"),
+            Self::AdmissionRefused => formatter.write_str("byte accounting refused a chunk"),
+            Self::RemoteClosed => formatter.write_str("the far side closed the stream"),
+            Self::RemoteFailed(failure) => write!(formatter, "the far side failed: {failure}"),
+            Self::CircuitDestroyed => formatter.write_str("the circuit was destroyed"),
+            Self::Idle => formatter.write_str("the stream was idle too long"),
+        }
+    }
+}
+
+/// How one pumped stream ended.
+///
+/// Law: `Orderly` iff both halves closed locally before any other exit of the pump; every other
+/// exit is `Aborted` with its cause, so an abortive end is never reported as an EOF (#963).
+#[derive(Debug)]
+pub(crate) enum TcpStreamEnd {
+    /// Both halves closed in order.
+    Orderly,
+    /// The stream ended while a half was open.
+    Aborted(TcpStreamAbort),
 }
 
 async fn pump_tcp_duplex_with_idle<S, E>(
@@ -53,7 +117,8 @@ async fn pump_tcp_duplex_with_idle<S, E>(
     mut inbound: mpsc::Receiver<TcpInbound>,
     effects: &mut E,
     idle_timeout: std::time::Duration,
-) where
+) -> TcpStreamEnd
+where
     S: AsyncRead + AsyncWrite + Unpin,
     E: TcpDuplexEffects,
 {
@@ -62,9 +127,9 @@ async fn pump_tcp_duplex_with_idle<S, E>(
     let mut state = TcpDuplexState::open();
     let idle = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle);
-    loop {
+    let end = loop {
         if state.is_closed() {
-            break;
+            break TcpStreamEnd::Orderly;
         }
         tokio::select! {
             read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
@@ -72,7 +137,7 @@ async fn pump_tcp_duplex_with_idle<S, E>(
                 match read_result {
                     Ok(0) => {
                         if effects.send(OnionTcpPayload::Shutdown).await.is_err() {
-                            break;
+                            break TcpStreamEnd::Aborted(TcpStreamAbort::SendFailed);
                         }
                         state.close_read();
                     }
@@ -81,18 +146,19 @@ async fn pump_tcp_duplex_with_idle<S, E>(
                             Ok(bytes) => bytes,
                             Err(error) => {
                                 effects.read_failed(&error).await;
-                                break;
+                                break TcpStreamEnd::Aborted(TcpStreamAbort::ReadFailed);
                             }
                         };
-                        if !effects.admit_bytes(bytes.len()).await
-                            || effects.send(OnionTcpPayload::Data { bytes }).await.is_err()
-                        {
-                            break;
+                        if !effects.admit_bytes(bytes.len()).await {
+                            break TcpStreamEnd::Aborted(TcpStreamAbort::AdmissionRefused);
+                        }
+                        if effects.send(OnionTcpPayload::Data { bytes }).await.is_err() {
+                            break TcpStreamEnd::Aborted(TcpStreamAbort::SendFailed);
                         }
                     }
                     Err(error) => {
                         effects.read_failed(&error).await;
-                        break;
+                        break TcpStreamEnd::Aborted(TcpStreamAbort::ReadFailed);
                     }
                 }
             }
@@ -103,10 +169,11 @@ async fn pump_tcp_duplex_with_idle<S, E>(
                         if !state.can_write() {
                             continue;
                         }
-                        if !effects.admit_bytes(bytes.len()).await
-                            || write.write_all(bytes.as_ref()).await.is_err()
-                        {
-                            break;
+                        if !effects.admit_bytes(bytes.len()).await {
+                            break TcpStreamEnd::Aborted(TcpStreamAbort::AdmissionRefused);
+                        }
+                        if write.write_all(bytes.as_ref()).await.is_err() {
+                            break TcpStreamEnd::Aborted(TcpStreamAbort::WriteFailed);
                         }
                     }
                     Some(TcpInbound::Shutdown) => {
@@ -117,21 +184,26 @@ async fn pump_tcp_duplex_with_idle<S, E>(
                     }
                     Some(TcpInbound::Close) | None => {
                         state.observe_remote_terminal();
-                        break;
+                        break TcpStreamEnd::Aborted(TcpStreamAbort::RemoteClosed);
                     }
                     Some(TcpInbound::Error(failure)) => {
                         effects.remote_failed(&failure);
                         state.observe_remote_terminal();
-                        break;
+                        break TcpStreamEnd::Aborted(TcpStreamAbort::RemoteFailed(failure));
+                    }
+                    Some(TcpInbound::Destroyed) => {
+                        state.observe_remote_terminal();
+                        break TcpStreamEnd::Aborted(TcpStreamAbort::CircuitDestroyed);
                     }
                 }
             }
-            _ = &mut idle => break,
+            _ = &mut idle => break TcpStreamEnd::Aborted(TcpStreamAbort::Idle),
         }
-    }
+    };
     if state.should_announce_terminal() {
         let _ = effects.send(OnionTcpPayload::Close).await;
     }
+    end
 }
 
 fn read_chunk(read_buf: &[u8], n: usize) -> std::io::Result<Bytes> {
@@ -239,6 +311,36 @@ mod tests {
         assert!(payloads.iter().any(
             |payload| matches!(payload, OnionTcpPayload::Data { bytes } if bytes.as_ref() == b"generic")
         ));
+        Ok(())
+    }
+
+    /// Law (#963): a destroyed circuit ends the pump aborted with `CircuitDestroyed`, while both
+    /// halves are open, and no terminal frame is echoed onto the dead circuit.
+    #[tokio::test]
+    async fn test_a_destroyed_circuit_aborts_the_pump_without_an_echo() -> Result<()> {
+        let (_client, server) = connected_pair().await?;
+        let (inbound_tx, inbound_rx) = mpsc::channel(1);
+        let recorded = Arc::new(RecordedEffects::default());
+        let mut route = RecordingRoute {
+            effects: Arc::clone(&recorded),
+        };
+        inbound_tx
+            .send(TcpInbound::Destroyed)
+            .await
+            .map_err(|error| Error::ExtensionError(error.to_string()))?;
+
+        let end = tokio::time::timeout(
+            Duration::from_secs(1),
+            pump_tcp_duplex(server, inbound_rx, &mut route),
+        )
+        .await
+        .map_err(|_| Error::ExtensionError("TCP pump did not stop".to_string()))?;
+
+        assert!(matches!(
+            end,
+            TcpStreamEnd::Aborted(TcpStreamAbort::CircuitDestroyed)
+        ));
+        assert!(lock(&recorded.payloads)?.is_empty());
         Ok(())
     }
 

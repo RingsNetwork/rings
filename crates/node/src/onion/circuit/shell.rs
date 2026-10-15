@@ -24,9 +24,11 @@ use super::OnionCellBucket;
 use super::OnionCircuitEffect;
 use super::OnionCircuitId;
 use super::OnionCircuitPayload;
+use super::OnionCircuitTeardown;
 use super::OnionClientReturn;
 use super::OnionForwardNonce;
 use super::OnionForwardSequence;
+use super::OnionRelayedCell;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::EffectScope;
@@ -207,14 +209,34 @@ where H: OnionCircuitHandler + MaybeSendSync + 'static
                 recipient,
                 bucket,
                 encoded_message,
+                cell,
             } => {
                 let payload = seal_encoded_message(&encoded_message, recipient, Some(bucket))?;
-                self.link_sender.enqueue_sealed(
-                    scope.lifecycle(),
-                    super::OnionLink::new(to, recipient),
-                    payload,
-                )?;
-                Ok(Vec::new())
+                let link = super::OnionLink::new(to, recipient);
+                match cell {
+                    OnionRelayedCell::Destroy => {
+                        self.link_sender
+                            .enqueue_destroy(scope.lifecycle(), link, payload)?;
+                        Ok(Vec::new())
+                    }
+                    OnionRelayedCell::Data { circuit_id } => {
+                        match self
+                            .link_sender
+                            .enqueue_sealed(scope.lifecycle(), link, payload)
+                        {
+                            Ok(()) => Ok(Vec::new()),
+                            // A cell the bounded outbox cannot carry destroys its circuit here;
+                            // any other failure is local and propagates (#963).
+                            Err(error @ Error::OnionQueueAdmission { .. }) => {
+                                tracing::debug!(%to, %error, "onion cell refused; destroying circuit");
+                                Ok(vec![encode_local_message(
+                                    OnionLocalMessage::CellRefused { to, circuit_id },
+                                )?])
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                }
             }
             OnionCircuitEffect::Exit {
                 from,
@@ -247,6 +269,10 @@ where H: OnionCircuitHandler + MaybeSendSync + 'static
                         tracing::warn!(%error, "onion exit effect failed");
                     }
                 });
+                Ok(Vec::new())
+            }
+            OnionCircuitEffect::Teardown(teardown) => {
+                self.handler.teardown(&scope.lifecycle(), teardown).await?;
                 Ok(Vec::new())
             }
             OnionCircuitEffect::DecryptClient {
@@ -364,6 +390,11 @@ pub trait OnionCircuitHandler {
         circuit_id: OnionCircuitId,
         payload: OnionAuthenticatedPayload,
     ) -> Result<()>;
+
+    /// End this node's endpoints of the circuits `teardown` names (`Law (Circuit fate)`, #963):
+    /// a stream ends aborted and a pending request fails, each with a typed reason. Required, so
+    /// no handler can leave a destroyed circuit's endpoint waiting.
+    async fn teardown(&self, scope: &Scope, teardown: OnionCircuitTeardown) -> Result<()>;
 }
 
 fn drop_bad_crypto(context: &str, error: Error) {

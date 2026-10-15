@@ -91,19 +91,31 @@ async fn run_bridge(
     mut commands: mpsc::Receiver<BridgeCommand>,
     io_chunk_bytes: usize,
 ) {
-    if let Err(error) = connector.open_stream(flow, Box::new(onion)).await {
-        send_event(&events, BridgeEvent::Failed { flow, error }).await;
-        return;
-    }
+    let mut end = match connector.open_stream(flow, Box::new(onion)).await {
+        Ok(end) => end,
+        Err(error) => {
+            send_event(&events, BridgeEvent::Failed { flow, error }).await;
+            return;
+        }
+    };
     if events.send(BridgeEvent::Opened(flow)).await.is_err() {
         return;
     }
 
     let mut read_open = true;
     let mut write_open = true;
+    // An orderly end, or a connector that ends without a report, leaves the end to the duplex.
+    let mut end_open = true;
     let mut buffer = vec![0_u8; io_chunk_bytes];
     while read_open || write_open {
         tokio::select! {
+            ended = &mut end, if end_open => {
+                end_open = false;
+                if let Ok(Err(error)) = ended {
+                    send_event(&events, BridgeEvent::Failed { flow, error }).await;
+                    return;
+                }
+            }
             read = gateway.read(buffer.as_mut_slice()), if read_open => {
                 match read {
                     Ok(0) => {
@@ -207,7 +219,9 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+    use crate::unreported_end;
     use crate::BoxGatewayDuplex;
+    use crate::OnionStreamEnd;
 
     struct EchoConnector;
 
@@ -219,7 +233,7 @@ mod tests {
             &self,
             _flow: FlowId,
             mut stream: BoxGatewayDuplex,
-        ) -> Result<(), GatewayError> {
+        ) -> Result<OnionStreamEnd, GatewayError> {
             tokio::spawn(async move {
                 let mut buffer = [0_u8; 32];
                 loop {
@@ -239,7 +253,7 @@ mod tests {
                     }
                 }
             });
-            Ok(())
+            Ok(unreported_end())
         }
     }
 
@@ -249,11 +263,11 @@ mod tests {
             &self,
             _flow: FlowId,
             mut stream: BoxGatewayDuplex,
-        ) -> Result<(), GatewayError> {
+        ) -> Result<OnionStreamEnd, GatewayError> {
             tokio::spawn(async move {
                 let _ = stream.write_all(b"abcdefgh").await;
             });
-            Ok(())
+            Ok(unreported_end())
         }
     }
 

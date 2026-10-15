@@ -30,17 +30,30 @@ impl pump::TcpDuplexEffects for ClientReturnPath {
     }
 }
 
-pub(super) fn spawn_client_stream<S>(
-    runtime: Arc<OnionTcpRuntime>,
-    scope: Scope,
-    key: TcpStreamKey,
-    stream: S,
-    path: OnionCircuitPath,
-    client_return: OnionClientReturn,
-    rx: mpsc::Receiver<TcpInbound>,
-) where
+/// The state one client stream's pump task owns.
+pub(super) struct ClientStreamTask {
+    pub(super) runtime: Arc<OnionTcpRuntime>,
+    pub(super) scope: Scope,
+    pub(super) key: TcpStreamKey,
+    pub(super) path: OnionCircuitPath,
+    pub(super) client_return: OnionClientReturn,
+    pub(super) rx: mpsc::Receiver<TcpInbound>,
+}
+
+/// Pump `stream` against its circuit until it ends, then release the stream and report its end.
+pub(super) fn spawn_client_stream<S, F>(task: ClientStreamTask, stream: S, on_end: F)
+where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    F: FnOnce(pump::TcpStreamEnd) + Send + 'static,
 {
+    let ClientStreamTask {
+        runtime,
+        scope,
+        key,
+        path,
+        client_return,
+        rx,
+    } = task;
     tokio::spawn(async move {
         let mut return_path = ClientReturnPath {
             runtime: runtime.clone(),
@@ -48,8 +61,22 @@ pub(super) fn spawn_client_stream<S>(
             path,
             client_return,
         };
-        pump::pump_tcp_duplex(stream, rx, &mut return_path).await;
+        let end = pump::pump_tcp_duplex(stream, rx, &mut return_path).await;
         runtime.remove_client_stream(key);
+        if let pump::TcpStreamEnd::Aborted(abort) = &end {
+            if abort.originates_here() {
+                let (peer, recipient, circuit_id) = return_path.path.first_edge();
+                if let Err(error) = runtime.link_sender.destroy(
+                    return_path.scope.clone(),
+                    peer,
+                    recipient,
+                    circuit_id,
+                ) {
+                    tracing::debug!(%error, "onion TCP client could not destroy its circuit");
+                }
+            }
+        }
+        on_end(end);
     });
 }
 

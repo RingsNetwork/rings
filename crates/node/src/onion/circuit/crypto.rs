@@ -139,6 +139,16 @@ impl OnionCircuitPath {
     pub(crate) fn service_name(&self) -> &OnionServiceName {
         self.route.service_name()
     }
+
+    /// The first hop of this path, its delegatee key, and the circuit id the first hop knows.
+    pub(crate) fn first_edge(&self) -> (Did, PublicKey<33>, OnionCircuitId) {
+        let first = self.positions.first();
+        (
+            first.hop.did,
+            first.hop.delegatee_public_key,
+            first.circuit_id,
+        )
+    }
 }
 
 /// Return the first overlay hop of a route: its entry guard.

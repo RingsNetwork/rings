@@ -109,6 +109,8 @@ pub enum FlowResetReason {
     OnionOpenFailed(String),
     /// The open Onion stream failed while carrying bytes.
     StreamFailed(String),
+    /// The open Onion stream was reset by its far side or by its circuit's destruction.
+    StreamReset(String),
     /// The byte bridge stopped accepting commands before the flow closed.
     BridgeClosed,
     /// Gateway shutdown reset the flow.
@@ -118,8 +120,9 @@ pub enum FlowResetReason {
 impl FlowResetReason {
     /// Classify a failure reported by a flow's byte bridge.
     ///
-    /// Stream errors keep their operation label; every other bridge failure happened while the
-    /// connector was opening the stream. Flow addresses are not copied into the reason.
+    /// Stream errors keep their operation label, and an abortive end reported by the connector is
+    /// a reset; every other bridge failure happened while the connector was opening the stream.
+    /// Flow addresses are not copied into the reason.
     pub fn from_bridge_failure(error: &GatewayError) -> Self {
         match error {
             GatewayError::StreamIo {
@@ -128,6 +131,7 @@ impl FlowResetReason {
             GatewayError::OnionUnavailable { message, .. } => {
                 Self::OnionOpenFailed(message.clone())
             }
+            GatewayError::OnionStreamReset { message, .. } => Self::StreamReset(message.clone()),
             other => Self::OnionOpenFailed(other.to_string()),
         }
     }

@@ -10,6 +10,7 @@ use tokio::time::Instant;
 use super::inbound::TcpInbound;
 use super::pump::pump_tcp_duplex;
 use super::pump::TcpDuplexEffects;
+use super::pump::TcpStreamEnd;
 use super::OnionTcpPayload;
 use super::OnionTcpRuntime;
 use super::TcpBackwardRoute;
@@ -192,7 +193,19 @@ async fn run_exit_stream(task: ExitStreamTask) {
         client,
         service,
     };
-    pump_tcp_duplex(stream, rx, &mut return_path).await;
+    let end = pump_tcp_duplex(stream, rx, &mut return_path).await;
     runtime.remove_exit_stream(key);
+    if let TcpStreamEnd::Aborted(abort) = &end {
+        if abort.originates_here() {
+            if let Err(error) = runtime.link_sender.destroy(
+                return_path.scope.clone(),
+                return_peer,
+                return_delegatee_public_key,
+                circuit_id,
+            ) {
+                tracing::debug!(%error, "onion TCP exit could not destroy its circuit");
+            }
+        }
+    }
     drop(lease);
 }

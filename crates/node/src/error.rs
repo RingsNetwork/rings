@@ -328,6 +328,12 @@ pub enum Error {
 }
 
 impl Error {
+    /// Whether this is an overlay send refused before any of its frames could be accepted, so
+    /// sending the payload again cannot duplicate it (`rings_core::error::Error::is_refused_before_acceptance`).
+    pub(crate) fn is_send_refused_before_acceptance(&self) -> bool {
+        matches!(self, Self::SendMessage(error) if error.is_refused_before_acceptance())
+    }
+
     fn discriminant(&self) -> u32 {
         // SAFETY: Because `Self` is marked `repr(u32)`, its layout is a `repr(C)` `union`
         // between `repr(C)` structs, each of which has the `u32` discriminant as its first
