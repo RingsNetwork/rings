@@ -20,7 +20,7 @@ use rings_gateway::bindings::TeardownFailure;
 use rings_gateway::bindings::TunnelControl;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 use rings_gateway::bindings::UnsupportedTunnelControl;
-use rings_gateway::ExitAvailability;
+use rings_gateway::ExitObservation;
 use rings_gateway::GatewayControlHandle;
 use rings_gateway::GatewayError;
 use rings_gateway::GatewayRuntime;
@@ -202,7 +202,7 @@ fn finish_gateway_cleanup<D: rings_gateway::PacketIo>(
                 "gateway route cleanup failed; the packet device remains open for selected routes \
                  until privileged cleanup succeeds: {error}"
             );
-            runtime.set_exit_availability(ExitAvailability::Unknown, Some(reason.clone()));
+            runtime.set_exit_availability(ExitObservation::Unknown(reason.clone()));
             tracing::error!("{reason}");
             std::mem::forget(device);
             Err(error)
@@ -259,30 +259,19 @@ async fn refresh_exit_availability(refresh: GatewayRefresh) -> Result<(), Gatewa
         ) {
             return Ok(());
         }
-        let (availability, reason) = match refresh
+        let exit = match refresh
             .processor
             .lookup_onion_exits(&refresh.onion_service, false)
             .await
         {
-            Ok(exits) if exits.is_empty() => (
-                ExitAvailability::Unavailable,
-                Some(format!(
-                    "no live Onion TCP exit advertises {}",
-                    refresh.onion_service
-                )),
-            ),
-            Ok(_) => (ExitAvailability::Available, None),
-            Err(error) => (
-                ExitAvailability::Unknown,
-                Some(format!("Onion exit discovery failed: {error}")),
-            ),
+            Ok(exits) if exits.is_empty() => ExitObservation::Unavailable(format!(
+                "no live Onion TCP exit advertises {}",
+                refresh.onion_service
+            )),
+            Ok(_) => ExitObservation::Available,
+            Err(error) => ExitObservation::Unknown(format!("Onion exit discovery failed: {error}")),
         };
-        if refresh
-            .gateway
-            .set_exit_availability(availability, reason)
-            .await
-            .is_err()
-        {
+        if refresh.gateway.set_exit_availability(exit).await.is_err() {
             if refresh.runtime_done.should_stop() {
                 return Ok(());
             }

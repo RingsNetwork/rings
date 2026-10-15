@@ -49,6 +49,11 @@ fn late_bridge_events_for_a_released_flow_are_idempotent() {
         )
         .expect("late failure is ignored");
 
-    assert_eq!(runtime.status_handle().snapshot().active_flows, 0);
-    assert_eq!(runtime.status_handle().snapshot().reason, None);
+    let status = runtime.status_handle().snapshot();
+    assert_eq!(status.active_flows, 0);
+    assert_eq!(
+        status.reason.as_deref(),
+        Some(crate::status::EXIT_DISCOVERY_PENDING)
+    );
+    assert_eq!(status.last_flow_reset, None);
 }
