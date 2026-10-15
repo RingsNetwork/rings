@@ -4,6 +4,7 @@ use wasm_bindgen_test::*;
 
 use super::create_connection;
 use super::get_peers;
+use super::is_routable_webrtc_state;
 use super::new_provider;
 use super::promise_settled_now;
 use super::provider_did;
@@ -16,7 +17,7 @@ use crate::provider::browser;
 ///
 /// ```text
 /// Admitted(a, b) ≡ peer_admitted(b) observed by a's backend
-/// Listed(a, b)   ≡ listPeers(a) = [b in state Connected]
+/// Listed(a, b)   ≡ listPeers(a) = [b in a routable WebRTC state]   (is_routable_webrtc_state)
 ///
 /// create_connection(a, b)    ⊢ ◇Admitted(a, b) ∧ ◇Admitted(b, a)
 /// Admitted(a, b)             ⟹ Listed(a, b)
@@ -46,8 +47,8 @@ async fn test_two_provider_connect_and_list() {
             assert!(peers.len() == 1, "peers len should be 1");
             let peer2 = peers.first().unwrap();
 
-            assert_eq!(
-                peer2.state, "Connected",
+            assert!(
+                is_routable_webrtc_state(&peer2.state),
                 "peer2 state got {:?}",
                 peer2.state
             );

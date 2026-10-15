@@ -14,6 +14,7 @@ use rings_core::lifecycle::StopToken;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::swarm::application::SwarmEvent;
 use rings_rpc::protos::rings_node::*;
+use rings_transport::core::transport::WebrtcConnectionState;
 use uuid;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
@@ -245,6 +246,26 @@ pub async fn get_peers(provider: &Provider) -> Vec<PeerInfo> {
     js_value::deserialize::<ListPeersResponse>(resp)
         .unwrap()
         .peers
+}
+
+/// Whether `state`, a listed peer's WebRTC state as `peers()` and `listPeers` render it, is one
+/// in which an admitted connection is routable.
+///
+/// ```text
+/// Ready(c) ⟺ webrtc(c) ∈ {Connecting, Connected} ∧ data_channel_open(c)   (core readiness)
+/// Listed(c) ⟹ Ready(c) ⟹ webrtc(c) ∈ {Connecting, Connected}
+/// ```
+///
+/// The listing reports the raw WebRTC state, and the browser may fire the data channel's
+/// `open` before the `connectionstatechange` to `connected`. An admitted, listed peer may
+/// therefore still read `Connecting`; only `Connected` is not guaranteed (#962).
+pub fn is_routable_webrtc_state(state: &str) -> bool {
+    [
+        WebrtcConnectionState::Connecting,
+        WebrtcConnectionState::Connected,
+    ]
+    .iter()
+    .any(|routable| format!("{routable:?}") == state)
 }
 
 /// Connect two providers and await both admissions.
