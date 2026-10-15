@@ -60,14 +60,44 @@ impl Notifier {
     /// waits on; `Err` iff the runtime could not run the timer (browser only), which ends the
     /// wait at once.
     pub async fn notified_within(&self, timeout: Duration) -> std::result::Result<(), TimerError> {
-        let mut woken = pin!(self.clone());
-        let mut elapsed = pin!(rings_runtime::sleep(timeout));
-        poll_fn(|context| match woken.as_mut().poll(context) {
-            Poll::Ready(()) => Poll::Ready(Ok(())),
-            Poll::Pending => elapsed.as_mut().poll(context),
-        })
-        .await
+        within(self.clone(), timeout).await
     }
+
+    /// Wait until this notifier or `other` is woken, or `timeout` has elapsed, whichever comes
+    /// first; the post-condition is that of [`Self::notified_within`].
+    #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+    pub(crate) async fn either_notified_within(
+        &self,
+        other: &Self,
+        timeout: Duration,
+    ) -> std::result::Result<(), TimerError> {
+        let (mut first, mut second) = (self.clone(), other.clone());
+        let woken = poll_fn(|context| {
+            match (
+                Pin::new(&mut first).poll(context),
+                Pin::new(&mut second).poll(context),
+            ) {
+                (Poll::Pending, Poll::Pending) => Poll::Pending,
+                _ => Poll::Ready(()),
+            }
+        });
+        within(woken, timeout).await
+    }
+}
+
+/// Wait until `woken` completes or `timeout` has elapsed, whichever comes first, composed in
+/// place: the timeout ends only this wait.
+async fn within(
+    woken: impl Future<Output = ()>,
+    timeout: Duration,
+) -> std::result::Result<(), TimerError> {
+    let mut woken = pin!(woken);
+    let mut elapsed = pin!(rings_runtime::sleep(timeout));
+    poll_fn(|context| match woken.as_mut().poll(context) {
+        Poll::Ready(()) => Poll::Ready(Ok(())),
+        Poll::Pending => elapsed.as_mut().poll(context),
+    })
+    .await
 }
 
 impl Future for Notifier {
