@@ -82,7 +82,8 @@ impl Handshake {
 /// What an offer from a peer does to this node's pending attempt for that peer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CrossingOfferVerdict {
-    /// This node abandons its attempt and answers the offer.
+    /// This node abandons its attempt and answers the offer; the answering generation replaces
+    /// the attempt in one transition (`Law (Atomic yield)`).
     Yield,
     /// This node keeps its unanswered overlay offer, sent under `tx_id`, and sends it back.
     CounterOffer {

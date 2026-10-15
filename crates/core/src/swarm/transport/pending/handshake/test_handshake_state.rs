@@ -101,8 +101,9 @@ fn test_answered_and_answering_attempts_refuse() {
 }
 
 /// A yield decided while the offer was `Creating` does not release it once it left as `Sent`:
-/// the release is refused, the attempt keeps its slot, and a release decided on the current
-/// state still applies.
+/// the yield is refused and the attempt keeps its slot, while a yield decided on the current
+/// state applies and hands the slot to the answering generation in the same transition
+/// (`Law (Atomic yield)`), even with the pending bound full.
 #[test]
 fn test_a_yield_releases_only_the_state_it_was_decided_on() -> Result<()> {
     let (_, peer) = ordered();
@@ -112,12 +113,17 @@ fn test_a_yield_releases_only_the_state_it_was_decided_on() -> Result<()> {
 
     let tx_id = uuid::Uuid::new_v4();
     assert!(registry.mark_offer_sent(attempt, "offer".to_string(), tx_id));
-    assert!(!registry.remove_pending_in(attempt, &decided));
+    assert_eq!(registry.replace_pending_in(attempt, &decided, 1)?, None);
     assert_eq!(registry.pending_attempt(peer), Some(attempt));
 
     let current = sent(OfferOwner::Overlay, tx_id);
-    assert!(registry.remove_pending_in(attempt, &current));
-    assert_eq!(registry.pending_attempt(peer), None);
+    let answering = registry
+        .replace_pending_in(attempt, &current, 1)?
+        .expect("a yield decided on the current state applies");
+    assert_ne!(answering, attempt);
+    assert_eq!(registry.pending_attempt(peer), Some(answering));
+    assert_eq!(registry.handshake(answering), Some(&Handshake::answering()));
     assert_eq!(registry.handshake(attempt), None);
+    assert!(registry.superseded_by_peer(attempt));
     Ok(())
 }
