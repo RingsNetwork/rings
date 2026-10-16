@@ -69,6 +69,8 @@ pub(crate) enum TcpStreamAbort {
     /// A cell from the stream's adjacent hop was dropped here (#966): the link is up, but the
     /// far side has not observed the loss.
     CellDropped,
+    /// The stream's inbound lane was full, so a frame of it was discarded here (#971).
+    InboundOverflow,
     /// No traffic for the relay idle timeout.
     Idle,
 }
@@ -84,6 +86,7 @@ impl TcpStreamAbort {
                 | Self::WriteFailed
                 | Self::AdmissionRefused
                 | Self::CellDropped
+                | Self::InboundOverflow
                 | Self::Idle
         )
     }
@@ -100,6 +103,7 @@ impl std::fmt::Display for TcpStreamAbort {
             Self::RemoteFailed(failure) => write!(formatter, "the far side failed: {failure}"),
             Self::CircuitDestroyed => formatter.write_str("the circuit was destroyed"),
             Self::CellDropped => formatter.write_str("a cell of the circuit was dropped here"),
+            Self::InboundOverflow => formatter.write_str("the stream's inbound lane overflowed"),
             Self::Idle => formatter.write_str("the stream was idle too long"),
         }
     }

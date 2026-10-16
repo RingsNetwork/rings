@@ -71,6 +71,7 @@ use inbound::tcp_inbound_lane;
 use inbound::TcpInbound;
 use inbound::TcpInboundLane;
 use inbound::TcpInboundSender;
+use pump::TcpStreamAbort;
 pub(crate) use pump::TcpStreamEnd;
 
 const TCP_BUF: usize = 30_000;
@@ -612,7 +613,7 @@ impl OnionTcpRuntime {
         let tx = self.client_inbound_sender(key, from)?;
         tx.try_send(inbound).map_err(|error| match error {
             tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                self.remove_client_stream(key);
+                self.end_client_stream(key, TcpStreamAbort::InboundOverflow);
                 Error::OnionRouteError(OnionRouteError::TcpStreamBackpressure)
             }
             tokio::sync::mpsc::error::TrySendError::Closed(_) => {
@@ -632,7 +633,7 @@ impl OnionTcpRuntime {
         let tx = self.exit_inbound_sender(key, from, service, sequence)?;
         tx.try_send(inbound).map_err(|error| match error {
             tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                self.remove_exit_stream(key);
+                self.end_exit_stream(key, TcpStreamAbort::InboundOverflow);
                 Error::OnionRouteError(OnionRouteError::TcpStreamBackpressure)
             }
             tokio::sync::mpsc::error::TrySendError::Closed(_) => {
@@ -793,6 +794,16 @@ impl OnionTcpRuntime {
         }
     }
 
+    /// End the client stream `key` for `cause` ([`end_stream`]).
+    fn end_client_stream(&self, key: TcpStreamKey, cause: TcpStreamAbort) {
+        end_stream(&self.client_streams, key, cause, |stream| &stream.inbound);
+    }
+
+    /// End the exit stream `key` for `cause` ([`end_stream`]).
+    fn end_exit_stream(&self, key: TcpStreamKey, cause: TcpStreamAbort) {
+        end_stream(&self.exit_streams, key, cause, |stream| &stream.inbound);
+    }
+
     fn admit_exit_stream(
         &self,
         policy: &OnionExitPolicy,
@@ -856,6 +867,23 @@ struct ExitStream {
     forward_sequences: OnionSequenceWindow,
     next_backward_sequence: u64,
     inbound: TcpInboundSender,
+}
+
+/// Remove the stream `key` of `streams` with `cause` recorded as its fate first, so its pump ends
+/// with that cause once the frames already queued are applied (`TcpStreamFate`); a stream already
+/// gone, or an unreadable table, ends nothing.
+fn end_stream<V>(
+    streams: &Mutex<HashMap<TcpStreamKey, V>>,
+    key: TcpStreamKey,
+    cause: TcpStreamAbort,
+    inbound: impl FnOnce(&V) -> &TcpInboundSender,
+) {
+    if let Some(stream) = lock(streams)
+        .ok()
+        .and_then(|mut streams| streams.remove(&key))
+    {
+        inbound(&stream).fate.end(cause);
+    }
 }
 
 fn authorize_client_stream(

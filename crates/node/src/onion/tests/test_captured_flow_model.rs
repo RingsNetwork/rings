@@ -81,15 +81,15 @@
 //! | exit reactions | `open_exit_stream`, then `pump_tcp_duplex` sends `Data` and `Shutdown` from one task (`onion/tcp/mod.rs`, `onion/tcp/pump.rs`) |
 //! | client reactions | `handle_client_payload` → `send_client_inbound`; the gateway sends the request only after `BridgeEvent::Opened` (`gateway/src/runtime.rs`) |
 //! | `Sever` | a link generation retires (`PeerRetired`, observed by both ends); under `Current` also `application_egress` refusing a send within `DATA_CHANNEL_SEND_ACCEPT_BUDGET` = 5 s, which `CircuitFate` retries instead (`swarm/transport/timeouts.rs`, `payload_send.rs`) |
-//! | `Drop` | the namespace queue refuses an envelope (`NAMESPACE_QUEUE_CAPACITY` envelopes, `NAMESPACE_QUEUE_WEIGHT` bytes; `NamespaceQueues::submit`, `extension/dispatch.rs`) |
+//! | `Drop` | the namespace queue refuses an envelope (`NAMESPACE_QUEUE_CAPACITY` envelopes, `NAMESPACE_QUEUE_WEIGHT` bytes; `NamespaceQueues::submit`, `extension/dispatch.rs`); at an endpoint, also its stream's full inbound lane (`TCP_INBOUND_LANE_FRAMES`; `send_client_inbound`, `send_exit_inbound`, `onion/tcp/mod.rs`) |
 //! | `CircuitFate`, a drop is observed | a refusal from an admitted peer queues `LinkFact::Dropped`, outside the bounds, at most one per peer while it waits, and never dropped (`extension/dispatch.rs`); the onion protocol maps it to `OnionCircuitInput::Link` (`Protocol::link_fact`, `circuit/protocol.rs`) |
 //! | `CircuitFate`, `Drop` at a relay | `destroy_link` removes every return edge on the link and seals `Destroy` toward both neighbours (`circuit/reducer.rs`) |
-//! | `CircuitFate`, `Drop` at an endpoint | `Teardown(Link(Dropped))` ends the link's streams with `TcpStreamAbort::CellDropped`, a cause that originates here, so each sends `Destroy` to its adjacent hop; the cause is recorded beside the stream's lane (`TcpStreamFate`), so a full lane cannot lose it (`onion/tcp/fate.rs`, `tcp/inbound.rs`) |
+//! | `CircuitFate`, `Drop` at an endpoint | `Teardown(Link(Dropped))` ends the link's streams with `TcpStreamAbort::CellDropped`, and a full lane ends its stream with `InboundOverflow` (#971): causes that originate here, so each sends `Destroy` to its adjacent hop; the cause is recorded beside the stream's lane (`TcpStreamFate`), so a full lane cannot lose it (`onion/tcp/fate.rs`, `tcp/inbound.rs`, `end_client_stream`, `end_exit_stream`) |
 //! | `Refuse`, `Abandon` | the per-peer onion outbox bound (`MAX_PENDING_ONION_SENDS_PER_PEER`, `MAX_PENDING_ONION_SEND_BYTES_PER_PEER`, `onion/circuit/send_outbox.rs`) refuses `enqueue_sealed` at a relay, or an endpoint's `send_sealed` |
 //! | `Current`, relay | the outbox only logs a failed send: `completion: None` (`send_outbox.rs`) |
 //! | `CircuitFate`, refusal is a delay | `send_until_settled` sends a cell refused before acceptance again while its peer is admitted (`send_outbox.rs`; `Error::is_refused_before_acceptance`, `error::send_class`) |
-//! | `CircuitFate`, both ends observe `Sever` | `PeerRetired` reaches each end's onion protocol in namespace order and is never dropped (`Protocol::peer_retired`, `extension/dispatch.rs`) |
-//! | `CircuitFate`, relay destruction | `destroy_adjacent`, `destroy_circuit`, `refuse_circuit` remove the return edge and seal `Destroy` toward the other neighbours (`circuit/reducer.rs`); the shell feeds a refused cell back as `CellRefused` (`circuit/shell.rs`) |
+//! | `CircuitFate`, both ends observe `Sever` | `LinkFact::Retired` reaches each end's onion protocol in namespace order and is never dropped (`Protocol::link_fact`, `extension/dispatch.rs`) |
+//! | `CircuitFate`, relay destruction | `destroy_link`, `destroy_circuit`, `refuse_circuit` remove the return edge and seal `Destroy` toward the other neighbours (`circuit/reducer.rs`); the shell feeds a refused cell back as `CellRefused` (`circuit/shell.rs`) |
 //! | `CircuitFate`, endpoints | `Teardown` ends client and exit streams and pending HTTPS requests (`onion/tcp/fate.rs`, `https/client.rs`); a stream aborted for a local cause sends `Destroy` to its adjacent hop (`tcp/client.rs`, `tcp/exit.rs`) |
 //! | client outcome `Destroyed` | the pump ends `Aborted(CircuitDestroyed)`; the gateway connector reports `OnionStreamReset`, and the gateway resets the flow with `StreamReset` (`onion/gateway.rs`, `gateway/src/bridge.rs`) |
 //! | `Destroy` exempt from the bound | `CellAdmission::Exempt`, `Charge::Exempt` (`send_outbox.rs`) |
@@ -105,8 +105,8 @@
 //! The other non-delivery sites on the path are unreachable within one flow and are not actions:
 //! the crypto admission gate (4096 operations per 60 s per peer, `circuit/limiter.rs`), forward
 //! layer expiry (≥ 120 s, `circuit/expiry.rs`), the relay return-edge TTL (120 s), liveness
-//! eviction (45 s after a probe issued 15 s after admission), the client inbound channel (32
-//! frames), and the exit's open-response quantum (250 ms, a delay).
+//! eviction (45 s after a probe issued 15 s after admission), and the exit's open-response quantum
+//! (250 ms, a delay).
 //!
 //! # Results (witnessed below for every circuit of 2 to 5 links)
 //!
