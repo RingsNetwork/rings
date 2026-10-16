@@ -4,10 +4,9 @@ use std::time::Duration;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::inbound::TcpInbound;
+use super::inbound::TcpInboundLane;
 use super::pump::pump_tcp_duplex;
 use super::pump::TcpDuplexEffects;
 use super::pump::TcpStreamEnd;
@@ -90,7 +89,7 @@ pub(super) struct ExitStreamTask {
     pub(super) client: OnionClientReturn,
     pub(super) service: OnionServiceName,
     pub(super) stream: TcpStream,
-    pub(super) rx: mpsc::Receiver<TcpInbound>,
+    pub(super) rx: TcpInboundLane,
     pub(super) lease: OnionExitLease,
 }
 

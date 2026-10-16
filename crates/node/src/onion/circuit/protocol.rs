@@ -1,5 +1,3 @@
-use rings_core::dht::Did;
-
 use super::codec::decode_event;
 use super::codec::OnionCircuitEvent;
 use super::codec::OnionCircuitInput;
@@ -8,6 +6,7 @@ use super::reducer::OnionCircuitReducer;
 use super::reducer::OnionCircuitState;
 use super::ONION_CIRCUIT_NAMESPACE;
 use crate::extension::ext::Ctx;
+use crate::extension::ext::LinkFact;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
 use crate::extension::ext::Transition;
@@ -70,10 +69,11 @@ impl Protocol for OnionCircuitProtocol {
         self.reducer.apply(ctx.state, event.input)
     }
 
-    /// A retired link destroys every circuit that rides it (`Law (Circuit fate)`, #963).
-    fn peer_retired(&self, peer: Did) -> Option<Self::Event> {
+    /// A retired link, or a cell dropped here from it, destroys every circuit that rides it
+    /// (`Law (Circuit fate)`, #963, #966).
+    fn link_fact(&self, fact: LinkFact) -> Option<Self::Event> {
         Some(OnionCircuitEvent {
-            input: OnionCircuitInput::PeerRetired { peer },
+            input: OnionCircuitInput::Link(fact),
         })
     }
 }

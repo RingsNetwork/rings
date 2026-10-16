@@ -1,5 +1,5 @@
 //! A TLA-style model of one captured TCP flow carried over an onion circuit, and its exhaustive
-//! check (#963, the residual `IdleTimeout` of #950).
+//! check (#963, the residual `IdleTimeout` of #950; drops at a hop, #966).
 //!
 //! # State
 //!
@@ -34,6 +34,8 @@
 //! Refuse(i, d) [failures_left > 0 ∧ head ≠ Destroy ∧ it reaches a relay]  the head crosses link i,
 //!                and the relay's outbox refuses to carry it on (bounded queue full).
 //! Abandon(e)   [failures_left > 0 ∧ outcome = Pending]  endpoint e's own data send is refused.
+//! Drop(i, d)   [failures_left > 0]  the head of link i in direction d, of any kind, reaches its
+//!                node, whose namespace queue drops it (full).
 //! Expire       [quiescent ∧ outcome = Pending]  the first deadline fires:
 //!                ¬opened ∧ OpenFirst → OpenTimedOut;  otherwise → IdleTimeout
 //! ```
@@ -43,7 +45,7 @@
 //! ```text
 //! Current      only a sender learns that its send failed, cell by cell:
 //!                relay          : the cell is discarded, nothing else happens
-//!                Refuse         : the cell is discarded
+//!                Refuse, Drop   : the cell is discarded
 //!                Abandon client : the pump stops → eof_seen   Abandon exit : closed, nothing sent
 //!                client ← Open  : OpenFailed      client ← Request : the pump stops → eof_seen
 //!                exit ← Opened  : the stream is dropped
@@ -55,7 +57,13 @@
 //!                Refuse at relay k : k destroys the circuit and sends Destroy both ways
 //!                Abandon client    : outcome := Destroyed; Destroy up
 //!                Abandon exit      : closed; Destroy down
-//!              Destroy is a control cell: no outbox bound refuses it.
+//!                Drop at relay k   : as Refuse at k        Drop at an endpoint : as Abandon
+//!              Destroy is a control cell: no outbox bound refuses it. A dropped Destroy is a drop
+//!              like any other: the node that drops it destroys the circuit in its place.
+//! Variants, each one point away from CircuitFate, checked to show that point necessary:
+//!   CircuitFateBoundedDestroy    the outbox bound refuses Destroy too
+//!   CircuitFateSilentDrops       Drop discards the cell, as Current does (before #966)
+//!   CircuitFateDropsDestroyAway  Drop at node k destroys only onward, in the cell's direction
 //! ```
 //!
 //! `quiescent` ≡ every live link is empty. Fairness and bounded delay: while a cell waits, a
@@ -73,6 +81,10 @@
 //! | exit reactions | `open_exit_stream`, then `pump_tcp_duplex` sends `Data` and `Shutdown` from one task (`onion/tcp/mod.rs`, `onion/tcp/pump.rs`) |
 //! | client reactions | `handle_client_payload` → `send_client_inbound`; the gateway sends the request only after `BridgeEvent::Opened` (`gateway/src/runtime.rs`) |
 //! | `Sever` | a link generation retires (`PeerRetired`, observed by both ends); under `Current` also `application_egress` refusing a send within `DATA_CHANNEL_SEND_ACCEPT_BUDGET` = 5 s, which `CircuitFate` retries instead (`swarm/transport/timeouts.rs`, `payload_send.rs`) |
+//! | `Drop` | the namespace queue refuses an envelope (`NAMESPACE_QUEUE_CAPACITY` envelopes, `NAMESPACE_QUEUE_WEIGHT` bytes; `NamespaceQueues::submit`, `extension/dispatch.rs`) |
+//! | `CircuitFate`, a drop is observed | a refusal from an admitted peer queues `LinkFact::Dropped`, outside the bounds, at most one per peer while it waits, and never dropped (`extension/dispatch.rs`); the onion protocol maps it to `OnionCircuitInput::Link` (`Protocol::link_fact`, `circuit/protocol.rs`) |
+//! | `CircuitFate`, `Drop` at a relay | `destroy_link` removes every return edge on the link and seals `Destroy` toward both neighbours (`circuit/reducer.rs`) |
+//! | `CircuitFate`, `Drop` at an endpoint | `Teardown(Link(Dropped))` ends the link's streams with `TcpStreamAbort::CellDropped`, a cause that originates here, so each sends `Destroy` to its adjacent hop; the cause is recorded beside the stream's lane (`TcpStreamFate`), so a full lane cannot lose it (`onion/tcp/fate.rs`, `tcp/inbound.rs`) |
 //! | `Refuse`, `Abandon` | the per-peer onion outbox bound (`MAX_PENDING_ONION_SENDS_PER_PEER`, `MAX_PENDING_ONION_SEND_BYTES_PER_PEER`, `onion/circuit/send_outbox.rs`) refuses `enqueue_sealed` at a relay, or an endpoint's `send_sealed` |
 //! | `Current`, relay | the outbox only logs a failed send: `completion: None` (`send_outbox.rs`) |
 //! | `CircuitFate`, refusal is a delay | `send_until_settled` sends a cell refused before acceptance again while its peer is admitted (`send_outbox.rs`; `Error::is_refused_before_acceptance`, `error::send_class`) |
@@ -86,25 +98,32 @@
 //! | `Expire` → `OpenTimedOut` | `TCP_OPEN_TIMEOUT_SECS` from the `Open` send (`onion/tcp/mod.rs`) |
 //! | `DeadlineOrder` | the request segment precedes the `Open` send, so the idle deadline is first iff `I ≤ O + Δ`: the test config (`I = O = 30 s`) is `IdleFirst`, the production default (`I = 300 s`) is `OpenFirst` |
 //!
-//! The namespace dispatch queue (`NAMESPACE_QUEUE_CAPACITY` envelopes, `extension/dispatch.rs`) can
-//! also refuse an envelope under load; it is outside this model, which assumes every queued cell
-//! is dispatched (#966).
+//! The core application inbox (`APPLICATION_INBOX_WEIGHT`) also drops a live message when full,
+//! counted only. The node's inbox reader never waits, so it fills only while the reader is
+//! starved; it is outside this model until its drops are observed too (#969).
 //!
 //! The other non-delivery sites on the path are unreachable within one flow and are not actions:
 //! the crypto admission gate (4096 operations per 60 s per peer, `circuit/limiter.rs`), forward
-//! layer expiry (≥ 120 s, `circuit/expiry.rs`), the relay return-edge TTL (120 s), the namespace
-//! queue (256 envelopes), liveness eviction (45 s after a probe issued 15 s after admission), the
-//! client inbound channel (32 frames), and the exit's open-response quantum (250 ms, a delay).
+//! layer expiry (≥ 120 s, `circuit/expiry.rs`), the relay return-edge TTL (120 s), liveness
+//! eviction (45 s after a probe issued 15 s after admission), the client inbound channel (32
+//! frames), and the exit's open-response quantum (250 ms, a delay).
 //!
 //! # Results (witnessed below for every circuit of 2 to 5 links)
 //!
 //! - **R1** Without a failure, every maximal execution ends `Delivered`, under both protocols.
 //! - **R2** Under `Current`, one link failure can end the flow in `IdleTimeout` under either
 //!   deadline order: a loss after the open is observed only by the gateway's idle clock.
-//! - **R3** Under `CircuitFate`, up to two failures of any kind (`Sever`, `Refuse`, `Abandon`) never
-//!   end the flow in `IdleTimeout`: every outcome is the response or a typed failure.
+//! - **R3** Under `CircuitFate`, up to two failures of any kind (`Sever`, `Refuse`, `Abandon`,
+//!   `Drop`, a dropped `Destroy` included) never end the flow in `IdleTimeout`: every outcome is the
+//!   response or a typed failure.
 //! - **R4** Under `CircuitFateBoundedDestroy`, one `Refuse` can end the flow in `IdleTimeout`: the
 //!   relay's `Destroy` toward the full queue is lost, so `Destroy` must be exempt from the bound.
+//! - **R5** Under `CircuitFateSilentDrops`, one `Drop` can end the flow in `IdleTimeout`: no sender
+//!   learns of a cell lost after its send was accepted, so the drop must be observed where it
+//!   happens.
+//! - **R6** Under `CircuitFateDropsDestroyAway`, one `Drop` can end the flow in `IdleTimeout`: the
+//!   side that sent the dropped cell never learns, so a drop must destroy the circuit toward both
+//!   neighbours, unlike a retirement, whose far side observes it by itself.
 //!
 //! Derivation of #950: by R1 and R2, the untyped reset occurs iff a link of the circuit fails
 //! while the flow is in flight. Per-hop order holds; the missing law is delivery: the circuit
@@ -114,7 +133,8 @@
 //! Law (Circuit fate), witnessed by R3: every cell of a circuit is delivered, or both endpoints of
 //! the circuit observe its destruction. A failed send is observed by its sender alone, and may lie
 //! on the only path toward the other endpoint; the failure is made symmetric at the link, so the
-//! node on each side observes it and carries `Destroy` away from it.
+//! node on each side observes it and carries `Destroy` away from it. A drop is observed by its
+//! receiver alone, so the receiver carries `Destroy` both ways (R5, R6).
 
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -169,18 +189,31 @@ enum DeadlineOrder {
 enum Protocol {
     /// Only the sender of a refused cell learns of it.
     Current,
-    /// Both ends of a failed link observe it and destroy the circuit.
+    /// Both ends of a failed link observe it and destroy the circuit, and a node that drops a cell
+    /// destroys the circuit in its place.
     CircuitFate,
     /// `CircuitFate` with `Destroy` held to the outbox bound: a relay's `Destroy` toward the full
     /// queue that refused a cell is refused too. Not implemented; checked to show the exemption
     /// is necessary.
     CircuitFateBoundedDestroy,
+    /// `CircuitFate` whose nodes drop cells silently, as before #966. Checked to show that a drop
+    /// must be observed where it happens.
+    CircuitFateSilentDrops,
+    /// `CircuitFate` whose node observing a drop destroys the circuit only away from the link the
+    /// cell came on, as after a retirement. Not implemented; checked to show that a drop must be
+    /// carried toward both neighbours.
+    CircuitFateDropsDestroyAway,
 }
 
 impl Protocol {
     /// Whether both ends of a failed link observe it.
     fn observes_link_fate(self) -> bool {
         !matches!(self, Self::Current)
+    }
+
+    /// Whether a node that drops a cell observes the drop.
+    fn observes_drops(self) -> bool {
+        !matches!(self, Self::Current | Self::CircuitFateSilentDrops)
     }
 }
 
@@ -388,19 +421,16 @@ impl State {
         link.severed = true;
         let lost_up = std::mem::take(&mut link.up);
         let lost_down = std::mem::take(&mut link.down);
-        match protocol {
-            Protocol::Current => {
-                lost_up
-                    .into_iter()
-                    .for_each(|cell| next.send_failed(protocol, index, cell));
-                lost_down
-                    .into_iter()
-                    .for_each(|cell| next.send_failed(protocol, index + 1, cell));
-            }
-            Protocol::CircuitFate | Protocol::CircuitFateBoundedDestroy => {
-                next.observe_destruction(protocol, index, Direction::Down);
-                next.observe_destruction(protocol, index + 1, Direction::Up);
-            }
+        if protocol.observes_link_fate() {
+            next.observe_destruction(protocol, index, Direction::Down);
+            next.observe_destruction(protocol, index + 1, Direction::Up);
+        } else {
+            lost_up
+                .into_iter()
+                .for_each(|cell| next.send_failed(protocol, index, cell));
+            lost_down
+                .into_iter()
+                .for_each(|cell| next.send_failed(protocol, index + 1, cell));
         }
         Some(next)
     }
@@ -443,6 +473,18 @@ impl State {
         Some(next)
     }
 
+    /// The endpoint `node` ends its stream for a cause of its own and destroys the circuit toward
+    /// its adjacent hop.
+    fn end_endpoint(&mut self, protocol: Protocol, node: usize) {
+        if node == 0 {
+            self.conclude(Outcome::Destroyed);
+            self.send(protocol, 0, Direction::Up, Cell::Destroy);
+        } else {
+            self.exit_closed = true;
+            self.send(protocol, node, Direction::Down, Cell::Destroy);
+        }
+    }
+
     /// `Abandon(e)`: the endpoint `node` aborts its stream after its own send was refused.
     fn abandon(&self, protocol: Protocol, node: usize) -> Option<Self> {
         if self.failures_left == 0 || self.outcome != Outcome::Pending {
@@ -450,17 +492,40 @@ impl State {
         }
         let mut next = self.clone();
         next.failures_left -= 1;
-        let exit = next.exit();
-        match (protocol, node == exit) {
-            (Protocol::Current, false) => next.eof_seen = true,
-            (Protocol::Current, true) => next.exit_closed = true,
-            (Protocol::CircuitFate | Protocol::CircuitFateBoundedDestroy, false) => {
-                next.conclude(Outcome::Destroyed);
-                next.send(protocol, 0, Direction::Up, Cell::Destroy);
-            }
-            (Protocol::CircuitFate | Protocol::CircuitFateBoundedDestroy, true) => {
-                next.exit_closed = true;
-                next.send(protocol, exit, Direction::Down, Cell::Destroy);
+        if protocol.observes_link_fate() {
+            next.end_endpoint(protocol, node);
+        } else if node == next.exit() {
+            next.exit_closed = true;
+        } else {
+            next.eof_seen = true;
+        }
+        Some(next)
+    }
+
+    /// `Drop(i, d)`: the head of link `index` in `direction`, of any kind, reaches its node, whose
+    /// namespace queue drops it. A node that observes the drop destroys the circuit in its place:
+    /// a relay toward both neighbours, an endpoint toward its adjacent hop.
+    fn drop_cell(&self, protocol: Protocol, index: usize, direction: Direction) -> Option<Self> {
+        if self.failures_left == 0 {
+            return None;
+        }
+        let mut next = self.clone();
+        next.links
+            .get_mut(index)?
+            .queue_mut(direction)
+            .pop_front()?;
+        next.failures_left -= 1;
+        let node = match direction {
+            Direction::Up => index + 1,
+            Direction::Down => index,
+        };
+        if protocol == Protocol::CircuitFateDropsDestroyAway {
+            next.observe_destruction(protocol, node, direction);
+        } else if protocol.observes_drops() {
+            if node == 0 || node == next.exit() {
+                next.end_endpoint(protocol, node);
+            } else {
+                next.destroy_at(protocol, node);
             }
         }
         Some(next)
@@ -489,6 +554,7 @@ impl State {
             for direction in [Direction::Up, Direction::Down] {
                 next.extend(self.cross(protocol, index, direction));
                 next.extend(self.refuse(protocol, index, direction));
+                next.extend(self.drop_cell(protocol, index, direction));
             }
             next.extend(self.sever(protocol, index));
         }
@@ -523,10 +589,12 @@ fn outcomes(
 }
 
 /// Every protocol and deadline order, for the checks that range over both.
-const PROTOCOLS: [Protocol; 3] = [
+const PROTOCOLS: [Protocol; 5] = [
     Protocol::Current,
     Protocol::CircuitFate,
     Protocol::CircuitFateBoundedDestroy,
+    Protocol::CircuitFateSilentDrops,
+    Protocol::CircuitFateDropsDestroyAway,
 ];
 
 /// Both deadline orders.
@@ -564,8 +632,8 @@ fn test_current_protocol_lets_a_link_failure_end_in_an_untyped_reset() {
     }
 }
 
-/// R3, Law (Circuit fate): up to two link failures end the flow with the response or a typed
-/// failure, never an untyped reset.
+/// R3, Law (Circuit fate): up to two failures of any kind, drops included, end the flow with the
+/// response or a typed failure, never an untyped reset.
 #[test]
 fn test_circuit_fate_types_every_link_failure() {
     for links in MIN_LINKS..=MAX_LINKS {
@@ -597,5 +665,35 @@ fn test_destroy_must_be_exempt_from_the_outbox_bound() {
             ended.contains(&Outcome::IdleTimeout),
             "links = {links}: {ended:?}"
         );
+    }
+}
+
+/// R5: a drop must be observed where it happens: dropped silently, as before #966, one cell lost
+/// at a hop can end the flow untyped, since no sender learns of it.
+#[test]
+fn test_a_drop_must_be_observed_where_it_happens() {
+    for links in MIN_LINKS..=MAX_LINKS {
+        for order in ORDERS {
+            let ended = outcomes(Protocol::CircuitFateSilentDrops, order, links, 1);
+            assert!(
+                ended.contains(&Outcome::IdleTimeout),
+                "links = {links}, {order:?}: {ended:?}"
+            );
+        }
+    }
+}
+
+/// R6: a drop must be carried toward both neighbours: destroyed only away from the link the cell
+/// came on, the side that sent it never learns, and one drop can end the flow untyped.
+#[test]
+fn test_a_drop_must_destroy_toward_both_neighbours() {
+    for links in MIN_LINKS..=MAX_LINKS {
+        for order in ORDERS {
+            let ended = outcomes(Protocol::CircuitFateDropsDestroyAway, order, links, 1);
+            assert!(
+                ended.contains(&Outcome::IdleTimeout),
+                "links = {links}, {order:?}: {ended:?}"
+            );
+        }
     }
 }

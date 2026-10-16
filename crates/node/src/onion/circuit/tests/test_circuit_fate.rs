@@ -1,5 +1,5 @@
-//! `Law (Circuit fate)` of the pure reducer (#963): a retired link or a received `Destroy` removes
-//! the circuits it touches and carries their destruction away from it.
+//! `Law (Circuit fate)` of the pure reducer (#963, #966): a retired link, a cell dropped here or a
+//! received `Destroy` removes the circuits it touches and carries their destruction on.
 
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
@@ -20,6 +20,7 @@ use super::super::OnionRelayedCell;
 use super::super::MAX_ONION_RELAY_CIRCUITS;
 use super::super::ONION_RELAY_RETURN_TTL_MS;
 use super::test_circuit_protocol::session;
+use crate::extension::ext::LinkFact;
 
 /// Circuit id of the relay's edge toward the client.
 const PREVIOUS_CIRCUIT: OnionCircuitId = OnionCircuitId::new([1; 16]);
@@ -102,20 +103,20 @@ fn test_a_retired_link_destroys_its_circuits_away_from_it() {
     let next = session();
     let state = relay_with_one_circuit(&previous, &next);
 
-    let (after, effects) = apply(&state, OnionCircuitInput::PeerRetired {
-        peer: next.delegator_did(),
-    });
+    let retired = LinkFact::Retired(next.delegator_did());
+    let (after, effects) = apply(&state, OnionCircuitInput::Link(retired));
     assert_eq!(after.relay_return_count(), 0);
     assert_eq!(effects.len(), 2);
     assert!(is_destroy_sent(&effects[0], &previous, PREVIOUS_CIRCUIT));
     assert_eq!(
         effects[1],
-        OnionCircuitEffect::Teardown(OnionCircuitTeardown::Peer(next.delegator_did()))
+        OnionCircuitEffect::Teardown(OnionCircuitTeardown::Link(retired))
     );
 
-    let (after, effects) = apply(&state, OnionCircuitInput::PeerRetired {
-        peer: previous.delegator_did(),
-    });
+    let (after, effects) = apply(
+        &state,
+        OnionCircuitInput::Link(LinkFact::Retired(previous.delegator_did())),
+    );
     assert_eq!(after.relay_return_count(), 0);
     assert!(is_destroy_sent(&effects[0], &next, NEXT_CIRCUIT));
 }
@@ -150,14 +151,16 @@ fn test_a_destroy_crosses_a_relay_to_the_other_neighbour() {
     )]);
 }
 
-/// A teardown names exactly the endpoints on its link: every circuit of a retired peer, or the
-/// one circuit a `Destroy` named on the link it came from.
+/// A teardown names exactly the endpoints on its link: every circuit of a retired peer or of one
+/// whose cell was dropped here, or the one circuit a `Destroy` named on the link it came from.
 #[test]
 fn test_a_teardown_ends_only_the_endpoints_on_its_link() {
     let peer = session().delegator_did();
     let other = session().delegator_did();
-    assert!(OnionCircuitTeardown::Peer(peer).ends(peer, NEXT_CIRCUIT));
-    assert!(!OnionCircuitTeardown::Peer(peer).ends(other, NEXT_CIRCUIT));
+    for fact in [LinkFact::Retired(peer), LinkFact::Dropped(peer)] {
+        assert!(OnionCircuitTeardown::Link(fact).ends(peer, NEXT_CIRCUIT));
+        assert!(!OnionCircuitTeardown::Link(fact).ends(other, NEXT_CIRCUIT));
+    }
     let circuit = OnionCircuitTeardown::Circuit {
         from: peer,
         circuit_id: NEXT_CIRCUIT,
@@ -185,4 +188,35 @@ fn test_a_refused_cell_destroys_its_circuit_toward_both_neighbours() {
         assert!(is_destroy_sent(&effects[0], &next, NEXT_CIRCUIT));
         assert!(is_destroy_sent(&effects[1], &previous, PREVIOUS_CIRCUIT));
     }
+}
+
+/// A cell dropped here from either neighbour destroys every circuit on that link toward both
+/// neighbours, the one whose cell was dropped included, and ends the local endpoints on that link:
+/// the link is up, and its far side has not observed the loss (#966).
+#[test]
+fn test_a_dropped_cell_destroys_its_link_toward_both_neighbours() {
+    let previous = session();
+    let next = session();
+    let stranger = session();
+    let state = relay_with_one_circuit(&previous, &next);
+
+    for peer in [next.delegator_did(), previous.delegator_did()] {
+        let dropped = LinkFact::Dropped(peer);
+        let (after, effects) = apply(&state, OnionCircuitInput::Link(dropped));
+        assert_eq!(after.relay_return_count(), 0);
+        assert_eq!(effects.len(), 3);
+        assert!(is_destroy_sent(&effects[0], &next, NEXT_CIRCUIT));
+        assert!(is_destroy_sent(&effects[1], &previous, PREVIOUS_CIRCUIT));
+        assert_eq!(
+            effects[2],
+            OnionCircuitEffect::Teardown(OnionCircuitTeardown::Link(dropped))
+        );
+    }
+
+    let dropped = LinkFact::Dropped(stranger.delegator_did());
+    let (after, effects) = apply(&state, OnionCircuitInput::Link(dropped));
+    assert_eq!(after.relay_return_count(), 1);
+    assert_eq!(effects, vec![OnionCircuitEffect::Teardown(
+        OnionCircuitTeardown::Link(dropped)
+    )]);
 }

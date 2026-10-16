@@ -1,8 +1,11 @@
 use rings_core::ecc::SecretKey;
 use rings_core::message::MessageSigner;
+use tokio::sync::mpsc::error::TryRecvError;
 
+use super::super::pump::TcpStreamAbort;
 use super::super::*;
 use crate::extension::ext::Extensions;
+use crate::extension::ext::LinkFact;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitTeardown;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
@@ -110,7 +113,7 @@ fn insert_test_client_stream(
     expected: Did,
     exit: OnionExitDescriptor,
     return_id: OnionReturnId,
-    tx: mpsc::Sender<TcpInbound>,
+    tx: TcpInboundSender,
 ) -> Result<TcpStreamKey> {
     insert_test_client_stream_for_service(
         runtime,
@@ -128,7 +131,7 @@ fn insert_test_client_stream_for_service(
     expected: Did,
     exit: OnionExitDescriptor,
     return_id: OnionReturnId,
-    tx: mpsc::Sender<TcpInbound>,
+    tx: TcpInboundSender,
 ) -> Result<TcpStreamKey> {
     let (open_tx, _open_rx) = tokio::sync::oneshot::channel();
     runtime.insert_client_stream(service, expected, exit, return_id, open_tx, tx)
@@ -164,7 +167,7 @@ fn test_saturated_client_inbound_queue_closes_stream_without_waiting() -> Result
     let runtime = runtime();
     let expected = did();
     let exit = session();
-    let (tx, _rx) = mpsc::channel(1);
+    let (tx, _rx) = tcp_inbound_lane(1);
     let key = insert_test_client_stream(
         &runtime,
         expected,
@@ -192,7 +195,7 @@ fn test_saturated_exit_inbound_queue_closes_stream_without_waiting() -> Result<(
     let key = TcpStreamKey {
         circuit_id: OnionCircuitId::new([22; 16]),
     };
-    let (tx, _rx) = mpsc::channel(1);
+    let (tx, _rx) = tcp_inbound_lane(1);
     runtime.insert_exit_stream(key, service.clone(), peer, tx)?;
 
     runtime.send_exit_inbound(
@@ -224,7 +227,7 @@ fn test_client_stream_accepts_only_expected_return_peer() -> Result<()> {
     let expected = did();
     let attacker = did();
     let exit = session();
-    let (tx, _rx) = mpsc::channel(1);
+    let (tx, _rx) = tcp_inbound_lane(1);
     let key = insert_test_client_stream(
         &runtime,
         expected,
@@ -248,7 +251,7 @@ fn test_client_stream_rejects_payload_from_wrong_exit_session() -> Result<()> {
     let selected_exit = session();
     let wrong_exit = session();
     let return_id = OnionReturnId::new([9; 16]);
-    let (tx, _rx) = mpsc::channel(1);
+    let (tx, _rx) = tcp_inbound_lane(1);
     let key = insert_test_client_stream(
         &runtime,
         expected,
@@ -274,7 +277,7 @@ fn test_client_stream_rejects_replayed_backward_nonce() -> Result<()> {
     let expected = did();
     let exit = session();
     let return_id = OnionReturnId::new([8; 16]);
-    let (tx, _rx) = mpsc::channel(1);
+    let (tx, _rx) = tcp_inbound_lane(1);
     let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&exit), return_id, tx)?;
     let payload = dummy_authenticated_payload(return_id, &exit);
 
@@ -316,7 +319,7 @@ fn test_busy_forward_stream_uses_constant_memory_sequence_window() -> Result<()>
     let key = TcpStreamKey {
         circuit_id: OnionCircuitId::new([7; 16]),
     };
-    let (tx, _rx) = mpsc::channel(1);
+    let (tx, _rx) = tcp_inbound_lane(1);
     runtime.insert_exit_stream(key, service.clone(), peer, tx)?;
 
     for sequence in 1..=10_000 {
@@ -365,7 +368,7 @@ fn test_busy_backward_stream_uses_constant_memory_sequence_window() -> Result<()
     let expected = Did::from(104_u32);
     let exit = session();
     let return_id = OnionReturnId::new([10; 16]);
-    let (tx, _rx) = mpsc::channel(1);
+    let (tx, _rx) = tcp_inbound_lane(1);
     let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&exit), return_id, tx)?;
 
     for sequence in 0..10_000 {
@@ -434,7 +437,7 @@ fn test_client_stream_rejects_backward_payload_for_wrong_service() -> Result<()>
     let expected = did();
     let exit = session();
     let return_id = OnionReturnId::new([10; 16]);
-    let (tx, _rx) = mpsc::channel(1);
+    let (tx, _rx) = tcp_inbound_lane(1);
     let key = insert_test_client_stream_for_service(
         &runtime,
         OnionServiceName::https(),
@@ -487,8 +490,8 @@ fn test_exit_stream_rejects_duplicate_live_circuit() {
         circuit_id: OnionCircuitId::new([3; 16]),
     };
     let expected = did();
-    let (first_tx, _first_rx) = mpsc::channel(1);
-    let (second_tx, _second_rx) = mpsc::channel(1);
+    let (first_tx, _first_rx) = tcp_inbound_lane(1);
+    let (second_tx, _second_rx) = tcp_inbound_lane(1);
 
     assert!(runtime
         .insert_exit_stream(key, OnionServiceName::tcp(), expected, first_tx)
@@ -539,7 +542,7 @@ async fn test_native_client_dispatch_hands_tcp_circuits_past_the_https_client() 
     let expected = did();
     let exit = session();
     let return_id = OnionReturnId::new([10; 16]);
-    let (tx, mut rx) = mpsc::channel(1);
+    let (tx, mut rx) = tcp_inbound_lane(1);
     let key = insert_test_client_stream(&tcp, expected, exit_descriptor(&exit), return_id, tx)?;
 
     handler
@@ -551,14 +554,15 @@ async fn test_native_client_dispatch_hands_tcp_circuits_past_the_https_client() 
         )
         .await?;
 
-    assert!(matches!(rx.try_recv(), Ok(TcpInbound::Close)));
+    assert!(matches!(rx.frames.try_recv(), Ok(TcpInbound::Close)));
     assert_eq!(https.client().pending_len(), 0);
     Ok(())
 }
 
-/// Law (#963): a teardown of a peer ends every client stream adjacent to it at once, an open
-/// still awaiting its answer included, and leaves streams on other links untouched; a teardown
-/// of one circuit ends only that stream.
+/// Law (#963, #966): a teardown of a link ends every client stream adjacent to it at once, an
+/// open still awaiting its answer included, and leaves streams on other links untouched; a
+/// teardown of one circuit ends only that stream. Each ended stream has its cause recorded before
+/// its lane closes: `CellDropped` after a drop here, `CircuitDestroyed` otherwise.
 #[test]
 fn test_teardown_ends_exactly_the_streams_on_its_link() -> Result<()> {
     let runtime = runtime();
@@ -566,7 +570,7 @@ fn test_teardown_ends_exactly_the_streams_on_its_link() -> Result<()> {
     let other = did();
     let exit = session();
     let (open_tx, mut open_rx) = tokio::sync::oneshot::channel();
-    let (opening_tx, _opening_rx) = mpsc::channel(4);
+    let (opening_tx, _opening_rx) = tcp_inbound_lane(4);
     let opening = runtime.insert_client_stream(
         OnionServiceName::tcp(),
         retired,
@@ -575,7 +579,7 @@ fn test_teardown_ends_exactly_the_streams_on_its_link() -> Result<()> {
         open_tx,
         opening_tx,
     )?;
-    let (open_stream_tx, mut open_stream_rx) = mpsc::channel(4);
+    let (open_stream_tx, mut open_stream_rx) = tcp_inbound_lane(4);
     let open = insert_test_client_stream(
         &runtime,
         retired,
@@ -583,7 +587,7 @@ fn test_teardown_ends_exactly_the_streams_on_its_link() -> Result<()> {
         OnionReturnId::new([32; 16]),
         open_stream_tx,
     )?;
-    let (kept_tx, mut kept_rx) = mpsc::channel(4);
+    let (kept_tx, mut kept_rx) = tcp_inbound_lane(4);
     let kept = insert_test_client_stream(
         &runtime,
         other,
@@ -591,29 +595,51 @@ fn test_teardown_ends_exactly_the_streams_on_its_link() -> Result<()> {
         OnionReturnId::new([33; 16]),
         kept_tx,
     )?;
+    let (dropped_tx, mut dropped_rx) = tcp_inbound_lane(4);
+    let dropped = insert_test_client_stream(
+        &runtime,
+        other,
+        exit_descriptor(&exit),
+        OnionReturnId::new([34; 16]),
+        dropped_tx,
+    )?;
 
-    runtime.teardown(OnionCircuitTeardown::Peer(retired))?;
+    runtime.teardown(OnionCircuitTeardown::Link(LinkFact::Retired(retired)))?;
 
     let streams = lock(&runtime.client_streams)?;
     assert!(!streams.contains_key(&opening));
     assert!(!streams.contains_key(&open));
     assert!(streams.contains_key(&kept));
+    assert!(streams.contains_key(&dropped));
     drop(streams);
-    assert!(matches!(
-        open_stream_rx.try_recv(),
-        Ok(TcpInbound::Destroyed)
-    ));
+    assert_ended(&mut open_stream_rx, TcpStreamAbort::CircuitDestroyed);
     assert!(matches!(
         open_rx.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Closed)
     ));
-    assert!(kept_rx.try_recv().is_err());
+    assert!(kept_rx
+        .frames
+        .try_recv()
+        .is_err_and(|error| error == TryRecvError::Empty));
 
     runtime.teardown(OnionCircuitTeardown::Circuit {
         from: other,
         circuit_id: kept.circuit_id,
     })?;
     assert!(!lock(&runtime.client_streams)?.contains_key(&kept));
-    assert!(matches!(kept_rx.try_recv(), Ok(TcpInbound::Destroyed)));
+    assert_ended(&mut kept_rx, TcpStreamAbort::CircuitDestroyed);
+
+    runtime.teardown(OnionCircuitTeardown::Link(LinkFact::Dropped(other)))?;
+    assert!(!lock(&runtime.client_streams)?.contains_key(&dropped));
+    assert_ended(&mut dropped_rx, TcpStreamAbort::CellDropped);
     Ok(())
+}
+
+/// Assert that `lane` is closed with nothing queued and `cause` recorded as its fate.
+fn assert_ended(lane: &mut TcpInboundLane, cause: TcpStreamAbort) {
+    assert!(lane
+        .frames
+        .try_recv()
+        .is_err_and(|error| error == TryRecvError::Disconnected));
+    assert_eq!(lane.fate.closed(), cause);
 }

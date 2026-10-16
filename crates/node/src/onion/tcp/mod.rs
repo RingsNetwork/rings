@@ -67,11 +67,17 @@ use exit::connect_exit_target;
 use exit::open_response_deadline;
 use exit::spawn_exit_stream;
 use exit::ExitStreamTask;
+use inbound::tcp_inbound_lane;
 use inbound::TcpInbound;
+use inbound::TcpInboundLane;
+use inbound::TcpInboundSender;
 pub(crate) use pump::TcpStreamEnd;
 
 const TCP_BUF: usize = 30_000;
 const TCP_OPEN_TIMEOUT_SECS: u64 = 30;
+
+/// Frames one stream's inbound lane holds before a further frame overflows it.
+const TCP_INBOUND_LANE_FRAMES: usize = 32;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum OnionTcpPayload {
@@ -114,7 +120,7 @@ pub struct NativeOnionOpenStream {
     key: TcpStreamKey,
     path: OnionCircuitPath,
     client_return: OnionClientReturn,
-    rx: mpsc::Receiver<TcpInbound>,
+    rx: TcpInboundLane,
 }
 
 impl NativeOnionOpenStream {
@@ -222,7 +228,7 @@ impl OnionTcpRuntime {
         let expected_exit = route.exit().clone();
         let service = route.service_name().clone();
         let client_return = OnionClientReturn::new(self.signer.delegatee_public_key());
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = tcp_inbound_lane(TCP_INBOUND_LANE_FRAMES);
         let (open_tx, open_rx) = oneshot::channel();
         let key = self.insert_client_stream(
             service.clone(),
@@ -525,8 +531,8 @@ impl OnionTcpRuntime {
         &self,
         request: &TcpExitOpen,
         policy: &OnionExitPolicy,
-    ) -> Result<(mpsc::Receiver<TcpInbound>, OnionExitLease)> {
-        let (tx, rx) = mpsc::channel(32);
+    ) -> Result<(TcpInboundLane, OnionExitLease)> {
+        let (tx, rx) = tcp_inbound_lane(TCP_INBOUND_LANE_FRAMES);
         self.insert_exit_stream(
             request.key,
             request.service.clone(),
@@ -549,7 +555,7 @@ impl OnionTcpRuntime {
         expected_exit: OnionExitDescriptor,
         return_id: OnionReturnId,
         open_ack: oneshot::Sender<std::result::Result<(), OnionExitFailure>>,
-        tx: mpsc::Sender<TcpInbound>,
+        inbound: TcpInboundSender,
     ) -> Result<TcpStreamKey> {
         let mut streams = lock(&self.client_streams)?;
         for _ in 0..16 {
@@ -565,7 +571,7 @@ impl OnionTcpRuntime {
                         return_id,
                         open_ack: Some(open_ack),
                         backward_sequences: OnionSequenceWindow::default(),
-                        tx,
+                        inbound,
                     });
                     return Ok(key);
                 }
@@ -582,7 +588,7 @@ impl OnionTcpRuntime {
         key: TcpStreamKey,
         service: OnionServiceName,
         expected_forward_peer: Did,
-        tx: mpsc::Sender<TcpInbound>,
+        inbound: TcpInboundSender,
     ) -> Result<()> {
         let mut streams = lock(&self.exit_streams)?;
         match streams.entry(key) {
@@ -594,7 +600,7 @@ impl OnionTcpRuntime {
                         OnionForwardSequence::FIRST.value(),
                     ),
                     next_backward_sequence: 0,
-                    tx,
+                    inbound,
                 });
                 Ok(())
             }
@@ -648,7 +654,7 @@ impl OnionTcpRuntime {
     ) -> Result<mpsc::Sender<TcpInbound>> {
         let streams = lock(&self.client_streams)?;
         let stream = authorize_client_stream(&streams, key, from)?;
-        Ok(stream.tx.clone())
+        Ok(stream.inbound.frames.clone())
     }
 
     fn verify_client_payload(
@@ -760,7 +766,7 @@ impl OnionTcpRuntime {
                 return Err(Error::OnionRouteError(OnionRouteError::ForwardReplay));
             }
         }
-        Ok(stream.tx.clone())
+        Ok(stream.inbound.frames.clone())
     }
 
     fn next_backward_sequence(&self, key: TcpStreamKey) -> Result<OnionBackwardSequence> {
@@ -837,7 +843,7 @@ struct ClientStream {
     return_id: OnionReturnId,
     open_ack: Option<oneshot::Sender<std::result::Result<(), OnionExitFailure>>>,
     backward_sequences: OnionSequenceWindow,
-    tx: mpsc::Sender<TcpInbound>,
+    inbound: TcpInboundSender,
 }
 
 // Invariant: `service` is the canonical service accepted by the Open payload that created this exit
@@ -849,7 +855,7 @@ struct ExitStream {
     expected_forward_peer: Did,
     forward_sequences: OnionSequenceWindow,
     next_backward_sequence: u64,
-    tx: mpsc::Sender<TcpInbound>,
+    inbound: TcpInboundSender,
 }
 
 fn authorize_client_stream(

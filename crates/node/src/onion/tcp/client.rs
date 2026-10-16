@@ -37,7 +37,7 @@ pub(super) struct ClientStreamTask {
     pub(super) key: TcpStreamKey,
     pub(super) path: OnionCircuitPath,
     pub(super) client_return: OnionClientReturn,
-    pub(super) rx: mpsc::Receiver<TcpInbound>,
+    pub(super) rx: TcpInboundLane,
 }
 
 /// Pump `stream` against its circuit until it ends, then release the stream and report its end.

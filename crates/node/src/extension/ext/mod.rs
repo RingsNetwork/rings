@@ -41,6 +41,7 @@ mod registry;
 pub use envelope::Envelope;
 pub use interpret::Interpret;
 pub use protocol::Ctx;
+pub use protocol::LinkFact;
 // Router internals — not part of the extension-author API (which is `Protocol` / `Interpret` /
 // `Scope` / `Transition` / …). Crate-visible only, so the old ambient `Core` surface
 // cannot be used to bypass the scoped-capability boundary. `Handler`/`DynHandler` stay private

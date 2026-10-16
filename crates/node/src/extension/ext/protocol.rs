@@ -123,12 +123,35 @@ pub trait Protocol {
         false
     }
 
-    /// The event this protocol makes of the retirement of `peer`'s link generation, or `None`
-    /// when the protocol keeps no state about links. `peer_retired : Did ⇀ Event`.
+    /// The event this protocol makes of `fact` about a link, or `None` when the protocol keeps
+    /// no state about links. `link_fact : LinkFact ⇀ Event`.
     ///
-    /// A retirement reaches the protocol in its namespace's queue, in the order the core
-    /// announced it relative to the envelopes around it, and is never dropped (#963).
-    fn peer_retired(&self, _peer: Did) -> Option<Self::Event> {
+    /// A fact reaches the protocol in its namespace's queue, in order with the envelopes around
+    /// it, and is never dropped (#963, #966).
+    fn link_fact(&self, _fact: LinkFact) -> Option<Self::Event> {
         None
+    }
+}
+
+/// A fact about this node's link to one peer, which the router delivers to a protocol beside
+/// its envelopes ([`Protocol::link_fact`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkFact {
+    /// `peer`'s link generation retired: nothing more crosses it (#963).
+    Retired(Did),
+    /// The namespace's queue dropped an envelope from `peer`, an admitted peer, for want of room:
+    /// the link stays up, but a message `peer` sent over it was lost here (#966).
+    ///
+    /// Several drops before the protocol reads the fact are told once: at most one such fact per
+    /// peer waits in a namespace's queue.
+    Dropped(Did),
+}
+
+impl LinkFact {
+    /// The peer at the other end of the link this fact is about.
+    pub const fn peer(self) -> Did {
+        match self {
+            Self::Retired(peer) | Self::Dropped(peer) => peer,
+        }
     }
 }
