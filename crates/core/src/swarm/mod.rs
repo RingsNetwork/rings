@@ -294,6 +294,10 @@ impl Swarm {
     }
 
     /// List active, routable peers and their connection status.
+    ///
+    /// The status is the connection's raw WebRTC state. A peer is routable once its data
+    /// channel is open in `Connecting` or `Connected`, so a listed peer may still read
+    /// `Connecting`: a browser can open the data channel before it reports `connected`.
     pub fn peers(&self) -> Vec<ConnectionInspect> {
         self.transport
             .get_connections()
