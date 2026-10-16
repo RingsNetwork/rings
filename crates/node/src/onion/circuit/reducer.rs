@@ -27,6 +27,7 @@ use super::ONION_FORWARD_MAX_VALIDITY_MS;
 use super::ONION_RELAY_RETURN_TTL_MS;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::ext::LinkFact;
 use crate::extension::ext::Transition;
 use crate::onion::OnionRouteError;
 
@@ -167,8 +168,10 @@ pub enum OnionRelayedCell {
 /// The local endpoints of destroyed circuits, as the shell finds them (#963).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OnionCircuitTeardown {
-    /// Every circuit whose adjacent hop is `peer`, whose link generation retired.
-    Peer(Did),
+    /// Every circuit whose adjacent hop is the peer of the fact: its link retired, or a cell
+    /// from it was dropped here (#966). After a drop the link is up, so each endpoint destroys
+    /// its circuit toward the peer as well.
+    Link(LinkFact),
     /// The circuit `circuit_id` whose adjacent hop `from` destroyed it.
     Circuit {
         /// Adjacent hop that sent the `Destroy`.
@@ -183,7 +186,7 @@ impl OnionCircuitTeardown {
     /// the adjacent hop `adjacent`.
     pub fn ends(self, adjacent: Did, circuit_id: OnionCircuitId) -> bool {
         match self {
-            Self::Peer(peer) => peer == adjacent,
+            Self::Link(fact) => fact.peer() == adjacent,
             Self::Circuit {
                 from,
                 circuit_id: destroyed,
@@ -203,17 +206,22 @@ impl OnionCircuitTeardown {
 /// CellReady(backward no match) -> state, [DecryptClient]
 /// CellReady(cover)             -> state, []
 /// CellRefused(to, c)           -> state' without the edge, [SealAndSend Destroy to both neighbours]
-/// PeerRetired(p)               -> state' without p's edges, [SealAndSend Destroy away from p]
-///                                 ++ [Teardown(Peer p)]
+/// Link(Retired p)              -> state' without p's edges, [SealAndSend Destroy away from p]
+///                                 ++ [Teardown(Link (Retired p))]
+/// Link(Dropped p)              -> state' without p's edges, [SealAndSend Destroy to both
+///                                 neighbours] ++ [Teardown(Link (Dropped p))]
 /// CellReady(Destroy c, from x) -> state' without the edge, [SealAndSend Destroy away from x]
 ///                                 or [Teardown(Circuit x c)] when no relay edge matches
 /// ```
 ///
-/// Law (Circuit fate, #963): after `PeerRetired(p)` no return edge adjacent to `p` remains, and
-/// each removed edge sends exactly one `Destroy`, to its neighbour other than `p`; a relay that
-/// receives `Destroy` treats it as the retirement of that one circuit on the sender's side. So a
+/// Law (Circuit fate, #963): after `Link(fact)` no return edge adjacent to `fact.peer()` remains.
+/// Each edge a retirement removes sends exactly one `Destroy`, to its neighbour other than the
+/// retired peer; each edge a drop removes sends one to each neighbour, since the link to the peer
+/// is still up and the peer's side has not observed the loss (#966). A relay that receives
+/// `Destroy` treats it as the retirement of that one circuit on the sender's side. So a
 /// destruction observed on either side of a link reaches both endpoints of every circuit it
-/// carries, through the circuit's own links.
+/// carries, through the circuit's own links; a `Destroy` dropped on its way is itself a drop, so
+/// the node that dropped it destroys the circuit in its place.
 ///
 /// The layer variant is the symbol it applies: a `Relay` layer applies `relay`, evaluated here, in
 /// the pure core, as `relay = id` (peel, record the return edge, forward the inner layer
@@ -240,10 +248,10 @@ impl OnionCircuitReducer {
     ) -> Transition<OnionCircuitState, OnionCircuitEffect> {
         let mut state = state.clone();
         let effect = match input {
-            OnionCircuitInput::PeerRetired { peer } => {
-                let mut effects = destroy_adjacent(&mut state, peer);
-                effects.push(OnionCircuitEffect::Teardown(OnionCircuitTeardown::Peer(
-                    peer,
+            OnionCircuitInput::Link(fact) => {
+                let mut effects = destroy_link(&mut state, fact);
+                effects.push(OnionCircuitEffect::Teardown(OnionCircuitTeardown::Link(
+                    fact,
                 )));
                 return Transition::with(state, effects);
             }
@@ -552,11 +560,14 @@ fn destroy_away_from(
     }
 }
 
-/// Remove every return edge adjacent to `peer` and destroy its circuit on the other side.
+/// Remove every return edge adjacent to the peer of `fact` and destroy its circuit: away from a
+/// retired peer, toward both neighbours after a drop.
 ///
-/// Post: no edge with `key.next_hop = peer` or `previous_hop = peer` remains, and the effects
-/// hold one `Destroy` per removed edge, sent to the neighbour other than `peer`.
-fn destroy_adjacent(state: &mut OnionCircuitState, peer: Did) -> Vec<OnionCircuitEffect> {
+/// Post: no edge with `key.next_hop = p` or `previous_hop = p` remains, for `p = fact.peer()`;
+/// the effects hold one `Destroy` per removed edge, to the neighbour other than `p`, after a
+/// retirement, and two, one to each neighbour, after a drop.
+fn destroy_link(state: &mut OnionCircuitState, fact: LinkFact) -> Vec<OnionCircuitEffect> {
+    let peer = fact.peer();
     let adjacent = state
         .relay_returns
         .iter()
@@ -569,13 +580,42 @@ fn destroy_adjacent(state: &mut OnionCircuitState, peer: Did) -> Vec<OnionCircui
     let table = Arc::make_mut(&mut state.relay_returns);
     adjacent
         .into_iter()
-        .filter_map(|(key, entry)| {
+        .flat_map(|(key, entry)| {
             table.remove(&key);
-            destroy_away_from(peer, key, entry)
-                .inspect_err(|error| tracing::debug!("drop onion destroy: {error}"))
-                .ok()
+            match fact {
+                LinkFact::Retired(_) => vec![destroy_away_from(peer, key, entry)],
+                LinkFact::Dropped(_) => Vec::from(destroy_both_ways(key, entry)),
+            }
         })
+        .filter_map(sent_destroy)
         .collect()
+}
+
+/// The two `Destroy`s that end the circuit of `(key, entry)` at this relay: toward the exit and
+/// toward the client.
+fn destroy_both_ways(
+    key: RelayReturnKey,
+    entry: RelayReturnEntry,
+) -> [Result<OnionCircuitEffect>; 2] {
+    [
+        destroy_toward(
+            key.next_hop,
+            entry.next_delegatee_public_key,
+            key.circuit_id,
+        ),
+        destroy_toward(
+            entry.previous_hop,
+            entry.previous_delegatee_public_key,
+            entry.previous_circuit_id,
+        ),
+    ]
+}
+
+/// The effect of a sealed `Destroy`, or none when it could not be encoded, logged.
+fn sent_destroy(effect: Result<OnionCircuitEffect>) -> Option<OnionCircuitEffect> {
+    effect
+        .inspect_err(|error| tracing::debug!("drop onion destroy: {error}"))
+        .ok()
 }
 
 /// Remove the return edge of the circuit `to` knows as `circuit_id`, whose cell this node's outbox
@@ -590,25 +630,10 @@ fn refuse_circuit(
         return Vec::new();
     };
     Arc::make_mut(&mut state.relay_returns).remove(&key);
-    [
-        destroy_toward(
-            key.next_hop,
-            entry.next_delegatee_public_key,
-            key.circuit_id,
-        ),
-        destroy_toward(
-            entry.previous_hop,
-            entry.previous_delegatee_public_key,
-            entry.previous_circuit_id,
-        ),
-    ]
-    .into_iter()
-    .filter_map(|effect| {
-        effect
-            .inspect_err(|error| tracing::debug!("drop onion destroy: {error}"))
-            .ok()
-    })
-    .collect()
+    destroy_both_ways(key, entry)
+        .into_iter()
+        .filter_map(sent_destroy)
+        .collect()
 }
 
 /// The return edge of the circuit `neighbour` knows as `circuit_id`, from either side.

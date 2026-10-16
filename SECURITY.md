@@ -98,9 +98,11 @@ Inbound validation refuses a path on any other message and a path that names a n
 - **Circuit fate.** A circuit lives no longer than the links it crosses: a cell refused before
   acceptance is sent again, and a link that retires, a cell a relay cannot queue, or a stream an
   endpoint aborts destroys the circuit with a `Destroy` cell carried hop by hop toward both
-  endpoints, which end their streams with a typed failure. `Destroy` is authenticated to the
-  adjacent hop only and is exempt from the outbox bounds; each hop on the circuit sees when it
-  is torn down.
+  endpoints, which end their streams with a typed failure. A cell a node's dispatch queue drops
+  for want of room destroys every circuit on the link it came from, toward both neighbours, so
+  an overloaded link sheds its circuits instead of losing their cells silently. `Destroy` is
+  authenticated to the adjacent hop only and is exempt from the outbox bounds; each hop on the
+  circuit sees when it is torn down.
 
 A circuit hides hops from each other and the client from the exit. It does not hide the
 client from its first hop, overlay membership, registry lookups, or timing from an observer

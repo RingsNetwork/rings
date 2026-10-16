@@ -11,6 +11,7 @@ use super::OnionForwardFrame;
 use super::OnionForwardLayer;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::ext::LinkFact;
 use crate::extension::ext::Reject;
 use crate::extension::ext::Wire;
 
@@ -48,8 +49,9 @@ pub(super) enum OnionLocalMessage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum OnionCircuitInput {
-    /// The link generation to `peer` retired: every circuit adjacent to it is destroyed.
-    PeerRetired { peer: Did },
+    /// A fact about the link to one peer: every circuit adjacent to it is destroyed (#963,
+    /// #966).
+    Link(LinkFact),
     /// This node could not carry a cell of the circuit `to` knows as `circuit_id`: the circuit
     /// is destroyed at this node, toward both neighbours (#963).
     CellRefused { to: Did, circuit_id: OnionCircuitId },

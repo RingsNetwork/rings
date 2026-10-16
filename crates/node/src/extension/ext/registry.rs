@@ -26,6 +26,7 @@ use super::delegation;
 use super::Ctx;
 use super::Envelope;
 use super::Interpret;
+use super::LinkFact;
 use super::Protocol;
 use super::Reject;
 use super::Transition;
@@ -52,9 +53,9 @@ pub(crate) trait Handler {
     /// feedback. `handle : (from, payload) → IO ()`.
     async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<()>;
 
-    /// Step the protocol's [`Protocol::peer_retired`] event for `peer`, if it makes one, as a
-    /// turn of its own. `retire_peer : Did → IO ()`.
-    async fn retire_peer(&self, core: &Core, peer: Did) -> Result<()>;
+    /// Step the protocol's [`Protocol::link_fact`] event for `fact`, if it makes one, as a turn
+    /// of its own. `observe_link : LinkFact → IO ()`.
+    async fn observe_link(&self, core: &Core, fact: LinkFact) -> Result<()>;
 }
 
 /// The router-internal capability. Cloneable and `'static` so a long-running engine task can
@@ -70,6 +71,12 @@ impl Core {
     /// This node's DID.
     pub fn did(&self) -> Did {
         self.processor.did()
+    }
+
+    /// Whether `peer`'s link generation is admitted now; `false` when the lifecycle cannot be
+    /// read.
+    pub(crate) fn peer_admitted(&self, peer: Did) -> bool {
+        self.processor.swarm.is_peer_admitted(peer).unwrap_or(false)
     }
 
     /// This node's session key.
@@ -190,10 +197,10 @@ impl Route {
         self.handler.handle(&self.core, from, payload).await
     }
 
-    /// Run the resolved protocol on the retirement of `peer`'s link generation, a fact only the
-    /// [`Backend`](crate::extension::Backend) reads off the core's inbox.
-    pub(crate) async fn retire_peer(&self, peer: Did) -> Result<()> {
-        self.handler.retire_peer(&self.core, peer).await
+    /// Run the resolved protocol on `fact`, which only the router establishes: a retirement it
+    /// reads off the core's inbox, or a drop by the namespace's own queue.
+    pub(crate) async fn observe_link(&self, fact: LinkFact) -> Result<()> {
+        self.handler.observe_link(&self.core, fact).await
     }
 }
 
@@ -243,11 +250,7 @@ impl Scope {
 
     /// Whether `peer`'s link generation is admitted now.
     pub(crate) fn peer_admitted(&self, peer: Did) -> bool {
-        self.core
-            .processor
-            .swarm
-            .is_peer_admitted(peer)
-            .unwrap_or(false)
+        self.core.peer_admitted(peer)
     }
 
     /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).
@@ -351,8 +354,8 @@ where
         self.run_turn(core, event).await
     }
 
-    async fn retire_peer(&self, core: &Core, peer: Did) -> Result<()> {
-        match self.protocol.peer_retired(peer) {
+    async fn observe_link(&self, core: &Core, fact: LinkFact) -> Result<()> {
+        match self.protocol.link_fact(fact) {
             Some(event) => self.run_turn(core, event).await,
             None => Ok(()),
         }

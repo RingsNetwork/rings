@@ -3,7 +3,9 @@
 //! ```text
 //!   inbox reader ──submit(from, bytes)──▶ queue[namespace] ──worker──▶ Route::dispatch
 //!                  (never waits; a refused       (one task per namespace, until stop)
-//!                   envelope is dropped, counted)
+//!                   envelope is dropped, counted)        └──────────▶ Route::observe_link
+//!              ──PeerRetired(p)─────────▶ Retired(p), every queue
+//!              ──refused from admitted p─▶ Dropped(p), its queue, once while one waits
 //! ```
 //!
 //! Laws:
@@ -16,20 +18,29 @@
 //!   [`NAMESPACE_QUEUE_WEIGHT`] encoded bytes queued or in dispatch. A queue holding no bytes
 //!   admits any envelope, so a namespace holds at most `max(NAMESPACE_QUEUE_WEIGHT, one
 //!   envelope)`, and the largest envelope the transport carries still gets through.
-//! - A peer's retirement is a fact, not an envelope: it is queued behind the envelopes that
-//!   preceded it in the inbox, outside both bounds, and never dropped, so a protocol keeping
-//!   per-link state learns of every retirement in inbox order (#963). Retirements are bounded by
-//!   the admissions the core announced.
+//! - A [`LinkFact`] is not an envelope: it is queued behind the envelopes that preceded it,
+//!   outside both bounds, and never dropped, so a protocol keeping per-link state learns of every
+//!   fact in order. A peer's retirement goes to every namespace (#963). An envelope a queue
+//!   refuses from an admitted peer makes that namespace a `Dropped` fact for the peer (#966): a
+//!   message lost here is observed here, so a protocol whose state rides the link (an onion
+//!   circuit) can end it instead of losing a cell silently. At most one `Dropped` per peer waits
+//!   in a queue, so facts are bounded by the admissions the core announced; a refusal of a peer
+//!   not admitted makes none, since no link state rides a link that is not up. The fact names the
+//!   envelope's verified signer, which is the adjacent hop for a direct send; an overlay-routed
+//!   envelope from an admitted origin names that origin's link though another carried it, so the
+//!   fact may end link state that lost nothing, never miss state that did.
 //! - Every envelope that is not dispatched is counted by its [`DispatchDrop`] reason, and logged
 //!   at `warn`.
 //! - The workers end once the stop of the [`Backend::serve`](super::Backend::serve) that started
 //!   them is requested, abandoning what they still hold.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use futures::channel::mpsc;
@@ -42,7 +53,9 @@ use serde::Serialize;
 
 use crate::extension::ext::Core;
 use crate::extension::ext::Envelope;
+use crate::extension::ext::LinkFact;
 use crate::extension::ext::Route;
+use crate::sync_lock::lock;
 
 /// Envelopes one namespace may hold before further ones are dropped.
 const NAMESPACE_QUEUE_CAPACITY: usize = 256;
@@ -130,8 +143,8 @@ enum Queued {
         payload: Bytes,
         weight: usize,
     },
-    /// The retirement of `peer`'s link generation.
-    PeerRetired { route: Route, peer: Did },
+    /// A fact about the link to one peer.
+    Fact { route: Route, fact: LinkFact },
 }
 
 /// What one namespace's queue holds, queued or in dispatch.
@@ -141,6 +154,8 @@ struct Held {
     envelopes: AtomicUsize,
     /// Encoded envelope bytes.
     weight: AtomicUsize,
+    /// Peers whose [`LinkFact::Dropped`] waits in the queue, not yet taken by the worker.
+    dropped: Mutex<HashSet<Did>>,
 }
 
 impl Held {
@@ -160,6 +175,19 @@ impl Held {
     fn release(&self, weight: usize) {
         self.envelopes.fetch_sub(1, Ordering::AcqRel);
         self.weight.fetch_sub(weight, Ordering::AcqRel);
+    }
+
+    /// Mark a drop from `peer`; `true` iff no `Dropped(peer)` was waiting, so one must be queued.
+    /// A poisoned set coalesces nothing: every drop is then told.
+    fn mark_dropped(&self, peer: Did) -> bool {
+        lock(&self.dropped).map_or(true, |mut waiting| waiting.insert(peer))
+    }
+
+    /// Unmark `peer` as its `Dropped` fact is taken, so a later drop is told again.
+    fn unmark_dropped(&self, peer: Did) {
+        if let Ok(mut waiting) = lock(&self.dropped) {
+            waiting.remove(&peer);
+        }
     }
 }
 
@@ -196,7 +224,8 @@ impl NamespaceQueues {
     }
 
     /// Queue the encoded envelope `bytes` from `from` for its namespace's worker, starting the
-    /// worker on first use; drop it, counted, when it is refused. Never waits.
+    /// worker on first use; drop it, counted, when it is refused, telling the namespace of a drop
+    /// from an admitted peer ([`LinkFact::Dropped`]). Never waits.
     pub(super) fn submit(&mut self, from: Did, bytes: &[u8]) {
         let Ok(envelope) = Envelope::decode(bytes) else {
             self.drops.record(DispatchDrop::Undecodable);
@@ -206,10 +235,13 @@ impl NamespaceQueues {
             self.drops.record(DispatchDrop::Unregistered);
             return;
         };
-        let queue = self.queue(envelope.namespace);
+        let queue = queue_of(&mut self.queues, &self.stop, envelope.namespace);
         let weight = bytes.len();
         if !queue.held.admits(weight) {
             self.drops.record(DispatchDrop::QueueFull);
+            if self.core.peer_admitted(from) && queue.held.mark_dropped(from) {
+                queue.tell(route, LinkFact::Dropped(from));
+            }
             return;
         }
         // Only this reader takes; the worker only releases, so the check holds.
@@ -230,24 +262,34 @@ impl NamespaceQueues {
     /// the envelopes already queued. Never waits and never refuses for room.
     pub(super) fn submit_retirement(&mut self, peer: Did) {
         for (namespace, route) in self.core.routes() {
-            let queue = self.queue(namespace);
-            if queue
-                .sender
-                .unbounded_send(Queued::PeerRetired { route, peer })
-                .is_err()
-            {
-                tracing::error!(%peer, "no worker to deliver a peer retirement");
-            }
+            queue_of(&mut self.queues, &self.stop, namespace).tell(route, LinkFact::Retired(peer));
         }
     }
+}
 
-    /// The queue of `namespace`, starting its worker on first use.
-    fn queue(&mut self, namespace: String) -> &NamespaceQueue {
-        let stop = &self.stop;
-        self.queues
-            .entry(namespace)
-            .or_insert_with(|| spawn_worker(stop.clone()))
+impl NamespaceQueue {
+    /// Queue `fact` for `route`, outside both bounds.
+    fn tell(&self, route: Route, fact: LinkFact) {
+        if self
+            .sender
+            .unbounded_send(Queued::Fact { route, fact })
+            .is_err()
+        {
+            tracing::error!(?fact, "no worker to deliver a link fact");
+        }
     }
+}
+
+/// The queue of `namespace` in `queues`, starting its worker, which ends once `stop` is
+/// requested, on first use.
+fn queue_of<'queues>(
+    queues: &'queues mut HashMap<String, NamespaceQueue>,
+    stop: &StopToken,
+    namespace: String,
+) -> &'queues NamespaceQueue {
+    queues
+        .entry(namespace)
+        .or_insert_with(|| spawn_worker(stop.clone()))
 }
 
 /// Start the worker of one namespace: it dispatches its envelopes in order until its queue is
@@ -273,7 +315,7 @@ fn spawn_worker(stop: StopToken) -> NamespaceQueue {
 }
 
 /// Dispatch every item of `receiver` in order, releasing each envelope from `held` once its
-/// dispatch ends.
+/// dispatch ends, and unmarking each `Dropped` fact as it is taken.
 async fn drain(mut receiver: mpsc::UnboundedReceiver<Queued>, held: Arc<Held>) {
     while let Some(queued) = receiver.next().await {
         let dispatched = match queued {
@@ -287,7 +329,12 @@ async fn drain(mut receiver: mpsc::UnboundedReceiver<Queued>, held: Arc<Held>) {
                 held.release(weight);
                 dispatched
             }
-            Queued::PeerRetired { route, peer } => route.retire_peer(peer).await,
+            Queued::Fact { route, fact } => {
+                if let LinkFact::Dropped(peer) = fact {
+                    held.unmark_dropped(peer);
+                }
+                route.observe_link(fact).await
+            }
         };
         if let Err(error) = dispatched {
             tracing::warn!(error = ?error, "protocol dispatch failed");
@@ -297,6 +344,8 @@ async fn drain(mut receiver: mpsc::UnboundedReceiver<Queued>, held: Arc<Held>) {
 
 #[cfg(test)]
 mod tests {
+    use rings_core::dht::Did;
+
     use super::admits;
     use super::DispatchDrop;
     use super::DispatchDropCounters;
@@ -342,5 +391,18 @@ mod tests {
     fn test_a_holding_queue_admits_up_to_its_weight_only() {
         assert!(admits(1, NAMESPACE_QUEUE_WEIGHT - 1));
         assert!(!admits(1, NAMESPACE_QUEUE_WEIGHT));
+    }
+
+    /// Law (#966): at most one `Dropped` fact per peer waits in a queue; once the worker takes
+    /// it, a later drop from that peer is told again.
+    #[test]
+    fn test_a_drop_is_told_once_while_its_fact_waits() {
+        let held = Held::default();
+        let peer = Did::from(7_u32);
+        assert!(held.mark_dropped(peer));
+        assert!(!held.mark_dropped(peer));
+        assert!(held.mark_dropped(Did::from(8_u32)));
+        held.unmark_dropped(peer);
+        assert!(held.mark_dropped(peer));
     }
 }

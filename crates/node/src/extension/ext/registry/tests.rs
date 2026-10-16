@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 use super::super::Ctx;
 use super::super::Envelope;
 use super::super::Interpret;
+use super::super::LinkFact;
 use super::super::Protocol;
 use super::super::Reject;
 use super::super::Transition;
@@ -656,67 +657,73 @@ async fn test_saturated_peer_control_lane_does_not_block_another_peer() -> Resul
     Ok(())
 }
 
-/// A protocol that records the retirements it is told of as effects.
-struct RetirementProtocol;
+/// A protocol that records the link facts it is told of as effects.
+struct LinkFactProtocol;
 
-impl Protocol for RetirementProtocol {
+impl Protocol for LinkFactProtocol {
     type State = ();
-    type Event = Did;
-    type Effect = Did;
+    type Event = LinkFact;
+    type Effect = LinkFact;
 
     fn namespace(&self) -> &str {
-        "retirements"
+        "link-facts"
     }
 
     fn init(&self) -> Self::State {}
 
     fn decode(&self, _wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
-        Err(Reject("retirements decode no envelope".to_string()))
+        Err(Reject("link facts decode no envelope".to_string()))
     }
 
-    fn step(&self, _ctx: Ctx<'_, Self::State>, peer: Self::Event) -> Transition<(), Did> {
-        Transition::with((), vec![peer])
+    fn step(&self, _ctx: Ctx<'_, Self::State>, fact: Self::Event) -> Transition<(), LinkFact> {
+        Transition::with((), vec![fact])
     }
 
-    fn peer_retired(&self, peer: Did) -> Option<Self::Event> {
-        Some(peer)
+    fn link_fact(&self, fact: LinkFact) -> Option<Self::Event> {
+        Some(fact)
     }
 }
 
-/// The interpreter of [`RetirementProtocol`]: it records each retired peer.
-struct RetirementRecorder {
-    retired: Arc<Mutex<Vec<Did>>>,
+/// The interpreter of [`LinkFactProtocol`]: it records each fact.
+struct LinkFactRecorder {
+    observed: Arc<Mutex<Vec<LinkFact>>>,
 }
 
 #[async_trait]
-impl Interpret for RetirementRecorder {
-    type Effect = Did;
+impl Interpret for LinkFactRecorder {
+    type Effect = LinkFact;
 
-    async fn run(&self, _scope: &EffectScope, peer: Did) -> Result<Vec<Bytes>> {
-        lock(&self.retired)?.push(peer);
+    async fn run(&self, _scope: &EffectScope, fact: LinkFact) -> Result<Vec<Bytes>> {
+        lock(&self.observed)?.push(fact);
         Ok(Vec::new())
     }
 }
 
-/// Law (#963): a retirement routed to a protocol steps its `peer_retired` event as a turn of its
-/// own; a protocol that keeps no link state is left untouched.
+/// Law (#963, #966): a link fact routed to a protocol steps its `link_fact` event as a turn of
+/// its own, in the order the facts were routed; a protocol that keeps no link state is left
+/// untouched.
 #[tokio::test]
-async fn test_a_retirement_steps_only_protocols_that_map_it() -> Result<()> {
+async fn test_a_link_fact_steps_only_protocols_that_map_it() -> Result<()> {
     let extensions = extensions()?;
-    let retired = Arc::new(Mutex::new(Vec::new()));
-    extensions.register(RetirementProtocol, RetirementRecorder {
-        retired: Arc::clone(&retired),
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    extensions.register(LinkFactProtocol, LinkFactRecorder {
+        observed: Arc::clone(&observed),
     })?;
     extensions.register(
         DelegatingProtocol { delegates: false },
         Arc::new(FailingOrderedInterpreter::default()),
     )?;
-    let peer = Did::from(41_u32);
+    let facts = [
+        LinkFact::Dropped(Did::from(41_u32)),
+        LinkFact::Retired(Did::from(41_u32)),
+    ];
 
-    for (_, route) in extensions.core().routes() {
-        route.retire_peer(peer).await?;
+    for fact in facts {
+        for (_, route) in extensions.core().routes() {
+            route.observe_link(fact).await?;
+        }
     }
 
-    assert_eq!(*lock(&retired)?, vec![peer]);
+    assert_eq!(*lock(&observed)?, facts);
     Ok(())
 }
