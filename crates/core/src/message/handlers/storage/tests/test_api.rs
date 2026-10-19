@@ -15,9 +15,11 @@ use crate::message::types::Message;
 use crate::message::ChordStorageInterface;
 use crate::message::ChordStorageInterfaceCacheChecker;
 use crate::message::MessageVerificationExt;
+use crate::tests::activity::probe_on_activity;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
+use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::manually_establish_connection;
 
 /// Whether `key` lies in the open clockwise interval `(lower, upper)`.
@@ -69,8 +71,15 @@ async fn test_storage_store_fetches_remote_entry_into_cache() -> Result<()> {
 
     assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
     assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
+    // The tap observes the overwrite before its handler runs (`InboundTap`): wait for the write.
+    let node2_storage = &node2.dht().storage;
+    probe_on_activity(
+        "the remote owner stores the entry",
+        TEST_HANG_GUARD,
+        || async { Ok((node2_storage.count().await? != 0).then_some(())) },
+    )
+    .await?;
     assert!(node1.dht().storage.count().await? == 0);
-    assert!(node2.dht().storage.count().await? != 0);
 
     node1.swarm.storage_fetch(entry_key).await?;
 

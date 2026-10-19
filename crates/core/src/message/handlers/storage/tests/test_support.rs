@@ -31,6 +31,7 @@ use crate::message::MessageSigner;
 use crate::message::Transaction;
 use crate::storage::MemStorage;
 use crate::swarm::SwarmBuilder;
+use crate::tests::activity::probe_on_activity;
 use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
 
@@ -425,15 +426,21 @@ pub(super) async fn assert_cached_data_values(
     entry_key: Did,
     expected: &[&str],
 ) -> Result<()> {
-    let entry = node
-        .swarm
-        .storage_check_cache(entry_key)
-        .await
-        .ok_or_else(|| Error::InvalidMessage("expected cached entry".to_string()))?;
     let expected_data = expected
         .iter()
         .map(|value| Bytes::from(value.to_string()))
         .collect::<Vec<_>>();
+    // The tap observes a payload before its handler runs (`InboundTap`), so a test that just
+    // observed the reply that caches the entry waits for the cache to hold the expected data;
+    // the handler's inbound release is the activity that wakes the probe.
+    let entry = probe_on_activity("the cache holds the expected data", TEST_HANG_GUARD, || {
+        let expected_data = &expected_data;
+        async move {
+            let cached = node.swarm.storage_check_cache(entry_key).await;
+            Ok(cached.filter(|entry| entry.data == *expected_data))
+        }
+    })
+    .await?;
 
     assert_eq!(entry.did, entry_key);
     assert_eq!(entry.kind, EntryKind::Data);
