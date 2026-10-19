@@ -45,12 +45,14 @@
 //!   fails it closed, replying `abort` under a block it holds, so the client learns of it at
 //!   once, or at its next loop, which the tombstone answers with `abort`. A session whose reply
 //!   cannot leave fails closed the same way.
-//! - **Bound.** Only a loop that can open a session (`data` with `T`) creates one, and it is
-//!   leased against its previous hop's share before its driver runs, so no previous hop holds
-//!   more than its share of the table, bound or not; each driver's inbound queue holds at most
-//!   `ONION_EXIT_SESSION_INBOUND` loops, since every loop goes through the one stored sender.
+//! - **Bound.** Only a loop that can open a session (`data` or `fin` with `T`) creates one, and
+//!   it is leased against its previous hop's share before its driver runs, so no previous hop
+//!   holds more than its share of the table, bound or not; each driver's inbound queue holds at
+//!   most `ONION_EXIT_SESSION_INBOUND` loops, since every loop goes through the one stored
+//!   sender.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -503,7 +505,7 @@ async fn perform<W: OnionWorld>(
     world: &mut Option<OnionOpenWorld<W>>,
     effects: Vec<OnionExitEffect>,
 ) -> bool {
-    let mut queue = std::collections::VecDeque::from(effects);
+    let mut queue = VecDeque::from(effects);
     while let Some(effect) = queue.pop_front() {
         match effect {
             OnionExitEffect::Open { target } => {
@@ -520,7 +522,7 @@ async fn perform<W: OnionWorld>(
                     _ => false,
                 };
                 if !written {
-                    queue.extend(machine.fail(get_epoch_ms()));
+                    fail(machine, &mut queue);
                 }
             }
             OnionExitEffect::ShutdownWrite => {
@@ -534,7 +536,7 @@ async fn perform<W: OnionWorld>(
             OnionExitEffect::Reply { frame, surb } => {
                 let Some((next, cell)) = seal(&frame, *surb) else {
                     tracing::debug!("an onion reply could not be sealed");
-                    queue.extend(machine.fail(get_epoch_ms()));
+                    fail(machine, &mut queue);
                     continue;
                 };
                 let sent = shared
@@ -547,13 +549,19 @@ async fn perform<W: OnionWorld>(
                     .await;
                 if let Err(error) = sent {
                     tracing::debug!(%next, %error, "an onion reply did not leave");
-                    queue.extend(machine.fail(get_epoch_ms()));
+                    fail(machine, &mut queue);
                 }
             }
             OnionExitEffect::Close => return false,
         }
     }
     true
+}
+
+/// The session failed while performing its effects: the failure's effects replace the ones still
+/// queued, which would otherwise run against a failed world or send after its `abort`.
+fn fail(machine: &mut OnionExitSession, queue: &mut VecDeque<OnionExitEffect>) {
+    *queue = VecDeque::from(machine.fail(get_epoch_ms()));
 }
 
 /// Admit and open the world at `target`: its authority must parse and the policy must allow
@@ -594,6 +602,7 @@ fn record<W>(shared: &OnionExitShared<W>, bytes: usize, now_ms: u128) -> bool {
 #[cfg(all(test, rings_native))]
 mod tests {
     use std::collections::HashMap;
+    use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
@@ -601,6 +610,7 @@ mod tests {
     use bytes::Bytes;
     use rings_core::dht::Did;
 
+    use super::fail;
     use super::open;
     use super::OnionExitRoute;
     use super::OnionExitSessionHandle;
@@ -614,6 +624,8 @@ mod tests {
     use crate::onion::circuit::OnionLinkSender;
     use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
     use crate::onion::exit_accounting::OnionExitAccounting;
+    use crate::onion::session::exit::OnionExitEffect;
+    use crate::onion::session::exit::OnionExitSession;
     use crate::onion::session::OnionSessionArguments;
     use crate::onion::session::OnionSessionId;
     use crate::onion::session::OnionTargetDigest;
@@ -818,5 +830,25 @@ mod tests {
             .map(|queue| queue.try_recv().is_err_and(|error| error.is_closed()))
             .collect::<Vec<_>>();
         assert_eq!(closed, [true, false, true]);
+    }
+
+    /// A failure while performing drops the effects still queued: no write runs against the
+    /// failed world, and nothing is sent after the failure's `abort`; only the failure's own
+    /// effects remain, ending the session.
+    #[test]
+    fn test_a_failure_replaces_the_queued_effects() {
+        let mut machine = OnionExitSession::new(OnionTargetDigest::of(b"example.com:443"), 0);
+        let mut queue = VecDeque::from([
+            OnionExitEffect::Write(Bytes::from_static(b"late")),
+            OnionExitEffect::ShutdownWrite,
+        ]);
+
+        fail(&mut machine, &mut queue);
+
+        assert!(queue.iter().all(|effect| !matches!(
+            effect,
+            OnionExitEffect::Write(_) | OnionExitEffect::ShutdownWrite
+        )));
+        assert!(matches!(queue.back(), Some(OnionExitEffect::Close)));
     }
 }

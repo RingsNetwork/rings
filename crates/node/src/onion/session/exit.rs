@@ -5,13 +5,17 @@
 //! phase:  Unbound ──T-frame, SHA-256(t) = d──▶ Opening ──opened──▶ Open(ack pending)
 //!            │  T-frame, SHA-256(t) ≠ d                │ refused        │ υ available
 //!            │  or data/fin before any T               ▼                ▼
+//!            │  (no reply; the tombstone answers       │                │
+//!            │   the next loop with abort(0))          │                │
 //!            └────────────────────────────────▶ Closed ◀─ abort(0) ─ Open(acked)
+//! (a T-frame is a `data` or a `fin` carrying T)
 //!
 //! forward(t, f, υ):  Q ← Q ∪ {υ};  f = credit(υ…) ⇒ Q ← Q ∪ υ…;  f ∈ {data, fin} ⇒ reorder,
 //!                    then per released frame, in order:
 //!   data(t?, w)  Unbound ∧ T ⇒ bind t, Open(t);  Opening ∨ Open ⇒ Write(w) for w ≠ ε
 //!                a later T naming another target ⇒ abort
-//!   fin          ⇒ ShutdownWrite
+//!   fin(t?)      Unbound ∧ T ⇒ bind t, Open(t), ShutdownWrite (an empty upload);
+//!                otherwise ⇒ ShutdownWrite;  a later T naming another target ⇒ abort
 //!                    then drain the held world bytes into the new credit
 //! forward abort(n):  the client gave up ⇒ Close, on arrival (no reply)
 //! opened(ok):        ok ⇒ Open, reply data(0, 0, ε) once some υ is available
