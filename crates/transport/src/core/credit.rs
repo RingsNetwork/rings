@@ -239,6 +239,12 @@ impl SendCredit {
         self.reserved = self.reserved.saturating_sub(1);
     }
 
+    /// The credits free for a new reservation: `limit − (committed + reserved)`, saturating.
+    pub(crate) const fn free(self) -> u64 {
+        self.limit
+            .saturating_sub(self.committed.saturating_add(self.reserved))
+    }
+
     /// Join a received credit: `limit ← max(limit, credit)`.
     pub(crate) fn grant(&mut self, limit: u64) {
         self.limit = self.limit.max(limit);

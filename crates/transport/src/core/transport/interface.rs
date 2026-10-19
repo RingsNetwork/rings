@@ -151,6 +151,12 @@ pub trait ConnectionInterface {
     /// for long keeps no connection, callback or channel alive.
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Self::Error>;
 
+    /// A read-only view of `lane`'s send credit on this connection generation (see
+    /// [`LaneCreditView`](crate::core::transport::LaneCreditView)): for a sender that shapes its
+    /// own emission to the receiver's release rate. It holds the connection weakly and reserves
+    /// nothing.
+    fn send_credit_view(&self, lane: ChannelLane) -> crate::core::transport::LaneCreditView;
+
     /// Get current webrtc connection state.
     fn webrtc_connection_state(&self) -> WebrtcConnectionState;
 

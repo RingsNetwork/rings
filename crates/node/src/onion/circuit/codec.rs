@@ -1,199 +1,94 @@
+//! The decode boundary of the data plane: a peer's cell, or the node's own reconcile.
+//!
+//! ```text
+//! decode(from, w) = Cell(from, parse(w))           from ≠ me    w is exactly one class length
+//!                 = Link(Reconcile)                from = me    injected once, at install
+//! link_fact(f)    = Link(Opened | Closed | Dropped (f.peer))    core's facts, in queue order
+//! ```
+//!
+//! A peer's payload is the raw cell `α‖β‖γ‖y`, with no framing (#834 D6, `F = 0`): the only
+//! check here is the width, the class being the length. A payload of any other length is
+//! rejected before it is copied.
+
 use bytes::Bytes;
 use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::cell::OnionCellBucket;
-use super::cell::OnionWireCell;
-use super::OnionBackwardFrame;
-use super::OnionCircuitId;
-use super::OnionForwardFrame;
-use super::OnionForwardLayer;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::LinkFact;
 use crate::extension::ext::Reject;
 use crate::extension::ext::Wire;
+use crate::onion::sphinx::cell::OnionCell;
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub(super) enum OnionWireMessage {
-    Forward(OnionForwardFrame),
-    Backward(OnionBackwardFrame),
-    /// One-hop link padding. It is authenticated to the immediate neighbor and never forwarded.
-    Cover,
-    /// The circuit the sender knows as `circuit_id` on this link is destroyed (#963). It is
-    /// authenticated to the immediate neighbor, which carries it on away from the sender.
-    Destroy {
-        circuit_id: OnionCircuitId,
-    },
+/// A fact about this node's links, in the order the data plane's queue delivers it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) enum OnionLinkFact {
+    /// Core admitted the peer's link (`LinkFact::Admitted`).
+    Opened(Did),
+    /// Core retired the peer's link (`LinkFact::Retired`, #963).
+    Closed(Did),
+    /// A message from the peer, whose link stays up, was dropped here for want of room
+    /// (`LinkFact::Dropped`, #966, #969): it may have been a cell of a session at this node.
+    Dropped(Did),
+    /// Reconcile the link table with core's admitted peers, read when the shell applies it:
+    /// injected once when the data plane is installed, so the links core admitted before its
+    /// namespace was registered are live (the linearisation obligation of `admission`).
+    Reconcile,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub(super) enum OnionLocalMessage {
-    CellReady {
-        from: Did,
-        received_at_ms: u128,
-        bucket: OnionCellBucket,
-        message: OnionWireMessage,
-    },
-    ForwardReady {
-        from: Did,
-        received_at_ms: u128,
-        bucket: OnionCellBucket,
-        circuit_id: OnionCircuitId,
-        layer: OnionForwardLayer,
-    },
-    /// This node's outbox refused a relayed cell of the circuit `to` knows as `circuit_id`.
-    CellRefused { to: Did, circuit_id: OnionCircuitId },
+impl From<LinkFact> for OnionLinkFact {
+    /// Core's link fact as the data plane's.
+    fn from(fact: LinkFact) -> Self {
+        match fact {
+            LinkFact::Admitted(peer) => Self::Opened(peer),
+            LinkFact::Retired(peer) => Self::Closed(peer),
+            LinkFact::Dropped(peer) => Self::Dropped(peer),
+        }
+    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum OnionCircuitInput {
-    /// A fact about the link to one peer: every circuit adjacent to it is destroyed (#963,
-    /// #966).
-    Link(LinkFact),
-    /// This node could not carry a cell of the circuit `to` knows as `circuit_id`: the circuit
-    /// is destroyed at this node, toward both neighbours (#963).
-    CellRefused { to: Did, circuit_id: OnionCircuitId },
-    CellObserved {
-        from: Did,
-        bucket: OnionCellBucket,
-        sealed: rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext,
-    },
-    CellReady {
-        from: Did,
-        received_at_ms: u128,
-        bucket: OnionCellBucket,
-        message: OnionWireMessage,
-    },
-    ForwardReady {
-        from: Did,
-        received_at_ms: u128,
-        bucket: OnionCellBucket,
-        circuit_id: OnionCircuitId,
-        layer: OnionForwardLayer,
-    },
+impl OnionLinkFact {
+    /// The fact's encoding as a self-injected payload.
+    pub(crate) fn encode(&self) -> Result<Bytes> {
+        rings_codec::serialize(self)
+            .map(Bytes::from)
+            .map_err(|_| Error::EncodeError)
+    }
 }
 
-/// One typed onion-circuit input accepted by the pure reducer.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OnionCircuitEvent {
+/// The typed input of the data plane's reducer.
+#[derive(Debug)]
+pub(crate) enum OnionCircuitInput {
+    /// A cell received from the peer `from` over their direct link.
+    Cell {
+        /// The authenticated previous hop.
+        from: Did,
+        /// The cell, parsed by its length.
+        cell: OnionCell,
+    },
+    /// A link fact.
+    Link(OnionLinkFact),
+}
+
+/// One typed onion-circuit input accepted by the reducer.
+#[derive(Debug)]
+pub(crate) struct OnionCircuitEvent {
     pub(super) input: OnionCircuitInput,
 }
 
+/// `decode` of the module documentation.
 pub(super) fn decode_event(wire: Wire<'_>) -> std::result::Result<OnionCircuitEvent, Reject> {
-    if wire.from == wire.me {
-        decode_local_message(wire.payload)
+    let input = if wire.from == wire.me {
+        rings_codec::deserialize::<OnionLinkFact>(wire.payload)
+            .map(OnionCircuitInput::Link)
+            .map_err(|error| Reject(format!("bad onion link fact: {error}")))?
     } else {
-        decode_wire_message(wire.from, wire.payload)
-    }
-}
-
-fn decode_wire_message(
-    from: Did,
-    payload: &[u8],
-) -> std::result::Result<OnionCircuitEvent, Reject> {
-    const MAX_SERIALIZED_CELL_OVERHEAD: usize = 4 * 1024;
-    const AEAD_TAG_BYTES: usize = 16;
-    let max_wire_len = OnionCellBucket::MiB12
-        .plaintext_len()
-        .saturating_add(MAX_SERIALIZED_CELL_OVERHEAD);
-    if payload.len() > max_wire_len {
-        return Err(Reject(
-            "encrypted onion cell exceeds wire bound".to_string(),
-        ));
-    }
-    let cell = rings_codec::deserialize::<OnionWireCell>(payload)
-        .map_err(|error| Reject(format!("bad encrypted onion cell: {error}")))?;
-    let expected_ciphertext_len = cell
-        .bucket
-        .plaintext_len()
-        .checked_add(AEAD_TAG_BYTES)
-        .ok_or_else(|| Reject("encrypted onion cell length overflow".to_string()))?;
-    if cell.sealed.ciphertext.len() != expected_ciphertext_len {
-        return Err(Reject(
-            "encrypted onion cell does not match its size class".to_string(),
-        ));
-    }
-    Ok(OnionCircuitEvent {
-        input: OnionCircuitInput::CellObserved {
-            from,
-            bucket: cell.bucket,
-            sealed: cell.sealed,
-        },
-    })
-}
-
-fn decode_local_message(payload: &[u8]) -> std::result::Result<OnionCircuitEvent, Reject> {
-    let message = rings_codec::deserialize::<OnionLocalMessage>(payload)
-        .map_err(|error| Reject(format!("bad local onion circuit message: {error}")))?;
-    let input = match message {
-        OnionLocalMessage::CellReady {
-            from,
-            received_at_ms,
-            bucket,
-            message,
-        } => OnionCircuitInput::CellReady {
-            from,
-            received_at_ms,
-            bucket,
-            message,
-        },
-        OnionLocalMessage::ForwardReady {
-            from,
-            received_at_ms,
-            bucket,
-            circuit_id,
-            layer,
-        } => OnionCircuitInput::ForwardReady {
-            from,
-            received_at_ms,
-            bucket,
-            circuit_id,
-            layer,
-        },
-        OnionLocalMessage::CellRefused { to, circuit_id } => {
-            OnionCircuitInput::CellRefused { to, circuit_id }
+        OnionCircuitInput::Cell {
+            from: wire.from,
+            cell: OnionCell::parse(wire.payload).map_err(|error| Reject(error.to_string()))?,
         }
     };
     Ok(OnionCircuitEvent { input })
-}
-
-pub(super) fn encode_local_message(message: OnionLocalMessage) -> Result<Bytes> {
-    rings_codec::serialize(&message)
-        .map(Bytes::from)
-        .map_err(|_| Error::EncodeError)
-}
-
-#[cfg(test)]
-mod tests {
-    use rings_core::delegation::DelegateeKey;
-    use rings_core::ecc::SecretKey;
-
-    use super::*;
-    use crate::onion::circuit::cell::seal_message;
-
-    #[test]
-    fn test_decode_rejects_oversized_wrapped_key_before_crypto_admission() {
-        let sender = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("sender session");
-        let recipient =
-            DelegateeKey::new_with_seckey(&SecretKey::random()).expect("recipient session");
-        let payload = seal_message(
-            &OnionWireMessage::Cover,
-            recipient.delegatee_public_key(),
-            Some(OnionCellBucket::KiB4),
-        )
-        .expect("seal cell");
-        let mut cell = rings_codec::deserialize::<OnionWireCell>(&payload).expect("decode cell");
-        let extra_block = cell
-            .sealed
-            .encrypted_key
-            .first()
-            .cloned()
-            .expect("wrapped-key block");
-        cell.sealed.encrypted_key.push(extra_block);
-        let oversized = rings_codec::serialize(&cell).expect("encode oversized cell");
-
-        assert!(decode_wire_message(sender.delegator_did(), &oversized).is_err());
-    }
 }

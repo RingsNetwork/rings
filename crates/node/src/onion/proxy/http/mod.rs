@@ -11,12 +11,11 @@ use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
-use super::OnionProxyConfig;
+use super::OnionProxyProtocol;
 use super::OnionProxyTarget;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::native::NativeOnionCircuitHandle;
-use crate::onion::OnionServiceName;
 use crate::processor::Processor;
 
 const MAX_CONNECT_HEADER_BYTES: usize = 8192;
@@ -40,8 +39,6 @@ pub const fn default_max_connect_connections() -> usize {
 pub struct OnionHttpProxyOptions {
     /// Local bind address.
     pub listen_addr: SocketAddr,
-    /// TCP onion-exit service used for local CONNECT requests.
-    pub service: OnionServiceName,
     /// Maximum concurrent local CONNECT requests accepted by this ingress.
     pub max_connections: usize,
     /// Deadline for receiving a complete CONNECT header.
@@ -50,10 +47,9 @@ pub struct OnionHttpProxyOptions {
 
 impl OnionHttpProxyOptions {
     /// Build options with production defaults for resource bounds.
-    pub fn new(listen_addr: SocketAddr, service: OnionServiceName) -> Self {
+    pub fn new(listen_addr: SocketAddr) -> Self {
         Self {
             listen_addr,
-            service,
             max_connections: DEFAULT_MAX_CONNECT_CONNECTIONS,
             header_timeout: Duration::from_secs(DEFAULT_CONNECT_HEADER_TIMEOUT_SECS),
         }
@@ -70,11 +66,7 @@ impl OnionHttpProxyOptions {
                 "onion_http_proxy_header_timeout_secs must be greater than zero".to_string(),
             ));
         }
-        self.proxy_config().map(|_| ())
-    }
-
-    fn proxy_config(&self) -> Result<OnionProxyConfig> {
-        OnionProxyConfig::tcp_connect_service(self.service.clone())
+        Ok(())
     }
 }
 
@@ -128,15 +120,30 @@ async fn handle_connect(
             return Err(error);
         }
     };
-    let proxy_route = processor
-        .build_onion_proxy_route(options.proxy_config()?, target)
-        .await?;
-    let opened = onion
-        .open_tcp_stream(proxy_route.route, proxy_route.target)
-        .await?;
-    write_proxy_response(&mut stream, "200 Connection Established").await?;
-    opened.relay(stream);
+    let opened = match processor
+        .build_onion_proxy_route(OnionProxyProtocol::TcpConnect, target)
+        .await
+    {
+        Ok(proxy_route) => {
+            onion
+                .open_tcp_stream(proxy_route.route, proxy_route.target)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    write_proxy_response(&mut stream, connect_status(opened.is_ok())).await?;
+    opened?.relay(stream);
     Ok(())
+}
+
+/// The CONNECT answer for a session that opened or did not: a refusal, from the route or the
+/// exit, is `502` with no reason (#843 Q5), since the exit gives none.
+const fn connect_status(opened: bool) -> &'static str {
+    if opened {
+        "200 Connection Established"
+    } else {
+        "502 Bad Gateway"
+    }
 }
 
 async fn read_connect_target(

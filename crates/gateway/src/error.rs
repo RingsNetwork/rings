@@ -235,8 +235,8 @@ pub enum GatewayError {
         /// Node-layer diagnostic.
         message: String,
     },
-    /// The open Onion stream of a flow ended abortively: its far side reset it, or its circuit
-    /// was destroyed (#963).
+    /// The open Onion stream of a flow ended abortively: its session failed closed, at its far
+    /// side or on a link it rides (#963).
     #[error("Onion stream for {target} was reset: {message}")]
     OnionStreamReset {
         /// Immutable flow target.

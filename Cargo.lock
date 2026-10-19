@@ -3434,6 +3434,7 @@ dependencies = [
  "log",
  "pin-project",
  "rand 0.8.6",
+ "rand_chacha 0.3.1",
  "reqwest",
  "rings-aez",
  "rings-codec",

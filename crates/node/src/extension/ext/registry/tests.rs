@@ -714,6 +714,7 @@ async fn test_a_link_fact_steps_only_protocols_that_map_it() -> Result<()> {
         Arc::new(FailingOrderedInterpreter::default()),
     )?;
     let facts = [
+        LinkFact::Admitted(Did::from(41_u32)),
         LinkFact::Dropped(Did::from(41_u32)),
         LinkFact::Retired(Did::from(41_u32)),
     ];

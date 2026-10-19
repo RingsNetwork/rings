@@ -21,7 +21,7 @@ datachannels, with no application server in the data path.
 
 - **A browser tab is a full peer.** It joins the DHT, routes and stores for others, and
   connects browser to browser, with no light client or gateway in between.
-- **Privacy is built in.** Onion circuits with cover traffic and entry guards run natively
+- **Privacy is built in.** Onion loops with constant-rate cover and entry guards run natively
   and in the browser; the [hosted console](https://rings.rs/#node) browses the web through
   them from a tab.
 - **Wallet keys are identities.** secp256k1 (MetaMask), ed25519 (Phantom), WebCrypto P-256,
@@ -103,8 +103,8 @@ metadata protection, separate from payload encryption.
 │  Extension      pure `Protocol::step` → `Effect` → `Interpret` shell   │  node::extension::ext
 │  runtime        over a namespace-scoped `Scope` (send / self-inject)   │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Privacy        onion circuits: layered ElGamal-AEAD over direct       │  crates/node/src/onion
-│  (circuits)     edges, fixed-batch cover + pacing, exit registry       │
+│  Privacy        onion loops: Sphinx cells over direct edges,           │  crates/node/src/onion
+│  (loops)        constant-rate cover, paid admission, exit registry     │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Overlay        Chord DHT: successor / finger tables, stabilization,   │  crates/core
 │  (routing +     DID addressing, message relay, network_id isolation,   │

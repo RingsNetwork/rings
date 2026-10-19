@@ -38,7 +38,8 @@ use super::header::ONION_HEADER_MAC_BYTES;
 use super::seed::OnionCarrySeed;
 use super::seed::OnionSegmentSeed;
 use super::seed::ONION_CARRY_SEED_BYTES;
-use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionExpiry;
+use crate::onion::circuit::OnionReplayNonce;
 use crate::onion::signature::OnionSymbol;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionServiceName;
@@ -121,6 +122,11 @@ impl OnionArguments {
     pub(crate) const fn new(bytes: [u8; ONION_ARGUMENT_BYTES]) -> Self {
         Self(bytes)
     }
+
+    /// The encoded arguments, for their symbol's argument codec.
+    pub(crate) const fn as_bytes(&self) -> &[u8; ONION_ARGUMENT_BYTES] {
+        &self.0
+    }
 }
 
 /// The application `(f, ā)` a layer names: `1 + Σ_W × A`, the symbol coproduct
@@ -166,10 +172,11 @@ pub(crate) struct OnionLayerHead {
     pub(crate) next: Did,
     /// `e_i`, the process epoch of the hop this layer is sealed for (#834 D2, L9).
     pub(crate) epoch: OnionProcessEpoch,
-    /// `x`, the loop expiry in milliseconds, one per loop (#834 D6).
-    pub(crate) expires_at_ms: u64,
+    /// `x`, the loop expiry, one per loop and on the grid `Q·ℕ` (#834 D6); parsed once, at
+    /// decoding, so every hop judges the same value.
+    pub(crate) expiry: OnionExpiry,
     /// `ν_i`, the replay nonce the hop admits at most once (L9).
-    pub(crate) nonce: OnionForwardNonce,
+    pub(crate) nonce: OnionReplayNonce,
 }
 
 /// A byte string outside the image of [`OnionLayer::encode`].
@@ -184,6 +191,9 @@ pub(crate) enum OnionLayerError {
     /// A `relay` layer whose argument field is not `0^A`.
     #[error("relay layer carries arguments")]
     RelayArguments,
+    /// The expiry `x` is not a point of the grid `Q·ℕ`.
+    #[error("layer expiry {0} ms is off the expiry grid")]
+    OffGridExpiry(u64),
 }
 
 impl OnionLayer {
@@ -200,7 +210,7 @@ impl OnionLayer {
             arguments,
             next: PublicKeyAddress::from(self.head.next).to_fixed_bytes(),
             epoch: self.head.epoch.to_bytes(),
-            expiry: self.head.expires_at_ms.to_be_bytes(),
+            expiry: self.head.expiry.to_wire_ms().to_be_bytes(),
             nonce: self.head.nonce.to_bytes(),
             inbound: *self.inbound.as_bytes(),
             outbound: *self.outbound.as_bytes(),
@@ -214,7 +224,8 @@ impl OnionLayer {
     /// # Errors
     ///
     /// [`OnionLayerError::Width`] unless `|w| = ℓ`, [`OnionLayerError::UnknownSymbol`] for a code
-    /// outside `Σ`, and [`OnionLayerError::RelayArguments`] for a non-canonical `relay` layer.
+    /// outside `Σ`, [`OnionLayerError::RelayArguments`] for a non-canonical `relay` layer, and
+    /// [`OnionLayerError::OffGridExpiry`] for an `x` off the grid.
     pub(crate) fn decode(bytes: &[u8]) -> Result<(Self, OnionHeaderMac), OnionLayerError> {
         let record = LayerRecord::decode(bytes).ok_or(OnionLayerError::Width(bytes.len()))?;
         let [code] = record.code;
@@ -234,8 +245,10 @@ impl OnionLayer {
                     application,
                     next: Did::from(PublicKeyAddress::from(record.next)),
                     epoch: OnionProcessEpoch::new(record.epoch),
-                    expires_at_ms: u64::from_be_bytes(record.expiry),
-                    nonce: OnionForwardNonce::new(record.nonce),
+                    expiry: OnionExpiry::from_wire_ms(u64::from_be_bytes(record.expiry)).ok_or(
+                        OnionLayerError::OffGridExpiry(u64::from_be_bytes(record.expiry)),
+                    )?,
+                    nonce: OnionReplayNonce::new(record.nonce),
                 },
                 inbound: OnionCarrySeed::new(record.inbound),
                 outbound: OnionSegmentSeed::new(record.outbound),

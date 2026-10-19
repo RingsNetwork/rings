@@ -154,7 +154,6 @@ impl LifecycleBounds {
     }
 
     /// Maximum peers in any phase.
-    #[cfg(test)]
     pub(in crate::swarm::transport) const fn total(self) -> usize {
         self.total
     }
@@ -221,6 +220,11 @@ pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry {
 }
 
 impl ConnectionLifecycleRegistry {
+    /// The bounds the registry was created under.
+    pub(in crate::swarm::transport) const fn bounds(&self) -> LifecycleBounds {
+        self.bounds
+    }
+
     /// Create an empty registry under `bounds`.
     pub(in crate::swarm::transport) fn new(bounds: LifecycleBounds) -> Self {
         Self {

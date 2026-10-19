@@ -1,7 +1,7 @@
 # rings-gateway
 
 `rings-gateway` is the native packet-to-stream gateway used by Rings nodes. It forwards
-explicitly selected IPv4/TCP flows through Rings Onion circuits. The packet mechanism does not
+explicitly selected IPv4/TCP flows through Rings Onion loops. The packet mechanism does not
 imply one routing policy: the Rings gateway contract is selective routing and has no full-tunnel
 or kill-switch mode.
 

@@ -35,19 +35,19 @@
 //! - **D7 seeds.** Derived keys equal their HKDF definition, and a key with a zero AEZ subkey is
 //!   detected, so the client re-draws the segment seed.
 //!
-//! Assumptions this module relies on, stated for the data-plane integration (#834 Phase 2a-4):
+//! Assumptions this module relies on, which the data plane (`onion::circuit`, #843) meets:
 //!
 //! 1. **No discriminant** (`F = 0`). A cell is exactly `b` bytes and its class is its length,
 //!    bound by `γ = MAC(b ‖ β)`. Link cover traffic is a uniformly random `b`-byte cell, which the
 //!    receiving hop rejects at `α` decoding (`≈ 99.6 %`, before any ECDH) or at `γ`; both are one
-//!    outcome, [`header::OnionHeaderError::Invalid`], charged `u(b)` by admission (#834) and
+//!    outcome, [`header::OnionPeelError::Invalid`], charged `u(b)` by admission (#834) and
 //!    checked before any replay-store insertion (L9 counts admitted layers only).
 //! 2. **Integrity and neighbour.** No per-edge cell AEAD remains: header integrity is `γ`, carry
 //!    integrity is the consumer's AEZ authenticator, and the neighbour `from` is the authenticated
 //!    transport link.
 //!
-//! Nothing here is wired to the data plane, and no live wire message changes: the module is
-//! crate-private until #834 Phase 2a-4 (#843) uses it.
+//! The module is crate-private: its one consumer is the loop data plane (`onion::circuit`), whose
+//! hop step and loop client are the only callers of the cell and the builder.
 
 use hkdf::Hkdf;
 use hkdf::HkdfExtract;
@@ -55,6 +55,7 @@ use sha2::Sha256;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
+pub(crate) mod builder;
 pub(crate) mod carry;
 pub(crate) mod cell;
 pub(crate) mod class;

@@ -86,8 +86,7 @@ fn exit_descriptor(
             policy: OnionExitPolicy {
                 allowed_targets: vec![OnionExitTarget::parse("example.com:443")?],
                 denied_targets: vec![],
-                max_circuits: 16,
-                max_streams_per_circuit: 4,
+                max_sessions: 16,
                 max_bytes_per_minute: 1024,
             },
             started_at_ms: 1,
@@ -212,16 +211,6 @@ fn assert_session_loop(route: &OnionRoute) {
             .len(),
         4
     );
-    let prefix = route.forward_path();
-    assert_eq!(
-        prefix
-            .relays()
-            .iter()
-            .map(|hop| hop.did)
-            .collect::<Vec<_>>(),
-        dids.get(..2).map(<[Did]>::to_vec).unwrap_or_default()
-    );
-    assert_eq!(prefix.terminal().did, route.exit_did());
 }
 
 /// Selection places the `tcp` registrant at the symbol position and relay registrants

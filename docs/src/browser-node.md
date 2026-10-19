@@ -28,7 +28,7 @@ to bottom:
    namespace and sends and receives messages under it over the plain overlay, which routes and
    encrypts but does not hide the endpoints.
 7. **WebView**: once the local onion gateway is ready, `/webview` browses target sites through
-   onion circuits, answered by a service worker the shell registers.
+   onion loops, answered by a service worker the shell registers.
 
 The shell is hash-routed (`#node`, `#node/settings`, `#node/workbench`, `#guide`), so every
 screen has a URL.

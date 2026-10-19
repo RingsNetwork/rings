@@ -21,6 +21,7 @@ use bytes::Bytes;
 use futures::lock::Mutex as AsyncMutex;
 use rings_core::dht::Did;
 use rings_runtime::MaybeSendSync;
+use rings_transport::core::transport::LaneCreditView;
 
 use super::delegation;
 use super::Ctx;
@@ -79,30 +80,48 @@ impl Core {
         self.processor.swarm.is_peer_admitted(peer).unwrap_or(false)
     }
 
+    /// The peers whose link generation is admitted now, each read under the lifecycle lock.
+    pub(crate) fn admitted_peers(&self) -> Vec<Did> {
+        self.processor
+            .swarm
+            .peer_dids()
+            .into_iter()
+            .filter(|peer| self.peer_admitted(*peer))
+            .collect()
+    }
+
+    /// The read-only view of the Application lane's send credit of `peer`'s sendable
+    /// connection generation, or `None` without one (`Swarm::application_credit`, #913).
+    pub(crate) fn application_credit(&self, peer: Did) -> Option<LaneCreditView> {
+        self.processor.swarm.application_credit(peer)
+    }
+
+    /// `𝓡`, the capacity of the swarm's connection registry (#723).
+    pub(crate) fn connection_registry_capacity(&self) -> Result<usize> {
+        self.processor
+            .swarm
+            .connection_registry_capacity()
+            .map_err(Error::InternalError)
+    }
+
     /// This node's session key.
-    #[cfg(rings_native)]
     pub(crate) fn delegatee_key(&self) -> &rings_core::delegation::DelegateeKey {
         self.processor.delegatee_key()
     }
 
-    /// The overlay network this node joins.
-    #[cfg(rings_native)]
-    pub(crate) fn network_id(&self) -> u32 {
-        self.processor.swarm.network_id()
-    }
-
     /// This process's onion role (#834 D2).
-    #[cfg(rings_native)]
     pub(crate) fn onion_role(&self) -> &crate::onion::OnionRole<crate::onion::OnionExitOffer> {
         self.processor.onion_role()
     }
 
-    /// This process's circuit capabilities: its onion role at its process epoch.
-    #[cfg(rings_native)]
-    pub(crate) fn onion_circuit_capabilities(
-        &self,
-    ) -> crate::onion::circuit::OnionCircuitCapabilities {
-        self.processor.onion_circuit_capabilities()
+    /// The cover floor of this node's idle onion links (#880).
+    pub(crate) fn onion_idle_floor(&self) -> crate::onion::circuit::OnionIdleFloor {
+        self.processor.onion_idle_floor()
+    }
+
+    /// The onion process epoch cell of this node (#834 D2).
+    pub(crate) fn onion_process_epoch(&self) -> crate::onion::OnionProcessEpochCell {
+        self.processor.onion_process_epoch()
     }
 
     /// Put a message on the overlay to `to` under `namespace`.
@@ -120,9 +139,8 @@ impl Core {
     }
 
     /// Re-enter the router with a *self*-addressed message (`from = this node`): a locally
-    /// injected command, or an engine task feeding a lifecycle event back to its protocol.
-    /// Only the native relay engine has such tasks.
-    #[cfg(rings_native)]
+    /// injected command, or an engine task feeding a lifecycle event back to its protocol (the
+    /// native relay engine, and the onion data plane's reconcile at install).
     pub async fn inject(&self, namespace: &str, payload: Bytes) -> Result<()> {
         self.dispatch(self.did(), Envelope::new(namespace, payload))
             .await
@@ -137,7 +155,6 @@ impl Core {
     /// crate-private: production reaches it only through [`inject`](Core::inject), with
     /// `from = self.did()`; inbound envelopes from peers take a [`Route`] instead, resolved by
     /// the [`Backend`](crate::extension::Backend)'s router.
-    #[cfg(rings_native)]
     pub(crate) async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
         match self.route(envelope.namespace.as_str()) {
             Some(route) => route.dispatch(from, envelope.payload).await,
@@ -253,6 +270,18 @@ impl Scope {
         self.core.peer_admitted(peer)
     }
 
+    /// The peers whose link generation is admitted now.
+    pub(crate) fn admitted_peers(&self) -> Vec<Did> {
+        self.core.admitted_peers()
+    }
+
+    /// The read-only view of the Application lane's send credit of `peer`'s connection, for a
+    /// sender that paces its own emission on it (#913): never a transport handle, and it
+    /// reserves nothing.
+    pub(crate) fn application_credit(&self, peer: Did) -> Option<LaneCreditView> {
+        self.core.application_credit(peer)
+    }
+
     /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).
     ///
     /// `pub(crate)`: this is the **long-lived lifecycle sink** for an extension's own engine
@@ -264,7 +293,6 @@ impl Scope {
     /// turn and budget.
     /// A third-party shell therefore gets only that bounded return path, never this re-entrant
     /// sink, so it cannot recurse `inject` to escape the budget.
-    #[cfg(rings_native)]
     pub(crate) async fn inject(&self, payload: Bytes) -> Result<()> {
         self.core.inject(self.namespace.as_str(), payload).await
     }

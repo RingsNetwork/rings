@@ -42,7 +42,7 @@ ignore its advertised policy, or withhold data, and every claim it makes is sign
 ## Layer Contracts
 
 A property belongs to the communication layer only if the plain relay gives it to every
-message; anything that needs a circuit belongs to the privacy layer.
+message; anything that needs an onion loop belongs to the privacy layer.
 
 ### Communication layer
 
@@ -63,7 +63,7 @@ readable by every hop and by a storage owner holding them for an offline recipie
 Routes are loop-free and take at most `2|V|` hops. While an origin has no predecessor, its
 requests may name one of its links in a signed `reply_via`, which receives at most one
 successor answer and forwards it only over a direct link. The hop budget is unsigned: it
-bounds honest work, not a dishonest hop. A leak here is a communication-layer bug; circuits
+bounds honest work, not a dishonest hop. A leak here is a communication-layer bug; loops
 inherit whatever the relay exposes.
 
 The carrier records no hop history, with one exception (#947): connect signaling (an offer,
@@ -74,42 +74,62 @@ Inbound validation refuses a path on any other message and a path that names a n
 
 ### Privacy layer
 
-`crates/node/src/onion` builds layered ElGamal-AEAD circuits over direct edges.
+`crates/node/src/onion` carries client-sealed loops of fixed-width Sphinx cells over direct
+edges (#843).
 
-- **Per-hop knowledge.** Each relay learns only its predecessor and successor; circuit ids
-  are rewritten at every hop. Only the exit sees the payload; only the client knows the
-  route.
+- **Per-hop knowledge.** Every edge of a loop carries one cell `α‖β‖γ‖y` of exactly `b`
+  bytes. Each position peels one Sphinx layer, which names its successor, its application and
+  the loop's expiry, and removes one AEZ layer of the carry `y`; a relay keeps no state for
+  the loop. Only the symbol hop opens the client's value, and only the client knows the whole
+  loop and recognises its return by the tag `γ` it drew. Replies carry no exit signature:
+  they open under a key only the client and the exit's process hold, so they are deniable.
 - **Route shape.** A route is a loop `g → r → exit → r' → g` through the client's entry
   guard `g`, with `H = 3n + 2` positions for `n ≤ 4` symbol hops (`H ≤ 14`), every position
   but the guard's return a distinct node. Selection fails closed rather than shorten a route,
-  since a short path is a distinguishable segment length. The current data plane seals the
-  forward prefix `g → r → exit` and answers along its reverse; the return segment is selected
-  but not yet used.
+  since a short path is a distinguishable segment length. The forward segment carries the
+  client's value to the exit; the return segment carries the reply, from a reply block the
+  client sealed, back through `g`.
 - **Exit services.** An exit descriptor signs one service of the closed signature
   `Σ_W = {tcp, https}`; `relay` is a capability, not a service, and any other name is
-  rejected wherever it enters a node.
-- **Cover and pacing.** Every non-empty batch toward a next hop holds exactly 4 cells,
-  padded with authenticated cover, after a 5–25 ms delay. Cells use fixed size classes
-  from 4 KiB to 12 MiB. Idle links send nothing.
-- **Replay.** One `(peer, circuit, nonce)` authorizes at most one exit action, and each exit
-  draws a fresh process epoch per start, which invalidates cells built before a restart.
+  rejected wherever it enters a node. `https` is a fetch only; every byte tunnel is `tcp`,
+  and no interpretation falls back to another symbol.
+- **Admission and replay.** A hop charges `u(b)` units of the sender's budget per window
+  `V` on receipt, before it decodes `α` or computes an ECDH; only a charged cell can be
+  peeled. One process-local store keyed by `(expiry, ν)` admits a layer at most once, and
+  each node draws a fresh process epoch per start, which invalidates cells built before it.
+- **Emission** (#880). While a link is up it emits one cell per slot at one of two constant
+  rates and never above them: the active rate `r` (one 16 KiB cell per ~10 ms) and the idle
+  floor `r_idle` (one unit per second; a node may lower it, never raise it). A queued real
+  cell takes the next slot and every other slot carries cover, so real cells replace cover,
+  never add to it. A link stays active for at least `D = 30 s` after a real cell. A slot is
+  emitted only while the link's Application transport lane has credit (#913), read through a
+  read-only view, so the rate is `min(r_phase, the receiver's release rate)`,
+  `r_phase ∈ {r, r_idle}`: the floor and the dwell hold while the receiver releases, and a
+  credit wait delays real and cover cells alike. Cells use fixed size classes from 16 KiB to
+  12 MiB, preserved across every edge.
+- **Session fate.** A session direction ends with `fin(n)` only when its bytes really ended,
+  and with `abort(n)`, carrying no reason, on any failure. A receiver reorders within a
+  bounded window; a sequence gap that persists past it, a frame that finds the session's queue
+  full, a loop the exit cannot place, or a link retired or overloaded under the session's
+  loops at an endpoint fails the session closed at that endpoint, which tells the other with
+  `abort`; an exit holding no reply block answers the session's next loop with `abort`. Relays
+  hold no session state, so a loss anywhere on the loop is observed by the endpoints as a gap
+  (not yet complete: a session with no reply in flight sees no gap, so the death of a link that
+  is neither endpoint's own is not yet observed at both endpoints, #975), and no truncated stream is presented as complete: a client resets its local stream (an RST,
+  not a FIN; a captured gateway flow is reset through its connector), a refused CONNECT is
+  answered `502`, and an `https` fetch fails. Accepted: once a download has ended with `fin`, a
+  later failure of the upload closes the local stream cleanly, so the local application is not
+  told that the exit could not write its last bytes.
 - **Entry guards.** A client pins a persisted set of first hops, limiting how many relays
   see its edge over time.
-- **Circuit fate.** A circuit lives no longer than the links it crosses: a cell refused before
-  acceptance is sent again, and a link that retires, a cell a relay cannot queue, or a stream an
-  endpoint aborts destroys the circuit with a `Destroy` cell carried hop by hop toward both
-  endpoints, which end their streams with a typed failure. A cell a node's application inbox or
-  dispatch queue drops for want of room destroys every circuit on the link it came from, toward
-  both neighbours, and a frame an endpoint's full stream lane discards destroys that stream's
-  circuit, so an overloaded link or stream sheds its circuits instead of losing their cells
-  silently. `Destroy` is
-  authenticated to the adjacent hop only and is exempt from the outbox bounds; each hop on the
-  circuit sees when it is torn down.
 
-A circuit hides hops from each other and the client from the exit. It does not hide the
-client from its first hop, overlay membership, registry lookups, or timing from an observer
-of every link. Anonymity also depends on the candidate set: registry descriptors are signed
-and expire, but a party with many identities can try to hold several positions of a route.
+A loop hides hops from each other and the client from the exit. It does not hide the client
+from its first hop, overlay membership, registry lookups, the loop's round-trip time from the
+guard, its class and expiry quantum from every hop, or each link's active/idle phase and its
+receiver's release rate (its load, and through the work a real cell costs it, a smeared trace of
+the real fraction) from an observer of that link. Anonymity also depends on the candidate set: registry descriptors are
+signed and expire, but a party with many identities can try to hold several positions of a
+route.
 
 ## Feature Boundaries
 

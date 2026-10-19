@@ -233,6 +233,10 @@ mod tests {
             ))))
         }
 
+        fn send_credit_view(&self, _: ChannelLane) -> crate::core::transport::LaneCreditView {
+            crate::core::transport::LaneCreditView::closed()
+        }
+
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {
             self.state
                 .lock()

@@ -37,6 +37,7 @@ use super::inbound_frame_exceeds_protocol_ceiling;
 use super::link_credit::CreditReservation;
 #[cfg(rings_transport_backend)]
 use super::link_credit::LaneCreditReservation;
+use super::link_credit::LaneCreditView;
 use super::link_credit::LinkCredit;
 use super::link_credit::NodeReceiveLoad;
 use super::AdmittedInboundFrame;
@@ -221,6 +222,12 @@ impl InnerTransportCallback {
     ) -> impl Future<Output = Result<LaneCreditReservation>> + 'static {
         let link = Arc::clone(&self.link_credit);
         async move { link.reserve(lane).await.map(LaneCreditReservation) }
+    }
+
+    /// A read-only view of `lane`'s send credit; see
+    /// [`ConnectionInterface::send_credit_view`](crate::core::transport::ConnectionInterface).
+    pub(crate) fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
+        self.link_credit.view(lane)
     }
 
     #[cfg(rings_transport_backend)]

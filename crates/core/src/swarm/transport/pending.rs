@@ -435,6 +435,11 @@ impl SwarmTransport {
         Ok(self.peer_lifecycles()?.active_attempt(peer))
     }
 
+    /// `𝓡`, the number of lifecycle records the registry holds in any phase (#723).
+    pub(crate) fn connection_registry_capacity(&self) -> Result<usize> {
+        Ok(self.peer_lifecycles()?.bounds().total())
+    }
+
     /// Whether any connection attempt toward `peer` exists, admitted or still handshaking.
     ///
     /// Post: `false` means `peer` is unreachable from this node right now and nothing is under

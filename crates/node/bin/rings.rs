@@ -284,11 +284,8 @@ async fn apply_run_overrides(
         c.onion_exit_policy.denied_targets =
             parse_onion_exit_targets(std::mem::take(&mut args.onion_exit_deny_target))?;
     }
-    if let Some(max_circuits) = args.onion_exit_max_circuits.take() {
-        c.onion_exit_policy.max_circuits = max_circuits;
-    }
-    if let Some(max_streams_per_circuit) = args.onion_exit_max_streams_per_circuit.take() {
-        c.onion_exit_policy.max_streams_per_circuit = max_streams_per_circuit;
+    if let Some(max_sessions) = args.onion_exit_max_sessions.take() {
+        c.onion_exit_policy.max_sessions = max_sessions;
     }
     if let Some(max_bytes_per_minute) = args.onion_exit_max_bytes_per_minute.take() {
         c.onion_exit_policy.max_bytes_per_minute = max_bytes_per_minute;
@@ -301,9 +298,6 @@ async fn apply_run_overrides(
     }
     if let Some(addr) = args.onion_http_proxy_addr.take() {
         c.onion_http_proxy_addr = Some(addr);
-    }
-    if let Some(service) = args.onion_http_proxy_service.take() {
-        c.onion_http_proxy_service = service;
     }
     if let Some(timeout_secs) = args.onion_http_proxy_header_timeout_secs.take() {
         c.onion_http_proxy_header_timeout_secs = timeout_secs;
@@ -409,7 +403,6 @@ fn onion_http_proxy_options(c: &config::Config) -> anyhow::Result<Option<OnionHt
     };
     Ok(Some(OnionHttpProxyOptions {
         listen_addr: addr.parse::<SocketAddr>()?,
-        service: c.onion_http_proxy_service.clone(),
         max_connections: c.onion_http_proxy_max_connections,
         header_timeout: Duration::from_secs(c.onion_http_proxy_header_timeout_secs),
     }))

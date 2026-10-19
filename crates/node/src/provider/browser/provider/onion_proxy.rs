@@ -19,15 +19,13 @@ use wasm_bindgen_futures::future_to_promise;
 
 use crate::error::Error;
 use crate::error::Result as NodeResult;
-use crate::extension::ext::Scope;
-use crate::onion::circuit::route_first_hop;
 use crate::onion::directory;
 use crate::onion::directory::OnionDirectoryReader;
 use crate::onion::https::OnionHttpsCall;
 use crate::onion::https::OnionHttpsClient;
 use crate::onion::https::OnionHttpsClientRequest;
 use crate::onion::https::OnionHttpsResponse;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::OnionExitDescriptor;
@@ -44,9 +42,8 @@ use crate::provider::RemoteRpcEndpoint;
 #[wasm_export]
 pub struct BrowserOnionProxy {
     pub(super) processor: Arc<Processor>,
-    pub(super) scope: Scope,
-    pub(super) config: OnionProxyConfig,
-    pub(super) client: Arc<OnionHttpsClient>,
+    pub(super) config: OnionProxyProtocol,
+    pub(super) client: OnionHttpsClient,
     pub(super) directory_endpoint: Option<RemoteRpcEndpoint>,
 }
 
@@ -65,8 +62,8 @@ pub struct BrowserOnionProxyResponse {
 /// render and audit the result.
 #[derive(serde::Serialize)]
 struct BrowserOnionRouteInfo {
-    /// DIDs of the hops the circuit uses, `g, r₀,₂, exit`: until #834 Phase 2a-4 the return
-    /// segment of the selected loop is unused and not reported.
+    /// DIDs of the loop's positions `1 … H` in order, `g, r₀,₂, exit, r₁,₁, g`: the guard
+    /// opens and closes the loop, so it is listed twice.
     hops: Vec<String>,
     /// Canonical service selected by the route.
     service: String,
@@ -78,7 +75,8 @@ struct BrowserOnionRouteInfo {
 fn browser_onion_route_info(route: &crate::onion::OnionRoute) -> NodeResult<BrowserOnionRouteInfo> {
     Ok(BrowserOnionRouteInfo {
         hops: route
-            .circuit_hops()
+            .hops()
+            .positions()
             .map(|hop| hop.did.to_string())
             .collect(),
         service: route.service().to_string(),
@@ -123,7 +121,7 @@ impl BrowserOnionDirectoryReader {
     }
 
     fn route_first_hop_is_direct(&self, route: &OnionProxyRoute) -> bool {
-        let first_hop = route_first_hop(&route.route);
+        let first_hop = route.route.hops().guard().did;
         first_hop != self.processor.did() && self.direct_peer_dids().contains(&first_hop)
     }
 
@@ -213,7 +211,7 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
 
 async fn build_browser_route_from_reader(
     reader: &BrowserOnionDirectoryReader,
-    config: OnionProxyConfig,
+    config: OnionProxyProtocol,
     target: OnionProxyTarget,
 ) -> NodeResult<OnionProxyRoute> {
     let direct_peers = reader.direct_peer_dids();
@@ -230,14 +228,13 @@ async fn build_browser_route_from_reader(
 
 async fn build_browser_onion_proxy_route(
     processor: Arc<Processor>,
-    config: OnionProxyConfig,
+    config: OnionProxyProtocol,
     target: OnionProxyTarget,
     directory_endpoint: Option<RemoteRpcEndpoint>,
 ) -> NodeResult<OnionProxyRoute> {
     if let Some(endpoint) = directory_endpoint {
         let remote_reader = BrowserOnionDirectoryReader::remote(processor.clone(), endpoint);
-        match build_browser_route_from_reader(&remote_reader, config.clone(), target.clone()).await
-        {
+        match build_browser_route_from_reader(&remote_reader, config, target.clone()).await {
             Ok(route) => return Ok(route),
             Err(remote_error) => {
                 let local_reader = BrowserOnionDirectoryReader::local(processor);
@@ -256,7 +253,7 @@ async fn build_browser_onion_proxy_route(
 impl BrowserOnionProxy {
     /// Return the exit service class this proxy selects.
     pub fn exit_service(&self) -> String {
-        self.config.exit_service().to_string()
+        self.config.exit_service_name().as_str().to_string()
     }
 
     /// Build an HTTPS-over-TCP onion proxy route for `target_authority` (`host:port`).
@@ -309,7 +306,7 @@ impl BrowserOnionProxy {
     async fn build_route(&self, target: OnionProxyTarget) -> NodeResult<OnionProxyRoute> {
         build_browser_onion_proxy_route(
             self.processor.clone(),
-            self.config.clone(),
+            self.config,
             target,
             self.directory_endpoint.clone(),
         )
@@ -324,7 +321,7 @@ impl BrowserOnionProxy {
 
     /// Send one typed HTTPS request through this proxy.
     ///
-    /// Dropping the returned future cancels its pending circuit immediately. Browser frontends
+    /// Dropping the returned future ends its session immediately. Browser frontends
     /// should use this method when their own request lifecycle can be cancelled.
     pub async fn request_http(
         &self,
@@ -333,10 +330,7 @@ impl BrowserOnionProxy {
     ) -> NodeResult<BrowserOnionProxyResponse> {
         let (target, call) = OnionHttpsCall::from_url(url, request)?;
         let route = self.build_route(target).await?;
-        let response = self
-            .client
-            .request(self.scope.clone(), &route, call)
-            .await?;
+        let response = self.client.request(&route, call).await?;
         Ok(BrowserOnionProxyResponse { response, route })
     }
 }

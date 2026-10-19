@@ -4,6 +4,7 @@
 //!   inbox reader ──submit(from, bytes)──▶ queue[namespace] ──worker──▶ Route::dispatch
 //!                  (never waits; a refused       (one task per namespace, until stop)
 //!                   envelope is dropped, counted)        └──────────▶ Route::observe_link
+//!              ──PeerAdmitted(p)────────▶ Admitted(p), every queue
 //!              ──PeerRetired(p)─────────▶ Retired(p), every queue
 //!              ──MessageDropped(p)──────▶ Dropped(p), every queue, once while one waits
 //!              ──refused from admitted p─▶ Dropped(p), its queue, once while one waits
@@ -21,7 +22,8 @@
 //!   envelope)`, and the largest envelope the transport carries still gets through.
 //! - A [`LinkFact`] is not an envelope: it is queued behind the envelopes that preceded it,
 //!   outside both bounds, and never dropped, so a protocol keeping per-link state learns of every
-//!   fact in order. A peer's retirement goes to every namespace (#963). An envelope a queue
+//!   fact in order. A peer's admission (#843) and its retirement (#963) go to every namespace, so
+//!   per peer each queue carries them alternately, as the core's inbox does. An envelope a queue
 //!   refuses from an admitted peer makes that namespace a `Dropped` fact for the peer (#966): a
 //!   message lost here is observed here, so a protocol whose state rides the link (an onion
 //!   circuit) can end it instead of losing a cell silently. A drop by the core's own inbox
@@ -261,14 +263,14 @@ impl NamespaceQueues {
         }
     }
 
-    /// Queue `fact` for every registered namespace, behind the envelopes already queued: a
-    /// retirement, or a drop by the core's inbox, which names no namespace. Never waits and never
-    /// refuses for room.
+    /// Queue `fact` for every registered namespace, behind the envelopes already queued: an
+    /// admission, a retirement, or a drop by the core's inbox, which names no namespace. Never
+    /// waits and never refuses for room.
     pub(super) fn submit_link_fact(&mut self, fact: LinkFact) {
         for (namespace, route) in self.core.routes() {
             let queue = queue_of(&mut self.queues, &self.stop, namespace);
             match fact {
-                LinkFact::Retired(_) => queue.tell(route, fact),
+                LinkFact::Admitted(_) | LinkFact::Retired(_) => queue.tell(route, fact),
                 LinkFact::Dropped(peer) => queue.tell_dropped(route, peer),
             }
         }
