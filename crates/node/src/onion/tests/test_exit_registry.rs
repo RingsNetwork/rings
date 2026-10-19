@@ -176,7 +176,7 @@ fn test_exit_target_patterns_round_trip_canonically() -> Result<()> {
     Ok(())
 }
 
-/// `parse ∘ encode = id` on every pattern that parses (#895 D-M1): over hosts, wildcards,
+/// `parse ∘ encode = id` on every pattern that parses: over hosts, wildcards,
 /// cases, trailing dots, brackets and ports, every accepted input's encoding parses back to the
 /// same pattern, so the advertised policy is the enforced one.
 #[test]

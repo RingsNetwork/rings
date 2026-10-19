@@ -273,7 +273,7 @@ fn consume(
     (symbol, arguments, value.as_slice().to_vec(), surb)
 }
 
-/// The seed law at `n = 2` (#895 B-M4): the segment hand-over at `h₁` runs, so `h₁` opens the
+/// The seed law at `n = 2`: the segment hand-over at `h₁` runs, so `h₁` opens the
 /// client's value, `h₂` opens exactly what `h₁` produced, and the client opens what `h₂`
 /// produced, each under the key the builder placed; every layer names the next position.
 #[test]
@@ -420,7 +420,7 @@ fn draw_value(rng: &mut impl RngCore) -> Vec<u8> {
     value
 }
 
-/// Non-interference (L5, #834 Tests; #895 B-M3, B2-M2), as a seeded property over drawn
+/// Non-interference (L5, #834 Tests), as a seeded property over drawn
 /// applications and values: for every position `i` of a two-symbol loop, two loops built from
 /// the same seed that differ in every `ā_j, v_j` with `j ≠ i` (and agree on `i`'s own `ā_i` and
 /// input) give `i` the same view: its whole layer `λ_i`, the width and class of its cell, and at

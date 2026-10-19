@@ -38,7 +38,7 @@
 //! - **Idle.** An idle session sends exactly one loop per `V/2`, whatever its credit: credit is
 //!   refilled only after the open or a reply, and expired credit is replaced by the keep-alive
 //!   alone ([`OnionCreditWindow::control_loops`]), so its route's links return to the idle floor
-//!   between loops (#880, #895 R3-M3).
+//!   between loops (#880).
 
 use std::collections::BTreeMap;
 
@@ -269,7 +269,7 @@ impl OnionCreditWindow {
     ///
     /// Credit is refilled only after the open or a reply: a block that expires unspent is
     /// replaced by the keep-alive alone, so an idle session sends exactly one loop per `V/2`,
-    /// never a refill burst per expiring cohort (Law Idle, #895 R3-M3).
+    /// never a refill burst per expiring cohort (Law Idle).
     pub(crate) fn control_loops(
         self,
         step: OnionControlStep,

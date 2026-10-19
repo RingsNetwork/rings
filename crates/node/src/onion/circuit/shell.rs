@@ -13,7 +13,7 @@
 //! Link(Opened(p))   p live ⇒ nothing;  else A.link_opened((p, fresh g)): a full table leaves it
 //!                   not live, else the emitter opens p's lane
 //! Link(Closed(p))   A.link_closed(p's live link);  the emitter closes p's lane;  fate(p)
-//! Link(Dropped(p))  fate(p)
+//! Link(Dropped(p))  fate(p): a message lost from p's live link may be theirs (#966, #969)
 //! Link(Reconcile)   L ← core's admitted peers, read now;  A.reconcile(L);  lanes ← A's live peers
 //! fate(p)           T.lose(p);  ⟦−⟧.lose(p)
 //! ```

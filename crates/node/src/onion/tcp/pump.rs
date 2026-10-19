@@ -15,7 +15,7 @@
 //! presented as complete (#843 D2′ `abort`). A failure after the session's `fin` (an upload
 //! the exit could no longer write) ends [`OnionPumpEnd::Closed`]: the local stream already
 //! holds every byte and an orderly end, and a reset would discard bytes still in its send
-//! buffer, turning a complete stream into an error (#895 B3-L1).
+//! buffer, turning a complete stream into an error.
 
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;

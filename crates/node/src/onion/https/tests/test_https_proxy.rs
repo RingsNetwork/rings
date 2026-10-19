@@ -419,12 +419,12 @@ fn test_https_session_encodings_are_pinned() {
     );
 }
 
-/// One budget across concurrent fetches (#895 D-N1): each fetch records its header names and
+/// One budget across concurrent fetches: each fetch records its header names and
 /// values and its body chunks as they stream against the shared accounting, so two fetches whose
 /// bodies together exceed the window's budget cannot both complete, and no more than the budget
 /// is ever recorded.
 ///
-/// Only what the budget guarantees is asserted (#895 D-M2): how the two streams interleave is
+/// Only what the budget guarantees is asserted: how the two streams interleave is
 /// socket timing, and an interleaving in which each has recorded part of its body before the
 /// other's next chunk is refused fails both, a correct outcome of recording as bytes stream.
 #[tokio::test]

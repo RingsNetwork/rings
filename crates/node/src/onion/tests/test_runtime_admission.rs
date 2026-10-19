@@ -1,4 +1,4 @@
-//! The onion runtime's registration delegates its namespace's admission (#888, #895 R4-M3).
+//! The onion runtime's registration delegates its namespace's admission (#888).
 
 use std::sync::Arc;
 

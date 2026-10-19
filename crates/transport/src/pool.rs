@@ -179,6 +179,7 @@ mod tests {
 
     use super::*;
     use crate::core::pool::ChannelLane;
+    use crate::core::transport::LaneCreditView;
     use crate::core::transport::SendPermit;
     use crate::delivery::DeliveryFuture;
 
@@ -233,8 +234,8 @@ mod tests {
             ))))
         }
 
-        fn send_credit_view(&self, _: ChannelLane) -> crate::core::transport::LaneCreditView {
-            crate::core::transport::LaneCreditView::closed()
+        fn send_credit_view(&self, _: ChannelLane) -> LaneCreditView {
+            LaneCreditView::closed()
         }
 
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {

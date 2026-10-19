@@ -20,8 +20,8 @@ use std::sync::RwLock;
 use bytes::Bytes;
 use futures::lock::Mutex as AsyncMutex;
 use rings_core::dht::Did;
+use rings_core::swarm::LaneCreditView;
 use rings_runtime::MaybeSendSync;
-use rings_transport::core::transport::LaneCreditView;
 
 use super::delegation;
 use super::Ctx;

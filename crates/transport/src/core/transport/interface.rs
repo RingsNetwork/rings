@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::ConnectionStateSnapshot;
+use super::LaneCreditView;
 use super::SendPermit;
 use super::WebrtcConnectionState;
 use crate::connection_ref::ConnectionRef;
@@ -152,10 +153,10 @@ pub trait ConnectionInterface {
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Self::Error>;
 
     /// A read-only view of `lane`'s send credit on this connection generation (see
-    /// [`LaneCreditView`](crate::core::transport::LaneCreditView)): for a sender that shapes its
+    /// [`LaneCreditView`]): for a sender that shapes its
     /// own emission to the receiver's release rate. It holds the connection weakly and reserves
     /// nothing.
-    fn send_credit_view(&self, lane: ChannelLane) -> crate::core::transport::LaneCreditView;
+    fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView;
 
     /// Get current webrtc connection state.
     fn webrtc_connection_state(&self) -> WebrtcConnectionState;

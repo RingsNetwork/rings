@@ -113,6 +113,13 @@ pub(super) const fn is_active(clock: LinkClock, queued: bool, now_us: u128) -> b
         }
 }
 
+/// Whether a link may start an emission: its lane has room for the cell's first frame,
+/// `free(l) ≥ 1`, where `free` is `None` without a connection (see the module's Rate law for why
+/// the gate is per frame, not per cell).
+pub(super) const fn is_credited(free: Option<u64>) -> bool {
+    matches!(free, Some(free) if free > 0)
+}
+
 /// The pure schedule of one up link (#880 option C), with `credited = free(l) ≥ 1` read from
 /// the link's transport credit view (#913):
 ///

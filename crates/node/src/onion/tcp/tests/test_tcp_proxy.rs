@@ -96,7 +96,7 @@ async fn test_a_completed_session_closes_the_local_socket_cleanly() {
     assert_eq!(received, b"whole");
 }
 
-/// Law (fail closed, #895 B3-L1): a failure after the session's `fin` (an upload the exit
+/// Law (fail closed): a failure after the session's `fin` (an upload the exit
 /// could no longer write) leaves the complete download intact: its peer reads every byte and
 /// an orderly end, never a reset.
 #[tokio::test]

@@ -140,7 +140,7 @@ fn test_a_world_failure_replies_abort_never_fin() {
     assert!(closes);
 }
 
-/// Liveness of failure (#895 R3-M2): a world failure with no block left closes the session
+/// Liveness of failure: a world failure with no block left closes the session
 /// without a reply; the client's next loop is answered with `abort` under that loop's own block,
 /// and the client reads it as `Aborted`, never as the end of its stream.
 #[test]

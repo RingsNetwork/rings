@@ -44,8 +44,13 @@
 //!   `free(l) ≥ 1`, and the emitter awaits each cell's send before it plans the next, so the
 //!   link's cell rate is `≤ min(r / u(b), ρ_rel / f(b))`: a receiver slower than `r` slows the
 //!   link. The transport refuses no honest frame (#913), so no cell, real or cover, is lost to
-//!   the receiver's window; the credit read only keeps the emitter from committing a cover cell
-//!   to a full window, where a real cell enqueued meanwhile would wait behind it.
+//!   the receiver's window. The gate is per frame ([`is_credited`]): a cell's first frame starts
+//!   only into a window with room, and its other `f(b) − 1` frames wait for credit inside its
+//!   send. A cell-sized gate `free(l) ≥ f(b)` is not a law one can keep: `f(b)` reaches 192
+//!   frames at 12 MiB, beyond the lane's whole window `W = 16`, so it would never hold. Hence a
+//!   real cell enqueued while a cell is in flight waits at most for that one cell, its own
+//!   frames' credit included, whether it is real or cover; never for a cover cell committed to a
+//!   window with no room for its first frame.
 //! - **Isolation.** Onion cells travel on the Application lane alone, whose credit is its own:
 //!   a stalled link holds back neither the node's DHT control lane nor any other link (#913).
 //! - **Floor.** While a link is up and its lane has credit, its rate is at least `r_idle`: an
@@ -59,12 +64,14 @@
 //!   a link is active its cell rate is `min(r / u(b), ρ_rel / f(b))` whatever the real volume,
 //!   since real cells replace cover, never add to it, and credit slows both alike. What is
 //!   visible is the active/idle phase at the resolution `D` and the receiver's release rate,
-//!   which reveals its load, never the sender's volume (#834 leakage table).
+//!   which reveals its load, never the sender's volume (#834 leakage table). A slot whose real
+//!   cell is refused before acceptance and requeued carries nothing, neither the cell nor
+//!   cover; a refusal is a link-level event, visible as such.
 //! - **Order.** Real cells of one link leave in FIFO order, one per slot, so a queued cell waits
 //!   at most its queue position times the slot, plus its credit waits. A real cell whose send
 //!   was refused before acceptance (`Error::is_send_refused_before_acceptance`: no frame of it
 //!   left, so sending it again cannot duplicate it) goes back to the head of its lane while its
-//!   link is up: a refusal delays a real cell, it never loses one (#895 R4-M1). A cancelled send
+//!   link is up: a refusal delays a real cell, it never loses one. A cancelled send
 //!   is such a refusal, never a success (#965).
 //! - **Bound.** The queues hold at most `MAX_PENDING_ONION_SENDS` cells and
 //!   `MAX_PENDING_ONION_SEND_BYTES` bytes, with a per-peer share of each.
@@ -81,9 +88,9 @@ use futures::channel::oneshot;
 use futures::FutureExt;
 use rand::RngCore;
 use rings_core::dht::Did;
+use rings_core::swarm::LaneCreditView;
 use rings_runtime::sleep;
 use rings_runtime::Spawner;
-use rings_transport::core::transport::LaneCreditView;
 use web_time::Instant;
 
 use super::OnionLink;
@@ -104,6 +111,7 @@ use lanes::EmitterStep;
 use lanes::OrderedSendState;
 use lanes::QueueRole;
 use lanes::Refusal;
+use schedule::is_credited;
 use schedule::Emission;
 pub use schedule::OnionIdleFloor;
 
@@ -399,10 +407,7 @@ async fn emit(sender: OnionLinkSender, peer: Did, epoch: u64, scope: Scope) {
         // connection has no credit: its emitter waits until woken (its lane closes).
         let credit = scope.application_credit(peer);
         let now_us = sender.now_us();
-        let credited = credit
-            .as_ref()
-            .and_then(LaneCreditView::free)
-            .is_some_and(|free| free > 0);
+        let credited = is_credited(credit.as_ref().and_then(LaneCreditView::free));
         let Ok(step) = lock(&sender.state)
             .map(|mut state| state.next(peer, epoch, sender.floor, credited, now_us))
         else {
@@ -459,9 +464,9 @@ async fn emit(sender: OnionLinkSender, peer: Did, epoch: u64, scope: Scope) {
                 // `peer` is the loop's exact next hop: overlay routing could pick another path
                 // and break both adjacency and the link's emission shape.
                 let result = scope.send_direct(peer, payload.clone()).await;
-                // A cell that never left goes back to the head of its lane while its link is up
-                // (#895 R4-M1); one whose link is down is lost with the link, whose retirement
-                // its sessions observe (`circuit::shell`).
+                // A cell that never left goes back to the head of its lane while its link is up;
+                // one whose link is down is lost with the link, whose retirement its sessions
+                // observe (`circuit::shell`).
                 if result
                     .as_ref()
                     .is_err_and(Error::is_send_refused_before_acceptance)

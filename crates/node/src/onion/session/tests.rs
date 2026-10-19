@@ -391,7 +391,7 @@ fn acked(blocks: &mut impl Iterator<Item = OnionSurb>) -> OnionExitSession {
     session
 }
 
-/// Totality (#895 B-H1): world bytes that arrive after every block has expired are held, not
+/// Totality: world bytes that arrive after every block has expired are held, not
 /// dropped, the world is not read meanwhile, and the held bytes are replied, in order, as soon
 /// as credit returns.
 #[test]
@@ -422,7 +422,7 @@ fn test_exit_session_holds_world_bytes_until_credit_returns() {
     assert!(session.reply_capacity(expired_ms).is_some());
 }
 
-/// Fail closed (#895 B-M2, B3-M2): a gap spends a remaining block on `abort`, never `fin`,
+/// Fail closed: a gap spends a remaining block on `abort`, never `fin`,
 /// before the session closes.
 #[test]
 fn test_exit_session_aborts_a_gap() {
@@ -441,7 +441,7 @@ fn test_exit_session_aborts_a_gap() {
     assert!(session.is_closed());
 }
 
-/// Fail closed (#895 C-M4, B3-M2): a world failure replies `abort`, never `fin`, if a block is
+/// Fail closed: a world failure replies `abort`, never `fin`, if a block is
 /// left, and closes either way; the held bytes are dropped with it.
 #[test]
 fn test_exit_session_aborts_a_world_failure_while_credit_lasts() {
@@ -460,7 +460,7 @@ fn test_exit_session_aborts_a_world_failure_while_credit_lasts() {
     assert_eq!(kinds(&drained.fail(NOW_MS)), ["close"]);
 }
 
-/// A session whose first frame is a `fin` carrying `T` (#895 D-L5) opens and shuts its upload;
+/// A session whose first frame is a `fin` carrying `T` opens and shuts its upload;
 /// a `fin` naming another target of a bound session aborts it (Law Binding).
 #[test]
 fn test_exit_session_opens_on_a_first_fin_with_its_target() {
@@ -486,7 +486,7 @@ fn test_exit_session_opens_on_a_first_fin_with_its_target() {
     );
 }
 
-/// The client's `fin` carries `T` until the first reply, as its `data` does (#895 D-L5).
+/// The client's `fin` carries `T` until the first reply, as its `data` does.
 #[test]
 fn test_client_fin_carries_the_target_until_the_first_reply() {
     let mut session = OnionClientSession::new(Bytes::from_static(TARGET));
@@ -512,7 +512,7 @@ fn test_client_fin_carries_the_target_until_the_first_reply() {
 }
 
 /// A failure after the world's `fin` was replied closes without an `abort`, which could overtake
-/// that `fin` and turn a complete download into a failure (#895 B4-L2).
+/// that `fin` and turn a complete download into a failure.
 #[test]
 fn test_exit_session_fails_after_its_fin_without_an_abort() {
     let mut blocks = surbs(61, 4, 0).into_iter();
@@ -524,7 +524,7 @@ fn test_exit_session_fails_after_its_fin_without_an_abort() {
     assert_eq!(kinds(&session.fail(NOW_MS)), ["close"]);
 }
 
-/// Binding (#895 C-L4, B3-M2): a later `T` frame naming another target aborts a bound session
+/// Binding: a later `T` frame naming another target aborts a bound session
 /// with `abort`.
 #[test]
 fn test_exit_session_refuses_to_rebind_its_target() {
@@ -542,7 +542,7 @@ fn test_exit_session_refuses_to_rebind_its_target() {
     );
 }
 
-/// The pool refuses a block whose expiry is not admissible now (#895 B-L2): passed, or beyond
+/// The pool refuses a block whose expiry is not admissible now: passed, or beyond
 /// `now + V`, whose reply the first relay would refuse.
 #[test]
 fn test_surb_pool_refuses_inadmissible_expiries() {
@@ -555,7 +555,7 @@ fn test_surb_pool_refuses_inadmissible_expiries() {
     assert!(pool.add(NOW_MS, surb(53)));
 }
 
-/// The sequence space ends cleanly (#895 B-L1, B2-L3): the frame at `u32::MAX` is released,
+/// The sequence space ends cleanly: the frame at `u32::MAX` is released,
 /// the direction does not fail by itself (a tick after it passes), and only a further frame
 /// fails it.
 #[test]
@@ -593,7 +593,7 @@ fn surbs_of(class: OnionLoopClass, seed: u64, count: usize, offset: u128) -> Vec
         .collect()
 }
 
-/// Totality over widths (#895 B2-L4): held bytes wider than one block are cut to each block's
+/// Totality over widths: held bytes wider than one block are cut to each block's
 /// own capacity, across blocks of different classes, and a held end of stream is replied after
 /// the data; nothing is replied while the pool is empty.
 #[test]
@@ -869,7 +869,7 @@ fn test_client_session_reads_a_first_abort_as_a_refusal() {
 }
 
 /// The credit window asks `⌊D / (k + 1)⌋` full loops, so it never exceeds `min(W, Q_max)` and
-/// sends nothing until it is `k + 1` short (#895 N-H2).
+/// sends nothing until it is `k + 1` short.
 #[test]
 fn test_credit_window_fills_to_its_target() {
     let window = OnionCreditWindow::DEFAULT;
@@ -913,7 +913,7 @@ fn test_a_steady_download_costs_one_loop_per_k_plus_one_replies() {
     assert!(loops >= replies / (k + 1) - 1, "{loops} loops");
 }
 
-/// Idle (#895 N-H1, R3-M3): a session with no replies and no data, driven through the
+/// Idle: a session with no replies and no data, driven through the
 /// driver's control rule every 10 s for 10 minutes after its open, sends exactly one keep-alive
 /// loop per `V/2` rounded up to a tick (every 80 s, so `⌊600 / 80⌋ = 7`), and no refill burst
 /// as the open's credit expires.

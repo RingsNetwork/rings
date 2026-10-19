@@ -411,8 +411,8 @@ impl OnionExitSession {
 
     /// Fail closed: reply `abort(n)` if a block is left, then close; held bytes are dropped,
     /// since nothing after an `abort` counts. Once the world's `fin` is replied the download is
-    /// complete, so the session closes without an `abort` that could overtake that `fin`
-    /// (#895 B4-L2); a later loop is answered as unheld.
+    /// complete, so the session closes without an `abort` that could overtake that `fin`; a
+    /// later loop is answered as unheld.
     fn abort(&mut self, now_ms: u128, effects: &mut Vec<OnionExitEffect>) {
         if self.is_closed() {
             return;
@@ -476,7 +476,7 @@ pub(crate) fn seal(frame: &OnionFrame, surb: OnionSurb) -> Option<(Did, OnionCel
 
 /// The answer of `h` to a forward loop of a session it does not hold (closed, refused, or never
 /// opened), sealed under that loop's own block: `abort`, so a client still using the session
-/// learns within one loop that it is gone (#895 R3-M2). A client's own `abort` is answered by
+/// learns within one loop that it is gone. A client's own `abort` is answered by
 /// nothing, since that client already gave the session up.
 ///
 /// The answer's `n` is `0`: `abort` is applied on arrival and its `n` is informational, and `h`

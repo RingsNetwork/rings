@@ -12,7 +12,7 @@
 //! unsequenced and flows client-to-`h` only. `fin` ends a direction whose bytes really ended;
 //! `abort` fails the session, carrying no reason (#834 D2′, #843 Q5), and is never an end of
 //! stream: a receiver applies it on arrival, since nothing after it counts. A `fin` carries `T`
-//! like `data` (#895 D-L5): a `fin` sent before the first reply names the target too, so it can
+//! like `data`: a `fin` sent before the first reply names the target too, so it can
 //! open the session at `h` even if it arrives before the session's first `data`. Its `n` is
 //! informational: the sender's next sequence where it has one (`0` from an exit answering a
 //! session it no longer holds), kept so every frame's contents are uniform; no receiver orders

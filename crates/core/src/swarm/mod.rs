@@ -19,7 +19,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub use builder::SwarmBuilder;
-use rings_transport::core::transport::LaneCreditView;
+/// The read-only view of one lane's send credit that [`Swarm::application_credit`] returns: the
+/// transport's type, re-exported so an application reads it through core alone.
+pub use rings_transport::core::transport::LaneCreditView;
 
 use self::callback::SwarmTransportCallback;
 use crate::dht::Chord;

@@ -425,7 +425,7 @@ impl<T> OrderedSendState<T> {
     }
 
     /// The cell in flight on `peer`'s lane of epoch `epoch` never left (its send was refused
-    /// before acceptance, #895 R4-M1): put it back at the head of the queue, keeping its quota,
+    /// before acceptance): put it back at the head of the queue, keeping its quota,
     /// bytes and relay share, so it leaves next, in order, and no real cell is lost to a
     /// refusal. Returns whether it was requeued; a closed lane drops it.
     pub(super) fn requeue(&mut self, peer: Did, epoch: u64, item: T) -> bool {

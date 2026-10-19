@@ -10,7 +10,7 @@
 //!                      ς closed within V ⇒ unheld (a tombstone: a late loop never respawns ς)
 //!                      ς new, frame T    ⇒ lease(from) ⇒ spawn a driver, driver ← (frame, υ)
 //!                                          (no slot or no lease ⇒ unheld: a refusal)
-//!                      ς new, other      ⇒ drop (it may overtake its own open, #895 R4-M2)
+//!                      ς new, other      ⇒ drop (it may overtake its own open)
 //! unheld(frame, υ):    reply abort(0) sealed under υ, unless frame is the client's abort
 //!
 //! driver(ς):  loop select
@@ -170,7 +170,7 @@ enum OnionExitRoute {
     /// refused (no table slot, no lease).
     Answer,
     /// Drop without an answer: a loop of a live session naming another target, or a loop of a
-    /// session never opened that carries no target (#895 R4-M2: it may be overtaking its own
+    /// session never opened that carries no target (it may be overtaking its own
     /// open, which the answer would refuse).
     Drop,
 }
@@ -357,7 +357,7 @@ impl<W: OnionWorld> OnionInterpretation for OnionExitSessions<W> {
                 self.answer_unheld(scope, refused.into_inner());
                 Ok(())
             }
-            // Fail closed at the queue (#895 B4-M1): a dropped sequenced frame may be the
+            // Fail closed at the queue: a dropped sequenced frame may be the
             // stream's last, which no later frame would reveal as a gap, so the session is
             // closed and the loop answered with `abort`; unsequenced credit is only dropped.
             Err(refused) => {
@@ -668,7 +668,7 @@ mod tests {
     }
 
     /// The exit's open admits a target only under its policy, and never opens the world for a
-    /// denied or malformed one (#895 D-L5, #843 Q5).
+    /// denied or malformed one (#843 Q5).
     #[tokio::test]
     async fn test_open_refuses_what_the_policy_denies_before_the_world() -> Result<()> {
         let policy = OnionExitPolicy::from_target_strings(vec!["*:443".to_string()], vec![
@@ -685,7 +685,7 @@ mod tests {
         Ok(())
     }
 
-    /// The routing of a loop (#895 R4-M2, B4-L4): a live session's loop is delivered, one naming
+    /// The routing of a loop: a live session's loop is delivered, one naming
     /// another target dropped; a buried session's loop is answered; a never-opened session's
     /// loop opens it only if it carries `T`, is answered when the table is full, and is dropped
     /// otherwise, since it may overtake its own open.

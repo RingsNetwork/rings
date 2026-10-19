@@ -9,6 +9,7 @@ use super::lanes::OrderedSendState;
 use super::lanes::QueueRole;
 use super::lanes::Refusal;
 use super::schedule::is_active;
+use super::schedule::is_credited;
 use super::schedule::plan;
 use super::schedule::slot_micros;
 use super::schedule::units_of;
@@ -95,7 +96,36 @@ fn test_the_idle_floor_is_configurable_downwards_only() {
     assert!(OnionIdleFloor::DEFAULT.slot_micros(1) > slot_micros(1));
 }
 
-/// Credit (#904): with no credit the schedule emits nothing, due or not, and a credited slot
+/// Rate (#913): the gate is per frame. A lane with room for one frame, or for any number below
+/// the frames of the largest class, `f(12 MiB) = 192` at 64 KiB frames, admits a start; only an
+/// exhausted lane, or no connection, holds it, so no class waits for a cell-sized window that the
+/// lane's `W = 16` could never offer.
+#[test]
+fn test_the_credit_gate_needs_room_for_one_frame_only() {
+    for free in [1, 2, 15, 16, 191] {
+        assert!(is_credited(Some(free)), "{free} free frames admit a start");
+    }
+    assert!(!is_credited(Some(0)));
+    assert!(!is_credited(None));
+
+    let units = units_of(OnionLoopClass::DEFAULT);
+    let clock = LinkClock {
+        last_real_us: Some(0),
+        last_start: Some((0, units)),
+    };
+    let due_us = slot_micros(units);
+    let floor = OnionIdleFloor::DEFAULT;
+    assert_eq!(
+        plan(clock, true, is_credited(Some(1)), floor, due_us),
+        Plan::Emit
+    );
+    assert_eq!(
+        plan(clock, true, is_credited(Some(0)), floor, due_us),
+        Plan::WaitCredit
+    );
+}
+
+/// Credit (#913): with no credit the schedule emits nothing, due or not, and a credited slot
 /// is decided as before, so credit only ever delays a start (Budget safety holds).
 #[test]
 fn test_no_credit_emits_nothing_and_credit_only_delays() {
@@ -122,7 +152,7 @@ fn test_no_credit_emits_nothing_and_credit_only_delays() {
     assert_eq!(plan(clock, true, true, floor, 10 * due_us), Plan::Emit);
 }
 
-/// Volume hiding (#904): an uncredited lane takes no queued cell and arms its wake-up, and
+/// Volume hiding (#913): an uncredited lane takes no queued cell and arms its wake-up, and
 /// once credited it emits its queued real cell exactly as it would have.
 #[test]
 fn test_an_uncredited_lane_holds_its_queue_until_credit_returns() {
@@ -149,7 +179,7 @@ fn test_an_uncredited_lane_holds_its_queue_until_credit_returns() {
     ));
 }
 
-/// Order (#895 R4-M1): a real cell whose send never left goes back to the head of its lane
+/// Order: a real cell whose send never left goes back to the head of its lane
 /// with its quota kept, and is the next real cell to leave.
 #[test]
 fn test_an_unsent_real_cell_is_requeued_at_the_head() {
@@ -176,7 +206,7 @@ fn test_an_unsent_real_cell_is_requeued_at_the_head() {
     ));
 }
 
-/// A node's own control cells (#895 R4-L1) never yield to relayed traffic: they are not in
+/// A node's own control cells never yield to relayed traffic: they are not in
 /// the relay share, so a waiting endpoint does not refuse them.
 #[test]
 fn test_local_control_cells_are_not_in_the_relay_share() {
@@ -464,7 +494,7 @@ fn test_an_enqueue_wakes_the_waiting_emitter() {
 
 /// A full lane registers an endpoint under the same lock as its refusal, and the next
 /// completion wakes exactly that one waiter; while it waits, relays holding half of the lane
-/// yield it (#895 N-M1, R3-M1).
+/// yield it.
 #[test]
 fn test_a_completion_wakes_one_waiting_endpoint_and_relays_yield_beyond_half() {
     let peer = Did::from(10_u32);
@@ -516,7 +546,7 @@ fn test_a_completion_wakes_one_waiting_endpoint_and_relays_yield_beyond_half() {
         .is_ok());
 }
 
-/// Fairness (#895 R3-M1): a waiting endpoint does not veto relays below half of the lane,
+/// Fairness: a waiting endpoint does not veto relays below half of the lane,
 /// so relayed traffic toward a busy endpoint's link is never blackholed.
 #[test]
 fn test_relays_below_half_keep_their_share_while_an_endpoint_waits() {
@@ -561,7 +591,7 @@ fn test_relays_below_half_keep_their_share_while_an_endpoint_waits() {
     );
 }
 
-/// Shutdown is terminal (#895 A2-M1): every lane closes and no link fact opens one again.
+/// Shutdown is terminal: every lane closes and no link fact opens one again.
 #[test]
 fn test_shutdown_closes_every_lane_and_opens_none_again() {
     let mut state = OrderedSendState::<u32>::default();
@@ -577,7 +607,7 @@ fn test_shutdown_closes_every_lane_and_opens_none_again() {
     assert!(state.lanes.is_empty());
 }
 
-/// A lane reopened within `V` keeps its emission clock (#895 N-L2): its first emission is
+/// A lane reopened within `V` keeps its emission clock: its first emission is
 /// due a slot after the last one of the closed lane, not at once.
 #[test]
 fn test_a_reopened_lane_keeps_its_emission_clock() {
