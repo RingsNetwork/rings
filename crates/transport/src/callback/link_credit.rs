@@ -316,6 +316,7 @@ impl LinkCredit {
         waiters.into_iter().for_each(|waiter| waiter.waker.wake());
     }
 
+    #[cfg(rings_transport_backend)]
     /// A read-only view of `lane`'s send credit (see [`LaneCreditView`]).
     pub(crate) fn view(self: &Arc<Self>, lane: ChannelLane) -> LaneCreditView {
         LaneCreditView::new(self, lane)

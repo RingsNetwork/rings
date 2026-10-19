@@ -20,6 +20,7 @@
 
 #[cfg(rings_transport_backend)]
 use std::future::poll_fn;
+#[cfg(rings_transport_backend)]
 use std::sync::Arc;
 use std::sync::Weak;
 #[cfg(rings_transport_backend)]
@@ -45,6 +46,7 @@ pub struct LaneCreditView {
 }
 
 impl LaneCreditView {
+    #[cfg(rings_transport_backend)]
     /// The view of `lane` of `link`.
     pub(crate) fn new(link: &Arc<LinkCredit>, lane: ChannelLane) -> Self {
         Self {
