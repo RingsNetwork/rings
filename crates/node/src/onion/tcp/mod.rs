@@ -22,6 +22,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use bytes::BytesMut;
 use rings_core::utils::get_epoch_ms;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -41,6 +42,7 @@ use crate::onion::session::serve::OnionWorldWriter;
 use crate::onion::target::resolve_public_target;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionProxyTarget;
+use crate::onion::OnionRouteError;
 
 mod duplex;
 mod pump;
@@ -80,10 +82,15 @@ async fn connect(target: &OnionProxyTarget) -> Result<TcpStream> {
             Err(error) => last = Some(error),
         }
     }
-    Err(Error::HttpRequestError(format!(
-        "onion TCP target {} did not connect: {last:?}",
+    Err(tcp_target(format!(
+        "{} did not connect: {last:?}",
         target.authority()
     )))
+}
+
+/// The failure of the `tcp` world at its target, named as the onion `tcp` layer's.
+fn tcp_target(reason: String) -> Error {
+    Error::OnionRouteError(OnionRouteError::TcpTarget(reason))
 }
 
 /// The socket world of a `tcp` exit, whose reads are recorded against the exit's byte policy.
@@ -109,6 +116,8 @@ pub(crate) struct OnionTcpReader {
     policy: OnionExitPolicy,
     /// The node-wide exit accounting.
     accounting: OnionExitAccounting,
+    /// The read buffer, reused across reads: a read fills only what arrives, never zeroing.
+    buffer: BytesMut,
 }
 
 /// The write half of a connected target.
@@ -125,9 +134,7 @@ impl OnionWorld for OnionTcpWorld {
         let opened_at = Instant::now();
         let connected = match timeout(TCP_OPEN_TIMEOUT, connect(target)).await {
             Ok(connected) => connected,
-            Err(_) => Err(Error::OnionRouteError(
-                crate::onion::OnionRouteError::TcpOpenTimedOut,
-            )),
+            Err(_) => Err(Error::OnionRouteError(OnionRouteError::TcpOpenTimedOut)),
         };
         tokio::time::sleep_until(open_response_deadline(opened_at, Instant::now())).await;
         let (read, write) = connected?.into_split();
@@ -136,6 +143,7 @@ impl OnionWorld for OnionTcpWorld {
                 half: read,
                 policy: self.policy.clone(),
                 accounting: self.accounting.clone(),
+                buffer: BytesMut::new(),
             },
             OnionTcpWriter(write),
         ))
@@ -147,19 +155,22 @@ impl OnionWorldReader for OnionTcpReader {
     /// Read up to `max` bytes and record them against the byte policy; a spent budget is a
     /// failure, which aborts the session.
     async fn read(&mut self, max: usize) -> Result<Option<Bytes>> {
-        let mut buffer = vec![0; max.max(1)];
-        let read =
-            self.half.read(&mut buffer).await.map_err(|error| {
-                Error::HttpRequestError(format!("onion TCP target read: {error}"))
-            })?;
+        let max = max.max(1);
+        self.buffer.reserve(max);
+        let limit = u64::try_from(max).unwrap_or(u64::MAX);
+        let read = (&mut self.half)
+            .take(limit)
+            .read_buf(&mut self.buffer)
+            .await
+            .map_err(|error| tcp_target(format!("read: {error}")))?;
         if read == 0 {
             return Ok(None);
         }
-        buffer.truncate(read);
+        let buffer = self.buffer.split();
         let bytes = u64::try_from(read).map_err(|_| Error::InvalidData)?;
         self.accounting
             .record_bytes(&self.policy, bytes, get_epoch_ms())?;
-        Ok(Some(Bytes::from(buffer)))
+        Ok(Some(buffer.freeze()))
     }
 }
 
@@ -169,14 +180,14 @@ impl OnionWorldWriter for OnionTcpWriter {
         self.0
             .write_all(&bytes)
             .await
-            .map_err(|error| Error::HttpRequestError(format!("onion TCP target write: {error}")))
+            .map_err(|error| tcp_target(format!("write: {error}")))
     }
 
     async fn shutdown(&mut self) -> Result<()> {
         self.0
             .shutdown()
             .await
-            .map_err(|error| Error::HttpRequestError(format!("onion TCP target shutdown: {error}")))
+            .map_err(|error| tcp_target(format!("shutdown: {error}")))
     }
 }
 

@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! data(w):   frame data(n, T?, w), n ← n + 1;  T is set, with t inline, until the first reply
-//! fin:       frame fin(n), n ← n + 1;     abort: frame abort(n), the session is given up
+//! fin:       frame fin(n, T?), n ← n + 1; T is set, with t inline, until the first reply
+//! abort:     frame abort(n), the session is given up
 //! reply(f):  replied ← ⊤;  reorder f, then per released frame, in order:
 //!   first frame   data(0, ε) ⇒ Opened      fin ⇒ Refused (tolerated; h refuses with abort(0))
 //!   later frames  data(w)    ⇒ Data(w)     fin ⇒ Fin
@@ -18,9 +19,9 @@
 //!
 //! Laws (tested in `session::tests`):
 //!
-//! - **Target.** Every `data` frame sent before the first reply carries `T` and the target; none
-//!   after it does, so the session opens at `h` whichever forward loop arrives first and the
-//!   target stops travelling once `h` has answered.
+//! - **Target.** Every `data` and `fin` frame sent before the first reply carries `T` and the
+//!   target; none after it does, so the session opens at `h` whichever forward loop arrives
+//!   first, and the target stops travelling once `h` has answered.
 //! - **Sequence.** Forward frames carry `n = 0, 1, …`; replies are released in their order.
 //! - **Open result.** The first reply decides the open: `data(0, ε)` is the ack, and `abort(0)`
 //!   the refusal `h` sends (the `abort` decision of #834 D2′, superseding #843 Q5's `fin`); a

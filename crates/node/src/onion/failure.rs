@@ -116,6 +116,10 @@ pub enum OnionRouteError {
     /// An HTTPS response channel closed before the exit's outcome was delivered.
     #[error("onion HTTPS response channel closed")]
     HttpsResponseClosed,
+    /// The exit's `tcp` world failed at its target: a connect, read, write or shutdown of the
+    /// target's socket. The reason stays at the exit; the client sees only a failed session.
+    #[error("onion TCP target: {0}")]
+    TcpTarget(String),
     /// The exit's connect to a `tcp` target did not complete within its open timeout.
     #[error("onion TCP open timed out")]
     TcpOpenTimedOut,
