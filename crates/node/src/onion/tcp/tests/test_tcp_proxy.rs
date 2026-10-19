@@ -162,12 +162,14 @@ fn test_tcp_duplex_state_suppresses_terminal_after_remote_close() {
     assert!(!state.should_announce_terminal());
 }
 
+/// Law (#971): a full client lane ends its stream without waiting, with `InboundOverflow`
+/// recorded as its fate, a cause that originates here, behind the frame already queued.
 #[test]
 fn test_saturated_client_inbound_queue_closes_stream_without_waiting() -> Result<()> {
     let runtime = runtime();
     let expected = did();
     let exit = session();
-    let (tx, _rx) = tcp_inbound_lane(1);
+    let (tx, mut rx) = tcp_inbound_lane(1);
     let key = insert_test_client_stream(
         &runtime,
         expected,
@@ -184,9 +186,13 @@ fn test_saturated_client_inbound_queue_closes_stream_without_waiting() -> Result
         ))
     ));
     assert!(!lock(&runtime.client_streams)?.contains_key(&key));
+    assert!(matches!(rx.frames.try_recv(), Ok(TcpInbound::Shutdown)));
+    assert_ended(&mut rx, TcpStreamAbort::InboundOverflow);
+    assert!(TcpStreamAbort::InboundOverflow.originates_here());
     Ok(())
 }
 
+/// Law (#971): a full exit lane ends its stream as a full client lane does.
 #[test]
 fn test_saturated_exit_inbound_queue_closes_stream_without_waiting() -> Result<()> {
     let runtime = runtime();
@@ -195,7 +201,7 @@ fn test_saturated_exit_inbound_queue_closes_stream_without_waiting() -> Result<(
     let key = TcpStreamKey {
         circuit_id: OnionCircuitId::new([22; 16]),
     };
-    let (tx, _rx) = tcp_inbound_lane(1);
+    let (tx, mut rx) = tcp_inbound_lane(1);
     runtime.insert_exit_stream(key, service.clone(), peer, tx)?;
 
     runtime.send_exit_inbound(
@@ -218,6 +224,8 @@ fn test_saturated_exit_inbound_queue_closes_stream_without_waiting() -> Result<(
         ))
     ));
     assert!(!lock(&runtime.exit_streams)?.contains_key(&key));
+    assert!(matches!(rx.frames.try_recv(), Ok(TcpInbound::Shutdown)));
+    assert_ended(&mut rx, TcpStreamAbort::InboundOverflow);
     Ok(())
 }
 
