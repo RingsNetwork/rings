@@ -18,7 +18,6 @@
 //! epoch the registrations publish.
 
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 
 use rings_runtime::Spawner;
 
@@ -52,9 +51,6 @@ pub(crate) struct OnionRuntime {
     scope: Scope,
     /// The node's loop client.
     loops: OnionLoopClient,
-    /// What the runtime's clones own together: when the last one drops, the data plane's
-    /// tasks end.
-    _life: Arc<OnionRuntimeLife>,
     /// The witness of the data plane's link table.
     #[cfg(all(test, rings_native))]
     links: OnionLinkWitness,
@@ -113,8 +109,7 @@ impl OnionRuntime {
         });
         Ok(Self {
             scope,
-            loops: OnionLoopClient::new(core.did(), tags, link_sender.clone()),
-            _life: Arc::new(OnionRuntimeLife { link_sender }),
+            loops: OnionLoopClient::new(core.did(), tags, link_sender),
             #[cfg(all(test, rings_native))]
             links,
         })
@@ -133,25 +128,6 @@ impl OnionRuntime {
     /// The exit's refusal, a timeout, or a send failure (see [`dial::open`]).
     pub(crate) async fn open(&self, request: OnionSessionRequest) -> Result<OnionClientStream> {
         dial::open(self.loops.clone(), self.scope.clone(), request).await
-    }
-}
-
-/// The data plane's long-lived parts, owned by the runtime's clones together.
-///
-/// Law (lifetime): every emitter ends when its lane closes; so once the last runtime clone
-/// drops, no onion task keeps the node alive.
-struct OnionRuntimeLife {
-    /// The node's link emitter.
-    link_sender: OnionLinkSender,
-}
-
-impl Drop for OnionRuntimeLife {
-    /// Shut the link sender down, which closes every lane and stops its emitter, and refuses
-    /// every later open, so link facts still queued for the data plane reopen nothing.
-    fn drop(&mut self) {
-        if let Err(error) = self.link_sender.shutdown() {
-            tracing::debug!(%error, "onion runtime could not close its link lanes");
-        }
     }
 }
 

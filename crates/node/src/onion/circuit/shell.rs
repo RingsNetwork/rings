@@ -448,6 +448,18 @@ impl OnionCircuitShell {
     }
 }
 
+impl Drop for OnionCircuitShell {
+    /// Law (lifetime): the data plane lives as long as its registration, which owns the shell,
+    /// not as long as any handle to it: a relay whose runtime handle was dropped still relays.
+    /// When the registry drops the shell, the link sender shuts down, which closes every lane,
+    /// stops its emitter, and refuses every later open, so no onion task outlives the protocol.
+    fn drop(&mut self) {
+        if let Err(error) = self.link_sender.shutdown() {
+            tracing::debug!(%error, "onion data plane could not close its link lanes");
+        }
+    }
+}
+
 /// What one link fact does to the emitter's lanes.
 enum OnionLaneChange {
     /// Nothing.
