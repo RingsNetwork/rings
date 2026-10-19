@@ -5,6 +5,7 @@
 //!                  (never waits; a refused       (one task per namespace, until stop)
 //!                   envelope is dropped, counted)        └──────────▶ Route::observe_link
 //!              ──PeerRetired(p)─────────▶ Retired(p), every queue
+//!              ──MessageDropped(p)──────▶ Dropped(p), every queue, once while one waits
 //!              ──refused from admitted p─▶ Dropped(p), its queue, once while one waits
 //! ```
 //!
@@ -23,7 +24,9 @@
 //!   fact in order. A peer's retirement goes to every namespace (#963). An envelope a queue
 //!   refuses from an admitted peer makes that namespace a `Dropped` fact for the peer (#966): a
 //!   message lost here is observed here, so a protocol whose state rides the link (an onion
-//!   circuit) can end it instead of losing a cell silently. At most one `Dropped` per peer waits
+//!   circuit) can end it instead of losing a cell silently. A drop by the core's own inbox
+//!   (`SwarmEvent::MessageDropped`, #969) names no namespace, so it goes to every one. At most one
+//!   `Dropped` per peer waits
 //!   in a queue, so facts are bounded by the admissions the core announced; a refusal of a peer
 //!   not admitted makes none, since no link state rides a link that is not up. The fact names the
 //!   envelope's verified signer, which is the adjacent hop for a direct send; an overlay-routed
@@ -239,8 +242,8 @@ impl NamespaceQueues {
         let weight = bytes.len();
         if !queue.held.admits(weight) {
             self.drops.record(DispatchDrop::QueueFull);
-            if self.core.peer_admitted(from) && queue.held.mark_dropped(from) {
-                queue.tell(route, LinkFact::Dropped(from));
+            if self.core.peer_admitted(from) {
+                queue.tell_dropped(route, from);
             }
             return;
         }
@@ -258,16 +261,28 @@ impl NamespaceQueues {
         }
     }
 
-    /// Queue the retirement of `peer`'s link generation for every registered namespace, behind
-    /// the envelopes already queued. Never waits and never refuses for room.
-    pub(super) fn submit_retirement(&mut self, peer: Did) {
+    /// Queue `fact` for every registered namespace, behind the envelopes already queued: a
+    /// retirement, or a drop by the core's inbox, which names no namespace. Never waits and never
+    /// refuses for room.
+    pub(super) fn submit_link_fact(&mut self, fact: LinkFact) {
         for (namespace, route) in self.core.routes() {
-            queue_of(&mut self.queues, &self.stop, namespace).tell(route, LinkFact::Retired(peer));
+            let queue = queue_of(&mut self.queues, &self.stop, namespace);
+            match fact {
+                LinkFact::Retired(_) => queue.tell(route, fact),
+                LinkFact::Dropped(peer) => queue.tell_dropped(route, peer),
+            }
         }
     }
 }
 
 impl NamespaceQueue {
+    /// Queue `LinkFact::Dropped(peer)` for `route` unless one already waits ([`Held::mark_dropped`]).
+    fn tell_dropped(&self, route: Route, peer: Did) {
+        if self.held.mark_dropped(peer) {
+            self.tell(route, LinkFact::Dropped(peer));
+        }
+    }
+
     /// Queue `fact` for `route`, outside both bounds.
     fn tell(&self, route: Route, fact: LinkFact) {
         if self
