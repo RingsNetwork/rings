@@ -39,6 +39,7 @@ use std::sync::Arc;
 use delegation::DelegatedNamespaces;
 pub use inbox::ApplicationInbox;
 use inbox::ApplicationOutlet;
+pub(crate) use inbox::Delivered;
 pub use inbox::APPLICATION_INBOX_WEIGHT;
 use lookup::ApplicationLookups;
 pub use lookup::SuccessorReport;
@@ -190,9 +191,10 @@ impl ApplicationMessage {
 /// A logical fact about a peer, as core concluded it.
 ///
 /// Law: per peer, the inbox yields `PeerAdmitted` and `PeerRetired` alternately, starting with
-/// `PeerAdmitted`, in the order core decided them. An admission retired before the application
-/// read it is withdrawn together with its retirement, so an application never reads a
-/// retirement of an admission it did not read.
+/// `PeerAdmitted`, in the order core decided them; every `MessageDropped` lies between an
+/// admission and the retirement after it. An admission retired before the application read it is
+/// withdrawn together with its retirement and the drops after it, so an application never reads a
+/// fact about an admission it did not read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SwarmEvent {
@@ -207,13 +209,22 @@ pub enum SwarmEvent {
         /// The retired peer.
         peer: Did,
     },
+    /// A live application message from `peer`, an admitted peer, was dropped here because the
+    /// inbox was full (#969). The link stays up, but a message `peer` sent was lost; several drops
+    /// before the application reads the fact are told once.
+    MessageDropped {
+        /// The admitted peer the dropped message came from.
+        peer: Did,
+    },
 }
 
 impl SwarmEvent {
     /// The peer this fact is about.
     pub fn peer(&self) -> Did {
         match *self {
-            Self::PeerAdmitted { peer } | Self::PeerRetired { peer } => peer,
+            Self::PeerAdmitted { peer }
+            | Self::PeerRetired { peer }
+            | Self::MessageDropped { peer } => peer,
         }
     }
 }

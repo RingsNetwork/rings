@@ -139,8 +139,10 @@ pub trait Protocol {
 pub enum LinkFact {
     /// `peer`'s link generation retired: nothing more crosses it (#963).
     Retired(Did),
-    /// The namespace's queue dropped an envelope from `peer`, an admitted peer, for want of room:
-    /// the link stays up, but a message `peer` sent over it was lost here (#966).
+    /// The namespace's queue (#966), or the core's application inbox (#969), dropped a message
+    /// from `peer`, an admitted peer, for want of room: the link stays up, but a message `peer`
+    /// sent over it was lost here. A drop by the core's inbox names no namespace, so every
+    /// namespace is told.
     ///
     /// Several drops before the protocol reads the fact are told once: at most one such fact per
     /// peer waits in a namespace's queue.

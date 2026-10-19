@@ -81,8 +81,8 @@
 //! | exit reactions | `open_exit_stream`, then `pump_tcp_duplex` sends `Data` and `Shutdown` from one task (`onion/tcp/mod.rs`, `onion/tcp/pump.rs`) |
 //! | client reactions | `handle_client_payload` → `send_client_inbound`; the gateway sends the request only after `BridgeEvent::Opened` (`gateway/src/runtime.rs`) |
 //! | `Sever` | a link generation retires (`PeerRetired`, observed by both ends); under `Current` also `application_egress` refusing a send within `DATA_CHANNEL_SEND_ACCEPT_BUDGET` = 5 s, which `CircuitFate` retries instead (`swarm/transport/timeouts.rs`, `payload_send.rs`) |
-//! | `Drop` | the namespace queue refuses an envelope (`NAMESPACE_QUEUE_CAPACITY` envelopes, `NAMESPACE_QUEUE_WEIGHT` bytes; `NamespaceQueues::submit`, `extension/dispatch.rs`); at an endpoint, also its stream's full inbound lane (`TCP_INBOUND_LANE_FRAMES`; `send_client_inbound`, `send_exit_inbound`, `onion/tcp/mod.rs`) |
-//! | `CircuitFate`, a drop is observed | a refusal from an admitted peer queues `LinkFact::Dropped`, outside the bounds, at most one per peer while it waits, and never dropped (`extension/dispatch.rs`); the onion protocol maps it to `OnionCircuitInput::Link` (`Protocol::link_fact`, `circuit/protocol.rs`) |
+//! | `Drop` | the namespace queue refuses an envelope (`NAMESPACE_QUEUE_CAPACITY` envelopes, `NAMESPACE_QUEUE_WEIGHT` bytes; `NamespaceQueues::submit`, `extension/dispatch.rs`), or the core application inbox drops a live message (`APPLICATION_INBOX_WEIGHT`; `ApplicationOutlet::deliver`, `swarm/application/inbox.rs`); at an endpoint, also its stream's full inbound lane (`TCP_INBOUND_LANE_FRAMES`; `send_client_inbound`, `send_exit_inbound`, `onion/tcp/mod.rs`) |
+//! | `CircuitFate`, a drop is observed | a refusal from an admitted peer queues `LinkFact::Dropped`, outside the bounds, at most one per peer while it waits, and never dropped (`extension/dispatch.rs`); a core inbox drop from an admitted peer is announced as `SwarmEvent::MessageDropped` under the lifecycle boundary (`announce_message_dropped`, `swarm/transport/pending.rs`), at most one per peer while it waits, and reaches every namespace as `LinkFact::Dropped` (`extension/mod.rs`); the onion protocol maps it to `OnionCircuitInput::Link` (`Protocol::link_fact`, `circuit/protocol.rs`) |
 //! | `CircuitFate`, `Drop` at a relay | `destroy_link` removes every return edge on the link and seals `Destroy` toward both neighbours (`circuit/reducer.rs`) |
 //! | `CircuitFate`, `Drop` at an endpoint | `Teardown(Link(Dropped))` ends the link's streams with `TcpStreamAbort::CellDropped`, and a full lane ends its stream with `InboundOverflow` (#971): causes that originate here, so each sends `Destroy` to its adjacent hop; the cause is recorded beside the stream's lane (`TcpStreamFate`), so a full lane cannot lose it (`onion/tcp/fate.rs`, `tcp/inbound.rs`, `end_client_stream`, `end_exit_stream`) |
 //! | `Refuse`, `Abandon` | the per-peer onion outbox bound (`MAX_PENDING_ONION_SENDS_PER_PEER`, `MAX_PENDING_ONION_SEND_BYTES_PER_PEER`, `onion/circuit/send_outbox.rs`) refuses `enqueue_sealed` at a relay, or an endpoint's `send_sealed` |
@@ -97,10 +97,6 @@
 //! | `Expire` → `IdleTimeout` | smoltcp `set_timeout(flow_idle_timeout)` from the last client segment (`gateway/src/tcp/mod.rs`) |
 //! | `Expire` → `OpenTimedOut` | `TCP_OPEN_TIMEOUT_SECS` from the `Open` send (`onion/tcp/mod.rs`) |
 //! | `DeadlineOrder` | the request segment precedes the `Open` send, so the idle deadline is first iff `I ≤ O + Δ`: the test config (`I = O = 30 s`) is `IdleFirst`, the production default (`I = 300 s`) is `OpenFirst` |
-//!
-//! The core application inbox (`APPLICATION_INBOX_WEIGHT`) also drops a live message when full,
-//! counted only. The node's inbox reader never waits, so it fills only while the reader is
-//! starved; it is outside this model until its drops are observed too (#969).
 //!
 //! The other non-delivery sites on the path are unreachable within one flow and are not actions:
 //! the crypto admission gate (4096 operations per 60 s per peer, `circuit/limiter.rs`), forward

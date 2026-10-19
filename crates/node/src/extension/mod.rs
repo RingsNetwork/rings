@@ -20,6 +20,7 @@ use rings_core::swarm::application::SwarmEvent;
 pub use crate::extension::dispatch::DispatchDropCounters;
 pub(crate) use crate::extension::dispatch::DispatchDrops;
 use crate::extension::ext::Extensions;
+use crate::extension::ext::LinkFact;
 use crate::provider::Provider;
 
 /// Observer of what the [`Backend`] reads from the application inbox but does not act on
@@ -102,8 +103,8 @@ impl Backend {
     }
 
     /// Route one item of the application inbox: a custom message to its namespace's queue, a
-    /// peer's retirement to every namespace's queue (#963), and every fact to the observer.
-    /// Never waits.
+    /// peer's retirement (#963) or a drop by the core's inbox (#969) to every namespace's queue as
+    /// a [`LinkFact`], and every fact to the observer. Never waits.
     fn route(&self, namespaces: &mut dispatch::NamespaceQueues, delivery: ApplicationDelivery) {
         match delivery {
             ApplicationDelivery::Message(ApplicationMessage {
@@ -117,8 +118,14 @@ impl Backend {
                 }
             }
             ApplicationDelivery::Event(event) => {
-                if let SwarmEvent::PeerRetired { peer } = event {
-                    namespaces.submit_retirement(peer);
+                match event {
+                    SwarmEvent::PeerRetired { peer } => {
+                        namespaces.submit_link_fact(LinkFact::Retired(peer));
+                    }
+                    SwarmEvent::MessageDropped { peer } => {
+                        namespaces.submit_link_fact(LinkFact::Dropped(peer));
+                    }
+                    _ => {}
                 }
                 if let Some(observer) = self.observer.as_deref() {
                     match event {

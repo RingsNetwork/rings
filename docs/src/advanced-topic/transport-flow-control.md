@@ -137,7 +137,10 @@ waiting) at its own pace, and no inbound lane ever waits for it to read:
 
 - Application delivery is lossy by design. A live application message that does not fit the
   full inbox is dropped, counted (`ApplicationInbox::dropped`) and logged at `warn`, as a
-  best-effort network drops it, and nothing tells its sender. A protocol that needs a
+  best-effort network drops it, and nothing tells its sender. A drop of a message from an
+  admitted peer is told to the application itself, as `SwarmEvent::MessageDropped` (one per
+  peer while it is unread), so a protocol whose state rides that link, such as an onion
+  circuit, can end that state instead of losing a cell silently (#969). A protocol that needs a
   reliable stream detects loss end to end: the TCP relay numbers its segments and resets a
   stream whose gap outlives `REORDER_DEADLINE` (four delivery bounds: a superseded path with
   at most four hops left to cross) or the replay window, closing the local socket

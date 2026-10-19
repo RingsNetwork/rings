@@ -674,6 +674,17 @@ impl SwarmTransport {
         self.application.outlet.announce(event);
     }
 
+    /// Announce that a live application message from `peer` was dropped for want of room in the
+    /// inbox, iff `peer` is admitted, inside the lifecycle boundary: the fact is then read after
+    /// `peer`'s admission and before its retirement (#969). Never waits.
+    pub(crate) fn announce_message_dropped(&self, peer: Did) -> Result<()> {
+        let lifecycle = self.connection_lifecycle()?;
+        if self.active_attempt(peer)?.is_some() {
+            self.announce(&lifecycle, SwarmEvent::MessageDropped { peer });
+        }
+        Ok(())
+    }
+
     /// Retire `attempt` only if `action` decides to, under the lifecycle boundary, announcing
     /// [`SwarmEvent::PeerRetired`] in the same step; see
     /// `ConnectionLifecycleRegistry::retire_active_if` for the post-conditions.
