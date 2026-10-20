@@ -244,7 +244,18 @@ $\upsilon_j$ SURBs of $\sid$ (D8).
   later frame, fails $\sid$ closed.  There is no retransmission, so a lost
   loop never removes stream bytes silently.
 \end{itemize}
-$\mathrm{data}(n,0,\epsilon)$ is a credit-only loop.
+\begin{itemize}
+\item \emph{Liveness.}  $\cl$ sends a forward loop of $\sid$ whenever none
+  has left for $V/2$ (the keep-alive, a credit-only loop).  When a forward
+  loop of $\sid$ arrives and $h$ has sent no reply of $\sid$ since the
+  previous forward loop of $\sid$ arrived, $h$ answers it at once with the
+  echo $\mathrm{data}(n,0,\epsilon)$, spending a SURB of $\sid$; the loop
+  brought one, so the echo is credit-neutral.  $\cl$ fails $\sid$ closed,
+  sending $\mathrm{abort}(n)$, once no frame of $\sid$ has arrived for
+  $\Delta=2V$ (Prop.~\ref{prop:liveness}).
+\end{itemize}
+$\mathrm{data}(n,0,\epsilon)$ is a credit-only loop forward and the echo
+backward; after the open ack it carries no stream bytes.
 $\mathrm{fin}$ closes one direction; $h$ drops $\sid$ once both directions
 are closed, or once no forward loop of $\sid$ has arrived for $V$.
 For \code{https} the frames carry the HTTPS request/response encoding
@@ -790,6 +801,36 @@ reading; $h$ sends $\mathrm{fin}$ at world EOF.  By the rule for $x$, a SURB liv
 and a session idle for longer than $V$ holds no credit.
 \end{invariant}
 
+\begin{proposition}[Liveness of failure]\label{prop:liveness}
+Let the latency of every loop segment vary by less than $V/4$, and let $L$
+be one return-segment latency.  (i) While both segments of $\sid$'s route
+deliver, consecutive frames of $\sid$ reach $\cl$ less than $7V/4<\Delta$
+apart, so $\cl$ never fails a live session.  (ii) If a link of either
+segment stops delivering at $t_0$, both endpoints observe the failure:
+after a forward loss $h$ drops $\sid$ by $t_0+V$ and $\cl$ fails it by
+$t_0+3V+L$; after a return loss $\cl$ fails it by $t_0+2V+L$, and its
+$\mathrm{abort}$ closes $\sid$ at $h$ on arrival.
+\end{proposition}
+\begin{proof}
+Forward loops of $\sid$ leave $\cl$ at most $V/2$ apart (keep-alive), so
+their arrivals $a_1<a_2<\cdots$ at $h$ satisfy $a_{k+1}-a_k<V/2+V/4=3V/4$.
+(i) By the echo rule every interval $(a_{k-1},a_k]$ holds a reply of
+$\sid$, sent at $a_k$ at the latest, so consecutive replies leave $h$ less
+than $2\cdot3V/4=3V/2$ apart and reach $\cl$ less than $3V/2+V/4=7V/4$
+apart.  (ii) Return loss: the last frame of $\sid$ reaches $\cl$ by
+$t_0+L$, so $\cl$ fails $\sid$ by $t_0+L+\Delta$; its $\mathrm{abort}$
+travels the forward segment, which still delivers.  Forward loss: no
+forward loop reaches $h$ after $t_0$, so $h$ drops $\sid$ by $t_0+V$;
+every SURB it holds arrived by $t_0$ and expires by $t_0+V$
+(Inv.~\ref{inv:credit}), so its last reply leaves by $t_0+V$ and $\cl$
+fails $\sid$ by $t_0+V+L+\Delta$.
+\end{proof}
+
+The echo is the cost of observing the return segment: an idle session
+turns every link of its route active for at least $D=Q$ once per $V/2$,
+its return links included; relays keep no session state, so no cheaper witness
+of the return path exists.
+
 \section{Security Laws}\label{sec:laws}
 
 \begin{assumption}[Primitives]\label{as:prim}
@@ -1230,7 +1271,7 @@ expiry $x$ & shared by all hops of a loop and all loops sealed in one $Q=30$\,s 
 $x$ locates departure within $Q$ & $\arr_i$ then reveals the client-to-hop delay $D_i$ to within $Q$: position advantage $|D_i-D'_{i'}|/Q$ (L5$'$) \\
 session id $\sid$ & seen only by $h$, sealed in $\lambda_h$; links the loops of one session, which $h$ links by target anyway (D2$'$) \\
 deniable replies & no signature of $h$; $\cl$ holds no transferable proof of what $h$ returned; exit accountability out of scope (Prop.~\ref{prop:replyauth}) \\
-link activity & rate $\rho B/V$ while active, floor $r_{\mathrm{idle}}$ while idle, active periods of at least $D=Q$: volume hidden, activity visible only at granularity $D$ \\
+link activity & rate $\rho B/V$ while active, floor $r_{\mathrm{idle}}$ while idle, active periods of at least $D=Q$: volume hidden, activity visible only at granularity $D$; an idle session activates its whole route, return links included, once per $V/2$ (Prop.~\ref{prop:liveness}) \\
 $p_k$ holds $\sigma_k$ & $p_k$ colluding with $r_{k,j}$ links two positions of one segment; no value leaks, and timing links them anyway \\
 client-authored semantics ($\bar a_{i+1}$ depends on meaning of $v_i$) & out of protocol scope \\
 \bottomrule
@@ -1374,6 +1415,7 @@ credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, r
 rate & loopback single-client \code{tcp} download $\ge1$\,MB/s at $b=16$\,KiB, upload $\approx1/(k+1)$ of download \\
 emission & no $V$-window of a link exceeds $\rho B$ units; constant rate while active, real cells FIFO; an honest sender at full load is never refused; an idle link emits exactly $r_{\mathrm{idle}}$; a real cell at $t$ keeps rate $r$ on $[t,t+D)$ \\
 frames & $T$ set until the first reply; open only on a matching digest; open ack $\mathrm{data}(0,0,\epsilon)$, a refusal is $\mathrm{abort}(0)$; $\mathrm{abort}$ applied on arrival, never an end of stream; reorder within $Q_{\max}$; a persisting gap fails closed; reserved $\phi$ bits rejected \\
+liveness & an idle session gets one echo $\mathrm{data}(n,0,\epsilon)$ per keep-alive with no reply since the previous forward loop, credit-neutral; a live session is never failed; a forward loss fails $\sid$ at $h$ by $V$ and at $\cl$ by $3V+L$; a return loss fails it at $\cl$ by $2V+L$ and at $h$ by $\cl$'s $\mathrm{abort}$ (Prop.~\ref{prop:liveness}) \\
 reply auth & no exit signature on the wire; a one-bit flip of a reply fails $\Enc{\tau}{k_{c_n}}$ \\
 replay store & no replayed layer admitted across filter rotation; a filter grows by blocks and is dropped exactly when its $x$ passes; memory tracks admitted tags; measured false-positive rate within $2^{-20}$ \\
 seeds & derived keys match the KDF definition; a weak derived key forces a re-draw \\
