@@ -103,8 +103,8 @@ impl Backend {
     }
 
     /// Route one item of the application inbox: a custom message to its namespace's queue, a
-    /// peer's retirement (#963) or a drop by the core's inbox (#969) to every namespace's queue as
-    /// a [`LinkFact`], and every fact to the observer. Never waits.
+    /// peer's admission (#843), its retirement (#963) or a drop by the core's inbox (#969) to
+    /// every namespace's queue as a [`LinkFact`], and every fact to the observer. Never waits.
     fn route(&self, namespaces: &mut dispatch::NamespaceQueues, delivery: ApplicationDelivery) {
         match delivery {
             ApplicationDelivery::Message(ApplicationMessage {
@@ -119,6 +119,9 @@ impl Backend {
             }
             ApplicationDelivery::Event(event) => {
                 match event {
+                    SwarmEvent::PeerAdmitted { peer } => {
+                        namespaces.submit_link_fact(LinkFact::Admitted(peer));
+                    }
                     SwarmEvent::PeerRetired { peer } => {
                         namespaces.submit_link_fact(LinkFact::Retired(peer));
                     }

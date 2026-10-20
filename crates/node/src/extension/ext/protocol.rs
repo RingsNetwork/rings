@@ -137,6 +137,11 @@ pub trait Protocol {
 /// its envelopes ([`Protocol::link_fact`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinkFact {
+    /// `peer`'s link generation was admitted: it is up until the `Retired(peer)` after it. Per
+    /// peer the queue carries `Admitted` and `Retired` alternately, in the order core decided
+    /// them, so a protocol keying state by admitted link (the onion data plane, #843) follows
+    /// core's links without reading them.
+    Admitted(Did),
     /// `peer`'s link generation retired: nothing more crosses it (#963).
     Retired(Did),
     /// The namespace's queue (#966), or the core's application inbox (#969), dropped a message
@@ -153,7 +158,7 @@ impl LinkFact {
     /// The peer at the other end of the link this fact is about.
     pub const fn peer(self) -> Did {
         match self {
-            Self::Retired(peer) | Self::Dropped(peer) => peer,
+            Self::Admitted(peer) | Self::Retired(peer) | Self::Dropped(peer) => peer,
         }
     }
 }

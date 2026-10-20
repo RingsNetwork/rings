@@ -24,8 +24,8 @@ directly. *In progress* and *Planned* items are direction, not commitments.
 - **Admission:** at-most-once delivery through a persisted per-origin replay window,
   per-origin rate limits, delegations referenced by content address, and bounded
   connection and storage state.
-- **Privacy:** onion circuits with layered ElGamal-AEAD, fixed-batch cover, pacing, size
-  classes, persisted entry guards, and TCP/HTTPS exits (`crates/node/src/onion`); the TUN
+- **Privacy:** onion loops of fixed-width Sphinx cells, constant-rate link emission with real
+  cells substituted for cover, paid admission, size classes, persisted entry guards, and TCP/HTTPS exits (`crates/node/src/onion`); the TUN
   gateway (`crates/gateway`) and onion WebView (`crates/webview`).
 - **Runtimes:** native daemon and `rings` CLI, JSON-RPC, C FFI, the browser provider, and the
   hosted console at [rings.rs](https://rings.rs/#node).
@@ -37,7 +37,8 @@ directly. *In progress* and *Planned* items are direction, not commitments.
 - Churn handling for 1.0 (#773–#779): a churn simulator, successor lists sized from network
   estimates, RTT-derived liveness with ICE restart, inbox replication, stability-weighted
   storage, and browser lifecycle handling.
-- Onion circuits as client-sealed loops of registered operation symbols (#834).
+- Onion loops as client-sealed pipelines of registered operation symbols (#834); the loop
+  data plane is cut over (#843, #880).
 
 ## Planned
 
@@ -45,7 +46,7 @@ directly. *In progress* and *Planned* items are direction, not commitments.
   choose where they land (#780).
 - Decentralized peer discovery and bootstrapping.
 - Pub/sub and service discovery as protocols.
-- DID-to-DID sender-unlinkable messaging over circuits.
+- DID-to-DID sender-unlinkable messaging over the loops.
 - Zero-knowledge identity, verifiable off-chain compute, secret sharing, and private storage
   as user-installed protocols.
 

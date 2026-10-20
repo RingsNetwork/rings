@@ -13,6 +13,7 @@ use serde::Serialize;
 use crate::core::pool::ChannelLane;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
@@ -136,6 +137,15 @@ where
         }
     }
 
+    /// The view is taken from the connection, which is let go at once; a released connection
+    /// has no credit to view.
+    fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
+        self.upgrade().map_or_else(
+            |_| LaneCreditView::closed(),
+            |connection| connection.send_credit_view(lane),
+        )
+    }
+
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.upgrade()
             .map(|c| c.webrtc_connection_state())
@@ -228,6 +238,9 @@ mod tests {
             unreachable!("a released ref must fail before reaching the inner connection")
         }
         fn reserve_send_credit(&self, _: ChannelLane) -> crate::delivery::SendCreditWait<Error> {
+            unreachable!("a released ref must fail before reaching the inner connection")
+        }
+        fn send_credit_view(&self, _: ChannelLane) -> LaneCreditView {
             unreachable!("a released ref must fail before reaching the inner connection")
         }
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {

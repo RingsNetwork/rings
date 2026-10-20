@@ -60,6 +60,10 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::sync_utils::lock_recover;
 
+mod view;
+
+pub use view::LaneCreditView;
+
 /// The bytes of received frames a node holds above which its lanes defer their credit
 /// advertisements: 16 MiB, the node-wide frame budget the transport held before per-lane credit.
 pub(crate) const NODE_RECEIVE_SOFT_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
@@ -310,6 +314,12 @@ impl LinkCredit {
     fn wake_senders(&self, index: CreditIndex) {
         let waiters = mem::take(&mut self.lock().send_waiters[index]);
         waiters.into_iter().for_each(|waiter| waiter.waker.wake());
+    }
+
+    #[cfg(rings_transport_backend)]
+    /// A read-only view of `lane`'s send credit (see [`LaneCreditView`]).
+    pub(crate) fn view(self: &Arc<Self>, lane: ChannelLane) -> LaneCreditView {
+        LaneCreditView::new(self, lane)
     }
 
     /// Apply a credit the peer advertised for `lane`: `limit ← max(limit, credit)`.

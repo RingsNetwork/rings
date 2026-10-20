@@ -16,8 +16,8 @@ pub type BoxGatewayDuplex = Box<dyn GatewayDuplex>;
 
 /// How an open Onion stream ended, reported at most once by its connector.
 ///
-/// A duplex expresses only an orderly end (EOF). An abortive end, the far side's reset or the
-/// destruction of the stream's circuit (#963), is reported here as `Err`, and the gateway resets
+/// A duplex expresses only an orderly end (EOF). An abortive end, a session that failed closed
+/// at its far side or on a link it rides (#963), is reported here as `Err`, and the gateway resets
 /// the captured flow with that reason. `Ok(())`, or a sender dropped without a report, leaves the
 /// orderly end to the duplex.
 pub type OnionStreamEnd = tokio::sync::oneshot::Receiver<Result<(), GatewayError>>;
@@ -29,7 +29,7 @@ pub fn unreported_end() -> OnionStreamEnd {
 
 /// Node-owned effect that opens one immutable target over an Onion TCP route.
 ///
-/// The gateway crate never imports Rings directory or circuit types. A native node implements
+/// The gateway crate never imports Rings directory or onion types. A native node implements
 /// this boundary by building a route for `flow.target`, opening it, and relaying `stream` through
 /// the resulting Onion stream. Failure must be fail-closed; implementations must not dial the
 /// target directly from the client node.

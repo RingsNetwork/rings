@@ -44,7 +44,7 @@ pub(crate) struct OnionProxyHttpRequest {
 pub(crate) struct OnionProxyRoute {
     /// Onion service name selected by the core route builder.
     pub(crate) service: String,
-    /// DIDs of the hops the circuit uses, entry guard first and exit last.
+    /// DIDs of the loop's positions in order: the guard first and last, the exit among them.
     pub(crate) hops: Vec<String>,
     /// Exit DID.
     pub(crate) exit: String,
@@ -342,7 +342,8 @@ fn display_route(route: &NodeOnionProxyRoute) -> OnionProxyRoute {
         service: route.exit_service().to_string(),
         hops: route
             .route
-            .circuit_hops()
+            .hops()
+            .positions()
             .map(|hop| hop.did.to_string())
             .collect(),
         exit: route.exit_did().to_string(),

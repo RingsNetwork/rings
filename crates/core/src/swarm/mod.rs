@@ -19,6 +19,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub use builder::SwarmBuilder;
+/// The read-only view of one lane's send credit that [`Swarm::application_credit`] returns: the
+/// transport's type, re-exported so an application reads it through core alone.
+pub use rings_transport::core::transport::LaneCreditView;
 
 use self::callback::SwarmTransportCallback;
 use crate::dht::Chord;
@@ -330,6 +333,24 @@ impl Swarm {
     /// [`SwarmEvent::PeerRetired`](application::SwarmEvent::PeerRetired).
     pub fn is_peer_admitted(&self, peer: Did) -> Result<bool> {
         Ok(self.transport.active_attempt(peer)?.is_some())
+    }
+
+    /// A read-only view of the send credit of the Application lane of `peer`'s sendable
+    /// connection generation, or `None` without one (#913). Application data travels on that
+    /// lane, so an application that shapes its own emission paces it on this view: the view
+    /// reserves nothing and holds the connection weakly, so reading it never changes what core
+    /// may send.
+    pub fn application_credit(&self, peer: Did) -> Option<LaneCreditView> {
+        self.transport.get_connection(peer).map(|connection| {
+            connection.send_credit_view(MessageCategory::Application.channel_lane())
+        })
+    }
+
+    /// `𝓡`, the capacity of the connection registry (#723): the most connection records, in
+    /// any phase, the swarm holds at once, `2 × (finger slots + successors + 1)`. It bounds the
+    /// admitted peers, so an application keying state by admitted link can size it by `𝓡`.
+    pub fn connection_registry_capacity(&self) -> Result<usize> {
+        self.transport.connection_registry_capacity()
     }
 
     /// Cancel the handshake `attempt` iff it is still pending, that is, no data channel has

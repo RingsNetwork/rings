@@ -25,6 +25,7 @@ use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::IrrevocableSendGuard;
+use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -610,6 +611,10 @@ impl ConnectionInterface for DummyConnection {
 
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
         self.callback.reserve_send_credit(lane)
+    }
+
+    fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
+        self.callback.send_credit_view(lane)
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {

@@ -58,7 +58,7 @@ pub struct Provider {
     extensions: crate::extension::ext::Extensions,
     dispatch_drops: Arc<DispatchDrops>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
-    onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion::https::OnionHttpsRuntime>>>>,
+    onion_runtime: Arc<Mutex<Option<crate::onion::runtime::OnionRuntime>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_directory_endpoint: Arc<Mutex<Option<RemoteRpcEndpoint>>>,
     /// Serializes the check-and-install of the onion circuit runtime in this provider's
@@ -102,7 +102,7 @@ impl Provider {
             extensions,
             dispatch_drops: Arc::default(),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
-            onion_https_runtime: Arc::new(Mutex::new(None)),
+            onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
             #[cfg(feature = "node")]
@@ -235,7 +235,7 @@ impl Provider {
             extensions,
             dispatch_drops: Arc::default(),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
-            onion_https_runtime: Arc::new(Mutex::new(None)),
+            onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
             #[cfg(feature = "node")]

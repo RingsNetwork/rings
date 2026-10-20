@@ -24,20 +24,17 @@
 //!   so when every registrant of the first symbol `h₁` extends to a loop, its marginal is its
 //!   quality share among them; for a one-symbol pipeline `h₁` is the exit.
 //!
-//! Until #834 Phase 2a-4 the data plane consumes only the loop's forward prefix
-//! [`OnionRoute::circuit_hops`], `g, r₀,₂, h₁ = relay^s ⋙ (s, ā)`, and answers along its reverse.
+//! The data plane seals the whole loop, one layer per position, and the reply returns through
+//! the positions after the symbol hop (`OnionLoop::return_path`).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::iter;
 
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 
-use super::pipeline::OnionPipeline;
-use super::pipeline::OnionSymbolWord;
 use super::OnionExitDescriptor;
 use super::OnionLoop;
 use super::OnionLoopRelay;
@@ -83,7 +80,7 @@ impl OnionRouteRequest {
 pub struct OnionRouteHop {
     /// Hop DID.
     pub did: Did,
-    /// Hop session public key used for ElGamal-AEAD layers.
+    /// Hop session public key, which the loop's header blinds its layer to.
     pub delegatee_public_key: PublicKey<33>,
     /// Process epoch `e_n` of the hop's registration (#834 D2).
     pub process_epoch: OnionProcessEpoch,
@@ -159,30 +156,6 @@ impl OnionRoute {
     /// Return the loop's hop assignment, positions `1 … H`.
     pub fn hops(&self) -> &OnionLoop<OnionRouteHop> {
         &self.hops
-    }
-
-    /// Return the hops the circuit uses: the loop's forward prefix `g, r₀,₂ … r₀,ₛ, h₁`.
-    ///
-    /// Until #834 Phase 2a-4 the data plane seals only this prefix and answers along its reverse;
-    /// the return segment of [`Self::hops`] is selected but unused.
-    pub fn circuit_hops(&self) -> impl Iterator<Item = &OnionRouteHop> {
-        self.hops
-            .forward_prefix()
-            .chain(iter::once(self.hops.terminal()))
-    }
-
-    /// Return [`Self::circuit_hops`] as the Phase 1 pipeline the data plane seals: the relay
-    /// positions before `h₁`, then the terminal `h₁ = hₙ` (the loop has `n = 1`).
-    pub(crate) fn forward_path(&self) -> OnionPipeline<OnionRouteHop> {
-        OnionPipeline::new(
-            self.hops.forward_prefix().copied().collect(),
-            *self.hops.terminal(),
-        )
-    }
-
-    /// Return the symbol word `relay^s ⋙ service` of [`Self::circuit_hops`].
-    pub fn word(&self) -> OnionSymbolWord {
-        OnionSymbolWord::new(self.hops.forward_prefix().count(), self.service.clone())
     }
 
     /// Return the selected exit descriptor.

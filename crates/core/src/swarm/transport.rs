@@ -29,6 +29,7 @@ use rings_transport::connections::WebrtcTransport as Transport;
 use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::LaneCreditReservation;
+use rings_transport::core::transport::LaneCreditView;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
@@ -654,6 +655,12 @@ impl SwarmConnection {
     ) -> impl std::future::Future<Output = Result<LaneCreditReservation>> + 'static {
         let wait = self.connection.reserve_send_credit(lane);
         async move { wait.await.map_err(Into::into) }
+    }
+
+    /// A read-only view of `lane`'s send credit on this connection generation; it holds the
+    /// connection weakly and reserves nothing.
+    pub(crate) fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
+        self.connection.send_credit_view(lane)
     }
 
     /// Hand one frame to the transport on `lane`; the sole send of every frame to another node.

@@ -45,7 +45,7 @@ fn test_every_computed_cell_is_charged_exactly_once() {
         send(&mut admission, ORIGIN_MS, 1, 5, layer(expiry(quantum), 2)),
         Verdict::Rejected(OnionAdmissionRejection::OutsideWindow)
     );
-    let invalid = admission.charge(ORIGIN_MS, sender, units(7));
+    let invalid = admission.charge_units(ORIGIN_MS, sender, units(7));
     assert!(invalid.is_ok());
     drop(invalid);
     assert_eq!(sender_load(&admission, 1, ORIGIN_MS), Some(2 + 3 + 5 + 7));
@@ -60,9 +60,11 @@ fn test_every_computed_cell_is_charged_exactly_once() {
     );
 
     let spent = ONION_ADMISSION_SENDER_UNITS - 17 - 1;
-    assert!(admission.charge(ORIGIN_MS, sender, units(spent)).is_ok());
+    assert!(admission
+        .charge_units(ORIGIN_MS, sender, units(spent))
+        .is_ok());
     let pipelined = (0..8)
-        .map(|_| admission.charge(ORIGIN_MS, sender, units(1)))
+        .map(|_| admission.charge_units(ORIGIN_MS, sender, units(1)))
         .collect::<Vec<_>>();
     assert!(pipelined.first().is_some_and(Result::is_ok));
     assert!(pipelined

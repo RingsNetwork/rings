@@ -109,7 +109,7 @@ pub enum FlowResetReason {
     OnionOpenFailed(String),
     /// The open Onion stream failed while carrying bytes.
     StreamFailed(String),
-    /// The open Onion stream was reset by its far side or by its circuit's destruction.
+    /// The open Onion stream failed closed, at its far side or on a link it rides.
     StreamReset(String),
     /// The byte bridge stopped accepting commands before the flow closed.
     BridgeClosed,

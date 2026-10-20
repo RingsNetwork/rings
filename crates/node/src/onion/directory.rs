@@ -8,7 +8,6 @@ use rings_core::utils::get_epoch_ms;
 use super::select_onion_route_from_candidates;
 use super::OnionEntryGuards;
 use super::OnionExitDescriptor;
-use super::OnionExitTarget;
 use super::OnionRoute;
 use super::OnionRouteCandidates;
 use super::OnionRouteError;
@@ -16,7 +15,7 @@ use super::OnionRouteRequest;
 use super::SystemRouteEntropy;
 use crate::error::Error;
 use crate::error::Result;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::online::OnlineNodeDescriptor;
@@ -47,7 +46,7 @@ pub(crate) trait OnionDirectoryReader {
 /// Build an onion proxy route for a concrete target.
 pub(crate) async fn build_onion_proxy_route(
     reader: &impl OnionDirectoryReader,
-    proxy: OnionProxyConfig,
+    proxy: OnionProxyProtocol,
     target: OnionProxyTarget,
 ) -> Result<OnionProxyRoute> {
     build_onion_proxy_route_with_first_hop(reader, proxy, target, |_| true).await
@@ -55,13 +54,12 @@ pub(crate) async fn build_onion_proxy_route(
 
 pub(crate) async fn build_onion_proxy_route_with_first_hop(
     reader: &impl OnionDirectoryReader,
-    proxy: OnionProxyConfig,
+    proxy: OnionProxyProtocol,
     target: OnionProxyTarget,
     first_hop_permitted: impl Fn(Did) -> bool,
 ) -> Result<OnionProxyRoute> {
-    let service_name = proxy.exit_service_name().clone();
+    let service_name = proxy.exit_service_name();
     let service = service_name.as_str().to_string();
-    let exit_target = OnionExitTarget::from_proxy_target(&target);
     let now_ms = get_epoch_ms();
     let directory_exits = OnionExitDescriptor::latest_valid_by_service_did(
         reader.live_onion_exits("").await?,
@@ -86,19 +84,19 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
         return Err(Error::OnionRouteError(
             OnionRouteError::NoExitForProxyProtocol {
                 service: service.clone(),
-                protocol: proxy.protocol.label().to_string(),
+                protocol: proxy.label().to_string(),
             },
         ));
     }
     let policy_exits = protocol_exits
         .into_iter()
-        .filter(|exit| exit.policy.allows_target(&exit_target))
+        .filter(|exit| exit.policy.allows_target(&target))
         .collect::<Vec<_>>();
     if policy_exits.is_empty() {
         return Err(Error::OnionRouteError(
             OnionRouteError::NoExitAllowsTarget {
                 service,
-                target: exit_target.authority().to_string(),
+                target: target.authority(),
             },
         ));
     }
@@ -107,7 +105,7 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
         build_onion_route_from_exits(reader, request, policy_exits, first_hop_permitted).await?;
 
     Ok(OnionProxyRoute {
-        protocol: proxy.protocol,
+        protocol: proxy,
         target,
         route,
     })

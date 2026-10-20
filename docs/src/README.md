@@ -10,7 +10,7 @@ relay, that relay carries the transport traffic.
 
 The overlay is the communication layer: it routes by DID and, once two peers have completed
 the E2E handshake, encrypts to a DID. It does not hide who is talking to whom. Privacy is the
-job of the privacy layer, the onion circuits that bound what each relay can learn to its
+job of the privacy layer, the onion loops that bound what each relay can learn to its
 predecessor and its successor; the contract of each layer is drawn in the
 [security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md#layer-contracts).
 

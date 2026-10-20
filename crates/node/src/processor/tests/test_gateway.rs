@@ -51,7 +51,7 @@ use tokio::sync::oneshot;
 use super::common::*;
 use super::*;
 use crate::onion::native::NativeOnionCircuitHandle;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::NativeOnionGatewayConnector;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::AdmissionActivity;
@@ -286,8 +286,7 @@ async fn prepare_onion_loop_public_gateway(
     // synthetic 198.18.0.0/15 target that the exit policy must reject.
     let authority = format!("{PUBLIC_HTTP_IPV4}:{PUBLIC_HTTP_PORT}");
     let mut exit_policy = onion_policy(&[authority.as_str()], &[])?;
-    exit_policy.max_circuits = 8;
-    exit_policy.max_streams_per_circuit = 2;
+    exit_policy.max_sessions = 8;
     exit_policy.max_bytes_per_minute = 1_048_576;
 
     let client = Arc::new(prepare_processor().await);
@@ -351,12 +350,9 @@ async fn prepare_onion_loop_public_gateway(
         ])?)
         .await?;
 
-    let proxy = OnionProxyConfig::tcp_connect();
+    let proxy = OnionProxyProtocol::TcpConnect;
     let preview = client
-        .build_onion_proxy_route(
-            proxy.clone(),
-            OnionProxyTarget::parse_authority(&authority)?,
-        )
+        .build_onion_proxy_route(proxy, OnionProxyTarget::parse_authority(&authority)?)
         .await?;
     let relay_dids = relays.iter().map(|relay| relay.did()).collect::<Vec<_>>();
     assert_eq!(preview.route.hops().positions().count(), 5);

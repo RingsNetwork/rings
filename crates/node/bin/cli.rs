@@ -79,11 +79,6 @@ fn parse_onion_exit_service(raw: &str) -> Result<OnionServiceName, String> {
     OnionServiceName::parse(raw).map_err(|error| error.to_string())
 }
 
-/// Parse a canonical service name for client-side onion proxy options.
-fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
-    OnionServiceName::parse(raw).map_err(|error| error.to_string())
-}
-
 /// Resolves a handshake payload argument that may be `-`, meaning "read it from stdin".
 ///
 /// The base58-check offer/answer strings are long and awkward to pass inline, so the
@@ -305,15 +300,8 @@ pub(crate) struct RunCommand {
     )]
     pub onion_exit_deny_target: Vec<String>,
 
-    #[arg(long, help = "Maximum onion circuits this exit will serve", env)]
-    pub onion_exit_max_circuits: Option<u32>,
-
-    #[arg(
-        long,
-        help = "Maximum streams per onion circuit this exit will serve",
-        env
-    )]
-    pub onion_exit_max_streams_per_circuit: Option<u32>,
+    #[arg(long, help = "Maximum onion sessions this exit will serve", env)]
+    pub onion_exit_max_sessions: Option<u32>,
 
     #[arg(long, help = "Maximum bytes per minute this exit will serve", env)]
     pub onion_exit_max_bytes_per_minute: Option<u64>,
@@ -330,14 +318,6 @@ pub(crate) struct RunCommand {
         env
     )]
     pub onion_http_proxy_addr: Option<String>,
-
-    #[arg(
-        long,
-        value_parser = parse_onion_service_name,
-        help = "Onion exit service used by the local HTTP CONNECT proxy: tcp or https",
-        env
-    )]
-    pub onion_http_proxy_service: Option<OnionServiceName>,
 
     #[arg(
         long,

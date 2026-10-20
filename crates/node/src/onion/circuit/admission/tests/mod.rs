@@ -26,7 +26,7 @@ use super::OnionChargeRejection;
 use super::OnionExpiry;
 use super::OnionReplayFilterKey;
 use super::ADMISSION_WINDOW_QUANTA_WIDE;
-use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionReplayNonce;
 use crate::onion::circuit::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use crate::onion::OnionProcessEpoch;
 
@@ -57,10 +57,7 @@ pub(super) fn registry(r: usize) -> NonZeroUsize {
 
 /// Generation `generation` of a link from DID `did`.
 pub(super) fn generation(did: u32, generation: u64) -> OnionAdmissionLink {
-    OnionAdmissionLink {
-        did: Did::from(did),
-        generation,
-    }
+    OnionAdmissionLink::new(Did::from(did), generation)
 }
 
 /// The first generation of a link from DID `did`.
@@ -116,7 +113,7 @@ pub(super) fn layer(expiry: OnionExpiry, tag: u128) -> OnionAdmissionLayer {
     OnionAdmissionLayer {
         epoch: EPOCH,
         expiry,
-        tag: OnionForwardNonce::new(tag.to_le_bytes()),
+        tag: OnionReplayNonce::new(tag.to_le_bytes()),
     }
 }
 
@@ -129,7 +126,7 @@ pub(super) fn send_on(
     n: u32,
     layer: OnionAdmissionLayer,
 ) -> Verdict {
-    match admission.charge(now_ms, link, units(n)) {
+    match admission.charge_units(now_ms, link, units(n)) {
         Err(rejection) => Verdict::Unpaid(rejection),
         Ok(token) => match admission.admit(now_ms, token, layer) {
             Ok(()) => Verdict::Admitted,

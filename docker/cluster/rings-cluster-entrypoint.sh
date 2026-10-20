@@ -364,8 +364,7 @@ write_config() {
             else
                 printf '  denied_targets: []\n'
             fi
-            printf '  max_circuits: 0\n'
-            printf '  max_streams_per_circuit: 0\n'
+            printf '  max_sessions: 0\n'
             printf '  max_bytes_per_minute: 0\n'
         fi
         external_ips="$(external_ip_candidates)"

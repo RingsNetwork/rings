@@ -179,6 +179,7 @@ mod tests {
 
     use super::*;
     use crate::core::pool::ChannelLane;
+    use crate::core::transport::LaneCreditView;
     use crate::core::transport::SendPermit;
     use crate::delivery::DeliveryFuture;
 
@@ -231,6 +232,10 @@ mod tests {
             Box::pin(std::future::ready(Err(Error::DataChannelOpen(
                 "test connection cannot send".to_string(),
             ))))
+        }
+
+        fn send_credit_view(&self, _: ChannelLane) -> LaneCreditView {
+            LaneCreditView::closed()
         }
 
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {
