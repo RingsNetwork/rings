@@ -281,11 +281,14 @@ Law Idle:  reset = IdleTimeout  ⇔  κ = ClientSilent ∧ φ = Open(Live)
 A flow reset is an idle timeout exactly when the client was silent for `T` while its stream was
 open, no failure of the stream's circuit had been observed, and no frame of it was known missing;
 an observed circuit failure names the reset whichever local event reaches the runtime first. The
-probe reports what the client endpoint has observed. A lost last forward frame, or a lost reply
-tail that includes the target's end of stream, is observed by no endpoint (the first never, the
-second only at the Onion session's own deadline), and until then the flow is indistinguishable
-from a healthy one whose target is silent (#981). The model, its proof and the
-model check are in `src/reset.rs`.
+probe reports what the client endpoint has observed. A lost last forward frame is observed through
+the forward high-water mark of the next credit loop: the exit fails the session and replies `abort`
+by `t₀ + 3V/2 + F`, and the flow reads `StreamReset` by `t₀ + 3V/2 + F + L` (#981), where `t₀` is
+the loss, `V` the loop validity, and `F` and `L` one forward and one return latency. Only a lost
+reply tail that includes the target's end of stream remains, observed at the Onion session's own
+deadline `Δ = 2V`. Until a loss is observed the flow is indistinguishable from a healthy one whose
+target is silent, so an idle timeout `T` that ends first still names it `IdleTimeout`. The model,
+its proof and the model check are in `src/reset.rs`.
 
 Flow capture binds the immutable `FlowId::target` and creates `TargetBound` directly. TCP
 endpoints are the sole ownership index for smoltcp handles; insertion and removal update

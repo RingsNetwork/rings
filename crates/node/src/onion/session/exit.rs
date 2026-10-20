@@ -10,8 +10,8 @@
 //!            └────────────────────────────────▶ Closed ◀─ abort(0) ─ Open(acked)
 //! (a T-frame is a `data` or a `fin` carrying T)
 //!
-//! forward(t, f, υ):  Q ← Q ∪ {υ};  f = credit(υ…) ⇒ Q ← Q ∪ υ…;  f ∈ {data, fin} ⇒ reorder,
-//!                    then per released frame, in order:
+//! forward(t, f, υ):  Q ← Q ∪ {υ};  f = credit(m, υ…) ⇒ Q ← Q ∪ υ…, then mark m (a gap ⇒ abort);
+//!                    f ∈ {data, fin} ⇒ reorder, then per released frame, in order:
 //!   data(t?, w)  Unbound ∧ T ⇒ bind t, Open(t);  Opening ∨ Open ⇒ Write(w) for w ≠ ε
 //!                a later T naming another target ⇒ abort
 //!   fin(t?)      Unbound ∧ T ⇒ bind t, Open(t), ShutdownWrite (an empty upload);
@@ -55,6 +55,15 @@
 //!   a failure; `fin` is sent only when the world's bytes really ended. Without a block the
 //!   session closes without a reply, and the shell answers the client's next loop, which
 //!   brings its own block, with `abort` ([`reply_to_unheld`]).
+//! - **Mark** (paper, D2′ Order; #981). A `credit(m, υ…)` whose `m` exceeds the next expected
+//!   forward sequence makes that frame known missing from the credit's arrival, exactly as a
+//!   later sequenced frame would ([`OnionReorder::mark`]); the gap rule then aborts `ς` after
+//!   `V`, under a block the credit loops left. `m` never releases or invents a frame, and an
+//!   `m` at or below the next expected sequence changes nothing. With the client's keep-alive,
+//!   a forward frame sent at `t₀` and lost on a delivering route is followed by a loop carrying
+//!   a sequence or a mark above it, arriving by `t₀ + V/2 + F` (`F` one forward-segment
+//!   latency), so `h` aborts `ς` by `t₀ + 3V/2 + F`, whether or not a later sequenced frame
+//!   follows (paper, Prop. Liveness of failure (iii)).
 //! - **Echo** (D2′ Liveness). A forward loop arriving at `a` when no reply of `ς` has left in
 //!   `(a − V/2, a]` is answered at once with the echo `data(n, 0, ε)`. The echo spends the
 //!   block that loop brought, so it is credit-neutral (the arrival changes `|Q_{h,ς}|` by the
@@ -224,9 +233,15 @@ impl OnionExitSession {
         self.pool.add(now_ms, surb);
         let mut effects = Vec::new();
         match frame {
-            OnionFrame::Credit(surbs) => surbs.into_iter().for_each(|surb| {
-                self.pool.add(now_ms, surb);
-            }),
+            OnionFrame::Credit { mark, surbs } => {
+                surbs.into_iter().for_each(|surb| {
+                    self.pool.add(now_ms, surb);
+                });
+                // Law Mark: the blocks are pooled first, so an abort can spend one of them.
+                if self.forward.mark(now_ms, mark).is_err() {
+                    self.abort(now_ms, &mut effects);
+                }
+            }
             OnionFrame::Data {
                 sequence,
                 target,
@@ -530,7 +545,7 @@ pub(crate) fn seal(frame: &OnionFrame, surb: OnionSurb) -> Option<(Did, OnionCel
 pub(crate) fn reply_to_unheld(frame: &OnionFrame) -> Option<OnionFrame> {
     match frame {
         OnionFrame::Abort { .. } => None,
-        OnionFrame::Data { .. } | OnionFrame::Fin { .. } | OnionFrame::Credit(_) => {
+        OnionFrame::Data { .. } | OnionFrame::Fin { .. } | OnionFrame::Credit { .. } => {
             Some(OnionFrame::Abort {
                 sequence: OnionSequence::FIRST,
             })

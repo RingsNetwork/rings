@@ -17,7 +17,7 @@
     the connection-registry capacity `𝓡`; a node's process epoch is fresh at every start and
     reset clears the admission state.
   - Sessions (#843, D2′): `tcp` and `https` are session symbols over the frames
-    `data(n, φ, w)`, `fin(n, φ)`, `credit(υ…)` and `abort(n)`. The target is bound by its digest
+    `data(n, φ, w)`, `fin(n, φ)`, `credit(m, υ…)` and `abort(n)`. The target is bound by its digest
     and travels under flag `T` until the first reply; the open ack is `data(0, 0, ε)` and a
     refusal is `abort(0)`; `abort` fails a session without a reason. The exit reads its world
     only while it holds the session's reply blocks (SURBs, up to `Q_max = 256`), so an
@@ -28,7 +28,10 @@
     (`Swarm::application_credit`, `LaneCreditView`) and never reserves it.
   - Liveness (#975): the client sends a keep-alive loop every `V/2`; the exit answers a loop that
     finds no reply of its session for `V/2` with an empty `data`; the client fails a session
-    silent for `Δ = 2V`, so a dead link on either segment is observed at both endpoints.
+    silent for `Δ = 2V`, so a dead link on either segment is observed at both endpoints. Every
+    credit frame carries the forward high-water mark `m`, the client's next forward sequence
+    (#981), so a lost last forward frame is known missing at the exit on the next credit loop,
+    and the exit fails the session with `abort` after `V`.
   - Circuit fate (#963, #964, #966, #969, #971): a retired link, a message dropped at dispatch
     or in the core application inbox from an admitted peer (`SwarmEvent::MessageDropped`,
     `LinkFact::Dropped`), or a full inbound stream lane fails every session riding it closed at

@@ -5,7 +5,7 @@
 //! reply spends one of them. The pieces, each pure:
 //!
 //! ```text
-//! frame    OnionFrame          data(n, φ, w) | fin(n) | credit(υ…)          the carried value
+//! frame    OnionFrame          data(n, φ, w) | fin(n) | credit(m, υ…)       the carried value
 //! ā        OnionSessionArguments  ς ‖ SHA-256(t) ‖ 0^16                      the layer arguments
 //! Q_{h,ς}  OnionSurbPool       ≤ Q_max reply blocks, least x first          at h
 //! order    OnionReorder        per-direction sequence, window Q_max        at both ends
@@ -27,7 +27,9 @@
 //!   reply of `ς` for `V/2` with the credit-neutral echo `data(n, 0, ε)`; and the client
 //!   fails `ς` closed, with `abort(n)`, once no frame of `ς` has arrived for `Δ = 2V`. A live
 //!   session is never failed, and a loss on either segment of the route is observed at both
-//!   endpoints, whichever link it is on.
+//!   endpoints, whichever link it is on. A single lost forward frame, the last one included, is
+//!   observed at `h` through the forward high-water mark `m` of the next credit loop (#981), so
+//!   `h` fails `ς` by `t₀ + 3V/2 + F` and the client by `t₀ + 3V/2 + F + L` (Prop. (iii)).
 
 pub(crate) mod client;
 pub(crate) mod dial;

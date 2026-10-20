@@ -4,6 +4,7 @@
 //! data(w):   frame data(n, T?, w), n ← n + 1;  T is set, with t inline, until the first reply
 //! fin:       frame fin(n, T?), n ← n + 1; T is set, with t inline, until the first reply
 //! abort:     frame abort(n), the session is given up
+//! credit(υ…): frame credit(n, υ…), n unchanged: the forward high-water mark m = n
 //! reply(t, f): replied ← ⊤;  heard ← t;  reorder f, then per released frame, in order:
 //!   first frame   data(0, ε) ⇒ Opened      fin ⇒ Refused (tolerated; h refuses with abort(0))
 //!   later frames  data(w)    ⇒ Data(w)     data(ε) ⇒ nothing (h's echo)     fin ⇒ Fin
@@ -24,6 +25,10 @@
 //!   target; none after it does, so the session opens at `h` whichever forward loop arrives
 //!   first, and the target stops travelling once `h` has answered.
 //! - **Sequence.** Forward frames carry `n = 0, 1, …`; replies are released in their order.
+//! - **Mark** (paper, D2′ Order; #981). Every `credit` frame, a refill or the keep-alive, carries
+//!   `m` = the next forward sequence, so every forward frame below `m` has been sent before
+//!   it, and `h` knows a lost one missing at the next credit loop (`session::exit`, Law Mark).
+//!   Once the sequence space is spent no `m` names it, and no credit is framed either.
 //! - **Open result.** The first reply decides the open: `data(0, ε)` is the ack, and `abort(0)`
 //!   the refusal `h` sends (the `abort` decision of #834 D2′, superseding #843 Q5's `fin`); a
 //!   `fin` before any data, which `h` never sends, is still read as a refusal, failing closed.
@@ -60,7 +65,14 @@
 //!                      and its abort, over the delivering forward segment, closes ς at h
 //!        forward loss: h drops ς by t₀ + V; its last block expires and its last reply leaves
 //!                      by t₀ + V (Invariant Credit)             ⇒ cl fails ς by t₀ + 3V + L
+//!   (iii) one lost forward frame n, sent at t₀, on a delivering route: the next forward loop
+//!                      leaves by t₀ + V/2 (keep-alive) carrying a sequence above n or a mark
+//!                      m > n (Law Mark), and arrives by t₀ + V/2 + F
+//!                      ⇒ h fails ς by t₀ + 3V/2 + F and replies abort(n′), so
+//!                        cl fails ς by t₀ + 3V/2 + F + L
 //!   ```
+//!
+//!   with `F` one forward-segment latency.
 //!
 //!   The echo `data(n, 0, ε)` after the open is heard, but carries no stream bytes, so it
 //!   yields no event.
@@ -77,6 +89,7 @@ use super::order::OnionSequenceGap;
 use super::pool::ONION_SURB_POOL_CAPACITY;
 use crate::onion::circuit::OnionExpiry;
 use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
 
 /// `Δ = 2V`: the longest a session's reply direction may stay silent before the client fails
@@ -199,6 +212,21 @@ impl OnionClientSession {
             .map(|sequence| OnionFrame::Abort { sequence })
     }
 
+    /// The next `credit(m, υ₁ … υ_k)` frame for the blocks `surbs`, with `m` the next forward
+    /// sequence (Law Mark); it takes no sequence.
+    ///
+    /// # Errors
+    ///
+    /// [`OnionSequenceExhausted`] once the sequence space is spent, since no `m` names it.
+    pub(crate) fn credit(
+        &self,
+        surbs: Vec<OnionSurb>,
+    ) -> Result<OnionFrame, OnionSequenceExhausted> {
+        self.forward
+            .ok_or(OnionSequenceExhausted)
+            .map(|mark| OnionFrame::Credit { mark, surbs })
+    }
+
     /// One reply of the session at `now`, returning what it releases, in order.
     ///
     /// # Errors
@@ -224,7 +252,7 @@ impl OnionClientSession {
             }),
             OnionFrame::Fin { sequence, .. } => (sequence, OnionStreamFrame::Fin { target: None }),
             // `h` never sends credit; one that does is ignored.
-            OnionFrame::Credit(_) => return Ok(Vec::new()),
+            OnionFrame::Credit { .. } => return Ok(Vec::new()),
             // Applied on arrival: nothing before it that is still missing will count.
             OnionFrame::Abort { .. } => {
                 self.aborted = true;

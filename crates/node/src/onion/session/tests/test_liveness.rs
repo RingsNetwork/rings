@@ -1,6 +1,6 @@
 //! Law tests of session liveness (#975; D2′ Liveness; paper, Prop. Liveness of failure): the
-//! exit's echo, the client's deadline, and the Proposition's three cases on the two machines
-//! joined by a modelled route.
+//! exit's echo, the client's deadline, and the Proposition's cases (i), (ii) and (iii, #981) on
+//! the two machines joined by a modelled route.
 //!
 //! Every instant is an argument of a pure machine, so the clock is the test's own.
 
@@ -8,6 +8,7 @@ use bytes::Bytes;
 
 use super::acked;
 use super::arguments;
+use super::credit;
 use super::kinds;
 use super::opening;
 use super::surbs;
@@ -15,6 +16,7 @@ use super::NOW_MS;
 use super::QUANTUM_MS;
 use super::TARGET;
 use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::session::client::OnionClientEvent;
 use crate::onion::session::client::OnionClientFailure;
 use crate::onion::session::client::OnionClientSession;
 use crate::onion::session::client::ONION_SESSION_DEADLINE_MS;
@@ -34,9 +36,18 @@ fn block_at(seed: u64, at_ms: u128) -> OnionSurb {
     surbs(seed, 1, at_ms / QUANTUM_MS).pop().expect("one block")
 }
 
-/// A credit-only forward frame with no further blocks: the keep-alive's shape, for the tests.
+/// One reply block built at `at`, as the client builds one: its expiry `⌈at / Q⌉·Q + X₀`
+/// ([`crate::onion::circuit::OnionExpiry::of_build`]) lies in `[at + V − Q, at + V)`.
+fn block_built_at(seed: u64, at_ms: u128) -> OnionSurb {
+    surbs(seed, 1, at_ms.div_ceil(QUANTUM_MS) + 1)
+        .pop()
+        .expect("one block")
+}
+
+/// A credit-only forward frame with no further blocks: the keep-alive's shape, for the tests,
+/// with the mark `m = 1` of a client that has sent only its open `data(0)`.
 fn bare_credit() -> OnionFrame {
-    OnionFrame::Credit(Vec::new())
+    credit(1, Vec::new())
 }
 
 /// The echo `data(n, 0, ε)` of `h` at sequence `n`.
@@ -102,7 +113,7 @@ fn test_exit_echo_is_credit_neutral() {
     let carried = surbs(81, 3, at / QUANTUM_MS);
     let count = carried.len();
     assert_eq!(
-        kinds(&session.forward(at, OnionFrame::Credit(carried), block_at(82, at))),
+        kinds(&session.forward(at, credit(1, carried), block_at(82, at))),
         ["data 1 0"]
     );
     let wide = vec![0x5a; OnionFrame::data_capacity(super::CLASS) * (count + 2)];
@@ -230,6 +241,9 @@ const BASE_MS: u128 = 2_000;
 /// The longest return-segment latency `L` of the model.
 const L_MS: u128 = BASE_MS + V / 4;
 
+/// The longest forward-segment latency `F` of the model: both segments draw from [`latency`].
+const F_MS: u128 = BASE_MS + V / 4;
+
 /// The latency of a segment's `index`-th crossing, `BASE + (7919·index mod V/4)`: it varies by
 /// less than `V/4`, the Proposition's premise.
 fn latency(index: u128) -> u128 {
@@ -245,12 +259,17 @@ enum OnionRouteCut {
     Forward(u128),
     /// The return segment stops at `t₀`.
     Return(u128),
+    /// Both segments deliver, but the one `data` the client sends at `t₀` is lost: its last
+    /// forward `data`, since no later one follows.
+    Upload(u128),
 }
 
 /// An event of the model.
 enum OnionModelEvent {
     /// The client's keep-alive is due.
     KeepAlive,
+    /// The client sends a `data` frame, which the route loses.
+    Upload,
     /// A forward loop reaches `h` with its block.
     Arrive(OnionFrame, Box<OnionSurb>),
     /// A reply reaches the client.
@@ -268,6 +287,8 @@ struct OnionModelOutcome {
     exit_closed_ms: Option<u128>,
     /// When the client's `abort` reached `h`.
     abort_arrived_ms: Option<u128>,
+    /// When `h`'s `abort` reached the client.
+    aborted_ms: Option<u128>,
     /// The widest gap between consecutive frames heard by the client.
     widest_silence_ms: u128,
     /// The echoes `h` sent.
@@ -275,7 +296,8 @@ struct OnionModelOutcome {
 }
 
 /// The client and `h` joined by a modelled route: the client sends its open, then its
-/// keep-alive every `V/2`; `h` opens at once; each crossing takes [`latency`].
+/// keep-alive every `V/2`, a credit loop carrying one block and its mark `m`; `h` opens at once;
+/// each crossing takes [`latency`].
 struct OnionLivenessModel {
     /// Where the route stops delivering.
     cut: OnionRouteCut,
@@ -314,6 +336,9 @@ impl OnionLivenessModel {
         let open = model.client.data(Bytes::new()).expect("a sequence");
         model.forward(NOW_MS, open);
         model.schedule(NOW_MS + V / 2, OnionModelEvent::KeepAlive);
+        if let OnionRouteCut::Upload(at) = cut {
+            model.schedule(at, OnionModelEvent::Upload);
+        }
         while let Some(at) = model.next_instant() {
             if at > horizon_ms {
                 break;
@@ -356,10 +381,19 @@ impl OnionLivenessModel {
         let (at, _, event) = self.events.remove(index);
         match event {
             OnionModelEvent::KeepAlive if self.outcome.client_failed_ms.is_none() => {
-                self.forward(at, OnionFrame::Credit(Vec::new()));
+                let seed = u64::try_from(self.forwards).expect("few loops") + 2_000;
+                let carried = vec![block_built_at(seed, at)];
+                let keep_alive = self.client.credit(carried).expect("a sequence");
+                self.forward(at, keep_alive);
                 self.schedule(at + V / 2, OnionModelEvent::KeepAlive);
             }
             OnionModelEvent::KeepAlive => {}
+            // The frame takes its sequence and is lost on the way: nothing reaches `h`.
+            OnionModelEvent::Upload => {
+                let request = self.client.data(Bytes::from_static(b"request"));
+                assert!(request.is_ok(), "a sequence");
+                self.forwards += 1;
+            }
             OnionModelEvent::Arrive(frame, surb) => {
                 if matches!(frame, OnionFrame::Abort { .. }) {
                     self.outcome.abort_arrived_ms = Some(at);
@@ -372,7 +406,11 @@ impl OnionLivenessModel {
                 self.outcome.widest_silence_ms =
                     self.outcome.widest_silence_ms.max(at - self.heard_ms);
                 self.heard_ms = at;
-                assert!(self.client.reply(at, frame).is_ok(), "no gap in the model");
+                let events = self.client.reply(at, frame).expect("no gap in the model");
+                if events.contains(&OnionClientEvent::Aborted) {
+                    self.outcome.aborted_ms = Some(at);
+                    self.outcome.client_failed_ms = Some(at);
+                }
             }
             OnionModelEvent::Reply(_) => {}
             OnionModelEvent::Tick => {
@@ -468,4 +506,28 @@ fn test_liveness_observes_a_forward_loss_at_both_endpoints() {
     let failed = outcome.client_failed_ms.expect("the client fails ς");
     assert!(failed <= cut + 3 * V + L_MS, "{outcome:?}");
     assert_eq!(outcome.abort_arrived_ms, None, "{outcome:?}");
+}
+
+/// Prop. Liveness of failure (iii), the forward tail (#981): the client's last `data`, sent at
+/// `t₀`, is lost while both segments deliver, and only keep-alives follow it. The first credit
+/// whose mark `m` exceeds it makes it known missing at `h`, which fails `ς` once the gap has
+/// persisted `V`, by `t₀ + 3V/2 + F`, and replies `abort`; the client fails `ς` on that `abort`,
+/// by `t₀ + 3V/2 + F + L`, before its own deadline.
+#[test]
+fn test_liveness_observes_a_lost_last_forward_frame_at_both_endpoints() {
+    let lost = NOW_MS + 3 * V + 7;
+    let outcome = OnionLivenessModel::run(OnionRouteCut::Upload(lost), NOW_MS + 12 * V);
+    let closed = outcome.exit_closed_ms.expect("h fails ς");
+    assert!(
+        closed >= lost + V,
+        "the gap rule, not a mark, fails ς: {outcome:?}"
+    );
+    assert!(closed <= lost + 3 * V / 2 + F_MS, "{outcome:?}");
+    let aborted = outcome.aborted_ms.expect("h's abort reaches the client");
+    assert_eq!(outcome.client_failed_ms, Some(aborted), "{outcome:?}");
+    assert!(aborted <= lost + 3 * V / 2 + F_MS + L_MS, "{outcome:?}");
+    assert_eq!(
+        outcome.abort_arrived_ms, None,
+        "the client never gives up first"
+    );
 }
