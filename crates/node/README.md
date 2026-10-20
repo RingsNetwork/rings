@@ -133,7 +133,6 @@ gateway:
   unix_helper_socket: /home/operator/.rings/gateway-helper.sock  # must match the helper's --socket
   wintun_dll_path: null
   status_refresh_secs: 2
-  onion_service: tcp
 ```
 
 `rings run --gateway` enables the section for that run without editing the file. On a config
