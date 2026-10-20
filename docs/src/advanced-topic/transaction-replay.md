@@ -45,13 +45,11 @@ This assumes a class's transactions reach the scheduler in signing order, as the
 sending task.
 
 The per-class streams are stored one record per stream (see [Persistence and
-bounds](#persistence-and-bounds)). A load that finds the former shared-stream snapshot
-(`rings-core:transaction-replay`) deletes it without decoding it, which resets every replay window
-once, as deleting the store does. The deletion is best effort: since the former snapshot is never
-decoded, a failed deletion is counted as a persistence failure and logged, admission continues, and
-the next load retries it; once it is gone, no load touches it again. An upgraded
-sender's per-class sequences are stale to a node that has not upgraded, so the upgrade is
-network-wide and mandatory.
+bounds](#persistence-and-bounds)). A store of 0.32 or earlier, which holds one snapshot of streams
+shared by every class under `rings-core:transaction-replay`, is not converted: the operator deletes
+the replay store while the node is stopped before upgrading, which resets every replay window once.
+An upgraded sender's per-class sequences are stale to a node that has not upgraded, so the upgrade
+is network-wide and mandatory.
 
 Every transaction carries a mandatory `u64` sequence. The transaction signature transcript
 binds the receiver-selected `network_id` through the signing domain and binds `destination`,

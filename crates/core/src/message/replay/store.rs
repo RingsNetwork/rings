@@ -15,8 +15,7 @@
 //!
 //! **Law (faithful restore).** [`restore`] ∘ `write*` is the identity on the tables: every
 //! record carries its own [`StreamKey`] and is written under `record_key` of that key, and a
-//! record restores its stream iff it decodes and holds a valid window. The one tolerated foreign key
-//! is the shared-stream snapshot of the key used before #898, which is reported, never decoded.
+//! record restores its stream iff it decodes and holds a valid window.
 //!
 //! **Law (fail closed per stream).** Let `name` be the storage's
 //! [`record_name`](crate::storage::KvStorageScan::record_name) and `U` the names of the records
@@ -51,8 +50,7 @@
 //! is reported by its file name and never deleted.
 //!
 //! The record is an opaque byte string to the storage, so browser storage never sees structured
-//! keys or `u64` counters, and the former snapshot (also an opaque byte string) loads as a
-//! record without being decoded.
+//! keys or `u64` counters.
 
 use std::collections::BTreeMap;
 
@@ -70,13 +68,6 @@ use crate::storage::UndecodableRecord;
 
 /// Common prefix of the storage key of every stream record.
 const RECORD_KEY_PREFIX: &str = "rings-core:transaction-replay:stream";
-/// Storage key of the snapshot whose streams were shared by every class (before #898).
-///
-/// It is deleted on first load without being read: its keys cannot name a class, so it cannot
-/// seed the per-class streams. Deleting it resets every replay window once, exactly as
-/// deleting the replay store does.
-pub(super) const SHARED_STREAM_SNAPSHOT_KEY: &str = "rings-core:transaction-replay";
-
 /// Largest canonical encoding of a [`StreamKey`]: the network id as a `u32` varint (5), two
 /// DIDs (43 each: a one-byte length and 42 hex characters) and the class tag (1).
 const STREAM_KEY_MAX_BYTES: usize = 5 + 2 * 43 + 1;
@@ -283,15 +274,6 @@ impl ReplayStore {
     }
 }
 
-/// The store a load restores, and whether it still holds the former snapshot.
-#[derive(Debug)]
-pub(super) struct RestoredStore {
-    /// The restored tables and unrestorable records.
-    pub(super) store: ReplayStore,
-    /// Whether the store holds the shared-stream snapshot of the key used before #898.
-    pub(super) holds_shared_snapshot: bool,
-}
-
 /// One restored stream: its table, its key and its state.
 enum RestoredStream {
     /// A sender stream and its last reserved sequence.
@@ -315,8 +297,6 @@ fn restore_record(bytes: &[u8]) -> std::result::Result<RestoredStream, Defect> {
 
 /// What one scanned record contributes to the restored store.
 enum Contribution {
-    /// The shared-stream snapshot of the key used before #898.
-    SharedSnapshot,
     /// A restored stream.
     Stream(RestoredStream),
     /// A record that does not restore, under its storage record name.
@@ -328,56 +308,39 @@ enum Contribution {
     },
 }
 
-/// Classify one scanned record (pure): the shared snapshot (the record filed under
-/// `shared_snapshot`, its name, which is never decoded), a restored stream, or an unrestorable
-/// record under its name.
+/// Classify one scanned record (pure): a restored stream, or an unrestorable record under its
+/// name.
 ///
-/// By the scan law a `Filed` record of key `k` is filed under `name(k)`, so the snapshot is the
-/// record filed under its name whether or not it decoded; `name(k)` is computed only for a
-/// decoded record.
-fn classify(
-    record: ScannedRecord<ReplayRecord>,
-    shared_snapshot: &str,
-    name: &impl Fn(&str) -> String,
-) -> Contribution {
+/// By the scan law a `Filed` record of key `k` is filed under `name(k)`; `name(k)` is computed
+/// only for a record that does not restore.
+fn classify(record: ScannedRecord<ReplayRecord>, name: &impl Fn(&str) -> String) -> Contribution {
     match record {
-        ScannedRecord::Undecodable(UndecodableRecord { name }) => match name == shared_snapshot {
-            true => Contribution::SharedSnapshot,
-            false => Contribution::Unrestorable {
-                name,
-                failure: RestoreFailure::Undecodable,
-            },
+        ScannedRecord::Undecodable(UndecodableRecord { name }) => Contribution::Unrestorable {
+            name,
+            failure: RestoreFailure::Undecodable,
         },
         ScannedRecord::Filed {
             key,
             value: ReplayRecord(bytes),
-        } => {
-            let filed_under = name(&key);
-            if filed_under == shared_snapshot {
-                return Contribution::SharedSnapshot;
-            }
-            match restore_record(&bytes) {
-                Ok(stream) => Contribution::Stream(stream),
-                Err(defect) => Contribution::Unrestorable {
-                    name: filed_under,
-                    failure: RestoreFailure::Defective { key, defect },
-                },
-            }
-        }
+        } => match restore_record(&bytes) {
+            Ok(stream) => Contribution::Stream(stream),
+            Err(defect) => Contribution::Unrestorable {
+                name: name(&key),
+                failure: RestoreFailure::Defective { key, defect },
+            },
+        },
     }
 }
 
 /// Restore the store from every record a scan returned (pure and total).
 ///
 /// `name` is the storage's record naming. Each record either restores its stream or joins the
-/// unrestorable records under its name (the fail-closed-per-stream law); the shared-stream
-/// snapshot is reported and never decoded, whether or not the storage could decode its framing.
+/// unrestorable records under its name (the fail-closed-per-stream law).
 ///
 /// ```text
-/// restore = foldl step (∅, ∅, false) ∘ map classify
+/// restore = foldl step (∅, ∅) ∘ map classify
 ///
 ///   scanned record r ──▶ classify
-///     r is the shared snapshot ──────────────▶ holds_shared_snapshot := true
 ///     Undecodable(r) ────────────────────────▶ U[r.name]      := Undecodable
 ///     Filed(k, v), restore_record = Err(f) ──▶ U[name(k)]     := f
 ///     Filed(k, v), restore_record = Ok(s) ───▶ tables[s]      := s.state
@@ -385,26 +348,20 @@ fn classify(
 pub(super) fn restore(
     records: Vec<ScannedRecord<ReplayRecord>>,
     name: impl Fn(&str) -> String,
-) -> RestoredStore {
-    let shared_snapshot = name(SHARED_STREAM_SNAPSHOT_KEY);
-    let empty = RestoredStore {
-        store: ReplayStore::default(),
-        holds_shared_snapshot: false,
-    };
+) -> ReplayStore {
     records
         .into_iter()
-        .map(|record| classify(record, &shared_snapshot, &name))
-        .fold(empty, |mut restored, contribution| {
+        .map(|record| classify(record, &name))
+        .fold(ReplayStore::default(), |mut restored, contribution| {
             match contribution {
-                Contribution::SharedSnapshot => restored.holds_shared_snapshot = true,
                 Contribution::Stream(RestoredStream::Sender(key, last)) => {
-                    restored.store.tables.sender.insert(key, last);
+                    restored.tables.sender.insert(key, last);
                 }
                 Contribution::Stream(RestoredStream::Receiver(key, state)) => {
-                    restored.store.tables.receiver.insert(key, *state);
+                    restored.tables.receiver.insert(key, *state);
                 }
                 Contribution::Unrestorable { name, failure } => {
-                    restored.store.unrestorable.insert(name, failure);
+                    restored.unrestorable.insert(name, failure);
                 }
             }
             restored
@@ -427,7 +384,6 @@ mod tests {
     use super::RECEIVER_STREAM_MAX_BYTES;
     use super::SENDER_STREAM_MAX_BYTES;
     use super::SEQUENCE_STATE_MAX_BYTES;
-    use super::SHARED_STREAM_SNAPSHOT_KEY;
     use super::STREAM_KEY_MAX_BYTES;
     use super::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
     use super::TRANSACTION_REPLAY_STORE_MAX_BYTES;
@@ -526,7 +482,7 @@ mod tests {
         format!("digest:{key}")
     }
 
-    /// Restore inverts the record writes, and the former snapshot is reported undecoded.
+    /// Restore inverts the record writes.
     #[test]
     fn test_restore_inverts_the_record_writes() -> Result<()> {
         let key = maximal_key(1);
@@ -534,18 +490,13 @@ mod tests {
         let records = decoded(vec![
             sender_record(&key, 7)?,
             receiver_record(&key, &window)?,
-            (
-                SHARED_STREAM_SNAPSHOT_KEY.to_string(),
-                ReplayRecord(vec![0xff; 3]),
-            ),
         ]);
         let restored = restore(records, by_key);
         let mut expected = ReplayTables::default();
         expected.sender.insert(key, 7);
         expected.receiver.insert(key, window);
-        assert_eq!(restored.store.tables, expected);
-        assert!(restored.store.unrestorable.is_empty());
-        assert!(restored.holds_shared_snapshot);
+        assert_eq!(restored.tables, expected);
+        assert!(restored.unrestorable.is_empty());
         Ok(())
     }
 
@@ -577,53 +528,44 @@ mod tests {
             }),
         ];
         assert_eq!(
-            restored.store.unrestorable,
+            restored.unrestorable,
             expected
                 .into_iter()
                 .collect::<std::collections::BTreeMap<_, _>>()
         );
         let mut tables = ReplayTables::default();
         tables.sender.insert(intact, 3);
-        assert_eq!(restored.store.tables, tables);
+        assert_eq!(restored.tables, tables);
         Ok(())
     }
 
     /// A record the storage cannot decode joins `U` under the storage's name, and the lookup
-    /// finds exactly the stream whose record key the storage files under that name; an
-    /// undecodable shared-stream snapshot is still recognised by its name and never decoded.
+    /// finds exactly the stream whose record key the storage files under that name.
     #[test]
     fn test_an_undecodable_record_fails_closed_the_stream_it_is_filed_as() -> Result<()> {
         let torn = maximal_key(1);
         let torn_slot = record_key(ReplayTable::Receiver, &torn)?;
         let records = vec![
             undecodable(by_digest(&torn_slot)),
-            undecodable(by_digest(SHARED_STREAM_SNAPSHOT_KEY)),
             filed(sender_record(&torn, 5)?),
         ];
 
         let restored = restore(records, by_digest);
-        assert!(restored.holds_shared_snapshot);
         assert_eq!(
-            restored.store.unrestorable.get(&by_digest(&torn_slot)),
+            restored.unrestorable.get(&by_digest(&torn_slot)),
             Some(&RestoreFailure::Undecodable)
         );
         assert_eq!(
-            restored
-                .store
-                .unavailable_record(ReplayTable::Receiver, &torn, by_digest)?,
+            restored.unavailable_record(ReplayTable::Receiver, &torn, by_digest)?,
             Some(by_digest(&torn_slot))
         );
         // The same stream's sender record restored: tables are separate slots.
         assert_eq!(
-            restored
-                .store
-                .unavailable_record(ReplayTable::Sender, &torn, by_digest)?,
+            restored.unavailable_record(ReplayTable::Sender, &torn, by_digest)?,
             None
         );
         assert_eq!(
-            restored
-                .store
-                .unavailable_record(ReplayTable::Receiver, &maximal_key(2), by_digest)?,
+            restored.unavailable_record(ReplayTable::Receiver, &maximal_key(2), by_digest)?,
             None
         );
         Ok(())
@@ -724,11 +666,11 @@ mod tests {
                     }
                     let restored = restore(records, by_digest);
                     assert_eq!(
-                        restored.store.tables,
-                        restore(intact, by_digest).store.tables,
+                        restored.tables,
+                        restore(intact, by_digest).tables,
                         "{store:?}"
                     );
-                    assert_eq!(restored.store.unrestorable, expected, "{store:?}");
+                    assert_eq!(restored.unrestorable, expected, "{store:?}");
                 }
             }
         }

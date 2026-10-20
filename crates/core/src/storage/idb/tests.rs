@@ -1,5 +1,5 @@
 //! Browser witnesses for the access-clock law, stored row shape, atomic touches, errors,
-//! schema migration, and LRU eviction. No test waits on or reads wall-clock time.
+//! and LRU eviction. No test waits on or reads wall-clock time.
 
 use rexie::TransactionMode;
 use serde::de::DeserializeOwned;
@@ -16,15 +16,11 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryVersion;
 use crate::dht::Did;
 use crate::message::Encoded;
-use crate::storage::idb::clock_store_name;
-use crate::storage::idb::restamp;
 use crate::storage::idb::AccessClock;
 use crate::storage::idb::AccessStamp;
 use crate::storage::idb::IdbStorage;
-use crate::storage::idb::LegacyRow;
 use crate::storage::idb::ACCESS_STAMP_INDEX;
 use crate::storage::idb::CLOCK_LIMIT;
-use crate::storage::idb::SCHEMA_VERSION;
 use crate::storage::KvStorageInterface;
 use crate::storage::RecordAuthority;
 
@@ -125,34 +121,6 @@ fn access_clock_refuses_to_leave_the_exact_integer_range() {
         Err(crate::error::Error::IdbAccessClockExhausted(CLOCK_LIMIT))
     ));
     assert!(AccessClock(u64::MAX).tick().is_err());
-}
-
-/// Legacy rows are stamped 0‥n by (last_visit_time, key); ties and missing times are ordered.
-#[wasm_bindgen_test]
-fn restamp_preserves_and_strictifies_the_legacy_eviction_order() {
-    let legacy = |key: &str, last_visit_time: Option<i64>| LegacyRow {
-        key: key.to_owned(),
-        last_visit_time,
-        data: JsValue::from(key),
-    };
-    let rows = vec![
-        legacy("late", Some(9)),
-        legacy("tie-b", Some(5)),
-        legacy("unstamped", None),
-        legacy("tie-a", Some(5)),
-    ];
-    let (restamped, clock) = restamp(rows).unwrap();
-    let order = restamped
-        .iter()
-        .map(|row| (row.key.as_str(), row.access_stamp.0, row.data.as_string()))
-        .collect::<Vec<_>>();
-    assert_eq!(order, vec![
-        ("unstamped", 0, Some("unstamped".to_owned())),
-        ("tie-a", 1, Some("tie-a".to_owned())),
-        ("tie-b", 2, Some("tie-b".to_owned())),
-        ("late", 3, Some("late".to_owned())),
-    ]);
-    assert_eq!(clock, AccessClock(4));
 }
 
 /// A row is stored as `{key, access_stamp, data}`, and a hit restamps it with the next tick.
@@ -374,123 +342,6 @@ async fn test_idb_prune() {
     instance.clear().await.unwrap();
     let count = instance.count().await.unwrap();
     assert_eq!(count, 0, "indexedDB is not empty");
-}
-
-/// Seed a database in a pre-clock layout with `rows` and close it.
-///
-/// `version = None` models a version-1 database (opened without a version, wall-clock indexes).
-/// `Some(SCHEMA_VERSION)` models a migration interrupted after the upgrade committed: the clock
-/// store and index exist, but the clock record and the restamped rows do not.
-async fn seed_legacy_database(name: &str, version: Option<u32>, rows: &[JsonValue]) {
-    let builder = rexie::Rexie::builder(name);
-    let builder = match version {
-        None => builder.add_object_store(
-            rexie::ObjectStore::new(name)
-                .key_path("key")
-                .add_index(rexie::Index::new("last_visit_time", "last_visit_time"))
-                .add_index(rexie::Index::new("visit_count", "visit_count")),
-        ),
-        Some(version) => builder
-            .version(version)
-            .add_object_store(
-                rexie::ObjectStore::new(name)
-                    .key_path("key")
-                    .add_index(rexie::Index::new(ACCESS_STAMP_INDEX, ACCESS_STAMP_INDEX)),
-            )
-            .add_object_store(rexie::ObjectStore::new(&clock_store_name(name))),
-    };
-    let database = builder.build().await.unwrap();
-    let transaction = database
-        .transaction(&[name], TransactionMode::ReadWrite)
-        .unwrap();
-    let store = transaction.store(name).unwrap();
-    for row in rows {
-        store
-            .put(&crate::utils::js_value::serialize(row).unwrap(), None)
-            .await
-            .unwrap();
-    }
-    transaction.done().await.unwrap();
-    database.close();
-}
-
-/// Rows as written by schema version 1, including a same-millisecond tie and surplus fields.
-fn legacy_rows() -> Vec<JsonValue> {
-    vec![
-        serde_json::json!({"key": "warm", "data": "warm", "last_visit_time": 1_700_000_000_005_i64}),
-        serde_json::json!({"key": "tie-b", "data": "tie-b", "last_visit_time": 1_700_000_000_001_i64,
-            "visit_count": u32::MAX, "created_time": 0}),
-        serde_json::json!({"key": "tie-a", "data": {"nested": [1, 2]}, "last_visit_time": 1_700_000_000_001_i64}),
-    ]
-}
-
-/// Assert the migrated layout: rows restamped in legacy order, clock `n`, only the new index.
-async fn assert_migrated(reopened: &IdbStorage) {
-    assert_eq!(reopened.db.version(), f64::from(SCHEMA_VERSION));
-    assert_eq!(stamp_of(reopened, "tie-a").await, 0);
-    assert_eq!(stamp_of(reopened, "tie-b").await, 1);
-    assert_eq!(stamp_of(reopened, "warm").await, 2);
-    assert_eq!(clock_of(reopened).await, 3);
-    let tie_b = raw_row(reopened, "tie-b").await;
-    assert!(tie_b.get("last_visit_time").is_none());
-    assert!(tie_b.get("visit_count").is_none());
-    assert!(tie_b.get("created_time").is_none());
-    assert_eq!(
-        raw_row(reopened, "tie-a").await["data"],
-        serde_json::json!({"nested": [1, 2]})
-    );
-    let scope = reopened.scope(TransactionMode::ReadOnly).unwrap();
-    assert_eq!(
-        scope.rows.index_names(),
-        vec![ACCESS_STAMP_INDEX.to_owned()]
-    );
-}
-
-/// A version-1 database is upgraded in place: no row is lost, the legacy eviction order
-/// (ties broken by key) becomes strict stamps, and eviction continues from it.
-#[wasm_bindgen_test]
-async fn opening_a_version_one_database_migrates_rows_in_lru_order() {
-    let name = format!("rings-idb-legacy-test-{}", uuid::Uuid::new_v4());
-    seed_legacy_database(&name, None, &legacy_rows()).await;
-
-    let reopened = IdbStorage::new_with_cap_and_name(3, &name).await.unwrap();
-    assert_migrated(&reopened).await;
-    drop(reopened);
-
-    // Reopening at the current schema is a no-op for stamps and clock.
-    let reopened = IdbStorage::new_with_cap_and_name(3, &name).await.unwrap();
-    assert_migrated(&reopened).await;
-
-    // The legacy-oldest row is the first eviction candidate.
-    reopened.put("new", &"new".to_owned()).await.unwrap();
-    assert_eq!(get_string(&reopened, "tie-a").await.unwrap(), None);
-    assert_eq!(stamp_of(&reopened, "new").await, 3);
-    let tie_b = get_string(&reopened, "tie-b").await.unwrap();
-    assert_eq!(tie_b.as_deref(), Some("tie-b"));
-}
-
-/// A migration interrupted after the upgrade reruns from the untouched legacy rows.
-#[wasm_bindgen_test]
-async fn interrupted_migration_reruns_on_next_open() {
-    let name = format!("rings-idb-interrupted-test-{}", uuid::Uuid::new_v4());
-    seed_legacy_database(&name, Some(SCHEMA_VERSION), &legacy_rows()).await;
-
-    let reopened = IdbStorage::new_with_cap_and_name(3, &name).await.unwrap();
-    assert_migrated(&reopened).await;
-}
-
-/// Migration completes before the row bound applies: a smaller capacity retires legacy-oldest rows.
-#[wasm_bindgen_test]
-async fn migrating_under_a_smaller_capacity_retires_legacy_oldest_rows() {
-    let name = format!("rings-idb-legacy-cap-test-{}", uuid::Uuid::new_v4());
-    seed_legacy_database(&name, None, &legacy_rows()).await;
-
-    let reopened = IdbStorage::new_with_cap_and_name(1, &name).await.unwrap();
-    assert_eq!(reopened.count().await.unwrap(), 1);
-    assert_eq!(get_string(&reopened, "tie-a").await.unwrap(), None);
-    assert_eq!(get_string(&reopened, "tie-b").await.unwrap(), None);
-    let warm = get_string(&reopened, "warm").await.unwrap();
-    assert_eq!(warm.as_deref(), Some("warm"));
 }
 
 /// Missing keys complete cleanly; in an authoritative store a decode error does not rewrite or
