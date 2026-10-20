@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- `onion_exit_policy` refuses unknown keys (#989). This is breaking for a config that still
+  carries the removed `max_circuits` or `max_streams_per_circuit`: it now fails to load instead
+  of loading silently with the session limit unspecified (`max_sessions: 0`). Replace them by
+  `max_sessions`.
+
+- Stores written by 0.32 or earlier are no longer converted (#989). Operator step, while the node
+  is stopped, before upgrading from such a release:
+  - browser: delete the site's IndexedDB data. Its schema-1 databases (0.31 and earlier) are no
+    longer migrated to the access clock, and its replay store may hold the pre-#898
+    shared-stream snapshot;
+  - native: delete the `transaction-replay` directory beside the data store if it holds the
+    pre-#898 shared-stream snapshot (`rings-core:transaction-replay`), which is no longer
+    deleted at load.
+
+  Either deletion resets every replay window once. A store written by 0.33 or 0.34.0 needs no
+  step. `Defect::Misplaced` is removed from the replay store: a record restores iff it decodes
+  and holds a valid window.
+
+- Documentation (#989): `docs/src/jsonrpc.md` is the one JSON-RPC reference, documenting every
+  method of `rings_rpc::method::Method` with its params, result, listener and Bearer
+  authorization, and `crates/rpc/README.md` links to it; the gateway and node README examples
+  drop `onion_service`; the reflection-bound docs state that only `FindSuccessorReport` returns
+  through `reply_via` and connect signaling retraces its recorded path (#947); the 0.34.0 notes
+  below state the `SwarmEvent` variants and core API additions correctly.
+
+## 0.34.0
+
 - Onion circuits are client-sealed loops of registered operation symbols (#834, Onion Kleisli
   pipelines; the specification is `papers/onion-kleisli-pipeline.tex`). This is a total
   network-wide cutover: nodes of 0.33 and 0.34 do not interoperate on onion traffic, and the seed
