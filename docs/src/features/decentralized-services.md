@@ -43,7 +43,7 @@ This command can also be accomplished through the JSON-RPC API.
 curl -X POST \
 -H "Content-Type: application/json" \
 -H "Authorization: Bearer YOUR-API-TOKEN" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "lookupService", "params": ["NAME"]}' \
+--data '{"jsonrpc": "2.0", "id": 1, "method": "lookupService", "params": {"name": "NAME"}}' \
 "http://127.0.0.1:50000"
 ```
 
@@ -74,19 +74,6 @@ Options:
   -b, --body <BODY>                  set content of http body
       --timeout <TIMEOUT>            [default: 30000]
   -h, --help                         Print help
-```
-
-For curl (JSON-RPC) usage
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace REMOTE-PEER-DID with did of remote peer
-## Replace HTTP-REQUEST-ARG with your request arguments
-curl -X POST \
--H "Content-Type: application/json" \
--H "Authorization: Bearer YOUR-API-TOKEN" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "sendSimpleTextMessage", "params": ["REMOTE-PEER-DID", {HTTP-REQUEST-ARG}]}' \
-"http://127.0.0.1:50000"
 ```
 
 ## Backend

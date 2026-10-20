@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- `onion_exit_policy` refuses unknown keys (#989). This is breaking for a config that still
+  carries the removed `max_circuits` or `max_streams_per_circuit`: it now fails to load instead
+  of loading silently with the session limit unspecified (`max_sessions: 0`). Replace them by
+  `max_sessions`.
+
+- Stores written by 0.32 or earlier are no longer converted (#989). Operator step, while the node
+  is stopped, before upgrading from such a release:
+  - browser: delete the site's IndexedDB data. Its schema-1 databases (0.31 and earlier) are no
+    longer migrated to the access clock, and its replay store may hold the pre-#898
+    shared-stream snapshot;
+  - native: delete the `transaction-replay` directory beside the data store if it holds the
+    pre-#898 shared-stream snapshot (`rings-core:transaction-replay`), which is no longer
+    deleted at load.
+
+  Either deletion resets every replay window once. A store written by 0.33 or 0.34.0 needs no
+  step. `Defect::Misplaced` is removed from the replay store: a record restores iff it decodes
+  and holds a valid window.
+
+- Documentation (#989): `docs/src/jsonrpc.md` is the one JSON-RPC reference, documenting every
+  method of `rings_rpc::method::Method` with its params, result, listener and Bearer
+  authorization, and `crates/rpc/README.md` links to it; the gateway and node README examples
+  drop `onion_service`; the reflection-bound docs state that only `FindSuccessorReport` returns
+  through `reply_via` and connect signaling retraces its recorded path (#947); the 0.34.0 notes
+  below state the `SwarmEvent` variants and core API additions correctly.
+
+## 0.34.0
+
 - Onion circuits are client-sealed loops of registered operation symbols (#834, Onion Kleisli
   pipelines; the specification is `papers/onion-kleisli-pipeline.tex`). This is a total
   network-wide cutover: nodes of 0.33 and 0.34 do not interoperate on onion traffic, and the seed
@@ -43,9 +70,7 @@
     are replaced by `max_sessions`; services outside `{tcp, https}` are rejected (#839); a relay
     requires `advertise_presence`, and an exit is always a relay (`OnionRole`, #842);
     `ProcessorBuilder::onion_idle_floor` may only lower the idle floor.
-  - Core API: `ConnectionStateChange`/`PeerRetired` carry the link generation; `PeerLink`,
-    `admitted_links()`, `connection_registry_capacity()` and generation-exact
-    `disconnect_link` are added.
+  - Core API: `Swarm::connection_registry_capacity()` is added.
 
 - User DHT sends (`storage_fetch`, `storage_store`, `append`, `tombstone`) recompute their next
   hop from fresh topology after a refusal before acceptance, woken by topology, link or capacity
@@ -164,13 +189,13 @@
     any `Message`, so the application cannot originate core's protocol messages; `Message`
     implements `From<ApplicationData>`, the inverse of the inbound projection, and
     `ApplicationData::custom` builds a custom message.
-  - `SwarmEvent` carries only logical facts, `PeerAdmitted` and `PeerRetired`;
-    `ConnectionStateChange`, `PeerTransition` and `peer_transition` are removed. Messages and
-    facts share the inbox's one queue, in the order core produced them, and an unread
-    `PeerAdmitted` is withdrawn by its `PeerRetired`. A connection's admission is announced in
-    the critical section that activates it and its retirement in the one that removes it, so
-    every admitted generation is announced both ways, in the order decided, and the per-peer
-    delivery turns are removed. `Swarm::is_peer_admitted` reads the active record.
+  - `SwarmEvent` carries only logical facts, `PeerAdmitted`, `PeerRetired` and (#969)
+    `MessageDropped`; `ConnectionStateChange`, `PeerTransition` and `peer_transition` are
+    removed. Messages and facts share the inbox's one queue, in the order core produced them,
+    and an unread `PeerAdmitted` is withdrawn by its `PeerRetired`. A connection's admission is
+    announced in the critical section that activates it and its retirement in the one that
+    removes it, so every admitted generation is announced both ways, in the order decided, and
+    the per-peer delivery turns are removed. `Swarm::is_peer_admitted` reads the active record.
   - `Swarm::lookup_successor` returns `SuccessorLookup::Routed(SuccessorReport)`, a handle that
     resolves to the reported successor; a report no live handle awaits is dropped by core.
     `SuccessorReport::tx_id`, `FindSuccessorReport::is_application_lookup` and the unused

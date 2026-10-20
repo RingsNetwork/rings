@@ -201,7 +201,11 @@ pub fn default_onion_exit_policy() -> OnionExitPolicy {
 }
 
 /// Signed policy fields for an onion exit.
+///
+/// Unknown fields are refused, so a removed limit (`max_circuits`, `max_streams_per_circuit`)
+/// in an old config fails to load rather than leaving the operator's limit unspecified.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct OnionExitPolicy {
     /// Target allow-list entries understood by the exit implementation. Empty means closed.
     pub allowed_targets: Vec<OnionExitTarget>,

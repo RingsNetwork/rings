@@ -16,7 +16,7 @@ static binary that runs on any distribution), plus the WebAssembly package for b
 Download the archive for your platform, unpack it, and put `rings` on your `PATH`:
 
 ```bash
-unzip rings-v0.34.0-aarch64-apple-darwin.zip
+unzip rings-v0.34.1-aarch64-apple-darwin.zip
 install -m 755 rings /usr/local/bin/rings
 rings --version
 ```

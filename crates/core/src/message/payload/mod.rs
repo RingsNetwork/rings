@@ -106,13 +106,14 @@ fn hash_transaction(
 /// All messages transmitted in RingsNetwork should be wrapped by `Transaction`.
 /// It additionally offer destination, tx_id and verification.
 ///
-/// A report for a transaction is routed to the transaction's [origin](Self::origin). Only the
-/// successor and connection answers a node needs while it has no predecessor
-/// (`FindSuccessorReport`, `ConnectNodeReport`) first go through
-/// [`reply_via`](Self::reply_via) when the origin signed one. No other return address exists,
-/// so a request can direct no report at a third party except one of these bounded answers at
-/// the one peer the origin itself named, which receives it whole and hands it on only over a
-/// direct link to the origin (see [`crate::dht::delivery`]).
+/// Every reply to a transaction is addressed to the transaction's [origin](Self::origin), and
+/// takes one of two routes. Only the successor answer a node needs while it has no
+/// predecessor (`FindSuccessorReport`) first goes through [`reply_via`](Self::reply_via) when
+/// the origin signed one; a connect-signaling reply retraces, hop by linked hop, the path its
+/// request recorded (#947); every other report routes straight toward the origin. No other
+/// return address exists, so a request can direct no reply at a third party except the one
+/// bounded successor answer at the one peer the origin itself named, which receives it whole
+/// and hands it on only over a direct link to the origin (see [`crate::dht::delivery`]).
 ///
 /// To transmit `Transaction` in RingsNetwork, user should build
 /// [MessagePayload] and use [PayloadSender] to send.
@@ -125,8 +126,8 @@ pub struct Transaction {
     pub tx_id: uuid::Uuid,
     /// Monotonic sequence inside the origin account's destination-scoped stream.
     pub sequence: u64,
-    /// The peer the origin's successor and connection answers return through while no node is
-    /// known to route to the origin: its nearest linked successor whenever it has no
+    /// The peer the origin's successor answers (`FindSuccessorReport`) return through while no
+    /// node is known to route to the origin: its nearest linked successor whenever it has no
     /// predecessor, i.e. while it joins and again after its predecessor departs until a new one
     /// notifies it; `None` otherwise. Signed with the rest of the transaction, so only the
     /// origin chooses it.
@@ -174,9 +175,9 @@ impl fmt::Debug for MessagePayload {
 
 impl Transaction {
     /// Wrap data: serialize it with [rings_codec::serialize], then sign it, `reply_via`
-    /// included, with `signer`. `reply_via` names the peer the origin's successor and
-    /// connection answers return through; a report, or any transaction whose origin has a
-    /// predecessor, names `None`.
+    /// included, with `signer`. `reply_via` names the peer the origin's successor answers
+    /// return through; a reply, or any transaction whose origin has a predecessor, names
+    /// `None`.
     pub fn new<T>(
         destination: Did,
         tx_id: uuid::Uuid,
@@ -441,8 +442,8 @@ pub trait PayloadSender {
     }
 
     /// Build a locally originated payload for `destination`: the only constructor of a
-    /// transaction this node authors, other than a report for a received request
-    /// ([`Self::send_report_message`]).
+    /// transaction this node authors, other than a reply to a received request
+    /// ([`Self::send_reply`], which authors both a report and a connect-signaling reply).
     ///
     /// The first hop is `next_hop` when the caller fixed it, otherwise the delivery decision;
     /// the transaction names this node's [`reply_via`](crate::dht::delivery::reply_via). When

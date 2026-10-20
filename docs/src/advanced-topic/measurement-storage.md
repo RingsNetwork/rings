@@ -39,19 +39,12 @@ smallest stamps through the `access_stamp` index, so two rows never tie. `clear`
 keeps the counter, so a stamp is never reused within one database. The counter
 stops with an error at `Number.MAX_SAFE_INTEGER` rather than repeat a stamp.
 
-Schema version 2 introduced the counter. A version-1 database, whose rows carry
-wall-clock `last_visit_time`, is migrated in place and never cleared: the upgrade
-adds the counter store and the `access_stamp` index and drops the old
-`last_visit_time` and `visit_count` indexes; the first open then restamps every
-row `0..n` in its former eviction order (`last_visit_time`, then key) and sets the
-counter to `n` in one transaction, dropping the unused `visit_count` and
-`created_time` fields. The counter record marks a completed migration; an
-interrupted one reruns from the untouched rows on the next open. The upgrade
-waits until every connection still open at version 1, such as another tab
-running an older build, has closed.
+Schema version 2 introduced the counter; the first open of a database writes the
+counter record `0`. A version-1 database (0.31 and earlier), whose rows carry
+wall-clock `last_visit_time` and no stamp, is not migrated: delete the browser's
+IndexedDB data for the site before upgrading from such a release.
 
 The constructor requires an explicit database name and nonzero capacity. Raw
-transactions are private to the adapter. Browser tests use unique database names,
-including an isolated previous-schema fixture, and exercise actual IndexedDB reads,
-writes, errors, access-clock touches, capacity eviction, migration, and
-reopening. No browser test reads or waits on wall-clock time.
+transactions are private to the adapter. Browser tests use unique database names
+and exercise actual IndexedDB reads, writes, errors, access-clock touches, capacity
+eviction, and reopening. No browser test reads or waits on wall-clock time.
