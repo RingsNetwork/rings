@@ -25,9 +25,10 @@
 //!   or a joiner linked only to its bootstrap, hands off on its first hop, and the receiver's
 //!   fuller view routes on greedily. A second crossing is refused, which ends the route with a
 //!   typed error;
-//! - `via b`: a successor or connection answer whose request named `reply_via = b` (see
-//!   [`Transaction`](crate::message::Transaction)) is first delivered to `b`, which hands it
-//!   to `T` over its link.
+//! - `via b`: a successor answer (`FindSuccessorReport`) whose request named `reply_via = b`
+//!   (see [`Transaction`](crate::message::Transaction)) is first delivered to `b`, which hands
+//!   it to `T` over its link. A connect-signaling reply never takes this stage: it retraces
+//!   the path its request recorded (#947).
 //!
 //! Law (safety). Every greedy hop satisfies `next ∈ (n, aim]`, so `dist(·, aim)` strictly
 //! decreases in `ℕ` and a greedy run visits each node at most once; the handoff flag only moves
@@ -52,8 +53,8 @@
 //! view is sparse reaches every node its handoff receiver's view reaches. Whatever the 0.31
 //! owner-lookup router delivered without cycling and with at most one crossing, delivery
 //! delivers too. Before convergence a payload for a node no view knows fails fast, within
-//! `2|V|` hops; a successor or connection answer to a node without a predecessor reaches it
-//! through the peer it named.
+//! `2|V|` hops; a successor answer to a node without a predecessor reaches it through the peer
+//! it named.
 
 use num_bigint::BigUint;
 
@@ -64,8 +65,8 @@ use super::Did;
 /// The stage of a route, carried by the relay carrier outside every signature.
 ///
 /// `RouteStage = Aim × 𝔹` with `Aim = {destination} + {via b}`. A fresh carrier starts at
-/// `(destination, ⊥)`, or at `(via b, ⊥)` for a successor or connection answer whose request
-/// named `reply_via = b`; a handoff moves `⊥ → ⊤` and nothing moves it back, which bounds each
+/// `(destination, ⊥)`, or at `(via b, ⊥)` for a successor answer whose request named
+/// `reply_via = b`; a handoff moves `⊥ → ⊤` and nothing moves it back, which bounds each
 /// aim to two greedy runs and one crossing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RouteStage {
@@ -199,8 +200,8 @@ pub fn route_toward(state: &TopologyState, aim: Did, linked: impl Fn(Did) -> boo
     }
 }
 
-/// `ReplyVia(n)`: the peer `n` names for its successor and connection answers while no node is
-/// known to route to it, i.e. while it has no predecessor; `None` once a predecessor has
+/// `ReplyVia(n)`: the peer `n` names for its successor answers while no node is known to route
+/// to it, i.e. while it has no predecessor; `None` once a predecessor has
 /// notified it.
 ///
 /// A predecessor `p` notifies `n` iff `p`'s successor is `n`, i.e. iff `p` knows `n`; from then

@@ -61,15 +61,13 @@
 //! [`TransactionForkEvidence`] against this node, inside it; the messages they carry are lost.
 //! No other stream is touched.
 //!
-//! The first load that finds the shared-stream
-//! snapshot of the key used before #898 deletes it without reading it (best effort, counted on
-//! failure); once it is gone no later load touches it. Sender and receiver tables each have a
-//! hard stream-count bound and never evict: once the bound is reached, a new stream fails
-//! closed. Existing stream records remain durable until an operator explicitly removes the
-//! replay store, which must therefore hold [`TRANSACTION_REPLAY_STORE_MAX_BYTES`] and
-//! [`TRANSACTION_REPLAY_STORE_MAX_RECORDS`] without evicting any. Deleting that store deletes
-//! the corresponding replay guarantee. Runtime-local origin quota state shares the serialized
-//! receiver commit boundary but is not part of the store.
+//! Sender and receiver tables each have a hard stream-count bound and never evict: once the
+//! bound is reached, a new stream fails closed. Existing stream records remain durable until an
+//! operator explicitly removes the replay store, which must therefore hold
+//! [`TRANSACTION_REPLAY_STORE_MAX_BYTES`] and [`TRANSACTION_REPLAY_STORE_MAX_RECORDS`] without
+//! evicting any. Deleting that store deletes the corresponding replay guarantee. Runtime-local
+//! origin quota state shares the serialized receiver commit boundary but is not part of the
+//! store.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -109,7 +107,6 @@ pub use self::store::ReplayRecord;
 use self::store::ReplayStore;
 use self::store::ReplayTable;
 use self::store::RestoreFailure;
-use self::store::SHARED_STREAM_SNAPSHOT_KEY;
 pub use self::store::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
 pub use self::store::TRANSACTION_REPLAY_STORE_MAX_BYTES;
 pub use self::store::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
@@ -506,9 +503,7 @@ impl TransactionReplay {
     /// cached from then on, unrestorable records included, so no later operation reads the
     /// storage again.
     ///
-    /// A load that finds the shared-stream snapshot of the key used before #898 retires it, so
-    /// once its deletion succeeds no later load, in this run or after a restart, touches it. A
-    /// scan that fails as a whole restores nothing: it is counted, the operation fails closed,
+    /// A scan that fails as a whole restores nothing: it is counted, the operation fails closed,
     /// and the next operation scans again.
     ///
     /// ```text
@@ -516,8 +511,7 @@ impl TransactionReplay {
     ///      │ no
     /// scan storage ── Err ──▶ count persistence failure ──▶ Err(load) (slot stays empty)
     ///      │ Ok(records)
-    /// restore (pure, total) ──▶ count + log unrestorable ──▶ retire shared snapshot?
-    ///      └────────────────────────────────▶ slot := store ──▶ slot
+    /// restore (pure, total) ──▶ count + log unrestorable ──▶ slot := store ──▶ slot
     /// ```
     async fn load_store<'a>(
         &self,
@@ -532,11 +526,8 @@ impl TransactionReplay {
                 }
             })?;
             let restored = restore(records, self.record_naming());
-            self.report_unrestorable(&restored.store.unrestorable);
-            if restored.holds_shared_snapshot {
-                self.retire_shared_stream_snapshot().await;
-            }
-            *slot = Some(restored.store);
+            self.report_unrestorable(&restored.unrestorable);
+            *slot = Some(restored);
         }
         slot.as_mut().ok_or(Error::TransactionReplayStateInvalid)
     }
@@ -587,22 +578,6 @@ impl TransactionReplay {
         self.counters
             .persistence_failure
             .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Delete the shared-stream snapshot of the key used before #898, without reading it.
-    ///
-    /// Best effort: the former key is never decoded, so a failed deletion leaves only inert
-    /// bytes. It is counted as a persistence failure and logged, admission continues, and the
-    /// next load retries it.
-    async fn retire_shared_stream_snapshot(&self) {
-        if let Err(error) = self.storage.remove(SHARED_STREAM_SNAPSHOT_KEY).await {
-            self.count_persistence_failure();
-            tracing::warn!(
-                %error,
-                key = SHARED_STREAM_SNAPSHOT_KEY,
-                "failed to delete the shared-stream replay snapshot; it is never read"
-            );
-        }
     }
 
     /// Store one stream's `record` under `storage_key`; a failure is counted and returned.

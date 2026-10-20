@@ -140,7 +140,6 @@ gateway:
   # Used directly on Windows; the Unix helper owns its separate --ledger path.
   route_ledger_path: "~/.rings/gateway-routes.json"
   status_refresh_secs: 2
-  onion_service: tcp
 ```
 
 For externally steered packet operation, `included_routes` may be empty. The packet interface

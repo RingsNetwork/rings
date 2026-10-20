@@ -28,20 +28,12 @@
 //! smallest stamps without any tie to break. `clear` keeps the clock, so stamps are never reused
 //! within one database.
 //!
-//! # Schema and migration
+//! # Schema
 //!
-//! `SCHEMA_VERSION` 2 introduced the clock. A version-1 database (opened without a version,
-//! rows ordered by wall-clock `last_visit_time`) is upgraded in place, never cleared:
-//!
-//! 1. the IndexedDB upgrade creates the clock store and the `access_stamp` index and drops the
-//!    `last_visit_time` and `visit_count` indexes;
-//! 2. the first open at version 2 finds no clock record, restamps every row with `0‥n` in its
-//!    former eviction order `(last_visit_time, key)` and sets the clock to `n`, all in one
-//!    transaction.
-//!
-//! The clock record witnesses that step 2 committed; an interrupted migration leaves the legacy
-//! rows untouched and reruns on the next open. The upgrade proceeds once every connection still
-//! open at version 1 (for example another tab running an older build) has closed.
+//! `SCHEMA_VERSION` 2 is the row store keyed by `key` and indexed by `access_stamp`, and the
+//! clock store. The first open of a database writes the clock record `0`; every later open finds
+//! it. A version-1 database (0.31 and earlier, rows ordered by wall-clock `last_visit_time`) is
+//! not migrated: its rows carry no stamp, so the operator deletes it before the upgrade.
 //!
 //! # Record authority
 //!
@@ -52,9 +44,9 @@
 //! a follow-up transaction that deletes only a row still undecodable there, and both report it
 //! absent. An authoritative store (the replay store, whose bad record keeps its stream closed)
 //! reports the decode error and leaves the row untouched. The authority governs the payload
-//! only; the row envelope is this store's own schema, migrated at open, and an envelope that
-//! does not decode is an error under either authority. The row budget above applies under
-//! either authority, so an authoritative store is sized never to reach it.
+//! only; the row envelope is this store's own schema, and an envelope that does not decode is
+//! an error under either authority. The row budget above applies under either authority, so an
+//! authoritative store is sized never to reach it.
 //!
 //! A `scan` (`KvStorageScan`) is outside the decode law: under either authority it reports
 //! every row, a row whose envelope or payload does not decode as an `UndecodableRecord` named
@@ -141,47 +133,6 @@ struct StoredRow {
     /// Caller-owned payload, already serialized.
     #[serde(with = "serde_wasm_bindgen::preserve")]
     data: JsValue,
-}
-
-/// Row as written by schema version 1; unlisted fields (`visit_count`, `created_time`) drop.
-#[derive(Deserialize)]
-struct LegacyRow {
-    /// Inline IndexedDB primary key.
-    key: String,
-    /// Wall-clock milliseconds of the latest access; absent sorts oldest.
-    #[serde(default)]
-    last_visit_time: Option<i64>,
-    /// Caller-owned payload, already serialized.
-    #[serde(with = "serde_wasm_bindgen::preserve")]
-    data: JsValue,
-}
-
-impl LegacyRow {
-    /// Position in the version-1 eviction order: its index key, then the primary key.
-    fn eviction_rank(&self) -> (Option<i64>, &str) {
-        (self.last_visit_time, self.key.as_str())
-    }
-}
-
-/// Stamp legacy rows `0‥n` in their version-1 eviction order and return the clock `n`.
-///
-/// Pure. Law: the output is sorted by [`LegacyRow::eviction_rank`] and its stamps are exactly
-/// `0, 1, …, n − 1`, so the relative eviction order of the rows is preserved and made strict.
-fn restamp(mut rows: Vec<LegacyRow>) -> Result<(Vec<StoredRow>, AccessClock)> {
-    rows.sort_by(|left, right| left.eviction_rank().cmp(&right.eviction_rank()));
-    let stamped = Vec::with_capacity(rows.len());
-    rows.into_iter().try_fold(
-        (stamped, AccessClock::ORIGIN),
-        |(mut stamped, clock), row| {
-            let (access_stamp, successor) = clock.tick()?;
-            stamped.push(StoredRow {
-                key: row.key,
-                access_stamp,
-                data: row.data,
-            });
-            Ok((stamped, successor))
-        },
-    )
 }
 
 /// Name of the clock store that accompanies the row store `name`.
@@ -272,32 +223,14 @@ impl Scope {
         Ok(())
     }
 
-    /// Start the clock unless its record exists, migrating version-1 rows (module docs, step 2).
-    ///
-    /// Every legacy row is decoded, and every restamped row and the clock encoded, before any
-    /// write is queued.
+    /// Start the clock at [`AccessClock::ORIGIN`] unless its record exists: the first open of a
+    /// database writes it, and every later open finds it (module docs, schema).
     async fn start_clock(&self) -> Result<()> {
         if self.clock_record().await?.is_some() {
             return Ok(());
         }
-        let legacy = self
-            .rows
-            .get_all(None, None, None, None)
+        self.write_clock(&js_value::serialize(&AccessClock::ORIGIN)?)
             .await
-            .map_err(Error::IDBError)?
-            .into_iter()
-            .map(|(_key, row)| js_value::deserialize::<LegacyRow>(row))
-            .collect::<Result<Vec<_>>>()?;
-        let (restamped, clock) = restamp(legacy)?;
-        let encoded = restamped
-            .iter()
-            .map(js_value::serialize)
-            .collect::<Result<Vec<_>>>()?;
-        let clock = js_value::serialize(&clock)?;
-        for row in encoded {
-            self.rows.put(&row, None).await.map_err(Error::IDBError)?;
-        }
-        self.write_clock(&clock).await
     }
 }
 
@@ -319,7 +252,6 @@ impl IdbStorage {
     /// Open a named disposable database with a nonzero maximum number of rows.
     ///
     /// `row_capacity` counts rows, and opening an existing store restores that row bound.
-    /// A database of an older schema is migrated in place without losing rows (module docs).
     pub async fn new_with_cap_and_name(row_capacity: u32, name: &str) -> Result<Self> {
         Self::new_with_cap_name_and_authority(row_capacity, name, RecordAuthority::Disposable).await
     }
