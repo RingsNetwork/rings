@@ -75,9 +75,17 @@ therefore established whenever either overlay offer is delivered.
 
 A data topic is a replicated set of elements (a state-based CRDT): each element carries the
 *dot* of the write that issued it, and replicas and hand-offs merge by join, so a replica's value
-does not depend on the order writes and hand-offs arrive in. A reader's fetch cache does not
-merge: it keeps the last reply it received, so a late reply from a stale replica can replace a
-fresher one until the next fetch (a cache that joins its replies is #864).
+does not depend on the order writes and hand-offs arrive in. A reader's fetch cache merges too:
+it joins every reply it receives (#864), so a late reply from a stale replica cannot replace a
+fresher one.
+
+A write returns once it has been applied locally or has left for each of its replicas, not once
+a remote replica has applied it. Which node owns a replica follows each node's view of the ring,
+and that view changes as peers join and as stabilization runs. An owner hands its replica to a
+new owner only in its next storage repair round, so a lookup made just after a write can reach a
+new owner that does not hold it yet. The writer itself does not depend on that: it applies its
+own write to its fetch cache, as every owner applies it, so it reads its own writes at once
+(#982). Any other node reads the write once its lookup reaches an owner that holds it.
 
 - **Every element expires individually.** An element expires at the earlier of two instants:
   100 minutes after its dot was issued (the element horizon `H`, the longest retention one write

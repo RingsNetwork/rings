@@ -39,6 +39,7 @@ use crate::utils::get_epoch_ms;
 mod test_cache_join;
 mod test_handoff;
 mod test_horizon;
+mod test_own_write;
 mod test_repair;
 
 fn data_entry(did: Did) -> Entry {

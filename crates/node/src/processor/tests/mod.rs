@@ -39,3 +39,5 @@ mod test_http_handshake;
 mod test_network;
 mod test_onion;
 mod test_registry;
+#[cfg(feature = "dummy")]
+mod test_storage_visibility;
