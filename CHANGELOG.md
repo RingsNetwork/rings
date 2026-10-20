@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+- Onion circuits are client-sealed loops of registered operation symbols (#834, Onion Kleisli
+  pipelines; the specification is `papers/onion-kleisli-pipeline.tex`). This is a total
+  network-wide cutover: nodes of 0.33 and 0.34 do not interoperate on onion traffic, and the seed
+  must be upgraded with the release. Breaking changes:
+  - Wire: the Sphinx header `χ = (α, β, γ)` of 14 uniform layers (`|χ| = 2919`) replaces the
+    per-layer envelope (#840); relays are stateless, with no return tables, circuit ids,
+    per-edge AEAD or exit reply signatures; the carry is AEZ v5 from the new in-repo crate
+    `rings-aez` (#836), and replies are deniable (no exit signature). A loop leaves the client
+    through its guard, crosses `s = 2` relays per segment and its symbol hops, and returns to the
+    client as position `H + 1`; `n ≤ 4` symbols, `H ≤ 14` positions (#842).
+  - Admission (L9, #841): every received cell is charged, by class, before any ECDH; replay is
+    an x-keyed sliced Bloom store; ledgers are keyed by live authenticated link and bounded by
+    the connection-registry capacity `𝓡`; a node's process epoch is fresh at every start and
+    reset clears the admission state.
+  - Sessions (#843, D2′): `tcp` and `https` are session symbols over the frames
+    `data(n, φ, w)`, `fin(n, φ)`, `credit(υ…)` and `abort(n)`. The target is bound by its digest
+    and travels under flag `T` until the first reply; the open ack is `data(0, 0, ε)` and a
+    refusal is `abort(0)`; `abort` fails a session without a reason. The exit reads its world
+    only while it holds the session's reply blocks (SURBs, up to `Q_max = 256`), so an
+    unreplenished session pauses its target instead of dropping bytes.
+  - Emission (#880): every link emits at the constant rate `r = ρB/V` while active and a cover
+    floor `r_idle = 1` unit/s while idle, real cells substituting for cover, with a dwell of
+    `D = 30 s`; the emitter paces on a read-only view of the Application lane's transport credit
+    (`Swarm::application_credit`, `LaneCreditView`) and never reserves it.
+  - Liveness (#975): the client sends a keep-alive loop every `V/2`; the exit answers a loop that
+    finds no reply of its session for `V/2` with an empty `data`; the client fails a session
+    silent for `Δ = 2V`, so a dead link on either segment is observed at both endpoints.
+  - Circuit fate (#963, #964, #966, #969, #971): a retired link, a message dropped at dispatch
+    or in the core application inbox from an admitted peer (`SwarmEvent::MessageDropped`,
+    `LinkFact::Dropped`), or a full inbound stream lane fails every session riding it closed at
+    that endpoint, which then tells the other endpoint with `abort`. A cancelled application
+    send is reported as `Err(OutboundTransferCancelled)`, never as sent.
+  - Configuration: `https` is a fetch only (CONNECT and SOCKS use `tcp`); exit targets accept
+    `*:<port>`; `onion_http_proxy_service`, `gateway.onion_service` and the `<|>` service
+    alternative are removed; the exit policy's `max_circuits` and `max_streams_per_circuit`
+    are replaced by `max_sessions`; services outside `{tcp, https}` are rejected (#839); a relay
+    requires `advertise_presence`, and an exit is always a relay (`OnionRole`, #842);
+    `ProcessorBuilder::onion_idle_floor` may only lower the idle floor.
+  - Core API: `ConnectionStateChange`/`PeerRetired` carry the link generation; `PeerLink`,
+    `admitted_links()`, `connection_registry_capacity()` and generation-exact
+    `disconnect_link` are added.
+
+- User DHT sends (`storage_fetch`, `storage_store`, `append`, `tombstone`) recompute their next
+  hop from fresh topology after a refusal before acceptance, woken by topology, link or capacity
+  events, never by a timer (#859, #862). A refused single-attempt write is
+  `Err(SingleAttemptRefused { refusal })`.
+
+- Connection establishment (#945, #946, #947, #953, #954, #960): connect signalling returns
+  along its recorded path, so a simultaneous open always ends with one edge; routing no longer
+  evaluates the link predicate under the topology lock; a yielded crossing offer is replaced by
+  the answering generation in one transition, so it reports `ConnectionAttemptSuperseded`; the
+  origin-quota clock is read under the admission lock, so no legitimate message is refused as
+  `MonotonicTimeRegressed`; a browser ICE gathering ends when its connection is closed locally.
+
+- The gateway names the cause of every captured-flow reset and degraded status (#950).
+
+- `rustls` is bumped to 0.23.46 for RUSTSEC-2026-0346..0349 (#956).
+
 - A delegation reference is a bounded, renewable lease, and nothing is held (#908). A frame
   whose reference missed was held for a repair round trip and released out of order, so later
   frames of its class could pass replay admission first and the released frame was lost as
