@@ -22,6 +22,12 @@
 //! - **Order.** Each direction releases `n = 0, 1, …` in order; a persisting gap fails the
 //!   session closed, never skipping bytes.
 //! - **Close.** `fin` in both directions, a gap, or `V` without a forward loop drops `ς` at `h`.
+//! - **Liveness** (D2′; paper, Prop. Liveness of failure). The client's keep-alive sends a
+//!   forward loop whenever none has left for `V/2`; `h` answers a forward loop that finds no
+//!   reply of `ς` for `V/2` with the credit-neutral echo `data(n, 0, ε)`; and the client
+//!   fails `ς` closed, with `abort(n)`, once no frame of `ς` has arrived for `Δ = 2V`. A live
+//!   session is never failed, and a loss on either segment of the route is observed at both
+//!   endpoints, whichever link it is on.
 
 pub(crate) mod client;
 pub(crate) mod dial;

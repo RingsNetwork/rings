@@ -3,6 +3,8 @@
 //! Reply blocks are built by the client's builder over a fixture return path, so the pool and the
 //! machines handle real `OnionSurb`s; nothing here touches a network or a clock.
 
+mod test_liveness;
+
 use bytes::Bytes;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -489,13 +491,13 @@ fn test_exit_session_opens_on_a_first_fin_with_its_target() {
 /// The client's `fin` carries `T` until the first reply, as its `data` does.
 #[test]
 fn test_client_fin_carries_the_target_until_the_first_reply() {
-    let mut session = OnionClientSession::new(Bytes::from_static(TARGET));
+    let mut session = OnionClientSession::new(Bytes::from_static(TARGET), NOW_MS);
     let Ok(OnionFrame::Fin { target, .. }) = session.fin() else {
         panic!("a fin frame");
     };
     assert_eq!(target.as_deref(), Some(TARGET));
 
-    let mut replied = OnionClientSession::new(Bytes::from_static(TARGET));
+    let mut replied = OnionClientSession::new(Bytes::from_static(TARGET), NOW_MS);
     let ack = OnionFrame::Data {
         sequence: OnionSequence::FIRST,
         target: None,
@@ -736,7 +738,7 @@ fn test_exit_session_closes_after_v_without_forward_loops() {
 /// up, and the first released reply decides the open.
 #[test]
 fn test_client_session_sets_t_until_the_first_reply() {
-    let mut session = OnionClientSession::new(Bytes::from_static(TARGET));
+    let mut session = OnionClientSession::new(Bytes::from_static(TARGET), NOW_MS);
     assert_eq!(
         session.data_capacity(CLASS),
         OnionFrame::data_capacity(CLASS) - 2 - TARGET.len()
@@ -792,7 +794,7 @@ fn test_client_session_sets_t_until_the_first_reply() {
 /// A `fin` before any data is a refusal.
 #[test]
 fn test_client_session_reads_a_first_fin_as_a_refusal() {
-    let mut session = OnionClientSession::new(Bytes::from_static(TARGET));
+    let mut session = OnionClientSession::new(Bytes::from_static(TARGET), NOW_MS);
     let fin = OnionFrame::Fin {
         sequence: OnionSequence::FIRST,
         target: None,
@@ -807,7 +809,7 @@ fn test_client_session_reads_a_first_fin_as_a_refusal() {
 /// `fin` held behind a gap is not released as one, and every later frame is ignored.
 #[test]
 fn test_client_session_reads_abort_as_a_failure_never_eof() {
-    let mut session = OnionClientSession::new(Bytes::from_static(TARGET));
+    let mut session = OnionClientSession::new(Bytes::from_static(TARGET), NOW_MS);
     let ack = OnionFrame::Data {
         sequence: OnionSequence::FIRST,
         target: None,
@@ -851,7 +853,7 @@ fn test_client_session_reads_abort_as_a_failure_never_eof() {
 /// frame it sends.
 #[test]
 fn test_client_session_reads_a_first_abort_as_a_refusal() {
-    let mut session = OnionClientSession::new(Bytes::from_static(TARGET));
+    let mut session = OnionClientSession::new(Bytes::from_static(TARGET), NOW_MS);
     let abort = OnionFrame::Abort {
         sequence: OnionSequence::FIRST,
     };
@@ -860,7 +862,7 @@ fn test_client_session_reads_a_first_abort_as_a_refusal() {
         Ok(vec![OnionClientEvent::Refused])
     );
 
-    let mut giving_up = OnionClientSession::new(Bytes::from_static(TARGET));
+    let mut giving_up = OnionClientSession::new(Bytes::from_static(TARGET), NOW_MS);
     giving_up.data(Bytes::new()).expect("sequence left");
     let Ok(OnionFrame::Abort { sequence }) = giving_up.abort() else {
         panic!("an abort frame");

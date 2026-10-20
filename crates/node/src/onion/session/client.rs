@@ -4,9 +4,9 @@
 //! data(w):   frame data(n, T?, w), n ← n + 1;  T is set, with t inline, until the first reply
 //! fin:       frame fin(n, T?), n ← n + 1; T is set, with t inline, until the first reply
 //! abort:     frame abort(n), the session is given up
-//! reply(f):  replied ← ⊤;  reorder f, then per released frame, in order:
+//! reply(t, f): replied ← ⊤;  heard ← t;  reorder f, then per released frame, in order:
 //!   first frame   data(0, ε) ⇒ Opened      fin ⇒ Refused (tolerated; h refuses with abort(0))
-//!   later frames  data(w)    ⇒ Data(w)     fin ⇒ Fin
+//!   later frames  data(w)    ⇒ Data(w)     data(ε) ⇒ nothing (h's echo)     fin ⇒ Fin
 //!   abort(n), on arrival      ⇒ Refused before the open is decided, Aborted after it
 //!                               (n is informational: nothing orders an abort)
 //! credit:    want min(W, Q_max) reply blocks outstanding at h; each forward loop leaves one and a
@@ -15,6 +15,7 @@
 //!            after the open and after each reply only: an expired block is not refilled
 //! keep-alive: one credit loop once no loop has left for V/2, which also replaces credit lost on
 //!            the way or expired (a session whose replies stop sends nothing else)
+//! expire(t): a gap persisting for V ⇒ fail;  t − heard ≥ Δ = 2V ⇒ fail (until abort or fin)
 //! ```
 //!
 //! Laws (tested in `session::tests`):
@@ -40,6 +41,27 @@
 //!   refilled only after the open or a reply, and expired credit is replaced by the keep-alive
 //!   alone ([`OnionCreditWindow::control_loops`]), so its route's links return to the idle floor
 //!   between loops (#880).
+//! - **Keep-alive.** A forward loop of `ς` leaves whenever none has left for `V/2`
+//!   ([`keep_alive_due`]); with `h`'s echo (`session::exit`, Law Echo), a forward loop that
+//!   reaches `h` when no reply of `ς` has left for `V/2` is answered at once.
+//! - **Deadline** (D2′ Liveness; paper, Prop. Liveness of failure). The session fails closed
+//!   once no frame of `ς` has arrived for `Δ = 2V` ([`ONION_SESSION_DEADLINE_MS`]), until `h`'s
+//!   `abort` or `fin` ends the reply direction. Let every loop segment's latency vary by less
+//!   than `V/4`, and `L` be one return-segment latency. Forward arrivals at `h` are then less
+//!   than `V/2 + V/4 = 3V/4` apart, so
+//!
+//!   ```text
+//!   (i)  live:         replies leave h < V/2 + 3V/4 = 5V/4 apart (Law Echo), and
+//!                      consecutive frames reach cl < 5V/4 + V/4 = 3V/2 < Δ apart
+//!                      ⇒ a live session is never failed
+//!   (ii) return loss:  the last frame reaches cl by t₀ + L     ⇒ cl fails ς by t₀ + 2V + L,
+//!                      and its abort, over the delivering forward segment, closes ς at h
+//!        forward loss: h drops ς by t₀ + V; its last block expires and its last reply leaves
+//!                      by t₀ + V (Invariant Credit)             ⇒ cl fails ς by t₀ + 3V + L
+//!   ```
+//!
+//!   The echo `data(n, 0, ε)` after the open is heard, but carries no stream bytes, so it
+//!   yields no event.
 
 use std::collections::BTreeMap;
 
@@ -55,6 +77,11 @@ use crate::onion::circuit::OnionExpiry;
 use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
 use crate::onion::sphinx::class::OnionLoopClass;
 
+/// `Δ = 2V`: the longest a session's reply direction may stay silent before the client fails
+/// the session closed (D2′ Liveness). It exceeds the `3V/2` bound between frames of a live
+/// session (Law Deadline (i)) by `V/2`.
+pub(crate) const ONION_SESSION_DEADLINE_MS: u128 = 2 * ONION_FORWARD_MAX_VALIDITY_MS;
+
 /// What the session learned from one reply, for the client shell to act on.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum OnionClientEvent {
@@ -68,6 +95,17 @@ pub(crate) enum OnionClientEvent {
     Fin,
     /// `h` gave the session up: the stream is incomplete.
     Aborted,
+}
+
+/// Why a client session failed closed on its own clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum OnionClientFailure {
+    /// The reply direction has a gap that can no longer fill.
+    #[error(transparent)]
+    Gap(#[from] OnionSequenceGap),
+    /// No frame of the session arrived for `Δ = 2V` (Law Deadline).
+    #[error("no frame of the session arrived for 2V")]
+    Silent,
 }
 
 /// Why the session can send no further frame: its 32-bit sequence space is spent.
@@ -90,12 +128,16 @@ pub(crate) struct OnionClientSession {
     replies: OnionReorder<OnionStreamFrame>,
     /// Whether `h` aborted: every later reply is ignored.
     aborted: bool,
+    /// Whether the world's `fin` was released: the reply direction is over.
+    ended: bool,
+    /// The arrival of the last frame of the session, or its creation before any.
+    heard_ms: u128,
 }
 
 impl OnionClientSession {
-    /// A session to the target with the canonical authority `target`; its arguments
-    /// `ā = ς ‖ SHA-256(t)` are the shell's.
-    pub(crate) fn new(target: Bytes) -> Self {
+    /// A session to the target with the canonical authority `target`, created at `now`; its
+    /// arguments `ā = ς ‖ SHA-256(t)` are the shell's.
+    pub(crate) fn new(target: Bytes, now_ms: u128) -> Self {
         Self {
             target,
             forward: Some(OnionSequence::FIRST),
@@ -103,6 +145,8 @@ impl OnionClientSession {
             decided: false,
             replies: OnionReorder::default(),
             aborted: false,
+            ended: false,
+            heard_ms: now_ms,
         }
     }
 
@@ -165,6 +209,7 @@ impl OnionClientSession {
         frame: OnionFrame,
     ) -> Result<Vec<OnionClientEvent>, OnionSequenceGap> {
         self.replied = true;
+        self.heard_ms = now_ms;
         if self.aborted {
             return Ok(Vec::new());
         }
@@ -193,28 +238,46 @@ impl OnionClientSession {
             .replies
             .accept(now_ms, sequence, frame)?
             .into_iter()
-            .map(|frame| self.interpret(frame))
+            .filter_map(|frame| self.interpret(frame))
             .collect())
     }
 
-    /// Fail closed if the reply direction's gap has persisted for `V`.
+    /// Fail closed at `now` if the reply direction's gap has persisted for `V`, or if it is
+    /// still open and silent at its deadline (Law Deadline).
     ///
     /// # Errors
     ///
-    /// [`OnionSequenceGap`] then.
-    pub(crate) fn expire(&mut self, now_ms: u128) -> Result<(), OnionSequenceGap> {
-        self.replies.expire(now_ms)
+    /// [`OnionClientFailure::Gap`] or [`OnionClientFailure::Silent`] then.
+    pub(crate) fn expire(&mut self, now_ms: u128) -> Result<(), OnionClientFailure> {
+        self.replies.expire(now_ms)?;
+        match self.deadline_ms() {
+            Some(deadline_ms) if now_ms >= deadline_ms => Err(OnionClientFailure::Silent),
+            _ => Ok(()),
+        }
     }
 
-    /// The meaning of one in-order reply: the first decides the open.
-    fn interpret(&mut self, frame: OnionStreamFrame) -> OnionClientEvent {
+    /// The instant `heard + Δ` at which a silent session fails, or `None` once its reply
+    /// direction is over (`h` aborted, or the world's `fin` arrived), since no frame follows.
+    pub(crate) fn deadline_ms(&self) -> Option<u128> {
+        (!self.aborted && !self.ended)
+            .then(|| self.heard_ms.saturating_add(ONION_SESSION_DEADLINE_MS))
+    }
+
+    /// The meaning of one in-order reply: the first decides the open; a later empty `data` is
+    /// `h`'s echo, heard but not stream bytes.
+    fn interpret(&mut self, frame: OnionStreamFrame) -> Option<OnionClientEvent> {
         let first = !self.decided;
         self.decided = true;
         match (first, frame) {
-            (true, OnionStreamFrame::Data { .. }) => OnionClientEvent::Opened,
-            (true, OnionStreamFrame::Fin { .. }) => OnionClientEvent::Refused,
-            (false, OnionStreamFrame::Data { payload, .. }) => OnionClientEvent::Data(payload),
-            (false, OnionStreamFrame::Fin { .. }) => OnionClientEvent::Fin,
+            (true, OnionStreamFrame::Data { .. }) => Some(OnionClientEvent::Opened),
+            (true, OnionStreamFrame::Fin { .. }) => Some(OnionClientEvent::Refused),
+            (false, OnionStreamFrame::Data { payload, .. }) => {
+                (!payload.is_empty()).then_some(OnionClientEvent::Data(payload))
+            }
+            (false, OnionStreamFrame::Fin { .. }) => {
+                self.ended = true;
+                Some(OnionClientEvent::Fin)
+            }
         }
     }
 
@@ -299,7 +362,13 @@ pub(crate) enum OnionControlStep {
 /// credit loop at `now`, which it does once `V/2` has passed without one. A forward loop of any
 /// kind resets it, so the rule fires at most once per `V/2`.
 pub(crate) const fn keep_alive_due(now_ms: u128, last_forward_ms: u128) -> bool {
-    now_ms.saturating_sub(last_forward_ms) >= ONION_FORWARD_MAX_VALIDITY_MS / 2
+    now_ms >= keep_alive_at(last_forward_ms)
+}
+
+/// The instant `last_forward + V/2` at which a session whose last loop left at `last_forward`
+/// owes `h` its keep-alive, so the driver can wake exactly then.
+pub(crate) const fn keep_alive_at(last_forward_ms: u128) -> u128 {
+    last_forward_ms.saturating_add(ONION_FORWARD_MAX_VALIDITY_MS / 2)
 }
 
 /// The client's ledger of the reply blocks outstanding at `h` for one session, by expiry.

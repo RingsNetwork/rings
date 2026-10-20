@@ -151,7 +151,7 @@ fn test_a_failure_without_a_block_is_answered_at_the_next_loop() {
     let mut session = OnionExitSession::new(arguments().digest, NOW_MS);
     session.forward(NOW_MS, opening(), blocks.remove(0));
     let (acked, _) = opened_replies(&mut fixture, session.opened(NOW_MS, true), &mut keys);
-    let mut client = OnionClientSession::new(bytes::Bytes::from_static(b"example.com:443"));
+    let mut client = OnionClientSession::new(bytes::Bytes::from_static(b"example.com:443"), NOW_MS);
     let ack = OnionFrame::decode(OnionLoopClass::DEFAULT, &acked[0]).expect("a frame");
     assert_eq!(
         client.reply(NOW_MS, ack),
