@@ -12,7 +12,6 @@ use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 use rings_core::ecc::PublicKey;
-use rings_core::message::MessageSigner;
 use rings_core::message::ReplayStorage;
 use rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 use rings_core::storage::idb::IdbStorage;
@@ -28,18 +27,16 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
 use crate::error::Result as NodeResult;
-use crate::extension::ext::Scope;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
-use crate::onion::circuit::OnionCircuitCapabilities;
-use crate::onion::circuit::OnionCircuitProtocol;
-use crate::onion::circuit::OnionCircuitShell;
-use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
-use crate::onion::https::BrowserOnionCircuitHandler;
-use crate::onion::https::OnionHttpsRuntime;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::https::OnionHttpsClient;
+use crate::onion::https_onion_exit_services;
+use crate::onion::proxy::OnionProxyProtocol;
+use crate::onion::runtime::OnionRuntime;
 use crate::onion::OnionEntryGuardStorage;
+use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
+use crate::onion::OnionRole;
 use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
 use crate::provider::Provider;
@@ -196,7 +193,7 @@ impl Provider {
         config: ProcessorConfig,
         storage_name: String,
     ) -> NodeResult<Self> {
-        let onion_https_exit_policy = config.onion_https_exit_policy();
+        config.validate_onion_role()?;
         let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
         let measure_storage =
             open_browser_measure_storage(&format!("{storage_name}/measure")).await;
@@ -217,8 +214,8 @@ impl Provider {
             Some(replay_storage),
         )
         .await?;
-        if let Some(policy) = onion_https_exit_policy {
-            provider.install_onion_https_protocol(Some(policy))?;
+        if provider.processor.onion_role().registers_relay() {
+            provider.install_onion_runtime()?;
         }
         provider.set_backend()?;
         Ok(provider)
@@ -303,7 +300,8 @@ impl Provider {
             let signer = wrapped_signer(signer);
             let policy = OnionExitPolicy::from_target_strings(allowed_targets, denied_targets)
                 .map_err(JsError::from)?;
-            policy.validate_targets().map_err(JsError::from)?;
+            let offer =
+                OnionExitOffer::new(https_onion_exit_services(), policy).map_err(JsError::from)?;
 
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
@@ -314,7 +312,6 @@ impl Provider {
             let replay_storage =
                 open_browser_replay_storage("rings-node/transaction-replay").await?;
 
-            let config_policy = policy.clone();
             let provider = Provider::new_provider_internal_with_config(
                 network_id,
                 ice_servers,
@@ -327,39 +324,15 @@ impl Provider {
                 evidence_storage,
                 onion_entry_guard_storage,
                 Some(replay_storage),
-                move |config| {
-                    config
-                        .enable_https_onion_exit()
-                        .onion_exit_policy(config_policy)
-                },
+                move |config| config.onion_role(OnionRole::Exit(offer)),
             )
             .await?;
 
-            provider
-                .install_onion_https_protocol(Some(policy))
-                .map_err(JsError::from)?;
+            provider.install_onion_runtime().map_err(JsError::from)?;
             provider.set_backend().map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
         })
-    }
-
-    /// Install the browser HTTPS onion-exit protocol handler with an explicit target policy.
-    ///
-    /// This updates the local exit handler used by incoming onion HTTPS requests. Discovery still
-    /// comes from the provider's processor configuration, so nodes that should be routeable exits
-    /// must also be constructed with HTTPS onion-exit advertisement enabled.
-    pub fn install_onion_https_exit(
-        &self,
-        allowed_targets: Vec<String>,
-        denied_targets: Vec<String>,
-    ) -> Result<(), JsError> {
-        let policy = OnionExitPolicy::from_target_strings(allowed_targets, denied_targets)
-            .map_err(JsError::from)?;
-        policy.validate_targets().map_err(JsError::from)?;
-        self.install_onion_https_protocol(Some(policy))
-            .map(|_| ())
-            .map_err(JsError::from)
     }
 
     /// Create new provider instance with serialized config (yaml/json)
@@ -542,22 +515,12 @@ impl Provider {
     ///
     /// The returned proxy is not bound to a URL; call [`BrowserOnionProxy::request`] with a full
     /// `https://` URL to send through the selected exit.
-    pub fn onion_https_proxy(
-        &self,
-        hop_count: usize,
-        allow_short_paths: bool,
-    ) -> Result<BrowserOnionProxy, JsError> {
-        let runtime = self
-            .install_onion_https_protocol(None)
-            .map_err(JsError::from)?;
+    pub fn onion_https_proxy(&self) -> Result<BrowserOnionProxy, JsError> {
+        let runtime = self.install_onion_runtime().map_err(JsError::from)?;
         Ok(BrowserOnionProxy {
             processor: self.processor.clone(),
-            scope: Scope::new(
-                self.extensions().core(),
-                ONION_CIRCUIT_NAMESPACE.to_string(),
-            ),
-            config: OnionProxyConfig::https_proxy(hop_count, allow_short_paths),
-            client: Arc::clone(runtime.client()),
+            config: OnionProxyProtocol::HttpsProxy,
+            client: OnionHttpsClient::new(runtime),
             directory_endpoint: self.onion_directory_endpoint().map_err(JsError::from)?,
         })
     }
@@ -630,72 +593,22 @@ impl Provider {
 }
 
 impl Provider {
-    fn install_onion_https_protocol(
-        &self,
-        exit_policy: Option<OnionExitPolicy>,
-    ) -> crate::error::Result<Arc<OnionHttpsRuntime>> {
-        let allow_exit = exit_policy.is_some();
-        let (runtime, registered) = {
-            let mut slot = self
-                .onion_https_runtime
-                .lock()
-                .map_err(|_| crate::error::Error::Lock)?;
-            if let Some(runtime) = slot.as_ref() {
-                (runtime.clone(), true)
-            } else {
-                let runtime = Arc::new(OnionHttpsRuntime::new(
-                    self.processor.delegatee_key().delegatee_public_key(),
-                ));
-                if self.extensions().contains(ONION_CIRCUIT_NAMESPACE) {
-                    return Err(crate::error::Error::ExtensionError(format!(
-                        "namespace {ONION_CIRCUIT_NAMESPACE:?} is already registered"
-                    )));
-                }
-                let capabilities = OnionCircuitCapabilities::from_registration(
-                    self.processor.advertise_onion_relay(),
-                    allow_exit.then(|| self.processor.onion_exit_epoch()),
-                );
-                self.register_protocol(
-                    OnionCircuitProtocol::new(capabilities),
-                    self.onion_https_shell(runtime.clone()),
-                )?;
-                *slot = Some(runtime.clone());
-                (runtime, false)
-            }
-        };
-
-        if let Some(policy) = exit_policy {
-            runtime.set_exit_policy(Some(policy));
-            if registered {
-                let capabilities = OnionCircuitCapabilities::from_registration(
-                    self.processor.advertise_onion_relay(),
-                    Some(self.processor.onion_exit_epoch()),
-                );
-                self.extensions().replace(
-                    OnionCircuitProtocol::new(capabilities),
-                    self.onion_https_shell(runtime.clone()),
-                )?;
-            }
+    /// Install this provider's onion runtime once: the data plane with the processor's role, and
+    /// for an exit the fetch world under the policy of its offer (`onion::runtime`).
+    ///
+    /// The role holds only services a browser interprets (`https`): the processor builder rejects
+    /// any other offer (`Error::UninterpretableOnionService`).
+    pub(crate) fn install_onion_runtime(&self) -> crate::error::Result<OnionRuntime> {
+        let mut slot = self
+            .onion_runtime
+            .lock()
+            .map_err(|_| crate::error::Error::Lock)?;
+        if let Some(runtime) = slot.as_ref() {
+            return Ok(runtime.clone());
         }
+        let runtime = OnionRuntime::install(&self.extensions())?;
+        *slot = Some(runtime.clone());
         Ok(runtime)
-    }
-
-    fn onion_https_shell(
-        &self,
-        runtime: Arc<OnionHttpsRuntime>,
-    ) -> OnionCircuitShell<BrowserOnionCircuitHandler> {
-        let link_sender = runtime.link_sender();
-        OnionCircuitShell::with_link_sender(
-            self.processor.delegatee_key().clone(),
-            BrowserOnionCircuitHandler::new(
-                runtime,
-                MessageSigner::new(
-                    self.processor.delegatee_key().clone(),
-                    self.processor.swarm.network_id(),
-                ),
-            ),
-            link_sender,
-        )
     }
 }
 

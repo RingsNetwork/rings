@@ -18,6 +18,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rings_core::lifecycle::StopToken;
+use rings_core::swarm::OfferReply;
 #[cfg(target_os = "linux")]
 use rings_gateway::bindings::NativePacketIo;
 #[cfg(target_os = "linux")]
@@ -49,9 +51,11 @@ use tokio::sync::oneshot;
 use super::common::*;
 use super::*;
 use crate::onion::native::NativeOnionCircuitHandle;
-use crate::onion::proxy::OnionProxyConfig;
-use crate::onion::tcp::NativeOnionTcpExitConfig;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::NativeOnionGatewayConnector;
+use crate::tests::activity::probe_on_activity;
+use crate::tests::activity::AdmissionActivity;
+use crate::tests::native::prepare_processor_with_onion_role;
 
 const PUBLIC_HTTP_PORT: u16 = 80;
 const PUBLIC_HTTP_IPV4: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
@@ -192,87 +196,150 @@ async fn receive_tcp(
     .expect("gateway TCP response deadline")
 }
 
-async fn connect_gateway_edge(first: &Processor, second: &Processor, label: &str) {
-    let offer = first
-        .swarm
-        .create_offer(second.did())
-        .await
-        .expect("create gateway edge offer");
-    let answer = second
-        .swarm
-        .answer_offer(offer)
-        .await
-        .expect("answer gateway edge offer");
-    first
-        .swarm
-        .accept_answer(answer)
-        .await
-        .expect("accept gateway edge answer");
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while !processor_has_admitted_peer(first, second.did())
-            || !processor_has_admitted_peer(second, first.did())
-        {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("gateway WebRTC edge {label} did not connect"));
+/// Whether `error` refuses a manual handshake because a concurrent handshake owns the edge: an
+/// attempt is under way or admitted, or the peer's handshake took this one's slot (#947). The
+/// edge then forms from that handshake.
+fn refused_by_concurrent_handshake(error: &rings_core::error::Error) -> bool {
+    matches!(
+        error,
+        rings_core::error::Error::AlreadyConnected
+            | rings_core::error::Error::ConnectionAttemptSuperseded { .. }
+    )
 }
 
-struct TwoHopGatewayFixture {
+/// One manual handshake from `first` to `second`. `second` replies with an answer, or, when
+/// its own sent overlay offer prevails on the tie-break, with that offer, which `first`
+/// answers (#947).
+async fn exchange_edge_signaling(
+    first: &Processor,
+    second: &Processor,
+) -> std::result::Result<(), rings_core::error::Error> {
+    let (attempt, offer) = first.swarm.offer_connection(second.did()).await?;
+    match second.swarm.answer_offer(offer).await? {
+        OfferReply::Answer(answer) => first.swarm.accept_answer_for(attempt, answer).await,
+        OfferReply::CounterOffer(counter_offer) => {
+            let answer = first
+                .swarm
+                .answer_offer(counter_offer)
+                .await?
+                .answer()
+                .ok_or(rings_core::error::Error::AlreadyConnected)?;
+            second.swarm.accept_answer(answer).await
+        }
+    }
+}
+
+/// Connect `first` to `second` and await, on admission activity, both admitting the edge.
+///
+/// Stabilization connects overlay neighbours by itself once some edges exist, so the manual
+/// handshake may meet the overlay's own: a refusal because that handshake owns the edge
+/// ([`refused_by_concurrent_handshake`]) satisfies the request, and the tie-break guarantees
+/// the crossing handshakes end with one edge (#947).
+async fn connect_gateway_edge(first: &Processor, second: &Processor, label: &str) {
+    match exchange_edge_signaling(first, second).await {
+        Ok(()) => {}
+        Err(error) if refused_by_concurrent_handshake(&error) => {}
+        Err(error) => panic!("gateway WebRTC edge {label} handshake: {error:?}"),
+    }
+    probe_on_activity(
+        &format!("gateway WebRTC edge {label} admitted on both ends"),
+        PROCESSOR_TEST_HANG_GUARD,
+        || {
+            let admitted = processor_has_admitted_peer(first, second.did())
+                && processor_has_admitted_peer(second, first.did());
+            async move { Ok(admitted.then_some(())) }
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("gateway WebRTC edge {label} did not connect: {error:?}"));
+}
+
+/// Serve `provider`'s application inbox with the extension backend on a detached task, with
+/// [`AdmissionActivity`] observing it, so an edge awaited by [`connect_gateway_edge`] wakes its
+/// probe on every admission and retirement.
+fn serve_observing_admissions(provider: &Provider) -> Result<()> {
+    let service =
+        provider.application_service(Some(Arc::new(AdmissionActivity)), StopToken::never())?;
+    rings_runtime::spawn_detached(service)
+        .map_err(|_| Error::ExtensionError("no runtime to serve the application inbox".to_owned()))
+}
+
+/// Relays of the gateway fixture besides the exit: an onion loop over one symbol has
+/// `H − 1 = 4` distinct hops, the exit included (#834 D5).
+const GATEWAY_FIXTURE_RELAYS: usize = 3;
+
+struct OnionLoopGatewayFixture {
     runtime: GatewayRuntime,
     _processors: Vec<Arc<Processor>>,
     _providers: Vec<Provider>,
 }
 
-async fn prepare_two_hop_public_gateway(config: GatewayConfig) -> Result<TwoHopGatewayFixture> {
+/// A client, three relays and a public TCP exit over real WebRTC edges.
+///
+/// Route selection draws the guard and both relay positions among the three relays, so the
+/// relays form a full mesh with an edge to the client and to the exit each: every loop the
+/// client can select has its forward prefix `g → r₀,₂ → exit` on live edges.
+async fn prepare_onion_loop_public_gateway(
+    config: GatewayConfig,
+) -> Result<OnionLoopGatewayFixture> {
     // Use a literal global address so host DNS proxies and fake-IP modes cannot turn this into a
     // synthetic 198.18.0.0/15 target that the exit policy must reject.
     let authority = format!("{PUBLIC_HTTP_IPV4}:{PUBLIC_HTTP_PORT}");
     let mut exit_policy = onion_policy(&[authority.as_str()], &[])?;
-    exit_policy.max_circuits = 8;
-    exit_policy.max_streams_per_circuit = 2;
+    exit_policy.max_sessions = 8;
     exit_policy.max_bytes_per_minute = 1_048_576;
 
     let client = Arc::new(prepare_processor().await);
-    let relay = Arc::new(prepare_processor().await);
-    let exit = Arc::new(prepare_processor().await);
+    let exit = Arc::new(
+        prepare_processor_with_onion_role(OnionRole::Exit(OnionExitOffer::new(
+            [OnionServiceName::tcp()],
+            exit_policy.clone(),
+        )?))
+        .await,
+    );
+    let mut relays = Vec::with_capacity(GATEWAY_FIXTURE_RELAYS);
+    for _ in 0..GATEWAY_FIXTURE_RELAYS {
+        relays.push(Arc::new(
+            prepare_processor_with_onion_role(OnionRole::Relay).await,
+        ));
+    }
     let client_provider = Provider::from_processor(Arc::clone(&client));
-    let relay_provider = Provider::from_processor(Arc::clone(&relay));
     let exit_provider = Provider::from_processor(Arc::clone(&exit));
-    let client_onion = NativeOnionCircuitHandle::install(
-        &client_provider.extensions(),
-        client.delegatee_key().clone(),
-        client.swarm.network_id(),
-        false,
-        None,
-    )?;
-    let _relay_onion = NativeOnionCircuitHandle::install(
-        &relay_provider.extensions(),
-        relay.delegatee_key().clone(),
-        relay.swarm.network_id(),
-        true,
-        None,
-    )?;
-    let _exit_onion = NativeOnionCircuitHandle::install(
-        &exit_provider.extensions(),
-        exit.delegatee_key().clone(),
-        exit.swarm.network_id(),
-        false,
-        Some(NativeOnionTcpExitConfig::tcp(exit_policy.clone())),
-    )?;
-    client_provider.set_backend()?;
-    relay_provider.set_backend()?;
-    exit_provider.set_backend()?;
+    let relay_providers = relays
+        .iter()
+        .map(|relay| Provider::from_processor(Arc::clone(relay)))
+        .collect::<Vec<_>>();
+    let client_onion = NativeOnionCircuitHandle::install(&client_provider.extensions())?;
+    for provider in relay_providers.iter() {
+        NativeOnionCircuitHandle::install(&provider.extensions())?;
+    }
+    NativeOnionCircuitHandle::install(&exit_provider.extensions())?;
+    serve_observing_admissions(&client_provider)?;
+    serve_observing_admissions(&exit_provider)?;
+    for provider in relay_providers.iter() {
+        serve_observing_admissions(provider)?;
+    }
 
-    connect_gateway_edge(&client, &relay, "client-relay").await;
-    connect_gateway_edge(&relay, &exit, "relay-exit").await;
+    for (index, relay) in relays.iter().enumerate() {
+        connect_gateway_edge(&client, relay, "client-relay").await;
+        connect_gateway_edge(relay, &exit, "relay-exit").await;
+        for later in relays.iter().skip(index + 1) {
+            connect_gateway_edge(relay, later, "relay-relay").await;
+        }
+    }
 
+    // The overlay's views still move here, so a lookup may reach an owner that never received
+    // these writes; the client reads them all the same, as their writer (#948, #982).
     let now_ms = get_epoch_ms();
     client
-        .storage_store(Processor::registry_entry(ONLINE_NODES_TOPIC, vec![
-            online_relay_descriptor_for_processor(&relay, now_ms)?,
-        ])?)
+        .storage_store(Processor::registry_entry(
+            ONLINE_NODES_TOPIC,
+            relays
+                .iter()
+                .chain([&exit])
+                .map(|relay| online_relay_descriptor_for_processor(relay, now_ms))
+                .collect::<Result<Vec<_>>>()?,
+        )?)
         .await?;
     client
         .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
@@ -285,15 +352,13 @@ async fn prepare_two_hop_public_gateway(config: GatewayConfig) -> Result<TwoHopG
         ])?)
         .await?;
 
-    let proxy = OnionProxyConfig::tcp_connect(2, false);
+    let proxy = OnionProxyProtocol::TcpConnect;
     let preview = client
-        .build_onion_proxy_route(
-            proxy.clone(),
-            OnionProxyTarget::parse_authority(&authority)?,
-        )
+        .build_onion_proxy_route(proxy, OnionProxyTarget::parse_authority(&authority)?)
         .await?;
-    assert_eq!(preview.route.hops().len(), 2);
-    assert_eq!(preview.route.hops().first(), Some(&relay.did()));
+    let relay_dids = relays.iter().map(|relay| relay.did()).collect::<Vec<_>>();
+    assert_eq!(preview.route.hops().positions().count(), 5);
+    assert!(relay_dids.contains(&preview.route.hops().guard().did));
     assert_eq!(preview.route.exit_did(), exit.did());
 
     let connector = Arc::new(NativeOnionGatewayConnector::new(
@@ -303,10 +368,14 @@ async fn prepare_two_hop_public_gateway(config: GatewayConfig) -> Result<TwoHopG
     ));
     let runtime =
         GatewayRuntime::new(config, connector, 23).expect("construct gateway runtime fixture");
-    Ok(TwoHopGatewayFixture {
+    let mut processors = vec![client, exit];
+    processors.extend(relays);
+    let mut providers = vec![client_provider, exit_provider];
+    providers.extend(relay_providers);
+    Ok(OnionLoopGatewayFixture {
         runtime,
-        _processors: vec![client, relay, exit],
-        _providers: vec![client_provider, relay_provider, exit_provider],
+        _processors: processors,
+        _providers: providers,
     })
 }
 
@@ -540,15 +609,15 @@ fn linux_namespace_http_request() -> std::result::Result<Vec<u8>, String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires public network access and three native WebRTC processors"]
-async fn captured_tcp_reaches_public_http_only_through_two_hop_onion_route() -> Result<()> {
+#[ignore = "requires public network access and five native WebRTC processors"]
+async fn captured_tcp_reaches_public_http_only_through_onion_loop() -> Result<()> {
     let _network_guard = network_test_guard().await;
     let target = PUBLIC_HTTP_IPV4;
-    let TwoHopGatewayFixture {
+    let OnionLoopGatewayFixture {
         mut runtime,
         _processors,
         _providers,
-    } = prepare_two_hop_public_gateway(gateway_config()).await?;
+    } = prepare_onion_loop_public_gateway(gateway_config()).await?;
     runtime
         .activate("memory-packet-io".to_string())
         .expect("activate gateway runtime");
@@ -635,15 +704,15 @@ async fn captured_tcp_reaches_public_http_only_through_two_hop_onion_route() -> 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires root, Linux TUN/network namespaces, and public network access"]
-async fn real_linux_tun_tcp_reaches_public_http_through_two_hop_onion_route() -> Result<()> {
+async fn real_linux_tun_tcp_reaches_public_http_through_onion_loop() -> Result<()> {
     let _network_guard = network_test_guard().await;
     let config = gateway_config_for(&["1.1.1.1/32"]);
     let plan = config.plan.clone();
-    let TwoHopGatewayFixture {
+    let OnionLoopGatewayFixture {
         mut runtime,
         _processors,
         _providers,
-    } = prepare_two_hop_public_gateway(config).await?;
+    } = prepare_onion_loop_public_gateway(config).await?;
 
     let (descriptor, interface_name, namespace) =
         start_linux_namespace_tunnel(plan).expect("establish isolated Linux TUN");

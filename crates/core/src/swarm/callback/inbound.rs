@@ -38,6 +38,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::measure::Authentication;
 use crate::message::MessagePayload;
+use crate::swarm::application::Delivered;
 use crate::swarm::detached::spawn_detached;
 use crate::utils::try_sleep;
 use crate::utils::GenerationWitness;
@@ -797,8 +798,9 @@ async fn process_event(
 }
 
 /// Dispatch `payload`, then hand its application data, if any, to the application inbox:
-/// queued or, when full, dropped, counted and logged by the inbox. Never waits on the
-/// application.
+/// queued or, when full, dropped, counted and logged by the inbox, and told as
+/// [`SwarmEvent::MessageDropped`](crate::swarm::application::SwarmEvent::MessageDropped) when it
+/// came from an admitted peer (#969). Never waits on the application.
 async fn process_logical_message(
     pipeline: &LogicalInbound,
     payload: &MessagePayload,
@@ -806,7 +808,12 @@ async fn process_logical_message(
 ) -> Result<()> {
     let message = pipeline.handle_payload(payload, prepared_message).await?;
     if let Some(application) = pipeline.application_message(payload, message) {
-        pipeline.transport.application().outlet.deliver(application);
+        let from = application.from;
+        if pipeline.transport.application().outlet.deliver(application) == Delivered::Dropped {
+            if let Err(error) = pipeline.transport.announce_message_dropped(from) {
+                tracing::warn!(peer = %from, ?error, "failed to announce a dropped message");
+            }
+        }
     }
     Ok(())
 }

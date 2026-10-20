@@ -17,7 +17,6 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::wallet::WalletAccount;
 use crate::webview::WebviewNode;
-use crate::webview::WebviewOnionSettings;
 
 /// The public seed node Rings Network operates, as a literal so `concat!` can splice it into
 /// the guide's command listings; [`PUBLIC_SEED_ENDPOINT`] is the same value as a constant.
@@ -116,8 +115,6 @@ pub struct NodeSettings {
     pub stabilize_interval: u64,
     /// IndexedDB storage namespace.
     pub storage_name: String,
-    /// Runtime WebView onion routing settings.
-    pub webview_onion_settings: WebviewOnionSettings,
 }
 
 /// Closed set of browser hosts that own a node-scoped WebView gateway.
@@ -160,12 +157,8 @@ pub async fn build_node(
     );
 
     let webview = match webview_host {
-        WebviewHost::CurrentWindow => {
-            WebviewNode::for_current_window(provider.clone(), settings.webview_onion_settings)
-        }
-        WebviewHost::Extension => {
-            WebviewNode::for_extension(provider.clone(), settings.webview_onion_settings).map(Some)
-        }
+        WebviewHost::CurrentWindow => WebviewNode::for_current_window(provider.clone()),
+        WebviewHost::Extension => WebviewNode::for_extension(provider.clone()).map(Some),
     }
     .map_err(|error| format!("initialize webview: {error}"))?;
     let listener = provider.listen();

@@ -29,6 +29,7 @@ use rings_transport::connections::WebrtcTransport as Transport;
 use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::LaneCreditReservation;
+use rings_transport::core::transport::LaneCreditView;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
@@ -61,6 +62,7 @@ mod delivery;
 pub(crate) mod egress;
 #[cfg(test)]
 mod frame_ledger;
+mod handshake;
 #[cfg(test)]
 mod inbound_tap;
 mod link_control;
@@ -71,8 +73,8 @@ mod payload_send;
 mod peer_operation;
 mod pending;
 mod readiness;
+mod rerouting;
 mod retention;
-mod signaling;
 mod storage_lookup;
 mod storage_sync;
 mod transaction_replay;
@@ -92,6 +94,9 @@ pub(crate) use self::frame_ledger::FrameInFlight;
 use self::frame_ledger::FrameLedger;
 #[cfg(test)]
 pub(crate) use self::frame_ledger::FrameSample;
+pub(crate) use self::handshake::CounterOffer;
+pub(crate) use self::handshake::CreatedAnswer;
+pub use self::handshake::OfferReply;
 #[cfg(test)]
 pub(crate) use self::inbound_tap::InboundTap;
 pub(crate) use self::liveness::IssuedProbe;
@@ -103,17 +108,17 @@ pub(crate) use self::liveness::PEER_LIVENESS_PERIOD_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::dispatched_link_control_for_test;
+pub(crate) use self::outbound::test_trace::dispatched_link_control_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::dispatched_link_control_since;
+pub(crate) use self::outbound::test_trace::dispatched_link_control_since;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::outbound_submit_count_for_test;
+pub(crate) use self::outbound::test_trace::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::referenced_slots_for_test;
+pub(crate) use self::outbound::test_trace::referenced_slots_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::reset_outbound_submit_count_for_test;
+pub(crate) use self::outbound::test_trace::reset_outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::outbound::LinkDirection;
+pub(crate) use self::outbound::test_trace::LinkDirection;
 use self::outbound::OutboundSchedulers;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::LINK_CONTROL_IN_FLIGHT_CAPACITY;
@@ -133,12 +138,17 @@ pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 pub(crate) use self::payload_send::hold_first_frame_deadlines_for_test;
 use self::peer_operation::PeerOperationLocks;
 use self::pending::ConnectionLifecycleBoundary;
+pub(crate) use self::pending::OfferOwner;
 pub(crate) use self::pending::PendingConnectionAttempt;
 use self::pending::PendingFingerUpdates;
 use self::pending::SharedConnectionLifecycles;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 use self::pending::PENDING_CONNECTION_TIMEOUT_MS;
 pub(crate) use self::readiness::TransportReadiness;
+pub(crate) use self::rerouting::reroute;
+pub(crate) use self::rerouting::Attempts;
+pub(crate) use self::rerouting::Placement;
+pub(crate) use self::rerouting::Route;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::retention::UNREFERENCED_CONNECTION_GRACE_MS;
 use self::storage_lookup::StorageAnswerClock;
@@ -217,13 +227,6 @@ type MeasuredDisconnectMap = BTreeMap<Did, MeasuredDisconnect>;
 struct MeasuredDisconnect {
     generation: u64,
     disconnected_since_ms: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum IncomingOfferAdmittedPeer {
-    Vacant,
-    Routable,
-    Unroutable(PendingConnectionAttempt),
 }
 
 /// Runtime settings used by [`SwarmTransport`].
@@ -380,24 +383,6 @@ impl SwarmTransport {
     /// Atomically claim the currently pending storage repair work.
     pub(crate) fn claim_storage_repair(&self) -> bool {
         self.storage_repair_requested.swap(false, Ordering::AcqRel)
-    }
-
-    fn incoming_offer_admitted_peer(&self, peer: Did) -> Result<IncomingOfferAdmittedPeer> {
-        self.with_connection_lifecycle(|| {
-            let Some(attempt) = self.active_attempt(peer)? else {
-                return Ok(IncomingOfferAdmittedPeer::Vacant);
-            };
-            if self.peer_lifecycles()?.sendable_attempt(peer) != Some(attempt) {
-                return Ok(IncomingOfferAdmittedPeer::Unroutable(attempt));
-            }
-            let Some(connection) = self.get_raw_connection(peer) else {
-                return Ok(IncomingOfferAdmittedPeer::Unroutable(attempt));
-            };
-            if connection.readiness().can_make_progress() {
-                return Ok(IncomingOfferAdmittedPeer::Routable);
-            }
-            Ok(IncomingOfferAdmittedPeer::Unroutable(attempt))
-        })
     }
 
     /// Select the next fair window over stable, ordered repair delivery keys.
@@ -672,6 +657,12 @@ impl SwarmConnection {
         async move { wait.await.map_err(Into::into) }
     }
 
+    /// A read-only view of `lane`'s send credit on this connection generation; it holds the
+    /// connection weakly and reserves nothing.
+    pub(crate) fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
+        self.connection.send_credit_view(lane)
+    }
+
     /// Hand one frame to the transport on `lane`; the sole send of every frame to another node.
     async fn send_data(
         &self,
@@ -728,6 +719,8 @@ impl From<SwarmConnection> for Did {
 
 /// Stage 6 model check (#772): rejoin races across connection generations.
 /// Built for every test target, so the browser build checks the same model.
+#[cfg(test)]
+mod test_model_check;
 #[cfg(test)]
 mod test_rejoin_model;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]

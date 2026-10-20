@@ -1,12 +1,7 @@
 use super::*;
 
 fn options() -> OnionHttpProxyOptions {
-    OnionHttpProxyOptions::new(
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        OnionServiceName::tcp(),
-        0,
-        false,
-    )
+    OnionHttpProxyOptions::new(SocketAddr::from(([127, 0, 0, 1], 0)))
 }
 
 #[test]
@@ -26,17 +21,6 @@ fn test_connect_request_line_rejects_plain_http_request() {
 }
 
 #[test]
-fn test_proxy_options_build_custom_tcp_service_config() -> Result<()> {
-    let mut options = options();
-    options.service = OnionServiceName::parse("web")?;
-
-    let proxy = options.proxy_config()?;
-
-    assert_eq!(proxy.exit_service(), "web");
-    Ok(())
-}
-
-#[test]
 fn test_proxy_options_reject_unbounded_connection_model() {
     let mut zero_connections = options();
     zero_connections.max_connections = 0;
@@ -51,4 +35,11 @@ fn test_proxy_options_reject_unbounded_connection_model() {
         zero_timeout.validate(),
         Err(Error::InvalidConfig(_))
     ));
+}
+
+/// A CONNECT answers 200 once the session opened, and 502 with no reason for any refusal.
+#[test]
+fn test_connect_answers_502_for_a_refusal() {
+    assert_eq!(connect_status(true), "200 Connection Established");
+    assert_eq!(connect_status(false), "502 Bad Gateway");
 }

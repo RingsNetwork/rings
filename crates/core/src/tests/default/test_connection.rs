@@ -31,7 +31,12 @@ async fn test_http_handshake_transactions_are_replay_protected() -> Result<()> {
 
     let offer = node1.swarm.create_offer(node2.did()).await?;
     let duplicate_offer = offer.clone();
-    let answer = node2.swarm.answer_offer(offer).await?;
+    let answer = node2
+        .swarm
+        .answer_offer(offer)
+        .await?
+        .answer()
+        .ok_or(Error::InvalidMessage("expected an answer".to_string()))?;
     assert!(matches!(
         node2.swarm.answer_offer(duplicate_offer).await,
         Err(Error::TransactionReplay { .. })
@@ -62,7 +67,12 @@ async fn test_http_handshake_rejects_invalid_inner_signatures_before_replay_admi
         Err(Error::VerifySignatureFailed)
     ));
 
-    let answer = node2.swarm.answer_offer(offer).await?;
+    let answer = node2
+        .swarm
+        .answer_offer(offer)
+        .await?
+        .answer()
+        .ok_or(Error::InvalidMessage("expected an answer".to_string()))?;
     let mut forged_answer = answer.clone();
     forged_answer.transaction.verification.sig.clear();
     assert!(matches!(
@@ -188,7 +198,13 @@ async fn test_dummy_mismatched_data_channel_open_does_not_admit_peer() {
     assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
     assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 1);
 
-    let answer = node2.swarm.answer_offer(offer).await.unwrap();
+    let answer = node2
+        .swarm
+        .answer_offer(offer)
+        .await
+        .unwrap()
+        .answer()
+        .expect("node2 holds no offer of its own, so it answers");
     node1.swarm.accept_answer(answer).await.unwrap();
 
     assert!(

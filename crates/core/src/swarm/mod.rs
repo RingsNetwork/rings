@@ -19,6 +19,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub use builder::SwarmBuilder;
+/// The read-only view of one lane's send credit that [`Swarm::application_credit`] returns: the
+/// transport's type, re-exported so an application reads it through core alone.
+pub use rings_transport::core::transport::LaneCreditView;
 
 use self::callback::SwarmTransportCallback;
 use crate::dht::Chord;
@@ -54,6 +57,10 @@ use crate::swarm::inbox::SwarmInboxDelivery;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
 use crate::swarm::observer::LookupOutcome;
+use crate::swarm::transport::CounterOffer;
+use crate::swarm::transport::CreatedAnswer;
+use crate::swarm::transport::OfferOwner;
+pub use crate::swarm::transport::OfferReply;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -290,6 +297,10 @@ impl Swarm {
     }
 
     /// List active, routable peers and their connection status.
+    ///
+    /// The status is the connection's raw WebRTC state. A peer is routable once its data
+    /// channel is open in `Connecting` or `Connected`, so a listed peer may still read
+    /// `Connecting`: a browser can open the data channel before it reports `connected`.
     pub fn peers(&self) -> Vec<ConnectionInspect> {
         self.transport
             .get_connections()
@@ -322,6 +333,24 @@ impl Swarm {
     /// [`SwarmEvent::PeerRetired`](application::SwarmEvent::PeerRetired).
     pub fn is_peer_admitted(&self, peer: Did) -> Result<bool> {
         Ok(self.transport.active_attempt(peer)?.is_some())
+    }
+
+    /// A read-only view of the send credit of the Application lane of `peer`'s sendable
+    /// connection generation, or `None` without one (#913). Application data travels on that
+    /// lane, so an application that shapes its own emission paces it on this view: the view
+    /// reserves nothing and holds the connection weakly, so reading it never changes what core
+    /// may send.
+    pub fn application_credit(&self, peer: Did) -> Option<LaneCreditView> {
+        self.transport.get_connection(peer).map(|connection| {
+            connection.send_credit_view(MessageCategory::Application.channel_lane())
+        })
+    }
+
+    /// `𝓡`, the capacity of the connection registry (#723): the most connection records, in
+    /// any phase, the swarm holds at once, `2 × (finger slots + successors + 1)`. It bounds the
+    /// admitted peers, so an application keying state by admitted link can size it by `𝓡`.
+    pub fn connection_registry_capacity(&self) -> Result<usize> {
+        self.transport.connection_registry_capacity()
     }
 
     /// Cancel the handshake `attempt` iff it is still pending, that is, no data channel has
@@ -433,26 +462,59 @@ impl Swarm {
     /// Reserve a connection generation for `peer` and create its offer, returning the attempt
     /// that names the generation so the caller can accept the answer for it or cancel it
     /// without touching a handshake the peer started meanwhile.
+    ///
+    /// The caller owns the offer and carries it out of band, so the attempt never sends it
+    /// over the DHT as a counter-offer (#947): a crossing offer from a larger DID is refused,
+    /// one from a smaller DID takes the slot.
     pub async fn offer_connection(&self, peer: Did) -> Result<(ConnectionAttempt, MessagePayload)> {
         let (attempt, offer_msg) = self
             .transport
-            .prepare_connection_offer_with_attempt(peer, self.transport_callback())
+            .prepare_connection_offer_owned_by(
+                peer,
+                self.transport_callback(),
+                OfferOwner::External,
+            )
             .await?;
 
         // This payload has fake next_hop.
         // The invoker should fix it before sending.
-        let payload = self
+        let payload = match self
             .transport
             .application_egress()
-            .originate(Message::ConnectNodeSend(offer_msg), peer, Some(self.did()))
-            .await?;
+            .originate(
+                Message::ConnectNodeSend(offer_msg.clone()),
+                peer,
+                Some(self.did()),
+            )
+            .await
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.transport
+                    .abandon_pending_connection(attempt, "wrapping connection offer")
+                    .await;
+                return Err(error);
+            }
+        };
+        self.transport
+            .mark_offer_sent(attempt, &offer_msg, payload.transaction.tx_id)?;
 
         Ok((ConnectionAttempt(attempt), payload))
     }
 
     /// Answer the offer of remote connection. This function will verify the answer payload and
     /// will wrap the answer inside a payload with verification.
-    pub async fn answer_offer(&self, offer_payload: MessagePayload) -> Result<MessagePayload> {
+    ///
+    /// The reply is [`OfferReply::Answer`], a `ConnectNodeReport` for the peer's
+    /// `accept_answer`, or, when this node holds its own sent overlay offer to the same peer and
+    /// that offer prevails on the DID tie-break (#947), [`OfferReply::CounterOffer`]: that
+    /// offer, a `ConnectNodeSend`, which the caller hands to the peer's `answer_offer`; the peer
+    /// abandons its own offer and answers this one, and that answer goes to this node's
+    /// `accept_answer`.
+    pub async fn answer_offer(
+        &self,
+        offer_payload: MessagePayload,
+    ) -> Result<OfferReply<MessagePayload, MessagePayload>> {
         if !offer_payload.verify_transaction_and_payload(self.network_id()) {
             return Err(Error::VerifySignatureFailed);
         }
@@ -475,24 +537,38 @@ impl Swarm {
             .await?;
 
         let peer = offer_payload.transaction.origin();
-        let answer_msg = self
+        // The reply payload has a fake next_hop; the invoker fixes it before sending.
+        match self
             .transport
             .answer_remote_connection(peer, self.transport_callback(), &msg)
-            .await?;
-
-        // This payload has fake next_hop.
-        // The invoker should fix it before sending.
-        let answer_payload = self
-            .transport
-            .application_egress()
-            .originate(
-                Message::ConnectNodeReport(answer_msg),
-                peer,
-                Some(self.did()),
-            )
-            .await?;
-
-        Ok(answer_payload)
+            .await?
+        {
+            OfferReply::Answer(CreatedAnswer { attempt, report }) => {
+                let wrapped = self
+                    .transport
+                    .application_egress()
+                    .originate(Message::ConnectNodeReport(report), peer, Some(self.did()))
+                    .await;
+                match wrapped {
+                    Ok(payload) => {
+                        self.transport.mark_reply_sent(attempt)?;
+                        Ok(OfferReply::Answer(payload))
+                    }
+                    Err(error) => {
+                        self.transport
+                            .abandon_pending_connection(attempt, "wrapping connection answer")
+                            .await;
+                        Err(error)
+                    }
+                }
+            }
+            OfferReply::CounterOffer(CounterOffer { offer, .. }) => self
+                .transport
+                .application_egress()
+                .originate(Message::ConnectNodeSend(offer), peer, Some(self.did()))
+                .await
+                .map(OfferReply::CounterOffer),
+        }
     }
 
     /// Accept the answer of remote connection. This function will verify the answer payload and
@@ -543,7 +619,7 @@ impl Swarm {
 
         let peer = answer_payload.transaction.signer();
         self.transport
-            .accept_remote_connection(peer, msg, expected)
+            .accept_remote_connection(peer, msg, expected, None)
             .await
     }
 }

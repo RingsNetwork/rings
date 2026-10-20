@@ -273,6 +273,17 @@ impl TopologyState {
             .filter(move |peer| *peer != self.local)
     }
 
+    /// `RoutesEqual(s, t)`: both states route every position alike.
+    ///
+    /// Routing reads the successor list, the predecessor and the finger hints only
+    /// (`find_successor`, `is_responsible_for`); convergence evidence and report tokens authorize
+    /// changes to those slots but route nothing themselves.
+    pub(crate) fn routes_equal(&self, other: &Self) -> bool {
+        self.successors == other.successors
+            && self.predecessor == other.predecessor
+            && self.fingers == other.fingers
+    }
+
     /// `Referenced(n, p)`: `p` occupies a successor, predecessor, or finger
     /// slot of `n`, so `n`'s routing state depends on reaching `p`.
     pub fn references(&self, peer: Did) -> bool {

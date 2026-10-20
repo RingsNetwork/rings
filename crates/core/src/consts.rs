@@ -57,7 +57,7 @@ pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 4;
 ///
 /// Derivation: the encoded size, less its chunk data, of the widest frame the chunk framer
 /// (`frame_chunk`) emits. The fields it fixes are as it fixes them: no `reply_via`, the relay
-/// aim toward the receiver, an exhausted hop budget. Every field it leaves free takes its
+/// aim toward the receiver, an exhausted hop budget, no recorded signaling path. Every field it leaves free takes its
 /// widest encoding: both delegation slots inline with the widest delegation (a BLS12-381
 /// account key, 48 bytes, and its 96-byte signature, the longest any verified delegation
 /// carries; `SignatureAlgorithm::signature_len`), every timestamp, lifetime and sequence at its
@@ -68,15 +68,17 @@ pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 4;
 /// `test_chunk_envelope_reserves_are_the_widest_framed_chunk`: a larger reserve wastes the same
 /// bytes in every chunk frame (#925), a smaller one lets a frame overflow the channel. A field
 /// the framer sets differently changes the witness, which then re-derives this value.
-pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 911;
+pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 912;
 /// Bytes a whole `MessagePayload` encodes beyond its message's own encoding, at most: the
 /// envelope reserve of a payload sent unchunked, such as a storage hand-off batch.
 ///
 /// Derivation: every envelope field at its widest, both delegation slots with the widest
-/// delegation, `reply_via` and the relay aim present (a relayed payload may carry both), and
-/// the length prefix of a message of up to `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes; the
-/// supremum, witnessed with equality by `test_payload_envelope_reserve_is_the_widest_envelope`.
-pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 941;
+/// delegation, `reply_via` and the relay aim present (a relayed payload may carry both), the
+/// widest signaling path an honest carrier records (connect signaling, #947: a return
+/// retracing a full hop budget of relays, which `Law (Bound)` of the path caps), and the
+/// length prefix of a message of up to `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes; the supremum,
+/// witnessed with equality by `test_payload_envelope_reserve_is_the_widest_envelope`.
+pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 3697;
 /// Smallest per-chunk *data* payload we are willing to produce. A peer that advertises a
 /// `max_message_size` so small that, after the envelope reserves, fewer than this many data bytes
 /// fit per chunk is rejected outright (`WireReserves::plan` returns `None`) rather than fragmenting a

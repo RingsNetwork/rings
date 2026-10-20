@@ -55,6 +55,7 @@ use crate::message::handlers::storage::operate_entry;
 use crate::swarm::application::RelayConsumption;
 use crate::swarm::callback::LocalDelivered;
 use crate::swarm::callback::LocalDelivery;
+use crate::swarm::transport::Attempts;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
 
@@ -86,15 +87,11 @@ impl SwarmInboxDelivery {
         Self { transport }
     }
 
-    /// Tombstone `removal` at the carrier's owner.
+    /// Tombstone `removal` at the carrier's owner, in one attempt (`Attempts::Single`): a
+    /// refusal before acceptance is `SingleAttemptRefused`, and the removal had no effect.
     async fn retire(&self, removal: Entry) -> Result<()> {
-        let transport = &self.transport;
-        operate_entry(
-            transport,
-            &transport.protocol_egress(),
-            EntryOperation::Tombstone(removal),
-        )
-        .await
+        let removal = EntryOperation::Tombstone(removal);
+        operate_entry(&self.transport, removal, Attempts::Single).await
     }
 
     /// Offer one element not yet handed over, unless its origin's quota is spent for this pass
@@ -145,6 +142,10 @@ impl InboxDelivery for SwarmInboxDelivery {
     /// Post: the elements of the locally stored inbox were taken in order, as the module laws
     /// say, until one found no room, no reader or a local failure; every element core is done
     /// with was tombstoned at its owner by one removal.
+    ///
+    /// A removal refused before acceptance (`SingleAttemptRefused`, a detached `Cancelled`
+    /// included) ends the drain with that error: the element stays at its owner and is taken
+    /// again on the next drain. No element is lost, and none is tombstoned twice.
     async fn deliver_inbox(&self) -> Result<()> {
         let now_ms = get_epoch_ms();
         let key = StorageKey::inbox_of(self.transport.dht.did);

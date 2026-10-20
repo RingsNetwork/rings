@@ -317,6 +317,13 @@ pub enum Error {
     #[error("A lock was poisoned by a panicking holder")]
     LockPoisoned,
 
+    /// A group element is the identity where `G ∖ {O}` is required
+    #[error("group element is the identity")]
+    IdentityElement,
+
+    /// A scalar is zero where `Z_n^*` is required
+    #[error("scalar is zero")]
+    ZeroScalar,
     /// The application inbox was already claimed
     #[error("The application inbox was already claimed")]
     ApplicationInboxClaimed,
@@ -439,6 +446,16 @@ pub enum Error {
     #[error("Pending WebRTC connection generation is exhausted")]
     PendingConnectionGenerationExhausted,
 
+    /// Connection attempt {generation} for {peer} was released (expired, cancelled or
+    /// disconnected) before setup completed, by anything but the peer's own handshake.
+    #[error("Connection attempt {generation} for {peer} was cancelled")]
+    ConnectionAttemptCancelled {
+        /// Peer whose connection generation was released.
+        peer: crate::dht::Did,
+        /// Generation that was released.
+        generation: u64,
+    },
+
     /// Connection attempt {generation} for {peer} was replaced before setup completed.
     #[error("Connection attempt {generation} for {peer} was superseded")]
     ConnectionAttemptSuperseded {
@@ -507,6 +524,14 @@ pub enum Error {
         peer: crate::dht::Did,
         /// Admission deadline in milliseconds.
         timeout_ms: u128,
+    },
+
+    /// A send under the application discipline was cancelled before any of its frames was
+    /// claimed: its generation was superseded, or its readiness, route, or scheduler revoked it.
+    #[error("Outbound transfer to {peer} was cancelled before its first frame was admitted")]
+    OutboundTransferCancelled {
+        /// Next hop the transfer was queued for.
+        peer: crate::dht::Did,
     },
 
     /// A detached transfer did not admit its first frame before its deadline.
@@ -663,6 +688,32 @@ pub enum Error {
     #[error("Relay hop budget {0} is above the maximum a carrier can hold")]
     RelayHopBudgetAboveMax(u8),
 
+    /// A recorded connect-signaling path claimed more hops than any carrier can take (#947)
+    #[error("Recorded relay path of {0} hops is above the maximum a carrier can take")]
+    RelayPathAboveMax(usize),
+
+    /// A connect-signaling reply cannot retrace its recorded path: this node has no link to the
+    /// path's next hop, so the reply ends here and the initiator's pending timeout covers it
+    /// (#947).
+    #[error("Recorded relay path hop {hop} is not linked to this node")]
+    RelayPathHopUnlinked {
+        /// The hop the recorded path names next.
+        hop: crate::dht::Did,
+    },
+
+    /// A recorded connect-signaling path names a node twice, or names the node holding it or
+    /// its destination: no honest route revisits a node, so the path is forged (#947)
+    #[error("Recorded relay path repeats hop {hop}")]
+    RelayPathRepeatedHop {
+        /// The repeated hop.
+        hop: crate::dht::Did,
+    },
+
+    /// A carrier's recorded path does not match its message: a path is carried exactly by
+    /// connect signaling (#947)
+    #[error("Relay path present on a message that is not connect signaling, or absent on one")]
+    RelaySignalingPathMismatch,
+
     /// Delivery toward a node cannot continue from this hop: no linked known peer makes
     /// progress toward its aim, and the route has already crossed that aim once, or this node
     /// has no linked known peer at all (see `dht::delivery`). The route ends here instead of
@@ -804,6 +855,14 @@ pub enum Error {
         context: &'static str,
     },
 
+    /// A detached transfer ended cancelled after its first frame was claimed by the backend
+    /// (the worker stopped mid-send), so the frame may have been delivered.
+    #[error("Detached send to {peer} was abandoned after the backend claimed its first frame")]
+    DetachedSendAbandonedAfterClaim {
+        /// Peer whose backend claimed the frame.
+        peer: crate::dht::Did,
+    },
+
     /// A tracked transfer did not stop within its post-deadline cleanup grace.
     #[error(
         "Tracked payload cleanup for {peer} exceeded its {timeout_ms}ms grace after the send deadline"
@@ -819,6 +878,26 @@ pub enum Error {
     /// Error on ser/der JsValue
     #[error("Error on ser/der JsValue")]
     SerdeWasmBindgenError(#[from] serde_wasm_bindgen::Error),
+
+    /// A data-plane rerouting spent its budget: every attempt was refused before acceptance.
+    #[error("Rerouting exhausted its budget of deferred sends; last cause: {last}")]
+    ReroutingExhausted {
+        /// The cause of the last deferral.
+        last: super::SendDeferral,
+    },
+
+    /// A single-attempt DHT placement (a write the inbound path originates) was refused before
+    /// acceptance; it had no effect and is not retried.
+    #[error("Single-attempt send refused before acceptance: {refusal}")]
+    SingleAttemptRefused {
+        /// The refusal.
+        refusal: super::SendDeferral,
+    },
+
+    /// A rerouted DHT placement was stopped while waiting to be retried; its refused attempt
+    /// had no effect.
+    #[error("Rerouting stopped while waiting to retry a placement")]
+    ReroutingStopped,
 
     /// Delegation is expired
     #[error("Delegation is expired")]

@@ -21,6 +21,7 @@ use crate::core::credit::LANE_CREDIT_WINDOW;
 use crate::core::pool::ChannelLane;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
@@ -91,6 +92,10 @@ impl ConnectionInterface for FlakyCreditConnection {
         Box::pin(std::future::ready(Err(Error::DataChannelOpen(
             "the test connection sends credit frames only".into(),
         ))))
+    }
+
+    fn send_credit_view(&self, _: ChannelLane) -> LaneCreditView {
+        LaneCreditView::closed()
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {

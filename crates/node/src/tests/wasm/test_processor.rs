@@ -13,12 +13,20 @@ use wasm_bindgen_test::*;
 use crate::prelude::*;
 use crate::processor::*;
 use crate::tests::wasm::await_mutual_admission;
+use crate::tests::wasm::is_routable_webrtc_state;
 use crate::tests::wasm::peer_transitions;
 use crate::tests::wasm::prepare_processor;
 use crate::tests::wasm::with_hang_guard;
 use crate::tests::wasm::PeerTransitions;
 use crate::tests::wasm::TransitionRecorder;
 use crate::tests::wasm::TEST_HANG_GUARD;
+
+/// Whether `states`, a processor's `peers()` entries for one peer, are exactly one entry in a
+/// routable WebRTC state: what an admitted, current generation guarantees. The state may still
+/// read `Connecting` ([`is_routable_webrtc_state`], #962).
+fn lists_one_routable_entry(states: &[String]) -> bool {
+    matches!(states, [state] if is_routable_webrtc_state(state))
+}
 
 async fn close_all_connections(p: &Processor) {
     futures::future::join_all(
@@ -143,7 +151,14 @@ async fn create_connection(p1: &ObservedProcessor, p2: &ObservedProcessor) {
         .unwrap();
 
     console_log!("answer_offer");
-    let answer = p2.processor.swarm.answer_offer(offer).await.unwrap();
+    let answer = p2
+        .processor
+        .swarm
+        .answer_offer(offer)
+        .await
+        .unwrap()
+        .answer()
+        .expect("p2 holds no offer of its own, so it answers");
 
     console_log!("accept_answer");
     p1.processor.swarm.accept_answer(answer).await.unwrap();
@@ -263,7 +278,8 @@ async fn test_processor_handshake_and_msg() {
 /// route p1's offer to p3 and p3's answer back. The concurrent connects may admit a
 /// generation that is superseded right after; `settled_peer_states` reads the listing only
 /// while the announced generation is current, and records are keyed by DID, so each end then
-/// lists exactly one `Connected` entry for the other.
+/// lists exactly one entry for the other, in a routable WebRTC state
+/// ([`lists_one_routable_entry`]).
 #[wasm_bindgen_test]
 async fn test_processor_connect_with_did() {
     with_hang_guard("test_processor_connect_with_did", TEST_HANG_GUARD, async {
@@ -283,7 +299,8 @@ async fn test_processor_connect_with_did() {
         create_connection(&p2, &p3).await;
         console_log!("processor_connect_p2_and_p3, done");
 
-        assert_eq!(p1.peer_states(p2.processor.did()), ["Connected"]);
+        let p1_states = p1.peer_states(p2.processor.did());
+        assert!(lists_one_routable_entry(&p1_states), "{p1_states:?}");
 
         console_log!("connect p1 and p3");
         let (p1_connect, p3_connect) = futures::join!(
@@ -298,8 +315,8 @@ async fn test_processor_connect_with_did() {
         );
 
         console_log!("check peers");
-        assert_eq!(p1_states, ["Connected"]);
-        assert_eq!(p3_states, ["Connected"]);
+        assert!(lists_one_routable_entry(&p1_states), "{p1_states:?}");
+        assert!(lists_one_routable_entry(&p3_states), "{p3_states:?}");
         console_log!("processor_close_all_connections");
         futures::join!(
             close_all_connections(&p1.processor),

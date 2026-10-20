@@ -1,4 +1,6 @@
+use super::DeferralTrigger;
 use super::Error;
+use super::SendClass;
 
 impl Error {
     pub(crate) fn unexpected_peer_ring_action(action: crate::dht::PeerRingAction) -> Self {
@@ -8,29 +10,22 @@ impl Error {
     /// True when local pre-send admission or memory capacity is exhausted.
     ///
     /// These failures happen before backend acceptance, so retrying cannot
-    /// duplicate a send. Post-acceptance timeouts are deliberately excluded:
-    /// their remote outcome is ambiguous even after the connection is retired.
+    /// duplicate a send (`send_class` proves it per variant). Post-acceptance
+    /// timeouts are deliberately excluded: their remote outcome is ambiguous
+    /// even after the connection is retired.
     pub(crate) const fn is_local_send_backpressure(&self) -> bool {
         matches!(
-            self,
-            Self::DataChannelSendQueueTimeout { .. }
-                | Self::OutboundTransferCapacityExceeded { .. }
-                | Self::OutboundTransferMemoryCapacityExceeded { .. }
-                | Self::OutboundTransferAdmissionTimeout { .. }
-                | Self::OutboundFirstFrameAdmissionTimeout { .. }
+            self.send_class(),
+            SendClass::Deferrable(DeferralTrigger::CapacityRelease | DeferralTrigger::ChannelDrain)
         )
     }
 
     /// Whether a data-plane send should be retried from freshly computed topology.
+    ///
+    /// Law: `is_deferrable_data_plane_send(e) ⟺ send_class(e) = Deferrable(_)`, so every retried
+    /// error is proved pre-acceptance.
     pub(crate) const fn is_deferrable_data_plane_send(&self) -> bool {
-        self.is_local_send_backpressure()
-            || matches!(
-                self,
-                Self::ConnectionAttemptSuperseded { .. }
-                    | Self::TransportNotReady { .. }
-                    | Self::SwarmMissDidInTable(_)
-                    | Self::Transport(rings_transport::error::Error::SendPermitRevoked)
-            )
+        matches!(self.send_class(), SendClass::Deferrable(_))
     }
 
     /// Whether this error should degrade peer quality through `FailedToSend`.
@@ -43,6 +38,11 @@ impl Error {
             Self::ConnectionAttemptSuperseded { .. }
             | Self::OutboundSchedulerRuntimeUnavailable
             | Self::CancelledDetachedAdmissionPublishedSuccess
+            | Self::DetachedSendAbandonedAfterClaim { .. }
+            // rerouting outcomes: a placement's verdict, never a peer's send failure
+            | Self::ReroutingExhausted { .. }
+            | Self::SingleAttemptRefused { .. }
+            | Self::ReroutingStopped
             | Self::DetachedPayloadCleanupTimeout { .. }
             | Self::DataChannelSendCompletionTimeout { .. }
             | Self::DataChannelDeliveryTimeout { .. }

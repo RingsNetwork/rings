@@ -170,7 +170,7 @@ impl SwarmTransport {
             ));
         }
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        super::outbound::record_dispatched_link_control(peer, control);
+        super::outbound::test_trace::record_dispatched_link_control(peer, control);
         Ok(())
     }
 

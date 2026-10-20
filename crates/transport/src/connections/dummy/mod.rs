@@ -25,6 +25,7 @@ use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::IrrevocableSendGuard;
+use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -66,6 +67,7 @@ use self::state::NEXT_CALLBACK_CID;
 use self::state::NEXT_DELIVERY_GATE;
 use self::state::POST_PERMIT_SEND_GATE;
 use self::state::POST_PERMIT_SEND_GATE_WAITING;
+use self::state::SEND_GATE_ENTERED;
 use self::state::SEND_MESSAGE_GATE;
 use self::state::SEND_MESSAGE_GATE_WAITING;
 use self::state::SEND_MESSAGE_PENDING;
@@ -539,6 +541,7 @@ impl FrameSink for DummyConnection {
         let post_permit_gate = POST_PERMIT_SEND_GATE.with(|gate| gate.borrow().clone());
         if let Some(post_permit_gate) = post_permit_gate {
             POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(true));
+            SEND_GATE_ENTERED.with(|entered| entered.notify_one());
             post_permit_gate.notified().await;
             POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
         }
@@ -566,6 +569,7 @@ impl FrameSink for DummyConnection {
             let (result_sender, result_receiver) = oneshot::channel();
             tokio::spawn(async move {
                 IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(true));
+                SEND_GATE_ENTERED.with(|entered| entered.notify_one());
                 irrevocable_gate.notified().await;
                 IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
                 let result = complete_irrevocable_send(
@@ -607,6 +611,10 @@ impl ConnectionInterface for DummyConnection {
 
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
         self.callback.reserve_send_credit(lane)
+    }
+
+    fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
+        self.callback.send_credit_view(lane)
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {

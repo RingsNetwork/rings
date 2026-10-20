@@ -28,6 +28,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2679,6 +2690,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-aez"
+version = "0.33.0"
+dependencies = [
+ "aes",
+ "subtle",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "rings-codec"
 version = "0.33.0"
 dependencies = [
@@ -2805,17 +2826,21 @@ dependencies = [
  "base58",
  "base64 0.13.1",
  "bytes",
+ "chacha20",
  "chrono",
  "clap",
  "dashmap",
  "dotenvy",
  "futures",
+ "hkdf",
+ "hmac",
  "js-sys",
  "jsonrpc-core",
  "lazy_static",
  "log",
  "rand",
  "reqwest",
+ "rings-aez",
  "rings-codec",
  "rings-core",
  "rings-derive",
@@ -2828,6 +2853,7 @@ dependencies = [
  "serde-saphyr",
  "serde-wasm-bindgen 0.6.5",
  "serde_json",
+ "sha2",
  "strum",
  "subtle",
  "thiserror 1.0.69",
@@ -2840,6 +2866,8 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
+ "zeroize",
 ]
 
 [[package]]
@@ -4055,6 +4083,20 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
 
 [[package]]
 name = "zerotrie"

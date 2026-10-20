@@ -180,3 +180,30 @@ async fn test_retirement_is_announced_after_the_read_admission() -> Result<()> {
     ]);
     Ok(())
 }
+
+/// Law (#969): a drop of a live message is announced only for a peer admitted at that instant, so
+/// `MessageDropped p` is read after `p`'s admission and before its retirement; a drop from a peer
+/// never admitted, or already retired, announces nothing.
+#[tokio::test]
+async fn test_a_drop_is_announced_only_for_an_admitted_peer() -> Result<()> {
+    let (transport, log) = transport_with_log()?;
+    let (peer, attempt) = admitted_peer(&transport).await?;
+    let stranger = SecretKey::random().address().into();
+
+    transport.announce_message_dropped(peer)?;
+    transport.announce_message_dropped(stranger)?;
+    // Read both facts before the retirement, which would withdraw them unread.
+    assert_eq!(log.events(), vec![
+        SwarmEvent::PeerAdmitted { peer },
+        SwarmEvent::MessageDropped { peer },
+    ]);
+    assert!(transport.disconnect_attempt(attempt).await?.is_some());
+    transport.announce_message_dropped(peer)?;
+
+    assert_eq!(log.events(), vec![
+        SwarmEvent::PeerAdmitted { peer },
+        SwarmEvent::MessageDropped { peer },
+        SwarmEvent::PeerRetired { peer },
+    ]);
+    Ok(())
+}

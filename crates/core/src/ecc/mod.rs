@@ -26,6 +26,7 @@ use crate::error::Result;
 pub mod elgamal;
 pub mod group;
 pub mod keys;
+pub mod prime_order;
 /// Signature schemes used by DID identity and provider login.
 pub mod signers;
 mod types;
@@ -179,40 +180,6 @@ impl TryFrom<PublicKey<33>> for K256AffinePoint {
         Ok(TryInto::<K256PublicKey>::try_into(key)?
             .to_projective()
             .to_affine())
-    }
-}
-
-impl TryFrom<K256AffinePoint> for PublicKey<33> {
-    type Error = Error;
-    fn try_from(a: K256AffinePoint) -> Result<Self> {
-        let encoded = a.to_encoded_point(true);
-        let data: [u8; 33] = encoded
-            .as_bytes()
-            .try_into()
-            .map_err(|_| Error::InvalidPublicKey)?;
-        Ok(Self(data))
-    }
-}
-
-impl From<K256PublicKey> for PublicKey<33> {
-    fn from(key: K256PublicKey) -> Self {
-        let encoded = key.to_encoded_point(true);
-        let mut data = [0u8; 33];
-        if encoded.as_bytes().len() == data.len() {
-            data.copy_from_slice(encoded.as_bytes());
-        }
-        Self(data)
-    }
-}
-
-impl From<K256VerifyingKey> for PublicKey<33> {
-    fn from(key: K256VerifyingKey) -> Self {
-        let encoded = key.to_encoded_point(true);
-        let mut data = [0u8; 33];
-        if encoded.as_bytes().len() == data.len() {
-            data.copy_from_slice(encoded.as_bytes());
-        }
-        Self(data)
     }
 }
 
@@ -514,7 +481,7 @@ pub(crate) mod tests {
 
     /// The secret key whose scalar is `index + 1`: a fixed, valid key per index, so a test
     /// built on it replays the same identities, ring positions and routes on every run.
-    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn deterministic_key(index: usize) -> SecretKey {
         let mut bytes = [0_u8; 32];
         let scalar = u64::try_from(index)

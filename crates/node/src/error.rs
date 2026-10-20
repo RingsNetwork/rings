@@ -34,6 +34,16 @@ pub enum OnionQueueAdmissionReason {
     PeerFull,
     /// A resource counter could not represent its successor.
     CounterOverflow,
+    /// The peer has no up link, so nothing may be queued for it.
+    LinkDown,
+}
+
+impl OnionQueueAdmissionReason {
+    /// Whether the refusal is a bound, which a later completion lifts: `GlobalFull` or
+    /// `PeerFull`.
+    pub const fn is_full(self) -> bool {
+        matches!(self, Self::GlobalFull | Self::PeerFull)
+    }
 }
 
 /// A wrap `Result` contains custom errors.
@@ -178,6 +188,13 @@ pub enum Error {
     /// The node configuration is structurally invalid.
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String) = 812,
+    /// An onion exit offers a service this node's runtime cannot interpret: a browser runtime
+    /// has `fetch` but no sockets, so it interprets `https` only.
+    #[error("this node's onion runtime cannot interpret the offered exit service {service:?}")]
+    UninterpretableOnionService {
+        /// The first offered service the runtime cannot interpret.
+        service: crate::onion::OnionServiceName,
+    } = 813,
     /// Opening browser IndexedDB-backed provider storage failed.
     #[error("Open browser storage \"{name}\" failed: {source}")]
     BrowserStorageOpen {
@@ -321,6 +338,12 @@ pub enum Error {
 }
 
 impl Error {
+    /// Whether this is an overlay send refused before any of its frames could be accepted, so
+    /// sending the payload again cannot duplicate it (`rings_core::error::Error::is_refused_before_acceptance`).
+    pub(crate) fn is_send_refused_before_acceptance(&self) -> bool {
+        matches!(self, Self::SendMessage(error) if error.is_refused_before_acceptance())
+    }
+
     fn discriminant(&self) -> u32 {
         // SAFETY: Because `Self` is marked `repr(u32)`, its layout is a `repr(C)` `union`
         // between `repr(C)` structs, each of which has the `u32` discriminant as its first

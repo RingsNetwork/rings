@@ -20,12 +20,14 @@ use std::sync::RwLock;
 use bytes::Bytes;
 use futures::lock::Mutex as AsyncMutex;
 use rings_core::dht::Did;
+use rings_core::swarm::LaneCreditView;
 use rings_runtime::MaybeSendSync;
 
 use super::delegation;
 use super::Ctx;
 use super::Envelope;
 use super::Interpret;
+use super::LinkFact;
 use super::Protocol;
 use super::Reject;
 use super::Transition;
@@ -51,6 +53,10 @@ pub(crate) trait Handler {
     /// Decode → step (pure, committed) → run the protocol's effects and synchronous
     /// feedback. `handle : (from, payload) → IO ()`.
     async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<()>;
+
+    /// Step the protocol's [`Protocol::link_fact`] event for `fact`, if it makes one, as a turn
+    /// of its own. `observe_link : LinkFact → IO ()`.
+    async fn observe_link(&self, core: &Core, fact: LinkFact) -> Result<()>;
 }
 
 /// The router-internal capability. Cloneable and `'static` so a long-running engine task can
@@ -68,9 +74,54 @@ impl Core {
         self.processor.did()
     }
 
-    #[cfg(rings_native)]
-    pub(crate) fn onion_exit_epoch(&self) -> crate::onion::OnionExitEpoch {
-        self.processor.onion_exit_epoch()
+    /// Whether `peer`'s link generation is admitted now; `false` when the lifecycle cannot be
+    /// read.
+    pub(crate) fn peer_admitted(&self, peer: Did) -> bool {
+        self.processor.swarm.is_peer_admitted(peer).unwrap_or(false)
+    }
+
+    /// The peers whose link generation is admitted now, each read under the lifecycle lock.
+    pub(crate) fn admitted_peers(&self) -> Vec<Did> {
+        self.processor
+            .swarm
+            .peer_dids()
+            .into_iter()
+            .filter(|peer| self.peer_admitted(*peer))
+            .collect()
+    }
+
+    /// The read-only view of the Application lane's send credit of `peer`'s sendable
+    /// connection generation, or `None` without one (`Swarm::application_credit`, #913).
+    pub(crate) fn application_credit(&self, peer: Did) -> Option<LaneCreditView> {
+        self.processor.swarm.application_credit(peer)
+    }
+
+    /// `𝓡`, the capacity of the swarm's connection registry (#723).
+    pub(crate) fn connection_registry_capacity(&self) -> Result<usize> {
+        self.processor
+            .swarm
+            .connection_registry_capacity()
+            .map_err(Error::InternalError)
+    }
+
+    /// This node's session key.
+    pub(crate) fn delegatee_key(&self) -> &rings_core::delegation::DelegateeKey {
+        self.processor.delegatee_key()
+    }
+
+    /// This process's onion role (#834 D2).
+    pub(crate) fn onion_role(&self) -> &crate::onion::OnionRole<crate::onion::OnionExitOffer> {
+        self.processor.onion_role()
+    }
+
+    /// The cover floor of this node's idle onion links (#880).
+    pub(crate) fn onion_idle_floor(&self) -> crate::onion::circuit::OnionIdleFloor {
+        self.processor.onion_idle_floor()
+    }
+
+    /// The onion process epoch cell of this node (#834 D2).
+    pub(crate) fn onion_process_epoch(&self) -> crate::onion::OnionProcessEpochCell {
+        self.processor.onion_process_epoch()
     }
 
     /// Put a message on the overlay to `to` under `namespace`.
@@ -88,9 +139,8 @@ impl Core {
     }
 
     /// Re-enter the router with a *self*-addressed message (`from = this node`): a locally
-    /// injected command, or an engine task feeding a lifecycle event back to its protocol.
-    /// Only the native relay engine has such tasks.
-    #[cfg(rings_native)]
+    /// injected command, or an engine task feeding a lifecycle event back to its protocol (the
+    /// native relay engine, and the onion data plane's reconcile at install).
     pub async fn inject(&self, namespace: &str, payload: Bytes) -> Result<()> {
         self.dispatch(self.did(), Envelope::new(namespace, payload))
             .await
@@ -105,7 +155,6 @@ impl Core {
     /// crate-private: production reaches it only through [`inject`](Core::inject), with
     /// `from = self.did()`; inbound envelopes from peers take a [`Route`] instead, resolved by
     /// the [`Backend`](crate::extension::Backend)'s router.
-    #[cfg(rings_native)]
     pub(crate) async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
         match self.route(envelope.namespace.as_str()) {
             Some(route) => route.dispatch(from, envelope.payload).await,
@@ -114,6 +163,22 @@ impl Core {
                 Ok(())
             }
         }
+    }
+
+    /// The route to every registered namespace's protocol, with its namespace.
+    pub(crate) fn routes(&self) -> Vec<(String, Route)> {
+        let Ok(handlers) = self.handlers.read() else {
+            return Vec::new();
+        };
+        handlers
+            .iter()
+            .map(|(namespace, handler)| {
+                (namespace.clone(), Route {
+                    core: self.clone(),
+                    handler: Arc::clone(handler),
+                })
+            })
+            .collect()
     }
 
     /// The route to `namespace`'s protocol, or `None` when no protocol is registered under it.
@@ -147,6 +212,12 @@ impl Route {
     /// message's verified signer, which only the [`Backend`](crate::extension::Backend) has.
     pub(crate) async fn dispatch(&self, from: Did, payload: Bytes) -> Result<()> {
         self.handler.handle(&self.core, from, payload).await
+    }
+
+    /// Run the resolved protocol on `fact`, which only the router establishes: a retirement it
+    /// reads off the core's inbox, or a drop by the namespace's own queue.
+    pub(crate) async fn observe_link(&self, fact: LinkFact) -> Result<()> {
+        self.handler.observe_link(&self.core, fact).await
     }
 }
 
@@ -194,6 +265,23 @@ impl Scope {
             .await
     }
 
+    /// Whether `peer`'s link generation is admitted now.
+    pub(crate) fn peer_admitted(&self, peer: Did) -> bool {
+        self.core.peer_admitted(peer)
+    }
+
+    /// The peers whose link generation is admitted now.
+    pub(crate) fn admitted_peers(&self) -> Vec<Did> {
+        self.core.admitted_peers()
+    }
+
+    /// The read-only view of the Application lane's send credit of `peer`'s connection, for a
+    /// sender that paces its own emission on it (#913): never a transport handle, and it
+    /// reserves nothing.
+    pub(crate) fn application_credit(&self, peer: Did) -> Option<LaneCreditView> {
+        self.core.application_credit(peer)
+    }
+
     /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).
     ///
     /// `pub(crate)`: this is the **long-lived lifecycle sink** for an extension's own engine
@@ -205,7 +293,6 @@ impl Scope {
     /// turn and budget.
     /// A third-party shell therefore gets only that bounded return path, never this re-entrant
     /// sink, so it cannot recurse `inject` to escape the budget.
-    #[cfg(rings_native)]
     pub(crate) async fn inject(&self, payload: Bytes) -> Result<()> {
         self.core.inject(self.namespace.as_str(), payload).await
     }
@@ -292,7 +379,27 @@ where
         if let Some(observe) = self.after_decode_for_test.as_ref() {
             observe();
         }
+        self.run_turn(core, event).await
+    }
 
+    async fn observe_link(&self, core: &Core, fact: LinkFact) -> Result<()> {
+        match self.protocol.link_fact(fact) {
+            Some(event) => self.run_turn(core, event).await,
+            None => Ok(()),
+        }
+    }
+}
+
+impl<P, I> Runner<P, I>
+where
+    P: Protocol + MaybeSendSync + 'static,
+    P::State: MaybeSendSync + 'static,
+    P::Effect: MaybeSendSync,
+    I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
+{
+    /// One turn of `event`: under the transition gate, step it, then run its effects and the
+    /// synchronous feedback fixpoint they produce.
+    async fn run_turn(&self, core: &Core, event: P::Event) -> Result<()> {
         // The transition gate establishes the protocol's linearization order for state commit
         // and its resulting effect trace. Decode remains outside that order: it has no state or
         // effects by contract. Holding the gate through interpretation preserves:

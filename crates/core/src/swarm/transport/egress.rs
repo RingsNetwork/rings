@@ -53,6 +53,7 @@ use super::SwarmTransport;
 use crate::delegation::DelegateeKey;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::error::Error;
 use crate::error::Result;
 use crate::message::MessageCategory;
 use crate::message::MessagePayload;
@@ -204,11 +205,21 @@ impl<D: Discipline> PayloadSender for Egress<'_, D> {
             .await
     }
 
-    /// Meet the peer under this sender's discipline.
+    /// Meet the peer under this sender's discipline; see [`payload_left`].
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
-        self.send_payload_with_outcome(did, payload)
-            .await
-            .map(|_| ())
+        payload_left(self.send_payload_with_outcome(did, payload).await?, did)
+    }
+}
+
+/// Whether a payload sent to `peer` left, from its send outcome.
+///
+/// Post: `Ok(())` iff `outcome = Succeeded`; a transfer cancelled before acceptance is
+/// `Err(OutboundTransferCancelled)`, never a success, so the caller learns that the payload did
+/// not leave and may send it again (#964). Only the waiting discipline produces `Cancelled`.
+fn payload_left(outcome: SendCompletionOutcome, peer: Did) -> Result<()> {
+    match outcome {
+        SendCompletionOutcome::Succeeded => Ok(()),
+        SendCompletionOutcome::Cancelled => Err(Error::OutboundTransferCancelled { peer }),
     }
 }
 
@@ -260,5 +271,32 @@ impl SwarmTransport {
     #[cfg(test)]
     pub(crate) fn application_egress_for_test(&self) -> Egress<'_, Application> {
         self.application_egress()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::payload_left;
+    use crate::dht::Did;
+    use crate::error::DeferralTrigger;
+    use crate::error::Error;
+    use crate::error::SendClass;
+    use crate::swarm::transport::delivery::SendCompletionOutcome;
+
+    /// Law: `payload_left(o, p) = Ok(())` iff `o = Succeeded`; a cancellation is the typed,
+    /// retryable `OutboundTransferCancelled` for `p` (#964).
+    #[test]
+    fn test_a_cancelled_transfer_is_not_reported_as_sent() {
+        let peer = Did::from(7_u32);
+        assert!(payload_left(SendCompletionOutcome::Succeeded, peer).is_ok());
+        let cancelled = payload_left(SendCompletionOutcome::Cancelled, peer);
+        assert!(
+            matches!(&cancelled, Err(Error::OutboundTransferCancelled { peer: refused }) if *refused == peer),
+            "{cancelled:?}"
+        );
+        assert!(cancelled.is_err_and(|error| matches!(
+            error.send_class(),
+            SendClass::Deferrable(DeferralTrigger::LinkChange)
+        )));
     }
 }

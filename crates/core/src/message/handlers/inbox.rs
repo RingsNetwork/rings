@@ -18,6 +18,7 @@ use crate::dht::Did;
 use crate::error::Result;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
+use crate::swarm::transport::Attempts;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
 
@@ -25,6 +26,10 @@ use crate::utils::get_epoch_ms;
 ///
 /// Pre: this node is responsible for the destination's ring position and the destination has
 /// no connection; `payload` was verified live on arrival.
+///
+/// One attempt (`Attempts::Single`): this runs on the inbound lane, which a rerouting wait must
+/// never hold, and it is sent under the protocol discipline. A refusal before acceptance is `SingleAttemptRefused` (the hold had no effect);
+/// before #859 the same refusal was the send's raw error, and a detached `Cancelled` was `Ok`.
 pub(crate) async fn hold_for_offline_destination(
     transport: Arc<SwarmTransport>,
     payload: &MessagePayload,
@@ -32,8 +37,8 @@ pub(crate) async fn hold_for_offline_destination(
     let held = HeldMessage::hold(payload.clone(), transport.message_signer(), get_epoch_ms())?;
     operate_entry(
         &transport,
-        &transport.protocol_egress(),
         EntryOperation::Extend(Entry::inbox_delta(&held)?),
+        Attempts::Single,
     )
     .await
 }

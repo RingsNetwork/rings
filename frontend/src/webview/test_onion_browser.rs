@@ -1,25 +1,36 @@
+use std::collections::BTreeSet;
+use std::future::Future;
+use std::iter;
 use std::rc::Rc;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
-use futures::channel::mpsc;
-use futures::StreamExt;
+use futures::channel::oneshot;
+use futures::future::try_join;
+use futures::future::try_join_all;
+use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
+use rings_node::extension::BackendObserver;
+use rings_node::onion::OnionExitOffer;
 use rings_node::onion::OnionExitPolicy;
-use rings_node::prelude::entry::Entry;
+use rings_node::onion::OnionRole;
+use rings_node::onion::OnionServiceName;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
+use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::rings_core::error::Result as CoreResult;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
-use rings_node::prelude::rings_core::storage::KvStorageInterface;
 use rings_node::prelude::uuid;
+use rings_node::prelude::StopToken;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
+use rings_node::provider::browser::ProviderListener;
 use rings_node::provider::Provider;
 use rings_test_support::activity::probe_on_activity;
 use rings_test_support::observer::activity_observer;
-use rings_test_support::within;
 use rings_webview::browser::BOOTSTRAP_MARKER;
 use rings_webview::GatewayHeader;
 use rings_webview::GatewayPrefix;
@@ -29,6 +40,7 @@ use rings_webview::TargetUrl;
 use rings_webview::WebviewError;
 use serde::Deserialize;
 use url::Url;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -37,15 +49,14 @@ use super::web_shell_bootstrap;
 use super::WebviewHostOutcome;
 use super::WebviewHostRequest;
 use super::WebviewNode;
-use super::WebviewOnionSettings;
 use super::GATEWAY_PREFIX;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_NETWORK_ID: u32 = 665;
-/// Host-only ICE: both providers live in this page, so no external STUN server is needed, and
+/// Host-only ICE: every provider lives in this page, so no external STUN server is needed, and
 /// none can put its latency inside `createOffer`/`answerOffer` ahead of every awaited state.
 const TEST_ICE_SERVERS: &str = "";
-/// Hang guard of one awaited state in this flow; a failure bound only.
+/// Hang guard of one awaited fixture state; a failure bound only, never the synchronisation.
 const FLOW_HANG_GUARD: Duration = Duration::from_secs(30);
 const TEST_STABILIZE_INTERVAL_SECS: u64 = 15;
 // Invariant: browser onion exits admit only public IP literals because the browser fetch adapter
@@ -53,6 +64,9 @@ const TEST_STABILIZE_INTERVAL_SECS: u64 = 15;
 // this fixture address from reaching the network while preserving the production admission model.
 const FIXTURE_HOST: &str = "1.1.1.1";
 const FIXTURE_ORIGIN_GLOBAL: &str = "__ringsWebviewOnionFixtureOrigin";
+/// Relays that are neither the client's guard nor the exit: the two candidates for the forward
+/// relay `r₀,₂` and the return relay `r₁,₁` of the loop `g, r₀,₂, exit, r₁,₁, g` (#834 D5).
+const FIXTURE_MIDDLE_RELAYS: usize = 2;
 
 #[derive(Debug, Deserialize)]
 struct FetchCall {
@@ -77,38 +91,14 @@ async fn test_webview_node_fetches_page_resources_through_browser_onion_exit() {
 }
 
 async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
-    let storage_suffix = uuid::Uuid::new_v4().to_simple().to_string();
-    let fixture_authority = fixture_authority();
     let fixture_index = fixture_url("/index.html");
     let fixture_css = fixture_url("/site.css");
     let fixture_api = fixture_url("/api/data");
     let fixture_submit = fixture_url("/forms/submit");
-    let (directory_writes, mut directory_written) = mpsc::unbounded();
-    let client = browser_provider(
-        &format!("rings-webview-onion-client-{storage_suffix}"),
-        None,
-        directory_writes.clone(),
-    )
-    .await?;
-    let exit = browser_provider(
-        &format!("rings-webview-onion-exit-{storage_suffix}"),
-        Some(fixture_authority.as_str()),
-        directory_writes,
-    )
-    .await?;
-    let _client_listener = client.listen();
-    let _exit_listener = exit.listen();
-    connect_browser_providers(&client, &exit).await?;
-    await_connected(&client, &exit).await?;
-
-    let node = WebviewNode::new(
-        client,
-        controlled_origin()?,
-        WebviewOnionSettings::new(true),
-        web_shell_bootstrap,
-    )?;
+    let (client, _listeners) = browser_onion_loop().await?;
+    let node = WebviewNode::new(client, controlled_origin()?, web_shell_bootstrap)?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
-    let index = retry_gateway_navigation(&node, &index_target, &mut directory_written).await?;
+    let index = gateway_navigation(&node, &index_target).await?;
     expect_status(&index, "index navigation", 200)?;
     let index_body = utf8_body(index)?;
     assert_contains(&index_body, "Rings Onion Fixture")?;
@@ -173,6 +163,146 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     Ok(())
 }
 
+/// Build the browser onion loop fixture and wait until the client's directory registers it.
+///
+/// ```text
+/// client ── guard ─┬─ relay₀ ─┬─ exit
+///                  └─ relay₁ ─┘
+/// ```
+///
+/// The listeners are returned with the client, and the caller holds them for as long as it
+/// routes through the loop.
+async fn browser_onion_loop() -> WebviewResult<(Rc<Provider>, Vec<ProviderListener>)> {
+    let storage_suffix = uuid::Uuid::new_v4().to_simple().to_string();
+    let fixture_authority = fixture_authority();
+    let client = browser_provider(
+        &format!("rings-webview-onion-client-{storage_suffix}"),
+        OnionRole::Client,
+    )
+    .await?;
+    let guard = browser_provider(
+        &format!("rings-webview-onion-guard-{storage_suffix}"),
+        OnionRole::Relay,
+    )
+    .await?;
+    let mut middle = Vec::with_capacity(FIXTURE_MIDDLE_RELAYS);
+    for index in 0..FIXTURE_MIDDLE_RELAYS {
+        middle.push(
+            browser_provider(
+                &format!("rings-webview-onion-relay-{index}-{storage_suffix}"),
+                OnionRole::Relay,
+            )
+            .await?,
+        );
+    }
+    let exit = browser_provider(
+        &format!("rings-webview-onion-exit-{storage_suffix}"),
+        OnionRole::Exit(fixture_authority.as_str()),
+    )
+    .await?;
+    // The client's only direct peer is `guard`, so the browser guard policy draws it; either
+    // middle relay can take the forward relay position, so each links the guard to the exit.
+    let edges = iter::once((&client, &guard))
+        .chain(middle.iter().map(|relay| (&guard, relay)))
+        .chain(middle.iter().map(|relay| (relay, &exit)))
+        .collect::<Vec<_>>();
+    // Each edge is connected when both ends have admitted each other: awaited on the
+    // admission events of their backends, not polled.
+    try_join_all(edges.iter().map(|(offerer, answerer)| async move {
+        connect_browser_providers(&offerer.provider, &answerer.provider).await?;
+        try_join(offerer.admits(answerer), answerer.admits(offerer)).await
+    }))
+    .await?;
+    // Listening starts each node's registrations, and the first one publishes at once: started
+    // after the edges, every registration reaches the overlay on its first attempt. A
+    // registration publish has no completion signal (#866), so the client's directory is polled.
+    let listeners = [&client, &guard, &exit]
+        .into_iter()
+        .chain(middle.iter())
+        .map(|node| node.provider.listen())
+        .collect::<Vec<_>>();
+    poll_until("the client directory to register the loop", || {
+        loop_directory_ready(&client.provider, FIXTURE_MIDDLE_RELAYS + 2)
+    })
+    .await?;
+    Ok((client.provider, listeners))
+}
+
+/// One fixture node: its provider and the peers its backend has admitted.
+struct FixtureNode {
+    /// The node's provider.
+    provider: Rc<Provider>,
+    /// Admission events of the node's backend.
+    admitted: Arc<AdmittedPeers>,
+}
+
+impl FixtureNode {
+    /// Resolve once this node has admitted `peer`.
+    async fn admits(&self, peer: &Self) -> WebviewResult<()> {
+        let did = Did::from_str(peer.provider.address().as_str())
+            .map_err(|error| WebviewError::transport(format!("fixture peer did: {error:?}")))?;
+        self.admitted.admission(did).await
+    }
+}
+
+/// The peers one fixture node has admitted, from its backend's admission events.
+#[derive(Default)]
+struct AdmittedPeers {
+    /// Admitted peers, and the admissions still awaited.
+    state: Mutex<AdmissionState>,
+}
+
+/// State of [`AdmittedPeers`].
+#[derive(Default)]
+struct AdmissionState {
+    /// Peers currently admitted.
+    admitted: BTreeSet<Did>,
+    /// Awaited admissions, each resolved when its peer is admitted.
+    awaited: Vec<(Did, oneshot::Sender<()>)>,
+}
+
+impl AdmittedPeers {
+    /// Resolve once `peer` is admitted: at once when it already is.
+    async fn admission(&self, peer: Did) -> WebviewResult<()> {
+        let admitted = {
+            let mut state = self.state.lock().map_err(|_| {
+                WebviewError::transport("fixture admission state poisoned".to_string())
+            })?;
+            if state.admitted.contains(&peer) {
+                return Ok(());
+            }
+            let (sender, receiver) = oneshot::channel();
+            state.awaited.push((peer, sender));
+            receiver
+        };
+        admitted
+            .await
+            .map_err(|_| WebviewError::transport("fixture admission observer dropped".to_string()))
+    }
+}
+
+impl BackendObserver for AdmittedPeers {
+    fn peer_admitted(&self, peer: Did) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.admitted.insert(peer);
+        let (resolved, awaited) = std::mem::take(&mut state.awaited)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(awaited, _)| *awaited == peer);
+        state.awaited = awaited;
+        for (_, sender) in resolved {
+            let _resolved = sender.send(());
+        }
+    }
+
+    fn peer_retired(&self, peer: Did) {
+        if let Ok(mut state) = self.state.lock() {
+            state.admitted.remove(&peer);
+        }
+    }
+}
+
 fn fixture_origin() -> String {
     format!("https://{FIXTURE_HOST}")
 }
@@ -185,12 +315,7 @@ fn fixture_url(path: &str) -> String {
     format!("{}{path}", fixture_origin())
 }
 
-/// Build a browser provider whose DHT storage signals each write on `directory_writes`.
-async fn browser_provider(
-    storage_name: &str,
-    exit_target: Option<&str>,
-    directory_writes: mpsc::UnboundedSender<()>,
-) -> WebviewResult<Rc<Provider>> {
+async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewResult<FixtureNode> {
     let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(|error| {
         WebviewError::transport(format!("build browser delegatee key: {error:?}"))
     })?;
@@ -200,17 +325,18 @@ async fn browser_provider(
         delegatee_key,
         TEST_STABILIZE_INTERVAL_SECS,
     );
-    if let Some(target) = exit_target {
-        let policy = OnionExitPolicy::from_target_strings(vec![target.to_string()], Vec::new())
-            .map_err(|error| WebviewError::transport(format!("build exit policy: {error:?}")))?;
-        config = config.enable_https_onion_exit().onion_exit_policy(policy);
-    }
-    let storage = Box::new(WriteSignalingStorage {
-        inner: IdbStorage::new_with_cap_and_name(50_000, storage_name)
+    config = config.onion_role(
+        role.try_map(|target| {
+            OnionExitPolicy::from_target_strings(vec![target.to_string()], Vec::new())
+                .and_then(|policy| OnionExitOffer::new([OnionServiceName::https()], policy))
+        })
+        .map_err(|error| WebviewError::transport(format!("build exit offer: {error:?}")))?,
+    );
+    let storage = Box::new(
+        IdbStorage::new_with_cap_and_name(50_000, storage_name)
             .await
             .map_err(|error| WebviewError::transport(format!("open idb storage: {error:?}")))?,
-        writes: directory_writes,
-    });
+    );
     let processor = ProcessorBuilder::from_config(&config)
         .map_err(|error| WebviewError::transport(format!("build processor config: {error:?}")))?
         .storage(storage)
@@ -218,44 +344,52 @@ async fn browser_provider(
         .observer(activity_observer())
         .build()
         .map_err(|error| WebviewError::transport(format!("build processor: {error:?}")))?;
-    let provider = Rc::new(provider_from_processor(processor));
-    provider
-        .set_backend()
-        .map_err(|error| WebviewError::transport(format!("install backend: {error:?}")))?;
-    if let Some(target) = exit_target {
-        provider
-            .install_onion_https_exit(vec![target.to_string()], Vec::new())
-            .map_err(|error| {
-                WebviewError::transport(format!("install onion HTTPS exit: {error:?}"))
-            })?;
-    }
+    let admitted = Arc::new(AdmittedPeers::default());
+    let provider = observed_provider(processor, Arc::clone(&admitted))?;
+    Ok(FixtureNode {
+        provider: Rc::new(provider),
+        admitted,
+    })
+}
+
+/// Wrap `processor` in a provider whose application service reports admissions to `admitted`.
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "Provider takes an Arc processor; this browser test keeps Rc"
+)]
+fn observed_provider(
+    processor: Processor,
+    admitted: Arc<AdmittedPeers>,
+) -> WebviewResult<Provider> {
+    let provider = Provider::from_processor(Arc::new(processor));
+    let service = provider
+        .application_service(Some(admitted), StopToken::never())
+        .map_err(|error| WebviewError::transport(format!("claim the inbox: {error:?}")))?;
+    wasm_bindgen_futures::spawn_local(service);
     Ok(provider)
 }
 
-#[expect(
-    clippy::arc_with_non_send_sync,
-    reason = "Provider::from_processor requires Arc<Processor>; this browser-only test stores Provider in Rc after the API boundary"
-)]
-fn provider_from_processor(processor: Processor) -> Provider {
-    Provider::from_processor(std::sync::Arc::new(processor))
-}
-
-async fn connect_browser_providers(client: &Provider, exit: &Provider) -> WebviewResult<()> {
+async fn connect_browser_providers(offerer: &Provider, answerer: &Provider) -> WebviewResult<()> {
     let offer = string_field(
         &rpc(
-            client,
+            offerer,
             "createOffer",
-            object(&[("did", exit.address().as_str())]),
+            object(&[("did", answerer.address().as_str())]),
         )
         .await?,
         "offer",
     )?;
     let answer = string_field(
-        &rpc(exit, "answerOffer", object(&[("offer", offer.as_str())])).await?,
+        &rpc(
+            answerer,
+            "answerOffer",
+            object(&[("offer", offer.as_str())]),
+        )
+        .await?,
         "answer",
     )?;
     let _accepted = rpc(
-        client,
+        offerer,
         "acceptAnswer",
         object(&[("answer", answer.as_str())]),
     )
@@ -288,120 +422,55 @@ fn string_field(value: &JsValue, field: &str) -> WebviewResult<String> {
         .ok_or_else(|| WebviewError::Browser(format!("missing string field {field:?}")))
 }
 
-/// Await, on activity, `client` listing `exit` as a `Connected` peer. Admission starts the join
-/// traffic, so the admitted state is followed by recorded activity.
-async fn await_connected(client: &Provider, exit: &Provider) -> WebviewResult<()> {
-    let exit_did = exit.address();
-    probe_on_activity(
-        "client lists the exit as connected",
-        FLOW_HANG_GUARD,
-        || async {
-            let peers = Reflect::get(
-                &rpc(client, "listPeers", Object::new().into()).await?,
-                &JsValue::from_str("peers"),
-            )
-            .map_err(js_webview_error)?;
-            let connected = js_sys::Array::from(&peers).iter().any(|peer| {
-                string_field(&peer, "did").is_ok_and(|did| did.eq_ignore_ascii_case(&exit_did))
-                    && string_field(&peer, "state").is_ok_and(|state| state == "Connected")
-            });
-            Ok(connected.then_some(()))
-        },
+/// Wait until `ready` holds, re-probing it after every recorded swarm activity (#889, #890).
+///
+/// The fixture preconditions (a WebRTC edge admitted, a DHT entry converged) change only through
+/// swarm traffic, which every provider's activity observer records. So `ready` is probed once,
+/// then again after each activity newer than the mark taken before the previous probe: no
+/// change is missed, and no timer paces the probes. `FLOW_HANG_GUARD` bounds a hang only.
+async fn poll_until<Ready, Check>(what: &str, mut ready: Check) -> WebviewResult<()>
+where
+    Check: FnMut() -> Ready,
+    Ready: Future<Output = WebviewResult<bool>>,
+{
+    probe_on_activity(what, FLOW_HANG_GUARD, || {
+        let probe = ready();
+        async move { Ok(probe.await?.then_some(())) }
+    })
+    .await
+}
+
+/// Return whether the client's directory holds the precondition of a loop route: the relay
+/// registrations of `relays` fixture nodes, the exit included, and the exit's `https` offer.
+async fn loop_directory_ready(client: &Provider, relays: usize) -> WebviewResult<bool> {
+    let nodes = rpc(client, "lookupOnlineNodes", Object::new().into()).await?;
+    let exits = rpc(
+        client,
+        "lookupOnionExits",
+        object(&[("service", OnionServiceName::https().as_str())]),
     )
-    .await
+    .await?;
+    let registered = array_field(&nodes, "nodes")?
+        .iter()
+        .filter(|node| {
+            Reflect::get(node, &JsValue::from_str("capabilities"))
+                .and_then(|capabilities| {
+                    Reflect::get(&capabilities, &JsValue::from_str("onion_relay"))
+                })
+                .is_ok_and(|epoch| !epoch.is_null() && !epoch.is_undefined())
+        })
+        .count();
+    Ok(registered >= relays && array_field(&exits, "exits")?.length() > 0)
 }
 
-/// A node's DHT storage that signals every write, for [`retry_gateway_navigation`].
-struct WriteSignalingStorage {
-    inner: IdbStorage,
-    writes: mpsc::UnboundedSender<()>,
+/// Read the array field `field` of a JSON-RPC response.
+fn array_field(value: &JsValue, field: &str) -> WebviewResult<Array> {
+    Reflect::get(value, &JsValue::from_str(field))
+        .map_err(js_webview_error)?
+        .dyn_into::<Array>()
+        .map_err(js_webview_error)
 }
 
-impl WriteSignalingStorage {
-    /// Signal one write; a closed receiver means the flow no longer waits on writes.
-    fn signal(&self) {
-        let _unobserved = self.writes.unbounded_send(());
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl KvStorageInterface<Entry> for WriteSignalingStorage {
-    async fn get(&self, key: &str) -> CoreResult<Option<Entry>> {
-        KvStorageInterface::<Entry>::get(&self.inner, key).await
-    }
-
-    async fn put(&self, key: &str, value: &Entry) -> CoreResult<()> {
-        KvStorageInterface::<Entry>::put(&self.inner, key, value).await?;
-        self.signal();
-        Ok(())
-    }
-
-    async fn get_all(&self) -> CoreResult<Vec<(String, Entry)>> {
-        KvStorageInterface::<Entry>::get_all(&self.inner).await
-    }
-
-    async fn remove(&self, key: &str) -> CoreResult<()> {
-        KvStorageInterface::<Entry>::remove(&self.inner, key).await?;
-        self.signal();
-        Ok(())
-    }
-
-    async fn clear(&self) -> CoreResult<()> {
-        KvStorageInterface::<Entry>::clear(&self.inner).await?;
-        self.signal();
-        Ok(())
-    }
-
-    async fn count(&self) -> CoreResult<u32> {
-        KvStorageInterface::<Entry>::count(&self.inner).await
-    }
-}
-
-/// Navigate to `target` once the client's directory lookup finds the browser onion exit.
-///
-/// Whether the lookup finds the exit is decided by the DHT storage of the two nodes: the exit's
-/// registration publishes its descriptor, and storage repair moves it to the key's owner. A
-/// failed attempt is therefore retried only after one of the two stores was written:
-///
-/// ```text
-/// loop:  forget(written)  ;  attempt = Ok ? return : await written
-/// ```
-///
-/// Writes are forgotten *before* each attempt, so a write during it wakes the next one and
-/// none is lost. A failed attempt writes a store only through read repair, when its lookup
-/// found the descriptor but observed a placement miss; repair converges, so such self-caused
-/// wakes are bounded, and every other wake is a directory change the next attempt must see. No
-/// timer paces the retries. The last error is kept for the hang-guard report.
-async fn retry_gateway_navigation(
-    node: &WebviewNode,
-    target: &TargetUrl,
-    directory_written: &mut mpsc::UnboundedReceiver<()>,
-) -> WebviewResult<GatewayResponse> {
-    let mut last_error = None::<String>;
-    let navigated = within(FLOW_HANG_GUARD, async {
-        loop {
-            while directory_written.try_recv().is_ok() {}
-            match gateway_navigation(node, target).await {
-                Ok(response) => return Some(response),
-                Err(error) => {
-                    last_error = Some(error.to_string());
-                    directory_written.next().await?;
-                }
-            }
-        }
-    })
-    .await
-    .flatten();
-    navigated.ok_or_else(|| {
-        WebviewError::transport(format!(
-            "gateway navigation did not find a browser onion exit within {FLOW_HANG_GUARD:?}: {}",
-            last_error.unwrap_or_else(|| "no attempt was made".to_string())
-        ))
-    })
-}
-
-/// Navigate to `target` through the controlled gateway: the external navigation redirects to
-/// the gateway, whose response is the page fetched through the onion exit.
 async fn gateway_navigation(
     node: &WebviewNode,
     target: &TargetUrl,

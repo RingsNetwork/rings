@@ -3248,8 +3248,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-aez"
+version = "0.34.0"
+dependencies = [
+ "aes",
+ "subtle",
+ "thiserror 1.0.69",
+ "wasm-bindgen-test",
+ "zeroize",
+]
+
+[[package]]
 name = "rings-codec"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "postcard",
  "serde",
@@ -3257,7 +3268,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -3327,7 +3338,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3337,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "rings-gateway"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -3356,11 +3367,11 @@ dependencies = [
 
 [[package]]
 name = "rings-logo"
-version = "0.33.0"
+version = "0.34.0"
 
 [[package]]
 name = "rings-measure"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3370,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "rings-native-example"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3385,7 +3396,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -3393,7 +3404,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -3405,6 +3416,7 @@ dependencies = [
  "base64 0.13.1",
  "bytes",
  "cbindgen",
+ "chacha20",
  "chrono",
  "clap",
  "console_error_panic_hook",
@@ -3412,6 +3424,8 @@ dependencies = [
  "dotenvy",
  "form_urlencoded",
  "futures",
+ "hkdf",
+ "hmac",
  "home",
  "js-sys",
  "jsonrpc-core",
@@ -3420,7 +3434,9 @@ dependencies = [
  "log",
  "pin-project",
  "rand 0.8.6",
+ "rand_chacha 0.3.1",
  "reqwest",
+ "rings-aez",
  "rings-codec",
  "rings-core",
  "rings-derive",
@@ -3435,6 +3451,7 @@ dependencies = [
  "serde-saphyr",
  "serde-wasm-bindgen",
  "serde_json",
+ "sha2",
  "smoltcp",
  "strum",
  "subtle",
@@ -3453,11 +3470,13 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
+ "web-time",
+ "zeroize",
 ]
 
 [[package]]
 name = "rings-relay-example"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "rings-core",
  "rings-node",
@@ -3466,7 +3485,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3490,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "rings-runtime"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "futures",
  "futures-timer",
@@ -3505,7 +3524,7 @@ dependencies = [
 
 [[package]]
 name = "rings-test-support"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "futures",
  "rings-core",
@@ -3514,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3546,7 +3565,7 @@ dependencies = [
 
 [[package]]
 name = "rings-webview"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3697,9 +3716,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "once_cell",
  "ring",

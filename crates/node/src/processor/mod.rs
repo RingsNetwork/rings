@@ -11,7 +11,6 @@ use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
-use rings_core::error::Error as CoreError;
 use rings_core::inspect::DHTInspect;
 use rings_core::lifecycle::StopSource;
 use rings_core::lifecycle::StopToken;
@@ -23,16 +22,11 @@ use rings_core::measure::MeasureImpl;
 use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerMeasurementPage;
 use rings_core::measure::PeerQuality;
-use rings_core::message::Decoder;
 use rings_core::message::DhtProtocolMode;
-use rings_core::message::Encoded;
-use rings_core::message::Encoder;
-use rings_core::message::MessagePayload;
 use rings_core::message::OriginQuotaConfig;
 use rings_core::message::OriginQuotaCounters;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::MemStorage;
-use rings_core::swarm::ConnectionAttempt;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_core::utils::get_epoch_ms;
@@ -55,6 +49,7 @@ use crate::observability::PeerRatingSnapshot;
 use crate::observability::SessionKeySnapshot;
 use crate::observability::OPERATOR_SCHEMA_VERSION;
 use crate::observability::PEER_RATING_CAPACITY;
+use crate::onion::circuit::OnionIdleFloor;
 use crate::onion::default_advertise_onion_exit;
 use crate::onion::default_advertise_onion_relay;
 use crate::onion::default_onion_exit_heartbeat_interval_secs;
@@ -63,21 +58,20 @@ use crate::onion::default_onion_exit_services;
 use crate::onion::default_onion_exit_ttl_secs;
 use crate::onion::directory;
 use crate::onion::directory::OnionDirectoryReader;
-use crate::onion::https_onion_exit_services;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::OnionEntryGuardStorage;
 use crate::onion::OnionEntryGuards;
 use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionExitEpoch;
+use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitRegistration;
+use crate::onion::OnionProcessEpoch;
+use crate::onion::OnionProcessEpochCell;
+use crate::onion::OnionRole;
 use crate::onion::OnionServiceName;
 use crate::onion::ONION_EXITS_TOPIC;
-use crate::onion::ONION_RELAY_CAPABILITY;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
@@ -94,13 +88,13 @@ use crate::registration::validate_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
-use crate::remote_endpoint::remote_rpc_client;
-use crate::remote_endpoint::RemoteRpcEndpoint;
 
 const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 mod builder;
 mod config;
+/// Handshakes: by DID over the overlay, and over a peer's HTTP endpoint.
+pub(crate) mod handshake;
 mod messaging;
 
 pub use builder::ProcessorBuilder;
@@ -108,6 +102,8 @@ pub use builder::ProcessorBuilder;
 pub(crate) use config::parse_webrtc_udp_port_range;
 pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
+pub(crate) use handshake::HandshakeFailure;
+pub(crate) use handshake::HandshakePeer;
 
 /// The pause between two reads of the fetch cache while a DHT fetch waits for its reply.
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -151,61 +147,6 @@ async fn sleep_registration_interval_with_stop(
     }
 }
 
-/// Which node a handshake over HTTP must end up connected to.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HandshakePeer {
-    /// Whatever DID the endpoint answers as.
-    Any,
-    /// Only this DID; any other answer is refused before an offer is created.
-    Pinned(Did),
-}
-
-/// Why a handshake over HTTP did not reach an accepted answer.
-#[derive(Debug)]
-pub(crate) enum HandshakeFailure {
-    /// The peer's slot is owned by another attempt (a handshake in flight, whichever side
-    /// started it): refused before any request when the local core already holds an unadmitted
-    /// handshake, or by the local core during the exchange. Nothing is wrong; a later attempt may
-    /// succeed.
-    InFlight {
-        /// The peer whose slot is owned.
-        peer: Did,
-    },
-    /// The handshake failed.
-    Failed(Error),
-}
-
-impl HandshakeFailure {
-    /// Sort a core refusal of one handshake stage: an offer refused because the peer already
-    /// holds a record, or an attempt superseded by the peer's own offer, is `InFlight`; any
-    /// other error is `Failed` under the stage's wrapper.
-    fn from_stage(peer: Did, stage: fn(CoreError) -> Error, error: CoreError) -> Self {
-        match error {
-            CoreError::AlreadyConnected | CoreError::ConnectionAttemptSuperseded { .. } => {
-                Self::InFlight { peer }
-            }
-            other => Self::Failed(stage(other)),
-        }
-    }
-}
-
-impl From<Error> for HandshakeFailure {
-    /// Every error that is not a core refusal of a handshake stage is a failure.
-    fn from(error: Error) -> Self {
-        Self::Failed(error)
-    }
-}
-
-impl From<HandshakeFailure> for Error {
-    /// A refusal is reported as `HandshakeInFlight`; a failure as itself.
-    fn from(failure: HandshakeFailure) -> Self {
-        match failure {
-            HandshakeFailure::InFlight { peer } => Error::HandshakeInFlight { peer },
-            HandshakeFailure::Failed(error) => error,
-        }
-    }
-}
-
 /// Processor for rings-node rpc server.
 ///
 /// Cloning shares the same node handle; publishes from any clone are serialized
@@ -216,8 +157,9 @@ pub struct Processor {
     pub swarm: Arc<Swarm>,
     /// Same delegatee key held by the swarm transport; kept here for node-layer descriptor signing.
     delegatee_key: DelegateeKey,
-    /// Fresh process epoch shared by exit advertisement and exit-layer admission.
-    onion_exit_epoch: OnionExitEpoch,
+    /// The process epoch `e_n` carried by every onion symbol this process registers (#834 D2):
+    /// drawn fresh at process start, renewed only by the onion admission state.
+    onion_process_epoch: OnionProcessEpochCell,
     onion_entry_guards: Arc<OnionEntryGuards>,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
@@ -225,11 +167,22 @@ pub struct Processor {
     /// Serializes listener generations across every clone and wrapper of this processor.
     /// Ownership includes graceful maintenance shutdown and measurement flushing.
     listener_lifecycle_lock: Arc<futures::lock::Mutex<()>>,
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    advertise_onion_relay: bool,
+    /// Onion symbols this process registers (#834 D2).
+    onion_role: OnionRole<OnionExitOffer>,
+    /// The cover floor of this node's idle onion links (#880).
+    onion_idle_floor: OnionIdleFloor,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     /// Process-local bounded recorder backing the authenticated operator surface.
     observability: Arc<Observability>,
+}
+
+/// The node error of a DHT operation run under a registration stop: a rerouting wait ended by
+/// the stop is the registration's cooperative stop, anything else an entry error.
+pub(crate) fn stoppable_storage_error(error: rings_core::error::Error) -> Error {
+    match error {
+        rings_core::error::Error::ReroutingStopped => Error::RegistrationStopped,
+        error => Error::EntryError(error),
+    }
 }
 
 impl Processor {
@@ -242,18 +195,25 @@ impl Processor {
         &self.delegatee_key
     }
 
-    pub(crate) const fn onion_exit_epoch(&self) -> OnionExitEpoch {
-        self.onion_exit_epoch
-    }
-
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     pub(crate) fn onion_entry_guards(&self) -> &OnionEntryGuards {
         self.onion_entry_guards.as_ref()
     }
 
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    pub(crate) fn advertise_onion_relay(&self) -> bool {
-        self.advertise_onion_relay
+    /// Return the onion symbols this process registers (#834 D2).
+    pub const fn onion_role(&self) -> &OnionRole<OnionExitOffer> {
+        &self.onion_role
+    }
+
+    /// Return the cover floor of this node's idle onion links (#880).
+    pub(crate) const fn onion_idle_floor(&self) -> OnionIdleFloor {
+        self.onion_idle_floor
+    }
+
+    /// Return the cell of this process's onion epoch `e_n` (#834 D2), shared with the onion
+    /// admission state and the registrations.
+    pub(crate) fn onion_process_epoch(&self) -> OnionProcessEpochCell {
+        self.onion_process_epoch.clone()
     }
 
     fn registration_context(&self) -> RegistrationContext<'_> {
@@ -296,6 +256,12 @@ impl Processor {
     }
 
     /// List signed online-node descriptors from the registry.
+    ///
+    /// The registry carrier is the join of every reply this node has observed (#864), with its
+    /// own writes applied (#982): it ascends in the lattice order while cached and live, so this
+    /// node lists what it registered itself whichever owner its lookup reaches, but a descriptor
+    /// still leaves it on a tombstone, on an overwrite or compaction floor (#867), or at the
+    /// element cap. Rerouted as [`Self::storage_fetch`] documents.
     pub async fn lookup_online_nodes(
         &self,
         include_expired: bool,
@@ -319,12 +285,17 @@ impl Processor {
     }
 
     /// List signed onion-exit descriptors from the application-layer exit registry.
+    ///
+    /// Like [`Self::lookup_online_nodes`], the carrier read is the join of the observed replies
+    /// (#864) with this node's own writes applied (#982). Rerouted as [`Self::storage_fetch`]
+    /// documents.
     pub async fn lookup_onion_exits(
         &self,
         service: &str,
         include_expired: bool,
     ) -> Result<Vec<OnionExitDescriptor>> {
         let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
+        let service = service.trim();
 
         let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(vec![]);
@@ -333,48 +304,8 @@ impl Processor {
         Ok(self.select_onion_exits_from_entry(&entry, service.trim(), include_expired))
     }
 
-    pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
-        let stop = StopToken::never();
-        self.fetch_storage_entry_with_stop(entry_key, &stop).await
-    }
-
-    /// Fetch `entry_key` and read the cache once the fetch is answered, stopping early on
-    /// `stop`.
-    ///
-    /// A reply is recognised by the fetch's reply marker
-    /// ([`Swarm::storage_fetch_answered_since`] the mark read before the fetch), not by the
-    /// cache holding a value: the cache may hold a value from before this fetch, and a cached
-    /// value is projected at the clock of each read, so it changes with no reply when an element
-    /// crosses its horizon.
-    ///
-    /// Post: the cache read after the reply, or, if none arrives within the fetch-poll budget,
-    /// the cache read at its end.
-    pub(crate) async fn fetch_storage_entry_with_stop(
-        &self,
-        entry_key: Did,
-        stop: &StopToken,
-    ) -> Result<Option<entry::Entry>> {
-        if stop.should_stop() {
-            return Err(Error::RegistrationStopped);
-        }
-        let mark = self.swarm.storage_fetch_mark();
-        self.storage_fetch(entry_key).await?;
-        for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
-            if stop.should_stop() {
-                return Err(Error::RegistrationStopped);
-            }
-            let answered = self
-                .swarm
-                .storage_fetch_answered_since(entry_key, mark)
-                .map_err(Error::EntryError)?;
-            if answered || is_final_lookup_poll(attempt) {
-                break;
-            }
-            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
-        }
-        Ok(self.storage_check_cache(entry_key).await)
-    }
-
+    /// Select the newest live exit registration per `(DID, service)` of `entry` offering
+    /// `service` (every service when empty).
     fn select_onion_exits_from_entry(
         &self,
         entry: &entry::Entry,
@@ -392,10 +323,83 @@ impl Processor {
         .collect()
     }
 
+    pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
+        let stop = StopToken::never();
+        self.fetch_storage_entry_with_stop(entry_key, &stop).await
+    }
+
+    /// Fetch `entry_key` and read the cache once the fetch is answered, stopping early on
+    /// `stop`; the cache holds the join of every reply observed (#864), with this node's own
+    /// writes applied (#982).
+    ///
+    /// A reply is recognised by the fetch's reply marker
+    /// ([`Swarm::storage_fetch_answered_since`] the mark read before the fetch), not by the
+    /// cache holding a value: the cache may hold a value from before this fetch, and a cached
+    /// value is projected at the clock of each read, so it changes with no reply when an element
+    /// crosses its horizon.
+    ///
+    /// A failed fetch is the empty read ([`Self::answer_failed_fetch`]). This serves the
+    /// directory lookups and the registration publisher alike: a publisher whose fetch fails
+    /// chooses what to tombstone from its cached observation instead of abandoning the attempt,
+    /// and its own replaced values are still caught by its record of what it published.
+    ///
+    /// Post: the cache read after the reply, or, if none arrives within the fetch-poll budget,
+    /// the cache read at its end.
+    pub(crate) async fn fetch_storage_entry_with_stop(
+        &self,
+        entry_key: Did,
+        stop: &StopToken,
+    ) -> Result<Option<entry::Entry>> {
+        if stop.should_stop() {
+            return Err(Error::RegistrationStopped);
+        }
+        let mark = self.swarm.storage_fetch_mark();
+        match self
+            .swarm
+            .scoped_storage(stop.clone())
+            .storage_fetch(entry_key)
+            .await
+            .map_err(stoppable_storage_error)
+        {
+            Ok(()) => {}
+            // A stop is the caller's cooperative stop, not a failed read.
+            Err(Error::RegistrationStopped) => return Err(Error::RegistrationStopped),
+            Err(error) => return self.answer_failed_fetch(entry_key, error).await,
+        }
+        for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            if stop.should_stop() {
+                return Err(Error::RegistrationStopped);
+            }
+            let answered = self
+                .swarm
+                .storage_fetch_answered_since(entry_key, mark)
+                .map_err(Error::EntryError)?;
+            if answered || is_final_lookup_poll(attempt) {
+                break;
+            }
+            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+        }
+        Ok(self.storage_check_cache(entry_key).await)
+    }
+
+    /// Answer a fetch of `entry_key` that failed with `error` as the empty read,
+    /// `cache ⊔ ∅ = cache`: from the live cached carrier, and with `error` only when there is none.
+    async fn answer_failed_fetch(
+        &self,
+        entry_key: Did,
+        error: Error,
+    ) -> Result<Option<entry::Entry>> {
+        let cached = self.storage_check_cache(entry_key).await;
+        if cached.is_some() {
+            tracing::debug!(%entry_key, %error, "storage fetch failed; answering from the cache");
+        }
+        cached.map(Some).ok_or(error)
+    }
+
     /// Build an onion proxy route for a client target through a target-agnostic proxy config.
     pub async fn build_onion_proxy_route(
         &self,
-        proxy: OnionProxyConfig,
+        proxy: OnionProxyProtocol,
         target: OnionProxyTarget,
     ) -> Result<OnionProxyRoute> {
         directory::build_onion_proxy_route(self, proxy, target).await
@@ -547,111 +551,6 @@ impl Processor {
         Ok(())
     }
 
-    /// Connect peer with web3 did.
-    /// There are 3 peers: PeerA, PeerB, PeerC.
-    /// 1. PeerA has a connection with PeerB.
-    /// 2. PeerC has a connection with PeerB.
-    /// 3. PeerC can connect PeerA with PeerA's web3 address.
-    ///
-    /// This operation is idempotent: if topology convergence already produced
-    /// the direct connection, the requested connection is satisfied.
-    pub async fn connect_with_did(&self, did: Did) -> Result<()> {
-        match self.swarm.connect(did).await {
-            Ok(()) | Err(rings_core::error::Error::AlreadyConnected) => Ok(()),
-            Err(error) => Err(Error::ConnectError(error)),
-        }
-    }
-
-    /// Handshake with the node behind `endpoint` over its public HTTP API: learn its DID, and
-    /// when `peer` is pinned refuse before any request if the local core already holds an
-    /// unadmitted handshake to it, and before any offer if the endpoint answers as another
-    /// node; then create, exchange and accept the offer. Returns the generation the offer
-    /// reserved once the answer is accepted; admission of the resulting transport completes
-    /// asynchronously and reaches the [`Backend`](crate::extension::Backend) as an item of the
-    /// core's `ApplicationInbox`. The exchange is pinned to that generation, so a handshake the
-    /// peer started meanwhile is neither answered nor cancelled by this one; a failure after the
-    /// offer was created cancels the generation iff it is still pending.
-    pub(crate) async fn connect_peer_via_http(
-        &self,
-        endpoint: &RemoteRpcEndpoint,
-        api_token: Option<&str>,
-        peer: HandshakePeer,
-    ) -> std::result::Result<ConnectionAttempt, HandshakeFailure> {
-        if let HandshakePeer::Pinned(pinned) = peer {
-            if self
-                .swarm
-                .has_unadmitted_connection(pinned)
-                .map_err(Error::ConnectError)?
-            {
-                return Err(HandshakeFailure::InFlight { peer: pinned });
-            }
-        }
-        let learned = async {
-            let client = remote_rpc_client(endpoint, api_token).await?;
-            let answered = client.node_did(&NodeDidRequest {}).await?.did;
-            let actual =
-                Did::from_str(answered.as_str()).map_err(|_| Error::InvalidDid(answered))?;
-            if let HandshakePeer::Pinned(expected) = peer {
-                if actual != expected {
-                    tracing::error!(
-                        %endpoint,
-                        %expected,
-                        %actual,
-                        "endpoint answered as another node; handshake refused"
-                    );
-                    return Err(Error::HandshakePeerMismatch { expected, actual });
-                }
-            }
-            Ok((client, actual))
-        };
-        let (client, actual) = learned.await?;
-        let (attempt, offer) = self
-            .swarm
-            .offer_connection(actual)
-            .await
-            .map_err(|error| HandshakeFailure::from_stage(actual, Error::CreateOffer, error))?;
-        let exchange = async {
-            let offer = offer.encode().map_err(|_| Error::EncodeError)?;
-            let answer = client
-                .answer_offer(&AnswerOfferRequest {
-                    offer: offer.to_string(),
-                })
-                .await
-                .map_err(Error::from)?
-                .answer;
-            let answer = MessagePayload::from_encoded(&Encoded::from(answer))
-                .map_err(|_| Error::DecodeError)?;
-            self.swarm
-                .accept_answer_for(attempt, answer)
-                .await
-                .map_err(|error| HandshakeFailure::from_stage(actual, Error::AcceptAnswer, error))
-        };
-        match exchange.await {
-            Ok(()) => Ok(attempt),
-            Err(failure) => {
-                self.abandon_handshake(attempt).await;
-                Err(failure)
-            }
-        }
-    }
-
-    /// Cancel the generation `attempt` reserved iff it is still pending, that is, no data
-    /// channel has opened on it; one admitting, admitted or superseded meanwhile is left alone,
-    /// and a failure to cancel is logged since the core expires an unadmitted attempt on its
-    /// own.
-    pub(crate) async fn abandon_handshake(&self, attempt: ConnectionAttempt) {
-        if let Err(error) = self.swarm.cancel_pending_connection_attempt(attempt).await {
-            tracing::warn!(?attempt, %error, "failed to cancel the abandoned handshake");
-        }
-    }
-
-    /// Whether a seed document owes `peer` a dial: it is not this node and its admission was
-    /// not announced. A peer with a handshake in flight is dialed and refused by the core,
-    /// which `connect seed` reads as the peer being taken care of.
-    pub(crate) fn owes_seed_dial(&self, peer: Did) -> Result<bool> {
-        Ok(peer != self.swarm.did() && !self.swarm.is_peer_admitted(peer)?)
-    }
-
     /// Disconnect a peer with web3 did.
     pub async fn disconnect(&self, did: Did) -> Result<()> {
         self.swarm
@@ -666,6 +565,13 @@ impl Processor {
     }
 
     /// Fetch an entry from DHT storage
+    ///
+    /// # Rerouting
+    ///
+    /// Every DHT operation of this processor (fetch, store, append, tombstone, and the
+    /// registry lookups and writes built on them) is rerouted as core's [`ChordStorageInterface`]
+    /// documents (#859): refusals before acceptance are retried on events within a budget, and
+    /// no placement is applied twice. A caller that must bound the wait drops the operation.
     pub async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
         self.swarm
             .storage_fetch(entry_key)
@@ -676,7 +582,11 @@ impl Processor {
     /// Store an entry on DHT storage, replacing its payloads.
     ///
     /// Each stored payload expires by the element lifetime rule of [`ChordStorageInterface`]
-    /// unless it is written again.
+    /// unless it is written again. Its visibility is that interface's: once this returns `Ok`,
+    /// this node reads the entry (read-your-writes, #982); another node reads it once an owner
+    /// its lookup reaches holds it.
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn storage_store(&self, entry: entry::Entry) -> Result<()> {
         self.swarm
             .storage_store(entry)
@@ -688,6 +598,8 @@ impl Processor {
     ///
     /// The appended element expires by the element lifetime rule of [`ChordStorageInterface`],
     /// even while other writes keep the topic alive, unless it is appended again.
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         self.swarm
             .storage_append_data(topic, data)
@@ -704,8 +616,8 @@ impl Processor {
     /// The elements of the data topic `topic` past the first `skip`, decoded as UTF-8 text; an
     /// element that is not UTF-8 is omitted, and a topic not found has no elements.
     ///
-    /// Law: `append_text_element(t, x)` then `fetch_text_elements(t, 0)` contains `x` while the
-    /// element is live.
+    /// Law (read-your-writes, #982): on one node, `append_text_element(t, x)` returning `Ok`
+    /// then `fetch_text_elements(t, 0)` contains `x` while the element is live and `t` cached.
     pub(crate) async fn fetch_text_elements(
         &self,
         topic: &str,
@@ -729,6 +641,8 @@ impl Processor {
     ///
     /// The removal covers every dot of `data` the storage owner holds, including earlier dots
     /// forgotten under a later one, and is collected once every add it covers has expired.
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()> {
         self.swarm
             .storage_tombstone_data(topic, data)

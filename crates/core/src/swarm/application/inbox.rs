@@ -12,7 +12,8 @@
 //!   message that does not fit is dropped, counted (`dropped`) and logged at `warn`: application
 //!   delivery is lossy by design, as a best-effort network is, and no lane ever waits for the
 //!   application to read. A protocol that needs a reliable stream detects loss end to end
-//!   itself (#939).
+//!   itself (#939); a drop of an admitted peer's message is also told as
+//!   [`SwarmEvent::MessageDropped`], so a protocol whose state rides that link can end it (#969).
 //! - **One order.** Messages and peer facts share one queue, in the order core produced them,
 //!   so a peer fact never overtakes an earlier message from the same peer. Facts describe
 //!   overlay membership, not a gate on messages: a message's identity is its origin, not the
@@ -24,9 +25,11 @@
 //!   message and no reservation admits one of any weight. A message is weighed once, when it
 //!   is admitted; its weight leaves the queue with it.
 //! - **Bounded facts.** An admission is withdrawn together with its retirement while unread
-//!   (`announce(PeerRetired p)` cancels a queued `PeerAdmitted p`), so per peer the queue holds
-//!   at most `[PeerRetired]` followed by `[PeerAdmitted]`: `|facts| ≤ 2 · |peers|` over the peers
-//!   admitted when last read or now. Facts are never dropped.
+//!   (`announce(PeerRetired p)` cancels a queued `PeerAdmitted p` and the drops of `p` after it),
+//!   and a drop is told once while one waits after `p`'s last admission or retirement, so per
+//!   peer the queue holds at most `[MessageDropped] [PeerRetired] [PeerAdmitted]
+//!   [MessageDropped]`: `|facts| ≤ 4 · |peers|` over the peers admitted when last read or now.
+//!   Facts are never dropped.
 //! - **Unclaimed.** Before the application claims the inbox, live messages are discarded (no
 //!   application can be owed them) and facts are kept, so a late claimer reads the peers already
 //!   admitted. No room is reserved then, so stored mail stays stored.
@@ -49,11 +52,23 @@ use futures::channel::oneshot;
 use super::ApplicationDelivery;
 use super::ApplicationMessage;
 use super::SwarmEvent;
+use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 
 /// The bytes of application data the inbox retains; a live message beyond it is dropped.
 pub const APPLICATION_INBOX_WEIGHT: usize = 64 * 1024 * 1024;
+
+/// What [`ApplicationOutlet::deliver`] did with a live message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Delivered {
+    /// Queued for the application.
+    Queued,
+    /// Discarded: no application reads the inbox.
+    Discarded,
+    /// Dropped, counted and logged: it did not fit.
+    Dropped,
+}
 
 /// Who reads the queue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,38 +145,61 @@ impl Queue {
         }
     }
 
-    /// Record `event`, withdrawing an unread admission its retirement ends.
+    /// Record `event`: a retirement withdraws an unread admission it ends, with the drops after
+    /// it; a drop waiting since `peer`'s last admission or retirement absorbs a later one.
     fn record(&mut self, event: SwarmEvent) {
         if self.claim == Claim::Released {
             return;
         }
-        if let SwarmEvent::PeerRetired { peer } = event {
-            let unread_admission = self
-                .items
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, queued)| match &queued.delivery {
-                    ApplicationDelivery::Event(fact) => fact.peer() == peer,
-                    ApplicationDelivery::Message(_) => false,
-                })
-                .filter(|(_, last)| {
+        match event {
+            SwarmEvent::PeerRetired { peer } => {
+                let last = self.last_lifecycle_fact(peer);
+                let unread_admission = last.filter(|at| {
                     matches!(
-                        last.delivery,
-                        ApplicationDelivery::Event(SwarmEvent::PeerAdmitted { .. })
+                        self.items.get(*at).map(|queued| &queued.delivery),
+                        Some(ApplicationDelivery::Event(SwarmEvent::PeerAdmitted { .. }))
                     )
-                })
-                .map(|(at, _)| at);
-            if let Some(at) = unread_admission {
-                self.items.remove(at);
-                return;
+                });
+                if let Some(at) = unread_admission {
+                    let dropped = ApplicationDelivery::Event(SwarmEvent::MessageDropped { peer });
+                    let after = self.items.split_off(at);
+                    self.items.extend(
+                        after
+                            .into_iter()
+                            .skip(1)
+                            .filter(|queued| queued.delivery != dropped),
+                    );
+                    return;
+                }
             }
+            SwarmEvent::MessageDropped { peer } => {
+                let since = self.last_lifecycle_fact(peer).map_or(0, |at| at + 1);
+                if self
+                    .items
+                    .iter()
+                    .skip(since)
+                    .any(|queued| queued.delivery == ApplicationDelivery::Event(event))
+                {
+                    return;
+                }
+            }
+            SwarmEvent::PeerAdmitted { .. } => {}
         }
         self.items.push_back(Queued {
             delivery: ApplicationDelivery::Event(event),
             weight: 0,
             consumed: None,
         });
+    }
+
+    /// The position of the last queued admission or retirement of `peer`.
+    fn last_lifecycle_fact(&self, peer: Did) -> Option<usize> {
+        self.items.iter().rposition(|queued| match queued.delivery {
+            ApplicationDelivery::Event(
+                SwarmEvent::PeerAdmitted { peer: fact } | SwarmEvent::PeerRetired { peer: fact },
+            ) => fact == peer,
+            _ => false,
+        })
     }
 
     /// The next item, releasing its weight and firing its consumption signal.
@@ -241,8 +279,10 @@ impl ApplicationOutlet {
     }
 
     /// Queue a live `message`; discard it when no application reads the inbox, or drop, count
-    /// and log it when it does not fit, as the module laws say.
-    pub(crate) fn deliver(&self, message: ApplicationMessage) {
+    /// and log it when it does not fit, as the module laws say. The caller tells a drop of an
+    /// admitted peer's message ([`SwarmEvent::MessageDropped`]) under the lifecycle boundary,
+    /// which the inbox, a leaf of the lock order, cannot take.
+    pub(crate) fn deliver(&self, message: ApplicationMessage) -> Delivered {
         let weight = message.weight();
         let mut queue = self.shared.lock();
         match queue.admit(weight) {
@@ -250,8 +290,9 @@ impl ApplicationOutlet {
                 queue.push(message, weight, None);
                 drop(queue);
                 self.shared.ready.notify(1);
+                Delivered::Queued
             }
-            Err(Refusal::Unread) => {}
+            Err(Refusal::Unread) => Delivered::Discarded,
             Err(Refusal::Full) => {
                 queue.dropped = queue.dropped.saturating_add(1);
                 let dropped = queue.dropped;
@@ -262,6 +303,7 @@ impl ApplicationOutlet {
                     dropped,
                     "application inbox full: live message dropped"
                 );
+                Delivered::Dropped
             }
         }
     }

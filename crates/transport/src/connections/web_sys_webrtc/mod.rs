@@ -47,6 +47,7 @@ use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -177,6 +178,9 @@ pub struct WebSysWebrtcConnection {
     remote_max_message_size: Arc<AtomicUsize>,
     /// The connection's callback: its credit gates every custom send.
     callback: Rc<InnerTransportCallback>,
+    /// Woken by [`ConnectionInterface::close`]: `RTCPeerConnection.close()` fires no event, so a
+    /// wait on the peer connection's own events learns of a local close only through it.
+    local_close: Notifier,
 }
 
 /// [WebSysWebrtcTransport] manages all the [WebSysWebrtcConnection] and
@@ -203,9 +207,17 @@ impl WebSysWebrtcConnection {
             connection_state,
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
             callback,
+            local_close: Notifier::default(),
         }
     }
 
+    /// Wait for ICE gathering to complete and return the local description.
+    ///
+    /// Law (Gathering ends): the wait ends when gathering completes, when this connection is
+    /// closed locally, or at `WEBRTC_GATHER_TIMEOUT`, whichever comes first. A gathering of a
+    /// locally closed connection fails as `Local connection closed`, the error native WebRTC
+    /// reports, so core classifies it by slot ownership (#945); waiting on gathering events
+    /// alone would outlive the close, which fires none (#960).
     async fn webrtc_gather(&self) -> Result<String> {
         let notifier = Notifier::default();
 
@@ -222,10 +234,23 @@ impl WebSysWebrtcConnection {
         self.webrtc_conn
             .set_onicegatheringstatechange(Some(c.as_ref().unchecked_ref()));
         c.forget();
+        // Subscribe, then read: the browser runtime is single-threaded, so no gathering event
+        // runs between this read and the wait, and a gathering already complete is not missed.
+        if self.webrtc_conn.ice_gathering_state() == RtcIceGatheringState::Complete {
+            notifier.wake();
+        }
 
         notifier
-            .notified_within(Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()))
+            .either_notified_within(
+                &self.local_close,
+                Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()),
+            )
             .await?;
+        if self.connection_state.snapshot().webrtc() == WebrtcConnectionState::Closed {
+            return Err(Error::WebrtcLocalSdpGenerationError(
+                "Local connection closed".to_string(),
+            ));
+        }
         if self.webrtc_conn.ice_gathering_state() != RtcIceGatheringState::Complete {
             return Err(Error::WebrtcLocalSdpGenerationError(format!(
                 "Webrtc gathering is not completed in {WEBRTC_GATHER_TIMEOUT} seconds"
@@ -299,6 +324,10 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
         self.callback.reserve_send_credit(lane)
+    }
+
+    fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
+        self.callback.send_credit_view(lane)
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -391,6 +420,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     async fn close(&self) -> Result<()> {
         self.connection_state.close();
         self.webrtc_conn.close();
+        self.local_close.wake();
         // `RTCPeerConnection.close()` fires no `connectionstatechange`, so the terminal-state
         // boundary never sees this close.
         self.callback.close_link_credit();
@@ -691,6 +721,9 @@ impl From<RtcPeerConnectionState> for WebrtcConnectionState {
         }
     }
 }
+
+#[cfg(test)]
+mod test_gather;
 
 #[cfg(test)]
 mod tests {

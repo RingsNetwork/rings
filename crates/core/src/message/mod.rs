@@ -95,6 +95,7 @@ pub use handlers::MessageHandler;
 
 pub use crate::swarm::storage_api::ChordStorageInterface;
 pub use crate::swarm::storage_api::ChordStorageInterfaceCacheChecker;
+pub use crate::swarm::storage_api::ScopedStorage;
 
 mod protocols;
 pub use protocols::DomainTag;
@@ -103,4 +104,8 @@ pub use protocols::MessageRelay;
 pub use protocols::MessageSigner;
 pub use protocols::MessageVerification;
 pub use protocols::MessageVerificationExt;
+pub use protocols::OutboundPath;
+pub use protocols::RelayPath;
+pub use protocols::ReturnPath;
+pub use protocols::SignalingPath;
 pub use protocols::SigningDomain;

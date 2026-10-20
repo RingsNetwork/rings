@@ -1,8 +1,9 @@
 //! Pure gateway lifecycle model.
 
-use crate::ExitAvailability;
+use crate::ExitObservation;
 use crate::FlowEvent;
 use crate::FlowId;
+use crate::FlowResetReason;
 use crate::FlowState;
 use crate::FlowTable;
 use crate::GatewayConfig;
@@ -72,8 +73,8 @@ pub struct GatewayServer {
     state: GatewayState,
     flows: FlowTable,
     interface: Option<String>,
-    exit_availability: ExitAvailability,
-    reason: Option<String>,
+    exit: ExitObservation,
+    last_flow_reset: Option<FlowResetReason>,
 }
 
 impl GatewayServer {
@@ -96,8 +97,8 @@ impl GatewayServer {
             state: GatewayState::Stopped,
             flows,
             interface: None,
-            exit_availability: ExitAvailability::Unknown,
-            reason: None,
+            exit: ExitObservation::pending(),
+            last_flow_reset: None,
         })
     }
 
@@ -114,8 +115,8 @@ impl GatewayServer {
         }
         if next == GatewayState::Stopped {
             self.interface = None;
-            self.exit_availability = ExitAvailability::Unknown;
-            self.reason = None;
+            self.exit = ExitObservation::pending();
+            self.last_flow_reset = None;
         }
         self.state = next;
         Ok(next)
@@ -126,14 +127,9 @@ impl GatewayServer {
         self.interface = Some(interface);
     }
 
-    /// Update compatible exit availability and its stable diagnostic.
-    pub fn set_exit_availability(
-        &mut self,
-        availability: ExitAvailability,
-        reason: Option<String>,
-    ) {
-        self.exit_availability = availability;
-        self.reason = reason;
+    /// Update the compatible exit observation and its stable diagnostic.
+    pub fn set_exit_availability(&mut self, exit: ExitObservation) {
+        self.exit = exit;
     }
 
     /// Capture a flow only while packet admission is active.
@@ -153,6 +149,18 @@ impl GatewayServer {
         self.flows.transition(id, event).map_err(Into::into)
     }
 
+    /// Record why one flow is reset and fail it if the table still tracks it.
+    ///
+    /// Gateway failure and shutdown drain the table before the runtime releases each endpoint,
+    /// so an untracked flow still records its reason.
+    pub fn reset_flow(&mut self, id: FlowId, reason: FlowResetReason) -> Result<(), GatewayError> {
+        if self.flows.state(id).is_some() {
+            self.transition_flow(id, FlowEvent::Fail)?;
+        }
+        self.last_flow_reset = Some(reason);
+        Ok(())
+    }
+
     /// Return the lifecycle state for one currently tracked flow.
     pub fn flow_state(&self, id: FlowId) -> Option<FlowState> {
         self.flows.state(id)
@@ -164,9 +172,9 @@ impl GatewayServer {
             self.state,
             self.interface.clone(),
             super::bindings::routes::capture_routes(&self.config.plan),
-            self.exit_availability,
+            &self.exit,
             self.flows.len(),
-            self.reason.clone(),
+            self.last_flow_reset.clone(),
         )
     }
 }
