@@ -41,9 +41,11 @@
 //!   refilled only after the open or a reply, and expired credit is replaced by the keep-alive
 //!   alone ([`OnionCreditWindow::control_loops`]), so its route's links return to the idle floor
 //!   between loops (#880).
-//! - **Keep-alive.** A forward loop of `ς` leaves whenever none has left for `V/2`
-//!   ([`keep_alive_due`]); with `h`'s echo (`session::exit`, Law Echo), a forward loop that
-//!   reaches `h` when no reply of `ς` has left for `V/2` is answered at once.
+//! - **Keep-alive.** While the reply direction is open, a forward loop of `ς` leaves whenever
+//!   none has left for `V/2` ([`keep_alive_due`]); after the world's `fin` no credit is sent,
+//!   so an idle half-open upload is dropped at `h` after `V`, and the deadline is disarmed with
+//!   it. With `h`'s echo (`session::exit`, Law Echo), a forward loop that reaches `h` when no
+//!   reply of `ς` has left for `V/2` is answered at once.
 //! - **Deadline** (D2′ Liveness; paper, Prop. Liveness of failure). The session fails closed
 //!   once no frame of `ς` has arrived for `Δ = 2V` ([`ONION_SESSION_DEADLINE_MS`]), until `h`'s
 //!   `abort` or `fin` ends the reply direction. Let every loop segment's latency vary by less

@@ -160,10 +160,10 @@ fn test_exit_does_not_echo_after_the_worlds_fin() {
 
 // ---- client: the deadline ---------------------------------------------------------------------
 
-/// Law Deadline: frames `7V/4` apart, wider than the live bound `3V/2`, never fail the session,
-/// and each echo is heard without an event.
+/// Law Deadline: frames `7V/4` apart, past the live bound `3V/2` and short of `Δ = 2V`, never
+/// fail the session, and each echo is heard without an event.
 #[test]
-fn test_client_never_fails_frames_seven_quarter_windows_apart() {
+fn test_client_never_fails_frames_short_of_the_deadline() {
     let mut client = opened_client();
     let spacing = 7 * V / 4;
     for sequence in 1..8_u32 {
