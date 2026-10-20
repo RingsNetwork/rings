@@ -3,17 +3,23 @@
 use std::sync::Arc;
 
 use rings_gateway::BoxGatewayDuplex;
+use rings_gateway::BoxOnionStreamProbe;
 use rings_gateway::FlowId;
 use rings_gateway::GatewayError;
+use rings_gateway::OnionStreamCondition;
 use rings_gateway::OnionStreamConnector;
-use rings_gateway::OnionStreamEnd;
+use rings_gateway::OnionStreamProbe;
 
 use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::proxy::OnionProxyProtocol;
+use crate::onion::session::witness::OnionSessionCondition;
+use crate::onion::session::witness::OnionSessionWitness;
 use crate::onion::tcp::OnionLocalStream;
-use crate::onion::tcp::OnionPumpEnd;
 use crate::onion::OnionProxyTarget;
 use crate::processor::Processor;
+
+/// The diagnostic a captured flow's reset carries when its session failed closed.
+const ONION_SESSION_FAILED: &str = "the onion session failed closed";
 
 /// Native connector that maps one captured target to one Rings Onion TCP stream.
 pub struct NativeOnionGatewayConnector {
@@ -44,13 +50,29 @@ impl NativeOnionGatewayConnector {
     }
 }
 
+/// The gateway's probe of one captured flow's session: its witness, read at any instant.
+struct NativeOnionStreamProbe(OnionSessionWitness);
+
+impl OnionStreamProbe for NativeOnionStreamProbe {
+    /// The session witness's condition, in the gateway's terms.
+    fn condition(&self) -> OnionStreamCondition {
+        match self.0.condition() {
+            OnionSessionCondition::Live => OnionStreamCondition::Live,
+            OnionSessionCondition::Stalled => OnionStreamCondition::Stalled,
+            OnionSessionCondition::Failed => {
+                OnionStreamCondition::Failed(ONION_SESSION_FAILED.to_string())
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl OnionStreamConnector for NativeOnionGatewayConnector {
     async fn open_stream(
         &self,
         flow: FlowId,
         stream: BoxGatewayDuplex,
-    ) -> Result<OnionStreamEnd, GatewayError> {
+    ) -> Result<BoxOnionStreamProbe, GatewayError> {
         let target = OnionProxyTarget::parse_authority(&flow.target.to_string())
             .map_err(|error| Self::onion_error(flow, error))?;
         let route = self
@@ -63,22 +85,14 @@ impl OnionStreamConnector for NativeOnionGatewayConnector {
             .open_tcp_stream(route.route, route.target)
             .await
             .map_err(|error| Self::onion_error(flow, error))?;
-        let (end, report) = tokio::sync::oneshot::channel();
-        opened.relay_reporting(stream, move |ended| {
-            if ended == OnionPumpEnd::Failed {
-                // A dropped report means the gateway already released the flow.
-                let _ = end.send(Err(GatewayError::OnionStreamReset {
-                    target: flow.target,
-                    message: "the onion session failed closed".to_string(),
-                }));
-            }
-        });
-        Ok(report)
+        Ok(Box::new(NativeOnionStreamProbe(
+            opened.relay_witnessed(stream),
+        )))
     }
 }
 
 impl OnionLocalStream for BoxGatewayDuplex {
     /// A drop: a duplex expresses no abortive close, so the failure crosses the gateway
-    /// boundary as the connector's [`OnionStreamEnd`], which resets the captured flow (#955).
+    /// boundary as the probe, which reads `Failed` before this drop (#902, #950).
     fn reset(self) {}
 }

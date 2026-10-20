@@ -14,17 +14,53 @@ impl<T> GatewayDuplex for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 /// Owned, type-erased gateway side of one reconstructed TCP stream.
 pub type BoxGatewayDuplex = Box<dyn GatewayDuplex>;
 
-/// How an open Onion stream ended, reported at most once by its connector.
+/// What a connector knows, at one instant, of the circuit of an open Onion stream (#950).
 ///
-/// A duplex expresses only an orderly end (EOF). An abortive end, a session that failed closed
-/// at its far side or on a link it rides (#963), is reported here as `Err`, and the gateway resets
-/// the captured flow with that reason. `Ok(())`, or a sender dropped without a report, leaves the
-/// orderly end to the duplex.
-pub type OnionStreamEnd = tokio::sync::oneshot::Receiver<Result<(), GatewayError>>;
+/// ```text
+/// Live ⇄ Stalled             a frame becomes known missing (a later one arrived) / it arrives
+/// Live | Stalled → Failed(c)  the stream failed closed; Failed is absorbing
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OnionStreamCondition {
+    /// No failure was observed and no frame is known missing.
+    Live,
+    /// A frame of the stream is known missing: a later one arrived and is held behind it.
+    Stalled,
+    /// The stream failed closed, at its far side or on a link it rides; carries the node-layer
+    /// diagnostic.
+    Failed(String),
+}
 
-/// The end of a connector that never reports an abortive end: the duplex alone ends the stream.
-pub fn unreported_end() -> OnionStreamEnd {
-    tokio::sync::oneshot::channel().1
+/// Synchronous view of the circuit of one open Onion stream, read by the runtime whenever it
+/// names how the captured flow ended.
+///
+/// A duplex expresses only an orderly end (EOF); the probe tells it apart from an abortive one.
+///
+/// Law (report before end): a connector whose stream fails makes its probe read `Failed` before
+/// it ends the duplex, so an EOF read while the probe reads `Failed` is that failure, never an
+/// orderly end (#902).
+pub trait OnionStreamProbe: Send + Sync {
+    /// The condition of the stream's circuit now.
+    fn condition(&self) -> OnionStreamCondition;
+}
+
+/// Owned, type-erased probe of one open Onion stream.
+pub type BoxOnionStreamProbe = Box<dyn OnionStreamProbe>;
+
+/// The probe of a connector that observes nothing of its circuit.
+struct UnobservedStream;
+
+impl OnionStreamProbe for UnobservedStream {
+    /// Always `Live`: the duplex alone ends the stream.
+    fn condition(&self) -> OnionStreamCondition {
+        OnionStreamCondition::Live
+    }
+}
+
+/// The probe of a connector that observes nothing of its circuit: it always reads `Live`, so
+/// the duplex alone ends the stream.
+pub fn unobserved_stream() -> BoxOnionStreamProbe {
+    Box::new(UnobservedStream)
 }
 
 /// Node-owned effect that opens one immutable target over an Onion TCP route.
@@ -39,11 +75,11 @@ pub trait OnionStreamConnector: Send + Sync {
     ///
     /// This method returns after the Onion route and exit stream are ready and the supplied
     /// stream has been handed to its long-running relay task. It must not wait for the entire
-    /// stream lifetime before returning; the returned [`OnionStreamEnd`] reports an abortive end
-    /// later.
+    /// stream lifetime before returning; the returned [`OnionStreamProbe`] reports the circuit's
+    /// condition for the rest of it.
     async fn open_stream(
         &self,
         flow: FlowId,
         stream: BoxGatewayDuplex,
-    ) -> Result<OnionStreamEnd, GatewayError>;
+    ) -> Result<BoxOnionStreamProbe, GatewayError>;
 }

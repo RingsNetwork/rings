@@ -13,8 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use rings_gateway::unreported_end;
+use rings_gateway::unobserved_stream;
 use rings_gateway::BoxGatewayDuplex;
+use rings_gateway::BoxOnionStreamProbe;
 use rings_gateway::FlowId;
 use rings_gateway::GatewayConfig;
 use rings_gateway::GatewayError;
@@ -22,7 +23,6 @@ use rings_gateway::GatewayPlan;
 use rings_gateway::GatewayRuntime;
 use rings_gateway::Mtu;
 use rings_gateway::OnionStreamConnector;
-use rings_gateway::OnionStreamEnd;
 use rings_gateway::PacketIo;
 use rings_gateway::PacketIoError;
 use smoltcp::phy::ChecksumCapabilities;
@@ -79,13 +79,13 @@ impl OnionStreamConnector for EchoConnector {
         &self,
         _flow: FlowId,
         stream: BoxGatewayDuplex,
-    ) -> Result<OnionStreamEnd, GatewayError> {
+    ) -> Result<BoxOnionStreamProbe, GatewayError> {
         tokio::spawn(async move {
             let (mut reader, mut writer) = tokio::io::split(stream);
             let _ = tokio::io::copy(&mut reader, &mut writer).await;
             let _ = writer.shutdown().await;
         });
-        Ok(unreported_end())
+        Ok(unobserved_stream())
     }
 }
 

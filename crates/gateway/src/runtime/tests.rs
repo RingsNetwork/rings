@@ -15,13 +15,13 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use super::*;
-use crate::unreported_end;
+use crate::unobserved_stream;
 use crate::BoxGatewayDuplex;
+use crate::BoxOnionStreamProbe;
 use crate::ExitAvailability;
 use crate::GatewayHealth;
 use crate::GatewayPlan;
 use crate::Mtu;
-use crate::OnionStreamEnd;
 
 struct ChannelPacketIo {
     ingress: mpsc::Receiver<Vec<u8>>,
@@ -87,7 +87,7 @@ impl OnionStreamConnector for RecordingConnector {
         &self,
         flow: FlowId,
         mut stream: BoxGatewayDuplex,
-    ) -> Result<OnionStreamEnd, GatewayError> {
+    ) -> Result<BoxOnionStreamProbe, GatewayError> {
         self.opened
             .send(flow)
             .await
@@ -99,7 +99,7 @@ impl OnionStreamConnector for RecordingConnector {
             let mut buffer = [0_u8; 64];
             while matches!(stream.read(&mut buffer).await, Ok(length) if length > 0) {}
         });
-        Ok(unreported_end())
+        Ok(unobserved_stream())
     }
 }
 
@@ -113,7 +113,7 @@ impl OnionStreamConnector for EchoConnector {
         &self,
         flow: FlowId,
         mut stream: BoxGatewayDuplex,
-    ) -> Result<OnionStreamEnd, GatewayError> {
+    ) -> Result<BoxOnionStreamProbe, GatewayError> {
         self.opened
             .send(flow)
             .await
@@ -140,7 +140,7 @@ impl OnionStreamConnector for EchoConnector {
                 }
             }
         });
-        Ok(unreported_end())
+        Ok(unobserved_stream())
     }
 }
 
@@ -154,7 +154,7 @@ impl OnionStreamConnector for FailingConnector {
         &self,
         flow: FlowId,
         _stream: BoxGatewayDuplex,
-    ) -> Result<OnionStreamEnd, GatewayError> {
+    ) -> Result<BoxOnionStreamProbe, GatewayError> {
         self.attempted
             .send(flow)
             .await
@@ -415,10 +415,11 @@ fn pending_handshake_exit_clock_releases_flow_capacity() {
         .expect("expired handshake is released");
     assert_eq!(runtime.status_handle().snapshot().active_flows, 0);
     // The SYN also armed smoltcp's idle clock for the same deadline, and the tick polls the
-    // stack before reading the runtime exit clock, so the stack's timeout names the reset.
+    // stack before reading the runtime exit clock; either clock names the phase that was
+    // waiting, the handshake (`crate::reset`, Law Phase).
     assert_eq!(
         runtime.status_handle().snapshot().last_flow_reset,
-        Some(FlowResetReason::IdleTimeout)
+        Some(FlowResetReason::HandshakeExpired)
     );
     assert_eq!(runtime.tcp.flow_count(), 0);
 }
@@ -504,7 +505,13 @@ async fn test_idle_timeout_after_onion_eof_is_a_named_reset() {
     runtime
         .reconcile_flow(flow, Duration::from_millis(1))
         .expect("bridge starts on an established flow");
-    for event in [BridgeEvent::Opened(flow), BridgeEvent::PeerClosed(flow)] {
+    for event in [
+        BridgeEvent::Opened {
+            flow,
+            probe: unobserved_stream(),
+        },
+        BridgeEvent::PeerClosed(flow),
+    ] {
         runtime
             .handle_bridge_event(event, Duration::from_millis(2))
             .expect("Onion stream opens and ends without a response");
@@ -868,6 +875,9 @@ mod late_events_tests;
 
 #[path = "stream_reset_tests.rs"]
 mod stream_reset_tests;
+
+#[path = "reset_law_tests.rs"]
+mod reset_law_tests;
 
 /// All public construction paths reject the same invalid inputs before allocating TCP state.
 #[test]

@@ -38,7 +38,11 @@ health projection without restarting the packet interface. Inspect the shared st
 current health.
 
 Every captured-flow reset names its cause in `last_flow_reset` and in an info-level
-`rings_gateway::runtime` event. Enable debug tracing for `rings_gateway::runtime` to also see typed
-packet-drop and flow-rejection reasons. These events contain neither packet bodies nor destination addresses. Configuration
+`rings_gateway::runtime` event. A silent client ends a flow as `idle-timeout` only when its onion
+stream was open and healthy; the same silence names what the flow was waiting on otherwise:
+`handshake-expired`, `open-expired` while the onion stream was still opening, `stream-stalled`
+while a frame of the stream was known missing, and `stream-reset` once its circuit had failed.
+Enable debug tracing for `rings_gateway::runtime` to also see typed packet-drop and
+flow-rejection reasons. These events contain neither packet bodies nor destination addresses. Configuration
 is checked at runtime construction before resource allocation; standalone server and TCP stack
 construction also reject invalid configuration.

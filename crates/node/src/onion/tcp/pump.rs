@@ -1,7 +1,7 @@
 //! The duplex pump of a client `tcp` session: one local byte stream against one session.
 //!
 //! ```text
-//! loop select, until both halves close or the stream idles for RELAY_IDLE_TIMEOUT:
+//! loop select, until both halves close or the stream idles for its idle timeout, if it has one:
 //!   local read  n > 0 ─▶ session.send(bytes)      local EOF ─▶ session.fin, close read
 //!   session Data(w)   ─▶ local write(w)           session Fin ─▶ local shutdown, close write
 //!   session Failed | end ─▶ stop
@@ -17,16 +17,21 @@
 //! holds every byte and an orderly end, and a reset would discard bytes still in its send
 //! buffer, turning a complete stream into an error.
 
+use std::future::pending;
+use std::pin::Pin;
+use std::time::Duration;
+
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::io::ReadHalf;
 use tokio::io::WriteHalf;
+use tokio::time::Instant;
+use tokio::time::Sleep;
 
 use super::duplex::TcpDuplexState;
 use super::TCP_BUF;
-use crate::extension::transport::RELAY_IDLE_TIMEOUT;
 use crate::onion::session::dial::OnionStreamEvent;
 use crate::onion::session::dial::OnionStreamReceiver;
 use crate::onion::session::dial::OnionStreamSender;
@@ -52,12 +57,50 @@ impl OnionPumpEnd {
     }
 }
 
-/// Pump `local` against the session halves (see the module diagram), returning the local
-/// stream with the pump's end so the caller applies the matching close.
+/// A running idle timer: it fires `timeout` after the last traffic.
+struct IdleTimer {
+    /// The pending expiry.
+    sleep: Pin<Box<Sleep>>,
+    /// The period every traffic restarts it with.
+    timeout: Duration,
+}
+
+/// The pump's idle clock: a timer, or none, which never expires.
+struct IdleClock(Option<IdleTimer>);
+
+impl IdleClock {
+    /// A clock expiring `timeout` from now, or one that never expires for `None`.
+    fn new(timeout: Option<Duration>) -> Self {
+        Self(timeout.map(|timeout| IdleTimer {
+            sleep: Box::pin(tokio::time::sleep(timeout)),
+            timeout,
+        }))
+    }
+
+    /// Traffic passed: the clock restarts.
+    fn touch(&mut self) {
+        if let Some(timer) = self.0.as_mut() {
+            timer.sleep.as_mut().reset(Instant::now() + timer.timeout);
+        }
+    }
+
+    /// Wait until the clock expires.
+    async fn expired(&mut self) {
+        match self.0.as_mut() {
+            Some(timer) => timer.sleep.as_mut().await,
+            None => pending().await,
+        }
+    }
+}
+
+/// Pump `local` against the session halves (see the module diagram) with the idle timeout
+/// `idle_timeout`, or none, returning the local stream with the pump's end so the caller
+/// applies the matching close.
 pub(super) async fn pump_tcp_duplex<S>(
     local: S,
     sender: OnionStreamSender,
     receiver: OnionStreamReceiver,
+    idle_timeout: Option<Duration>,
 ) -> (S, OnionPumpEnd)
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -70,31 +113,29 @@ where
         &mut state,
         sender,
         receiver,
-        RELAY_IDLE_TIMEOUT,
+        IdleClock::new(idle_timeout),
     )
     .await;
     (read.unsplit(write), OnionPumpEnd::of(state))
 }
 
 /// The select loop of [`pump_tcp_duplex`]: returns when both halves close, on the first
-/// failure, or after `idle_timeout` without traffic, leaving the reached halves in `state`.
+/// failure, or once `idle` expires without traffic, leaving the reached halves in `state`.
 async fn pump_halves<S>(
     read: &mut ReadHalf<S>,
     write: &mut WriteHalf<S>,
     state: &mut TcpDuplexState,
     mut sender: OnionStreamSender,
     mut receiver: OnionStreamReceiver,
-    idle_timeout: std::time::Duration,
+    mut idle: IdleClock,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut buffer = vec![0_u8; TCP_BUF];
-    let idle = tokio::time::sleep(idle_timeout);
-    tokio::pin!(idle);
     while !state.is_closed() {
         tokio::select! {
             read_result = read.read(buffer.as_mut_slice()), if state.can_read() => {
-                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                idle.touch();
                 match read_result {
                     Ok(0) => {
                         if sender.fin().await.is_err() {
@@ -117,7 +158,7 @@ async fn pump_halves<S>(
                 }
             }
             event = receiver.next() => {
-                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                idle.touch();
                 match event {
                     Some(OnionStreamEvent::Data(bytes)) => {
                         if state.can_write() && write.write_all(&bytes).await.is_err() {
@@ -135,7 +176,7 @@ async fn pump_halves<S>(
                     Some(OnionStreamEvent::Failed) | None => return,
                 }
             }
-            () = &mut idle => return,
+            () = idle.expired() => return,
         }
     }
 }

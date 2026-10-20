@@ -248,13 +248,44 @@ reason: such exits project to `GatewayHealth::Degraded` with that reason, so a d
 always names its cause, and recovery projects back to active without a second lifecycle
 transition. Status readers use `GatewayStatusHandle::snapshot()`.
 
-Every flow reset carries a typed `FlowResetReason` (handshake expiry, idle timeout, client reset,
-ungraceful close, Onion open or stream failure, Onion stream reset, closed bridge, or gateway
-stop). A connector reports an abortive end of an open stream, such as its circuit's destruction,
-through the `OnionStreamEnd` it returns, and the flow is reset rather than half-closed. The runtime logs
-it at info level and records it as `GatewayStatus::last_flow_reset`. A half-close is forwarded only
-after the client's FIN, so an endpoint closed by reset or idle timeout is reported as a reset, never
-as a graceful close.
+Every flow reset carries a typed `FlowResetReason` (handshake expiry, open expiry, idle timeout,
+stream stall, client reset, ungraceful close, Onion open or stream failure, Onion stream reset,
+closed bridge, or gateway stop). The runtime logs it at info level and records it as
+`GatewayStatus::last_flow_reset`. A half-close is forwarded only after the client's FIN, so an
+endpoint closed by reset or idle timeout is reported as a reset, never as a graceful close.
+
+### Reset law
+
+A connector returns, with each opened stream, an `OnionStreamProbe`: the condition
+`σ ∈ {Live, Stalled, Failed(c)}` of the stream's circuit at any instant, `Stalled` when a frame
+is known missing (a later one arrived and is held behind it). A failing connector makes its
+probe read `Failed` before it ends the duplex, so an EOF read under `Failed` is that failure,
+never an orderly end. The runtime names every end from the phase `φ` of the flow and how its
+TCP endpoint closed, `κ`:
+
+```text
+φ ∈ {Handshake, Opening, Open(σ)}       κ ∈ {ClientReset, ClientSilent, Ungraceful}
+                                        ClientSilent: no client segment for T = flow_idle_timeout
+
+closure(Open(Failed(c)), κ)          = StreamReset(c)      (also every bridge error and EOF)
+closure(φ, ClientReset)              = ClientReset
+closure(φ, Ungraceful)               = UngracefulClose
+closure(Handshake, ClientSilent)     = HandshakeExpired
+closure(Opening, ClientSilent)       = OpenExpired
+closure(Open(Stalled), ClientSilent) = StreamStalled
+closure(Open(Live), ClientSilent)    = IdleTimeout
+
+Law Idle:  reset = IdleTimeout  ⇔  κ = ClientSilent ∧ φ = Open(Live)
+```
+
+A flow reset is an idle timeout exactly when the client was silent for `T` while its stream was
+open, no failure of the stream's circuit had been observed, and no frame of it was known missing;
+an observed circuit failure names the reset whichever local event reaches the runtime first. The
+probe reports what the client endpoint has observed. A lost last forward frame, or a lost reply
+tail that includes the target's end of stream, is observed by no endpoint (the first never, the
+second only at the Onion session's own deadline), and until then the flow is indistinguishable
+from a healthy one whose target is silent (#981). The model, its proof and the
+model check are in `src/reset.rs`.
 
 Flow capture binds the immutable `FlowId::target` and creates `TargetBound` directly. TCP
 endpoints are the sole ownership index for smoltcp handles; insertion and removal update

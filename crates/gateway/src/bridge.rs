@@ -7,6 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
+use crate::BoxOnionStreamProbe;
 use crate::FlowId;
 use crate::GatewayError;
 use crate::OnionStreamConnector;
@@ -20,7 +21,11 @@ pub(super) enum BridgeCommand {
 }
 
 pub(super) enum BridgeEvent {
-    Opened(FlowId),
+    /// The stream opened; its probe names every later end of the flow (`crate::reset`).
+    Opened {
+        flow: FlowId,
+        probe: BoxOnionStreamProbe,
+    },
     Data {
         flow: FlowId,
         bytes: Vec<u8>,
@@ -91,31 +96,27 @@ async fn run_bridge(
     mut commands: mpsc::Receiver<BridgeCommand>,
     io_chunk_bytes: usize,
 ) {
-    let mut end = match connector.open_stream(flow, Box::new(onion)).await {
-        Ok(end) => end,
+    let probe = match connector.open_stream(flow, Box::new(onion)).await {
+        Ok(probe) => probe,
         Err(error) => {
             send_event(&events, BridgeEvent::Failed { flow, error }).await;
             return;
         }
     };
-    if events.send(BridgeEvent::Opened(flow)).await.is_err() {
+    if events
+        .send(BridgeEvent::Opened { flow, probe })
+        .await
+        .is_err()
+    {
         return;
     }
 
     let mut read_open = true;
     let mut write_open = true;
-    // An orderly end, or a connector that ends without a report, leaves the end to the duplex.
-    let mut end_open = true;
     let mut buffer = vec![0_u8; io_chunk_bytes];
+    // An EOF is forwarded as read; the runtime tells an abortive one apart by the probe.
     while read_open || write_open {
         tokio::select! {
-            ended = &mut end, if end_open => {
-                end_open = false;
-                if let Ok(Err(error)) = ended {
-                    send_event(&events, BridgeEvent::Failed { flow, error }).await;
-                    return;
-                }
-            }
             read = gateway.read(buffer.as_mut_slice()), if read_open => {
                 match read {
                     Ok(0) => {
@@ -219,9 +220,9 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
-    use crate::unreported_end;
+    use crate::unobserved_stream;
     use crate::BoxGatewayDuplex;
-    use crate::OnionStreamEnd;
+    use crate::BoxOnionStreamProbe;
 
     struct EchoConnector;
 
@@ -233,7 +234,7 @@ mod tests {
             &self,
             _flow: FlowId,
             mut stream: BoxGatewayDuplex,
-        ) -> Result<OnionStreamEnd, GatewayError> {
+        ) -> Result<BoxOnionStreamProbe, GatewayError> {
             tokio::spawn(async move {
                 let mut buffer = [0_u8; 32];
                 loop {
@@ -253,7 +254,7 @@ mod tests {
                     }
                 }
             });
-            Ok(unreported_end())
+            Ok(unobserved_stream())
         }
     }
 
@@ -263,11 +264,11 @@ mod tests {
             &self,
             _flow: FlowId,
             mut stream: BoxGatewayDuplex,
-        ) -> Result<OnionStreamEnd, GatewayError> {
+        ) -> Result<BoxOnionStreamProbe, GatewayError> {
             tokio::spawn(async move {
                 let _ = stream.write_all(b"abcdefgh").await;
             });
-            Ok(unreported_end())
+            Ok(unobserved_stream())
         }
     }
 
@@ -282,7 +283,8 @@ mod tests {
     async fn bridge_preserves_data_and_half_close() {
         let (events_tx, mut events_rx) = mpsc::channel(4);
         let handle = spawn_bridge(flow(), Arc::new(EchoConnector), events_tx, 64, 32);
-        assert!(matches!(events_rx.recv().await, Some(BridgeEvent::Opened(id)) if id == flow()));
+        let opened = events_rx.recv().await;
+        assert!(matches!(opened, Some(BridgeEvent::Opened { flow: id, .. }) if id == flow()));
         handle
             .try_send(BridgeCommand::Data(b"echo".to_vec()))
             .expect("empty bounded command queue");
@@ -320,7 +322,8 @@ mod tests {
     async fn bridge_waits_for_tcp_consumption_before_reading_more_onion_data() {
         let (events_tx, mut events_rx) = mpsc::channel(4);
         let handle = spawn_bridge(flow(), Arc::new(BurstConnector), events_tx, 64, 4);
-        assert!(matches!(events_rx.recv().await, Some(BridgeEvent::Opened(id)) if id == flow()));
+        let opened = events_rx.recv().await;
+        assert!(matches!(opened, Some(BridgeEvent::Opened { flow: id, .. }) if id == flow()));
 
         let first = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
             .await
@@ -358,7 +361,8 @@ mod tests {
     async fn dropping_handle_aborts_bridge_task() {
         let (events_tx, mut events_rx) = mpsc::channel(1);
         let handle = spawn_bridge(flow(), Arc::new(EchoConnector), events_tx, 64, 32);
-        assert!(matches!(events_rx.recv().await, Some(BridgeEvent::Opened(id)) if id == flow()));
+        let opened = events_rx.recv().await;
+        assert!(matches!(opened, Some(BridgeEvent::Opened { flow: id, .. }) if id == flow()));
         let task = handle.task.abort_handle();
         drop(handle);
         tokio::task::yield_now().await;

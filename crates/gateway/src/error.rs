@@ -235,15 +235,6 @@ pub enum GatewayError {
         /// Node-layer diagnostic.
         message: String,
     },
-    /// The open Onion stream of a flow ended abortively: its session failed closed, at its far
-    /// side or on a link it rides (#963).
-    #[error("Onion stream for {target} was reset: {message}")]
-    OnionStreamReset {
-        /// Immutable flow target.
-        target: SocketAddr,
-        /// Node-layer diagnostic.
-        message: String,
-    },
     /// A reconstructed TCP-to-Onion duplex operation failed.
     #[error("gateway flow {flow:?} stream operation {operation} failed: {message}")]
     StreamIo {

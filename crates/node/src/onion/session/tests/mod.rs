@@ -4,6 +4,7 @@
 //! machines handle real `OnionSurb`s; nothing here touches a network or a clock.
 
 mod test_liveness;
+mod test_witness;
 
 use bytes::Bytes;
 use rand::rngs::StdRng;

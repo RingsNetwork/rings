@@ -34,11 +34,13 @@ use tokio::time::Instant;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::transport::RELAY_IDLE_TIMEOUT;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::session::dial::OnionClientStream;
 use crate::onion::session::serve::OnionWorld;
 use crate::onion::session::serve::OnionWorldReader;
 use crate::onion::session::serve::OnionWorldWriter;
+use crate::onion::session::witness::OnionSessionWitness;
 use crate::onion::target::resolve_public_target;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionProxyTarget;
@@ -48,7 +50,7 @@ mod duplex;
 mod pump;
 
 use pump::pump_tcp_duplex;
-pub(crate) use pump::OnionPumpEnd;
+use pump::OnionPumpEnd;
 
 /// Largest read of the local stream, split into frames by the session.
 const TCP_BUF: usize = 30_000;
@@ -203,30 +205,39 @@ impl NativeOnionOpenStream {
         Self { stream }
     }
 
-    /// Relay the local byte stream `local` through the session, until both directions close;
-    /// a pump whose incoming bytes did not end with the session's `fin` resets `local` (see the
-    /// module's fail-closed law).
+    /// Relay the local byte stream `local` through the session, until both directions close or
+    /// it idles for `RELAY_IDLE_TIMEOUT` (5 min); a pump whose incoming bytes did not end with
+    /// the session's `fin` resets `local` (see the module's fail-closed law).
     pub fn relay<S>(self, local: S)
     where S: OnionLocalStream {
-        self.relay_reporting(local, |_| {});
+        let _ = self.relay_with(local, Some(RELAY_IDLE_TIMEOUT));
     }
 
-    /// [`Self::relay`], handing `on_end` how the pump ended once it stops, after a failed pump
-    /// reset `local`: a boundary that cannot express a reset on `local` itself carries the
-    /// failure through `on_end` instead, so it is never read as a clean end (#955).
-    pub(crate) fn relay_reporting<S, F>(self, local: S, on_end: F)
-    where
-        S: OnionLocalStream,
-        F: FnOnce(OnionPumpEnd) + Send + 'static,
-    {
+    /// [`Self::relay`] for a boundary that owns the stream's idleness and cannot express a reset
+    /// on `local` itself, such as a captured gateway flow (#950): no idle clock of the pump's
+    /// own, and the session's witness returned, which reads `Failed` before a failed pump resets
+    /// `local` (`session::witness`, Law Report before end), so the boundary never reads that
+    /// reset as a clean end.
+    pub(crate) fn relay_witnessed<S>(self, local: S) -> OnionSessionWitness
+    where S: OnionLocalStream {
+        self.relay_with(local, None)
+    }
+
+    /// Spawn the pump of `local` against the session with the idle timeout `idle_timeout`, or
+    /// none; a failed pump records the failure in the session's witness, then resets `local`.
+    fn relay_with<S>(self, local: S, idle_timeout: Option<Duration>) -> OnionSessionWitness
+    where S: OnionLocalStream {
+        let witness = self.stream.witness();
+        let recorded = witness.clone();
         let (sender, receiver) = self.stream.split();
         tokio::spawn(async move {
-            let (local, end) = pump_tcp_duplex(local, sender, receiver).await;
+            let (local, end) = pump_tcp_duplex(local, sender, receiver, idle_timeout).await;
             if end == OnionPumpEnd::Failed {
+                recorded.record_failed();
                 local.reset();
             }
-            on_end(end);
         });
+        witness
     }
 }
 

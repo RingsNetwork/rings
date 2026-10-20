@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use rings_gateway::BoxGatewayDuplex;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
@@ -6,6 +7,7 @@ use super::super::duplex::TcpDuplexState;
 use super::super::NativeOnionOpenStream;
 use crate::onion::session::dial::OnionClientStream;
 use crate::onion::session::dial::OnionStreamEvent;
+use crate::onion::session::witness::OnionSessionCondition;
 
 /// Law (half-close): each half closes independently and stays closed; the stream is over
 /// exactly when both are.
@@ -116,4 +118,45 @@ async fn test_a_failure_after_the_sessions_fin_keeps_the_complete_stream() {
         .await
         .expect("an orderly end");
     assert_eq!(received, b"whole");
+}
+
+/// Law (report before end, #902, #950): a witnessed relay whose session fails reads `Failed` in
+/// its witness before its local stream ends, so a boundary that sees only that end (a gateway
+/// duplex, whose reset is a drop and reads as EOF) reads the failure, never an orderly end.
+#[tokio::test]
+async fn test_a_witnessed_relay_reports_a_failure_before_its_local_stream_ends() {
+    let (local, mut peer) = tokio::io::duplex(64);
+    let local: BoxGatewayDuplex = Box::new(local);
+    let (stream, mut driver) = OnionClientStream::driven_by_test();
+    let witness = NativeOnionOpenStream::new(stream).relay_witnessed(local);
+    assert_eq!(witness.condition(), OnionSessionCondition::Live);
+
+    driver.emit(OnionStreamEvent::Failed).await;
+    let end = peer.read(&mut [0_u8; 1]).await;
+    assert_eq!(end.map_err(|error| error.kind()), Ok(0));
+    assert_eq!(witness.condition(), OnionSessionCondition::Failed);
+}
+
+/// Law (whole stream): a witnessed relay whose session's `fin` reached the local stream never
+/// reads `Failed`, even when the session fails afterwards: the stream is whole.
+#[tokio::test]
+async fn test_a_witnessed_relay_keeps_a_whole_stream_unfailed() {
+    let (local, mut peer) = tokio::io::duplex(64);
+    let local: BoxGatewayDuplex = Box::new(local);
+    let (stream, mut driver) = OnionClientStream::driven_by_test();
+    let witness = NativeOnionOpenStream::new(stream).relay_witnessed(local);
+
+    driver
+        .emit(OnionStreamEvent::Data(Bytes::from_static(b"whole")))
+        .await;
+    driver.emit(OnionStreamEvent::Fin).await;
+    driver.emit(OnionStreamEvent::Failed).await;
+    let mut received = Vec::new();
+    peer.read_to_end(&mut received)
+        .await
+        .expect("an orderly end");
+    assert_eq!(received, b"whole");
+    // The pump is gone once its command queue closes; it recorded nothing on its way out.
+    assert_eq!(driver.next_is_fin().await, None);
+    assert_eq!(witness.condition(), OnionSessionCondition::Live);
 }
