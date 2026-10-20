@@ -1,15 +1,17 @@
 //! Session frames, the carried values of a world-facing session symbol (#834 D2′, D8).
 //!
 //! ```text
-//! enc(data(n, φ, w))    = 00 ‖ n:u32 ‖ φ ‖ w       |w| ≤ C₀ − 7
-//! enc(fin(n, φ))        = 01 ‖ n:u32 ‖ φ ‖ (|t|:u16 ‖ t  when T)
-//! enc(credit(υ₁ … υ_k)) = 02 ‖ υ₁ ‖ … ‖ υ_k         |υ| = 2979, k ≥ 1
-//! enc(abort(n))         = 03 ‖ n:u32
-//! φ = T·2⁰,  T ⇒ w = |t|:u16 ‖ t ‖ w′              the other bits of φ are 0
+//! enc(data(n, φ, w))       = 00 ‖ n:u32 ‖ φ ‖ w           |w| ≤ C₀ − 7
+//! enc(fin(n, φ))           = 01 ‖ n:u32 ‖ φ ‖ (|t|:u16 ‖ t  when T)
+//! enc(credit(m, υ₁ … υ_k)) = 02 ‖ m:u32 ‖ υ₁ ‖ … ‖ υ_k   |υ| = 2979, k ≥ 1
+//! enc(abort(n))            = 03 ‖ n:u32
+//! φ = T·2⁰,  T ⇒ w = |t|:u16 ‖ t ‖ w′                    the other bits of φ are 0
 //! ```
 //!
-//! `n` is the per-direction sequence of `data`, `fin` and `abort`, starting at 0; `credit` is
-//! unsequenced and flows client-to-`h` only. `fin` ends a direction whose bytes really ended;
+//! `n` is the per-direction sequence of `data`, `fin` and `abort`, starting at 0; `credit` takes
+//! no sequence and flows client-to-`h` only. It carries the forward high-water mark `m`, the
+//! sender's next forward sequence, so `h` knows every forward frame below `m` was sent (paper,
+//! D2′ Order; #981). `fin` ends a direction whose bytes really ended;
 //! `abort` fails the session, carrying no reason (#834 D2′, #843 Q5), and is never an end of
 //! stream: a receiver applies it on arrival, since nothing after it counts. A `fin` carries `T`
 //! like `data`: a `fin` sent before the first reply names the target too, so it can
@@ -29,10 +31,11 @@
 //! - **Width** (L3). A frame whose encoding exceeds `C₀ − 1` bytes, the widest value `pad`
 //!   admits, is refused by `encode`, never truncated: [`OnionFrame::data_capacity`] is exactly
 //!   `C₀ − 7` for `data` without `T` (six bytes of frame, one of padding marker), and a `credit`
-//!   frame holds at most `k = ⌊(C₀ − 2) / |υ|⌋` blocks (`k = 4` at 16 KiB).
-//! - **Closure.** Every other tag byte, a reserved flag bit, a truncated field, a `credit` whose
-//!   length is not a whole number of blocks, and trailing bytes after `fin`'s target or after
-//!   `abort` are rejected.
+//!   frame holds at most `k = ⌊(C₀ − 6) / |υ|⌋` blocks (the tag, `m` and the padding marker take
+//!   six bytes; `k = 4` at 16 KiB, Prop. SURB batching).
+//! - **Closure.** Every other tag byte, a reserved flag bit, a truncated field (`m` included), a
+//!   `credit` whose length after `m` is not a whole number of blocks, or is none, and trailing
+//!   bytes after `fin`'s target or after `abort` are rejected.
 
 use bytes::Bytes;
 use zeroize::Zeroizing;
@@ -58,6 +61,9 @@ const TARGET_FLAG: u8 = 0x01;
 
 /// Bytes of a `data` frame before `w`: the tag, `n` and `φ`.
 const DATA_OVERHEAD_BYTES: usize = 1 + 4 + 1;
+
+/// Bytes of a `credit` frame before its blocks: the tag and `m`.
+const CREDIT_OVERHEAD_BYTES: usize = 1 + 4;
 
 /// Bytes of the target length `|t|` in front of `t`.
 const TARGET_LENGTH_BYTES: usize = 2;
@@ -107,8 +113,14 @@ pub(crate) enum OnionFrame {
         /// `t` when `T` is set: sent before the first reply, like `data`.
         target: Option<Bytes>,
     },
-    /// `credit(υ₁ … υ_k)`: `k ≥ 1` further reply blocks for the session.
-    Credit(Vec<OnionSurb>),
+    /// `credit(m, υ₁ … υ_k)`: `k ≥ 1` further reply blocks for the session, and the forward
+    /// high-water mark `m`.
+    Credit {
+        /// `m`, the sender's next forward sequence: every forward frame below it was sent.
+        mark: OnionSequence,
+        /// `υ₁ … υ_k`.
+        surbs: Vec<OnionSurb>,
+    },
     /// `abort(n)`: the session failed at its sender; no reason is given, and `n` is
     /// informational (see the module documentation).
     Abort {
@@ -170,7 +182,7 @@ impl OnionFrame {
     /// Whether the frame is sequenced (`data`, `fin`, `abort`): a frame whose loss is a gap in
     /// its direction, unlike `credit`.
     pub(crate) const fn is_sequenced(&self) -> bool {
-        !matches!(self, Self::Credit(_))
+        !matches!(self, Self::Credit { .. })
     }
 
     /// `C₀ − 7`, the most stream bytes one `data` frame without `T` carries in class `class`:
@@ -186,9 +198,10 @@ impl OnionFrame {
         Self::data_capacity(class).checked_sub(TARGET_LENGTH_BYTES + target.len())
     }
 
-    /// `k = ⌊(C₀ − 2) / |υ|⌋`, the most reply blocks one `credit` frame holds in `class` (D8).
+    /// `k = ⌊(C₀ − 6) / |υ|⌋`, the most reply blocks one `credit` frame holds in `class` (D8):
+    /// the carried value is at most `C₀ − 1` bytes, five of them the frame's tag and `m`.
     pub(crate) const fn credit_capacity(class: OnionLoopClass) -> usize {
-        (class.value_capacity() - 1) / ONION_SURB_BYTES
+        (class.value_capacity() - CREDIT_OVERHEAD_BYTES) / ONION_SURB_BYTES
     }
 
     /// `enc(frame)`, refusing a frame wider than the carry of `class`, or a `credit` frame of no
@@ -224,11 +237,12 @@ impl OnionFrame {
                 bytes.push(ABORT_TAG);
                 bytes.extend_from_slice(&sequence.value().to_be_bytes());
             }
-            Self::Credit(surbs) if surbs.is_empty() => {
+            Self::Credit { surbs, .. } if surbs.is_empty() => {
                 return Err(OnionFrameUnencodable::EmptyCredit);
             }
-            Self::Credit(surbs) => {
+            Self::Credit { mark, surbs } => {
                 bytes.push(CREDIT_TAG);
+                bytes.extend_from_slice(&mark.value().to_be_bytes());
                 surbs.iter().for_each(|surb| surb.encode_into(&mut bytes));
             }
         }
@@ -271,6 +285,7 @@ impl OnionFrame {
                 _ => Err(OnionFrameError::Malformed),
             },
             CREDIT_TAG => {
+                let (mark, rest) = split_sequence(rest)?;
                 let (blocks, []) = rest.as_chunks::<ONION_SURB_BYTES>() else {
                     return Err(OnionFrameError::Malformed);
                 };
@@ -281,7 +296,7 @@ impl OnionFrame {
                     .iter()
                     .map(|block| OnionSurb::decode(class, block).ok_or(OnionFrameError::Surb))
                     .collect::<Result<Vec<_>, _>>()
-                    .map(Self::Credit)
+                    .map(|surbs| Self::Credit { mark, surbs })
             }
             _ => Err(OnionFrameError::Tag),
         }
@@ -336,7 +351,7 @@ fn split_target(bytes: &[u8]) -> Result<(Option<Bytes>, &[u8]), OnionFrameError>
     }
 }
 
-/// `n` and the rest of a frame.
+/// `n` (or `m`) and the rest of a frame.
 fn split_sequence(bytes: &[u8]) -> Result<(OnionSequence, &[u8]), OnionFrameError> {
     bytes
         .split_first_chunk::<4>()

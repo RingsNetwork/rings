@@ -68,9 +68,9 @@ const GOLDEN_FIN: &str = "010000000700";
 const GOLDEN_FIN_WITH_TARGET: &str = "010000000801000f6578616d706c652e636f6d3a343433";
 /// Pinned `enc(abort(9))`.
 const GOLDEN_ABORT: &str = "0300000009";
-/// Pinned `H(enc(credit(υ)))` of the fixture reply block.
+/// Pinned `H(enc(credit(m, υ)))` of the fixture reply block, `m = 0x01020304`.
 const GOLDEN_CREDIT_DIGEST: &str =
-    "fb3590462a35db66bf2deca51264d9a42f97d35c4ce2b915cd2fd9d696c19957";
+    "f48d4af3690620c269caa1890cddebde6bba7d4d3500e696a672966516ee036f";
 /// Pinned `ā = ς ‖ SHA-256(t) ‖ 0^16` of the fixture session.
 const GOLDEN_SESSION_ARGUMENTS: &str =
     "515151515151515151515151515151512d92752e69614799ea8467c10d252c76f79c85845cf23d54406ef49ab463ff0c00000000000000000000000000000000";
@@ -268,13 +268,20 @@ fn test_credit_frame_is_pinned() {
         &mut ChaCha20Rng::from_seed(GOLDEN_SEED),
     )
     .expect("build the reply block");
-    let encoded = OnionFrame::Credit(vec![surb])
-        .encode(OnionLoopClass::DEFAULT)
-        .expect("one block fits");
+    let encoded = OnionFrame::Credit {
+        mark: OnionSequence::new(0x0102_0304),
+        surbs: vec![surb],
+    }
+    .encode(OnionLoopClass::DEFAULT)
+    .expect("one block fits");
 
+    assert_eq!(hex(&encoded[..5]), "0201020304", "02 ‖ m:u32");
     assert_eq!(digest(encoded.as_slice()), GOLDEN_CREDIT_DIGEST);
     let decoded = OnionFrame::decode(OnionLoopClass::DEFAULT, encoded.as_slice()).expect("decodes");
-    assert!(matches!(&decoded, OnionFrame::Credit(blocks) if blocks.len() == 1));
+    assert!(matches!(
+        &decoded,
+        OnionFrame::Credit { mark, surbs } if mark.value() == 0x0102_0304 && surbs.len() == 1
+    ));
     assert_eq!(
         decoded
             .encode(OnionLoopClass::DEFAULT)

@@ -164,7 +164,10 @@ fn test_a_failure_without_a_block_is_answered_at_the_next_loop() {
         "no block is left, so no reply"
     );
     // The client's `V/2` keep-alive: a credit frame, whose blocks the answer does not read.
-    let keep_alive = OnionFrame::Credit(Vec::new());
+    let keep_alive = OnionFrame::Credit {
+        mark: OnionSequence::new(1),
+        surbs: Vec::new(),
+    };
     let answer = reply_to_unheld(&keep_alive).expect("an unheld loop is answered");
     let reply = vec![OnionExitEffect::Reply {
         frame: answer,

@@ -15,7 +15,8 @@
 //!                             its guard's link retired or dropped, or the queue was full)
 //!            reply         ─▶ credit.replied;  machine.reply ⇒ events;  control(Refill)
 //!            tick          ─▶ gap and deadline check;  control(Tick)
-//!          control(step):  control_loops(step) full credit loops                    (queued)
+//!          control(step):  control_loops(step) full credit loops, each credit(m, υ…) with m
+//!                          the next forward sequence                               (queued)
 //!            Refill ⇒ ⌊(min(W, Q_max) − outstanding) / (k + 1)⌋;  Tick ⇒ keep-alive
 //!          tick at:        min(now + T, last_forward + V/2, heard + Δ), each only once it
 //!                          is later than now: the keep-alive and the deadline are punctual
@@ -549,11 +550,13 @@ impl OnionSessionDriver {
         Ok(())
     }
 
-    /// One full credit loop: `k` fresh reply blocks, `k + 1` at `h`.
+    /// One full credit loop: `k` fresh reply blocks, `k + 1` at `h`, and the forward high-water
+    /// mark `m` (Law Mark).
     fn credit_loop(&mut self, sink: &OnionReplySink) -> Result<()> {
         let blocks = OnionFrame::credit_capacity(self.class);
         let (surbs, expiry) = self.loops.surbs(&self.route, self.class, blocks, sink)?;
-        self.enqueue(&OnionFrame::Credit(surbs), sink)?;
+        let frame = self.machine.credit(surbs).map_err(|_| Error::InvalidData)?;
+        self.enqueue(&frame, sink)?;
         self.credit.sent(get_epoch_ms(), expiry, blocks);
         Ok(())
     }

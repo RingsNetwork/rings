@@ -4,6 +4,7 @@
 //! machines handle real `OnionSurb`s; nothing here touches a network or a clock.
 
 mod test_liveness;
+mod test_mark;
 mod test_witness;
 
 use bytes::Bytes;
@@ -109,6 +110,14 @@ fn round_trip(frame: &OnionFrame) -> Vec<u8> {
     bytes
 }
 
+/// `credit(m, υ…)` with the forward high-water mark `m`.
+fn credit(mark: u32, blocks: Vec<OnionSurb>) -> OnionFrame {
+    OnionFrame::Credit {
+        mark: OnionSequence::new(mark),
+        surbs: blocks,
+    }
+}
+
 // ---- frame -------------------------------------------------------------------------------------
 
 /// Every frame round-trips canonically, the widest `data` is exactly `C₀ − 7` bytes of stream
@@ -139,9 +148,9 @@ fn test_frames_round_trip_at_their_width_bounds() {
         sequence: OnionSequence::FIRST,
         target: Some(Bytes::from_static(TARGET)),
     });
-    let credit = OnionFrame::Credit(surbs(10, OnionFrame::credit_capacity(CLASS), 0));
+    let widest_credit = credit(u32::MAX, surbs(10, OnionFrame::credit_capacity(CLASS), 0));
     assert_eq!(OnionFrame::credit_capacity(CLASS), 4);
-    round_trip(&credit);
+    round_trip(&widest_credit);
 
     let overwide = OnionFrame::Data {
         sequence: OnionSequence::FIRST,
@@ -149,11 +158,12 @@ fn test_frames_round_trip_at_their_width_bounds() {
         payload: Bytes::from(vec![0; capacity + 1]),
     };
     assert!(overwide.encode(CLASS).is_err());
-    assert!(OnionFrame::Credit(surbs(11, 5, 0)).encode(CLASS).is_err());
+    assert!(credit(0, surbs(11, 5, 0)).encode(CLASS).is_err());
+    assert!(credit(0, Vec::new()).encode(CLASS).is_err());
 }
 
 /// Closure: unknown tags, reserved flags, truncated fields, trailing bytes after `fin` or
-/// `abort`, and `credit` frames of no or partial blocks are rejected.
+/// `abort`, and `credit` frames of a truncated `m`, or of no or partial blocks, are rejected.
 #[test]
 fn test_malformed_frames_are_rejected() {
     let fin = OnionFrame::Fin {
@@ -167,11 +177,11 @@ fn test_malformed_frames_are_rejected() {
     }
     .encode(CLASS)
     .expect("fits");
-    let mut credit = OnionFrame::Credit(surbs(12, 1, 0))
+    let mut partial = credit(7, surbs(12, 1, 0))
         .encode(CLASS)
         .expect("fits")
         .to_vec();
-    credit.pop();
+    partial.pop();
     for (bytes, error) in [
         (Vec::new(), OnionFrameError::Tag),
         (vec![0x04], OnionFrameError::Tag),
@@ -188,7 +198,9 @@ fn test_malformed_frames_are_rejected() {
             OnionFrameError::Malformed,
         ),
         (vec![0x02], OnionFrameError::Malformed),
-        (credit, OnionFrameError::Malformed),
+        (vec![0x02, 0, 0, 7], OnionFrameError::Malformed),
+        (vec![0x02, 0, 0, 0, 7], OnionFrameError::Malformed),
+        (partial, OnionFrameError::Malformed),
     ] {
         assert_eq!(
             OnionFrame::decode(CLASS, &bytes).err(),
@@ -318,7 +330,7 @@ fn kinds(effects: &[OnionExitEffect]) -> Vec<String> {
                 } => format!("data {} {}", sequence.value(), payload.len()),
                 OnionFrame::Fin { sequence, .. } => format!("fin {}", sequence.value()),
                 OnionFrame::Abort { sequence } => format!("abort {}", sequence.value()),
-                OnionFrame::Credit(_) => "credit".to_string(),
+                OnionFrame::Credit { .. } => "credit".to_string(),
             },
             OnionExitEffect::Close => "close".to_string(),
         })
@@ -346,8 +358,8 @@ fn test_exit_session_opens_acks_replies_and_closes() {
         kinds(&session.forward(NOW_MS, opening(0, b"hello"), next())),
         ["open example.com:443", "write hello"]
     );
-    let credit = OnionFrame::Credit(vec![next()]);
-    assert!(kinds(&session.forward(NOW_MS, credit, next())).is_empty());
+    let refill = credit(1, vec![next()]);
+    assert!(kinds(&session.forward(NOW_MS, refill, next())).is_empty());
     assert_eq!(
         session.reply_capacity(NOW_MS),
         None,
@@ -389,7 +401,7 @@ fn acked(blocks: &mut impl Iterator<Item = OnionSurb>) -> OnionExitSession {
     let mut session = OnionExitSession::new(arguments().digest, NOW_MS);
     let mut next = || blocks.next().expect("a fixture block");
     session.forward(NOW_MS, opening(0, b""), next());
-    session.forward(NOW_MS, OnionFrame::Credit(vec![next()]), next());
+    session.forward(NOW_MS, credit(1, vec![next()]), next());
     assert_eq!(kinds(&session.opened(NOW_MS, true)), ["data 0 0"]);
     session
 }
@@ -417,9 +429,9 @@ fn test_exit_session_holds_world_bytes_until_credit_returns() {
     );
 
     let mut fresh = surbs(46, 2, 2).into_iter();
-    let credit = OnionFrame::Credit(vec![fresh.next().expect("a block")]);
+    let refill = credit(1, vec![fresh.next().expect("a block")]);
     assert_eq!(
-        kinds(&session.forward(expired_ms, credit, fresh.next().expect("a block"))),
+        kinds(&session.forward(expired_ms, refill, fresh.next().expect("a block"))),
         ["data 1 4"]
     );
     assert!(session.reply_capacity(expired_ms).is_some());
@@ -619,7 +631,7 @@ fn test_held_bytes_are_cut_to_each_blocks_capacity_then_fin() {
     assert_eq!(
         kinds(&session.forward(
             expired_ms,
-            OnionFrame::Credit(vec![wider.next().expect("a wide block")]),
+            credit(1, vec![wider.next().expect("a wide block")]),
             fresh.next().expect("a block"),
         )),
         [format!("data 1 {small}"), format!("data 2 {}", small + 5)]
@@ -632,7 +644,7 @@ fn test_held_bytes_are_cut_to_each_blocks_capacity_then_fin() {
     assert_eq!(
         kinds(&session.forward(
             expired_ms,
-            OnionFrame::Credit(vec![fresh.next().expect("a block")]),
+            credit(1, vec![fresh.next().expect("a block")]),
             surbs(58, 1, 2).pop().expect("a block"),
         )),
         ["fin 3"],
@@ -693,8 +705,8 @@ fn test_exit_session_refusal_and_credit_resumption() {
     // The open ack spends the session's only block.
     assert_eq!(kinds(&starved.opened(NOW_MS, true)), ["data 0 0"]);
     assert_eq!(starved.reply_capacity(NOW_MS), None);
-    let credit = OnionFrame::Credit(surbs(46, 4, 0));
-    assert!(kinds(&starved.forward(NOW_MS, credit, surb(47))).is_empty());
+    let refill = credit(1, surbs(46, 4, 0));
+    assert!(kinds(&starved.forward(NOW_MS, refill, surb(47))).is_empty());
     assert_eq!(
         starved.reply_capacity(NOW_MS),
         Some(OnionFrame::data_capacity(CLASS)),

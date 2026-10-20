@@ -71,22 +71,26 @@
 //! so is every classifier (Totality). The domain is finite, and `reset::tests` checks each law
 //! on all of it.
 //!
-//! # Residual: losses no endpoint observes
+//! # Residual: losses observed late
 //!
 //! `σ` is a function of what the client endpoint has observed, and a lost frame is observed
-//! only through a later frame of its direction. Two losses leave every observation unchanged:
+//! only through a later frame of its direction, or, forward, a later credit's high-water mark
+//! (paper, D2′ Order; #981). Let `t₀` be the loss, `F` and `L` one forward and one return
+//! latency, and `V` the loop validity:
 //!
-//! - a lost last forward `data`: `h` never sees it (credit carries no sequence) while it keeps
-//!   echoing the keep-alive, so neither endpoint ever fails the session;
-//! - a lost reply tail that includes the world's `fin`: `h` sends no echo after `fin`, so only
-//!   the session's own deadline `Δ = 2V` observes it.
+//! - a lost last forward `data` is exposed at `h` by the next credit loop, whose mark `m` lies
+//!   above it, the keep-alive at the latest; `h` fails the session by `t₀ + 3V/2 + F` and
+//!   replies `abort`, so `σ` reads `Failed` (`StreamReset`) by `t₀ + 3V/2 + F + L` (paper,
+//!   Prop. Liveness of failure (iii));
+//! - a lost reply tail that includes the world's `fin` remains: `h` sends no echo after `fin`,
+//!   so only the session's own deadline `Δ = 2V` observes it.
 //!
-//! A lost reply before `fin` is not among them: the next sequenced reply (a later `data`, the
-//! `fin`, or the echo `data(n, 0, ε)`) exposes it, `σ` reads `Stalled` (`StreamStalled`), and the
-//! gap rule fails the session after `V`. Until an unobserved loss is observed, the run is
+//! A lost reply before `fin` is exposed sooner: the next sequenced reply (a later `data`, the
+//! `fin`, or the echo `data(n, 0, ε)`) exposes it, `σ` reads `Stalled` (`StreamStalled`), and
+//! the gap rule fails the session after `V`. Until a loss is observed, the run is
 //! indistinguishable, at the gateway and at the client, from a healthy flow whose target is
-//! silent, so `closure`, a function of the observations, names both `IdleTimeout`. Making such
-//! a loss observable is a change to the loop protocol (#981).
+//! silent, so `closure`, a function of the observations, names both `IdleTimeout` when the flow
+//! idle timeout `T` ends first.
 
 use crate::FlowResetReason;
 use crate::GatewayError;

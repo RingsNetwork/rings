@@ -9,9 +9,11 @@
 //! Path = (stage, hole, unseen, failed, end)
 //!   stage   Handshake | Opening | Open
 //!   hole    None | Delayed | Lost      a frame missing while a later one is held (observed)
-//!   unseen  None | Forward | Return    a frame lost with no later frame of its direction
-//!                                      (observed by no one; a Return loss is a reply tail
-//!                                      with the world's fin, caught at Δ = 2V)
+//!   unseen  None | Forward | Return    a frame lost with no later frame of its direction,
+//!                                      observed late: a Forward loss by the next credit's
+//!                                      mark and h's abort after 3V/2 + F + L (#981); a Return
+//!                                      loss is a reply tail with the world's fin, caught at
+//!                                      Δ = 2V
 //!   failed  None | Some(c)             a failure the probe reads
 //!   end     None | Orderly | Reset(r)
 //! σ(p) = Failed(c) if failed = c,  Stalled if hole ≠ None,  Live otherwise
@@ -27,6 +29,7 @@
 //! GapExpires       hole ≠ None: failed ← gap   (missing for V since a later frame came)
 //! LoseUnseen(d)    Open, unseen = None: unseen ← d
 //! Deadline         unseen = Return: failed ← silent   (no frame for Δ)
+//! Exposed          unseen = Forward: failed ← abort   (h's gap rule, after a mark above it)
 //! Abort            Open: failed ← abort   (h's abort, a link fact, a failed pump)
 //! Eof              Open: failed ⇒ end eof(σ) (report before end);
 //!                  hole = None ∧ unseen ≠ Return ⇒ the world's fin: end eof(σ) or Orderly
@@ -191,9 +194,10 @@ enum Hole {
 /// The direction of a frame lost with no later frame of its direction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Unseen {
-    /// A client-to-`h` frame: `h` never learns of it, since credit carries no sequence.
+    /// A client-to-`h` frame with no later frame of its direction: the next credit's mark
+    /// exposes it at `h`, whose `abort` fails the session after `3V/2 + F + L` (#981).
     Forward,
-    /// An `h`-to-client frame: the client's deadline `Δ` fails the session.
+    /// An `h`-to-client tail with the world's `fin`: the client's deadline `Δ` fails the session.
     Return,
 }
 
@@ -228,6 +232,7 @@ enum Action {
     GapExpires,
     LoseUnseen(Unseen),
     Deadline,
+    Exposed,
     Abort,
     Eof,
     ClientSilent,
@@ -236,7 +241,7 @@ enum Action {
 }
 
 /// Every action of the model.
-const ACTIONS: [Action; 15] = [
+const ACTIONS: [Action; 16] = [
     Action::Establish,
     Action::OpenOk,
     Action::OpenErr,
@@ -247,6 +252,7 @@ const ACTIONS: [Action; 15] = [
     Action::LoseUnseen(Unseen::Forward),
     Action::LoseUnseen(Unseen::Return),
     Action::Deadline,
+    Action::Exposed,
     Action::Abort,
     Action::Eof,
     Action::ClientSilent,
@@ -317,6 +323,9 @@ impl Path {
             Action::Deadline if healthy && self.unseen == Some(Unseen::Return) => {
                 next.failed = Some("silent");
             }
+            Action::Exposed if healthy && self.unseen == Some(Unseen::Forward) => {
+                next.failed = Some("abort");
+            }
             Action::Abort if healthy => next.failed = Some("abort"),
             Action::Eof if open && self.failed.is_some() => {
                 next.end = eof_reason(self.condition()).map(End::Reset);
@@ -376,9 +385,10 @@ fn terminal_paths() -> Vec<(Path, Action, Path)> {
 ///   no failure was observed nor a frame known missing.
 /// - Dominance: an observed failure names the reset `StreamReset`, whatever ends the flow.
 /// - Report before end: an EOF after a failure is never an orderly end.
-/// - Residual: an idle timeout over a defective circuit is reachable only through an unseen
-///   loss, and its twin without that loss, identical in every observation, is an idle timeout
-///   too; the forward case reaches it, as the module documentation of `crate::reset` states.
+/// - Residual: an idle timeout over a defective circuit is reachable only through a loss not
+///   yet observed, and its twin without that loss, identical in every observation, is an idle
+///   timeout too; either case reaches it when `T` ends before the loss is observed, as the
+///   module documentation of `crate::reset` states.
 #[test]
 fn test_reset_law_holds_on_every_execution_of_the_captured_flow_model() {
     let terminals = terminal_paths();
@@ -414,6 +424,7 @@ fn test_reset_law_holds_on_every_execution_of_the_captured_flow_model() {
         }
     }
     assert!(unseen_idle.contains(&Some(Unseen::Forward)));
+    assert!(unseen_idle.contains(&Some(Unseen::Return)));
 }
 
 /// The model's reasons are a function of the runtime's observations `(φ, action)` alone: two
