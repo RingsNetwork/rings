@@ -155,14 +155,15 @@ where noted.
   (advertised through `advertise_onion_relay` instead), is rejected, so restrict an exit's reach
   with the policy targets rather than with a custom service name: an exit that should only carry
   HTTPS registers `tcp` with the allowed target `*:443`.
-  A policy target is `host:port`, `*:port` (any host on that port) or `*:*` (any target).
-  An empty `allowed_targets` list is a closed policy that admits no target, so advertising an
-  exit requires at least one allowed target; deny entries override allows; a `0` limit is
-  unspecified. A `*` is recognised only as a whole host (`*:port`, `*:*`); any other `*` in a
-  host is refused. Deny entries match the requested authority, not the addresses it resolves
-  to: an IP literal or another name for a denied host is not denied by a name entry, so deny
-  by the name the client requests, and rely on the exit's public-address floor for private
-  and loopback ranges.
+  A policy target is `host:port`, `*:port` (any host on that port) or `*:*` (any target). An
+  empty `allowed_targets` list is a closed policy that admits no target, so advertising an exit
+  requires at least one allowed target; deny entries override allows; a `0` limit is
+  unspecified. The policy takes only these four keys: any other, including the removed
+  `max_circuits` and `max_streams_per_circuit`, is refused as an unknown field. A `*` is
+  recognised only as a whole host (`*:port`, `*:*`); any other `*` in a host is refused. Deny
+  entries match the requested authority, not the addresses it resolves to: an IP literal or
+  another name for a denied host is not denied by a name entry, so deny by the name the client
+  requests, and rely on the exit's public-address floor for private and loopback ranges.
 
 ## HTTP CONNECT proxy
 

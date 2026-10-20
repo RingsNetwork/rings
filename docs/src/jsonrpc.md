@@ -1,753 +1,292 @@
 # API
 
-## How To
+A native node serves JSON-RPC 2.0 over HTTP `POST /` on two listeners. This page is the one
+reference for its methods; the method set is `rings_rpc::method::Method`, and every params and
+result object below is the matching `Request`/`Response` struct of `rings_rpc::protos::rings_node`.
 
-This section provides instructions on how to perform common requests on rings JSON-RPC API endpoints.
+## Making requests
 
-### Make requests
-
-#### curl
-
-Url `curl` to make the requests.
-
-```
+```sh
 curl -X POST \
--H "Content-Type: application/json" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "nodeInfo", "params": []}' \
-"http://127.0.0.1:50000"
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(cat ~/.rings/api-token)" \
+  --data '{"jsonrpc": "2.0", "id": 1, "method": "nodeInfo", "params": {}}' \
+  "http://127.0.0.1:50000"
 ```
 
-#### javascript
+* Every request must use `Content-Type: application/json`.
+* `params` is one JSON object whose fields are those listed for the method; a method without
+  parameters takes `{}`.
+* Gated methods require the listener's credential as `Authorization: Bearer <token>`.
+  `rings init` writes the token to an owner-only `api-token` file next to the YAML
+  configuration, and the `rings` CLI reads it automatically.
 
-TODO
+### Listeners and authorization
 
-## JSON-RPC methods
+| Listener | Methods | Authorization |
+|---|---|---|
+| internal (`internal_api_port`, default 50000) | every method | Bearer required |
+| external (`external_api_addr`, default 127.0.0.1:50001) | `nodeDid`, `answerOffer` | public |
+| external (`external_api_addr`, default 127.0.0.1:50001) | `nodeInfo`, `lookupOnlineNodes`, `lookupOnionExits` | Bearer required |
 
-This section lists the rings JSON-RPC API endpoints. You can call these [APIs using a variety of tools](jsonrpc.md#Make\_request).
+The external listener refuses every other method. The public methods are the two halves of the
+HTTP handshake: `nodeDid` reveals the DID the caller is about to address, and the offer that
+`answerOffer` admits already carries a signature bound to the peer DID. A batch is authorized by
+its strictest member, so a batch that mixes a public and a gated method requires the token. The
+[node README](https://github.com/RingsNetwork/rings/tree/master/crates/node#control-api-security)
+covers browser origins, remote binding and TLS.
 
-### Error codes
+### Errors
 
-The follow list contains all possible error codes and associated messages:
-
-| code   | meaning                                   | category |
-| ------ | ----------------------------------------- | -------- |
-| -32000 | Internal service error                    | standard |
-| -32001 | Connect remote server with error occurred | standard |
-| -32002 | Push or find pending transport failed     | standard |
-| -32003 | Transport not found                       | standard |
-| -32004 | Create new `transport` failed             | standard |
-| -32005 | Close `transport` failed                  | standard |
-| -32006 | Encode data error                         | standard |
-| -32007 | Decode data error                         | standard |
-| -32008 | Register ice failed                       | standard |
-| -32009 | Create new `offer` failed                 | standard |
-| -32010 | Create new `answder` failed               | standard |
-| -32011 | Invalid transport id                      | standard |
-| -32012 | Invalid did                               | standard |
-| -32013 | Invalid method                            | standard |
-| -32014 | Send message with error occurred          | standard |
-| -32015 | Permission requires to do something       | standard |
-| -32016 | VNode action error                        | standard |
-| -32017 | Register service with error occurred      | standard |
-| -32018 | Invalid data                              | standard |
-| -32019 | Invalid message                           | standard |
-| -32020 | Invalid service                           | standard |
-| -32021 | Invalid address                           | standard |
-| -32022 | Invalid auth data                         | standard |
-
-Example error response:
+Errors follow JSON-RPC 2.0:
 
 ```json
 {
-    "id": 1,
-    "jsonrpc": "2.0",
-    "error": {
-        "code": -32000,
-        "message": "internal service error",
-    }
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": { "code": 500, "message": "Invalid did: ..." }
 }
+```
+
+* `-32700` parse error, `-32600` invalid request, `-32601` unknown method, `-32602` invalid
+  params (a missing field, a malformed DID, data that is not base64, a page limit out of range),
+  `-32603` internal error.
+* A failure inside the node carries the stable positive code of
+  `rings_node::error::Error::code()`, whose hundreds name the category: `1xx` remote RPC, `2xx`
+  connection and handshake, `3xx` encoding, `5xx` DID, method and permission, `6xx` connect,
+  send and DHT entries, `8xx` data, storage and configuration, `9xx` files, `10xx`
+  serialization, `11xx` core, `15xx` extensions and runtime, `16xx` onion.
+
+## Methods
+
+| Method | Params | Result |
+|---|---|---|
+| [`nodeDid`](#nodedid) | — | `did` |
+| [`nodeInfo`](#nodeinfo) | — | `version`, `swarm` |
+| [`connectPeerViaHttp`](#connectpeerviahttp) | `url`, `api_token?` | `did` |
+| [`connectWithDid`](#connectwithdid) | `did` | — |
+| [`connectWithSeed`](#connectwithseed) | `peers` | — |
+| [`listPeers`](#listpeers) | — | `peers` |
+| [`createOffer`](#createoffer) | `did` | `offer` |
+| [`answerOffer`](#answeroffer) | `offer` | `answer` |
+| [`acceptAnswer`](#acceptanswer) | `answer` | — |
+| [`disconnect`](#disconnect) | `did` | — |
+| [`sendBackendMessage`](#sendbackendmessage) | `destination_did`, `namespace`, `data` | — |
+| [`sendE2eHandshake`](#sende2ehandshake) | `destination_did` | `tx_id` |
+| [`sendE2eMessage`](#sende2emessage) | `destination_did`, `recipient_public_key`, `data`, `max_plaintext_frame_len?` | `stream_id` |
+| [`publishMessageToTopic`](#publishmessagetotopic) | `topic`, `data` | — |
+| [`fetchTopicMessages`](#fetchtopicmessages) | `topic`, `skip` | `data` |
+| [`registerService`](#registerservice) | `name` | — |
+| [`lookupService`](#lookupservice) | `name` | `dids` |
+| [`lookupOnlineNodes`](#lookuponlinenodes) | `include_expired?` | `nodes` |
+| [`lookupOnionExits`](#lookuponionexits) | `service?`, `include_expired?` | `exits` |
+| [`peerMeasurement`](#peermeasurement) | `did` | `measurement` |
+| [`listPeerMeasurements`](#listpeermeasurements) | `limit?`, `cursor?` | `measurements`, `next_cursor` |
+
+A field marked `?` may be omitted. A method whose result is `—` returns `{}` on success.
+
+### nodeDid
+
+The DID of this node. Public on the external listener.
+
+* Params: `{}`.
+* Result: `did`, the node's DID as a hex string.
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "nodeDid", "params": {}}
+```
+
+```json
+{"jsonrpc": "2.0", "id": 1, "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0"}}
 ```
 
 ### nodeInfo
 
-return rings node basic information.
+The node's version and an inspection of its swarm.
 
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json`
-
-#### EXAMPLE
-
-```
-curl -X POST \
--H "Content-Type: application/json" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "nodeInfo", "params": []}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-* `version` - current running node version
-
-#### BODY
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-        "version": "0.0.1"
-    }
-}
-```
+* Params: `{}`.
+* Result:
+  * `version`: the node version;
+  * `swarm`: `null`, or
+    * `peers`: as in [`listPeers`](#listpeers);
+    * `dht`: `{did, successors, predecessor, finger_table_ranges: [{did, start, end}]}`;
+    * `persistence_storage`, `cache_storage`: `{items: [{key, value: {did, kind, data}}]}`,
+      each element of `data` the base64 of its bytes.
 
 ### connectPeerViaHttp
 
-Connect a peer with peer's jsonrpc endpoint
+Connect to the peer behind a JSON-RPC endpoint by the HTTP handshake: this node calls the
+remote `nodeDid`, sends it an offer with `answerOffer`, and accepts the answer.
 
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json`
-
-#### EXAMPLE
-
-```
-## Replace REMOTE-JSONRPC-ENDPOINT with the url what you want to connect
-curl -X POST \
--H "Content-Type: application/json" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "connectPeerViaHttp", "params": ["REMOTE-JSONRPC-ENDPOINT"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-* `transport_did` - the id of transport
-
-#### EXAMPLE
+* Params:
+  * `url`: the remote endpoint, normally its external listener;
+  * `api_token` (optional): a Bearer token for a remote endpoint fronted by a proxy that demands
+    one; absent by default, since the handshake is public.
+* Result: `did`, the DID of the peer the handshake reached.
 
 ```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": [
-        "abcd-1234"
-    ]
-}
+{"jsonrpc": "2.0", "id": 1, "method": "connectPeerViaHttp",
+ "params": {"url": "https://node.example:50001"}}
 ```
 
 ### connectWithDid
 
-Connect a peer with peer's did
+Connect to a peer by DID, signalling the offer and answer through the DHT. The node must already
+be on the ring.
 
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace REMOTE-PEER-DID with the did what you want to connect
-## Replace YOUR-SIGNATURE with your signature
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "connectPeerWithDid", "params": ["REMOTE-PEER-DID"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": null
-}
-```
+* Params: `did`.
+* Result: `{}` once the offer is sent, or at once when the peer is already connected; the
+  connection opens asynchronously.
 
 ### connectWithSeed
 
-Connect a peer with peer's seed
+Connect to a set of seed peers by the HTTP handshake. The set is validated before any entry is
+dialled, so an invalid or ambiguous document dials nothing, and a peer listed twice is dialled
+once. A peer already connected or being connected is skipped.
 
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace REMOTE-PEER-SEED with the did what you want to connect
-## Replace YOUR-SIGNATURE with your signature
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "connectPeerWithSeed", "params": ["REMOTE-PEER-SEED"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": null
-}
-```
-
-### createOffer
-
-Create an offer for connection
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace REMOTE-PEER-SEED with the did what you want to connect
-## Replace YOUR-SIGNATURE with your signature
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "createOffer", "params": []}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-* `transport_id`: id of the transport
-* `ice`: ice message
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-        "transport_id": "1234",
-        "ice": "abcd1234",
-    }
-}
-```
-
-### answerOffer
-
-Answer an offer for connection. The result is the encoded answer, or, when this node's own
-pending overlay offer to the offering peer prevails on the DID tie-break, that offer as a
-counter-offer: the caller answers it with its own `answerOffer` and returns that answer with
-this node's `acceptAnswer`.
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace REMOTE-PEER-SEED with the did what you want to connect
-## Replace YOUR-SIGNATURE with your signature
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "createOffer", "params": ["REMOTE-PEER-SEED"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-* `transport_id`: id of the transport
-* `ice`: ice message
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-        "transport_id": "1234",
-        "ice": "abcd1234",
-    }
-}
-```
+* Params: `peers`, a list of `{did, url, api_token?}`; the handshake fails unless the endpoint
+  `url` answers as `did`.
+* Result: `{}` when every owed dial succeeded.
 
 ### listPeers
 
-List all node connected peers
+The peers this node has connections to.
 
-#### REQUEST
+* Params: `{}`.
+* Result: `peers`, a list of `{did, state}`, where `state` is the connection state the swarm
+  reports.
 
-`POST http://127.0.0.1:50000`
+### createOffer
 
-#### HEADERS
+Create an offer for a manual handshake with `did`. Deliver it to the peer out of band; the peer
+passes it to its `answerOffer`.
 
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
+* Params: `did`, the peer that will answer.
+* Result: `offer`, the encoded signed offer.
 
-#### EXAMPLE
+### answerOffer
 
-```
-## Replace YOUR-SIGNATURE with your signature
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "listPeers", "params": []}' \
-"http://127.0.0.1:50000"
-```
+Answer an encoded offer. Public on the external listener.
 
-#### RESPONSE
+* Params: `offer`, as returned by `createOffer`.
+* Result: `answer`, the encoded answer, or, when this node's own pending overlay offer to the
+  offering peer prevails on the DID tie-break, that offer as a counter-offer: the caller answers
+  it with its own `answerOffer` and returns that answer with this node's `acceptAnswer`.
 
-* `peers` - list of connected peers
-  * `transport_id` - id of the transport
-  * `did` - did of remote peer
-  * `state` - transport state
+### acceptAnswer
 
-#### EXAMPLE
+Accept an encoded answer to an offer this node created, which opens the connection.
 
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": [
-        {
-            "did": "abcd1234"
-            "transport_id": "1234",
-            "state": "connected",
-        }
-    ]
-}
-```
+* Params: `answer`, as returned by the peer's `answerOffer`.
+* Result: `{}`.
 
-### closeConnection
+### disconnect
 
-Close a connected connection with the did of peer
+Close this node's connection to `did`.
 
-#### REQUEST
+* Params: `did`.
+* Result: `{}`.
 
-`POST http://127.0.0.1:50000`
+### sendBackendMessage
 
-#### HEADERS
+Send an extension message to `destination_did`, routed to the protocol `namespace` there.
 
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
+* Params:
+  * `destination_did`;
+  * `namespace`: the extension protocol namespace;
+  * `data`: the payload bytes, standard base64.
+* Result: `{}`.
 
-#### EXAMPLE
+### sendE2eHandshake
 
-```
-## Replace REMOTE-PEER-DID with ice what you got from others
-## Replace YOUR-SIGNATURE with your signature
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "closeConnection", "params": ["REMOTE-PEER-DID"]}' \
-"http://127.0.0.1:50000"
-```
+Ask `destination_did` for its end-to-end encryption public key.
 
-#### RESPONSE
+* Params: `destination_did`.
+* Result: `tx_id`, the transaction id of the handshake request.
 
-#### EXAMPLE
+### sendE2eMessage
 
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {}
-}
-```
+Send bytes to `destination_did` encrypted end to end under `recipient_public_key`.
 
-### listPendings
-
-List all pending connections
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "closeConnection", "params": []}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-* `transport_infos` - list of all pending transports
-  * `transport_id` - id of the transport
-  * `state` - state of the transport
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": [
-        {
-            "transport_id": "abcd1234",
-            "state": "new"
-        }
-    ]
-}
-```
-
-### closePendingTransport
-
-Close a specific pending transport
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace TRANSPORT-ID with the transport_id which in listPendings
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "closePendingTransport", "params": ["TRANSPORT-ID"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {}
-}
-```
-
-### sendSimpleTextMessage
-
-Send simple text message to a peer
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace REMOTE-PEER-DID with did of remote peer
-## Replace TEXT with what you want to send
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "sendSimpleTextMessage", "params": ["REMOTE-PEER-DID", "TEXT"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-* `tx_id` - transaction id
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-         "tx_id": "abcd1234"
-    }
-}
-```
-
-### sendCustomMessage
-
-Send custom message to a peer
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace REMOTE-PEER-DID with did of remote peer
-## Replace MESSAGE-TYPE with type of your message
-## Replace DATA with message payload after base64
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "sendCustomMessage", "params": ["REMOTE-PEER-DID", "MESSAGE-TYPE", "DATA"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-* `tx_id` - transaction id
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-         "tx_id": "abcd1234"
-    }
-}
-```
+* Params:
+  * `destination_did`;
+  * `recipient_public_key`: base58-check, or hex;
+  * `data`: the plaintext bytes, standard base64;
+  * `max_plaintext_frame_len` (optional): the plaintext frame length; `0` or absent is the core
+    default.
+* Result: `stream_id`, the id of the encrypted stream.
 
 ### publishMessageToTopic
 
-Publish data message to specific topic
+Append a text element to the DHT data topic `topic`.
 
-A published message is a data-topic element: it expires by the element lifetime rule of
-[DHT storage](advanced-topic/chord.md#data-topic-storage) unless it is published again.
+* Params: `topic`, `data` (UTF-8 text).
+* Result: `{}`.
 
-#### REQUEST
+### fetchTopicMessages
 
-`POST http://127.0.0.1:50000`
+Read the elements of the DHT data topic `topic`.
 
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace TOPIC with message topic
-## Replace DATA with message payload after base64
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "publishMessageToTOpic", "params": ["TOPIC", "DATA"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {}
-}
-```
-
-### fetchMessageToTopic
-
-Fetch message from specific topic
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace TOPIC with message topic
-## Replace DATA with message payload after base64
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "fetchMessageToTopic", "params": ["TOPIC", "INDEX"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-* MESSAGES - message vec of specific topic
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": [
-        "topic_message",
-    ]
-}
-```
+* Params: `topic`, `skip` (the number of leading elements to omit).
+* Result: `data`, the remaining elements as UTF-8 text; an element that is not UTF-8 is omitted,
+  and a topic not found has no elements.
 
 ### registerService
 
-Register custom service to rings network
+Register this node as a provider of the service `name`: append its DID to the topic `name`.
 
-A registration is one element of the service's data topic: it expires by the element lifetime
-rule of [DHT storage](advanced-topic/chord.md#data-topic-storage) unless the service registers
-again.
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace NAME with the service name what you want to publish to rings network
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "registerService", "params": ["NAME"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {}
-}
-```
+* Params: `name`.
+* Result: `{}`.
 
 ### lookupService
 
-Lookup custom service from rings network, you can find all dids of node which provide service you want.
+The providers registered for the service `name`.
 
-#### REQUEST
+* Params: `name`.
+* Result: `dids`, the registered DIDs.
 
-`POST http://127.0.0.1:50000`
+### lookupOnlineNodes
 
-#### HEADERS
+The signed descriptors of the online-node registry.
 
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
+* Params: `include_expired` (optional, default `false`).
+* Result: `nodes`, a list of descriptors with `did`, `public_key`, `delegatee_public_key`,
+  `node_type` (`Native`, `Browser` or `Ffi`), `network_id`, `storage_redundancy`,
+  `dht_virtual_nodes`, `capabilities` (`{onion_relay}`, the relay's process epoch or `null`),
+  `endpoint_hint`, `started_at_ms`, `heartbeat_at_ms`, `expires_at_ms`, `version` and
+  `signature`.
 
-#### EXAMPLE
+### lookupOnionExits
 
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace NAME with the service name what you want to lookup in rings network
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "lookupService", "params": ["NAME"]}' \
-"http://127.0.0.1:50000"
-```
+The signed onion-exit descriptors.
 
-#### RESPONSE
+* Params:
+  * `service` (optional): `tcp` or `https`; empty or absent means every service;
+  * `include_expired` (optional, default `false`).
+* Result: `exits`, a list of descriptors with `did`, `public_key`, `delegatee_public_key`,
+  `process_epoch`, `node_type`, `network_id`, `service`, `policy` (`{allowed_targets,
+  denied_targets, max_sessions, max_bytes_per_minute}`), `started_at_ms`, `heartbeat_at_ms`,
+  `expires_at_ms`, `version` and `signature`.
 
-* DIDS - did list of nodes which provide service with specific name
+### peerMeasurement
 
-#### EXAMPLE
+This node's local measurement of one peer.
 
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": [
-        "did1",
-        "did2",
-    ]
-}
-```
+* Params: `did`.
+* Result: `measurement`, `null` when the peer was never measured, or
+  * `did`;
+  * `counters`: `{connected, disconnected, sent, failed_to_send, received,
+    failed_to_receive}`;
+  * `credit`: `null`, or `{bytes_sent_to_peer, bytes_received_from_peer, last_seen_seconds,
+    score}`, with `score` in `[1, 10]`;
+  * `reliability`: `healthy`, `unknown` or `degraded`.
 
-### pollMessage
+### listPeerMeasurements
 
-Use this method, you can pull messages received by this node, to provide your custom service, But we suggest use `websocket` endpoint realtime get messages.
+One page of this node's peer measurements, in DID order.
 
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json` `X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace WAIT with a bool value, true will block the request, until new message receive.
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "pollMessage", "params": ["WAIT"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-* message - custom message received
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-      "message": {
-          message_type: 1,
-          data: "base64 text"
-      }
-    }
-}
-```
+* Params:
+  * `limit` (optional): entries per page, from 1 to 1000; absent means 100;
+  * `cursor` (optional): the `next_cursor` of the previous page.
+* Result: `measurements`, as in [`peerMeasurement`](#peermeasurement), and `next_cursor`,
+  `null` at the end.

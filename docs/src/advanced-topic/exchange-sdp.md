@@ -70,14 +70,14 @@ Then we ask Node1 to create an offer by:
 curl -X POST \
 -H "Content-Type: application/json" \
 -H "Authorization: Bearer <node1-api-token>" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "createOffer", "params": []}' \
+--data '{"jsonrpc": "2.0", "id": 1, "method": "createOffer", "params": {"did": "<did2>"}}' \
 "http://127.0.0.1:50000"
 ```
 
 The output is a complex JSON, which including SDP info and candidates encoded in base58:
 
 ```bash
-{"jsonrpc":"2.0","result":<b58 encoded offer>,"id":1}%
+{"jsonrpc":"2.0","result":{"offer":"<b58 encoded offer>"},"id":1}
 ```
 
 ### Accept Offer and Create Answer
@@ -90,14 +90,14 @@ curl -X POST \
 -H "Authorization: Bearer <node2-api-token>" \
 --data '{"jsonrpc": "2.0",
         "id": 1, "method": "answerOffer",
-        "params": ["<b58 encoded offer>"]}' \
+        "params": {"offer": "<b58 encoded offer>"}}' \
 "http://127.0.0.1:50001"
 ```
 
 Here we will get answer responses by `Node 2`:
 
 ```bash
-{"jsonrpc":"2.0","result":"<b58 encoded answer>","id":1}
+{"jsonrpc":"2.0","result":{"answer":"<b58 encoded answer>"},"id":1}
 ```
 
 The result is a counter-offer instead of an answer when `Node 2` already holds its own pending
@@ -117,17 +117,15 @@ curl -X POST \
 --data '{"jsonrpc": "2.0",
          "id": 1, "method":
          "acceptAnswer",
-         "params": ["<b58 encoded answer>"]}' \
+         "params": {"answer": "<b58 encoded answer>"}}' \
 "http://127.0.0.1:50000"
 ```
 
-It will respond:
+It will respond with an empty result, and the connection opens asynchronously; `listPeers`
+shows it:
 
 ```bash
-{"jsonrpc":"2.0","result":{
-    "did":"<did2>","state":"checking",
-    "transport_id":"<uuid of transport>"
-},"id":1}%
+{"jsonrpc":"2.0","result":{},"id":1}
 ```
 
 ## Conclusion

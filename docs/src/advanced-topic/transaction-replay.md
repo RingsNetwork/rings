@@ -45,13 +45,11 @@ This assumes a class's transactions reach the scheduler in signing order, as the
 sending task.
 
 The per-class streams are stored one record per stream (see [Persistence and
-bounds](#persistence-and-bounds)). A load that finds the former shared-stream snapshot
-(`rings-core:transaction-replay`) deletes it without decoding it, which resets every replay window
-once, as deleting the store does. The deletion is best effort: since the former snapshot is never
-decoded, a failed deletion is counted as a persistence failure and logged, admission continues, and
-the next load retries it; once it is gone, no load touches it again. An upgraded
-sender's per-class sequences are stale to a node that has not upgraded, so the upgrade is
-network-wide and mandatory.
+bounds](#persistence-and-bounds)). A store of 0.32 or earlier, which holds one snapshot of streams
+shared by every class under `rings-core:transaction-replay`, is not converted: the operator deletes
+the replay store while the node is stopped before upgrading, which resets every replay window once.
+An upgraded sender's per-class sequences are stale to a node that has not upgraded, so the upgrade
+is network-wide and mandatory.
 
 Every transaction carries a mandatory `u64` sequence. The transaction signature transcript
 binds the receiver-selected `network_id` through the signing domain and binds `destination`,
@@ -180,12 +178,12 @@ unrestorable records and the calls refused on their streams.
 ## Bad records
 
 The first replay operation restores the store from one scan and caches the result; no later call
-reads the store again. A record restores its stream iff it decodes, holds a valid window and sits
-under the record key of the stream it carries. Any other record is kept and joins the set `U` of
-unrestorable records (#910): torn, corrupt, unreadable (any read error but the absence of the entry,
-such as a permission or an I/O error), holding another key's record (which only something outside
-the store can put there), misplaced, or holding an invalid window. Its name is the storage's record
-name: the native file name, or the browser row key.
+reads the store again. Every record is written under the record key of the stream it carries, and
+a record restores its stream iff it decodes and holds a valid window. Any other record is kept and
+joins the set `U` of unrestorable records (#910): torn, corrupt, unreadable (any read error but the
+absence of the entry, such as a permission or an I/O error), holding another key's record (which
+only something outside the store can put there), or holding an invalid window. Its name is the
+storage's record name: the native file name, or the browser row key.
 
 ```text
 unavailable(table, key)  ⟺  record_name(record_key(table, key)) ∈ U

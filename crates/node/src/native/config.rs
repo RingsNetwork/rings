@@ -877,4 +877,23 @@ gateway:
             );
         }
     }
+
+    /// The circuit-era policy limits are refused inside `onion_exit_policy`, which the
+    /// top-level unknown-field rule does not reach.
+    #[test]
+    fn test_removed_onion_exit_policy_limits_are_rejected() {
+        for legacy_field in ["max_circuits", "max_streams_per_circuit"] {
+            let document = generated_document().replace(
+                "onion_exit_policy:\n",
+                &format!("onion_exit_policy:\n  {legacy_field}: 8\n"),
+            );
+            assert!(document.contains(legacy_field));
+            let result = serde_saphyr::from_str::<Config>(&document);
+
+            assert!(
+                result.is_err(),
+                "legacy policy field {legacy_field} must be rejected"
+            );
+        }
+    }
 }

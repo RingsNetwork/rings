@@ -165,8 +165,7 @@ async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEnt
 }
 
 /// Open the browser replay store under a row capacity of every record of a full store
-/// ([`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]) and one row for the former shared-stream snapshot,
-/// until the first load after the #898 upgrade deletes it. IndexedDB evicts its least recently
+/// ([`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]). IndexedDB evicts its least recently
 /// used row beyond the capacity, and an evicted replay record would reopen replay for its
 /// stream, so the capacity must never be reached. The store is authoritative: a record it cannot
 /// decode is reported and kept, never retired.
@@ -175,7 +174,7 @@ async fn open_browser_replay_storage(storage_name: &str) -> NodeResult<ReplaySto
         name: storage_name.to_string(),
         source,
     };
-    let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS + 1)
+    let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS)
         .map_err(|_| open_error(rings_core::error::Error::InvalidCapacity))?;
     IdbStorage::new_with_cap_name_and_authority(rows, storage_name, RecordAuthority::Authoritative)
         .await
