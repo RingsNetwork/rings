@@ -14,16 +14,22 @@
 //!            replies closed ─▶ abort(n); Failed to the user (a reply was or may be lost here:
 //!                             its guard's link retired or dropped, or the queue was full)
 //!            reply         ─▶ credit.replied;  machine.reply ⇒ events;  control(Refill)
-//!            tick          ─▶ gap check;  control(Tick)
+//!            tick          ─▶ gap and deadline check;  control(Tick)
 //!          control(step):  control_loops(step) full credit loops                    (queued)
 //!            Refill ⇒ ⌊(min(W, Q_max) − outstanding) / (k + 1)⌋;  Tick ⇒ keep-alive
+//!          tick at:        min(now + T, last_forward + V/2, heard + Δ), each only once it
+//!                          is later than now: the keep-alive and the deadline are punctual
+//!          any failure ─▶ abort(n);  Failed to the user                             (queued)
 //! ```
 //!
 //! Departure: stream frames wait for the guard's lane, which is the upload's backpressure;
 //! control loops are queued, at most `⌊W / (k + 1)⌋` at a time, so they never hold up the
 //! replies the driver reads.
 //!
-//! Laws: the pure machines' (Target, Sequence, Open result, Credit). Every loop leaves exactly
+//! Laws: the pure machines' (Target, Sequence, Open result, Credit, Keep-alive, Deadline): the
+//! driver wakes at the keep-alive's and the deadline's own instants, so the keep-alive leaves
+//! `V/2` after the last loop and a reply direction silent for `Δ = 2V` fails the session, sends
+//! `abort(n)` toward `h` and hands the user `Failed` (D2′ Liveness). Every loop leaves exactly
 //! one block at `h` and every credit loop `k + 1`, so upload is `1/(k + 1)` of download when the
 //! client only receives (Prop. SURB batching). The driver awaits the user's consumption of each
 //! event before it tops up credit, so a slow user slows `h` down instead of losing bytes.
@@ -41,6 +47,7 @@ use rings_runtime::sleep;
 use rings_runtime::Spawner;
 use zeroize::Zeroizing;
 
+use super::client::keep_alive_at;
 use super::client::OnionClientCredit;
 use super::client::OnionClientEvent;
 use super::client::OnionClientSession;
@@ -70,8 +77,9 @@ use crate::onion::OnionServiceName;
 /// not as a timeout.
 const ONION_SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// The period of the driver's tick.
-const ONION_SESSION_TICK: Duration = Duration::from_secs(10);
+/// The longest period of the driver's tick, in milliseconds: the gap check's resolution; the
+/// keep-alive and the deadline wake the driver at their own instants.
+const ONION_SESSION_TICK_MS: u128 = 10_000;
 
 /// Commands and events queued between a stream and its driver.
 const ONION_SESSION_QUEUE: usize = 32;
@@ -254,7 +262,7 @@ pub(crate) async fn open(
         route: request.route,
         class: request.class,
         window: request.window,
-        machine: OnionClientSession::new(target),
+        machine: OnionClientSession::new(target, get_epoch_ms()),
         credit: OnionClientCredit::default(),
         last_forward_ms: 0,
         fin_sent: false,
@@ -331,7 +339,7 @@ impl OnionSessionDriver {
         if !started || self.control(OnionControlStep::Refill, &sink).is_err() {
             return;
         }
-        let mut tick = Box::pin(sleep(ONION_SESSION_TICK).fuse());
+        let mut tick = Box::pin(sleep(self.tick_after(get_epoch_ms())).fuse());
         loop {
             let (step, control) = futures::select! {
                 command = commands.next() => match command {
@@ -364,7 +372,7 @@ impl OnionSessionDriver {
                     ),
                 },
                 _ = tick => {
-                    tick = Box::pin(sleep(ONION_SESSION_TICK).fuse());
+                    tick = Box::pin(sleep(self.tick_after(get_epoch_ms())).fuse());
                     (self.expire(), Some(OnionControlStep::Tick))
                 },
             };
@@ -463,8 +471,21 @@ impl OnionSessionDriver {
         }
     }
 
-    /// The tick's gap check: a reply missing for longer than the reorder window fails the
-    /// session.
+    /// The wait from `now` to the driver's next tick: the earliest of `now + T`, the keep-alive
+    /// (while credit is still sent) and the deadline, each counted only once it is later than
+    /// `now`, so a keep-alive the guard's lane refused is retried a period later, not in a spin.
+    fn tick_after(&self, now_ms: u128) -> Duration {
+        let keep_alive_ms = (!self.world_ended).then(|| keep_alive_at(self.last_forward_ms));
+        let wake_ms = [keep_alive_ms, self.machine.deadline_ms()]
+            .into_iter()
+            .flatten()
+            .filter(|at_ms| *at_ms > now_ms)
+            .fold(now_ms.saturating_add(ONION_SESSION_TICK_MS), u128::min);
+        Duration::from_millis(u64::try_from(wake_ms.saturating_sub(now_ms)).unwrap_or(u64::MAX))
+    }
+
+    /// The tick's checks: a reply missing for longer than the reorder window, or a reply
+    /// direction silent for `Δ` (Law Deadline), fails the session.
     fn expire(&mut self) -> Result<()> {
         self.machine
             .expire(get_epoch_ms())

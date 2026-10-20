@@ -37,7 +37,11 @@
 //!   under its own block, so a client whose session closed without a reply (no block left)
 //!   learns of it at its next loop, at the latest its `V/2` keep-alive, which lands inside the
 //!   `V`-long tombstone; a session never opened is left to the client's open timeout. A
-//!   sequenced frame is never dropped for queue room: the session fails closed instead.
+//!   sequenced frame is never dropped for queue room: the session fails closed instead. An
+//!   idle session's return segment is witnessed by the machine's echo (Law Echo), which this
+//!   shell sends as any other reply: a dead return link fails `ς` at the client by its
+//!   deadline `Δ = 2V`, and the client's `abort` closes it here; a dead forward link closes it
+//!   here after `V` without a forward loop, and at the client by its deadline.
 //! - **Pause.** The world is read only when the machine reports a capacity, so a `tcp` session
 //!   with no credit leaves its socket unread, and resumes on credit.
 //! - **Fate.** A retired link, or a message dropped here from a peer whose link stays up, ends

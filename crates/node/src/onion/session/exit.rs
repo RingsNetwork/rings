@@ -16,7 +16,8 @@
 //!                a later T naming another target ⇒ abort
 //!   fin(t?)      Unbound ∧ T ⇒ bind t, Open(t), ShutdownWrite (an empty upload);
 //!                otherwise ⇒ ShutdownWrite;  a later T naming another target ⇒ abort
-//!                    then drain the held world bytes into the new credit
+//!                    then drain the held world bytes into the new credit,
+//!                    then echo
 //! forward abort(n):  the client gave up ⇒ Close, on arrival (no reply)
 //! opened(ok):        ok ⇒ Open, reply data(0, 0, ε) once some υ is available
 //!                    ¬ok ⇒ abort
@@ -27,6 +28,8 @@
 //!                    a persisting gap ⇒ abort
 //!                    t − last forward ≥ V, or both directions closed ⇒ Close
 //! fail(t):           the world failed ⇒ abort
+//! echo(t):           Open(acked) ∧ ¬read_closed ∧ t − last_reply ≥ V/2 ⇒ reply data(n, 0, ε)
+//!                    (last_reply: when the last reply of ς left; every reply sets it)
 //! abort:             reply abort(n) if a block is left, then Close (fail closed, #834 D2′);
 //!                    held bytes are dropped, since the stream ends failed; after the world's
 //!                    fin is replied, Close without a reply (no abort overtakes that fin)
@@ -52,6 +55,19 @@
 //!   a failure; `fin` is sent only when the world's bytes really ended. Without a block the
 //!   session closes without a reply, and the shell answers the client's next loop, which
 //!   brings its own block, with `abort` ([`reply_to_unheld`]).
+//! - **Echo** (D2′ Liveness). A forward loop arriving at `a` when no reply of `ς` has left in
+//!   `(a − V/2, a]` is answered at once with the echo `data(n, 0, ε)`. The echo spends the
+//!   block that loop brought, so it is credit-neutral (the arrival changes `|Q_{h,ς}|` by the
+//!   blocks its frame carries alone), consumes the next reply sequence, and carries no stream
+//!   bytes. The rule is a pure function of the arrival instant and the last reply's departure;
+//!   `h` keeps no timer for it, and a burst of forward loops costs at most one echo per `V/2`.
+//!   No echo precedes the open ack, so `data(0, 0, ε)` and `abort(0)` keep their meaning, and
+//!   none follows the world's `fin`. With the client's keep-alive, which sends a forward loop
+//!   whenever none has left for `V/2`, forward arrivals are less than `3V/4` apart when segment
+//!   latency varies by less than `V/4`, so after a reply at `r` some arrival in
+//!   `[r + V/2, r + 5V/4)` finds the horizon empty: replies of `ς` leave `h` less than `5V/4`
+//!   apart, and reach the client less than `3V/2 < Δ = 2V` apart (paper, Prop. Liveness of
+//!   failure).
 
 use std::collections::VecDeque;
 
@@ -67,6 +83,11 @@ use crate::onion::circuit::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionSurb;
+
+/// `V/2`, the echo horizon: a forward loop is echoed when no reply of its session has left for
+/// this long (Law Echo). It equals the client's keep-alive period, so an idle session costs one
+/// echo per keep-alive.
+pub(crate) const ONION_SESSION_ECHO_HORIZON_MS: u128 = ONION_FORWARD_MAX_VALIDITY_MS / 2;
 
 /// A sequenced frame of a stream direction, as the reorder window releases it.
 #[derive(Debug)]
@@ -159,6 +180,9 @@ pub(crate) struct OnionExitSession {
     last_forward_ms: u128,
     /// The arrival of the first forward loop.
     created_ms: u128,
+    /// The departure of the last reply, the echo rule's state; meaningful once acked, since
+    /// the ack is the first reply.
+    last_reply_ms: u128,
 }
 
 impl OnionExitSession {
@@ -176,6 +200,7 @@ impl OnionExitSession {
             write_closed: false,
             last_forward_ms: now_ms,
             created_ms: now_ms,
+            last_reply_ms: now_ms,
         }
     }
 
@@ -228,6 +253,7 @@ impl OnionExitSession {
         }
         self.flush_ack(now_ms, &mut effects);
         self.drain(now_ms, &mut effects);
+        self.echo(now_ms, &mut effects);
         effects
     }
 
@@ -413,6 +439,20 @@ impl OnionExitSession {
         }
     }
 
+    /// The echo rule at the forward arrival `now` (Law Echo): if no reply has left in
+    /// `(now − V/2, now]`, reply `data(n, 0, ε)` under the block the loop brought. Nothing before
+    /// the ack, after the world's `fin`, or with `Q_{h,ς} = ∅` (the loop's block was refused),
+    /// since a reply that cannot leave would close the session.
+    fn echo(&mut self, now_ms: u128, effects: &mut Vec<OnionExitEffect>) {
+        let quiet = self.phase == (OnionExitPhase::Open { acked: true })
+            && !self.read_closed
+            && now_ms.saturating_sub(self.last_reply_ms) >= ONION_SESSION_ECHO_HORIZON_MS
+            && !self.pool.is_empty(now_ms);
+        if quiet {
+            self.reply_frame(now_ms, ReplyKind::Data(Bytes::new()), effects);
+        }
+    }
+
     /// Fail closed: reply `abort(n)` if a block is left, then close; held bytes are dropped,
     /// since nothing after an `abort` counts. Once the world's `fin` is replied the download is
     /// complete, so the session closes without an `abort` that could overtake that `fin`; a
@@ -452,6 +492,7 @@ impl OnionExitSession {
             ReplyKind::Abort => OnionFrame::Abort { sequence },
         };
         self.reply = sequence.next();
+        self.last_reply_ms = now_ms;
         effects.push(OnionExitEffect::Reply {
             frame,
             surb: Box::new(surb),

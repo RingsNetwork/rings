@@ -34,9 +34,11 @@
 //! `Dropped(p)`, where a lost cell may have been one of theirs, each fails closed at this node
 //! and sends `abort` toward its other endpoint, which therefore observes the failure too, at the
 //! latest at its next loop. A cell lost at a relay is observed by both endpoints as a sequence
-//! gap, which fails the session closed the same way (`session`). Not yet complete: a session
-//! with no reply in flight sees no gap, so the death of a link that is neither endpoint's own is
-//! not yet observed at both endpoints (#975).
+//! gap, which fails the session closed the same way (`session`). A session with no reply in
+//! flight sees no gap; its liveness rule observes the death of a link that is neither endpoint's
+//! own instead: `h` echoes the client's keep-alive, the client fails a session silent for
+//! `Δ = 2V` and aborts it toward `h`, and `h` drops a session without a forward loop for `V`
+//! (`session`, D2′ Liveness, #975).
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
