@@ -43,9 +43,7 @@
     are replaced by `max_sessions`; services outside `{tcp, https}` are rejected (#839); a relay
     requires `advertise_presence`, and an exit is always a relay (`OnionRole`, #842);
     `ProcessorBuilder::onion_idle_floor` may only lower the idle floor.
-  - Core API: `ConnectionStateChange`/`PeerRetired` carry the link generation; `PeerLink`,
-    `admitted_links()`, `connection_registry_capacity()` and generation-exact
-    `disconnect_link` are added.
+  - Core API: `Swarm::connection_registry_capacity()` is added.
 
 - User DHT sends (`storage_fetch`, `storage_store`, `append`, `tombstone`) recompute their next
   hop from fresh topology after a refusal before acceptance, woken by topology, link or capacity
@@ -164,13 +162,13 @@
     any `Message`, so the application cannot originate core's protocol messages; `Message`
     implements `From<ApplicationData>`, the inverse of the inbound projection, and
     `ApplicationData::custom` builds a custom message.
-  - `SwarmEvent` carries only logical facts, `PeerAdmitted` and `PeerRetired`;
-    `ConnectionStateChange`, `PeerTransition` and `peer_transition` are removed. Messages and
-    facts share the inbox's one queue, in the order core produced them, and an unread
-    `PeerAdmitted` is withdrawn by its `PeerRetired`. A connection's admission is announced in
-    the critical section that activates it and its retirement in the one that removes it, so
-    every admitted generation is announced both ways, in the order decided, and the per-peer
-    delivery turns are removed. `Swarm::is_peer_admitted` reads the active record.
+  - `SwarmEvent` carries only logical facts, `PeerAdmitted`, `PeerRetired` and (#969)
+    `MessageDropped`; `ConnectionStateChange`, `PeerTransition` and `peer_transition` are
+    removed. Messages and facts share the inbox's one queue, in the order core produced them,
+    and an unread `PeerAdmitted` is withdrawn by its `PeerRetired`. A connection's admission is
+    announced in the critical section that activates it and its retirement in the one that
+    removes it, so every admitted generation is announced both ways, in the order decided, and
+    the per-peer delivery turns are removed. `Swarm::is_peer_admitted` reads the active record.
   - `Swarm::lookup_successor` returns `SuccessorLookup::Routed(SuccessorReport)`, a handle that
     resolves to the reported successor; a report no live handle awaits is dropped by core.
     `SuccessorReport::tx_id`, `FindSuccessorReport::is_application_lookup` and the unused
