@@ -206,10 +206,11 @@ $A=64$ bytes whatever $|t|$; and $\In_f=\Out_f=\mathrm{Frame}$,
 \begin{gather*}
 \enc(\mathrm{data}(n,\phi,w))=\mathtt{00}\,\|\,n\,\|\,\phi\,\|\,w,\\
 \enc(\mathrm{fin}(n,\phi))=\mathtt{01}\,\|\,n\,\|\,\phi\,\|\,(|t|\,\|\,t\ \text{if}\ T),\\
-\enc(\mathrm{credit}(\upsilon_1..\upsilon_k))=\mathtt{02}\,\|\,\upsilon_1\|\cdots\|\upsilon_k,\\
+\enc(\mathrm{credit}(m,\upsilon_1..\upsilon_k))=\mathtt{02}\,\|\,m\,\|\,\upsilon_1\|\cdots\|\upsilon_k,\\
 \enc(\mathrm{abort}(n))=\mathtt{03}\,\|\,n,
 \end{gather*}
-with $n$ a $32$-bit per-direction sequence, $\phi$ a flags byte,
+with $n$ a $32$-bit per-direction sequence, $m$ the $32$-bit forward
+high-water mark (the sender's next forward sequence), $\phi$ a flags byte,
 $|w|\le C_0-7$ (L3: six frame bytes and the $\pad$ marker), and
 $\upsilon_j$ SURBs of $\sid$ (D8).
 \begin{itemize}
@@ -237,8 +238,11 @@ $\upsilon_j$ SURBs of $\sid$ (D8).
   failure without a SURB reaches $\cl$ at its next loop.  $\mathrm{fin}$ is
   sent only when the world's bytes really ended.
 \item \emph{Order.}  $n$ starts at $0$ per direction and grows by one per
-  $\mathrm{data}$, $\mathrm{fin}$ or $\mathrm{abort}$; $\mathrm{credit}$ is
-  unsequenced.  It
+  $\mathrm{data}$, $\mathrm{fin}$ or $\mathrm{abort}$; $\mathrm{credit}$
+  takes no sequence but carries $m$, so $h$, whose next expected forward
+  sequence is below $m$, knows a frame is missing exactly as when a later
+  frame arrives: a forward frame lost with no later frame behind it is
+  exposed by the next credit loop, the keep-alive at the latest.  It
   lies inside the carry, so no relay sees it.  A receiver reorders within
   $Q_{\max}$ frames; a gap persisting past that window, or for $V$ after a
   later frame, fails $\sid$ closed.  There is no retransmission, so a lost
@@ -769,11 +773,12 @@ and the pools of all sessions at $h$ count against $\quota(h,f,\epsilon)$.
 \end{defD}
 
 \begin{proposition}[SURB batching]\label{prop:batch}
-A credit loop carries $k=\lfloor(C_0-2)/|\upsilon|\rfloor$ SURBs and
-yields $k+1$ credits; upload is $1/(k+1)$ of download.  At $b=16$\,KiB,
+A credit loop carries $k=\lfloor(C_0-6)/|\upsilon|\rfloor$ SURBs (the tag,
+$m$ and the $\pad$ marker take six bytes) and yields $k+1$ credits; upload
+is $1/(k+1)$ of download.  At $b=16$\,KiB,
 \begin{gather*}
-C_0-2=16384-2919-16-2=13447,\\
-k=\lfloor13447/2979\rfloor=4 .
+C_0-6=16384-2919-16-6=13443,\\
+k=\lfloor13443/2979\rfloor=4 .
 \end{gather*}
 \end{proposition}
 \begin{proof}
@@ -811,7 +816,11 @@ apart, so $\cl$ never fails a live session.  (ii) If a link of either
 segment stops delivering at $t_0$, both endpoints observe the failure:
 after a forward loss $h$ drops $\sid$ by $t_0+V$ and $\cl$ fails it by
 $t_0+3V+L$; after a return loss $\cl$ fails it by $t_0+2V+L$, and its
-$\mathrm{abort}$ closes $\sid$ at $h$ on arrival.
+$\mathrm{abort}$ closes $\sid$ at $h$ on arrival.  (iii) If one forward frame
+$n$, sent at $t_0$, is lost while both segments deliver, and $F$ is one
+forward-segment latency, $h$ fails $\sid$ by $t_0+3V/2+F$ and sends
+$\mathrm{abort}$, and $\cl$ fails it by $t_0+3V/2+F+L$, whether or not a
+later sequenced frame follows.
 \end{proposition}
 \begin{proof}
 Forward loops of $\sid$ leave $\cl$ at most $V/2$ apart (keep-alive), so
@@ -825,7 +834,12 @@ travels the forward segment, which still delivers.  Forward loss: no
 forward loop reaches $h$ after $t_0$, so $h$ drops $\sid$ by $t_0+V$;
 every SURB it holds arrived by $t_0$ and expires by $t_0+V$
 (Inv.~\ref{inv:credit}), so its last reply leaves by $t_0+V$ and $\cl$
-fails $\sid$ by $t_0+V+L+\Delta$.
+fails $\sid$ by $t_0+V+L+\Delta$.  (iii) The next forward loop after $n$
+leaves within $V/2$ (keep-alive) and arrives by $t_0+V/2+F$; it is a
+sequenced frame above $n$ or a credit with $m>n$, so from then on $h$
+knows $n$ missing (Order).  The gap fails $\sid$ once it persists for $V$,
+by $t_0+3V/2+F$, and $h$ spends the SURB that loop brought on
+$\mathrm{abort}$, which reaches $\cl$ one return latency later.
 \end{proof}
 
 The echo is the cost of observing the return segment: an idle session
@@ -1413,11 +1427,11 @@ L9 & replayed layer and reused SURB rejected; an earlier process epoch rejected 
 reconcile & $\mathrm{reconcile}_i(L)$ closes $\mathcal L_i\setminus L$, opens $L\setminus\mathcal L_i$ with the full-table refusal; $\mathcal L_i=L\setminus\mathrm{refused}$; a dropped \code{Retired} releases the slot; called on callback replacement and each tick $\le V$; $L$ linearised with the event stream: no live link closed, no retired one reopened \\
 D6 & a uniform (cover) cell is rejected at $\alpha$ decoding or at $\gamma$, is charged $u(b)$ once, never reaches $R_i$ \\
 D1$'$, D2 & unknown shape rejected at configuration, descriptor decode, route construction; a backend name only under $\mathsf{invoke}$, canonical, $\le32$ bytes over $[\mathtt{a\text{-}z0\text{-}9.\_\text{-}}]$, validated against signed descriptors; $\sigma$ carries no $\omega$ \\
-credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after new credit; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs; credit beyond $Q_{\max}$ is dropped \\
+credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, removes each SURB before release, drops expired SURBs, and resumes after new credit; two sessions at one $h$ never share a SURB; $\mathrm{fin}$ both ways drops $\sid$; a credit frame adds $k$ SURBs and carries the forward high-water mark $m$; credit beyond $Q_{\max}$ is dropped \\
 rate & loopback single-client \code{tcp} download $\ge1$\,MB/s at $b=16$\,KiB, upload $\approx1/(k+1)$ of download \\
 emission & no $V$-window of a link exceeds $\rho B$ units; constant rate while active, real cells FIFO; an honest sender at full load is never refused; an idle link emits exactly $r_{\mathrm{idle}}$; a real cell at $t$ keeps rate $r$ on $[t,t+D)$ \\
 frames & $T$ set until the first reply; open only on a matching digest; open ack $\mathrm{data}(0,0,\epsilon)$, a refusal is $\mathrm{abort}(0)$; $\mathrm{abort}$ applied on arrival, never an end of stream; reorder within $Q_{\max}$; a persisting gap fails closed; reserved $\phi$ bits rejected \\
-liveness & an idle session gets one echo $\mathrm{data}(n,0,\epsilon)$ per forward loop arriving $V/2$ or more after its last reply, credit-neutral, at most one per $V/2$; a live session is never failed; a forward loss fails $\sid$ at $h$ by $V$ and at $\cl$ by $3V+L$; a return loss fails it at $\cl$ by $2V+L$ and at $h$ by $\cl$'s $\mathrm{abort}$ (Prop.~\ref{prop:liveness}) \\
+liveness & an idle session gets one echo $\mathrm{data}(n,0,\epsilon)$ per forward loop arriving $V/2$ or more after its last reply, credit-neutral, at most one per $V/2$; a live session is never failed; a forward loss fails $\sid$ at $h$ by $V$ and at $\cl$ by $3V+L$; a return loss fails it at $\cl$ by $2V+L$ and at $h$ by $\cl$'s $\mathrm{abort}$; a single lost forward frame, the last one included, fails it at $h$ by $3V/2+F$ through the credit high-water mark $m$ (Prop.~\ref{prop:liveness}) \\
 reply auth & no exit signature on the wire; a one-bit flip of a reply fails $\Enc{\tau}{k_{c_n}}$ \\
 replay store & no replayed layer admitted across filter rotation; a filter grows by blocks and is dropped exactly when its $x$ passes; memory tracks admitted tags; measured false-positive rate within $2^{-20}$ \\
 seeds & derived keys match the KDF definition; a weak derived key forces a re-draw \\
