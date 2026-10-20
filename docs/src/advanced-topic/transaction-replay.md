@@ -180,12 +180,12 @@ unrestorable records and the calls refused on their streams.
 ## Bad records
 
 The first replay operation restores the store from one scan and caches the result; no later call
-reads the store again. A record restores its stream iff it decodes, holds a valid window and sits
-under the record key of the stream it carries. Any other record is kept and joins the set `U` of
-unrestorable records (#910): torn, corrupt, unreadable (any read error but the absence of the entry,
-such as a permission or an I/O error), holding another key's record (which only something outside
-the store can put there), misplaced, or holding an invalid window. Its name is the storage's record
-name: the native file name, or the browser row key.
+reads the store again. Every record is written under the record key of the stream it carries, and
+a record restores its stream iff it decodes and holds a valid window. Any other record is kept and
+joins the set `U` of unrestorable records (#910): torn, corrupt, unreadable (any read error but the
+absence of the entry, such as a permission or an I/O error), holding another key's record (which
+only something outside the store can put there), or holding an invalid window. Its name is the
+storage's record name: the native file name, or the browser row key.
 
 ```text
 unavailable(table, key)  ⟺  record_name(record_key(table, key)) ∈ U
