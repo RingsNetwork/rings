@@ -54,7 +54,7 @@ async fn admit_at(
             digest,
             MessageCategory::Application.into(),
             1,
-            OriginQuotaInstant::from_nanos(now),
+            || OriginQuotaInstant::from_nanos(now),
         )
         .await
 }
@@ -221,5 +221,40 @@ async fn replay_persistence_failure_rolls_back_provisional_quota() -> Result<()>
         admit_at(&runtime, key, 0, digest(1), 0).await?,
         SequenceVerdict::First
     );
+    Ok(())
+}
+
+/// Law (Clock under the lock, #953): an admission reads the quota clock only while it holds
+/// the admission lock. Two admissions on one quota key are created in the order `A, B` and
+/// take the lock in the order `B, A`; an instant fixed at creation would hand `A` an instant
+/// older than the one `B` recorded and fail with `MonotonicTimeRegressed`. Read under the
+/// lock, the instants follow the lock order and both admissions commit.
+#[tokio::test]
+async fn test_quota_clock_is_read_under_the_admission_lock() -> Result<()> {
+    let runtime = runtime(4);
+    let key = stream(1);
+    let readings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let clock = |label: &'static str| {
+        let readings = std::sync::Arc::clone(&readings);
+        move || {
+            let mut readings = readings.lock().expect("test clock lock");
+            let tick = readings.len() as u128;
+            readings.push(label);
+            OriginQuotaInstant::from_nanos(tick * ONE_SECOND)
+        }
+    };
+    let charge = || MessageCategory::Application.into();
+
+    let held = runtime.state.lock().await;
+    let mut first = std::pin::pin!(runtime.admit_at(key, 0, digest(1), charge(), 1, clock("A")));
+    let mut second = std::pin::pin!(runtime.admit_at(key, 1, digest(2), charge(), 1, clock("B")));
+    assert!(futures::poll!(first.as_mut()).is_pending());
+    assert!(futures::poll!(second.as_mut()).is_pending());
+    assert!(readings.lock().expect("test clock lock").is_empty());
+    drop(held);
+
+    assert_eq!(second.await?, SequenceVerdict::First);
+    assert_eq!(first.await?, SequenceVerdict::Late);
+    assert_eq!(*readings.lock().expect("test clock lock"), ["B", "A"]);
     Ok(())
 }

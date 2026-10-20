@@ -4,6 +4,9 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
+use futures::future::join_all;
+use rerouted::LookupPlacement;
+use rerouted::OperatePlacement;
 
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
@@ -20,6 +23,7 @@ use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
 use crate::error::Result;
+use crate::error::SendClass;
 use crate::message::effects::core_actor_steps;
 use crate::message::effects::yield_core_actor_step;
 use crate::message::effects::CoreEffect;
@@ -31,12 +35,39 @@ use crate::message::types::SyncEntriesWithSuccessorReport;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
 use crate::swarm::transport::egress::Application;
 use crate::swarm::transport::egress::Discipline;
 use crate::swarm::transport::egress::Egress;
+use crate::swarm::transport::reroute;
+use crate::swarm::transport::Attempts;
+use crate::swarm::transport::Route;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
+
+/// Join the results of an operation's placements, which all ran to completion.
+///
+/// `Ok` iff every placement succeeded. Otherwise the error reported is the join of the
+/// placements' acceptance classes: an `Ambiguous` error when any placement's effect is unknown
+/// (so a caller never mistakes a possibly-applied operation for an unapplied one), else the
+/// first error; every other error is logged, not dropped.
+fn join_placements(results: Vec<Result<()>>) -> Result<()> {
+    let mut errors = results
+        .into_iter()
+        .filter_map(Result::err)
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let reported = errors
+        .iter()
+        .position(|error| error.send_class() == SendClass::Ambiguous)
+        .unwrap_or(0);
+    let error = errors.swap_remove(reported);
+    for other in errors {
+        tracing::warn!(%other, "another placement of the storage operation failed");
+    }
+    Err(error)
+}
 
 fn finish_storage_action(act: PeerRingAction) -> Result<()> {
     match act {
@@ -91,8 +122,9 @@ async fn cache_lookup_reply(
     Ok(())
 }
 
-/// Execute storage fetch actions for the Swarm-facing storage API, sending each remote
-/// lookup and each read repair through `sender`, the application boundary's egress.
+/// Execute storage fetch actions for the Swarm-facing storage API: each remote lookup is a
+/// placement making the `attempts` given (`reroute`, #859), each read repair is sent through
+/// `sender`, the application boundary's egress.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
 pub(crate) async fn handle_storage_fetch_act(
@@ -101,6 +133,7 @@ pub(crate) async fn handle_storage_fetch_act(
     resource: Did,
     act: PeerRingAction,
     redundancy: u16,
+    attempts: Attempts,
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
@@ -112,33 +145,34 @@ pub(crate) async fn handle_storage_fetch_act(
                 .await?;
             run_storage_repair_transport_effects(&transport, sender, repair).await?;
         }
-        PeerRingAction::RemoteAction(next, dht_act) => {
-            if let PeerRingRemoteAction::FindEntry(query) = dht_act {
-                tracing::debug!(
-                    "storage_fetch send_message: SearchEntry({:?}) to {:?}",
-                    query,
-                    next
-                );
-                sender
-                    .send_message(
-                        Message::SearchEntry(SearchEntry {
-                            resource: query.resource,
-                            placement: query.placement,
-                            redundancy,
-                        }),
-                        next,
-                    )
-                    .await?;
-            }
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindEntry(query)) => {
+            tracing::debug!("storage_fetch SearchEntry({query:?}) to {next:?}");
+            let placement = LookupPlacement { query, redundancy };
+            let message = placement.message(query);
+            reroute(
+                &transport,
+                &placement,
+                Route::Remote { next, message },
+                attempts,
+            )
+            .await?;
         }
         PeerRingAction::MultiActions(acts) => {
-            for (act, has_next) in core_actor_steps(acts) {
-                handle_storage_fetch_act(transport.clone(), sender, resource, act, redundancy)
-                    .await?;
-                if has_next {
-                    yield_core_actor_step().await;
-                }
-            }
+            // Placements are independent: one waiting for its trigger must not hold the others.
+            // The Swarm storage API runs off the core actor, so nothing here yields to it.
+            join_placements(
+                join_all(acts.into_iter().map(|act| {
+                    handle_storage_fetch_act(
+                        transport.clone(),
+                        sender,
+                        resource,
+                        act,
+                        redundancy,
+                        attempts.clone(),
+                    )
+                }))
+                .await,
+            )?;
         }
         PeerRingAction::EntryMisses(misses) => {
             transport.observe_storage_misses(resource, redundancy, misses)?;
@@ -148,22 +182,50 @@ pub(crate) async fn handle_storage_fetch_act(
     Ok(())
 }
 
-/// Execute storage store actions, sending each remote operation through `sender`.
+/// Execute storage store actions: each remote operation is a placement making the `attempts`
+/// given (`reroute`, #859), sent under the egress discipline they imply.
+///
+/// ```text
+/// MultiActions under Rerouted ⇒ concurrently: placements are independent, and one waiting
+///                                for its trigger must not hold the others (the Swarm API runs
+///                                off the core actor)
+///                 under Single   ⇒ one by one, yielding to the core actor between steps (the
+///                                protocol context runs on it)
+/// ```
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
-pub(super) async fn handle_storage_store_act<S>(sender: &S, act: PeerRingAction) -> Result<()>
-where S: PayloadSender + rings_runtime::MaybeSendSync + ?Sized {
+pub(super) async fn handle_storage_store_act(
+    transport: Arc<SwarmTransport>,
+    act: PeerRingAction,
+    attempts: Attempts,
+) -> Result<()> {
     match act {
-        PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindEntryForOperate(op)) => {
-            sender
-                .send_message(Message::OperateEntry(*op), target)
-                .await?;
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindEntryForOperate(op)) => {
+            let placement = OperatePlacement(*op);
+            let message = placement.message();
+            reroute(
+                &transport,
+                &placement,
+                Route::Remote { next, message },
+                attempts,
+            )
+            .await?;
         }
         PeerRingAction::MultiActions(acts) => {
-            for (act, has_next) in core_actor_steps(acts) {
-                handle_storage_store_act(sender, act).await?;
-                if has_next {
-                    yield_core_actor_step().await;
+            match attempts {
+                Attempts::Rerouted(_) => join_placements(
+                    join_all(acts.into_iter().map(|act| {
+                        handle_storage_store_act(transport.clone(), act, attempts.clone())
+                    }))
+                    .await,
+                )?,
+                Attempts::Single => {
+                    for (act, has_next) in core_actor_steps(acts) {
+                        handle_storage_store_act(transport.clone(), act, Attempts::Single).await?;
+                        if has_next {
+                            yield_core_actor_step().await;
+                        }
+                    }
                 }
             }
         }
@@ -284,23 +346,22 @@ async fn handle_storage_search_act(
 }
 
 /// Apply `operation` under the transport's configured redundancy: locally where this node is
-/// an accepted placement and by `OperateEntry`, sent through `sender`, toward every remote one.
+/// an accepted placement and by `OperateEntry` toward every remote one, each remote placement
+/// making the `attempts` given.
 ///
-/// The Swarm storage API passes its application-boundary sender; the protocol context passes its
-/// protocol egress (`SwarmTransport::protocol_egress`).
-pub(crate) async fn operate_entry<S>(
-    transport: &SwarmTransport,
-    sender: &S,
+/// The Swarm storage API reroutes (`Attempts::Rerouted`), its sends under the application
+/// discipline; the protocol context makes one attempt (`Attempts::Single`), its sends under the
+/// protocol discipline, so no inbound lane waits on a peer (see `swarm::transport::Attempts`).
+pub(crate) async fn operate_entry(
+    transport: &Arc<SwarmTransport>,
     operation: EntryOperation,
-) -> Result<()>
-where
-    S: PayloadSender + rings_runtime::MaybeSendSync + ?Sized,
-{
+    attempts: Attempts,
+) -> Result<()> {
     let action = transport
         .dht
         .entry_operate(operation, transport.storage_redundancy())
         .await?;
-    handle_storage_store_act(sender, action).await
+    handle_storage_store_act(transport.clone(), action, attempts).await
 }
 
 fn next_hop_for_sync_entries(
@@ -459,6 +520,7 @@ impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
     }
 }
 
+mod rerouted;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 #[cfg(test)]
 mod tests;

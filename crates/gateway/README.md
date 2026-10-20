@@ -1,7 +1,7 @@
 # rings-gateway
 
 `rings-gateway` is the native packet-to-stream gateway used by Rings nodes. It forwards
-explicitly selected IPv4/TCP flows through Rings Onion circuits. The packet mechanism does not
+explicitly selected IPv4/TCP flows through Rings Onion loops. The packet mechanism does not
 imply one routing policy: the Rings gateway contract is selective routing and has no full-tunnel
 or kill-switch mode.
 
@@ -141,8 +141,6 @@ gateway:
   route_ledger_path: "~/.rings/gateway-routes.json"
   status_refresh_secs: 2
   onion_service: tcp
-  onion_hop_count: 0
-  onion_allow_short_paths: false
 ```
 
 For externally steered packet operation, `included_routes` may be empty. The packet interface
@@ -201,8 +199,9 @@ The loopback-only internal API exposes gateway status when configured:
 GET /gateway/status
 ```
 
-It reports interface, lifecycle, normalized capture routes, active-flow count, last error, and
-Onion-exit availability without granting route mutation authority.
+It reports interface, lifecycle, normalized capture routes, active-flow count, Onion-exit
+availability with the reason it is not available, and the cause of the most recent flow reset,
+without granting route mutation authority.
 
 <!-- ANCHOR_END: operator-guide -->
 ## Library model API
@@ -224,12 +223,12 @@ RINGS_GATEWAY_BENCH_BYTES_PER_FLOW=1024 \
 cargo run --release -p rings-gateway --example gateway-bench
 ```
 
-The native node integration test uses real WebRTC processors, a two-hop Onion route, and a public
-TCP exit with in-memory packet injection:
+The native node integration test uses real WebRTC processors, a guard-closed Onion loop over three
+relays, and a public TCP exit with in-memory packet injection:
 
 ```bash
 cargo test -p rings-node \
-  captured_tcp_reaches_public_http_only_through_two_hop_onion_route \
+  captured_tcp_reaches_public_http_only_through_onion_loop \
   -- --ignored --nocapture
 ```
 
@@ -244,9 +243,52 @@ These evidence classes are reported separately; none is described as a complete 
 ### Lifecycle and ownership boundaries
 
 `GatewayState::Active` means packet admission is enabled. Exit availability is a separate
-input to `GatewayStatus`: unknown or unavailable exits project to `GatewayHealth::Degraded`,
-and recovery projects back to active without a second lifecycle transition. Status readers
-use `GatewayStatusHandle::snapshot()`.
+input to `GatewayStatus`, an `ExitObservation` in which every unknown or unavailable exit owns its
+reason: such exits project to `GatewayHealth::Degraded` with that reason, so a degraded status
+always names its cause, and recovery projects back to active without a second lifecycle
+transition. Status readers use `GatewayStatusHandle::snapshot()`.
+
+Every flow reset carries a typed `FlowResetReason` (handshake expiry, open expiry, idle timeout,
+stream stall, client reset, ungraceful close, Onion open or stream failure, Onion stream reset,
+closed bridge, or gateway stop). The runtime logs it at info level and records it as
+`GatewayStatus::last_flow_reset`. A half-close is forwarded only after the client's FIN, so an
+endpoint closed by reset or idle timeout is reported as a reset, never as a graceful close.
+
+### Reset law
+
+A connector returns, with each opened stream, an `OnionStreamProbe`: the condition
+`σ ∈ {Live, Stalled, Failed(c)}` of the stream's circuit at any instant, `Stalled` when a frame
+is known missing (a later one arrived and is held behind it). A failing connector makes its
+probe read `Failed` before it ends the duplex, so an EOF read under `Failed` is that failure,
+never an orderly end. The runtime names every end from the phase `φ` of the flow and how its
+TCP endpoint closed, `κ`:
+
+```text
+φ ∈ {Handshake, Opening, Open(σ)}       κ ∈ {ClientReset, ClientSilent, Ungraceful}
+                                        ClientSilent: no client segment for T = flow_idle_timeout
+
+closure(Open(Failed(c)), κ)          = StreamReset(c)      (also every bridge error and EOF)
+closure(φ, ClientReset)              = ClientReset
+closure(φ, Ungraceful)               = UngracefulClose
+closure(Handshake, ClientSilent)     = HandshakeExpired
+closure(Opening, ClientSilent)       = OpenExpired
+closure(Open(Stalled), ClientSilent) = StreamStalled
+closure(Open(Live), ClientSilent)    = IdleTimeout
+
+Law Idle:  reset = IdleTimeout  ⇔  κ = ClientSilent ∧ φ = Open(Live)
+```
+
+A flow reset is an idle timeout exactly when the client was silent for `T` while its stream was
+open, no failure of the stream's circuit had been observed, and no frame of it was known missing;
+an observed circuit failure names the reset whichever local event reaches the runtime first. The
+probe reports what the client endpoint has observed. A lost last forward frame is observed through
+the forward high-water mark of the next credit loop: the exit fails the session and replies `abort`
+by `t₀ + 3V/2 + F`, and the flow reads `StreamReset` by `t₀ + 3V/2 + F + L` (#981), where `t₀` is
+the loss, `V` the loop validity, and `F` and `L` one forward and one return latency. Only a lost
+reply tail that includes the target's end of stream remains, observed at the Onion session's own
+deadline `Δ = 2V`. Until a loss is observed the flow is indistinguishable from a healthy one whose
+target is silent, so an idle timeout `T` that ends first still names it `IdleTimeout`. The model,
+its proof and the model check are in `src/reset.rs`.
 
 Flow capture binds the immutable `FlowId::target` and creates `TargetBound` directly. TCP
 endpoints are the sole ownership index for smoltcp handles; insertion and removal update

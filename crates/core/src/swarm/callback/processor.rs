@@ -257,7 +257,8 @@ impl InboundProcessor {
     }
 }
 
-/// Verify one resolved frame of `wire_bytes` bytes and decode the message it carries.
+/// Verify one resolved frame of `wire_bytes` bytes and decode the message it carries, refusing
+/// a carrier whose recorded path does not match the message.
 ///
 /// The payload is self-contained by now: whether a delegation slot travelled inline or by
 /// reference, this is the verification it always was.
@@ -275,6 +276,11 @@ pub(super) fn prepare_resolved_frame(
     }
     let message = payload.transaction.data::<Message>()?;
     let kind = MessageKind::from_message(&message);
+    // A path is carried exactly by connect signaling, and a carried path names no node twice
+    // (#947); anything else is refused before any handler sees it.
+    payload
+        .relay
+        .validate_signaling_path(kind.carries_signaling_path())?;
     let lane = InboundLane::from_kind(kind);
     Ok(PreparedInboundFrame {
         payload,

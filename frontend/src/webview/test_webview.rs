@@ -80,16 +80,6 @@ fn test_extension_bootstrap_omits_web_overlay_and_preserves_worker_bridge() -> W
 }
 
 #[wasm_bindgen_test]
-fn test_webview_onion_settings_requires_explicit_short_path_opt_in() {
-    let settings = WebviewOnionSettings::default();
-    assert!(!settings.options().allow_short_paths);
-
-    settings.set_allow_short_paths(true);
-
-    assert!(settings.options().allow_short_paths);
-}
-
-#[wasm_bindgen_test]
 fn test_browser_gateway_request_ids_are_positive_safe_integers() {
     assert_eq!(browser_request_id(&JsValue::from_f64(7.0)), Ok(7));
     assert!(browser_request_id(&JsValue::from_f64(0.0)).is_err());
@@ -205,13 +195,9 @@ fn test_host_redirects_then_serves_a_gateway_document_through_its_transport() ->
         ));
     };
 
-    let response =
-        futures::executor::block_on(host.handle(WebviewHostRequest::navigation_with_payload(
-            gateway_url,
-            "POST",
-            headers,
-            body,
-        )))?;
+    let response = futures::executor::block_on(host.handle(
+        WebviewHostRequest::navigation_with_payload(gateway_url, "POST", headers, body),
+    ))?;
     let WebviewHostOutcome::Response(response) = response else {
         return Err(WebviewError::transport(
             "gateway document was not served".to_string(),

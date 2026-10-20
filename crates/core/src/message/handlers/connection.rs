@@ -28,6 +28,19 @@ mod topology_view;
 
 use topology_view::connect_successor_hint;
 
+/// `result` with the expected drop of a connect-signaling reply whose recorded path names a hop
+/// this node lost the link to (#947) logged at debug and absorbed: the initiator's pending
+/// timeout covers it, and it is no fault of this node.
+fn drop_unlinked_return(result: Result<()>, context: &'static str) -> Result<()> {
+    match result {
+        Err(Error::RelayPathHopUnlinked { hop }) => {
+            tracing::debug!(%hop, context, "connect signaling reply dropped: return hop unlinked");
+            Ok(())
+        }
+        other => other,
+    }
+}
+
 /// QueryForTopoInfoSend is direct message
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
@@ -73,8 +86,11 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 sdp_bytes = msg.sdp.len(),
                 "CONNECT_NODE offer forward"
             );
-            self.run_effects([CoreEffect::forward_payload(ctx, None)])
-                .await
+            drop_unlinked_return(
+                self.run_effects([CoreEffect::forward_payload(ctx, None)])
+                    .await,
+                "CONNECT_NODE forward",
+            )
         } else {
             let peer = ctx.transaction.origin();
             tracing::trace!(
@@ -84,23 +100,34 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 sdp_bytes = msg.sdp.len(),
                 "CONNECT_NODE offer answer start"
             );
-            // The answer waits on ICE gathering, so it is negotiated and reported apart from
-            // this inbound event (inbound locality).
-            if let Err(error) = self
+            // The reply, an answer or a counter-offer, retraces the offer's path (#947); the
+            // answer waits on ICE gathering, so it is negotiated and sent apart from this inbound
+            // event (inbound locality).
+            let answered = self
                 .transport
-                .answer_remote_connection_detached(self.inner_callback(), ctx, msg)
-                .await
-            {
-                tracing::warn!(
-                    local = %self.dht.did,
-                    peer = %peer,
-                    tx_id = %ctx.transaction.tx_id,
-                    error = ?error,
-                    "CONNECT_NODE offer answer failed"
-                );
-                return Err(error);
+                .answer_signaled_offer(self.inner_callback(), ctx, msg)
+                .await;
+            match drop_unlinked_return(answered, "CONNECT_NODE offer reply") {
+                Ok(()) => {
+                    tracing::trace!(
+                        local = %self.dht.did,
+                        peer = %peer,
+                        tx_id = %ctx.transaction.tx_id,
+                        "CONNECT_NODE offer reply complete"
+                    );
+                    Ok(())
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        local = %self.dht.did,
+                        peer = %peer,
+                        tx_id = %ctx.transaction.tx_id,
+                        error = ?error,
+                        "CONNECT_NODE offer answer failed"
+                    );
+                    Err(error)
+                }
             }
-            Ok(())
         }
     }
 }
@@ -120,8 +147,11 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
                 sdp_bytes = msg.sdp.len(),
                 "CONNECT_NODE answer forward"
             );
-            self.run_effects([CoreEffect::forward_payload(ctx, None)])
-                .await
+            drop_unlinked_return(
+                self.run_effects([CoreEffect::forward_payload(ctx, None)])
+                    .await,
+                "CONNECT_NODE forward",
+            )
         } else {
             let peer = ctx.transaction.origin();
             tracing::trace!(
@@ -131,17 +161,28 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
                 sdp_bytes = msg.sdp.len(),
                 "CONNECT_NODE answer accept start"
             );
+            // The answer applies only to the generation whose offer left under this
+            // transaction (#947); a late one, for an offer since released, touches nothing.
             match self
                 .transport
-                .accept_remote_connection(peer, msg, None)
+                .accept_signaled_answer(peer, ctx.transaction.tx_id, msg)
                 .await
             {
-                Ok(()) => {
+                Ok(true) => {
                     tracing::trace!(
                         local = %self.dht.did,
                         peer = %peer,
                         tx_id = %ctx.transaction.tx_id,
                         "CONNECT_NODE answer accept complete"
+                    );
+                    Ok(())
+                }
+                Ok(false) => {
+                    tracing::debug!(
+                        local = %self.dht.did,
+                        peer = %peer,
+                        tx_id = %ctx.transaction.tx_id,
+                        "CONNECT_NODE answer for no pending offer dropped"
                     );
                     Ok(())
                 }
@@ -254,4 +295,4 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 #[cfg(test)]
-pub mod tests;
+mod test_connection;

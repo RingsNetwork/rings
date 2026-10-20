@@ -21,6 +21,7 @@ use super::NEXT_CALLBACK_CID;
 use super::NEXT_DELIVERY_GATE;
 use super::POST_PERMIT_SEND_GATE;
 use super::POST_PERMIT_SEND_GATE_WAITING;
+use super::SEND_GATE_ENTERED;
 use super::SEND_MESSAGE_GATE;
 use super::SEND_MESSAGE_GATE_WAITING;
 use super::SEND_MESSAGE_PENDING;
@@ -258,6 +259,12 @@ pub fn release_irrevocable_send_gate() {
 /// Return whether a background dummy send is waiting past its irrevocable boundary.
 pub fn irrevocable_send_gate_waiting() -> bool {
     IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.get())
+}
+
+/// The notification this thread's sends raise when they park at the post-permit or the
+/// irrevocable gate; `notified()` resolves once per parked send, even if it parked first.
+pub fn send_gate_entered() -> Arc<tokio::sync::Notify> {
+    SEND_GATE_ENTERED.with(Arc::clone)
 }
 
 /// Test hook: force `send_message` to stay pending once this thread has already dispatched

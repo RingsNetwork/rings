@@ -18,6 +18,7 @@ use smoltcp::wire::IpAddress;
 use smoltcp::wire::IpCidr;
 
 use self::device::PacketQueueDevice;
+use crate::reset::EndpointClosure;
 use crate::FlowId;
 use crate::FlowRejectReason;
 use crate::GatewayConfig;
@@ -37,6 +38,10 @@ pub enum TcpFlowAdmission {
 struct TcpEndpoint {
     handle: SocketHandle,
     pending_deadline: Option<Duration>,
+    /// Gateway clock reading when the most recent client segment was consumed.
+    last_client_segment: Duration,
+    /// Whether a client RST closed this endpoint.
+    client_reset: bool,
 }
 
 /// Stable projection of the internal TCP endpoint state.
@@ -178,6 +183,8 @@ impl TcpStack {
             pending_deadline: TcpEndpointState::Listening
                 .exit_clock(self.flow_idle_timeout)
                 .map(|timeout| elapsed.saturating_add(timeout)),
+            last_client_segment: elapsed,
+            client_reset: false,
         });
         TcpFlowAdmission::Accepted
     }
@@ -192,11 +199,19 @@ impl TcpStack {
         segment: TcpSegment,
         elapsed: Duration,
     ) -> Result<(), TcpStackError> {
-        if !self.endpoints.contains_key(&segment.flow) {
-            return Err(TcpStackError::UnknownFlow(segment.flow));
-        }
+        let endpoint = self
+            .endpoints
+            .get_mut(&segment.flow)
+            .ok_or(TcpStackError::UnknownFlow(segment.flow))?;
+        endpoint.last_client_segment = elapsed;
         self.device.enqueue_ingress(packet);
         self.poll(elapsed);
+        // An RST outside the receive window leaves the endpoint open and is not a reset.
+        if segment.rst && self.endpoint_state(segment.flow)? == TcpEndpointState::Closed {
+            if let Some(endpoint) = self.endpoints.get_mut(&segment.flow) {
+                endpoint.client_reset = true;
+            }
+        }
         Ok(())
     }
 
@@ -294,9 +309,21 @@ impl TcpStack {
         Ok(())
     }
 
-    /// Return whether the application may still receive bytes from the captured client.
-    pub fn client_read_open(&self, flow: FlowId) -> Result<bool, TcpStackError> {
-        self.socket(flow).map(tcp::Socket::may_recv)
+    /// Return whether the captured client finished its byte stream with a FIN.
+    ///
+    /// Exactly the states entered by receiving the client's FIN qualify. A closed endpoint does
+    /// not: it closed by reset or idle timeout, so its missing bytes are a reset, not an EOF to
+    /// forward as a graceful half-close.
+    pub fn client_finished(&self, flow: FlowId) -> Result<bool, TcpStackError> {
+        self.socket(flow).map(|socket| {
+            matches!(
+                socket.state(),
+                tcp::State::CloseWait
+                    | tcp::State::LastAck
+                    | tcp::State::Closing
+                    | tcp::State::TimeWait
+            )
+        })
     }
 
     /// Return the number of TCP endpoints currently owned by the stack.
@@ -329,6 +356,33 @@ impl TcpStack {
             }
         }
         Ok(expired)
+    }
+
+    /// Classify how an endpoint closed before both byte directions shut down.
+    ///
+    /// Besides the FIN exchange, smoltcp closes an endpoint on a client RST or when no client
+    /// segment arrived for `flow_idle_timeout`. Its idle clock never starts before the last client
+    /// segment, so `elapsed < last_client_segment + flow_idle_timeout` excludes the timeout; a
+    /// close matching neither cause is a FIN exchange whose half-close never reached the bridge.
+    pub(crate) fn endpoint_closure(
+        &self,
+        flow: FlowId,
+        elapsed: Duration,
+    ) -> Result<EndpointClosure, TcpStackError> {
+        let endpoint = self
+            .endpoints
+            .get(&flow)
+            .ok_or(TcpStackError::UnknownFlow(flow))?;
+        let idle_deadline = endpoint
+            .last_client_segment
+            .saturating_add(self.flow_idle_timeout);
+        Ok(if endpoint.client_reset {
+            EndpointClosure::ClientReset
+        } else if elapsed >= idle_deadline {
+            EndpointClosure::ClientSilent
+        } else {
+            EndpointClosure::Ungraceful
+        })
     }
 
     /// Abort a flow, emit its terminal TCP packet, and release its endpoint capacity.
@@ -730,7 +784,31 @@ mod tests {
 
         stack.poll(Duration::from_secs(2));
         assert_eq!(stack.endpoint_state(flow), Ok(TcpEndpointState::Closed));
+        assert_eq!(
+            stack.endpoint_closure(flow, Duration::from_secs(2)),
+            Ok(EndpointClosure::ClientSilent)
+        );
         assert_eq!(stack.release_closed_flow(flow), Ok(true));
         assert_eq!(stack.flow_count(), 0);
+    }
+
+    #[test]
+    fn test_client_reset_is_not_classified_as_idle_timeout() {
+        let mut candidate = config();
+        candidate.flow_idle_timeout = Duration::from_secs(1);
+        let mut stack = TcpStack::new(&candidate, 7).expect("valid TCP stack");
+        let (flow, _) = establish(&mut stack);
+
+        ingest_tcp(
+            &mut stack,
+            tcp_packet_with_payload(TcpControl::Rst, TcpSeqNumber(8), None, &[]),
+            Duration::from_millis(3),
+        );
+        assert_eq!(stack.endpoint_state(flow), Ok(TcpEndpointState::Closed));
+        // A reset observed after the idle window still names the client as its cause.
+        assert_eq!(
+            stack.endpoint_closure(flow, Duration::from_secs(5)),
+            Ok(EndpointClosure::ClientReset)
+        );
     }
 }

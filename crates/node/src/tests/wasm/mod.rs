@@ -14,12 +14,15 @@ use rings_core::lifecycle::StopToken;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::swarm::application::SwarmEvent;
 use rings_rpc::protos::rings_node::*;
+use rings_transport::core::transport::WebrtcConnectionState;
 use uuid;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
 use crate::extension::BackendObserver;
 use crate::logging::browser::init_logging;
+use crate::onion::OnionExitOffer;
+use crate::onion::OnionRole;
 use crate::prelude::rings_core::utils::js_value;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
@@ -171,6 +174,11 @@ pub fn setup_log() {
 }
 
 pub async fn prepare_processor() -> Processor {
+    prepare_processor_with_onion_role(OnionRole::Client).await
+}
+
+/// Prepare a browser test processor registering the onion symbols of `role`.
+pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) -> Processor {
     let key = SecretKey::random();
     let sm = DelegateeKey::new_with_seckey(&key).unwrap();
 
@@ -193,6 +201,7 @@ pub async fn prepare_processor() -> Processor {
         .unwrap()
         .storage(storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+        .onion_role(role)
         .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
@@ -237,6 +246,26 @@ pub async fn get_peers(provider: &Provider) -> Vec<PeerInfo> {
     js_value::deserialize::<ListPeersResponse>(resp)
         .unwrap()
         .peers
+}
+
+/// Whether `state`, a listed peer's WebRTC state as `peers()` and `listPeers` render it, is one
+/// in which an admitted connection is routable.
+///
+/// ```text
+/// Ready(c) ⟺ webrtc(c) ∈ {Connecting, Connected} ∧ data_channel_open(c)   (core readiness)
+/// Listed(c) ⟹ Ready(c) ⟹ webrtc(c) ∈ {Connecting, Connected}
+/// ```
+///
+/// The listing reports the raw WebRTC state, and the browser may fire the data channel's
+/// `open` before the `connectionstatechange` to `connected`. An admitted, listed peer may
+/// therefore still read `Connecting`; only `Connected` is not guaranteed (#962).
+pub fn is_routable_webrtc_state(state: &str) -> bool {
+    [
+        WebrtcConnectionState::Connecting,
+        WebrtcConnectionState::Connected,
+    ]
+    .iter()
+    .any(|routable| format!("{routable:?}") == state)
 }
 
 /// Connect two providers and await both admissions.

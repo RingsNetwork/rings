@@ -113,7 +113,8 @@ fn test_origin_is_the_account_behind_the_signing_session() -> Result<()> {
 
 /// Witness of [`MAX_PAYLOAD_ENVELOPE_OVERHEAD`], with equality: a whole payload with every
 /// envelope field at its widest (both delegation slots with [`Delegation::widest_for_test`],
-/// `reply_via` and the relay aim present and handed off, the hop budget full, every sequence,
+/// `reply_via` and the relay aim present and handed off, the hop budget full, the widest
+/// recorded signaling path, every sequence,
 /// timestamp and lifetime at its type's maximum) encodes to exactly its message's own encoding
 /// plus the reserve, for a message whose length prefix is the widest a data-channel frame has.
 ///
@@ -124,9 +125,11 @@ fn test_payload_envelope_reserve_is_the_widest_envelope() -> Result<()> {
     use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
     use crate::consts::MAX_PAYLOAD_ENVELOPE_OVERHEAD;
+    use crate::consts::MAX_RELAY_HOPS;
     use crate::delegation::Delegation;
     use crate::dht::delivery::RouteStage;
     use crate::message::protocols::HopBudget;
+    use crate::message::SignalingPath;
 
     let peer: Did = SecretKey::random().address().into();
     let message = Message::custom(&vec![u8::MAX; MAX_DATA_CHANNEL_MESSAGE_SIZE / 2])?;
@@ -138,6 +141,15 @@ fn test_payload_envelope_reserve_is_the_widest_envelope() -> Result<()> {
     payload.transaction.reply_via = Some(peer);
     payload.relay.hop_budget = HopBudget::MAX;
     payload.relay.stage = RouteStage::replying_via(Some(peer)).handed_off();
+    // The widest recorded path an honest carrier holds (`Law (Bound)` of the signaling path):
+    // a return retracing a full hop budget of distinct relays, none of them crossed yet.
+    let mut recorded = SignalingPath::outbound();
+    for hop in 0..u32::from(MAX_RELAY_HOPS) {
+        recorded = recorded.forwarded(Did::from(hop))?;
+    }
+    payload.relay = payload
+        .relay
+        .with_signaling_path(SignalingPath::Return(recorded.reply()));
     for verification in [
         &mut payload.transaction.verification,
         &mut payload.verification,

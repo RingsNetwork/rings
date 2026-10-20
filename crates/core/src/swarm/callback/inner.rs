@@ -500,6 +500,7 @@ impl TransportCallback for SwarmTransportCallback {
         cid: &str,
         s: WebrtcConnectionState,
     ) -> Result<(), TransportCallbackError> {
+        self.processor.logical.transport.signal_link_transition();
         let Some(did) = self
             .connection_event_peer(cid, "connection state change")
             .await?
@@ -552,6 +553,7 @@ impl TransportCallback for SwarmTransportCallback {
     }
 
     async fn on_data_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
+        self.processor.logical.transport.signal_link_transition();
         let Some(did) = self.connection_event_peer(cid, "data-channel open").await? else {
             return Ok(());
         };

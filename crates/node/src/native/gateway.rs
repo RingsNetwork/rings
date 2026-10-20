@@ -20,7 +20,7 @@ use rings_gateway::bindings::TeardownFailure;
 use rings_gateway::bindings::TunnelControl;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 use rings_gateway::bindings::UnsupportedTunnelControl;
-use rings_gateway::ExitAvailability;
+use rings_gateway::ExitObservation;
 use rings_gateway::GatewayControlHandle;
 use rings_gateway::GatewayError;
 use rings_gateway::GatewayRuntime;
@@ -29,8 +29,9 @@ use tokio::sync::oneshot;
 
 use super::config::NativeGatewayConfig;
 use crate::onion::native::NativeOnionCircuitHandle;
-use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::NativeOnionGatewayConnector;
+use crate::onion::OnionServiceName;
 use crate::prelude::StopSource;
 use crate::prelude::StopToken;
 use crate::processor::Processor;
@@ -61,11 +62,7 @@ impl NativeGatewayRunner {
         config: NativeGatewayConfig,
     ) -> anyhow::Result<Self> {
         validate_status_refresh_secs(config.status_refresh_secs)?;
-        let proxy = OnionProxyConfig::tcp_connect_service(
-            config.onion_service.clone(),
-            config.onion_hop_count,
-            config.onion_allow_short_paths,
-        )?;
+        let proxy = OnionProxyProtocol::TcpConnect;
         let connector = Arc::new(NativeOnionGatewayConnector::new(
             processor.clone(),
             onion,
@@ -122,7 +119,6 @@ impl NativeGatewayRunner {
         let update = refresh_exit_availability(GatewayRefresh {
             processor: self.processor.clone(),
             gateway: self.runtime.control_handle(),
-            onion_service: self.config.onion_service.as_str().to_string(),
             interval: Duration::from_secs(self.config.status_refresh_secs),
             stop: stop.clone(),
             runtime_done: runtime_done.token(),
@@ -206,7 +202,7 @@ fn finish_gateway_cleanup<D: rings_gateway::PacketIo>(
                 "gateway route cleanup failed; the packet device remains open for selected routes \
                  until privileged cleanup succeeds: {error}"
             );
-            runtime.set_exit_availability(ExitAvailability::Unknown, Some(reason.clone()));
+            runtime.set_exit_availability(ExitObservation::Unknown(reason.clone()));
             tracing::error!("{reason}");
             std::mem::forget(device);
             Err(error)
@@ -230,7 +226,6 @@ fn select_wintun_dll_path(
 struct GatewayRefresh {
     processor: Arc<Processor>,
     gateway: GatewayControlHandle,
-    onion_service: String,
     interval: Duration,
     stop: StopToken,
     runtime_done: StopToken,
@@ -263,30 +258,19 @@ async fn refresh_exit_availability(refresh: GatewayRefresh) -> Result<(), Gatewa
         ) {
             return Ok(());
         }
-        let (availability, reason) = match refresh
+        let exit = match refresh
             .processor
-            .lookup_onion_exits(&refresh.onion_service, false)
+            .lookup_onion_exits(OnionServiceName::tcp().as_str(), false)
             .await
         {
-            Ok(exits) if exits.is_empty() => (
-                ExitAvailability::Unavailable,
-                Some(format!(
-                    "no live Onion TCP exit advertises {}",
-                    refresh.onion_service
-                )),
-            ),
-            Ok(_) => (ExitAvailability::Available, None),
-            Err(error) => (
-                ExitAvailability::Unknown,
-                Some(format!("Onion exit discovery failed: {error}")),
-            ),
+            Ok(exits) if exits.is_empty() => ExitObservation::Unavailable(format!(
+                "no live Onion TCP exit advertises {}",
+                OnionServiceName::tcp().as_str()
+            )),
+            Ok(_) => ExitObservation::Available,
+            Err(error) => ExitObservation::Unknown(format!("Onion exit discovery failed: {error}")),
         };
-        if refresh
-            .gateway
-            .set_exit_availability(availability, reason)
-            .await
-            .is_err()
-        {
+        if refresh.gateway.set_exit_availability(exit).await.is_err() {
             if refresh.runtime_done.should_stop() {
                 return Ok(());
             }

@@ -146,12 +146,16 @@ impl HandleRpc<AnswerOfferRequest, AnswerOfferResponse> for Processor {
         let offer_payload =
             MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
 
+        // The reply is the answer, or, when this node's own sent overlay offer to the peer
+        // prevails on the tie-break (#947), that offer: the caller answers it with its own
+        // `answerOffer` and returns the answer with this node's `acceptAnswer`.
         let answer_payload = self
             .swarm
             .answer_offer(offer_payload)
             .await
             .map_err(ServerError::AnswerOffer)
-            .map_err(Error::from)?;
+            .map_err(Error::from)?
+            .into_inner();
 
         tracing::debug!("connect_peer_via_ice response: {:?}", answer_payload);
         let encoded = answer_payload

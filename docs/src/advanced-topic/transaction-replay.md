@@ -90,7 +90,9 @@ final destination.
 At that destination, replay classification and the runtime-local origin rate quota share one
 serialized admission boundary but remain separate state models. Replay, Fork, and Stale consume no
 quota; quota rejection leaves the durable replay window unchanged; and a replay-store failure rolls
-back the provisional quota reservation. Quota state is never encoded in a `ReplayRecord`. The
+back the provisional quota reservation. The quota clock is read inside that boundary, so the
+instants a quota record receives follow the order in which admissions hold it and never regress.
+Quota state is never encoded in a `ReplayRecord`. The
 deterministic byte cost is the verified original transaction's `data.len()`: normal messages pay it
 once, chunk envelopes pay nothing, and a successfully reassembled original pays it once before
 logical lane admission.

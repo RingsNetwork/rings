@@ -89,6 +89,40 @@ impl FlowState {
     }
 }
 
+/// Cause of one captured flow being reset.
+///
+/// Every runtime reset carries one value of this type, so a reset without a cause cannot be
+/// constructed; `crate::reset` states which value names which end. Variants carry no packet
+/// contents and no flow addresses.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "kind", content = "detail")]
+pub enum FlowResetReason {
+    /// The TCP handshake did not complete within the flow timeout.
+    HandshakeExpired,
+    /// The Onion stream did not open before the client was silent for the flow idle timeout.
+    OpenExpired,
+    /// The client was silent for the flow idle timeout while its open stream was healthy: no
+    /// failure of its circuit was observed and no frame of it was known missing.
+    IdleTimeout,
+    /// The client was silent for the flow idle timeout while a frame of its open stream was known
+    /// missing: a later frame had arrived and was held behind it.
+    StreamStalled,
+    /// The captured client reset the connection.
+    ClientReset,
+    /// The TCP endpoint closed before both byte directions shut down.
+    UngracefulClose,
+    /// The Onion stream could not be opened; carries the node-layer diagnostic.
+    OnionOpenFailed(String),
+    /// The open Onion stream failed while carrying bytes.
+    StreamFailed(String),
+    /// The open Onion stream failed closed, at its far side or on a link it rides.
+    StreamReset(String),
+    /// The byte bridge stopped accepting commands before the flow closed.
+    BridgeClosed,
+    /// Gateway shutdown reset the flow.
+    GatewayStopped,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

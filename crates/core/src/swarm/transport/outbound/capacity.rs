@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::sync::Mutex;
-#[cfg(test)]
-use std::task::Poll;
 
+use event_listener::Event;
+use event_listener::EventListener;
 #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
 use tokio::sync::watch;
 
@@ -20,6 +20,13 @@ use crate::fair_admission::CountedReservedCapacity;
 use crate::fair_admission::FairWaitBudget;
 use crate::fair_admission::FairWaitQueue;
 use crate::fair_admission::ReservedCapacity;
+use crate::lifecycle::epoch::Epoch;
+
+mod view;
+
+pub(in crate::swarm::transport) use view::CapacityView;
+pub(in crate::swarm::transport) use view::PeerProgress;
+pub(in crate::swarm::transport) use view::PeerStamp;
 
 /// Hard per-peer transfer bound, including queued and delivery-waiting heads.
 pub(crate) const OUTBOUND_TRANSFER_QUEUE_CAPACITY: usize = 256;
@@ -115,9 +122,12 @@ fn global_byte_reservations() -> &'static [usize; TransferClass::COUNT] {
     active_reservations(&OUTBOUND_GLOBAL_BYTE_RESERVATIONS)
 }
 
+/// The two ways `acquire_with_fixed_reservation` can admit a demand.
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum CapacityScope {
+pub(in crate::swarm::transport) enum CapacityScope {
+    /// The class's fixed reservation, open whatever is queued.
     FixedReservation,
+    /// The shared capacity, reached only through the fair-wait queue.
     Shared,
 }
 
@@ -172,10 +182,24 @@ async fn acquire_with_fixed_reservation<T>(
     .await
 }
 
+/// `Admits ≜ reserved(Fixed) ∨ (queue empty ∧ reserved(Shared))`: the admission path of
+/// `acquire_with_fixed_reservation` decided without admitting, for a demand of any size. A
+/// demand the fixed reservation does not cover is refused by `try_admit_unqueued`, or queued by
+/// `acquire_fair`, whenever a waiter is queued, so shared room alone does not admit it.
+pub(in crate::swarm::transport) fn admits_now(
+    queue_empty: bool,
+    reserved: impl Fn(CapacityScope) -> bool,
+) -> bool {
+    reserved(CapacityScope::FixedReservation) || (queue_empty && reserved(CapacityScope::Shared))
+}
+
 pub(super) struct GlobalTransferCapacity {
     state: Mutex<ReservedCapacity<{ TransferClass::COUNT }>>,
     waiters: Arc<FairWaitQueue>,
     wait_budget: Arc<FairWaitBudget>,
+    /// Advanced after every release of a global permit, which every transfer holds, so it
+    /// counts every transfer's release of its peer and global capacity.
+    releases: Epoch,
 }
 
 impl GlobalTransferCapacity {
@@ -188,7 +212,53 @@ impl GlobalTransferCapacity {
             state: Mutex::new(ReservedCapacity::new()),
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget.clone())),
             wait_budget,
+            releases: Epoch::default(),
         }
+    }
+
+    /// Register for every event after which the global part of `Room` may change: its
+    /// releases and its queue's departures.
+    fn room_listeners(&self) -> [EventListener; 2] {
+        [self.releases.listen(), self.waiters.departures().listen()]
+    }
+
+    /// The pure reservation step: `state` after admitting `bytes` of `class` in `scope`, or
+    /// the refusal. Shared by `try_acquire_inner` (which commits it) and `has_room` (which does
+    /// not), so the room predicate is the admission rule itself.
+    fn reserved(
+        mut state: ReservedCapacity<{ TransferClass::COUNT }>,
+        peer: Did,
+        class: TransferClass,
+        bytes: usize,
+        scope: CapacityScope,
+    ) -> Result<ReservedCapacity<{ TransferClass::COUNT }>> {
+        let reservations = global_byte_reservations();
+        let refused = || memory_capacity_error(peer, bytes, global_byte_limit(class));
+        if scope == CapacityScope::FixedReservation
+            && !state.reservation_covers(class.index(), bytes, reservations)
+        {
+            return Err(refused());
+        }
+        if !state.try_reserve(
+            class.index(),
+            bytes,
+            OUTBOUND_GLOBAL_BYTE_CAPACITY,
+            reservations,
+        ) {
+            return Err(refused());
+        }
+        Ok(state)
+    }
+
+    /// Whether `demand` could be admitted now by the global capacity (see `admits_now`).
+    fn has_room(&self, peer: Did, demand: TransferDemand) -> bool {
+        let state = *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        admits_now(self.waiters.is_empty(), |scope| {
+            Self::reserved(state, peer, demand.class, demand.bytes, scope).is_ok()
+        })
     }
 
     fn try_acquire_inner(
@@ -202,21 +272,7 @@ impl GlobalTransferCapacity {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = *state;
-        let reservations = global_byte_reservations();
-        if scope == CapacityScope::FixedReservation
-            && !next.reservation_covers(class.index(), bytes, reservations)
-        {
-            return Err(memory_capacity_error(peer, bytes, global_byte_limit(class)));
-        }
-        if !next.try_reserve(
-            class.index(),
-            bytes,
-            OUTBOUND_GLOBAL_BYTE_CAPACITY,
-            reservations,
-        ) {
-            return Err(memory_capacity_error(peer, bytes, global_byte_limit(class)));
-        }
+        let next = Self::reserved(*state, peer, class, bytes, scope)?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         crate::simulation::observe_outbound_global_capacity(
             next.admitted(),
@@ -266,12 +322,19 @@ impl GlobalTransferCapacity {
 #[derive(Clone, Copy)]
 struct PeerCapacityState {
     capacity: CountedReservedCapacity<{ TransferClass::COUNT }>,
+    /// Transfers of the peer that reached its link and ended: the progress of the link.
+    ///
+    /// Inv: incremented in the critical section that releases the transfer's peer capacity,
+    /// so one reading of the state sees a transfer either admitted or counted here, never
+    /// both and never neither.
+    drained: u64,
 }
 
 impl PeerCapacityState {
     const fn new() -> Self {
         Self {
             capacity: CountedReservedCapacity::new(),
+            drained: 0,
         }
     }
 
@@ -308,6 +371,13 @@ pub(super) struct TransferCapacity {
     state: Mutex<PeerCapacityState>,
     global: Arc<GlobalTransferCapacity>,
     waiters: Arc<FairWaitQueue>,
+    /// Advanced after every release of this peer's capacity, a half reservation included:
+    /// the events after which `Room` may change.
+    releases: Epoch,
+    /// Notified after `PeerCapacityState::drained` grows
+    /// ([`TransferCapacityPermit::release_after_progress`]). A transfer that never admitted a
+    /// frame to the link, and a half reservation, do not notify it.
+    progressed: Event,
     /// Test witness of this capacity's deallocation. Nothing is ever sent on it, so its
     /// subscribers observe exactly one event, the channel closing when the capacity is
     /// dropped, and that event is terminal.
@@ -322,9 +392,57 @@ impl TransferCapacity {
             state: Mutex::new(PeerCapacityState::new()),
             global,
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget)),
+            releases: Epoch::default(),
+            progressed: Event::new(),
             #[cfg(all(test, not(feature = "dummy"), not(target_family = "wasm")))]
             retirement: watch::channel(()).0,
         }
+    }
+
+    /// The pure reservation step of this peer (see `GlobalTransferCapacity::reserved`).
+    fn reserved(
+        mut state: PeerCapacityState,
+        peer: Did,
+        class: TransferClass,
+        bytes: usize,
+        scope: CapacityScope,
+    ) -> Result<PeerCapacityState> {
+        if scope == CapacityScope::FixedReservation && !state.reservation_covers(class, bytes) {
+            return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
+        }
+        match state.try_reserve(class, bytes) {
+            Ok(()) => Ok(state),
+            Err(CountedReservationRejection::Count) => {
+                Err(Error::OutboundTransferCapacityExceeded {
+                    peer,
+                    capacity: transfer_limit(class),
+                })
+            }
+            Err(CountedReservationRejection::Bytes) => {
+                Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)))
+            }
+        }
+    }
+
+    /// `Room(peer, demand)`: `demand` could be admitted now by this peer and the global
+    /// capacity (see `admits_now`), without admitting it.
+    fn has_room(&self, peer: Did, demand: TransferDemand) -> bool {
+        let state = *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        admits_now(self.waiters.is_empty(), |scope| {
+            Self::reserved(state, peer, demand.class, demand.bytes, scope).is_ok()
+        }) && self.global.has_room(peer, demand)
+    }
+
+    /// `Room(peer, demand)` for a peer that holds no capacity: its own state is fresh and its
+    /// queue empty, so only the fixed or shared step decides.
+    fn has_room_unheld(global: &GlobalTransferCapacity, peer: Did, demand: TransferDemand) -> bool {
+        let fresh = PeerCapacityState::new();
+        admits_now(true, |scope| {
+            Self::reserved(fresh, peer, demand.class, demand.bytes, scope).is_ok()
+        }) && global.has_room(peer, demand)
     }
 
     fn try_acquire_peer_inner(
@@ -338,22 +456,7 @@ impl TransferCapacity {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = *state;
-        if scope == CapacityScope::FixedReservation && !next.reservation_covers(class, bytes) {
-            return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
-        }
-        match next.try_reserve(class, bytes) {
-            Ok(()) => {}
-            Err(CountedReservationRejection::Count) => {
-                return Err(Error::OutboundTransferCapacityExceeded {
-                    peer,
-                    capacity: transfer_limit(class),
-                });
-            }
-            Err(CountedReservationRejection::Bytes) => {
-                return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
-            }
-        }
+        let next = Self::reserved(*state, peer, class, bytes, scope)?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         crate::simulation::observe_outbound_peer_capacity(
             next.capacity.admitted_count(),
@@ -366,6 +469,7 @@ impl TransferCapacity {
             capacity: self.clone(),
             class,
             bytes,
+            reach: LinkReach::Unreached,
         })
     }
 
@@ -441,7 +545,13 @@ impl TransferCapacity {
         Ok(TransferCapacityPermit::held(peer_permit, global_permit))
     }
 
-    /// Observe live permit ownership for the common native/browser contract tests.
+    /// Register for every event after which `Room` of this peer may change: its releases and
+    /// its queue's departures.
+    fn room_listeners(&self) -> [EventListener; 2] {
+        [self.releases.listen(), self.waiters.departures().listen()]
+    }
+
+    /// Live permits of this peer: `0` iff no transfer of the peer holds frames in flight.
     #[cfg(test)]
     pub(super) fn admitted(&self) -> usize {
         self.state
@@ -467,6 +577,41 @@ impl TransferCapacity {
     }
 }
 
+/// What one transfer asks of outbound capacity: its class and its reservation in bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::swarm::transport) struct TransferDemand {
+    /// The scheduling class the transfer is admitted under.
+    class: TransferClass,
+    /// The reservation in bytes (at least one).
+    bytes: usize,
+}
+
+impl TransferDemand {
+    /// The demand of a transfer of `class` reserving `bytes`, as `acquire` charges it.
+    pub(in crate::swarm::transport) fn new(class: TransferClass, bytes: usize) -> Self {
+        Self {
+            class,
+            bytes: bytes.max(1),
+        }
+    }
+
+    /// A demand for tests that only carry one through the automaton.
+    #[cfg(test)]
+    pub(in crate::swarm::transport) fn for_test() -> Self {
+        Self::new(TransferClass::Application, 1)
+    }
+
+    /// The class the demand is admitted under.
+    pub(super) const fn class(self) -> TransferClass {
+        self.class
+    }
+
+    /// The bytes the demand reserves.
+    pub(super) const fn bytes(self) -> usize {
+        self.bytes
+    }
+}
+
 /// The outbound capacity one transfer holds until it ends, released when it drops.
 pub(in crate::swarm::transport) struct TransferCapacityPermit {
     _share: PermitShare,
@@ -474,7 +619,9 @@ pub(in crate::swarm::transport) struct TransferCapacityPermit {
 
 /// What a [`TransferCapacityPermit`] holds.
 enum PermitShare {
-    /// A share of its peer's capacity and of the node's.
+    /// A share of its peer's capacity and of the node's. Fields drop in declaration order, so
+    /// the global release, which advances `GlobalTransferCapacity::releases`, follows the peer
+    /// release (what a rerouted placement waiting for room reads, #859).
     Held {
         _peer: PeerCapacityPermit,
         _global: GlobalCapacityPermit,
@@ -505,20 +652,64 @@ impl TransferCapacityPermit {
     }
 }
 
+impl TransferCapacityPermit {
+    /// Release the permit of a transfer that admitted a frame to the peer's link and has
+    /// ended, counting it in `PeerCapacityState::drained`, then notify the peer's progress.
+    ///
+    /// Post: a waiter woken by this progress reads the peer and global capacity already
+    /// released, so its retry is not refused by the transfer that woke it. Dropping a permit
+    /// releases it without progress: nothing it reserved reached the link.
+    /// A transfer bounded by its sender holds no peer capacity, so it counts in no drain.
+    pub(in crate::swarm::transport) fn release_after_progress(mut self) {
+        let capacity = match &mut self._share {
+            PermitShare::Held { _peer, .. } => {
+                _peer.reach = LinkReach::Reached;
+                Some(Arc::clone(&_peer.capacity))
+            }
+            PermitShare::BoundedBySender { .. } => None,
+        };
+        drop(self);
+        if let Some(capacity) = capacity {
+            capacity.progressed.notify(usize::MAX);
+        }
+    }
+}
+
+/// Whether a transfer holding a peer permit admitted a frame to the peer's link.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkReach {
+    /// No frame of the transfer reached the link (a half reservation, or a transfer that
+    /// ended before its first frame).
+    Unreached,
+    /// The transfer admitted a frame to the link and has ended.
+    Reached,
+}
+
 struct PeerCapacityPermit {
     capacity: Arc<TransferCapacity>,
     class: TransferClass,
     bytes: usize,
+    /// Whether the release counts as the link's progress.
+    reach: LinkReach,
 }
 
 impl Drop for PeerCapacityPermit {
+    /// Release the peer capacity and, for a transfer that reached the link, count it drained
+    /// in the same critical section (Inv of `PeerCapacityState::drained`).
     fn drop(&mut self) {
-        self.capacity
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .release(self.class, self.bytes);
+        {
+            let mut state = self
+                .capacity
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.release(self.class, self.bytes);
+            if self.reach == LinkReach::Reached {
+                state.drained = state.drained.saturating_add(1);
+            }
+        }
         self.capacity.waiters.wake_front();
+        self.capacity.releases.advance();
         // Test builds: an outbound release is a state change that quiescence probes read.
         #[cfg(test)]
         crate::tests::activity::record_activity();
@@ -539,6 +730,7 @@ impl Drop for GlobalCapacityPermit {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .release(self.class.index(), self.bytes);
         self.capacity.waiters.wake_front();
+        self.capacity.releases.advance();
     }
 }
 
@@ -646,212 +838,4 @@ impl TransferCapacityAnchor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_reserved_capacity_bound_holds_for_all_short_reserve_release_traces() {
-        const CAPACITY: usize = 5;
-        const RESERVATIONS: [usize; TransferClass::COUNT] = [2, 1, 1, 1];
-        const ACTIONS: usize = TransferClass::COUNT * 2;
-        const TRACE_LENGTH: u32 = 6;
-        let trace_count = ACTIONS.pow(TRACE_LENGTH);
-
-        for encoded in 0..trace_count {
-            let mut code = encoded;
-            let mut capacity = ReservedCapacity::<{ TransferClass::COUNT }>::new();
-            let mut admitted_by_class = [0usize; TransferClass::COUNT];
-            for _ in 0..TRACE_LENGTH {
-                let action = code % ACTIONS;
-                code /= ACTIONS;
-                let class_index = action % TransferClass::COUNT;
-                if action < TransferClass::COUNT {
-                    if capacity.try_reserve(class_index, 1, CAPACITY, &RESERVATIONS) {
-                        admitted_by_class[class_index] =
-                            admitted_by_class[class_index].saturating_add(1);
-                    }
-                } else if admitted_by_class[class_index] > 0 {
-                    capacity.release(class_index, 1);
-                    admitted_by_class[class_index] =
-                        admitted_by_class[class_index].saturating_sub(1);
-                }
-                assert_eq!(capacity.admitted(), admitted_by_class.iter().sum::<usize>());
-                assert!(capacity.admitted() <= CAPACITY);
-            }
-        }
-    }
-
-    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    #[test]
-    fn test_class_reservation_ablation_changes_real_admission_limits() {
-        assert!(transfer_limit(TransferClass::Application) < OUTBOUND_TRANSFER_QUEUE_CAPACITY);
-        assert!(peer_byte_limit(TransferClass::Application) < OUTBOUND_PEER_BYTE_CAPACITY);
-
-        let _runtime = crate::simulation::SimulationRuntimeGuard::enter(
-            42,
-            1_700_000_000_000,
-            crate::simulation::ProtectionProfile::without_class_reservations(),
-        )
-        .expect("simulation runtime must install");
-        assert_eq!(
-            transfer_limit(TransferClass::Application),
-            OUTBOUND_TRANSFER_QUEUE_CAPACITY
-        );
-        assert_eq!(
-            peer_byte_limit(TransferClass::Application),
-            OUTBOUND_PEER_BYTE_CAPACITY
-        );
-    }
-
-    #[cfg_attr(
-        all(feature = "wasm", target_family = "wasm"),
-        wasm_bindgen_test::wasm_bindgen_test
-    )]
-    #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
-    async fn test_reserved_outbound_request_bypasses_borrower_waiter() {
-        let global = Arc::new(GlobalTransferCapacity::new());
-        let capacity = Arc::new(TransferCapacity::new(global.clone()));
-        let unrelated_capacity = Arc::new(TransferCapacity::new(global));
-        let peer = Did::from(90_u32);
-        let unrelated_peer = Did::from(91_u32);
-        let blocker = capacity
-            .try_acquire(peer, TransferClass::Application, 100 * 1024 * 1024)
-            .expect("blocker must fit");
-        let mut large = Box::pin(capacity.acquire(peer, TransferClass::Storage, 120 * 1024 * 1024));
-        let mut unrelated = Box::pin(unrelated_capacity.acquire(
-            unrelated_peer,
-            TransferClass::Application,
-            2 * 1024 * 1024,
-        ));
-
-        assert!(matches!(futures::poll!(large.as_mut()), Poll::Pending));
-        let reserved = futures::future::join_all(
-            (0..OUTBOUND_CONTROL_RESERVED_TRANSFERS)
-                .map(|_| capacity.acquire(peer, TransferClass::DhtControl, 1)),
-        )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()
-        .expect("control requests within their reservation must bypass");
-        let mut later = Box::pin(capacity.acquire(peer, TransferClass::DhtControl, 1));
-        assert!(matches!(
-            futures::poll!(later.as_mut()),
-            Poll::Ready(Err(_))
-        ));
-        assert!(matches!(
-            futures::poll!(unrelated.as_mut()),
-            Poll::Ready(Ok(_))
-        ));
-        drop(blocker);
-        assert!(matches!(futures::poll!(large.as_mut()), Poll::Ready(Ok(_))));
-        drop(reserved);
-    }
-
-    #[cfg_attr(
-        all(feature = "wasm", target_family = "wasm"),
-        wasm_bindgen_test::wasm_bindgen_test
-    )]
-    #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
-    async fn test_global_borrowers_are_fifo_while_reserved_control_bypasses() {
-        const BLOCKER_BYTES: usize = (OUTBOUND_GLOBAL_BYTE_CAPACITY - 16 * 1024 * 1024) / 2;
-        let global = Arc::new(GlobalTransferCapacity::new());
-        let first = Arc::new(TransferCapacity::new(global.clone()));
-        let second = Arc::new(TransferCapacity::new(global.clone()));
-        let waiting = Arc::new(TransferCapacity::new(global.clone()));
-        let later = Arc::new(TransferCapacity::new(global.clone()));
-        let control = Arc::new(TransferCapacity::new(global));
-        let first_blocker = first
-            .try_acquire(
-                Did::from(101_u32),
-                TransferClass::Application,
-                BLOCKER_BYTES,
-            )
-            .expect("first global blocker must fit");
-        let _second_blocker = second
-            .try_acquire(
-                Did::from(102_u32),
-                TransferClass::Application,
-                BLOCKER_BYTES,
-            )
-            .expect("second global blocker must fit");
-        let mut front =
-            Box::pin(waiting.acquire(Did::from(103_u32), TransferClass::Storage, 20 * 1024 * 1024));
-        let mut behind =
-            Box::pin(later.acquire(Did::from(104_u32), TransferClass::E2e, 8 * 1024 * 1024));
-        let mut reserved =
-            Box::pin(control.acquire(Did::from(105_u32), TransferClass::DhtControl, 1));
-
-        assert!(matches!(futures::poll!(front.as_mut()), Poll::Pending));
-        assert!(matches!(futures::poll!(behind.as_mut()), Poll::Pending));
-        assert!(matches!(
-            futures::poll!(reserved.as_mut()),
-            Poll::Ready(Ok(_))
-        ));
-        drop(first_blocker);
-        assert!(matches!(futures::poll!(front.as_mut()), Poll::Ready(Ok(_))));
-        assert!(matches!(
-            futures::poll!(behind.as_mut()),
-            Poll::Ready(Ok(_))
-        ));
-    }
-
-    #[cfg_attr(
-        all(feature = "wasm", target_family = "wasm"),
-        wasm_bindgen_test::wasm_bindgen_test
-    )]
-    #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
-    async fn test_shared_wait_budget_bounds_payloads_outside_admitted_capacity() {
-        const HEADROOM_BYTES: usize = 16 * 1024 * 1024;
-        const WAIT_BYTES: usize = 20 * 1024 * 1024;
-        let global = Arc::new(GlobalTransferCapacity::new());
-        let first = Arc::new(TransferCapacity::new(global.clone()));
-        let second = Arc::new(TransferCapacity::new(global.clone()));
-        let blocker_bytes = (OUTBOUND_GLOBAL_BYTE_CAPACITY - HEADROOM_BYTES) / 2;
-        let _first_blocker = first
-            .try_acquire(
-                Did::from(201_u32),
-                TransferClass::Application,
-                blocker_bytes,
-            )
-            .expect("first global blocker must fit");
-        let _second_blocker = second
-            .try_acquire(
-                Did::from(202_u32),
-                TransferClass::Application,
-                blocker_bytes,
-            )
-            .expect("second global blocker must fit");
-        let waiter_count = OUTBOUND_GLOBAL_BYTE_CAPACITY / WAIT_BYTES;
-        let capacities = (0..=waiter_count)
-            .map(|_| Arc::new(TransferCapacity::new(global.clone())))
-            .collect::<Vec<_>>();
-        let mut waiters = capacities
-            .iter()
-            .take(waiter_count)
-            .enumerate()
-            .map(|(index, capacity)| {
-                Box::pin(capacity.acquire(
-                    Did::from(
-                        300_u32 + u32::try_from(index).expect("waiter index must fit in u32"),
-                    ),
-                    TransferClass::Storage,
-                    WAIT_BYTES,
-                ))
-            })
-            .collect::<Vec<_>>();
-
-        for waiter in &mut waiters {
-            assert!(matches!(futures::poll!(waiter.as_mut()), Poll::Pending));
-        }
-        let overflow_capacity = capacities.last().expect("overflow capacity must exist");
-        let mut overflow = Box::pin(overflow_capacity.acquire(
-            Did::from(400_u32),
-            TransferClass::Storage,
-            WAIT_BYTES,
-        ));
-        assert!(matches!(
-            futures::poll!(overflow.as_mut()),
-            Poll::Ready(Err(Error::OutboundTransferMemoryCapacityExceeded { .. }))
-        ));
-    }
-}
+mod test_capacity;

@@ -66,17 +66,15 @@ Options:
       --advertise-onion-relay
           Advertise this node as an onion relay in the online-node registry [env: ADVERTISE_ONION_RELAY=]
       --advertise-onion-exit
-          Publish this node as an onion exit in the application-layer exit registry [env: ADVERTISE_ONION_EXIT=]
+          Publish this node as an onion exit in the application-layer exit registry; requires --advertise-onion-relay [env: ADVERTISE_ONION_EXIT=]
       --onion-exit-service <ONION_EXIT_SERVICE>
-          TCP-backed exit service name, e.g. https or web. May be repeated. [env: ONION_EXIT_SERVICE=]
+          Onion exit service to serve: tcp or https. May be repeated. [env: ONION_EXIT_SERVICE=]
       --onion-exit-allow-target <ONION_EXIT_ALLOW_TARGET>
           Allow-list target for onion exit policy. May be repeated. [env: ONION_EXIT_ALLOW_TARGET=]
       --onion-exit-deny-target <ONION_EXIT_DENY_TARGET>
           Deny-list target for onion exit policy. May be repeated. [env: ONION_EXIT_DENY_TARGET=]
-      --onion-exit-max-circuits <ONION_EXIT_MAX_CIRCUITS>
-          Maximum onion circuits this exit will serve [env: ONION_EXIT_MAX_CIRCUITS=]
-      --onion-exit-max-streams-per-circuit <ONION_EXIT_MAX_STREAMS_PER_CIRCUIT>
-          Maximum streams per onion circuit this exit will serve [env: ONION_EXIT_MAX_STREAMS_PER_CIRCUIT=]
+      --onion-exit-max-sessions <ONION_EXIT_MAX_SESSIONS>
+          Maximum onion sessions this exit will serve [env: ONION_EXIT_MAX_SESSIONS=]
       --onion-exit-max-bytes-per-minute <ONION_EXIT_MAX_BYTES_PER_MINUTE>
           Maximum bytes per minute this exit will serve [env: ONION_EXIT_MAX_BYTES_PER_MINUTE=]
       --onion-exit-heartbeat-interval-secs <ONION_EXIT_HEARTBEAT_INTERVAL_SECS>
@@ -85,12 +83,6 @@ Options:
           Onion-exit registry descriptor TTL in seconds [env: ONION_EXIT_TTL_SECS=]
       --onion-http-proxy-addr <ONION_HTTP_PROXY_ADDR>
           Bind a local HTTP CONNECT proxy that routes client TCP streams through onion exits, e.g. 127.0.0.1:18080 [env: ONION_HTTP_PROXY_ADDR=]
-      --onion-http-proxy-service <ONION_HTTP_PROXY_SERVICE>
-          TCP onion-exit service used by the local HTTP CONNECT proxy, e.g. tcp or web [env: ONION_HTTP_PROXY_SERVICE=]
-      --onion-http-proxy-hop-count <ONION_HTTP_PROXY_HOP_COUNT>
-          Desired hop count for the local onion HTTP proxy. 0 uses node default. [env: ONION_HTTP_PROXY_HOP_COUNT=]
-      --onion-http-proxy-allow-short-paths
-          Allow the local onion HTTP proxy to use shorter routes when too few relays are live [env: ONION_HTTP_PROXY_ALLOW_SHORT_PATHS=]
       --onion-http-proxy-header-timeout-secs <ONION_HTTP_PROXY_HEADER_TIMEOUT_SECS>
           Maximum seconds to wait for one HTTP CONNECT header [env: ONION_HTTP_PROXY_HEADER_TIMEOUT_SECS=]
       --onion-http-proxy-max-connections <ONION_HTTP_PROXY_MAX_CONNECTIONS>

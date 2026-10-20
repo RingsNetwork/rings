@@ -69,7 +69,8 @@ async fn test_storage_store_fetches_remote_entry_into_cache() -> Result<()> {
     })
     .await?;
 
-    assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
+    // Read-your-writes (#982): the writer observes its own write before any fetch.
+    assert_cached_data_values(&node1, entry_key, &[data.as_str()]).await?;
     assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
     // The tap observes the overwrite before its handler runs (`InboundTap`): wait for the write.
     let node2_storage = &node2.dht().storage;
@@ -154,7 +155,8 @@ async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> 
     wait_for_msgs([&node1, &node2]).await;
     assert_no_more_msg([&node1, &node2]).await;
 
-    assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
+    // Read-your-writes (#982): the writer observes its own appends before any fetch.
+    assert_cached_data_values(&node1, entry_key, &["111", "222"]).await?;
     assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
     assert!(node1.dht().storage.count().await? == 0);
     assert!(node2.dht().storage.count().await? != 0);
@@ -212,7 +214,8 @@ async fn test_storage_append_data_moves_existing_entry_payload_to_end_once() -> 
         assert_no_more_msg([&node1, &node2]).await;
     }
 
-    assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
+    // Read-your-writes (#982): the writer observes its own appends before any fetch.
+    assert_cached_data_values(&node1, entry_key, &["111", "333", "222"]).await?;
     assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
     assert_eq!(node1.dht().storage.count().await?, 0);
     assert_ne!(node2.dht().storage.count().await?, 0);

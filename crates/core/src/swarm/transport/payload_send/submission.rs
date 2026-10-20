@@ -181,7 +181,14 @@ impl EnqueuedDetached {
                 }
             },
         };
+        // Every detached result reaches the caller here: a `Cancelled` from any path (worker
+        // drop or panic, scheduler loss, a stopped submit) stands only while the admission can
+        // still be cancelled, never after a claim won.
+        let settled = match result {
+            Ok(SendCompletionOutcome::Cancelled) => cancel_on_drop.settle_cancelled(peer),
+            result => result,
+        };
         cancel_on_drop.disarm();
-        result
+        settled
     }
 }

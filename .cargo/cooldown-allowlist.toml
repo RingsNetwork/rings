@@ -1,6 +1,7 @@
 # This is a cooldown-gate exception, not a build pin. The fresh release is
-# admitted early because it carries the RUSTSEC-2026-0285 fix; all older
-# compatible rustls releases remain vulnerable.
+# admitted early because it carries the fixes for RUSTSEC-2026-0346, -0347,
+# -0348 and -0349 (#956); all older compatible rustls releases remain
+# vulnerable.
 [[allow.exact]]
 crate = "rustls"
-version = "0.23.45"
+version = "0.23.46"

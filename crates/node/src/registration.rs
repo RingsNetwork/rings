@@ -27,7 +27,9 @@ use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::lifecycle::StopToken;
+use rings_core::message::ChordStorageInterface;
 use rings_core::message::MessageSigner;
+use rings_core::message::ScopedStorage;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
 
@@ -36,11 +38,14 @@ use crate::descriptor::RegistryElement;
 use crate::descriptor::SignedDescriptor;
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::OnionProcessEpochCell;
+use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
 use crate::processor::dht_lookup_poll_budget;
+use crate::processor::stoppable_storage_error;
 use crate::processor::Processor;
 
 const DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -197,6 +202,27 @@ impl<'a> RegistrationContext<'a> {
         MessageSigner::new(self.delegatee_key(), self.network_id())
     }
 
+    /// The DHT operations of this registration: their rerouting waits end at its stop.
+    fn storage(&self) -> ScopedStorage<'_> {
+        self.processor.swarm.scoped_storage(self.stop.clone())
+    }
+
+    /// Append `data` to `topic`, stopping cooperatively with the registration.
+    pub(crate) async fn append_data(&self, topic: &str, data: Bytes) -> Result<()> {
+        self.storage()
+            .storage_append_data(topic, data)
+            .await
+            .map_err(stoppable_storage_error)
+    }
+
+    /// Tombstone `data` in `topic`, stopping cooperatively with the registration.
+    pub(crate) async fn tombstone_data(&self, topic: &str, data: Bytes) -> Result<()> {
+        self.storage()
+            .storage_tombstone_data(topic, data)
+            .await
+            .map_err(stoppable_storage_error)
+    }
+
     pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
         self.processor
             .fetch_storage_entry_with_stop(entry_key, &self.stop)
@@ -229,6 +255,9 @@ impl DhtRegistrationPublisher {
     /// Invariant: registry topics are keyed presence sets, not append-only heartbeat logs.
     /// Preservation: every observed value replaced by the current publish is tombstoned after the
     /// replacement value has been touched, while unrelated publisher keys stay joinable.
+    ///
+    /// Each append and tombstone is rerouted as `Processor::storage_fetch` documents, and its
+    /// rerouting wait ends at the registration's stop.
     pub(crate) async fn publish_replacing<D>(
         &self,
         context: &RegistrationContext<'_>,
@@ -260,16 +289,12 @@ impl DhtRegistrationPublisher {
 
         for value in &current_values {
             context.ensure_running()?;
-            context
-                .processor
-                .storage_append_data(&self.topic, value.clone())
-                .await?;
+            context.append_data(&self.topic, value.clone()).await?;
         }
         for stale_value in stale_values {
             context.ensure_running()?;
             context
-                .processor
-                .storage_tombstone_data(&self.topic, stale_value.clone())
+                .tombstone_data(&self.topic, stale_value.clone())
                 .await?;
             self.published_values
                 .lock()
@@ -349,8 +374,9 @@ pub struct OnlineNodeRegistration {
     node_type: OnlineNodeType,
     started_at_ms: u128,
     endpoint_hint: Option<String>,
-    /// Immutable labels selected while the processor is built.
-    capabilities: Vec<String>,
+    /// The process epoch this node registers `relay` at, if it relays (#834 D2): read at every
+    /// heartbeat, so a renewed epoch is published by the next one.
+    onion_relay: Option<OnionProcessEpochCell>,
     publisher: DhtRegistrationPublisher,
 }
 
@@ -361,7 +387,7 @@ impl OnlineNodeRegistration {
         ttl: Duration,
         node_type: OnlineNodeType,
         endpoint_hint: Option<String>,
-        capabilities: Vec<String>,
+        onion_relay: Option<OnionProcessEpochCell>,
     ) -> Self {
         Self {
             heartbeat_interval,
@@ -369,7 +395,7 @@ impl OnlineNodeRegistration {
             node_type,
             started_at_ms: get_epoch_ms(),
             endpoint_hint,
-            capabilities,
+            onion_relay,
             publisher: DhtRegistrationPublisher::new(ONLINE_NODES_TOPIC),
         }
     }
@@ -389,7 +415,9 @@ impl OnlineNodeRegistration {
                 network_id: context.network_id(),
                 storage_redundancy: context.storage_redundancy(),
                 dht_virtual_nodes: context.dht_virtual_nodes(),
-                capabilities: self.capabilities.clone(),
+                capabilities: OnlineNodeCapabilities {
+                    onion_relay: self.onion_relay.as_ref().map(OnionProcessEpochCell::get),
+                },
                 endpoint_hint: self.endpoint_hint.clone(),
                 started_at_ms: self.started_at_ms,
                 heartbeat_at_ms: now_ms,

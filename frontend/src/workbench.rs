@@ -8,9 +8,6 @@ use std::time::Duration;
 use futures::future::Either;
 use futures::FutureExt;
 use gloo_timers::future::sleep;
-use wasm_bindgen::JsCast;
-use web_sys::Event;
-use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 use crate::controls::metric;
@@ -44,8 +41,6 @@ struct OnionRequestOutputs {
 pub(crate) struct OnionProxyState<'a> {
     pub(crate) url: &'a UseStateHandle<String>,
     pub(crate) method: &'a UseStateHandle<String>,
-    pub(crate) hop_count: &'a UseStateHandle<String>,
-    pub(crate) allow_short_paths: &'a UseStateHandle<bool>,
     pub(crate) headers: &'a UseStateHandle<String>,
     pub(crate) body: &'a UseStateHandle<String>,
     pub(crate) route_result: &'a UseStateHandle<String>,
@@ -85,22 +80,11 @@ fn onion_route_callback(
     status: UseStateHandle<String>,
 ) -> Callback<MouseEvent> {
     let url = state.url.clone();
-    let hop_count = state.hop_count.clone();
-    let allow_short_paths = state.allow_short_paths.clone();
     let route_result = state.route_result.clone();
     let response_status = state.response_status.clone();
     Callback::from(move |_| {
-        let options =
-            match onion::OnionProxyOptions::from_input(hop_count.as_str(), *allow_short_paths) {
-                Ok(options) => options,
-                Err(error) => {
-                    status.set(error);
-                    return;
-                }
-            };
         let request = onion::OnionProxyRouteRequest {
             url: (*url).trim().to_string(),
-            options,
         };
         let backend = OnionProxyBackend::current(&node_ref, &generation);
         let token = backend.token.clone();
@@ -158,8 +142,6 @@ fn onion_request_callback(
 ) -> Callback<MouseEvent> {
     let url = state.url.clone();
     let method = state.method.clone();
-    let hop_count = state.hop_count.clone();
-    let allow_short_paths = state.allow_short_paths.clone();
     let headers = state.headers.clone();
     let body = state.body.clone();
     let response_status = state.response_status.clone();
@@ -167,14 +149,7 @@ fn onion_request_callback(
     let response_body = state.response_body.clone();
     let route_result = state.route_result.clone();
     Callback::from(move |_| {
-        let request = match onion_http_request(
-            &url,
-            &method,
-            &headers,
-            &body,
-            &hop_count,
-            *allow_short_paths,
-        ) {
+        let request = match onion_http_request(&url, &method, &headers, &body) {
             Ok(request) => request,
             Err(error) => {
                 status.set(error);
@@ -216,17 +191,13 @@ fn onion_http_request(
     method: &UseStateHandle<String>,
     headers: &UseStateHandle<String>,
     body: &UseStateHandle<String>,
-    hop_count: &UseStateHandle<String>,
-    allow_short_paths: bool,
 ) -> Result<onion::OnionProxyHttpRequest, String> {
-    let options = onion::OnionProxyOptions::from_input(hop_count.as_str(), allow_short_paths)?;
     let headers = onion::parse_header_lines(headers.as_str())?;
     Ok(onion::OnionProxyHttpRequest {
         url: (*url).trim().to_string(),
         method: (*method).trim().to_string(),
         headers,
         body: (*body).as_bytes().to_vec(),
-        options,
     })
 }
 
@@ -305,8 +276,6 @@ fn onion_request_form(
             <h3>{ "Request" }</h3>
             { text_input("HTTPS URL", state.url.clone()) }
             { text_input("Method", state.method.clone()) }
-            { text_input("Hop count", state.hop_count.clone()) }
-            { allow_short_paths_control(state.allow_short_paths.clone()) }
             { textarea("Headers", state.headers.clone()) }
             { textarea("Body", state.body.clone()) }
             <div class="button-row">
@@ -345,26 +314,6 @@ where
     match futures::future::select(operation, timer).await {
         Either::Left((result, _)) => result,
         Either::Right((_, _)) => Err(format!("{label} timed out")),
-    }
-}
-
-fn allow_short_paths_control(state: UseStateHandle<bool>) -> Html {
-    let onchange = {
-        let state = state.clone();
-        Callback::from(move |event: Event| {
-            if let Some(input) = event
-                .target()
-                .and_then(|target| target.dyn_into::<HtmlInputElement>().ok())
-            {
-                state.set(input.checked());
-            }
-        })
-    };
-    html! {
-        <label class="field checkbox-field">
-            <span>{ "Allow short paths" }</span>
-            <input type="checkbox" checked={*state} {onchange} />
-        </label>
     }
 }
 

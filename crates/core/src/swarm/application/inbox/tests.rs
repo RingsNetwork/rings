@@ -1,6 +1,7 @@
 use futures::FutureExt;
 
 use super::ApplicationOutlet;
+use super::Delivered;
 use super::APPLICATION_INBOX_WEIGHT;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
@@ -247,4 +248,72 @@ fn test_the_inbox_ends_once_the_outlet_is_gone_and_drained() {
         Some(Some(ApplicationDelivery::Message(_)))
     ));
     assert_eq!(inbox.next().now_or_never(), Some(None));
+}
+
+/// Law (#969): a drop is told once while one waits after the peer's last admission or
+/// retirement, and a drop after a later admission is told again: a waiting drop of an earlier
+/// generation does not absorb it.
+#[test]
+fn test_a_drop_is_told_once_per_generation_while_it_waits() {
+    let outlet = ApplicationOutlet::new();
+    let inbox = outlet.claim().unwrap();
+    let peer = peer();
+    outlet.announce(SwarmEvent::PeerAdmitted { peer });
+    assert!(inbox.try_next().is_some());
+    outlet.announce(SwarmEvent::MessageDropped { peer });
+    outlet.announce(SwarmEvent::MessageDropped { peer });
+    outlet.announce(SwarmEvent::PeerRetired { peer });
+    outlet.announce(SwarmEvent::PeerAdmitted { peer });
+    outlet.announce(SwarmEvent::MessageDropped { peer });
+    outlet.announce(SwarmEvent::MessageDropped { peer });
+    let read: Vec<_> = std::iter::from_fn(|| inbox.try_next()).collect();
+    assert_eq!(read, [
+        ApplicationDelivery::Event(SwarmEvent::MessageDropped { peer }),
+        ApplicationDelivery::Event(SwarmEvent::PeerRetired { peer }),
+        ApplicationDelivery::Event(SwarmEvent::PeerAdmitted { peer }),
+        ApplicationDelivery::Event(SwarmEvent::MessageDropped { peer }),
+    ]);
+    outlet.announce(SwarmEvent::MessageDropped { peer });
+    assert_eq!(
+        inbox.try_next(),
+        Some(ApplicationDelivery::Event(SwarmEvent::MessageDropped {
+            peer
+        }))
+    );
+}
+
+/// Law (#969): a retirement that withdraws an unread admission withdraws the drops after it, so
+/// the application never reads a drop of an admission it did not read; other peers' facts and
+/// messages stay.
+#[test]
+fn test_a_withdrawn_admission_takes_its_drops_with_it() {
+    let outlet = ApplicationOutlet::new();
+    let inbox = outlet.claim().unwrap();
+    let (kept, withdrawn) = (peer(), peer());
+    let earlier = message(1);
+    outlet.announce(SwarmEvent::PeerAdmitted { peer: withdrawn });
+    outlet.announce(SwarmEvent::MessageDropped { peer: withdrawn });
+    outlet.announce(SwarmEvent::PeerAdmitted { peer: kept });
+    outlet.deliver(earlier.clone());
+    outlet.announce(SwarmEvent::MessageDropped { peer: kept });
+    outlet.announce(SwarmEvent::PeerRetired { peer: withdrawn });
+    let read: Vec<_> = std::iter::from_fn(|| inbox.try_next()).collect();
+    assert_eq!(read, [
+        ApplicationDelivery::Event(SwarmEvent::PeerAdmitted { peer: kept }),
+        ApplicationDelivery::Message(earlier),
+        ApplicationDelivery::Event(SwarmEvent::MessageDropped { peer: kept }),
+    ]);
+}
+
+/// `deliver` reports what it did, so its caller can tell a drop (#969).
+#[test]
+fn test_delivery_reports_whether_a_message_was_queued_discarded_or_dropped() {
+    let outlet = ApplicationOutlet::new();
+    assert_eq!(outlet.deliver(message(1)), Delivered::Discarded);
+    let _inbox = outlet.claim().unwrap();
+    assert_eq!(
+        outlet.deliver(message(APPLICATION_INBOX_WEIGHT)),
+        Delivered::Queued
+    );
+    assert_eq!(outlet.deliver(message(1)), Delivered::Dropped);
 }

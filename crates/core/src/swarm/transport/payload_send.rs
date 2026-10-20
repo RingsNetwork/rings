@@ -22,6 +22,7 @@ use super::outbound::OutboundTransfer;
 use super::outbound::OutboundTransferRoute;
 use super::outbound::SenderBound;
 use super::outbound::TransferCapacityPermit;
+use super::outbound::TransferDemand;
 use super::timeouts::OUTBOUND_PAYLOAD_CLEANUP_GRACE;
 use super::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use super::AdmittedConnection;
@@ -246,6 +247,17 @@ impl DetachedAdmissionOnDrop {
         )
     }
 
+    /// Settle a detached `Cancelled` toward `peer` through the admission's cancellation gate
+    /// (lemma (P), #859): it stands only while the admission can still be cancelled, never after
+    /// a claim won, whose outcome is the ambiguous `DetachedSendAbandonedAfterClaim`.
+    fn settle_cancelled(&self, peer: Did) -> Result<SendCompletionOutcome> {
+        self.cleanup
+            .value()
+            .map_or(Ok(SendCompletionOutcome::Cancelled), |cleanup| {
+                cleanup.admission.settle_cancelled(peer)
+            })
+    }
+
     fn disarm(&mut self) {
         self.cleanup.disarm();
     }
@@ -272,6 +284,11 @@ fn outbound_memory_reservation(wire_bytes: usize) -> usize {
     crate::fair_admission::retained_wire_bytes(wire_bytes).max(1)
 }
 
+/// The capacity demand of a transfer of `kind` whose wire form is `wire_bytes` long.
+fn transfer_demand(kind: OutboundMessageKind, wire_bytes: usize) -> TransferDemand {
+    TransferDemand::new(kind.class(), outbound_memory_reservation(wire_bytes))
+}
+
 fn resolve_scheduler_loss(
     admitted: &AdmittedConnection,
     local_error: Error,
@@ -284,6 +301,15 @@ fn resolve_scheduler_loss(
 }
 
 impl SwarmTransport {
+    /// The capacity demand of `payload`, as `prepare_outbound_transfer` reserves it: what a
+    /// rerouted placement refused for capacity waits room for (#859).
+    pub(super) fn payload_demand(payload: &MessagePayload) -> Result<TransferDemand> {
+        Ok(transfer_demand(
+            OutboundMessageKind::from_wire(&payload.transaction.data)?,
+            payload.wire_size()?,
+        ))
+    }
+
     /// Reserve outbound capacity to `peer` for a transfer of `bytes`.
     ///
     /// A send under [`QueueAdmission::Immediate`] takes it without waiting and is refused as
@@ -316,12 +342,12 @@ impl SwarmTransport {
             QueueAdmission::Tracked => {
                 return self
                     .outbound_schedulers
-                    .reserve(peer, kind.class(), bytes)
+                    .reserve(peer, TransferDemand::new(kind.class(), bytes))
                     .await;
             }
             QueueAdmission::Waiting => self
                 .outbound_schedulers
-                .reserve(peer, kind.class(), bytes)
+                .reserve(peer, TransferDemand::new(kind.class(), bytes))
                 .fuse(),
         };
         let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_BUDGET).fuse();

@@ -5,6 +5,7 @@ use super::test_support::install_two_node_chord_view;
 use super::test_support::next_payload_matching;
 use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
+use super::test_support::split_owner_keys;
 use super::test_support::split_redundant_entry;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::Entry;
@@ -39,7 +40,6 @@ use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
-use crate::tests::fixed_secret_keys;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::TEST_NETWORK_ID;
@@ -142,9 +142,7 @@ async fn test_leave_dht_attempt_requests_repair_only_for_a_referenced_peer() -> 
 #[cfg(feature = "dummy")]
 #[tokio::test]
 async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
-    // Fixed identities: with random ones, two nearby addresses leave one node an arc too short
-    // for any sampled entry to split its placements between the nodes.
-    let [key1, key2] = fixed_secret_keys::<2>()?;
+    let [key1, key2] = split_owner_keys()?;
     let node1 = prepare_node_with_storage_redundancy(key1, 2)?;
     let node2 = prepare_node_with_storage_redundancy(key2, 2)?;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -195,9 +193,10 @@ async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
         })
         .await?;
 
+    // The cache holds the join of the replies, normalized for storage like every carrier.
     assert_eq!(
         node1.swarm.storage_check_cache(entry.did).await,
-        Some(entry)
+        Some(entry.try_into_storage_entry()?)
     );
     assert_eq!(
         node2
@@ -252,8 +251,7 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
 
 #[tokio::test]
 async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() -> Result<()> {
-    // Fixed identities, so the sampled split-owner entry exists on every run.
-    let [key1, key2] = fixed_secret_keys::<2>()?;
+    let [key1, key2] = split_owner_keys()?;
     let node1 = prepare_node_with_storage_redundancy(key1, 2)?;
     let node2 = prepare_node_with_storage_redundancy(key2, 2)?;
 
@@ -341,7 +339,11 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
 
     node.swarm.storage_fetch(entry.did).await?;
 
-    assert_eq!(node.swarm.storage_check_cache(entry.did).await, Some(entry));
+    // The cache holds the join of the replies, normalized for storage like every carrier.
+    assert_eq!(
+        node.swarm.storage_check_cache(entry.did).await,
+        Some(entry.try_into_storage_entry()?)
+    );
     assert_no_more_msg([&node]).await;
     Ok(())
 }
@@ -841,5 +843,54 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
         node.dht().storage.get(&placement_key.to_string()).await?,
         None
     );
+    Ok(())
+}
+
+/// Read-join through the handler path (#864): two `FoundEntry` replies from replicas holding
+/// disjoint adds of one carrier leave their join in the cache, whichever answers last.
+#[tokio::test]
+async fn test_found_entry_replies_join_in_the_cache() -> Result<()> {
+    let resource = Did::from(10u32);
+    let now_ms = crate::utils::get_epoch_ms();
+    let replica = |value: &str, writer: u32| -> Result<Entry> {
+        Ok(EntryOperation::Extend(crate::tests::live_entry(
+            resource,
+            vec![Bytes::copy_from_slice(value.as_bytes())],
+            EntryKind::Data,
+        ))
+        .stamped(now_ms, Did::from(writer))?
+        .entry()
+        .clone())
+    };
+    let (holds_a, holds_b) = (replica("a", 1)?, replica("b", 2)?);
+
+    let mut cached = Vec::new();
+    for replies in [[&holds_a, &holds_b], [&holds_b, &holds_a]] {
+        let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+        let handler = MessageHandler::new(node.swarm.transport.clone());
+        node.swarm.transport.start_storage_lookup(resource, 2)?;
+        for reply in replies {
+            let found = FoundEntry {
+                data: vec![reply.clone()],
+                misses: vec![],
+                resource,
+                redundancy: 2,
+            };
+            let context = MessagePayload::new_send(
+                Message::FoundEntry(found.clone()),
+                node.swarm.transport.message_signer(),
+                node.did(),
+                node.did(),
+            )?;
+            handler.handle(&context, &found).await?;
+        }
+        cached.push(node.swarm.storage_check_cache(resource).await);
+    }
+
+    let [forward, reverse] = cached.as_slice() else {
+        return Err(Error::InvalidMessage("two reply orders".to_string()));
+    };
+    assert_eq!(forward, reverse);
+    assert_eq!(forward.as_ref().map(|entry| entry.data.len()), Some(2));
     Ok(())
 }

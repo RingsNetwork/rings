@@ -853,6 +853,9 @@ async fn test_predecessor_notification_serializes_with_generation_retirement() -
     Ok(())
 }
 
+/// The detached boundary under worker loss: a `Cancelled` published after the claim.
+#[cfg(feature = "dummy")]
+mod detached;
 #[cfg(feature = "dummy")]
 /// Finger-specific transport lifecycle regression tests.
 ///

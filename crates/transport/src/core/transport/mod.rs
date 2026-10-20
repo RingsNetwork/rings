@@ -33,6 +33,7 @@ pub use state::ConnectionStateSnapshot;
 pub use state::WebrtcConnectionState;
 
 pub use crate::callback::link_credit::LaneCreditReservation;
+pub use crate::callback::link_credit::LaneCreditView;
 
 #[cfg(test)]
 mod tests;

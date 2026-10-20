@@ -48,17 +48,9 @@ type NodeSettings = {
 };
 
 /**
- * Route-selection options shared by extension-side onion proxy calls.
+ * Onion proxy route probe request. The route length is fixed by the onion loop shape.
  */
-type OnionProxyOptions = {
-  readonly hopCount: number;
-  readonly allowShortPaths: boolean;
-};
-
-/**
- * Onion proxy route probe request.
- */
-type OnionProxyRouteRequest = OnionProxyOptions & {
+type OnionProxyRouteRequest = {
   readonly url: string;
 };
 

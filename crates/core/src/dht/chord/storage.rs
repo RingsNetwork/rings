@@ -25,6 +25,31 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils::get_epoch_ms;
 
+/// The step one placement of a lookup takes (see [`PeerRing::lookup_placement`]).
+#[derive(Debug)]
+pub(crate) enum PlacementLookup {
+    /// A live value is stored here.
+    Found(Entry),
+    /// This node owns the placement and stores nothing for it.
+    Missed(PlacementMiss),
+    /// Ask `next` for `query`.
+    Remote {
+        /// The node the query goes to.
+        next: Did,
+        /// The placement the query interrogates.
+        query: EntryLookupKey,
+    },
+}
+
+/// Where one placement of an operation is applied (see [`PeerRing::operate_route`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OperateRoute {
+    /// This node accepts the placement.
+    Owned,
+    /// The operation is routed through `next`.
+    Remote(Did),
+}
+
 /// The identity of a stored carrier: its kind and its placement.
 ///
 /// Storage is partitioned by kind, so the two carriers one position can name (a data topic,
@@ -90,10 +115,11 @@ enum Projection {
     WrittenBack,
     /// Return it only, writing nothing, not even the retirement of a value no longer live: the
     /// reader writes the slot itself under the transition (a join or an operation), whose write
-    /// subsumes the write-back and the retirement, or the store is the fetch cache, which has
-    /// no transition, so a write or a removal could undo a concurrent put. A dead cached value
-    /// stays until a put replaces it or the cache's count bound evicts it, and is reported
-    /// absent meanwhile.
+    /// subsumes the write-back and the retirement, or the store is the fetch cache, whose reads
+    /// take no transition (only its read-join puts and its writer's observations take the cache
+    /// transition), so a read's write or removal could undo a concurrent put. A dead cached value
+    /// stays until a put replaces it or the cache's count bound evicts it, and is reported absent
+    /// meanwhile.
     ReturnedOnly,
 }
 
@@ -167,14 +193,64 @@ async fn retire_unless_live(
     Ok(Some(entry))
 }
 
-/// Storage transition law: every read-modify-write of a slot (an operation, a join, an
-/// acknowledged removal, and the retirement a read performs) runs under the ring's storage
-/// transition, one at a time. The inbound actor and the stabilizer write the same slots
-/// concurrently (a hold arriving while the recipient drains its inbox, a hand-off joining while
-/// a repair pass reads), and the store itself only orders single puts, so without this
-/// serialization one of two interleaved read-modify-writes would overwrite the other and a held
-/// message could be lost. The transition is held across the store's own awaits and nothing
-/// else, so it never nests and never waits on the network.
+/// Join the `admitted` value into the live value stored at `key`, project the join to its
+/// element horizon at `now_ms`, and store it.
+///
+/// Pre: the caller holds the transition of `store`.
+/// Post: the stored value is `(live ⊔ admitted).retired_at(now_ms)` when a live value exists,
+/// otherwise `admitted.retired_at(now_ms)`, normalized for storage either way (the join
+/// normalizes the union, the admission normalized `admitted`); it is returned.
+async fn join_live_entry(
+    store: &EntryStorage,
+    key: &str,
+    admitted: AdmittedEntry,
+    now_ms: u128,
+) -> Result<Entry> {
+    let admitted = admitted.into_entry();
+    let joined = match live_entry(store, key, now_ms, Projection::ReturnedOnly).await? {
+        Some(live) => live.join(admitted)?,
+        None => admitted,
+    }
+    .retired_at(now_ms);
+    store.put(key, &joined).await?;
+    Ok(joined)
+}
+
+/// Apply `op` to the live value stored at `key`, or to the operation's empty carrier `⊥` when
+/// none is live, and store the result iff it is live at `now_ms`: the operation transition an
+/// owner applies to replicated storage and a writer to its own fetch cache.
+///
+/// Pre: the caller holds the transition of `store`, and `op` passed the admission law.
+/// Post: the slot holds `(live or ⊥).operate(op)` when that is live at `now_ms`, and is clear
+/// otherwise, since a stored value is always live when written.
+async fn operate_live_entry(
+    store: &EntryStorage,
+    key: &str,
+    op: EntryOperation,
+    actor: Did,
+    now_ms: u128,
+) -> Result<()> {
+    let local = match live_entry(store, key, now_ms, Projection::ReturnedOnly).await? {
+        Some(local) => local,
+        None => op.gen_default_entry()?,
+    };
+    match local.operate(now_ms, op, actor)?.live_at(now_ms) {
+        Some(value) => store.put(key, &value).await,
+        None => store.remove(key).await,
+    }
+}
+
+/// Transition law: every read-modify-write of a slot (an operation, a join, an acknowledged
+/// removal, and the retirement a read performs) runs under its store's transition, one at a
+/// time: the storage transition for replicated storage, the cache transition for the fetch
+/// cache. The two stores share no slot and no invariant, so each has its own lock, and no path
+/// holds both. The inbound actor and the stabilizer write the same slots concurrently (a hold
+/// arriving while the recipient drains its inbox, a hand-off joining while a repair pass reads,
+/// two fetch replies, or a reply and the writer's own write, meeting in one cache slot), and a
+/// store itself only orders single puts, so without this serialization one of two interleaved
+/// read-modify-writes would overwrite the other and a held message, an observed reply or an
+/// observed write could be lost. The transition is held across the store's own awaits and
+/// nothing else, so it never nests and never waits on the network.
 impl PeerRing {
     /// Read the live replicated entry of `kind` stored at `placement` on this node, projected at
     /// `now_ms` as every storage read is: test support for the controlled-network tests of
@@ -362,17 +438,72 @@ impl PeerRing {
         }
         let key = StorageKey::new(op.kind(), placement).to_string();
         let _transition = self.storage_transition.lock().await;
-        let local = match live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await? {
-            Some(local) => local,
-            None => op.gen_default_entry()?,
-        };
-        // A stored value is always live when written: a result no longer live clears the slot.
-        match local.operate(now_ms, op, self.did)?.live_at(now_ms) {
-            Some(stored) => self.storage.put(&key, &stored).await,
-            None => self.storage.remove(&key).await,
+        operate_live_entry(&self.storage, &key, op, self.did, now_ms).await
+    }
+
+    /// The step one placement of a lookup takes under the topology and local storage at
+    /// `now_ms`: the per-placement `Compute` shared by a whole lookup and by the rerouting of one
+    /// placement.
+    ///
+    /// ```text
+    /// find_storage_owner(placement)
+    ///   ├─ Some(owner) ─▶ [live value stored here?] ── yes ─▶ Found(value)
+    ///   │                        │ no
+    ///   │                        ├─ owner ≠ self ─────────────────────▶ Remote(owner)
+    ///   │                        └─ owner = self ─▶ [fallback ∧ virtual nodes ∧ ∃ head]
+    ///   │                                              ├─ yes ─▶ Remote(head)
+    ///   │                                              └─ no  ─▶ Missed(placement, self)
+    ///   └─ RemoteAction(next, FindSuccessor(id)) ──────────────────▶ Remote(next) for id
+    /// ```
+    pub(crate) async fn lookup_placement(
+        &self,
+        query: EntryLookupKey,
+        fallback_on_local_virtual_miss: bool,
+        now_ms: u128,
+    ) -> Result<PlacementLookup> {
+        match self.find_storage_owner(query.placement)? {
+            PeerRingAction::Some(owner) => {
+                // A lookup reads the data namespace: a relay inbox is never fetched, its
+                // recipient drains it from local storage, so a lookup at its position sees it as
+                // absent.
+                let key = StorageKey::new(EntryKind::Data, query.placement);
+                // A carrier past its retention bound serves no element: it answers as a miss,
+                // so the lookup asks the next placement and read-repair joins the missed one,
+                // instead of an empty value shadowing a replica with data.
+                let served = self
+                    .live_storage_entry(key, now_ms)
+                    .await?
+                    .filter(|value| value.bound_live_at(now_ms));
+                if let Some(value) = served {
+                    return Ok(PlacementLookup::Found(value));
+                }
+                tracing::debug!("Cannot find entry in local storage, try to query from successor");
+                if owner != self.did {
+                    return Ok(PlacementLookup::Remote { next: owner, query });
+                }
+                let head =
+                    if fallback_on_local_virtual_miss && self.storage_virtual_nodes_enabled()? {
+                        self.with_topology_state(topology::successor_head)?
+                    } else {
+                        None
+                    };
+                Ok(match head {
+                    Some(next) => PlacementLookup::Remote { next, query },
+                    None => PlacementLookup::Missed(PlacementMiss::new(query.placement, owner)),
+                })
+            }
+            PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(id)) => {
+                Ok(PlacementLookup::Remote {
+                    next,
+                    query: EntryLookupKey::new(query.resource, id),
+                })
+            }
+            action => Err(Error::unexpected_peer_ring_action(action)),
         }
     }
 
+    /// Look up every placement of `entry_key`: the first stored value ends the lookup with the
+    /// misses observed before it; otherwise every remote placement becomes a `FindEntry`.
     async fn entry_lookup_inner(
         &self,
         entry_key: Did,
@@ -384,72 +515,22 @@ impl PeerRing {
         let mut misses = vec![];
         for placement_key in entry_key.rotate_affine(redundancy)? {
             let query = EntryLookupKey::new(entry_key, placement_key);
-            // A lookup reads the data namespace: a relay inbox is never fetched, its recipient
-            // drains it from local storage, so a lookup at its position sees it as absent.
-            let key = StorageKey::new(EntryKind::Data, placement_key);
-            let act = match self.find_storage_owner(placement_key) {
-                Ok(PeerRingAction::Some(succ)) => {
-                    // A carrier past its retention bound serves no element: it answers as a
-                    // miss, so the lookup asks the next placement and read-repair joins the
-                    // missed one, instead of an empty value shadowing a replica with data.
-                    let served = self
-                        .live_storage_entry(key, now_ms)
-                        .await
-                        .map(|value| value.filter(|value| value.bound_live_at(now_ms)));
-                    match served {
-                        Ok(Some(value)) => {
-                            let observed_misses = std::mem::take(&mut misses);
-                            Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
-                                value,
-                                observed_misses,
-                            )))
-                        }
-                        Ok(None) => {
-                            tracing::debug!(
-                                "Cannot find entry in local storage, try to query from successor"
-                            );
-                            if succ == self.did {
-                                if fallback_on_local_virtual_miss
-                                    && self.storage_virtual_nodes_enabled()?
-                                {
-                                    if let Some(next) =
-                                        self.with_topology_state(topology::successor_head)?
-                                    {
-                                        Ok(PeerRingAction::RemoteAction(
-                                            next,
-                                            RemoteAction::FindEntry(query),
-                                        ))
-                                    } else {
-                                        misses.push(PlacementMiss::new(placement_key, succ));
-                                        Ok(PeerRingAction::None)
-                                    }
-                                } else {
-                                    misses.push(PlacementMiss::new(placement_key, succ));
-                                    Ok(PeerRingAction::None)
-                                }
-                            } else {
-                                Ok(PeerRingAction::RemoteAction(
-                                    succ,
-                                    RemoteAction::FindEntry(query),
-                                ))
-                            }
-                        }
-                        Err(error) => Err(error),
-                    }
+            match self
+                .lookup_placement(query, fallback_on_local_virtual_miss, now_ms)
+                .await?
+            {
+                PlacementLookup::Found(value) => {
+                    return Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
+                        value, misses,
+                    )));
                 }
-                Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(id))) => {
-                    Ok(PeerRingAction::RemoteAction(
+                PlacementLookup::Missed(miss) => misses.push(miss),
+                PlacementLookup::Remote { next, query } => {
+                    ret.push(PeerRingAction::RemoteAction(
                         next,
-                        RemoteAction::FindEntry(EntryLookupKey::new(entry_key, id)),
-                    ))
+                        RemoteAction::FindEntry(query),
+                    ));
                 }
-                Ok(action) => Err(Error::unexpected_peer_ring_action(action)),
-                Err(error) => Err(error),
-            }?;
-            if act.is_remote() {
-                ret.push(act);
-            } else if act.is_some_entry() {
-                return Ok(act);
             }
         }
         if !misses.is_empty() {
@@ -489,6 +570,19 @@ impl PeerRing {
         self.entry_lookup_inner(entry_key, false, redundancy).await
     }
 
+    /// Where an operation of `kind` at `placement` is applied under the topology now: the
+    /// per-placement `Compute` shared by [`Self::entry_operate`] and the rerouting of one
+    /// placement.
+    pub(crate) fn operate_route(&self, placement: Did, kind: EntryKind) -> Result<OperateRoute> {
+        match self.find_storage_owner_for(placement, kind)? {
+            PeerRingAction::Some(_) => Ok(OperateRoute::Owned),
+            PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_)) => {
+                Ok(OperateRoute::Remote(next))
+            }
+            action => Err(Error::unexpected_peer_ring_action(action)),
+        }
+    }
+
     /// Apply `op` under a runtime `redundancy`: locally at every accepted placement, and as a
     /// [`RemoteAction::FindEntryForOperate`] toward every remote one.
     pub(crate) async fn entry_operate(
@@ -502,27 +596,19 @@ impl PeerRing {
         let kind = op.entry().kind;
         let redundancy = kind.replication(redundancy);
         let mut ret = vec![];
-        for entry_key in entry_key.rotate_affine(redundancy)? {
-            let act = match self.find_storage_owner_for(entry_key, kind) {
-                Ok(PeerRingAction::Some(_)) => {
-                    self.operate_storage_entry(now_ms, entry_key, op.clone(), self.did)
+        for placement in entry_key.rotate_affine(redundancy)? {
+            match self.operate_route(placement, kind)? {
+                OperateRoute::Owned => {
+                    self.operate_storage_entry(now_ms, placement, op.clone(), self.did)
                         .await?;
-                    Ok(PeerRingAction::None)
                 }
-                Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_))) => {
-                    Ok(PeerRingAction::RemoteAction(
-                        next,
-                        RemoteAction::FindEntryForOperate(Box::new(PlacedEntryOperation {
-                            placement: entry_key,
-                            op: op.clone(),
-                        })),
-                    ))
-                }
-                Ok(action) => Err(Error::unexpected_peer_ring_action(action)),
-                Err(error) => Err(error),
-            }?;
-            if act.is_remote() {
-                ret.push(act);
+                OperateRoute::Remote(next) => ret.push(PeerRingAction::RemoteAction(
+                    next,
+                    RemoteAction::FindEntryForOperate(Box::new(PlacedEntryOperation {
+                        placement,
+                        op: op.clone(),
+                    })),
+                )),
             }
         }
         Ok(ret.into())
@@ -539,7 +625,8 @@ impl PeerRing {
     /// removes and register that hold it live are what the repair spreads.
     ///
     /// `held` ⊇ `served`: `local_cache_get = filter(bound_live_at) ∘ local_cache_held`.
-    /// The fetch cache has no transition, so the projection is returned only.
+    /// A cache read takes no transition (only the cache's read-join puts do), so the
+    /// projection is returned only.
     pub(crate) async fn local_cache_held(
         &self,
         entry_key: Did,
@@ -558,22 +645,52 @@ impl PeerRing {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageCache<PeerRingAction> for PeerRing {
-    /// Cache a fetched entry.
+    /// Join a fetched entry into the cache: `cache[k] ← cache[k] ⊔ entry` (#864).
     ///
     /// Pre: `entry` satisfies the same admission law as a replicated write, so a peer cannot
     /// pin a fetched value in the cache past the retention bound it could obtain in storage.
-    /// Post: the cached value is `entry` projected to its element horizon, as every stored
-    /// value is.
+    /// Post: the cached carrier is the join of every live reply observed for its key since the
+    /// key last became resident, with this node's own writes applied
+    /// ([`Self::local_cache_observe_write`]), so, within one residency, it does not depend on
+    /// the order in which replicas answer; it is projected to its element horizon, as every
+    /// stored value is.
+    /// The read-join-write is one cache transition, so two concurrent replies cannot lose one
+    /// side.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
         if entry.kind.is_relay_inbox() {
             return Err(Error::RelayInboxOperationNotAllowed);
         }
         let now_ms = get_epoch_ms();
-        let entry = entry
-            .validate_admissible_at(now_ms, self.network_id())?
-            .into_entry()
-            .retired_at(now_ms);
-        self.cache.put(&entry.did.to_string(), &entry).await
+        let key = entry.did.to_string();
+        let admitted = entry.validate_admissible_at(now_ms, self.network_id())?;
+        let _transition = self.cache_transition.lock().await;
+        join_live_entry(&self.cache, &key, admitted, now_ms)
+            .await
+            .map(drop)
+    }
+
+    /// Observe this node's own write `op` in the cache: `cache[k] ← (cache[k] or ⊥).operate(op)`,
+    /// the transition every owner applies (#982).
+    ///
+    /// Pre: `op` is stamped, as the owners receive it; stamping is idempotent, so its dots are
+    /// the ones every owner applies.
+    /// Post: an overwrite or an extend leaves `cache[k] ⊔ stamped(op)`, below every replica
+    /// that has applied `op` (`R.operate(op) = R ⊔ stamped(op)`), so the cache still ascends in
+    /// `⊑`; a tombstone leaves covering removes at the dots of its values the cache holds, the
+    /// dots this writer observed and asked to remove. An operation the admission law refuses,
+    /// which no owner applies, and a relay inbox, which no lookup reads, are not observed.
+    async fn local_cache_observe_write(&self, op: EntryOperation) -> Result<()> {
+        let now_ms = get_epoch_ms();
+        if op.kind().is_relay_inbox()
+            || op
+                .validate_admissible_at(now_ms, self.network_id())
+                .is_err()
+        {
+            return Ok(());
+        }
+        let key = op.entry().did.to_string();
+        let _transition = self.cache_transition.lock().await;
+        operate_live_entry(&self.cache, &key, op, self.did, now_ms).await
     }
 
     /// Read a cached entry, as a lookup serves it.

@@ -209,6 +209,10 @@ if (( NODE_COUNT < 1 )); then
     die "RINGS_NODE_COUNT must be at least 1"
 fi
 
+if [[ "$ADVERTISE_ONION_EXIT" == "true" ]] && [[ "$ADVERTISE_ONION_RELAY" != "true" ]]; then
+    die "RINGS_ADVERTISE_ONION_EXIT requires RINGS_ADVERTISE_ONION_RELAY: every onion exit is also a relay"
+fi
+
 if [[ "$ADVERTISE_ONION_EXIT" == "true" ]] && [[ -z "$(trim "$ONION_EXIT_ALLOW_TARGETS")" ]]; then
     die "RINGS_ONION_EXIT_ALLOW_TARGETS must include at least one target when RINGS_ADVERTISE_ONION_EXIT is true"
 fi
@@ -360,8 +364,7 @@ write_config() {
             else
                 printf '  denied_targets: []\n'
             fi
-            printf '  max_circuits: 0\n'
-            printf '  max_streams_per_circuit: 0\n'
+            printf '  max_sessions: 0\n'
             printf '  max_bytes_per_minute: 0\n'
         fi
         external_ips="$(external_ip_candidates)"

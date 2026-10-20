@@ -214,6 +214,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::onion::OnionProcessEpoch;
     use crate::prelude::DelegateeKey;
 
     struct FixedEntropy {
@@ -239,6 +240,7 @@ mod tests {
         Ok(OnionRouteHop::new(
             delegatee_key.delegator_did(),
             delegatee_key.delegatee_public_key(),
+            OnionProcessEpoch::new([7; 16]),
         ))
     }
 

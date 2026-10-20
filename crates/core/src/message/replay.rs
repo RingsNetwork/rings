@@ -370,6 +370,17 @@ where
         .map_err(Error::TransactionReplayUnscheduled)?
 }
 
+/// The runtime-local quota clock: monotonic time elapsed since `started_at`, read when called.
+fn quota_clock(started_at: Instant) -> impl FnOnce() -> OriginQuotaInstant {
+    move || {
+        OriginQuotaInstant::from_nanos(
+            Instant::now()
+                .saturating_duration_since(started_at)
+                .as_nanos(),
+        )
+    }
+}
+
 /// Storage accepted by the transaction replay runtime.
 pub type ReplayStorage = Box<rings_runtime::maybe_send_sync!(dyn KvStorageScan<ReplayRecord>)>;
 
@@ -663,31 +674,37 @@ impl TransactionReplay {
         charge: OriginQuotaCharge,
         byte_cost: usize,
     ) -> Result<SequenceVerdict> {
-        let now = OriginQuotaInstant::from_nanos(
-            Instant::now()
-                .saturating_duration_since(self.started_at)
-                .as_nanos(),
-        );
+        let clock = quota_clock(self.started_at);
         let replay = Arc::clone(self);
         run_whole(async move {
             replay
-                .admit_at(key, sequence, digest, charge, byte_cost, now)
+                .admit_at(key, sequence, digest, charge, byte_cost, clock)
                 .await
         })
         .await
     }
 
-    /// The admission transition at quota time `now`: lock, load, classify, reserve quota,
+    /// The admission transition: lock, load, classify, read the quota clock, reserve quota,
     /// persist the stream's record, then update the table.
-    async fn admit_at(
+    ///
+    /// Law (Clock under the lock): `clock` is read only inside the critical section of
+    /// `state`, so the instants the quota table receives follow the order in which
+    /// transitions hold the lock. A monotonic clock then gives every quota record a
+    /// non-decreasing sequence of instants, and `MonotonicTimeRegressed` is unreachable;
+    /// an instant read before the lock could be overtaken by a later reading that locked
+    /// first (#953).
+    async fn admit_at<C>(
         &self,
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
         charge: OriginQuotaCharge,
         byte_cost: usize,
-        now: OriginQuotaInstant,
-    ) -> Result<SequenceVerdict> {
+        clock: C,
+    ) -> Result<SequenceVerdict>
+    where
+        C: FnOnce() -> OriginQuotaInstant,
+    {
         let mut state = self.state.lock().await;
         let TransactionAdmissionState { store, quota } = &mut *state;
         let store = self.load_store(store).await?;
@@ -730,7 +747,7 @@ impl TransactionReplay {
             key.destination,
             charge.lane,
         );
-        let reservation = quota.reserve(quota_key, charge.message_limit, byte_cost, now);
+        let reservation = quota.reserve(quota_key, charge.message_limit, byte_cost, clock());
         let quota_reservation = match reservation {
             Ok(reservation) => reservation,
             Err(error) => {
@@ -759,7 +776,7 @@ impl TransactionReplay {
             digest,
             crate::message::MessageCategory::Application.into(),
             0,
-            OriginQuotaInstant::ZERO,
+            || OriginQuotaInstant::ZERO,
         )
         .await
     }

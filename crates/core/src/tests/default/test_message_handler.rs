@@ -322,7 +322,7 @@ async fn received_hops(node: &Node, origin: Did, matches: fn(&Message) -> bool) 
 /// belongs to `test_dht_schedule` and the Stateright model.
 ///
 /// No real-WebRTC form of this relayed connect is kept here:
-/// `message::handlers::connection::tests::test_triple_nodes_*` issue the relayed
+/// `message::handlers::connection::test_connection::test_triple_nodes_*` issue the relayed
 /// `connect` only when the join has not already linked n1 and n3, and they wait on
 /// wall-clock helpers. A dedicated real-transport smoke test is tracked in #882.
 #[cfg(feature = "dummy")]

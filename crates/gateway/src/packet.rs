@@ -34,6 +34,8 @@ pub struct TcpSegment {
     pub syn: bool,
     /// Whether ACK is set.
     pub ack: bool,
+    /// Whether RST is set.
+    pub rst: bool,
 }
 
 impl TcpSegment {
@@ -147,6 +149,7 @@ fn classify_tcp(ipv4: &Ipv4Packet<&[u8]>) -> PacketDisposition {
         },
         syn: tcp.syn(),
         ack: tcp.ack(),
+        rst: tcp.rst(),
     })
 }
 

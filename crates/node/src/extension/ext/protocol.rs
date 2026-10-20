@@ -122,4 +122,43 @@ pub trait Protocol {
     fn delegates_admission(&self) -> bool {
         false
     }
+
+    /// The event this protocol makes of `fact` about a link, or `None` when the protocol keeps
+    /// no state about links. `link_fact : LinkFact ⇀ Event`.
+    ///
+    /// A fact reaches the protocol in its namespace's queue, in order with the envelopes around
+    /// it, and is never dropped (#963, #966).
+    fn link_fact(&self, _fact: LinkFact) -> Option<Self::Event> {
+        None
+    }
+}
+
+/// A fact about this node's link to one peer, which the router delivers to a protocol beside
+/// its envelopes ([`Protocol::link_fact`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkFact {
+    /// `peer`'s link generation was admitted: it is up until the `Retired(peer)` after it. Per
+    /// peer the queue carries `Admitted` and `Retired` alternately, in the order core decided
+    /// them, so a protocol keying state by admitted link (the onion data plane, #843) follows
+    /// core's links without reading them.
+    Admitted(Did),
+    /// `peer`'s link generation retired: nothing more crosses it (#963).
+    Retired(Did),
+    /// The namespace's queue (#966), or the core's application inbox (#969), dropped a message
+    /// from `peer`, an admitted peer, for want of room: the link stays up, but a message `peer`
+    /// sent over it was lost here. A drop by the core's inbox names no namespace, so every
+    /// namespace is told.
+    ///
+    /// Several drops before the protocol reads the fact are told once: at most one such fact per
+    /// peer waits in a namespace's queue.
+    Dropped(Did),
+}
+
+impl LinkFact {
+    /// The peer at the other end of the link this fact is about.
+    pub const fn peer(self) -> Did {
+        match self {
+            Self::Admitted(peer) | Self::Retired(peer) | Self::Dropped(peer) => peer,
+        }
+    }
 }

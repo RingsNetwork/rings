@@ -16,24 +16,19 @@
 //! `find_successor`, true of every representable state, so no reachable
 //! state could falsify it.
 //!
-//! Liveness is stated in `search`, over [`is_converged`] and
+//! Liveness is stated in `test_model_check`, over [`is_converged`] and
 //! [`retains_live_heads`].
 
 use std::fmt;
 
 use super::node::LifecycleEvent;
 use super::overlay::Overlay;
+use super::overlay::OverlayAction;
 use super::overlay::OverlayState;
 use crate::dht::topology::successor_head;
-
-/// What a law claims about the reachable states.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Expectation {
-    /// `□`: every reachable state satisfies the predicate.
-    Always,
-    /// `◇`: some reachable state satisfies the predicate (coverage).
-    Sometimes,
-}
+use crate::swarm::transport::test_model_check::CheckedModel;
+use crate::swarm::transport::test_model_check::Expectation;
+use crate::swarm::transport::test_model_check::Law;
 
 /// The identity of a law, as verdicts and mutation tests refer to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,17 +89,6 @@ impl fmt::Display for LawName {
             }
         })
     }
-}
-
-/// One checked proposition over the composed carrier.
-#[derive(Clone, Copy)]
-pub(super) struct Law {
-    /// Identity used in verdicts and by the mutation tests.
-    pub(super) name: LawName,
-    /// Whether the predicate must hold everywhere or somewhere.
-    pub(super) expectation: Expectation,
-    /// The predicate.
-    pub(super) holds: fn(&Overlay, &OverlayState) -> bool,
 }
 
 /// `□ stale_effect = None`: the history variable never records a retired
@@ -224,7 +208,7 @@ pub(super) fn retains_live_heads(state: &OverlayState) -> bool {
 }
 
 /// Every checked proposition, in report order.
-pub(super) const LAWS: [Law; 7] = [
+pub(super) const LAWS: [Law<Overlay>; 7] = [
     Law {
         name: LawName::RetiredGenerationsAreInert,
         expectation: Expectation::Always,
@@ -261,3 +245,39 @@ pub(super) const LAWS: [Law; 7] = [
         holds: head_replacement_fills_capacity,
     },
 ];
+
+/// The rejoin carrier as an instance of the shared search: its laws are [`LAWS`] and its
+/// liveness target is [`is_converged`].
+impl CheckedModel for Overlay {
+    type State = OverlayState;
+    type Action = OverlayAction;
+    type LawName = LawName;
+
+    fn init(&self) -> OverlayState {
+        Overlay::init(self)
+    }
+
+    fn actions(&self, state: &OverlayState) -> Vec<OverlayAction> {
+        Overlay::actions(self, state)
+    }
+
+    fn next_state(&self, state: &OverlayState, action: &OverlayAction) -> Option<OverlayState> {
+        Overlay::next_state(self, state, action)
+    }
+
+    fn laws(&self) -> &[Law<Self>] {
+        &LAWS
+    }
+
+    fn is_converged(&self, state: &OverlayState) -> bool {
+        is_converged(self, state)
+    }
+
+    fn is_environmental(action: &OverlayAction) -> bool {
+        action.is_environmental()
+    }
+
+    fn is_periodic(action: &OverlayAction) -> bool {
+        action.is_periodic()
+    }
+}

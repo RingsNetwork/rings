@@ -1,0 +1,456 @@
+//! The client's session machine and credit window (#834 D2′, D6′, D8).
+//!
+//! ```text
+//! data(w):   frame data(n, T?, w), n ← n + 1;  T is set, with t inline, until the first reply
+//! fin:       frame fin(n, T?), n ← n + 1; T is set, with t inline, until the first reply
+//! abort:     frame abort(n), the session is given up
+//! credit(υ…): frame credit(n, υ…), n unchanged: the forward high-water mark m = n
+//! reply(t, f): replied ← ⊤;  heard ← t;  reorder f, then per released frame, in order:
+//!   first frame   data(0, ε) ⇒ Opened      fin ⇒ Refused (tolerated; h refuses with abort(0))
+//!   later frames  data(w)    ⇒ Data(w)     data(ε) ⇒ nothing (h's echo)     fin ⇒ Fin
+//!   abort(n), on arrival      ⇒ Refused before the open is decided, Aborted after it
+//!                               (n is informational: nothing orders an abort)
+//! credit:    want min(W, Q_max) reply blocks outstanding at h; each forward loop leaves one and a
+//!            full credit loop k + 1, so the deficit D asks ⌊D / (k + 1)⌋ full credit loops: the
+//!            window refills only once it is k + 1 short, a hysteresis of one loop
+//!            after the open and after each reply only: an expired block is not refilled
+//! keep-alive: one credit loop once no loop has left for V/2, which also replaces credit lost on
+//!            the way or expired (a session whose replies stop sends nothing else)
+//! expire(t): a gap persisting for V ⇒ fail;  t − heard ≥ Δ = 2V ⇒ fail (until abort or fin)
+//! ```
+//!
+//! Laws (tested in `session::tests`):
+//!
+//! - **Target.** Every `data` and `fin` frame sent before the first reply carries `T` and the
+//!   target; none after it does, so the session opens at `h` whichever forward loop arrives
+//!   first, and the target stops travelling once `h` has answered.
+//! - **Sequence.** Forward frames carry `n = 0, 1, …`; replies are released in their order.
+//! - **Mark** (paper, D2′ Order; #981). Every `credit` frame, a refill or the keep-alive, carries
+//!   `m` = the next forward sequence, so every forward frame below `m` has been sent before
+//!   it, and `h` knows a lost one missing at the next credit loop (`session::exit`, Law Mark).
+//!   Once the sequence space is spent no `m` names it, and no credit is framed either.
+//! - **Open result.** The first reply decides the open: `data(0, ε)` is the ack, and `abort(0)`
+//!   the refusal `h` sends (the `abort` decision of #834 D2′, superseding #843 Q5's `fin`); a
+//!   `fin` before any data, which `h` never sends, is still read as a refusal, failing closed.
+//! - **Abort.** An `abort` is a failure, never an end of stream: it yields `Aborted` (or
+//!   `Refused` before the open), at once and whatever is still missing before it, and nothing
+//!   after it, so a stream `h` could not finish is never presented as complete.
+//! - **Credit.** The window never asks for more than `min(W, Q_max)` outstanding blocks. The
+//!   client's count tracks the blocks at `h` up to replies in flight, loss and clock skew at an
+//!   expiry: `h` spends the block of least expiry first, and so does [`OnionClientCredit`]; both
+//!   drop a block at its expiry; and the count saturates at `Q_max`, where `h` refuses further
+//!   blocks.
+//! - **Batching.** A steady download of `n` replies costs at most `⌈n / (k + 1)⌉ + 1` forward
+//!   loops (Prop. SURB batching), since only full credit frames are sent.
+//! - **Idle.** An idle session sends exactly one loop per `V/2`, whatever its credit: credit is
+//!   refilled only after the open or a reply, and expired credit is replaced by the keep-alive
+//!   alone ([`OnionCreditWindow::control_loops`]), so its route's links return to the idle floor
+//!   between loops (#880).
+//! - **Keep-alive.** While the reply direction is open, a forward loop of `ς` leaves whenever
+//!   none has left for `V/2` ([`keep_alive_due`]); after the world's `fin` no credit is sent,
+//!   so an idle half-open upload is dropped at `h` after `V`, and the deadline is disarmed with
+//!   it. With `h`'s echo (`session::exit`, Law Echo), a forward loop that reaches `h` when no
+//!   reply of `ς` has left for `V/2` is answered at once.
+//! - **Deadline** (D2′ Liveness; paper, Prop. Liveness of failure). The session fails closed
+//!   once no frame of `ς` has arrived for `Δ = 2V` ([`ONION_SESSION_DEADLINE_MS`]), until `h`'s
+//!   `abort` or `fin` ends the reply direction. Let every loop segment's latency vary by less
+//!   than `V/4`, and `L` be one return-segment latency. Forward arrivals at `h` are then less
+//!   than `V/2 + V/4 = 3V/4` apart, so
+//!
+//!   ```text
+//!   (i)  live:         replies leave h < V/2 + 3V/4 = 5V/4 apart (Law Echo), and
+//!                      consecutive frames reach cl < 5V/4 + V/4 = 3V/2 < Δ apart
+//!                      ⇒ a live session is never failed
+//!   (ii) return loss:  the last frame reaches cl by t₀ + L     ⇒ cl fails ς by t₀ + 2V + L,
+//!                      and its abort, over the delivering forward segment, closes ς at h
+//!        forward loss: h drops ς by t₀ + V; its last block expires and its last reply leaves
+//!                      by t₀ + V (Invariant Credit)             ⇒ cl fails ς by t₀ + 3V + L
+//!   (iii) one lost forward frame n, sent at t₀, on a delivering route: the next forward loop
+//!                      leaves by t₀ + V/2 (keep-alive) carrying a sequence above n or a mark
+//!                      m > n (Law Mark), and arrives by t₀ + V/2 + F
+//!                      ⇒ h fails ς by t₀ + 3V/2 + F and replies abort(n′), so
+//!                        cl fails ς by t₀ + 3V/2 + F + L
+//!   ```
+//!
+//!   with `F` one forward-segment latency.
+//!
+//!   The echo `data(n, 0, ε)` after the open is heard, but carries no stream bytes, so it
+//!   yields no event.
+
+use std::collections::BTreeMap;
+
+use bytes::Bytes;
+
+use super::exit::OnionStreamFrame;
+use super::frame::OnionFrame;
+use super::frame::OnionSequence;
+use super::order::OnionReorder;
+use super::order::OnionSequenceGap;
+use super::pool::ONION_SURB_POOL_CAPACITY;
+use crate::onion::circuit::OnionExpiry;
+use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::sphinx::cell::OnionSurb;
+use crate::onion::sphinx::class::OnionLoopClass;
+
+/// `Δ = 2V`: the longest a session's reply direction may stay silent before the client fails
+/// the session closed (D2′ Liveness). It exceeds the `3V/2` bound between frames of a live
+/// session (Law Deadline (i)) by `V/2`.
+pub(crate) const ONION_SESSION_DEADLINE_MS: u128 = 2 * ONION_FORWARD_MAX_VALIDITY_MS;
+
+/// What the session learned from one reply, for the client shell to act on.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum OnionClientEvent {
+    /// `h` opened the world: the open ack.
+    Opened,
+    /// `h` refused or failed to open the world; no reason is given (#843 Q5).
+    Refused,
+    /// Stream bytes from the world.
+    Data(Bytes),
+    /// The world closed its stream.
+    Fin,
+    /// `h` gave the session up: the stream is incomplete.
+    Aborted,
+}
+
+/// Why a client session failed closed on its own clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum OnionClientFailure {
+    /// The reply direction has a gap that can no longer fill.
+    #[error(transparent)]
+    Gap(#[from] OnionSequenceGap),
+    /// No frame of the session arrived for `Δ = 2V` (Law Deadline).
+    #[error("no frame of the session arrived for 2V")]
+    Silent,
+}
+
+/// Why the session can send no further frame: its 32-bit sequence space is spent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("session sequence space exhausted")]
+pub(crate) struct OnionSequenceExhausted;
+
+/// The client's machine of one session; see the module documentation.
+#[derive(Debug)]
+pub(crate) struct OnionClientSession {
+    /// `t`, the canonical target authority.
+    target: Bytes,
+    /// The sequence of the next forward frame; `None` once spent.
+    forward: Option<OnionSequence>,
+    /// Whether any reply of the session has arrived: `T` stops.
+    replied: bool,
+    /// Whether the open has been decided by the first released reply.
+    decided: bool,
+    /// The `h`-to-client direction.
+    replies: OnionReorder<OnionStreamFrame>,
+    /// Whether `h` aborted: every later reply is ignored.
+    aborted: bool,
+    /// Whether the world's `fin` was released: the reply direction is over.
+    ended: bool,
+    /// The arrival of the last frame of the session, or its creation before any.
+    heard_ms: u128,
+}
+
+impl OnionClientSession {
+    /// A session to the target with the canonical authority `target`, created at `now`; its
+    /// arguments `ā = ς ‖ SHA-256(t)` are the shell's.
+    pub(crate) fn new(target: Bytes, now_ms: u128) -> Self {
+        Self {
+            target,
+            forward: Some(OnionSequence::FIRST),
+            replied: false,
+            decided: false,
+            replies: OnionReorder::default(),
+            aborted: false,
+            ended: false,
+            heard_ms: now_ms,
+        }
+    }
+
+    /// The most stream bytes the next `data` frame can carry in `class`: less the target while
+    /// `T` is still set.
+    pub(crate) fn data_capacity(&self, class: OnionLoopClass) -> usize {
+        if self.replied {
+            OnionFrame::data_capacity(class)
+        } else {
+            OnionFrame::data_capacity_with_target(class, &self.target).unwrap_or(0)
+        }
+    }
+
+    /// The next `data(n, T?, w)` frame.
+    ///
+    /// # Errors
+    ///
+    /// [`OnionSequenceExhausted`] once the sequence space is spent.
+    pub(crate) fn data(&mut self, payload: Bytes) -> Result<OnionFrame, OnionSequenceExhausted> {
+        let sequence = self.advance()?;
+        Ok(OnionFrame::Data {
+            sequence,
+            target: (!self.replied).then(|| self.target.clone()),
+            payload,
+        })
+    }
+
+    /// The next `fin(n)` frame, with `T` and the target until the first reply, as `data`.
+    ///
+    /// # Errors
+    ///
+    /// [`OnionSequenceExhausted`] once the sequence space is spent.
+    pub(crate) fn fin(&mut self) -> Result<OnionFrame, OnionSequenceExhausted> {
+        let sequence = self.advance()?;
+        Ok(OnionFrame::Fin {
+            sequence,
+            target: (!self.replied).then(|| self.target.clone()),
+        })
+    }
+
+    /// The next `abort(n)` frame: the client gives the session up.
+    ///
+    /// # Errors
+    ///
+    /// [`OnionSequenceExhausted`] once the sequence space is spent.
+    pub(crate) fn abort(&mut self) -> Result<OnionFrame, OnionSequenceExhausted> {
+        self.advance()
+            .map(|sequence| OnionFrame::Abort { sequence })
+    }
+
+    /// The next `credit(m, υ₁ … υ_k)` frame for the blocks `surbs`, with `m` the next forward
+    /// sequence (Law Mark); it takes no sequence.
+    ///
+    /// # Errors
+    ///
+    /// [`OnionSequenceExhausted`] once the sequence space is spent, since no `m` names it.
+    pub(crate) fn credit(
+        &self,
+        surbs: Vec<OnionSurb>,
+    ) -> Result<OnionFrame, OnionSequenceExhausted> {
+        self.forward
+            .ok_or(OnionSequenceExhausted)
+            .map(|mark| OnionFrame::Credit { mark, surbs })
+    }
+
+    /// One reply of the session at `now`, returning what it releases, in order.
+    ///
+    /// # Errors
+    ///
+    /// [`OnionSequenceGap`] if the reply direction has a gap that can no longer fill; the
+    /// session then fails closed.
+    pub(crate) fn reply(
+        &mut self,
+        now_ms: u128,
+        frame: OnionFrame,
+    ) -> Result<Vec<OnionClientEvent>, OnionSequenceGap> {
+        self.replied = true;
+        self.heard_ms = now_ms;
+        if self.aborted {
+            return Ok(Vec::new());
+        }
+        let (sequence, frame) = match frame {
+            OnionFrame::Data {
+                sequence, payload, ..
+            } => (sequence, OnionStreamFrame::Data {
+                target: None,
+                payload,
+            }),
+            OnionFrame::Fin { sequence, .. } => (sequence, OnionStreamFrame::Fin { target: None }),
+            // `h` never sends credit; one that does is ignored.
+            OnionFrame::Credit { .. } => return Ok(Vec::new()),
+            // Applied on arrival: nothing before it that is still missing will count.
+            OnionFrame::Abort { .. } => {
+                self.aborted = true;
+                let decided = std::mem::replace(&mut self.decided, true);
+                return Ok(vec![if decided {
+                    OnionClientEvent::Aborted
+                } else {
+                    OnionClientEvent::Refused
+                }]);
+            }
+        };
+        Ok(self
+            .replies
+            .accept(now_ms, sequence, frame)?
+            .into_iter()
+            .filter_map(|frame| self.interpret(frame))
+            .collect())
+    }
+
+    /// Fail closed at `now` if the reply direction's gap has persisted for `V`, or if it is
+    /// still open and silent at its deadline (Law Deadline).
+    ///
+    /// # Errors
+    ///
+    /// [`OnionClientFailure::Gap`] or [`OnionClientFailure::Silent`] then.
+    pub(crate) fn expire(&mut self, now_ms: u128) -> Result<(), OnionClientFailure> {
+        self.replies.expire(now_ms)?;
+        match self.deadline_ms() {
+            Some(deadline_ms) if now_ms >= deadline_ms => Err(OnionClientFailure::Silent),
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether a reply is known missing: a later one arrived and is held behind it
+    /// ([`OnionReorder::is_stalled`]), the observable half of a gap (#950).
+    pub(crate) fn stalled(&self) -> bool {
+        self.replies.is_stalled()
+    }
+
+    /// The instant `heard + Δ` at which a silent session fails, or `None` once its reply
+    /// direction is over (`h` aborted, or the world's `fin` arrived), since no frame follows.
+    pub(crate) fn deadline_ms(&self) -> Option<u128> {
+        (!self.aborted && !self.ended)
+            .then(|| self.heard_ms.saturating_add(ONION_SESSION_DEADLINE_MS))
+    }
+
+    /// The meaning of one in-order reply: the first decides the open; a later empty `data` is
+    /// `h`'s echo, heard but not stream bytes.
+    fn interpret(&mut self, frame: OnionStreamFrame) -> Option<OnionClientEvent> {
+        let first = !self.decided;
+        self.decided = true;
+        match (first, frame) {
+            (true, OnionStreamFrame::Data { .. }) => Some(OnionClientEvent::Opened),
+            (true, OnionStreamFrame::Fin { .. }) => Some(OnionClientEvent::Refused),
+            (false, OnionStreamFrame::Data { payload, .. }) => {
+                (!payload.is_empty()).then_some(OnionClientEvent::Data(payload))
+            }
+            (false, OnionStreamFrame::Fin { .. }) => {
+                self.ended = true;
+                Some(OnionClientEvent::Fin)
+            }
+        }
+    }
+
+    /// Take the next forward sequence.
+    fn advance(&mut self) -> Result<OnionSequence, OnionSequenceExhausted> {
+        let sequence = self.forward.ok_or(OnionSequenceExhausted)?;
+        self.forward = sequence.next();
+        Ok(sequence)
+    }
+}
+
+/// The client's credit window: the number `W ≤ Q_max` of reply blocks it keeps outstanding at
+/// `h` for one session; credit beyond `Q_max` would be dropped at `h`.
+///
+/// `W` bounds the download rate by `W / RTT`: at the default `W = 64` and a loop round trip below
+/// `0.6 s`, one session can take its link's full emission rate (`≈ 98` replies per second, #880).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OnionCreditWindow {
+    /// `W`.
+    target: usize,
+}
+
+impl OnionCreditWindow {
+    /// The default window, `W = 64`.
+    pub(crate) const DEFAULT: Self = Self { target: 64 };
+
+    /// The window `W = target`.
+    #[cfg(test)]
+    pub(crate) const fn new(target: usize) -> Self {
+        Self { target }
+    }
+
+    /// The number of full credit loops to send when `outstanding` blocks are live at `h` in
+    /// class `class`: `⌊(min(W, Q_max) − outstanding) / (k + 1)⌋`. Each leaves `k + 1` blocks,
+    /// so together they never exceed the window, and none is sent until the window is `k + 1`
+    /// short. The window is capped at `h`'s pool bound `Q_max`, since a block past it is
+    /// dropped at `h` and its loop wasted.
+    pub(crate) fn credit_loops(self, outstanding: usize, class: OnionLoopClass) -> usize {
+        let deficit = self
+            .target
+            .min(ONION_SURB_POOL_CAPACITY)
+            .saturating_sub(outstanding);
+        deficit / (OnionFrame::credit_capacity(class) + 1)
+    }
+
+    /// The full credit loops the driver sends after `step` at `now`, with `outstanding` blocks
+    /// live at `h` and its last loop gone at `last_forward`: the pure control rule.
+    ///
+    /// ```text
+    /// Refill ⇒ ⌊(min(W, Q_max) − outstanding) / (k + 1)⌋        (credit_loops)
+    /// Tick   ⇒ keep_alive_due(now, last_forward) ? 1 : 0        (keep_alive_due)
+    /// ```
+    ///
+    /// Credit is refilled only after the open or a reply: a block that expires unspent is
+    /// replaced by the keep-alive alone, so an idle session sends exactly one loop per `V/2`,
+    /// never a refill burst per expiring cohort (Law Idle).
+    pub(crate) fn control_loops(
+        self,
+        step: OnionControlStep,
+        outstanding: usize,
+        class: OnionLoopClass,
+        now_ms: u128,
+        last_forward_ms: u128,
+    ) -> usize {
+        match step {
+            OnionControlStep::Refill => self.credit_loops(outstanding, class),
+            OnionControlStep::Tick => usize::from(keep_alive_due(now_ms, last_forward_ms)),
+        }
+    }
+}
+
+/// A step of the client's driver after which it may send control (credit) loops.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OnionControlStep {
+    /// The open left, or a reply arrived: `h` may have spent blocks the window refills.
+    Refill,
+    /// The driver's periodic tick: only the keep-alive.
+    Tick,
+}
+
+/// The keep-alive rule: whether a session whose last loop left at `last_forward` owes `h` one
+/// credit loop at `now`, which it does once `V/2` has passed without one. A forward loop of any
+/// kind resets it, so the rule fires at most once per `V/2`.
+pub(crate) const fn keep_alive_due(now_ms: u128, last_forward_ms: u128) -> bool {
+    now_ms >= keep_alive_at(last_forward_ms)
+}
+
+/// The instant `last_forward + V/2` at which a session whose last loop left at `last_forward`
+/// owes `h` its keep-alive, so the driver can wake exactly then.
+pub(crate) const fn keep_alive_at(last_forward_ms: u128) -> u128 {
+    last_forward_ms.saturating_add(ONION_FORWARD_MAX_VALIDITY_MS / 2)
+}
+
+/// The client's ledger of the reply blocks outstanding at `h` for one session, by expiry.
+///
+/// ```text
+/// sent(t, x, n): L[x] ← L[x] + min(n, Q_max − count(t))                 (h refuses past Q_max)
+/// replied(t):   L[x] ← L[x] − 1 for the least x > t with L[x] > 0      (h spends least x first)
+/// count(t):     Σ_{x > t} L[x]                                         (h drops a block at x)
+/// ```
+#[derive(Debug, Default)]
+pub(crate) struct OnionClientCredit {
+    /// `L`: blocks sent and not yet spent, by expiry.
+    outstanding: BTreeMap<OnionExpiry, usize>,
+}
+
+impl OnionClientCredit {
+    /// Count `count` blocks sent at `now` with expiry `expiry`, of which `h` keeps at most what
+    /// its pool has room for.
+    pub(crate) fn sent(&mut self, now_ms: u128, expiry: OnionExpiry, count: usize) {
+        let room = ONION_SURB_POOL_CAPACITY.saturating_sub(self.count(now_ms));
+        let kept = count.min(room);
+        if kept > 0 {
+            *self.outstanding.entry(expiry).or_default() += kept;
+        }
+    }
+
+    /// A reply arrived at `now`: `h` spent its block of least expiry.
+    pub(crate) fn replied(&mut self, now_ms: u128) {
+        self.purge(now_ms);
+        if let Some(mut least) = self.outstanding.first_entry() {
+            *least.get_mut() -= 1;
+            if *least.get() == 0 {
+                least.remove();
+            }
+        }
+    }
+
+    /// The blocks still outstanding at `now`.
+    pub(crate) fn count(&mut self, now_ms: u128) -> usize {
+        self.purge(now_ms);
+        self.outstanding.values().sum()
+    }
+
+    /// Drop every bucket whose expiry has passed at `now`.
+    fn purge(&mut self, now_ms: u128) {
+        self.outstanding
+            .retain(|expiry, count| *count > 0 && !expiry.has_passed_at(now_ms));
+    }
+}

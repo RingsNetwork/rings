@@ -1,61 +1,22 @@
 use super::codec::decode_event;
 use super::codec::OnionCircuitEvent;
+use super::codec::OnionCircuitInput;
+use super::reducer::apply;
 use super::reducer::OnionCircuitEffect;
-use super::reducer::OnionCircuitReducer;
-use super::reducer::OnionCircuitState;
 use super::ONION_CIRCUIT_NAMESPACE;
 use crate::extension::ext::Ctx;
+use crate::extension::ext::LinkFact;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
 
-/// Capabilities this node enables for the onion circuit data plane.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OnionCircuitCapabilities {
-    relay: bool,
-    exit_epoch: Option<crate::onion::OnionExitEpoch>,
-}
-
-impl OnionCircuitCapabilities {
-    /// Build capabilities from the node's advertised relay flag and installed exit epoch.
-    pub const fn from_registration(
-        relay: bool,
-        exit_epoch: Option<crate::onion::OnionExitEpoch>,
-    ) -> Self {
-        Self { relay, exit_epoch }
-    }
-
-    pub(super) const fn accepts_forward_layers(self) -> bool {
-        self.relay || self.exit_epoch.is_some()
-    }
-
-    pub(super) const fn permits_relay_layer(self) -> bool {
-        self.relay
-    }
-
-    pub(super) fn permits_exit_epoch(self, process_epoch: crate::onion::OnionExitEpoch) -> bool {
-        matches!(self.exit_epoch, Some(local_epoch) if local_epoch == process_epoch)
-    }
-}
-
-/// Encrypted onion circuit protocol.
-#[derive(Clone, Debug)]
-pub struct OnionCircuitProtocol {
-    reducer: OnionCircuitReducer,
-}
-
-impl OnionCircuitProtocol {
-    /// Create a protocol instance over explicit onion circuit capabilities.
-    pub fn new(capabilities: OnionCircuitCapabilities) -> Self {
-        Self {
-            reducer: OnionCircuitReducer::new(capabilities),
-        }
-    }
-}
+/// The onion data plane as a protocol: a stateless reducer over cells and link facts.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct OnionCircuitProtocol;
 
 impl Protocol for OnionCircuitProtocol {
-    type State = OnionCircuitState;
+    type State = ();
     type Event = OnionCircuitEvent;
     type Effect = OnionCircuitEffect;
 
@@ -63,9 +24,7 @@ impl Protocol for OnionCircuitProtocol {
         ONION_CIRCUIT_NAMESPACE
     }
 
-    fn init(&self) -> Self::State {
-        OnionCircuitState::default()
-    }
+    fn init(&self) -> Self::State {}
 
     fn decode(&self, wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
         decode_event(wire)
@@ -73,9 +32,27 @@ impl Protocol for OnionCircuitProtocol {
 
     fn step(
         &self,
-        ctx: Ctx<'_, Self::State>,
+        _ctx: Ctx<'_, Self::State>,
         event: Self::Event,
     ) -> Transition<Self::State, Self::Effect> {
-        self.reducer.apply(ctx.state, event.input)
+        apply(event.input)
+    }
+
+    /// The onion data plane admits its own direct-edge traffic (#888): every cell is charged
+    /// `u(b) = b / 16 KiB` against the live link it arrived on, on receipt and before any
+    /// cryptography (#834 L9, see `circuit::admission`), so a sending neighbour is bounded by its
+    /// link's unit budget. Core's per-origin message count would only throttle a link's
+    /// constant-rate emission below `r`; the per-origin byte bucket still applies.
+    fn delegates_admission(&self) -> bool {
+        true
+    }
+
+    /// Every fact about a link reaches the data plane, in its queue's order: an admission makes
+    /// the link live, a retirement ends it, and both a retirement and a drop end the sessions
+    /// this node holds on it (`Law (Circuit fate)`, #963, #966, #969; see `circuit::shell`).
+    fn link_fact(&self, fact: LinkFact) -> Option<Self::Event> {
+        Some(OnionCircuitEvent {
+            input: OnionCircuitInput::Link(fact.into()),
+        })
     }
 }

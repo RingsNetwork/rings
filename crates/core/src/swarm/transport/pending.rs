@@ -3,15 +3,25 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use rings_transport::core::transport::TransportInterface;
+/// Cancellation and expiry of unadmitted generations.
+mod cancellation;
 /// Finger-table proof admission at the pending/active transport boundary.
 ///
 /// The module-level algorithm, its exhaustive lifecycle branches and the transition that
 /// interprets them live in `pending::finger`.
 mod finger;
+/// The signaling state of a pending attempt (#947).
+mod handshake;
 mod registry;
 
 #[cfg(all(test, feature = "dummy"))]
 pub(crate) use finger::FingerUpdateDisposition;
+pub(super) use handshake::crossing_offer_verdict;
+pub(super) use handshake::CrossingOfferVerdict;
+pub(super) use handshake::Handshake;
+pub(crate) use handshake::OfferOwner;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(super) use handshake::OfferPhase;
 pub(super) use registry::ActiveConnectionSet;
 pub(super) use registry::ConnectionLifecycleRegistry;
 pub(super) use registry::LifecycleBounds;
@@ -27,6 +37,7 @@ use crate::dht::FingerFixRequest;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
+use crate::lifecycle::epoch::Epoch;
 use crate::swarm::application::SwarmEvent;
 use crate::swarm::callback::SwarmTransportCallback;
 use crate::utils::get_epoch_ms_i64;
@@ -58,7 +69,7 @@ type PendingFingerUpdatesGuard<'transport> =
 
 /// Shared serialization boundary for logical connection ownership.
 ///
-/// Clone law: every clone refers to the same mutex. Holding the boundary
+/// Clone law: every clone refers to the same mutex and the same epoch. Holding the boundary
 /// prevents admission, retirement, and final send admission from crossing.
 ///
 /// Lock order: under the boundary, locks are taken in this order and never the reverse, each
@@ -73,6 +84,9 @@ type PendingFingerUpdatesGuard<'transport> =
 pub(super) struct ConnectionLifecycleBoundary {
     /// Mutex that serializes admission, retirement, and final send checks.
     inner: Arc<Mutex<()>>,
+    /// Advanced by every admission, retirement, and readiness callback: the event a rerouted
+    /// send waits on for its hop to become usable (see `rerouting`).
+    link_transitions: Arc<Epoch>,
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     /// Test-only count of threads waiting to acquire the lifecycle gate.
     waiting: Arc<std::sync::atomic::AtomicUsize>,
@@ -90,9 +104,15 @@ impl ConnectionLifecycleBoundary {
     pub(super) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(())),
+            link_transitions: Arc::new(Epoch::default()),
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
             waiting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// The epoch of link transitions shared by every clone of this boundary.
+    pub(super) fn link_transitions(&self) -> &Epoch {
+        &self.link_transitions
     }
 
     /// Hold the boundary until the returned evidence drops.
@@ -176,20 +196,6 @@ pub(super) enum AnswerSlot {
     /// A generation an answer cannot apply to: past pending, or pending without a transport
     /// object.
     Owned(PendingConnectionAttempt),
-}
-
-/// Which unadmitted phases a cancellation may release, in the registry's vocabulary.
-enum CancellationScope {
-    /// `Pending` only: no data channel has opened, so only the record and its transport object
-    /// are released.
-    Pending,
-    /// `Pending` or `Admitting`.
-    Unadmitted,
-}
-
-struct RetiredPendingConnection {
-    /// Raw transport released by retirement, if it still exists in the backend.
-    connection: Option<SwarmConnection>,
 }
 
 /// Transport object paired with the pending generation that owns its callbacks.
@@ -333,12 +339,25 @@ impl SwarmTransport {
             .map(|lifecycles| lifecycles.owns_active_slot(attempt))
     }
 
+    /// Reserve a pending generation for `peer` with a test-default signaling state: an
+    /// external offer still being created.
+    #[cfg(test)]
     pub(super) async fn reserve_pending_connection(
         &self,
         peer: Did,
     ) -> Result<PendingConnectionAttempt> {
+        self.reserve_pending_connection_for(peer, Handshake::offering(OfferOwner::External))
+            .await
+    }
+
+    /// Reserve a pending generation for `peer` whose signaling starts in `handshake`.
+    pub(super) async fn reserve_pending_connection_for(
+        &self,
+        peer: Did,
+        handshake: Handshake,
+    ) -> Result<PendingConnectionAttempt> {
         self.prepare_pending_reservation(peer).await?;
-        self.commit_pending_reservation(peer)
+        self.commit_pending_reservation(peer, handshake)
     }
 
     /// Validate the remote-peer precondition and free a slot before commit.
@@ -370,9 +389,15 @@ impl SwarmTransport {
     }
 
     /// Commit one previously prepared reservation under the lifecycle boundary.
-    fn commit_pending_reservation(&self, peer: Did) -> Result<PendingConnectionAttempt> {
+    fn commit_pending_reservation(
+        &self,
+        peer: Did,
+        handshake: Handshake,
+    ) -> Result<PendingConnectionAttempt> {
         let _lifecycle = self.connection_lifecycle()?;
-        let attempt = self.peer_lifecycles()?.reserve(peer, get_epoch_ms_i64())?;
+        let attempt = self
+            .peer_lifecycles()?
+            .reserve_for(peer, get_epoch_ms_i64(), handshake)?;
         tracing::debug!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
@@ -394,7 +419,7 @@ impl SwarmTransport {
         self.prepare_pending_reservation(peer).await?;
         observe_after_prepare();
         observe_before_commit();
-        self.commit_pending_reservation(peer)
+        self.commit_pending_reservation(peer, Handshake::offering(OfferOwner::External))
     }
 
     #[cfg(all(test, feature = "dummy"))]
@@ -408,6 +433,11 @@ impl SwarmTransport {
 
     pub(crate) fn active_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
         Ok(self.peer_lifecycles()?.active_attempt(peer))
+    }
+
+    /// `𝓡`, the number of lifecycle records the registry holds in any phase (#723).
+    pub(crate) fn connection_registry_capacity(&self) -> Result<usize> {
+        Ok(self.peer_lifecycles()?.bounds().total())
     }
 
     /// Whether any connection attempt toward `peer` exists, admitted or still handshaking.
@@ -625,6 +655,7 @@ impl SwarmTransport {
         admitting.activate();
         self.announce(&lifecycle, SwarmEvent::PeerAdmitted { peer: attempt.peer });
         pending_finger_updates.remove(&attempt);
+        self.connection_lifecycle.link_transitions().advance();
         tracing::info!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
@@ -633,16 +664,6 @@ impl SwarmTransport {
             "connection admission committed"
         );
         Ok(Some(action))
-    }
-
-    /// Release the record of `attempt` iff it is still pending, leaving its transport object,
-    /// if any, in place: the `Pending` arm of the one cancellation transition without the close.
-    pub(super) fn retire_pending_connection(
-        &self,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<bool> {
-        self.retire_pending_connection_for_close(attempt, CancellationScope::Pending)
-            .map(|retired| retired.is_some())
     }
 
     /// Announce a peer fact to the application inbox, inside the lifecycle boundary `_held`
@@ -656,6 +677,17 @@ impl SwarmTransport {
         #[cfg(test)]
         crate::tests::activity::record_activity();
         self.application.outlet.announce(event);
+    }
+
+    /// Announce that a live application message from `peer` was dropped for want of room in the
+    /// inbox, iff `peer` is admitted, inside the lifecycle boundary: the fact is then read after
+    /// `peer`'s admission and before its retirement (#969). Never waits.
+    pub(crate) fn announce_message_dropped(&self, peer: Did) -> Result<()> {
+        let lifecycle = self.connection_lifecycle()?;
+        if self.active_attempt(peer)?.is_some() {
+            self.announce(&lifecycle, SwarmEvent::MessageDropped { peer });
+        }
+        Ok(())
     }
 
     /// Retire `attempt` only if `action` decides to, under the lifecycle boundary, announcing
@@ -693,6 +725,7 @@ impl SwarmTransport {
             peer_liveness.remove(attempt.peer);
             measured_disconnects.remove(&attempt.peer);
             self.outbound_schedulers.shutdown(attempt.peer);
+            self.connection_lifecycle.link_transitions().advance();
             self.announce(lifecycle, SwarmEvent::PeerRetired { peer: attempt.peer });
         }
         Ok(outcome)
@@ -726,130 +759,6 @@ impl SwarmTransport {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn retirement_waiter_count_for_test(&self) -> usize {
         self.connection_lifecycle.waiting_for_test()
-    }
-
-    /// Cancel a current pending or admitting handshake and release its transport object.
-    pub(crate) async fn cancel_unadmitted_connection(
-        &self,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<bool> {
-        self.cancel_connection(attempt, CancellationScope::Unadmitted)
-            .await
-    }
-
-    /// Cancel `attempt` iff it is still pending, that is, no data channel has opened on it, and
-    /// release its transport object. An admitting generation has a data channel open and its
-    /// DHT admission in flight; it is left to complete, or to fail on its own path.
-    pub(crate) async fn cancel_pending_connection(
-        &self,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<bool> {
-        self.cancel_connection(attempt, CancellationScope::Pending)
-            .await
-    }
-
-    /// Release the unadmitted record of `attempt` within `scope` and close its transport
-    /// object; `false` when `attempt` owns no record in that scope.
-    async fn cancel_connection(
-        &self,
-        attempt: PendingConnectionAttempt,
-        scope: CancellationScope,
-    ) -> Result<bool> {
-        let Some(retired) = self.retire_pending_connection_for_close(attempt, scope)? else {
-            return Ok(false);
-        };
-        tracing::debug!(
-            target: "rings_core::swarm::transport::handshake",
-            local = %self.dht.did,
-            peer = %attempt.peer,
-            generation = attempt.generation,
-            "pending connection cancelled"
-        );
-        if let Some(connection) = retired.connection {
-            self.transport
-                .close_connection_if_current(&connection.connection)
-                .await
-                .map_err(Error::Transport)?;
-        }
-        Ok(true)
-    }
-
-    fn retire_pending_connection_for_close(
-        &self,
-        attempt: PendingConnectionAttempt,
-        scope: CancellationScope,
-    ) -> Result<Option<RetiredPendingConnection>> {
-        let _lifecycle = self.connection_lifecycle()?;
-        let removed = {
-            let mut lifecycles = self.peer_lifecycles()?;
-            match scope {
-                CancellationScope::Pending => lifecycles.remove_pending(attempt),
-                CancellationScope::Unadmitted => lifecycles.remove_unadmitted(attempt),
-            }
-        };
-        if !removed {
-            return Ok(None);
-        }
-        self.cancel_pending_finger_updates(attempt)?;
-        Ok(Some(RetiredPendingConnection {
-            connection: self.get_raw_connection(attempt.peer),
-        }))
-    }
-
-    pub(super) async fn abandon_pending_connection(
-        &self,
-        attempt: PendingConnectionAttempt,
-        operation: &str,
-    ) {
-        if let Err(error) = self.cancel_unadmitted_connection(attempt).await {
-            tracing::warn!(
-                "failed to cancel pending connection to {} after {operation}: {error}",
-                attempt.peer
-            );
-        }
-    }
-
-    /// Close pending handshakes whose data channel did not open before the deadline.
-    ///
-    /// These peers have never entered the DHT, so expiry only releases the
-    /// transport object; it deliberately performs no topology mutation.
-    pub(crate) async fn expire_pending_connections(&self) -> Result<()> {
-        let expired = {
-            let _lifecycle = self.connection_lifecycle()?;
-            let expired = self.peer_lifecycles()?.expire(get_epoch_ms_i64());
-            expired
-                .into_iter()
-                .map(|expired| {
-                    self.cancel_pending_finger_updates(expired.attempt)?;
-                    let connection = self.get_raw_connection(expired.attempt.peer);
-                    Ok((expired, connection))
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
-        for (expired, connection) in expired {
-            let attempt = expired.attempt;
-            let state = connection
-                .as_ref()
-                .map(|connection| connection.webrtc_connection_state());
-            tracing::warn!(
-                target: "rings_core::swarm::transport::handshake",
-                local = %self.dht.did,
-                peer = %attempt.peer,
-                generation = attempt.generation,
-                age_ms = expired.age_ms,
-                timeout_ms = PENDING_CONNECTION_TIMEOUT_MS,
-                phase = expired.phase.as_str(),
-                state = ?state,
-                "connection attempt timed out before admission commit"
-            );
-            if let Some(connection) = connection {
-                self.transport
-                    .close_connection_if_current(&connection.connection)
-                    .await
-                    .map_err(Error::Transport)?;
-            }
-        }
-        Ok(())
     }
 
     /// Create a new non-routable transport connection and register its pending attempt.

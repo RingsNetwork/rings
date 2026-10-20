@@ -18,7 +18,6 @@ use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::stabilization::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
-use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
@@ -37,8 +36,10 @@ use crate::tests::held_inbox_for;
 use crate::tests::live_entry;
 use crate::utils::get_epoch_ms;
 
+mod test_cache_join;
 mod test_handoff;
 mod test_horizon;
+mod test_own_write;
 mod test_repair;
 
 fn data_entry(did: Did) -> Entry {
@@ -894,39 +895,5 @@ async fn test_join_storage_entry_keeps_the_later_retention_bound() -> Result<()>
         .join_storage_entry(now_ms, placement_key, earlier)
         .await?;
     assert_eq!(stored.expires_at_ms, Some(now_ms + 2_000));
-    Ok(())
-}
-
-/// The fetched-entry cache shares the admission law, and a read reports an expired value absent
-/// without removing it, since a removal could undo a concurrent put; a later put replaces it.
-#[tokio::test]
-async fn test_local_cache_shares_admission_and_retention() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let resource = Did::from(10u32);
-
-    assert!(matches!(
-        node.local_cache_put(expired(data_entry(resource))).await,
-        Err(Error::EntryNotLive)
-    ));
-    let mut pinned = data_entry(resource);
-    pinned.crdt.register = Some(EntryVersion::new(
-        u128::MAX,
-        Did::from(9u32),
-        Did::from(1u32),
-    ));
-    assert!(matches!(
-        node.local_cache_put(pinned).await,
-        Err(Error::EntryVersionAheadOfClock)
-    ));
-
-    node.cache
-        .put(&resource.to_string(), &expired(data_entry(resource)))
-        .await?;
-    assert_eq!(node.local_cache_get(resource).await?, None);
-    assert_eq!(node.cache.count().await?, 1);
-    let fresh = data_entry(resource);
-    node.local_cache_put(fresh).await?;
-    assert!(node.local_cache_get(resource).await?.is_some());
-    assert_eq!(node.cache.count().await?, 1);
     Ok(())
 }

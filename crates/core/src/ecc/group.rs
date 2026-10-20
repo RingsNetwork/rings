@@ -55,6 +55,7 @@ use p256::Scalar as Secp256r1ScalarField;
 use rand::RngCore;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
+use zeroize::Zeroize;
 
 use crate::algebra::AbelianGroup;
 use crate::algebra::CommutativeRing;
@@ -753,14 +754,12 @@ impl TryFrom<PublicKey<33>> for Point<Secp256k1> {
     }
 }
 
-impl TryFrom<Point<Secp256k1>> for PublicKey<33> {
-    type Error = Error;
-
-    fn try_from(point: Point<Secp256k1>) -> Result<Self> {
-        if point.inner == K256ProjectivePoint::IDENTITY {
-            return Err(Error::InvalidPublicKey);
-        }
-        K256AffinePoint::from(point).try_into()
+impl<C: CurveGroup> Zeroize for Scalar<C>
+where C::Scalar: Zeroize
+{
+    /// Zeroizes the native scalar.
+    fn zeroize(&mut self) {
+        self.inner.zeroize();
     }
 }
 

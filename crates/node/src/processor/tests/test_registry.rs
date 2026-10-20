@@ -214,8 +214,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
     let other = prepare_processor().await;
     let now_ms = get_epoch_ms();
     let mut policy = onion_policy(&["example.com:443"], &[])?;
-    policy.max_circuits = 8;
-    policy.max_streams_per_circuit = 2;
+    policy.max_sessions = 8;
     policy.max_bytes_per_minute = 4096;
     let stale_tcp = onion_exit_descriptor_for_processor_with_service(
         &processor,
@@ -227,12 +226,6 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         &processor,
         OnionServiceName::https(),
         now_ms.saturating_sub(20_000),
-        policy.clone(),
-    )?;
-    let stale_api = onion_exit_descriptor_for_processor_with_service(
-        &processor,
-        OnionServiceName::parse("api")?,
-        now_ms.saturating_sub(10_000),
         policy.clone(),
     )?;
     let other_https = onion_exit_descriptor_for_processor_with_service(
@@ -253,7 +246,6 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
             stale_tcp,
             stale_https,
-            stale_api,
             other_https.clone(),
             expired_other_https,
         ])?)
@@ -263,9 +255,8 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         Duration::from_secs(30),
         Duration::from_secs(90),
         default_online_node_type(),
-        vec![OnionServiceName::https()],
-        policy,
-        processor.onion_exit_epoch(),
+        OnionExitOffer::new(vec![OnionServiceName::https()], policy)?,
+        processor.onion_process_epoch(),
     );
     let published = registration
         .publish_descriptors(&processor.registration_context())
@@ -276,7 +267,7 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .ok_or_else(|| Error::InvalidConfig("expected one onion-exit descriptor".to_string()))?;
     assert_eq!(
         published_descriptor.process_epoch,
-        processor.onion_exit_epoch()
+        processor.onion_process_epoch.get()
     );
     let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
     processor.storage_fetch(entry_key).await?;
@@ -299,9 +290,10 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
         .any(|descriptor| descriptor == &published_descriptor));
     assert!(stored.iter().any(|descriptor| descriptor == &other_https));
 
-    // #871: the four replaced or expired descriptors are covering removes, and every one of
-    // them is collected once it is stable, `H + σ` after the newest dot it covers.
-    assert_eq!(entry.crdt.tombstones.len(), 4);
+    // #871: the three replaced or expired descriptors (both stale self records and the expired
+    // foreign one) are covering removes, and every one of them is collected once it is stable,
+    // `H + σ` after the newest dot it covers.
+    assert_eq!(entry.crdt.tombstones.len(), 3);
     let stable_at =
         get_epoch_ms() + u128::from(EntryKind::Data.max_lifetime_ms()) + TS_OFFSET_TOLERANCE_MS;
     let collected = entry.retired_at(stable_at);
@@ -328,7 +320,7 @@ async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Res
             network_id: expired_processor.swarm.network_id(),
             storage_redundancy: expired_processor.swarm.storage_redundancy(),
             dht_virtual_nodes: expired_processor.swarm.dht_virtual_nodes(),
-            capabilities: Vec::new(),
+            capabilities: OnlineNodeCapabilities::default(),
             endpoint_hint: None,
             started_at_ms: now_ms.saturating_sub(120_000),
             heartbeat_at_ms: now_ms.saturating_sub(90_000),
@@ -422,7 +414,7 @@ async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Res
             network_id: foreign.swarm.network_id(),
             storage_redundancy: mismatched_storage_redundancy(foreign.swarm.storage_redundancy()),
             dht_virtual_nodes: foreign.swarm.dht_virtual_nodes(),
-            capabilities: Vec::new(),
+            capabilities: OnlineNodeCapabilities::default(),
             endpoint_hint: None,
             started_at_ms: now_ms,
             heartbeat_at_ms: now_ms,
