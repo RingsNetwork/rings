@@ -65,20 +65,28 @@
 //! - **Totality.** `closure` and `bridge` are total, so every reset carries a reason.
 //!
 //! Proof. `failure` is defined only on `Open(Failed(c))`, so on that phase every classifier
-//! returns `StreamReset(c)` (Dominance). Elsewhere `closure = local`, whose six cases partition
-//! `FlowPhase × EndpointClosure` minus the failed phases, and only `(Open(Live), ClientSilent)`
-//! maps to `IdleTimeout` (Idle, Phase). `local` and `of_error` are total, hence so is every
-//! classifier (Totality). The domain is finite, and `reset::tests` checks each law on all of it.
+//! returns `StreamReset(c)` (Dominance). Elsewhere `closure = local`, whose cases restricted to
+//! the phases without a failure name `ClientSilent` by phase, and only `(Open(Live),
+//! ClientSilent)` maps to `IdleTimeout` (Idle, Phase). `local` and `of_error` are total, hence
+//! so is every classifier (Totality). The domain is finite, and `reset::tests` checks each law
+//! on all of it.
 //!
 //! # Residual: losses no endpoint observes
 //!
-//! `σ` is a function of what the client endpoint has observed. A frame lost with no later frame
-//! of its direction arriving leaves every observation unchanged: a lost last forward `data` is
-//! never seen by `h` (credit carries no sequence) while `h` keeps echoing the keep-alive, and
-//! a lost last reply is seen only by the session's own deadline `Δ = 2V`. Until then the run is
+//! `σ` is a function of what the client endpoint has observed, and a lost frame is observed
+//! only through a later frame of its direction. Two losses leave every observation unchanged:
+//!
+//! - a lost last forward `data`: `h` never sees it (credit carries no sequence) while it keeps
+//!   echoing the keep-alive, so neither endpoint ever fails the session;
+//! - a lost reply tail that includes the world's `fin`: `h` sends no echo after `fin`, so only
+//!   the session's own deadline `Δ = 2V` observes it.
+//!
+//! A lost reply before `fin` is not among them: the next sequenced reply (a later `data`, the
+//! `fin`, or the echo `data(n, 0, ε)`) exposes it, `σ` reads `Stalled` (`StreamStalled`), and the
+//! gap rule fails the session after `V`. Until an unobserved loss is observed, the run is
 //! indistinguishable, at the gateway and at the client, from a healthy flow whose target is
-//! silent, so `closure`, a function of the observations, names both `IdleTimeout`. Making such a
-//! loss observable is a change to the loop protocol (#981).
+//! silent, so `closure`, a function of the observations, names both `IdleTimeout`. Making such
+//! a loss observable is a change to the loop protocol (#981).
 
 use crate::FlowResetReason;
 use crate::GatewayError;
@@ -119,13 +127,16 @@ fn failure(phase: &FlowPhase) -> Option<FlowResetReason> {
     }
 }
 
-/// `closure(φ, κ)`: the reason of a flow in `phase` whose TCP endpoint closed by `closure`; its
-/// first arm is `failure(φ)`.
+/// `closure(φ, κ) = failure(φ) ?: local(φ, κ)`: the reason of a flow in `phase` whose TCP
+/// endpoint closed by `closure`.
 pub(crate) fn closure_reason(phase: &FlowPhase, closure: EndpointClosure) -> FlowResetReason {
+    failure(phase).unwrap_or_else(|| local(phase, closure))
+}
+
+/// `local(φ, κ)`: the name of the local cause `closure` of a flow in `phase` alone. It is total;
+/// on a failed stream it is never the result, since `failure` dominates it.
+fn local(phase: &FlowPhase, closure: EndpointClosure) -> FlowResetReason {
     match (phase, closure) {
-        (FlowPhase::Open(OnionStreamCondition::Failed(cause)), _) => {
-            FlowResetReason::StreamReset(cause.clone())
-        }
         (_, EndpointClosure::ClientReset) => FlowResetReason::ClientReset,
         (_, EndpointClosure::Ungraceful) => FlowResetReason::UngracefulClose,
         (FlowPhase::Handshake, EndpointClosure::ClientSilent) => FlowResetReason::HandshakeExpired,
@@ -133,9 +144,10 @@ pub(crate) fn closure_reason(phase: &FlowPhase, closure: EndpointClosure) -> Flo
         (FlowPhase::Open(OnionStreamCondition::Stalled), EndpointClosure::ClientSilent) => {
             FlowResetReason::StreamStalled
         }
-        (FlowPhase::Open(OnionStreamCondition::Live), EndpointClosure::ClientSilent) => {
-            FlowResetReason::IdleTimeout
-        }
+        (
+            FlowPhase::Open(OnionStreamCondition::Live | OnionStreamCondition::Failed(_)),
+            EndpointClosure::ClientSilent,
+        ) => FlowResetReason::IdleTimeout,
     }
 }
 

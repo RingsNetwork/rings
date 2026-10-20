@@ -10,7 +10,8 @@
 //!   stage   Handshake | Opening | Open
 //!   hole    None | Delayed | Lost      a frame missing while a later one is held (observed)
 //!   unseen  None | Forward | Return    a frame lost with no later frame of its direction
-//!                                      (observed by no one; Return is caught at Δ = 2V)
+//!                                      (observed by no one; a Return loss is a reply tail
+//!                                      with the world's fin, caught at Δ = 2V)
 //!   failed  None | Some(c)             a failure the probe reads
 //!   end     None | Orderly | Reset(r)
 //! σ(p) = Failed(c) if failed = c,  Stalled if hole ≠ None,  Live otherwise
