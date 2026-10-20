@@ -328,6 +328,8 @@ async fn prepare_onion_loop_public_gateway(
         }
     }
 
+    // The overlay's views still move here, so a lookup may reach an owner that never received
+    // these writes; the client reads them all the same, as their writer (#948, #982).
     let now_ms = get_epoch_ms();
     client
         .storage_store(Processor::registry_entry(

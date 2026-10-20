@@ -116,9 +116,10 @@ enum Projection {
     /// Return it only, writing nothing, not even the retirement of a value no longer live: the
     /// reader writes the slot itself under the transition (a join or an operation), whose write
     /// subsumes the write-back and the retirement, or the store is the fetch cache, whose reads
-    /// take no transition (only its read-join puts take the cache transition), so a read's write
-    /// or removal could undo a concurrent put. A dead cached value stays until a put replaces it
-    /// or the cache's count bound evicts it, and is reported absent meanwhile.
+    /// take no transition (only its read-join puts and its writer's observations take the cache
+    /// transition), so a read's write or removal could undo a concurrent put. A dead cached value
+    /// stays until a put replaces it or the cache's count bound evicts it, and is reported absent
+    /// meanwhile.
     ReturnedOnly,
 }
 
@@ -215,16 +216,41 @@ async fn join_live_entry(
     Ok(joined)
 }
 
+/// Apply `op` to the live value stored at `key`, or to the operation's empty carrier `⊥` when
+/// none is live, and store the result iff it is live at `now_ms`: the operation transition an
+/// owner applies to replicated storage and a writer to its own fetch cache.
+///
+/// Pre: the caller holds the transition of `store`, and `op` passed the admission law.
+/// Post: the slot holds `(live or ⊥).operate(op)` when that is live at `now_ms`, and is clear
+/// otherwise, since a stored value is always live when written.
+async fn operate_live_entry(
+    store: &EntryStorage,
+    key: &str,
+    op: EntryOperation,
+    actor: Did,
+    now_ms: u128,
+) -> Result<()> {
+    let local = match live_entry(store, key, now_ms, Projection::ReturnedOnly).await? {
+        Some(local) => local,
+        None => op.gen_default_entry()?,
+    };
+    match local.operate(now_ms, op, actor)?.live_at(now_ms) {
+        Some(value) => store.put(key, &value).await,
+        None => store.remove(key).await,
+    }
+}
+
 /// Transition law: every read-modify-write of a slot (an operation, a join, an acknowledged
 /// removal, and the retirement a read performs) runs under its store's transition, one at a
 /// time: the storage transition for replicated storage, the cache transition for the fetch
 /// cache. The two stores share no slot and no invariant, so each has its own lock, and no path
 /// holds both. The inbound actor and the stabilizer write the same slots concurrently (a hold
 /// arriving while the recipient drains its inbox, a hand-off joining while a repair pass reads,
-/// two fetch replies joining one cache slot), and a store itself only orders single puts, so
-/// without this serialization one of two interleaved read-modify-writes would overwrite the
-/// other and a held message or an observed reply could be lost. The transition is held across
-/// the store's own awaits and nothing else, so it never nests and never waits on the network.
+/// two fetch replies, or a reply and the writer's own write, meeting in one cache slot), and a
+/// store itself only orders single puts, so without this serialization one of two interleaved
+/// read-modify-writes would overwrite the other and a held message, an observed reply or an
+/// observed write could be lost. The transition is held across the store's own awaits and
+/// nothing else, so it never nests and never waits on the network.
 impl PeerRing {
     /// Read the live replicated entry of `kind` stored at `placement` on this node, projected at
     /// `now_ms` as every storage read is: test support for the controlled-network tests of
@@ -412,15 +438,7 @@ impl PeerRing {
         }
         let key = StorageKey::new(op.kind(), placement).to_string();
         let _transition = self.storage_transition.lock().await;
-        let local = match live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await? {
-            Some(local) => local,
-            None => op.gen_default_entry()?,
-        };
-        // A stored value is always live when written: a result no longer live clears the slot.
-        match local.operate(now_ms, op, self.did)?.live_at(now_ms) {
-            Some(stored) => self.storage.put(&key, &stored).await,
-            None => self.storage.remove(&key).await,
-        }
+        operate_live_entry(&self.storage, &key, op, self.did, now_ms).await
     }
 
     /// The step one placement of a lookup takes under the topology and local storage at
@@ -632,8 +650,10 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// Pre: `entry` satisfies the same admission law as a replicated write, so a peer cannot
     /// pin a fetched value in the cache past the retention bound it could obtain in storage.
     /// Post: the cached carrier is the join of every live reply observed for its key since the
-    /// key last became resident, so, within one residency, it does not depend on the order in
-    /// which replicas answer; it is projected to its element horizon, as every stored value is.
+    /// key last became resident, with this node's own writes applied
+    /// ([`Self::local_cache_observe_write`]), so, within one residency, it does not depend on
+    /// the order in which replicas answer; it is projected to its element horizon, as every
+    /// stored value is.
     /// The read-join-write is one cache transition, so two concurrent replies cannot lose one
     /// side.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
@@ -647,6 +667,30 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         join_live_entry(&self.cache, &key, admitted, now_ms)
             .await
             .map(drop)
+    }
+
+    /// Observe this node's own write `op` in the cache: `cache[k] ← (cache[k] or ⊥).operate(op)`,
+    /// the transition every owner applies (#982).
+    ///
+    /// Pre: `op` is stamped, as the owners receive it; stamping is idempotent, so its dots are
+    /// the ones every owner applies.
+    /// Post: an overwrite or an extend leaves `cache[k] ⊔ stamped(op)`, below every replica
+    /// that has applied `op` (`R.operate(op) = R ⊔ stamped(op)`), so the cache still ascends in
+    /// `⊑`; a tombstone leaves covering removes at the dots of its values the cache holds, the
+    /// dots this writer observed and asked to remove. An operation the admission law refuses,
+    /// which no owner applies, and a relay inbox, which no lookup reads, are not observed.
+    async fn local_cache_observe_write(&self, op: EntryOperation) -> Result<()> {
+        let now_ms = get_epoch_ms();
+        if op.kind().is_relay_inbox()
+            || op
+                .validate_admissible_at(now_ms, self.network_id())
+                .is_err()
+        {
+            return Ok(());
+        }
+        let key = op.entry().did.to_string();
+        let _transition = self.cache_transition.lock().await;
+        operate_live_entry(&self.cache, &key, op, self.did, now_ms).await
     }
 
     /// Read a cached entry, as a lookup serves it.

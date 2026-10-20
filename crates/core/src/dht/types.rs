@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use super::did::Did;
 use super::entry::Entry;
+use super::entry::EntryOperation;
 use super::entry::PlacementMiss;
 use super::entry::SyncedEntryAck;
 use crate::error::Result;
@@ -118,6 +119,14 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 /// - Bounds: every reply is admitted like a replicated write, every carrier is capped at its
 ///   kind's `max_data_len` (oldest dropped), and the cache holds at most
 ///   [`LOCAL_CACHE_CAPACITY`](crate::consts::LOCAL_CACHE_CAPACITY) carriers.
+/// - Own writes (#982): a node observes its own write too, `cache[k] ← (cache[k] or
+///   ⊥).operate(op)` ([`Self::local_cache_observe_write`]). For an overwrite or an extend,
+///   `stamped(op) ⊑ R.operate(op)` for every replica `R`, so what the observation adds is below
+///   every replica that applied `op`, and the first reply from one of them adds nothing new
+///   from `op`.
+///   With read-join this gives read-your-writes: once a write has returned `Ok`, every read of
+///   `k` by its writer contains it while `k` stays resident and the write is live, whichever
+///   owner a later lookup reaches.
 /// - Residency: evicting a key at capacity, or retiring it under the retention law,
 ///   un-observes it, and its next read starts again from the replies it gets.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -125,6 +134,8 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 pub trait ChordStorageCache<Action>: Chord<Action> {
     /// Join a fetched resource into the local cache.
     async fn local_cache_put(&self, entry: Entry) -> Result<()>;
+    /// Apply this node's own stamped write `op` to the local cache, as every owner applies it.
+    async fn local_cache_observe_write(&self, op: EntryOperation) -> Result<()>;
     /// Get a live cached entry as a lookup serves it: a carrier past its retention bound is
     /// absent.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>>;

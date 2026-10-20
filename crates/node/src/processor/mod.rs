@@ -257,10 +257,11 @@ impl Processor {
 
     /// List signed online-node descriptors from the registry.
     ///
-    /// The registry carrier is the join of every reply this node has observed (#864): it ascends
-    /// in the lattice order while cached and live, but a descriptor still leaves it on a
-    /// tombstone, on an overwrite or compaction floor (#867), or at the element cap. Rerouted as
-    /// [`Self::storage_fetch`] documents.
+    /// The registry carrier is the join of every reply this node has observed (#864), with its
+    /// own writes applied (#982): it ascends in the lattice order while cached and live, so this
+    /// node lists what it registered itself whichever owner its lookup reaches, but a descriptor
+    /// still leaves it on a tombstone, on an overwrite or compaction floor (#867), or at the
+    /// element cap. Rerouted as [`Self::storage_fetch`] documents.
     pub async fn lookup_online_nodes(
         &self,
         include_expired: bool,
@@ -286,7 +287,8 @@ impl Processor {
     /// List signed onion-exit descriptors from the application-layer exit registry.
     ///
     /// Like [`Self::lookup_online_nodes`], the carrier read is the join of the observed replies
-    /// (#864). Rerouted as [`Self::storage_fetch`] documents.
+    /// (#864) with this node's own writes applied (#982). Rerouted as [`Self::storage_fetch`]
+    /// documents.
     pub async fn lookup_onion_exits(
         &self,
         service: &str,
@@ -327,7 +329,8 @@ impl Processor {
     }
 
     /// Fetch `entry_key` and read the cache once the fetch is answered, stopping early on
-    /// `stop`; the cache holds the join of every reply observed (#864).
+    /// `stop`; the cache holds the join of every reply observed (#864), with this node's own
+    /// writes applied (#982).
     ///
     /// A reply is recognised by the fetch's reply marker
     /// ([`Swarm::storage_fetch_answered_since`] the mark read before the fetch), not by the
@@ -579,7 +582,9 @@ impl Processor {
     /// Store an entry on DHT storage, replacing its payloads.
     ///
     /// Each stored payload expires by the element lifetime rule of [`ChordStorageInterface`]
-    /// unless it is written again.
+    /// unless it is written again. Its visibility is that interface's: once this returns `Ok`,
+    /// this node reads the entry (read-your-writes, #982); another node reads it once an owner
+    /// its lookup reaches holds it.
     ///
     /// Rerouted as [`Self::storage_fetch`] documents.
     pub async fn storage_store(&self, entry: entry::Entry) -> Result<()> {
@@ -611,8 +616,8 @@ impl Processor {
     /// The elements of the data topic `topic` past the first `skip`, decoded as UTF-8 text; an
     /// element that is not UTF-8 is omitted, and a topic not found has no elements.
     ///
-    /// Law: `append_text_element(t, x)` then `fetch_text_elements(t, 0)` contains `x` while the
-    /// element is live.
+    /// Law (read-your-writes, #982): on one node, `append_text_element(t, x)` returning `Ok`
+    /// then `fetch_text_elements(t, 0)` contains `x` while the element is live and `t` cached.
     pub(crate) async fn fetch_text_elements(
         &self,
         topic: &str,

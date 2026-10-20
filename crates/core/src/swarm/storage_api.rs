@@ -19,6 +19,7 @@ use crate::message::handlers::storage::operate_entry;
 use crate::swarm::transport::Attempts;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
+use crate::utils::get_epoch_ms;
 
 /// ChordStorageInterface should imply necessary method for DHT storage
 ///
@@ -39,6 +40,30 @@ use crate::swarm::Swarm;
 /// The placements of one operation run concurrently and all run to completion: an `Err`
 /// means that at least one placement failed while others may have been applied, and it is an
 /// ambiguous error whenever any placement's outcome is unknown.
+///
+/// Visibility (#948, #982): `Ok` means every placement was applied here or has left this node,
+/// not that a remote one was applied. A later fetch resolves each placement again, under the
+/// topology then, and an owner follows each node's referenced view, which changes on topology
+/// events; the old owner hands the entry off only in a storage repair round. So the store and
+/// the fetch may reach different owners:
+///
+/// ```text
+/// store(e) ─▶ X = owner_t₀(p) applies e    ── a view changes: owner_t₁(p) = Y ≠ X ──
+/// fetch(k) ─▶ Y = owner_t₁(p) holds nothing ─▶ miss
+/// ```
+///
+/// The writer itself observes its write instead: once an operation returns `Ok`, it is applied
+/// to the writer's fetch cache as every owner applies it
+/// ([`ChordStorageCache::local_cache_observe_write`]), and a fetch answers the join of that
+/// cache and its replies. Law (read-your-writes): if `op` on `k` returned `Ok` at `t₀`, every
+/// read of `k` by this node after `t₀` contains `op`'s effect while `k` stays cached and the
+/// effect is live. Another node reads the write once an owner its lookup reaches holds it.
+///
+/// Read-your-writes is a session guarantee about the writer's own view, not evidence of
+/// replication: after `Ok` an owner may still refuse or lose the operation, and the writer
+/// reads it all the same. A caller therefore never takes its own read-back as a publication
+/// check (a registry's readiness, for one, #866); only another node's read witnesses that an
+/// owner holds the write.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterface {
@@ -102,6 +127,19 @@ impl ScopedStorage<'_> {
     fn attempts(&self) -> Attempts {
         Attempts::Rerouted(self.stop.clone())
     }
+
+    /// Apply `operation` at its placements and, once every one has been applied or has left,
+    /// observe it in this node's cache: the read-your-writes law of
+    /// [`ChordStorageInterface`].
+    ///
+    /// The operation is stamped once, here: stamping is idempotent, so the owners apply and the
+    /// cache observes the same dots. An `Err` observes nothing.
+    async fn operate_observed(&self, operation: EntryOperation) -> Result<()> {
+        let dht = &self.transport.dht;
+        let operation = operation.stamped(get_epoch_ms(), dht.did)?;
+        operate_entry(self.transport, operation.clone(), self.attempts()).await?;
+        dht.local_cache_observe_write(operation).await
+    }
 }
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -145,32 +183,19 @@ impl ChordStorageInterface for ScopedStorage<'_> {
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types
     async fn storage_store(&self, entry: Entry) -> Result<()> {
-        operate_entry(
-            self.transport,
-            EntryOperation::Overwrite(entry),
-            self.attempts(),
-        )
-        .await
+        self.operate_observed(EntryOperation::Overwrite(entry))
+            .await
     }
 
     async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_entry(
-            self.transport,
-            EntryOperation::Extend(entry),
-            self.attempts(),
-        )
-        .await
+        self.operate_observed(EntryOperation::Extend(entry)).await
     }
 
     async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        operate_entry(
-            self.transport,
-            EntryOperation::Tombstone(entry),
-            self.attempts(),
-        )
-        .await
+        self.operate_observed(EntryOperation::Tombstone(entry))
+            .await
     }
 }
 
