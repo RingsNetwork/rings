@@ -85,7 +85,11 @@ and that view changes as peers join and as stabilization runs. An owner hands it
 new owner only in its next storage repair round, so a lookup made just after a write can reach a
 new owner that does not hold it yet. The writer itself does not depend on that: it applies its
 own write to its fetch cache, as every owner applies it, so it reads its own writes at once
-(#982). Any other node reads the write once its lookup reaches an owner that holds it.
+(#982). Any other node reads the write once its lookup reaches an owner that holds it. That
+guarantee is about the writer's own view only, not proof that the write was replicated: an owner
+can still refuse or lose it after the write returned. So a writer must never use its own
+read-back to check that something was published, such as a registry being ready (#866); only
+another node's read shows that an owner holds the write.
 
 - **Every element expires individually.** An element expires at the earlier of two instants:
   100 minutes after its dot was issued (the element horizon `H`, the longest retention one write

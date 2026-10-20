@@ -58,6 +58,12 @@ use crate::utils::get_epoch_ms;
 /// cache and its replies. Law (read-your-writes): if `op` on `k` returned `Ok` at `t₀`, every
 /// read of `k` by this node after `t₀` contains `op`'s effect while `k` stays cached and the
 /// effect is live. Another node reads the write once an owner its lookup reaches holds it.
+///
+/// Read-your-writes is a session guarantee about the writer's own view, not evidence of
+/// replication: after `Ok` an owner may still refuse or lose the operation, and the writer
+/// reads it all the same. A caller therefore never takes its own read-back as a publication
+/// check (a registry's readiness, for one, #866); only another node's read witnesses that an
+/// owner holds the write.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterface {
