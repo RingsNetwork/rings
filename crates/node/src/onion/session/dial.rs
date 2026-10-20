@@ -20,6 +20,8 @@
 //!          tick at:        min(now + T, last_forward + V/2, heard + Δ), each only once it
 //!                          is later than now: the keep-alive and the deadline are punctual
 //!          any failure ─▶ abort(n);  Failed to the user                             (queued)
+//!          witness:        after each reply, Stalled ⇔ a reply is held behind a missing one;
+//!                          Failed before Failed reaches the user (session::witness)
 //! ```
 //!
 //! Departure: stream frames wait for the guard's lane, which is the upload's backpressure;
@@ -55,6 +57,7 @@ use super::client::OnionControlStep;
 use super::client::OnionCreditWindow;
 use super::frame::OnionFrame;
 use super::pool::ONION_SURB_POOL_CAPACITY;
+use super::witness::OnionSessionWitness;
 use super::OnionSessionArguments;
 use super::OnionSessionId;
 use super::OnionTargetDigest;
@@ -124,9 +127,18 @@ pub(crate) struct OnionClientStream {
     commands: mpsc::Sender<OnionStreamCommand>,
     /// The driver's event queue.
     events: mpsc::Receiver<OnionStreamEvent>,
+    /// The session's witness, which the driver writes; only native streams have a reader.
+    #[cfg(rings_native)]
+    witness: OnionSessionWitness,
 }
 
 impl OnionClientStream {
+    /// The session's witness: its condition at any instant, without waiting on its events.
+    #[cfg(rings_native)]
+    pub(crate) fn witness(&self) -> OnionSessionWitness {
+        self.witness.clone()
+    }
+
     /// Split into the sending and the receiving halves.
     pub(crate) fn split(self) -> (OnionStreamSender, OnionStreamReceiver) {
         (
@@ -160,6 +172,7 @@ impl OnionClientStream {
             Self {
                 commands,
                 events: delivered,
+                witness: OnionSessionWitness::default(),
             },
             OnionTestDriver {
                 events,
@@ -268,7 +281,10 @@ pub(crate) async fn open(
         fin_sent: false,
         given_up: false,
         world_ended: false,
+        witness: OnionSessionWitness::default(),
     };
+    #[cfg(rings_native)]
+    let witness = driver.witness.clone();
     Spawner::current()?.spawn(driver.run(received, events, opened));
     let timeout = sleep(ONION_SESSION_OPEN_TIMEOUT).fuse();
     futures::pin_mut!(timeout);
@@ -276,6 +292,8 @@ pub(crate) async fn open(
         Either::Left((Ok(true), _)) => Ok(OnionClientStream {
             commands,
             events: delivered,
+            #[cfg(rings_native)]
+            witness,
         }),
         Either::Left((Ok(false) | Err(_), _)) => {
             Err(Error::OnionRouteError(OnionRouteError::ExitRefused))
@@ -310,6 +328,8 @@ struct OnionSessionDriver {
     given_up: bool,
     /// Whether the world's `fin` has arrived: `h` replies nothing more, so no credit is sent.
     world_ended: bool,
+    /// The session's witness, read by the stream's user.
+    witness: OnionSessionWitness,
 }
 
 /// What the driver does after one reply.
@@ -383,6 +403,7 @@ impl OnionSessionDriver {
             if controlled.is_err() {
                 // Fail closed: `h` learns of it by our `abort`, the user by `Failed`.
                 self.abort(&sink);
+                self.witness_failure();
                 let _ = events.send(OnionStreamEvent::Failed).await;
                 return;
             }
@@ -401,6 +422,7 @@ impl OnionSessionDriver {
         let Ok(released) = self.machine.reply(reply.received_at_ms, reply.frame) else {
             return OnionReplyFlow::Fail;
         };
+        self.witness.record_stalled(self.machine.stalled());
         for event in released {
             let forwarded = match event {
                 OnionClientEvent::Opened => {
@@ -424,6 +446,7 @@ impl OnionSessionDriver {
                 // and nothing to tell `h` back.
                 OnionClientEvent::Aborted => {
                     self.given_up = true;
+                    self.witness_failure();
                     let _ = events.send(OnionStreamEvent::Failed).await;
                     return OnionReplyFlow::Stop;
                 }
@@ -433,6 +456,15 @@ impl OnionSessionDriver {
             }
         }
         OnionReplyFlow::Continue
+    }
+
+    /// Record the session's failure in its witness before the user hears of it, unless the
+    /// world's `fin` already made the stream whole (`session::witness`, Laws Report before end,
+    /// Whole stream).
+    fn witness_failure(&self) {
+        if !self.world_ended {
+            self.witness.record_failed();
+        }
     }
 
     /// Send `bytes` as data frames, each no wider than the frame capacity of the class.

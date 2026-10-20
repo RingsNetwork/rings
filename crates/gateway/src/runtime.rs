@@ -13,6 +13,11 @@ use crate::bridge::spawn_bridge;
 use crate::bridge::BridgeCommand;
 use crate::bridge::BridgeEvent;
 use crate::bridge::BridgeHandle;
+use crate::reset::bridge_reason;
+use crate::reset::closure_reason;
+use crate::reset::eof_reason;
+use crate::reset::FlowPhase;
+use crate::BoxOnionStreamProbe;
 use crate::ExitObservation;
 use crate::FlowEvent;
 use crate::FlowId;
@@ -100,6 +105,8 @@ impl PendingChunk {
 
 struct RuntimeFlow {
     bridge: Option<BridgeHandle>,
+    /// The probe of the opened Onion stream; set exactly when the flow establishes.
+    probe: Option<BoxOnionStreamProbe>,
     client_to_onion_buffer: Option<Vec<u8>>,
     pending_to_client: VecDeque<PendingChunk>,
     client_eof_sent: bool,
@@ -111,6 +118,7 @@ impl RuntimeFlow {
     fn captured(chunk_bytes: usize) -> Self {
         Self {
             bridge: None,
+            probe: None,
             client_to_onion_buffer: Some(vec![0_u8; chunk_bytes]),
             pending_to_client: VecDeque::new(),
             client_eof_sent: false,
@@ -437,8 +445,11 @@ impl GatewayRuntime {
         elapsed: Duration,
     ) -> Result<ReconcileScope, GatewayError> {
         match event {
-            BridgeEvent::Opened(flow) => {
+            BridgeEvent::Opened { flow, probe } => {
                 if self.server.flow_state(flow) == Some(FlowState::Opening(flow)) {
+                    if let Some(runtime) = self.flows.get_mut(&flow) {
+                        runtime.probe = Some(probe);
+                    }
                     self.server.transition_flow(flow, FlowEvent::Establish)?;
                     self.publish_status();
                 }
@@ -471,6 +482,15 @@ impl GatewayRuntime {
                 let Some(runtime) = self.flows.get_mut(&flow) else {
                     return Ok(ReconcileScope::None);
                 };
+                // An EOF read while the probe reads `Failed` is that failure (report before end).
+                let failed = runtime
+                    .probe
+                    .as_ref()
+                    .and_then(|probe| eof_reason(probe.condition()));
+                if let Some(reason) = failed {
+                    self.fail_flow(flow, reason, elapsed)?;
+                    return Ok(ReconcileScope::None);
+                }
                 runtime.onion_eof_seen = true;
                 self.mark_half_closed(flow)?;
                 self.publish_status();
@@ -480,7 +500,8 @@ impl GatewayRuntime {
                 if !self.flows.contains_key(&flow) {
                     return Ok(ReconcileScope::None);
                 }
-                self.fail_flow(flow, FlowResetReason::from_bridge_failure(&error), elapsed)?;
+                let reason = bridge_reason(&self.phase(flow), &error);
+                self.fail_flow(flow, reason, elapsed)?;
                 if matches!(error, GatewayError::OnionUnavailable { .. }) {
                     self.server
                         .set_exit_availability(ExitObservation::Unknown(error.to_string()));
@@ -695,8 +716,8 @@ impl GatewayRuntime {
             .get(&flow)
             .is_some_and(|runtime| runtime.client_eof_sent && runtime.onion_eof_seen);
         if !graceful {
-            let reason = self.tcp.ungraceful_close_reason(flow, elapsed)?;
-            return self.fail_flow(flow, reason, elapsed);
+            let closure = self.tcp.endpoint_closure(flow, elapsed)?;
+            return self.fail_flow(flow, closure_reason(&self.phase(flow), closure), elapsed);
         }
         if let Some(runtime) = self.flows.remove(&flow) {
             if let Some(bridge) = runtime.bridge {
@@ -707,6 +728,22 @@ impl GatewayRuntime {
         let _ = self.tcp.release_closed_flow(flow)?;
         self.publish_status();
         Ok(())
+    }
+
+    /// `φ` of `flow` now (`crate::reset`): open once its probe is set, which happens exactly as
+    /// it establishes; opening while its bridge awaits the connector; in handshake before that.
+    fn phase(&self, flow: FlowId) -> FlowPhase {
+        match self
+            .flows
+            .get(&flow)
+            .and_then(|runtime| runtime.probe.as_ref())
+        {
+            Some(probe) => FlowPhase::Open(probe.condition()),
+            None if self.server.flow_state(flow) == Some(FlowState::Opening(flow)) => {
+                FlowPhase::Opening
+            }
+            None => FlowPhase::Handshake,
+        }
     }
 
     /// Reset one captured flow for `reason`: stop its bridge, fail its lifecycle, and abort its

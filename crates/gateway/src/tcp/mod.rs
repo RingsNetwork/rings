@@ -18,9 +18,9 @@ use smoltcp::wire::IpAddress;
 use smoltcp::wire::IpCidr;
 
 use self::device::PacketQueueDevice;
+use crate::reset::EndpointClosure;
 use crate::FlowId;
 use crate::FlowRejectReason;
-use crate::FlowResetReason;
 use crate::GatewayConfig;
 use crate::GatewayError;
 use crate::TcpSegment;
@@ -358,17 +358,17 @@ impl TcpStack {
         Ok(expired)
     }
 
-    /// Classify why an endpoint closed before both byte directions shut down.
+    /// Classify how an endpoint closed before both byte directions shut down.
     ///
     /// Besides the FIN exchange, smoltcp closes an endpoint on a client RST or when no client
     /// segment arrived for `flow_idle_timeout`. Its idle clock never starts before the last client
     /// segment, so `elapsed < last_client_segment + flow_idle_timeout` excludes the timeout; a
     /// close matching neither cause is a FIN exchange whose half-close never reached the bridge.
-    pub fn ungraceful_close_reason(
+    pub(crate) fn endpoint_closure(
         &self,
         flow: FlowId,
         elapsed: Duration,
-    ) -> Result<FlowResetReason, TcpStackError> {
+    ) -> Result<EndpointClosure, TcpStackError> {
         let endpoint = self
             .endpoints
             .get(&flow)
@@ -377,11 +377,11 @@ impl TcpStack {
             .last_client_segment
             .saturating_add(self.flow_idle_timeout);
         Ok(if endpoint.client_reset {
-            FlowResetReason::ClientReset
+            EndpointClosure::ClientReset
         } else if elapsed >= idle_deadline {
-            FlowResetReason::IdleTimeout
+            EndpointClosure::ClientSilent
         } else {
-            FlowResetReason::UngracefulClose
+            EndpointClosure::Ungraceful
         })
     }
 
@@ -785,8 +785,8 @@ mod tests {
         stack.poll(Duration::from_secs(2));
         assert_eq!(stack.endpoint_state(flow), Ok(TcpEndpointState::Closed));
         assert_eq!(
-            stack.ungraceful_close_reason(flow, Duration::from_secs(2)),
-            Ok(FlowResetReason::IdleTimeout)
+            stack.endpoint_closure(flow, Duration::from_secs(2)),
+            Ok(EndpointClosure::ClientSilent)
         );
         assert_eq!(stack.release_closed_flow(flow), Ok(true));
         assert_eq!(stack.flow_count(), 0);
@@ -807,8 +807,8 @@ mod tests {
         assert_eq!(stack.endpoint_state(flow), Ok(TcpEndpointState::Closed));
         // A reset observed after the idle window still names the client as its cause.
         assert_eq!(
-            stack.ungraceful_close_reason(flow, Duration::from_secs(5)),
-            Ok(FlowResetReason::ClientReset)
+            stack.endpoint_closure(flow, Duration::from_secs(5)),
+            Ok(EndpointClosure::ClientReset)
         );
     }
 }

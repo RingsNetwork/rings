@@ -23,6 +23,9 @@
 //! - **Reordering.** Any permutation of `0 … m` with `m < W` releases `0 … m` in order.
 //! - **Gap.** A frame `n ≥ next + W`, or a missing `next` for `V` after a later frame arrived,
 //!   yields [`OnionSequenceGap`]; after it the direction releases nothing more.
+//! - **Stall.** `stalled ⇔ P ≠ ∅ ∧ ¬failed`: from a later frame's arrival until `next` arrives
+//!   or the gap fails the direction, the receiver knows a frame is missing
+//!   ([`OnionReorder::is_stalled`]).
 
 use std::collections::BTreeMap;
 
@@ -106,6 +109,13 @@ impl<F> OnionReorder<F> {
             }
         }
         Ok(released)
+    }
+
+    /// Whether a frame is known missing: a later one arrived and is held behind `next`, and the
+    /// direction has not failed. It holds from such an arrival until `next` arrives or
+    /// [`Self::expire`] fails the direction, so it is the observable half of a gap (#950).
+    pub(crate) fn is_stalled(&self) -> bool {
+        self.failed.is_none() && !self.pending.is_empty()
     }
 
     /// Start the direction at `next`, for tests at the end of the sequence space.

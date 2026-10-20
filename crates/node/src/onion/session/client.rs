@@ -258,6 +258,12 @@ impl OnionClientSession {
         }
     }
 
+    /// Whether a reply is known missing: a later one arrived and is held behind it
+    /// ([`OnionReorder::is_stalled`]), the observable half of a gap (#950).
+    pub(crate) fn stalled(&self) -> bool {
+        self.replies.is_stalled()
+    }
+
     /// The instant `heard + Δ` at which a silent session fails, or `None` once its reply
     /// direction is over (`h` aborted, or the world's `fin` arrived), since no frame follows.
     pub(crate) fn deadline_ms(&self) -> Option<u128> {

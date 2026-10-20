@@ -6,7 +6,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::FlowTransitionError;
-use crate::GatewayError;
 
 /// Stable identity of one captured TCP flow.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -93,14 +92,21 @@ impl FlowState {
 /// Cause of one captured flow being reset.
 ///
 /// Every runtime reset carries one value of this type, so a reset without a cause cannot be
-/// constructed. Variants carry no packet contents and no flow addresses.
+/// constructed; `crate::reset` states which value names which end. Variants carry no packet
+/// contents and no flow addresses.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", tag = "kind", content = "detail")]
 pub enum FlowResetReason {
     /// The TCP handshake did not complete within the flow timeout.
     HandshakeExpired,
-    /// No client segment arrived within the flow idle timeout.
+    /// The Onion stream did not open before the client was silent for the flow idle timeout.
+    OpenExpired,
+    /// The client was silent for the flow idle timeout while its open stream was healthy: no
+    /// failure of its circuit was observed and no frame of it was known missing.
     IdleTimeout,
+    /// The client was silent for the flow idle timeout while a frame of its open stream was known
+    /// missing: a later frame had arrived and was held behind it.
+    StreamStalled,
     /// The captured client reset the connection.
     ClientReset,
     /// The TCP endpoint closed before both byte directions shut down.
@@ -115,26 +121,6 @@ pub enum FlowResetReason {
     BridgeClosed,
     /// Gateway shutdown reset the flow.
     GatewayStopped,
-}
-
-impl FlowResetReason {
-    /// Classify a failure reported by a flow's byte bridge.
-    ///
-    /// Stream errors keep their operation label, and an abortive end reported by the connector is
-    /// a reset; every other bridge failure happened while the connector was opening the stream.
-    /// Flow addresses are not copied into the reason.
-    pub fn from_bridge_failure(error: &GatewayError) -> Self {
-        match error {
-            GatewayError::StreamIo {
-                operation, message, ..
-            } => Self::StreamFailed(format!("{operation}: {message}")),
-            GatewayError::OnionUnavailable { message, .. } => {
-                Self::OnionOpenFailed(message.clone())
-            }
-            GatewayError::OnionStreamReset { message, .. } => Self::StreamReset(message.clone()),
-            other => Self::OnionOpenFailed(other.to_string()),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -36,6 +36,8 @@ pub(crate) mod frame;
 pub(crate) mod order;
 pub(crate) mod pool;
 pub(crate) mod serve;
+pub(crate) mod witness;
+
 #[cfg(test)]
 mod tests;
 
