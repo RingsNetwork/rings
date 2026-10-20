@@ -247,10 +247,12 @@ $\upsilon_j$ SURBs of $\sid$ (D8).
 \begin{itemize}
 \item \emph{Liveness.}  $\cl$ sends a forward loop of $\sid$ whenever none
   has left for $V/2$ (the keep-alive, a credit-only loop).  When a forward
-  loop of $\sid$ arrives and $h$ has sent no reply of $\sid$ since the
-  previous forward loop of $\sid$ arrived, $h$ answers it at once with the
+  loop of $\sid$ arrives at $a$ and $h$ has sent no reply of $\sid$ in
+  $(a-V/2,a]$, $h$ answers it at once with the
   echo $\mathrm{data}(n,0,\epsilon)$, spending a SURB of $\sid$; the loop
-  brought one, so the echo is credit-neutral.  $\cl$ fails $\sid$ closed,
+  brought one, so the echo is credit-neutral.  The rule reads only $a$ and
+  the last reply's departure, so $h$ keeps no timer, and a burst of forward
+  loops costs at most one echo per $V/2$.  $\cl$ fails $\sid$ closed,
   sending $\mathrm{abort}(n)$, once no frame of $\sid$ has arrived for
   $\Delta=2V$ (Prop.~\ref{prop:liveness}).
 \end{itemize}
@@ -804,7 +806,7 @@ and a session idle for longer than $V$ holds no credit.
 \begin{proposition}[Liveness of failure]\label{prop:liveness}
 Let the latency of every loop segment vary by less than $V/4$, and let $L$
 be one return-segment latency.  (i) While both segments of $\sid$'s route
-deliver, consecutive frames of $\sid$ reach $\cl$ less than $7V/4<\Delta$
+deliver, consecutive frames of $\sid$ reach $\cl$ less than $3V/2<\Delta$
 apart, so $\cl$ never fails a live session.  (ii) If a link of either
 segment stops delivering at $t_0$, both endpoints observe the failure:
 after a forward loss $h$ drops $\sid$ by $t_0+V$ and $\cl$ fails it by
@@ -814,10 +816,10 @@ $\mathrm{abort}$ closes $\sid$ at $h$ on arrival.
 \begin{proof}
 Forward loops of $\sid$ leave $\cl$ at most $V/2$ apart (keep-alive), so
 their arrivals $a_1<a_2<\cdots$ at $h$ satisfy $a_{k+1}-a_k<V/2+V/4=3V/4$.
-(i) By the echo rule every interval $(a_{k-1},a_k]$ holds a reply of
-$\sid$, sent at $a_k$ at the latest, so consecutive replies leave $h$ less
-than $2\cdot3V/4=3V/2$ apart and reach $\cl$ less than $3V/2+V/4=7V/4$
-apart.  (ii) Return loss: the last frame of $\sid$ reaches $\cl$ by
+(i) Let a reply of $\sid$ leave $h$ at $r$.  Some arrival $a_k$ lies in
+$[r+V/2,\,r+V/2+3V/4)$, and by the echo rule a reply leaves by $a_k$, so
+consecutive replies leave $h$ less than $5V/4$ apart and reach $\cl$ less
+than $5V/4+V/4=3V/2$ apart.  (ii) Return loss: the last frame of $\sid$ reaches $\cl$ by
 $t_0+L$, so $\cl$ fails $\sid$ by $t_0+L+\Delta$; its $\mathrm{abort}$
 travels the forward segment, which still delivers.  Forward loss: no
 forward loop reaches $h$ after $t_0$, so $h$ drops $\sid$ by $t_0+V$;
@@ -1415,7 +1417,7 @@ credit & a \code{tcp} session emits no reply without a SURB of its own $\sid$, r
 rate & loopback single-client \code{tcp} download $\ge1$\,MB/s at $b=16$\,KiB, upload $\approx1/(k+1)$ of download \\
 emission & no $V$-window of a link exceeds $\rho B$ units; constant rate while active, real cells FIFO; an honest sender at full load is never refused; an idle link emits exactly $r_{\mathrm{idle}}$; a real cell at $t$ keeps rate $r$ on $[t,t+D)$ \\
 frames & $T$ set until the first reply; open only on a matching digest; open ack $\mathrm{data}(0,0,\epsilon)$, a refusal is $\mathrm{abort}(0)$; $\mathrm{abort}$ applied on arrival, never an end of stream; reorder within $Q_{\max}$; a persisting gap fails closed; reserved $\phi$ bits rejected \\
-liveness & an idle session gets one echo $\mathrm{data}(n,0,\epsilon)$ per keep-alive with no reply since the previous forward loop, credit-neutral; a live session is never failed; a forward loss fails $\sid$ at $h$ by $V$ and at $\cl$ by $3V+L$; a return loss fails it at $\cl$ by $2V+L$ and at $h$ by $\cl$'s $\mathrm{abort}$ (Prop.~\ref{prop:liveness}) \\
+liveness & an idle session gets one echo $\mathrm{data}(n,0,\epsilon)$ per forward loop arriving $V/2$ or more after its last reply, credit-neutral, at most one per $V/2$; a live session is never failed; a forward loss fails $\sid$ at $h$ by $V$ and at $\cl$ by $3V+L$; a return loss fails it at $\cl$ by $2V+L$ and at $h$ by $\cl$'s $\mathrm{abort}$ (Prop.~\ref{prop:liveness}) \\
 reply auth & no exit signature on the wire; a one-bit flip of a reply fails $\Enc{\tau}{k_{c_n}}$ \\
 replay store & no replayed layer admitted across filter rotation; a filter grows by blocks and is dropped exactly when its $x$ passes; memory tracks admitted tags; measured false-positive rate within $2^{-20}$ \\
 seeds & derived keys match the KDF definition; a weak derived key forces a re-draw \\
