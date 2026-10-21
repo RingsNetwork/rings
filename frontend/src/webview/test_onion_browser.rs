@@ -13,6 +13,7 @@ use futures::future::try_join_all;
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
+use rings_node::extension::ext::LinkFact;
 use rings_node::extension::BackendObserver;
 use rings_node::onion::OnionExitOffer;
 use rings_node::onion::OnionExitPolicy;
@@ -282,7 +283,22 @@ impl AdmittedPeers {
 }
 
 impl BackendObserver for AdmittedPeers {
-    fn peer_admitted(&self, peer: Did) {
+    fn link_fact(&self, fact: LinkFact) {
+        match fact {
+            LinkFact::Admitted(peer) => self.admit(peer),
+            LinkFact::Retired(peer) => {
+                if let Ok(mut state) = self.state.lock() {
+                    state.admitted.remove(&peer);
+                }
+            }
+            LinkFact::Dropped(_) => {}
+        }
+    }
+}
+
+impl AdmittedPeers {
+    /// Record `peer` as admitted and resolve every wait for it.
+    fn admit(&self, peer: Did) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
@@ -293,12 +309,6 @@ impl BackendObserver for AdmittedPeers {
         state.awaited = awaited;
         for (_, sender) in resolved {
             let _resolved = sender.send(());
-        }
-    }
-
-    fn peer_retired(&self, peer: Did) {
-        if let Ok(mut state) = self.state.lock() {
-            state.admitted.remove(&peer);
         }
     }
 }

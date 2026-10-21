@@ -3,12 +3,12 @@
 //! the probe awaits the handle `Swarm::lookup_successor` returns.
 //!
 //! ```text
-//!   BackendObserver::peer_admitted(p) ─▶ admissions: Admissions ─▶ dial waiting for p
-//!   BackendObserver::peer_retired(p)  ─▶ losses: PeerLosses     ─▶ supervisor drain + wake
+//!   BackendObserver::link_fact(Admitted(p)) ─▶ admissions: Admissions ─▶ dial waiting for p
+//!   BackendObserver::link_fact(Retired(p))  ─▶ losses: PeerLosses     ─▶ supervisor drain + wake
 //! ```
 //!
 //! "Retired" is the swarm's word for the fact; "loss" is the supervisor's word for what it means
-//! to a managed target. The translation happens here, once, in `peer_retired`.
+//! to a managed target. The translation happens here, once, in `link_fact`.
 //!
 //! Each record is bounded: admissions by one waiter per peer in flight (one per dial), losses
 //! by the distinct peers that leave between two drains. Writers never block and never fail the
@@ -31,6 +31,7 @@ use tokio::sync::oneshot;
 use tokio::sync::Notify;
 
 use crate::error::Result;
+use crate::extension::ext::LinkFact;
 use crate::extension::BackendObserver;
 use crate::sync_lock::lock;
 
@@ -198,18 +199,22 @@ impl ReachabilityEvidence {
 }
 
 impl BackendObserver for ReachabilityEvidence {
-    /// Resolve a dial waiting for this admission; a poisoned record is logged, never propagated.
-    fn peer_admitted(&self, peer: Did) {
-        if let Err(error) = self.admissions.observe(peer) {
-            tracing::error!(%peer, %error, "bootstrap admission record unavailable");
-        }
-    }
-
-    /// Record the retirement as a loss for the supervisor; a poisoned record is logged, never
+    /// Resolve a dial waiting for an admission, and record a retirement as a loss for the
+    /// supervisor; a drop is no evidence of reachability. A poisoned record is logged, never
     /// propagated.
-    fn peer_retired(&self, peer: Did) {
-        if let Err(error) = self.losses.observe(peer) {
-            tracing::error!(%peer, %error, "bootstrap loss record unavailable");
+    fn link_fact(&self, fact: LinkFact) {
+        match fact {
+            LinkFact::Admitted(peer) => {
+                if let Err(error) = self.admissions.observe(peer) {
+                    tracing::error!(%peer, %error, "bootstrap admission record unavailable");
+                }
+            }
+            LinkFact::Retired(peer) => {
+                if let Err(error) = self.losses.observe(peer) {
+                    tracing::error!(%peer, %error, "bootstrap loss record unavailable");
+                }
+            }
+            LinkFact::Dropped(_) => {}
         }
     }
 }

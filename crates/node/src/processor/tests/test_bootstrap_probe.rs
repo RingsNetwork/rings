@@ -17,6 +17,7 @@ use rings_core::swarm::SuccessorLookup;
 
 use super::common::*;
 use super::*;
+use crate::extension::ext::LinkFact;
 use crate::extension::BackendObserver;
 use crate::native::bootstrap::BootstrapPort;
 use crate::native::bootstrap::DialFailure;
@@ -39,13 +40,8 @@ const NEVER_DIALED: &str = "https://never-dialed.example.org:50001/";
 struct ActiveEvidence(Arc<ReachabilityEvidence>);
 
 impl BackendObserver for ActiveEvidence {
-    fn peer_admitted(&self, peer: Did) {
-        self.0.peer_admitted(peer);
-        record_activity();
-    }
-
-    fn peer_retired(&self, peer: Did) {
-        self.0.peer_retired(peer);
+    fn link_fact(&self, fact: LinkFact) {
+        self.0.link_fact(fact);
         record_activity();
     }
 }

@@ -8,14 +8,12 @@ pub mod transport;
 use std::sync::Arc;
 
 use futures::FutureExt;
-use rings_core::dht::Did;
 use rings_core::lifecycle::StopToken;
 use rings_core::message::CustomMessage;
 use rings_core::swarm::application::ApplicationData;
 use rings_core::swarm::application::ApplicationDelivery;
 use rings_core::swarm::application::ApplicationInbox;
 use rings_core::swarm::application::ApplicationMessage;
-use rings_core::swarm::application::SwarmEvent;
 
 pub use crate::extension::dispatch::DispatchDropCounters;
 pub(crate) use crate::extension::dispatch::DispatchDrops;
@@ -34,11 +32,11 @@ use crate::provider::Provider;
 /// may still wait in their namespace's queue: facts keep their order among themselves and with
 /// E2E messages, but may overtake custom messages.
 pub trait BackendObserver: Send + Sync {
-    /// `peer` was admitted: its transport is ready and it joined the local DHT.
-    fn peer_admitted(&self, _peer: Did) {}
-
-    /// `peer` left the local DHT, whichever physical event or local decision caused it.
-    fn peer_retired(&self, _peer: Did) {}
+    /// A fact about this node's link to one peer, the same fact every namespace's queue is
+    /// given: [`LinkFact::Admitted`] when the peer's transport is ready and it joined the local
+    /// DHT, [`LinkFact::Retired`] when it left, whichever physical event or local decision caused
+    /// it, and [`LinkFact::Dropped`] when the core's inbox dropped a message from it.
+    fn link_fact(&self, _fact: LinkFact) {}
 
     /// An E2E message (handshake or stream frame) addressed to this node.
     fn e2e_message(&self, _message: &ApplicationMessage) {}
@@ -103,8 +101,8 @@ impl Backend {
     }
 
     /// Route one item of the application inbox: a custom message to its namespace's queue, a
-    /// peer's admission (#843), its retirement (#963) or a drop by the core's inbox (#969) to
-    /// every namespace's queue as a [`LinkFact`], and every fact to the observer. Never waits.
+    /// peer's admission (#843), its retirement (#963) or a drop by the core's inbox (#969), as
+    /// one [`LinkFact`], to every namespace's queue and to the observer. Never waits.
     fn route(&self, namespaces: &mut dispatch::NamespaceQueues, delivery: ApplicationDelivery) {
         match delivery {
             ApplicationDelivery::Message(ApplicationMessage {
@@ -118,23 +116,10 @@ impl Backend {
                 }
             }
             ApplicationDelivery::Event(event) => {
-                match event {
-                    SwarmEvent::PeerAdmitted { peer } => {
-                        namespaces.submit_link_fact(LinkFact::Admitted(peer));
-                    }
-                    SwarmEvent::PeerRetired { peer } => {
-                        namespaces.submit_link_fact(LinkFact::Retired(peer));
-                    }
-                    SwarmEvent::MessageDropped { peer } => {
-                        namespaces.submit_link_fact(LinkFact::Dropped(peer));
-                    }
-                    _ => {}
-                }
-                if let Some(observer) = self.observer.as_deref() {
-                    match event {
-                        SwarmEvent::PeerAdmitted { peer } => observer.peer_admitted(peer),
-                        SwarmEvent::PeerRetired { peer } => observer.peer_retired(peer),
-                        _ => {}
+                if let Some(fact) = LinkFact::of(&event) {
+                    namespaces.submit_link_fact(fact);
+                    if let Some(observer) = self.observer.as_deref() {
+                        observer.link_fact(fact);
                     }
                 }
             }

@@ -9,6 +9,7 @@
 //! effects and its own interpreter without ever touching the core.
 
 use rings_core::dht::Did;
+use rings_core::swarm::application::SwarmEvent;
 use rings_runtime::MaybeSendSync;
 
 /// The raw boundary input handed to [`Protocol::decode`]: an inbound message's authenticated
@@ -155,6 +156,18 @@ pub enum LinkFact {
 }
 
 impl LinkFact {
+    /// The link fact `event` states, or `None` for an event about no link.
+    /// `of : SwarmEvent ⇀ LinkFact`, a bijection on the link events, `of(e).peer()` being the
+    /// peer `e` names.
+    pub const fn of(event: &SwarmEvent) -> Option<Self> {
+        match *event {
+            SwarmEvent::PeerAdmitted { peer } => Some(Self::Admitted(peer)),
+            SwarmEvent::PeerRetired { peer } => Some(Self::Retired(peer)),
+            SwarmEvent::MessageDropped { peer } => Some(Self::Dropped(peer)),
+            _ => None,
+        }
+    }
+
     /// The peer at the other end of the link this fact is about.
     pub const fn peer(self) -> Did {
         match self {
