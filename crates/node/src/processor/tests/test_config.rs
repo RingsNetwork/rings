@@ -7,6 +7,7 @@ use super::common::*;
 use super::*;
 use crate::processor::config::parse_webrtc_udp_port_range;
 use crate::registration::registry_refresh_bound;
+use crate::tests::test_processor_builder;
 
 #[test]
 fn test_webrtc_udp_port_range_absent_by_default() {
@@ -297,52 +298,33 @@ fn test_onion_relay_requires_presence_advertisement() -> Result<()> {
     Ok(())
 }
 
-/// The serialized flags are parsed onto the role once: "exit without relay" and an exit with a
-/// closed policy are rejected there, and a typed role survives the round trip.
+/// A typed role survives the round trip through the serialized flags, which are parsed onto
+/// the role once (`OnionRole::from_flags`, whose rejections `onion::role` tests).
 #[test]
 fn test_serialized_onion_flags_parse_onto_the_role() -> Result<()> {
     let config = onion_test_config().onion_role(https_exit_role()?);
     let serialized = ProcessorConfigSerialized::try_from(config.clone())?;
-    let mut exit_only = serialized.clone();
-    exit_only.advertise_onion_relay = false;
-    let mut closed = serialized.clone();
-    closed.onion_exit_policy = OnionExitPolicy::default();
 
     assert!(serialized.advertise_onion_relay && serialized.advertise_onion_exit);
     assert_eq!(
         ProcessorConfig::try_from(serialized)?.onion_role,
         config.onion_role
     );
-    assert!(matches!(
-        ProcessorConfig::try_from(exit_only),
-        Err(Error::InvalidConfig(message))
-            if message.contains("advertise_onion_exit")
-                && message.contains("advertise_onion_relay")
-    ));
-    assert!(matches!(
-        ProcessorConfig::try_from(closed),
-        Err(Error::InvalidConfig(message)) if message.contains("allowed target")
-    ));
     Ok(())
 }
 
-/// The relay capability carries the process epoch `e_n`, and every build (process start) draws a
-/// fresh one (#834 D2).
+/// The reserved HTTPS name is valid without a parallel transport discriminator; an exit
+/// registers `relay` with it, whose capability carries the process epoch `e_n`, and every build
+/// (process start) draws a fresh one (#834 D2).
 #[tokio::test]
-async fn test_onion_relay_capability_carries_a_fresh_process_epoch() {
-    let config = onion_test_config().onion_role(OnionRole::Relay);
-    let start = || {
-        ProcessorBuilder::from_config(&config)
-            .unwrap()
-            .storage(Box::new(MemStorage::new()))
-            .dht_finger_table_size(8)
-            .build()
-            .unwrap()
-    };
-    let processor = start();
-    let restarted = start();
-    let descriptor = processor.online_node_descriptor_at(get_epoch_ms()).unwrap();
+async fn test_https_onion_exit_registers_relay_with_a_fresh_process_epoch() -> Result<()> {
+    let config = onion_test_config().onion_role(https_exit_role()?);
+    let start = || test_processor_builder(&config).build();
+    let processor = start()?;
+    let restarted = start()?;
+    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
 
+    assert_eq!(processor.onion_role(), &https_exit_role()?);
     assert_eq!(
         descriptor.capabilities,
         OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch.get())
@@ -350,24 +332,6 @@ async fn test_onion_relay_capability_carries_a_fresh_process_epoch() {
     assert_ne!(
         processor.onion_process_epoch.get(),
         restarted.onion_process_epoch.get()
-    );
-}
-
-/// The reserved HTTPS name is valid without a parallel transport discriminator, and an exit
-/// registers `relay` with it.
-#[tokio::test]
-async fn test_reserved_https_onion_exit_service_is_accepted() -> Result<()> {
-    let processor =
-        ProcessorBuilder::from_config(&onion_test_config().onion_role(https_exit_role()?))?
-            .storage(Box::new(MemStorage::new()))
-            .dht_finger_table_size(8)
-            .build()?;
-    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
-
-    assert_eq!(processor.onion_role(), &https_exit_role()?);
-    assert_eq!(
-        descriptor.capabilities,
-        OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch.get())
     );
     Ok(())
 }

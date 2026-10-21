@@ -26,12 +26,10 @@ use crate::onion::OnionExitOffer;
 use crate::onion::OnionRole;
 use crate::prelude::rings_core::utils::js_value;
 use crate::processor::Processor;
-use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 use crate::provider::Provider;
+use crate::tests::test_processor_builder;
 use crate::tests::TEST_ICE_SERVERS;
-
-const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 
 /// Per-test hang guard of the connection tests; see [`with_hang_guard`].
 ///
@@ -178,16 +176,8 @@ pub async fn prepare_processor() -> Processor {
 
 /// Prepare a browser test processor registering the onion symbols of `role`.
 pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) -> Processor {
-    let key = SecretKey::random();
-    let sm = DelegateeKey::new_with_seckey(&key).unwrap();
-
-    let config = serde_saphyr::to_string(&ProcessorConfig::new(
-        0,
-        TEST_ICE_SERVERS.to_string(),
-        sm,
-        200,
-    ))
-    .unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
+    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 200);
 
     let storage_name = uuid::Uuid::new_v4().to_simple().to_string();
     let storage = Box::new(
@@ -196,12 +186,9 @@ pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) 
             .unwrap(),
     );
 
-    ProcessorBuilder::from_serialized(&config)
-        .unwrap()
+    test_processor_builder(&config)
         .storage(storage)
-        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .onion_role(role)
-        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }
