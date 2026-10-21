@@ -53,20 +53,6 @@ pub enum OfferReply<A, O> {
 }
 
 impl<A, O> OfferReply<A, O> {
-    /// Map the answer and the counter-offer independently.
-    pub fn map<A2, O2>(
-        self,
-        answer: impl FnOnce(A) -> A2,
-        counter_offer: impl FnOnce(O) -> O2,
-    ) -> OfferReply<A2, O2> {
-        match self {
-            Self::Answer(reply) => OfferReply::Answer(answer(reply)),
-            Self::CounterOffer(reply) => OfferReply::CounterOffer(counter_offer(reply)),
-        }
-    }
-}
-
-impl<A, O> OfferReply<A, O> {
     /// The answer, or `None` for a counter-offer.
     pub fn answer(self) -> Option<A> {
         match self {

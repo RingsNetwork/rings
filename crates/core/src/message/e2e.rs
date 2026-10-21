@@ -241,12 +241,6 @@ impl E2eStreamEncryptor {
         self.encrypt_frame(plaintext, false, rng)
     }
 
-    /// Encrypt one non-final plaintext frame with the default thread-local RNG.
-    pub fn encrypt_next_with_default_rng(&mut self, plaintext: &[u8]) -> Result<E2eStreamFrame> {
-        let mut rng = rand::thread_rng();
-        self.encrypt_next(plaintext, &mut rng)
-    }
-
     /// Encrypt the final plaintext frame and close this stream.
     pub fn encrypt_final(
         &mut self,
@@ -254,12 +248,6 @@ impl E2eStreamEncryptor {
         rng: &mut impl RngCore,
     ) -> Result<E2eStreamFrame> {
         self.encrypt_frame(plaintext, true, rng)
-    }
-
-    /// Encrypt the final plaintext frame with the default thread-local RNG.
-    pub fn encrypt_final_with_default_rng(&mut self, plaintext: &[u8]) -> Result<E2eStreamFrame> {
-        let mut rng = rand::thread_rng();
-        self.encrypt_final(plaintext, &mut rng)
     }
 
     fn encrypt_plaintext_frame(
