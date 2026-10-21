@@ -41,15 +41,10 @@ pub enum StorageSyncPurpose {
 }
 
 impl StorageSyncPurpose {
-    /// Whether this sync moves ownership of its placements.
-    pub const fn is_ownership_handoff(self) -> bool {
-        matches!(self, Self::OwnershipHandoff)
-    }
-
     /// Returns whether reports for this sync kind may drive source cleanup: exactly the syncs
     /// that move ownership.
     pub const fn permits_source_cleanup(self) -> bool {
-        self.is_ownership_handoff()
+        matches!(self, Self::OwnershipHandoff)
     }
 }
 

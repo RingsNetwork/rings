@@ -345,7 +345,7 @@ async fn test_get_and_check_connection_times_out_wedged_data_channel_wait() -> R
             .get_and_check_send_connection_with_timeout(node2.did(), Duration::from_millis(20)),
     )
     .await
-    .map_err(|_| Error::PromiseStateTimeout)?;
+    .map_err(|_| Error::ServiceIOError(std::io::ErrorKind::TimedOut.into()))?;
 
     // The send is refused; retirement belongs to stabilization, so the
     // connection and the successor slot survive one impatient sender.
@@ -382,7 +382,7 @@ async fn test_get_and_check_connection_waits_for_disconnected_open_transport() -
             .get_and_check_send_connection_with_timeout(node2.did(), Duration::from_millis(20)),
     )
     .await
-    .map_err(|_| Error::PromiseStateTimeout)?;
+    .map_err(|_| Error::ServiceIOError(std::io::ErrorKind::TimedOut.into()))?;
 
     // The send is refused; retirement belongs to stabilization, so the
     // connection and the successor slot survive one impatient sender.

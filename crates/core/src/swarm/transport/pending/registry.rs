@@ -244,11 +244,7 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
         now_ms: i64,
     ) -> Result<PendingConnectionAttempt> {
-        self.reserve_for(
-            peer,
-            now_ms,
-            Handshake::offering(super::handshake::OfferOwner::External),
-        )
+        self.reserve_for(peer, now_ms, Handshake::TEST_DEFAULT)
     }
 
     /// Reserve a pending generation for `peer` whose signaling starts in `handshake`.
@@ -534,7 +530,7 @@ impl ConnectionLifecycleRegistry {
             return Ok(None);
         }
         let answering = self.next_attempt(attempt.peer)?;
-        self.insert_pending(answering, now_ms, Handshake::answering());
+        self.insert_pending(answering, now_ms, Handshake::Answering);
         Ok(Some(answering))
     }
 
@@ -698,7 +694,7 @@ impl ConnectionLifecycleRegistry {
                 owner: *owner,
                 phase: OfferPhase::Sent { sdp, tx_id },
             }),
-            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+            Handshake::Offering { .. } | Handshake::Answering => None,
         })
     }
 
@@ -725,20 +721,7 @@ impl ConnectionLifecycleRegistry {
                 owner: *owner,
                 phase: OfferPhase::Answered,
             }),
-            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
-        })
-    }
-
-    /// Apply `Answering(false) -> Answering(true)`.
-    pub(in crate::swarm::transport) fn mark_reply_sent(
-        &mut self,
-        attempt: PendingConnectionAttempt,
-    ) -> bool {
-        self.advance_handshake(attempt, |current| match current {
-            Handshake::Answering { reply_sent: false } => {
-                Some(Handshake::Answering { reply_sent: true })
-            }
-            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+            Handshake::Offering { .. } | Handshake::Answering => None,
         })
     }
 
@@ -776,7 +759,7 @@ impl ConnectionLifecycleRegistry {
                 current != attempt
                     && matches!(
                         self.handshakes.get(&attempt.peer),
-                        Some(Handshake::Answering { .. })
+                        Some(Handshake::Answering)
                     )
             }
             Some(

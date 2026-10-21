@@ -80,8 +80,8 @@
 //! Law (S1-class) : ∀e. send_class(e) = Deferrable(_) ⇒ PreAcceptance(e)
 //! ```
 //!
-//! A detached `Ok(Cancelled)` is pre-acceptance by (P) and is carried as
-//! [`SendDeferral::cancelled`]. `Ambiguous` collects the errors produced after a claim (by (C):
+//! A detached `Ok(Cancelled)` is pre-acceptance by (P) and is carried as the deferrable
+//! `OutboundTransferCancelled`. `Ambiguous` collects the errors produced after a claim (by (C):
 //! completion and delivery timeouts, cleanup timeouts after a claim, backend I/O); they are
 //! never retried. `Fatal` makes no acceptance claim: its variants are not transient data-plane
 //! conditions, so retrying them from fresh topology cannot change their outcome.
@@ -91,6 +91,7 @@ use std::fmt;
 use rings_transport::error::Error as TransportError;
 
 use super::Error;
+#[cfg(test)]
 use crate::dht::Did;
 
 /// The acceptance class of an error returned by a data-plane send (see the module laws).
@@ -121,32 +122,25 @@ pub(crate) enum DeferralTrigger {
 
 /// The cause of one deferral: a send refused before backend acceptance.
 ///
-/// Inv: a value is built only from a detached `Cancelled` outcome or from an error whose
-/// `SendClass` is `Deferrable`, so every value witnesses `PreAcceptance` (module laws).
+/// Inv: a value is built only from an error whose `SendClass` is `Deferrable(trigger)`, so
+/// every value witnesses `PreAcceptance` (module laws).
 #[derive(Debug)]
-pub struct SendDeferral(DeferralCause);
-
-/// The two shapes of a pre-acceptance refusal.
-#[derive(Debug)]
-enum DeferralCause {
-    /// The detached transfer to `hop` was cancelled before its first frame was claimed.
-    Cancelled {
-        /// Link peer the transfer was bound to.
-        hop: Did,
-    },
-    /// The send path refused with an error of class `Deferrable(trigger)`.
-    Refused {
-        /// The refusal.
-        error: Box<Error>,
-        /// The trigger its class names.
-        trigger: DeferralTrigger,
-    },
+pub struct SendDeferral {
+    /// The refusal.
+    error: Box<Error>,
+    /// The trigger its class names.
+    trigger: DeferralTrigger,
 }
 
 impl SendDeferral {
-    /// A detached transfer to `hop` that completed `Cancelled`: pre-acceptance by lemma (P).
-    pub(crate) const fn cancelled(hop: Did) -> Self {
-        Self(DeferralCause::Cancelled { hop })
+    /// A detached transfer to `hop` that completed `Cancelled`, carried as the refusal
+    /// `OutboundTransferCancelled` (`Deferrable(LinkChange)`): pre-acceptance by lemma (P).
+    #[cfg(test)]
+    pub(crate) fn cancelled(hop: Did) -> Self {
+        Self {
+            error: Box::new(Error::OutboundTransferCancelled { peer: hop }),
+            trigger: DeferralTrigger::LinkChange,
+        }
     }
 
     /// `Ok(deferral)` iff `error` is deferrable; otherwise the error itself, unchanged.
@@ -154,31 +148,23 @@ impl SendDeferral {
     /// Post: `Ok(d)` ⇒ `d.trigger() = t` where `error.send_class() = Deferrable(t)`.
     pub(crate) fn refused(error: Error) -> Result<Self, Error> {
         match error.send_class() {
-            SendClass::Deferrable(trigger) => Ok(Self(DeferralCause::Refused {
+            SendClass::Deferrable(trigger) => Ok(Self {
                 error: Box::new(error),
                 trigger,
-            })),
+            }),
             SendClass::Ambiguous | SendClass::Fatal => Err(error),
         }
     }
 
     /// The event class after which this refusal may resolve.
     pub(crate) const fn trigger(&self) -> DeferralTrigger {
-        match &self.0 {
-            DeferralCause::Cancelled { .. } => DeferralTrigger::LinkChange,
-            DeferralCause::Refused { trigger, .. } => *trigger,
-        }
+        self.trigger
     }
 }
 
 impl fmt::Display for SendDeferral {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0 {
-            DeferralCause::Cancelled { hop } => {
-                write!(formatter, "send to {hop} cancelled before acceptance")
-            }
-            DeferralCause::Refused { error, .. } => write!(formatter, "{error}"),
-        }
+        write!(formatter, "{}", self.error)
     }
 }
 
@@ -249,7 +235,7 @@ impl Error {
             | Self::DetachedRuntimeUnavailable(_)
             // entries, inboxes and storage
             | Self::EntryKindNotEqual | Self::EntryDidNotEqual | Self::EntryNotOverwritable
-            | Self::EntryNotAppendable | Self::EntryDotIndexOutOfBounds { .. } | Self::EntryNotLive
+            | Self::EntryDotIndexOutOfBounds { .. } | Self::EntryNotLive
             | Self::EntryLifetimeExceedsMax | Self::EntryVersionAheadOfClock
             | Self::EntryPayloadExceedsMax | Self::RelayMessageNotAddressedToInbox
             | Self::RelayMessageNotCustom | Self::RelayMessageUnverifiable
@@ -271,14 +257,13 @@ impl Error {
             | Self::MessageTooLarge(_) | Self::MessageSizeOverflow
             | Self::PeerMaxMessageSizeTooSmall(_)
             // connection lifecycle
-            | Self::PromiseStateTimeout | Self::AlreadyConnected
+            | Self::AlreadyConnected
             | Self::ConnectionAttemptCancelled { .. }
             | Self::PendingConnectionCapacityExceeded { .. }
             | Self::ConnectionCapacityExceeded { .. } | Self::PendingConnectionGenerationExhausted
             | Self::NotifyPredecessorOriginMismatch { .. }
             | Self::NotifyPredecessorOriginNotAdmitted { .. } | Self::SwarmConnectionLifecycleLock
             | Self::ShouldNotConnectSelf | Self::SwarmMissTransport(_) | Self::ConnectionNotFound
-            | Self::InvalidTransport
             // local channels and schedulers
             | Self::ChannelSendMessageFailed | Self::ChannelRecvMessageFailed(_)
             | Self::OutboundSchedulerRuntimeUnavailable | Self::LockPoisoned

@@ -140,7 +140,9 @@ impl KvStorageInterface<MeasurementSnapshot<Did>> for FailingStorage {
         _key: &str,
         _value: &MeasurementSnapshot<Did>,
     ) -> rings_core::error::Result<()> {
-        Err(CoreError::InvalidTransport)
+        Err(CoreError::ServiceIOError(std::io::Error::other(
+            "store unavailable",
+        )))
     }
 
     async fn get_all(&self) -> rings_core::error::Result<Vec<(String, MeasurementSnapshot<Did>)>> {
@@ -211,7 +213,9 @@ impl KvStorageInterface<MeasurementSnapshot<Did>> for TransientStorage {
         let previous = self.state.attempts.fetch_add(1, Ordering::SeqCst);
         self.state.attempt_permits.add_permits(1);
         if previous < self.state.failures_before_success {
-            return Err(CoreError::InvalidTransport);
+            return Err(CoreError::ServiceIOError(std::io::Error::other(
+                "store unavailable",
+            )));
         }
         *lock_or_recover(&self.state.value) = Some(value.clone());
         Ok(())
@@ -977,7 +981,7 @@ async fn storage_failure_is_observable_without_rolling_back_memory() {
     assert_eq!(evidence(&measure).await.received, 1);
     assert!(matches!(
         measure.flush_with_timeout(Duration::from_secs(1)).await,
-        Err(MeasureRuntimeError::Storage(CoreError::InvalidTransport))
+        Err(MeasureRuntimeError::Storage(CoreError::ServiceIOError(_)))
     ));
     assert_eq!(evidence(&measure).await.received, 1);
 }

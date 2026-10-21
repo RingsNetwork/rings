@@ -225,7 +225,7 @@ impl OutboundPeerHandle {
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        self.state._capacity_anchor.try_acquire(peer, class, bytes)
+        self.state._capacity_anchor.admit_now(peer, class, bytes)
     }
 
     pub(super) fn submit(
@@ -390,11 +390,10 @@ impl OutboundSchedulers {
     pub(super) fn reserve_now(
         &self,
         peer: Did,
-        class: TransferClass,
-        bytes: usize,
+        demand: TransferDemand,
     ) -> Result<TransferCapacityPermit> {
         let capacity = self.lock_registry().capacity(peer, &self.global_capacity);
-        capacity.admit_now(peer, class, bytes)
+        capacity.admit_now(peer, demand.class(), demand.bytes())
     }
 
     /// A permit holding no shared capacity for a transfer `bound` admits, if it admits one now;

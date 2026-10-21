@@ -1,6 +1,3 @@
-#[cfg(feature = "dummy")]
-use rings_transport::core::transport::TransportInterface;
-
 use super::*;
 use crate::dht::FingerFixRequest;
 #[cfg(feature = "dummy")]
@@ -235,12 +232,7 @@ async fn test_stale_pending_close_cannot_remove_replacement_transport() -> Resul
         .new_pending_connection(replacement, replacement_callback)
         .await?;
 
-    assert!(
-        !transport
-            .transport
-            .close_connection_if_current(&old_connection.connection)
-            .await?
-    );
+    assert!(!transport.close_if_current(&old_connection).await?);
     assert!(transport.is_pending_connection_attempt(replacement)?);
     assert!(transport.get_raw_connection(peer).is_some());
     transport.cancel_unadmitted_connection(replacement).await?;

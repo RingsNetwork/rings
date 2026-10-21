@@ -310,7 +310,7 @@ impl SwarmTransport {
         ))
     }
 
-    /// Reserve outbound capacity to `peer` for a transfer of `bytes`.
+    /// Reserve outbound capacity to `peer` for a transfer demanding `demand`.
     ///
     /// A send under [`QueueAdmission::Immediate`] takes it without waiting and is refused as
     /// local backpressure when it is full (the inbound-locality law of the `egress` module);
@@ -321,8 +321,7 @@ impl SwarmTransport {
     async fn reserve_outbound_capacity(
         &self,
         peer: Did,
-        kind: OutboundMessageKind,
-        bytes: usize,
+        demand: TransferDemand,
         admission: QueueAdmission,
     ) -> Result<TransferCapacityPermit> {
         if let QueueAdmission::Bounded(bound) = admission {
@@ -335,20 +334,12 @@ impl SwarmTransport {
         }
         let reserve = match admission {
             QueueAdmission::Immediate | QueueAdmission::Bounded(_) => {
-                return self
-                    .outbound_schedulers
-                    .reserve_now(peer, kind.class(), bytes);
+                return self.outbound_schedulers.reserve_now(peer, demand);
             }
             QueueAdmission::Tracked => {
-                return self
-                    .outbound_schedulers
-                    .reserve(peer, TransferDemand::new(kind.class(), bytes))
-                    .await;
+                return self.outbound_schedulers.reserve(peer, demand).await;
             }
-            QueueAdmission::Waiting => self
-                .outbound_schedulers
-                .reserve(peer, TransferDemand::new(kind.class(), bytes))
-                .fuse(),
+            QueueAdmission::Waiting => self.outbound_schedulers.reserve(peer, demand).fuse(),
         };
         let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_BUDGET).fuse();
         pin_mut!(reserve, timeout);
@@ -693,8 +684,7 @@ impl SwarmTransport {
         let capacity_permit = self
             .reserve_outbound_capacity(
                 did,
-                message_kind,
-                outbound_memory_reservation(wire_bytes),
+                transfer_demand(message_kind, wire_bytes),
                 queue_admission,
             )
             .await?;

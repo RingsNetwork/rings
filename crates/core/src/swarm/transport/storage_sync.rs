@@ -294,7 +294,7 @@ impl<'data> StorageSyncBatch<'data> {
         if !placed.entry.kind.is_relay_inbox() {
             return Ok(true);
         }
-        if !self.purpose.is_ownership_handoff() {
+        if !self.purpose.permits_source_cleanup() {
             return Ok(false);
         }
         let predecessor = transport
