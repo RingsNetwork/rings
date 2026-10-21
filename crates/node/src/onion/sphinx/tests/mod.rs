@@ -19,7 +19,6 @@ use rand::RngCore;
 use rand::SeedableRng;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
-use rings_core::ecc::SecretKey;
 
 use super::cell::Charged;
 use super::cell::OnionAdmittedCell;
@@ -39,6 +38,8 @@ use crate::onion::circuit::OnionAdmissionState;
 use crate::onion::circuit::OnionExpiry;
 use crate::onion::circuit::OnionReplayFilterKey;
 use crate::onion::circuit::OnionReplayNonce;
+use crate::onion::tests::fixture::fixture_secret;
+use crate::onion::tests::fixture::grid_expiry;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionServiceName;
 
@@ -57,7 +58,7 @@ fn fixture_link() -> OnionAdmissionLink {
 /// The expiry `x = (3 + offset)·Q` of a fixture layer, admissible at [`FIXTURE_ARRIVAL_MS`] for
 /// `offset < 5`.
 fn fixture_expiry(offset: u32) -> OnionExpiry {
-    OnionExpiry::from_ms(u128::from(3 + offset) * 30_000).expect("on the grid")
+    grid_expiry(u128::from(3 + offset))
 }
 
 /// A fresh hop admission at [`FIXTURE_EPOCH`] with [`fixture_link`] live.
@@ -108,9 +109,7 @@ fn fixture_rng(seed: u64) -> StdRng {
 /// The delegatee key of hop `index`: the fixed scalar `(index + 1)·0x0101…01`.
 fn hop_key(index: usize) -> DelegateeKey {
     let byte = u8::try_from(index).expect("fixture index fits a byte") + 1;
-    let secret =
-        SecretKey::try_from(format!("{byte:02x}").repeat(32).as_str()).expect("fixture scalar");
-    DelegateeKey::new_with_seckey(&secret).expect("fixture delegation")
+    DelegateeKey::new_with_seckey(&fixture_secret(byte)).expect("fixture delegation")
 }
 
 /// The layer of `position` in a loop of `hops` positions under fixture `seed`: `relay` everywhere

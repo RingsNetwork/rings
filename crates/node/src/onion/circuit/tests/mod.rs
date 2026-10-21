@@ -14,7 +14,6 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
-use rings_core::ecc::SecretKey;
 
 use super::admission::OnionAdmissionState;
 use super::admission::OnionReplayFilterKey;
@@ -32,6 +31,10 @@ use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionLoopTag;
 use crate::onion::sphinx::layer::OnionApplication;
+use crate::onion::tests::fixture::fixture_route_hop;
+use crate::onion::tests::fixture::fixture_secret;
+use crate::onion::tests::fixture::grid_expiry;
+use crate::onion::tests::fixture::session_loop;
 use crate::onion::OnionLoop;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionRouteHop;
@@ -48,7 +51,7 @@ const CLIENT: u32 = 99;
 
 /// The fixture loop's expiry `x = 5Q`, admissible at [`NOW_MS`].
 fn expiry() -> OnionExpiry {
-    OnionExpiry::from_ms(150_000).expect("on the grid")
+    grid_expiry(5)
 }
 
 /// One hop of the fixture loop: its key and its admission state.
@@ -62,10 +65,8 @@ struct Hop {
 impl Hop {
     /// The hop with the fixed scalar `(seed)·0x0101…01`, with no link live yet.
     fn new(seed: u8) -> Self {
-        let secret =
-            SecretKey::try_from(format!("{seed:02x}").repeat(32).as_str()).expect("fixture scalar");
         Self {
-            key: DelegateeKey::new_with_seckey(&secret).expect("fixture delegation"),
+            key: DelegateeKey::new_with_seckey(&fixture_secret(seed)).expect("fixture delegation"),
             admission: OnionAdmissionState::new(
                 EPOCH,
                 OnionReplayFilterKey::new([seed; 32]),
@@ -91,7 +92,7 @@ impl Hop {
 
     /// The hop's route entry.
     fn route_hop(&self) -> OnionRouteHop {
-        OnionRouteHop::new(self.did(), self.key.delegatee_public_key(), EPOCH)
+        fixture_route_hop(&self.key, EPOCH)
     }
 
     /// `Hop_i` of `cell` from `from` at [`NOW_MS`], as a relaying node that owns no loop tags.
@@ -134,14 +135,7 @@ impl Fixture {
 
     /// The route `g, r₀₂, h, r₁₁, g`.
     fn route(&self) -> OnionLoop<OnionRouteHop> {
-        let mut relays = [0, 1, 3].into_iter();
-        OnionLoop::try_unfold(Vec::new(), self.hops[2].route_hop(), |_| {
-            relays
-                .next()
-                .map(|index| self.hops[index].route_hop())
-                .ok_or(crate::error::Error::InvalidData)
-        })
-        .expect("the fixture loop")
+        session_loop(self.hops.each_ref().map(Hop::route_hop))
     }
 
     /// A seeded loop applying `tcp` at `h` to `value`.

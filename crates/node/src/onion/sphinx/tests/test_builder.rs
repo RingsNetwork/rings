@@ -28,6 +28,8 @@ use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::sphinx::layer::OnionArguments;
 use crate::onion::sphinx::layer::OnionLayerApplication;
+use crate::onion::tests::fixture::fixture_route_hop;
+use crate::onion::tests::fixture::session_loop;
 use crate::onion::OnionLoop;
 use crate::onion::OnionLoopRelay;
 use crate::onion::OnionRouteHop;
@@ -46,22 +48,7 @@ fn keys() -> [DelegateeKey; 4] {
 
 /// The route hop of `key`.
 fn route_hop(key: &DelegateeKey) -> OnionRouteHop {
-    OnionRouteHop::new(
-        key.delegator_did(),
-        key.delegatee_public_key(),
-        FIXTURE_EPOCH,
-    )
-}
-
-/// The session loop `g = 0, r₀₂ = 1, h = 2, r₁₁ = 3, g = 0` of `keys`.
-fn session_loop(keys: &[DelegateeKey; 4]) -> OnionLoop<OnionRouteHop> {
-    let mut relays = [0, 1, 3].into_iter();
-    OnionLoop::try_unfold(Vec::new(), route_hop(&keys[2]), |relay| {
-        let index = relays.next().ok_or(crate::error::Error::InvalidData)?;
-        assert_eq!(relay == OnionLoopRelay::Guard, index == 0);
-        Ok(route_hop(&keys[index]))
-    })
-    .expect("a session loop")
+    fixture_route_hop(key, FIXTURE_EPOCH)
 }
 
 /// Relay a cell through `key`, checking the relay's layer; return the cell and the DID it goes
@@ -85,7 +72,7 @@ fn relay(bytes: Vec<u8>, key: &DelegateeKey) -> (Did, Vec<u8>) {
 fn test_built_loop_runs_through_paid_hops() {
     let mut rng = fixture_rng(70);
     let keys = keys();
-    let hops = session_loop(&keys);
+    let hops = session_loop(keys.each_ref().map(route_hop));
     let mut arguments = [0; 64];
     rng.fill_bytes(&mut arguments);
     let arguments = OnionArguments::new(arguments);
@@ -150,7 +137,7 @@ fn test_built_loop_runs_through_paid_hops() {
 fn test_credit_surb_reaches_the_client_under_its_own_key() {
     let mut rng = fixture_rng(71);
     let keys = keys();
-    let hops = session_loop(&keys);
+    let hops = session_loop(keys.each_ref().map(route_hop));
     let (surb, reply) = build_surb(
         hops.return_path(),
         client(),
@@ -193,7 +180,7 @@ fn test_applications_must_match_the_symbol_positions() {
     for applications in [Vec::new(), vec![application.clone(), application]] {
         assert_eq!(
             build_loop(
-                &session_loop(&keys()),
+                &session_loop(keys().each_ref().map(route_hop)),
                 &applications,
                 client(),
                 OnionLoopClass::DEFAULT,

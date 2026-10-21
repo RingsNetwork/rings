@@ -23,6 +23,7 @@ use rings_core::swarm::OfferReply;
 use rings_core::utils::get_epoch_ms;
 use rings_test_support::with_hang_guard;
 
+use super::fixture::session_loop;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::circuit::OnionAlgebra;
@@ -36,7 +37,6 @@ use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
-use crate::onion::OnionLoop;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRole;
 use crate::onion::OnionRoute;
@@ -203,14 +203,8 @@ impl LoopNetwork {
 
     /// The route `g, r₀₂, h, r₁₁, g` to `h`'s registration of `service`.
     pub(super) fn route(&self, service: OnionServiceName) -> Result<OnionRoute> {
-        let [g, r02, h, r11] = &self.hops;
-        let mut relays = [g, r02, r11].into_iter();
-        let hops = OnionLoop::try_unfold(Vec::new(), h.route_hop(), |_| {
-            relays
-                .next()
-                .map(LoopNode::route_hop)
-                .ok_or(Error::InvalidData)
-        })?;
+        let hops = session_loop(self.hops.each_ref().map(LoopNode::route_hop));
+        let [_, _, h, _] = &self.hops;
         Ok(OnionRoute::new(
             service.clone(),
             hops,
