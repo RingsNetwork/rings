@@ -30,7 +30,6 @@ use serde::Deserialize;
 
 use super::decode_outcome;
 use super::default_method;
-use super::default_path;
 use super::encode_request;
 use super::normalize_method;
 use super::normalize_path;
@@ -95,7 +94,7 @@ impl OnionHttpsCall {
         request: OnionHttpsClientRequest,
     ) -> Result<(OnionProxyTarget, Self)> {
         let (target, path) = parse_https_url(url)?;
-        Ok((target, Self::with_default_path(request, path.as_str())?))
+        Ok((target, Self::with_default_path(request, path)?))
     }
 
     /// Normalize `request`, using `default_path` when it carries no path override.
@@ -199,7 +198,7 @@ fn client_outcome(bytes: &[u8]) -> Result<OnionHttpsResponse> {
 }
 
 /// Split an absolute `https://` URL into its canonical target and its path-and-query.
-fn parse_https_url(url: &str) -> Result<(OnionProxyTarget, String)> {
+fn parse_https_url(url: &str) -> Result<(OnionProxyTarget, &str)> {
     let url = url.trim();
     let (scheme, rest) = url.split_once("://").ok_or_else(|| {
         Error::HttpRequestError("HTTPS onion proxy request URL must be absolute".to_string())
@@ -286,16 +285,10 @@ fn https_authority_with_default_port(authority: &str) -> Result<String> {
     }
 }
 
-/// Path-and-query of the URL suffix after the authority, with the fragment removed.
-fn url_path(suffix: &str) -> String {
-    let path = suffix
+/// Path-and-query of the URL suffix after the authority, with the fragment removed. An empty
+/// path and a bare query are canonicalized by `normalize_path`, as every call's path is.
+fn url_path(suffix: &str) -> &str {
+    suffix
         .split_once('#')
-        .map_or(suffix, |(before_fragment, _)| before_fragment);
-    if path.is_empty() {
-        default_path()
-    } else if path.starts_with('?') {
-        format!("/{path}")
-    } else {
-        path.to_string()
-    }
+        .map_or(suffix, |(before_fragment, _)| before_fragment)
 }
