@@ -2,127 +2,86 @@
 
 ![A WebAssembly peer-to-peer network](../assets/webassembly-p2p-network.png)
 
-Rings Network enables users to integrate services into its decentralized network. Its underlying mechanism relies on Rings DHT for service registration and discovery. Setting up hidden services is a straightforward process that decentralizes any service with just a few simple steps.
+A service on Rings has two independent parts:
 
-## Understand de-service
+1. **Discovery.** A provider registers its DID under a service name in the DHT, and a client
+   looks the name up to get the providers' DIDs.
+2. **Transport.** The client reaches a provider by DID through an extension protocol: a
+   namespaced message, or a TCP/UDP tunnel through the built-in relay.
 
-For classic Internet architecture, "services" typically refer to centralized services and entities. However, by using a Rings network, it is possible to effectively transform those centralized services into decentralized services.
+Registering a name binds no endpoint: the DHT entry holds DIDs only, and what a provider serves
+is whatever its extension protocols do. There is no service backend in `config.yaml`; the node
+configuration rejects unknown keys, so an old `backend:` section fails to load.
 
-This is achieved through a Rings custom backend. By configuring the Rings network to act as a transparent forwarder, all messages directed towards a registered service will ultimately be processed by this custom backend handler.
-
-### Register of de-service
-
-Every de-service provider can register itself in the network. The Rings network will create a key-value pair for each service in the form of `hash(services_name): [services_provider_did]` and store it using the DHT (Distributed Hash Table) feature across the network. When other network nodes request a de-service, this traffic will be forwarded to the corresponding active node providing that service.
-
-In fact, we will utilize the Chord algorithm to find the corresponding data based on the hash of the register\_name. For more details, you can continue reading the section about the Distributed Hash Table (DHT).
-
-[chord.md](../advanced-topic/chord.md)
-
-### Lookup of de-service
-
-De-services declare themselves alive by registering again periodically: a registration expires by the element lifetime rule of [DHT storage](../advanced-topic/chord.md#data-topic-storage).
-
-```
-rings service lookup --help
-Usage: rings service lookup [OPTIONS] <NAME>
-
-Arguments:
-  <NAME>
-
-Options:
-  -u, --endpoint-url <ENDPOINT_URL>  rings-node endpoint url. If not provided, use endpoint_url in config file or http://127.0.0.1:50000 [env: ENDPOINT_URL=]
-  -c, --config <CONFIG>              Config file location [env: CONFIG=] [default: ~/.rings/config.yaml]
-  -h, --help                         Print help
-```
-
-This command can also be accomplished through the JSON-RPC API.
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace NAME with the service name what you want to lookup in rings network
-curl -X POST \
--H "Content-Type: application/json" \
--H "Authorization: Bearer YOUR-API-TOKEN" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "lookupService", "params": {"name": "NAME"}}' \
-"http://127.0.0.1:50000"
-```
-
-It will return a provider list of de-service, and then you can use the elements in the list to request de-services.
-
-### Request de-services
-
-Rings CLI provides a set of tools to assist in requesting de-services. This can be accomplished through the command line or via our Curl API.
-
-For command-line usage:
-
-```
-rings send http --help
-Sends an HTTP request message.
-
-Usage: rings send http [OPTIONS] <TO_DID> <NAME> [PATH]
-
-Arguments:
-  <TO_DID>
-  <NAME>
-  [PATH]    [default: /]
-
-Options:
-  -u, --endpoint-url <ENDPOINT_URL>  rings-node endpoint url. If not provided, use endpoint_url in config file or http://127.0.0.1:50000 [env: ENDPOINT_URL=]
-  -c, --config <CONFIG>              Config file location [env: CONFIG=] [default: ~/.rings/config.yaml]
-  -X, --method <METHOD>              request method [default: get]
-  -H, --header <HEADERS>             headers append to the request
-  -b, --body <BODY>                  set content of http body
-      --timeout <TIMEOUT>            [default: 30000]
-  -h, --help                         Print help
-```
-
-## Backend
-
-Backends can be classified into various types based on different transmission protocols, such as TCP-Backend, HTTP-Backend, and WASM-Backend. The essence of a backend is that it acts as a custom message handler. It must have a service name and a delegated service path.
-
-For example, we can declare a backend service with the name "ipfs\_provider." This service will redirect all requests directed towards its name to a configured prefix handler, which, in our example, is [http://127.0.0.1:8080](http://127.0.0.1:8080).
-
-Thus, our config.yaml can be looks like this:
-
-### Config your backend
-
-Rings allows users to configure hidden services through the "config.yaml" file. If you are not familiar with what "config.yaml" is, I recommend reading up on it.
-
-[config.yaml.md](../advanced-topic/config.yaml.md)
-
-For a hidden service, three fields need to be provided: "name," "register\_service," and "prefix". For example:
-
-```yaml
-- name: ipfs
-  register_service: ipfs_provider
-  prefix: http://127.0.0.1:8080
-```
-
-This config will perform two tasks:
-
-1. It will use the "register\_service" function to register itself as an "ipfs\_provider" within the Rings Network.
-2. It will forward all incoming traffic from the Rings Network to the specified "prefix."
-
-Now let's integrate it into the `config.yaml` file:
+## Discovery
 
 ```bash
-# cat ./config.yaml
-
-internal_api_port: 50000
-endpoint_url: http://127.0.0.1:50000
-delegatee_key: ~/.rings/delegatee_key
-ice_servers: stun://stun.l.google.com:19302
-stabilize_interval: 3
-external_ip: null
-backend:
-- name: ipfs
-  register_service: ipfs_provider
-  prefix: http://127.0.0.1:8080
-...
+rings service register <name>
+rings service lookup <name>
 ```
 
-Once all the configurations are set up, you can use the command `rings run` to start hosting your decentralized services.
+`register` appends this node's DID to the data topic `name`; `lookup` prints the topic's elements,
+one per line. The topic is an ordinary [data topic](../advanced-topic/chord.md#data-topic-storage),
+the one `publishMessageToTopic` and `fetchTopicMessages` also address, so a lookup returns every
+text element written to it. A registration is a plain write and expires after 10 minutes: a
+provider runs `register` again within that period to stay listed.
 
-## An example of de-service
+The same calls over JSON-RPC ([API](../jsonrpc.md#registerservice)):
 
-[decentralized-service-examples.md](../examples/decentralized-service-examples.md)
+```sh
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(cat ~/.rings/api-token)" \
+  --data '{"jsonrpc": "2.0", "id": 1, "method": "registerService", "params": {"name": "echo"}}' \
+  "http://127.0.0.1:50000"
+
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(cat ~/.rings/api-token)" \
+  --data '{"jsonrpc": "2.0", "id": 1, "method": "lookupService", "params": {"name": "echo"}}' \
+  "http://127.0.0.1:50000"
+```
+
+`lookupService` returns `{"dids": [...]}`.
+
+## Transport
+
+### Namespaced messages
+
+```bash
+rings send message <did> <namespace> <data>
+```
+
+delivers `data` to the protocol registered under `namespace` on `did` (the `sendBackendMessage`
+method). The provider handles it in an extension protocol it registered: a Rust protocol in a
+node that embeds `rings-node`, or a JS handler `provider.on(namespace, initialState, handler)` in
+the browser.
+
+### TCP and UDP relay
+
+`rings run` installs the relay on the namespaces `tcp` and `udp`, but registers no relay service:
+the relay maps a service name to a local socket address only through `RelayHandle` in an
+embedding Rust program, and neither the CLI, the JSON-RPC API nor the configuration can add one.
+
+```rust
+// Provider node: expose a local socket under a relay service name, and advertise it.
+let relay = RelayHandle::install(&provider.extensions())?;
+relay.register_tcp_service("echo".into(), "127.0.0.1:7000".parse()?).await?;
+processor.register_service("echo").await?;
+
+// Client node: find a provider, then tunnel a local listener to its relay service.
+let relay = RelayHandle::install(&provider.extensions())?;
+let request = LookupServiceRequest { name: "echo".into() };
+let dids = rpc_client.lookup_service(&request).await?.dids;
+let peer: Did = dids[0].parse()?;
+relay.open_tcp_tunnel("127.0.0.1:9000".parse()?, peer, "echo".into()).await?;
+```
+
+A connection to the client's `127.0.0.1:9000` then reaches the provider's `127.0.0.1:7000`.
+`register_udp_service` and `open_udp_tunnel` do the same for datagrams. The relay is direct:
+both nodes know each other's DID, and every hop on the overlay route sees both endpoints. For
+traffic that hides its endpoints, use an onion exit ([Native Gateway](../native-gateway.md)).
+
+## Examples
+
+[Decentralized Service Examples](../examples/decentralized-service-examples.md)
