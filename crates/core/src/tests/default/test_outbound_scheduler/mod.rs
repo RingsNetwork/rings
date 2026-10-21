@@ -1,6 +1,7 @@
 //! End-to-end scheduler invariants over the controlled dummy transport.
 
 use std::future::pending;
+use std::future::Future;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -233,9 +234,10 @@ async fn test_irrevocable_send_timeout_releases_scheduler_capacity() -> Result<(
     assert!(outbound_capacity_released(&node1.swarm.transport, peer));
     assert!(dummy_controlled::irrevocable_send_gate_waiting());
     drop(paused_send);
-    wait_until("retired irrevocable dummy send completion", || {
-        !dummy_controlled::irrevocable_send_gate_waiting()
-    })
+    wait_for(
+        "retired irrevocable dummy send completion",
+        dummy_controlled::irrevocable_send_gate_left(),
+    )
     .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
@@ -253,11 +255,7 @@ async fn test_detached_deadline_cannot_succeed_after_irrevocable_chunk_admission
     let paused_send = PausedIrrevocableSendGuard::new();
     dummy_controlled::reset_sent_count();
     let payload = tracked_payload(&node1, peer, &vec![7_u8; 50_000])?;
-    let deadline = async {
-        while !dummy_controlled::irrevocable_send_gate_waiting() {
-            tokio::task::yield_now().await;
-        }
-    };
+    let deadline = dummy_controlled::irrevocable_send_gate_entered();
 
     let error = node1
         .swarm
@@ -275,9 +273,10 @@ async fn test_detached_deadline_cannot_succeed_after_irrevocable_chunk_admission
     );
     assert!(outbound_capacity_released(&node1.swarm.transport, peer));
     drop(paused_send);
-    wait_until("retired chunk send completion", || {
-        !dummy_controlled::irrevocable_send_gate_waiting()
-    })
+    wait_for(
+        "retired chunk send completion",
+        dummy_controlled::irrevocable_send_gate_left(),
+    )
     .await?;
     assert_eq!(
         dummy_controlled::sent_count(),
@@ -515,20 +514,23 @@ async fn test_shutdown_releases_batch_before_first_tracked_completion() -> Resul
     // the first transfer, which the paused dispatch holds: every permit is
     // still admitted when the connection is torn down.
     node1.swarm.transport.resume_outbound_worker_for_test(peer);
-    wait_until("active tracked shutdown transfer", || {
+    wait_for(
+        "active tracked shutdown transfer",
+        dummy_controlled::send_message_gate_entered(),
+    )
+    .await?;
+    assert!(node1
+        .swarm
+        .transport
+        .outbound_worker_has_active_transfer_for_test(peer));
+    assert_eq!(
         node1
             .swarm
             .transport
-            .outbound_worker_has_active_transfer_for_test(peer)
-            && dummy_controlled::send_message_waiting_at_dispatch()
-            && node1
-                .swarm
-                .transport
-                .outbound_admitted_transfer_count_for_test(peer)
-                == Some(40)
-            && dummy_controlled::sent_count() == 0
-    })
-    .await?;
+            .outbound_admitted_transfer_count_for_test(peer),
+        Some(40)
+    );
+    assert_eq!(dummy_controlled::sent_count(), 0);
     node1.swarm.transport.disconnect(peer).await?;
     for (index, task) in tasks.into_iter().enumerate() {
         let outcome = timeout(Duration::from_secs(2), task)
@@ -659,6 +661,13 @@ impl BehaviourJudgement for PendingMeasure {
     async fn quality(&self, _did: Did) -> PeerQuality {
         PeerQuality::Unknown
     }
+}
+
+/// Wait for `event`, bounded by the test hang guard.
+async fn wait_for(label: &str, event: impl Future<Output = ()>) -> Result<()> {
+    timeout(TEST_HANG_GUARD, event)
+        .await
+        .map_err(|_| invalid_test_state(format!("timed out waiting for {label}")))
 }
 
 async fn wait_until(label: &str, condition: impl Fn() -> bool) -> Result<()> {
@@ -820,9 +829,10 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
             )
             .await
     });
-    wait_until("storage dispatch gate", || {
-        dummy_controlled::send_message_waiting_at_dispatch()
-    })
+    wait_for(
+        "storage dispatch gate",
+        dummy_controlled::send_message_gate_entered(),
+    )
     .await?;
 
     dummy_controlled::release_delivery_future_gate();

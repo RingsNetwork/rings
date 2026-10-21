@@ -47,6 +47,7 @@ use self::delay::random;
 use self::delay::random_delay;
 use self::event::Event;
 use self::retirement::DummyRetirementFence;
+use self::state::set_parked;
 use self::state::ControlledDeliveryEntry;
 use self::state::ACTIVE_DELIVERY_GATE;
 use self::state::CLOSE_PENDING;
@@ -59,15 +60,14 @@ use self::state::DELIVERY_FUTURE_PENDING;
 use self::state::DROP_MESSAGES;
 use self::state::HELD_DELIVERY_GATE;
 use self::state::IRREVOCABLE_SEND_GATE;
-use self::state::IRREVOCABLE_SEND_GATE_WAITING;
+use self::state::IRREVOCABLE_SEND_GATE_PARKED;
 use self::state::MAX_MESSAGE_SIZE;
 use self::state::NEXT_CALLBACK_CID;
 use self::state::NEXT_DELIVERY_GATE;
 use self::state::POST_PERMIT_SEND_GATE;
-use self::state::POST_PERMIT_SEND_GATE_WAITING;
-use self::state::SEND_GATE_ENTERED;
+use self::state::POST_PERMIT_SEND_GATE_PARKED;
 use self::state::SEND_MESSAGE_GATE;
-use self::state::SEND_MESSAGE_GATE_WAITING;
+use self::state::SEND_MESSAGE_GATE_PARKED;
 use self::state::SEND_MESSAGE_PENDING;
 use self::state::SEND_MESSAGE_PENDING_AFTER_SENT_COUNT;
 use self::state::SENT_COUNT;
@@ -528,9 +528,9 @@ impl FrameSink for DummyConnection {
         }
         let send_gate = SEND_MESSAGE_GATE.with(|gate| gate.borrow().clone());
         if let Some(send_gate) = send_gate {
-            SEND_MESSAGE_GATE_WAITING.with(|waiting| waiting.set(true));
+            set_parked(&SEND_MESSAGE_GATE_PARKED, true);
             send_gate.notified().await;
-            SEND_MESSAGE_GATE_WAITING.with(|waiting| waiting.set(false));
+            set_parked(&SEND_MESSAGE_GATE_PARKED, false);
         }
         let data = rings_codec::serialize(&frame).map(Bytes::from)?;
         if !permit.allows() {
@@ -538,10 +538,9 @@ impl FrameSink for DummyConnection {
         }
         let post_permit_gate = POST_PERMIT_SEND_GATE.with(|gate| gate.borrow().clone());
         if let Some(post_permit_gate) = post_permit_gate {
-            POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(true));
-            SEND_GATE_ENTERED.with(|entered| entered.notify_one());
+            set_parked(&POST_PERMIT_SEND_GATE_PARKED, true);
             post_permit_gate.notified().await;
-            POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
+            set_parked(&POST_PERMIT_SEND_GATE_PARKED, false);
         }
         if !permit.allows() {
             return Err(Error::SendPermitRevoked);
@@ -566,10 +565,9 @@ impl FrameSink for DummyConnection {
             let connection_state = Arc::clone(&self.connection_state);
             let (result_sender, result_receiver) = oneshot::channel();
             tokio::spawn(async move {
-                IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(true));
-                SEND_GATE_ENTERED.with(|entered| entered.notify_one());
+                set_parked(&IRREVOCABLE_SEND_GATE_PARKED, true);
                 irrevocable_gate.notified().await;
-                IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
+                set_parked(&IRREVOCABLE_SEND_GATE_PARKED, false);
                 let result = complete_irrevocable_send(
                     &connection_state,
                     data,

@@ -68,11 +68,7 @@ async fn test_detached_first_frame_cleanup_is_bounded_and_retires_generation() -
     let paused_send = PausedIrrevocableSendGuard::new();
     let _pending_close = PendingCloseGuard::new();
     let payload = tracked_payload(&node1, peer, b"bounded-detached-cleanup")?;
-    let deadline = async {
-        while !dummy_controlled::irrevocable_send_gate_waiting() {
-            tokio::task::yield_now().await;
-        }
-    };
+    let deadline = dummy_controlled::irrevocable_send_gate_entered();
 
     let error = timeout(
         Duration::from_secs(2),
@@ -92,9 +88,10 @@ async fn test_detached_first_frame_cleanup_is_bounded_and_retires_generation() -
     ));
     assert!(node1.swarm.transport.get_connection(peer).is_none());
     drop(paused_send);
-    wait_until("abandoned irrevocable dummy send", || {
-        !dummy_controlled::irrevocable_send_gate_waiting()
-    })
+    wait_for(
+        "abandoned irrevocable dummy send",
+        dummy_controlled::irrevocable_send_gate_left(),
+    )
     .await?;
     Ok(())
 }
