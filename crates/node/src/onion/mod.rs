@@ -89,8 +89,6 @@ pub use route::OnionRouteHop;
 pub use route::OnionRouteRequest;
 pub(crate) use route::SystemRouteEntropy;
 pub use signature::OnionServiceName;
-pub use signature::OnionSymbolSpec;
-pub use signature::ONION_SIGNATURE;
 pub use target::OnionProxyTarget;
 pub use target::OnionProxyTargetError;
 
@@ -184,13 +182,13 @@ pub(crate) const fn default_advertise_onion_exit() -> bool {
     false
 }
 
-/// Default native exit services: the world-facing symbols of [`ONION_SIGNATURE`] in table order.
+/// Default native exit services: the world-facing symbols of the onion signature, in table order.
 /// It is only published when onion-exit advertisement is enabled.
 pub fn default_onion_exit_services() -> Vec<OnionServiceName> {
     OnionServiceName::world_facing().collect()
 }
 
-/// Standard HTTPS onion-exit service set: the single `https` symbol of [`ONION_SIGNATURE`].
+/// Standard HTTPS onion-exit service set: the single `https` symbol of the onion signature.
 pub fn https_onion_exit_services() -> Vec<OnionServiceName> {
     vec![OnionServiceName::https()]
 }
