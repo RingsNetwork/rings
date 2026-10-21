@@ -3,7 +3,6 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
 use std::sync::Mutex;
 
 use rings_core::delegation::DelegationBuilder;
@@ -31,9 +30,8 @@ use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
 use crate::measure::UnavailableEvidenceStorage;
 #[cfg(feature = "node")]
-use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
-#[cfg(feature = "node")]
 use crate::onion::native::NativeOnionCircuitHandle;
+use crate::onion::runtime::OnionRuntime;
 use crate::onion::OnionEntryGuardStorage;
 use crate::prelude::wasm_export;
 use crate::processor::Processor;
@@ -57,14 +55,11 @@ pub struct Provider {
     handler: InternalRpcHandler,
     extensions: crate::extension::ext::Extensions,
     dispatch_drops: Arc<DispatchDrops>,
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    onion_runtime: Arc<Mutex<Option<crate::onion::runtime::OnionRuntime>>>,
+    /// The onion runtime installed in this provider's registry, shared by its clones; its lock
+    /// serializes the check-and-install, so the runtime is installed at most once.
+    onion_runtime: Arc<Mutex<Option<OnionRuntime>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_directory_endpoint: Arc<Mutex<Option<RemoteRpcEndpoint>>>,
-    /// Serializes the check-and-install of the onion circuit runtime in this provider's
-    /// registry, shared by its clones.
-    #[cfg(feature = "node")]
-    onion_circuit_install: Arc<Mutex<()>>,
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -101,12 +96,9 @@ impl Provider {
             handler: InternalRpcHandler,
             extensions,
             dispatch_drops: Arc::default(),
-            #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "node")]
-            onion_circuit_install: Arc::new(Mutex::new(())),
         }
     }
 
@@ -114,6 +106,41 @@ impl Provider {
     /// this, so registration (via the provider) and dispatch see the same table.
     pub fn extensions(&self) -> crate::extension::ext::Extensions {
         self.extensions.clone()
+    }
+
+    /// This provider's onion runtime, installed in its registry on first use: the data plane
+    /// with the processor's role, and for an exit the worlds of its offer the platform
+    /// interprets (`onion::runtime`).
+    ///
+    /// Idempotent within this provider's registry, which its clones share: the check and the
+    /// install run under the slot's lock, so concurrent callers install once and share the
+    /// runtime. Another provider over the same processor has its own registry.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Lock`] for a poisoned slot, or the failure of [`OnionRuntime::install`].
+    pub(crate) fn onion_runtime(&self) -> Result<OnionRuntime> {
+        let mut slot = self.onion_runtime.lock().map_err(|_| Error::Lock)?;
+        if let Some(runtime) = slot.as_ref() {
+            return Ok(runtime.clone());
+        }
+        let runtime = OnionRuntime::install(&self.extensions())?;
+        *slot = Some(runtime.clone());
+        Ok(runtime)
+    }
+
+    /// Install the onion runtime when the processor's role registers `relay`, so a node never
+    /// advertises a relay it does not run; a runtime installed before is kept.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::onion_runtime`].
+    pub(crate) fn install_relay_onion_runtime(&self) -> Result<()> {
+        if self.processor.onion_role().registers_relay() {
+            self.onion_runtime().map(drop)
+        } else {
+            Ok(())
+        }
     }
 
     /// The drop counters the [`Backend`] serving this provider's application inbox records in.
@@ -234,12 +261,9 @@ impl Provider {
             handler: InternalRpcHandler,
             extensions,
             dispatch_drops: Arc::default(),
-            #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "node")]
-            onion_circuit_install: Arc::new(Mutex::new(())),
         })
     }
 
@@ -410,9 +434,9 @@ impl Provider {
     ///
     /// This is a long-running task; do not await completion as a readiness signal. Listening
     /// publishes the processor's registrations, so a role that registers `relay` first installs
-    /// its onion runtime (`install_onion_runtime`).
+    /// its onion runtime (`install_relay_onion_runtime`).
     pub async fn listen(&self) -> Result<()> {
-        self.install_onion_runtime()?;
+        self.install_relay_onion_runtime()?;
         self.processor.listen().await;
         Ok(())
     }
@@ -422,28 +446,20 @@ impl Provider {
     /// This is a long-running task; do not await completion as a readiness signal. Like
     /// [`Self::listen`], it first installs the onion runtime of a role that registers `relay`.
     pub async fn listen_with(&self, stop: StopToken) -> Result<()> {
-        self.install_onion_runtime()?;
+        self.install_relay_onion_runtime()?;
         self.processor.listen_with(stop).await;
         Ok(())
     }
 
-    /// Install the onion circuit runtime when the processor's role registers `relay` and no
-    /// runtime is installed yet, so a native node never advertises a relay it does not run.
+    /// The native handle of this provider's onion runtime. The runtime is installed in this
+    /// provider's registry on first use, once for all its clones, and shared afterwards.
     ///
-    /// Idempotent within this provider's registry, which its clones share: the check and the
-    /// install run under one lock, so concurrent listens install once. A caller that needs the
-    /// circuit handle installs it first ([`NativeOnionCircuitHandle::install`]); listening then
-    /// keeps that installation. Another provider over the same processor has its own registry,
-    /// and ordering a direct install against a concurrent listen is the caller's.
-    fn install_onion_runtime(&self) -> Result<()> {
-        let _serialized = self.onion_circuit_install.lock().map_err(|_| Error::Lock)?;
-        let extensions = self.extensions();
-        if self.processor.onion_role().registers_relay()
-            && !extensions.contains(ONION_CIRCUIT_NAMESPACE)
-        {
-            NativeOnionCircuitHandle::install(&extensions)?;
-        }
-        Ok(())
+    /// # Errors
+    ///
+    /// [`Error::Lock`] for a poisoned runtime slot, or a registry or runtime failure of the
+    /// install.
+    pub fn onion_circuit(&self) -> Result<NativeOnionCircuitHandle> {
+        self.onion_runtime().map(NativeOnionCircuitHandle::new)
     }
 }
 

@@ -32,7 +32,6 @@ use crate::measure::MeasureStorage;
 use crate::onion::https::OnionHttpsClient;
 use crate::onion::https_onion_exit_services;
 use crate::onion::proxy::OnionProxyProtocol;
-use crate::onion::runtime::OnionRuntime;
 use crate::onion::OnionEntryGuardStorage;
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
@@ -213,9 +212,7 @@ impl Provider {
             Some(replay_storage),
         )
         .await?;
-        if provider.processor.onion_role().registers_relay() {
-            provider.install_onion_runtime()?;
-        }
+        provider.install_relay_onion_runtime()?;
         provider.set_backend()?;
         Ok(provider)
     }
@@ -327,7 +324,9 @@ impl Provider {
             )
             .await?;
 
-            provider.install_onion_runtime().map_err(JsError::from)?;
+            provider
+                .install_relay_onion_runtime()
+                .map_err(JsError::from)?;
             provider.set_backend().map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
@@ -515,7 +514,7 @@ impl Provider {
     /// The returned proxy is not bound to a URL; call [`BrowserOnionProxy::request`] with a full
     /// `https://` URL to send through the selected exit.
     pub fn onion_https_proxy(&self) -> Result<BrowserOnionProxy, JsError> {
-        let runtime = self.install_onion_runtime().map_err(JsError::from)?;
+        let runtime = self.onion_runtime().map_err(JsError::from)?;
         Ok(BrowserOnionProxy {
             processor: self.processor.clone(),
             config: OnionProxyProtocol::HttpsProxy,
@@ -588,26 +587,6 @@ impl Provider {
                 .collect::<js_sys::Array>();
             Ok(JsValue::from(dids))
         })
-    }
-}
-
-impl Provider {
-    /// Install this provider's onion runtime once: the data plane with the processor's role, and
-    /// for an exit the fetch world under the policy of its offer (`onion::runtime`).
-    ///
-    /// The role holds only services a browser interprets (`https`): the processor builder rejects
-    /// any other offer (`Error::UninterpretableOnionService`).
-    pub(crate) fn install_onion_runtime(&self) -> crate::error::Result<OnionRuntime> {
-        let mut slot = self
-            .onion_runtime
-            .lock()
-            .map_err(|_| crate::error::Error::Lock)?;
-        if let Some(runtime) = slot.as_ref() {
-            return Ok(runtime.clone());
-        }
-        let runtime = OnionRuntime::install(&self.extensions())?;
-        *slot = Some(runtime.clone());
-        Ok(runtime)
     }
 }
 

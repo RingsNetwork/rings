@@ -110,11 +110,7 @@ impl Provider {
     /// the provider was built.
     pub fn listen(&self) -> ProviderListener {
         // Install before spawning, so the task holds only the installation's outcome.
-        let installed = if self.processor.onion_role().registers_relay() {
-            self.install_onion_runtime().map(drop)
-        } else {
-            Ok(())
-        };
+        let installed = self.install_relay_onion_runtime();
         // Clone the processor before spawning the JS promise so the exported
         // Provider value can be dropped independently of the listener task.
         let processor = self.processor.clone();

@@ -50,7 +50,6 @@ use tokio::sync::oneshot;
 
 use super::common::*;
 use super::*;
-use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::NativeOnionGatewayConnector;
 use crate::tests::activity::probe_on_activity;
@@ -309,11 +308,11 @@ async fn prepare_onion_loop_public_gateway(
         .iter()
         .map(|relay| Provider::from_processor(Arc::clone(relay)))
         .collect::<Vec<_>>();
-    let client_onion = NativeOnionCircuitHandle::install(&client_provider.extensions())?;
+    let client_onion = client_provider.onion_circuit()?;
     for provider in relay_providers.iter() {
-        NativeOnionCircuitHandle::install(&provider.extensions())?;
+        provider.onion_circuit()?;
     }
-    NativeOnionCircuitHandle::install(&exit_provider.extensions())?;
+    exit_provider.onion_circuit()?;
     serve_observing_admissions(&client_provider)?;
     serve_observing_admissions(&exit_provider)?;
     for provider in relay_providers.iter() {
