@@ -322,7 +322,7 @@ const fn transport_send_class(error: &rings_transport::error::Error) -> SendClas
         TransportError::SendPermitRevoked | TransportError::LinkCreditClosed(_) => {
             SendClass::Deferrable(DeferralTrigger::LinkChange)
         }
-        TransportError::Io(_) | TransportError::MessageNotDelivered(_) => SendClass::Ambiguous,
+        TransportError::MessageNotDelivered(_) => SendClass::Ambiguous,
         #[cfg(feature = "std")]
         TransportError::Webrtc(_)
         | TransportError::NativeSendCompletionTimeout { .. }
