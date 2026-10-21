@@ -16,7 +16,7 @@ use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
-use crate::dht::PeerRing;
+use crate::dht::OperateRoute;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::dht::StorageSyncDestination;
@@ -234,17 +234,6 @@ pub(super) async fn handle_storage_store_act(
     Ok(())
 }
 
-async fn operate_entry_at_placement(
-    dht: &PeerRing,
-    placement: Did,
-    op: EntryOperation,
-    writer: Did,
-) -> Result<()> {
-    let now_ms = get_epoch_ms();
-    dht.operate_storage_entry(now_ms, placement, op.stamped(now_ms, dht.did)?, writer)
-        .await
-}
-
 async fn handle_placed_entry_operation(
     handler: &MessageHandler,
     ctx: &MessagePayload,
@@ -252,23 +241,15 @@ async fn handle_placed_entry_operation(
 ) -> Result<()> {
     msg.validate_placement(handler.transport.storage_redundancy())?;
 
-    match handler
-        .dht
-        .find_storage_owner_for(msg.placement, msg.op.entry().kind)?
-    {
-        PeerRingAction::Some(_) => {
-            operate_entry_at_placement(
-                &handler.dht,
-                msg.placement,
-                msg.op.clone(),
-                ctx.transaction.origin(),
-            )
-            .await
+    let dht = &handler.dht;
+    match dht.operate_route(msg.placement, msg.op.kind())? {
+        OperateRoute::Owned => {
+            let now_ms = get_epoch_ms();
+            let op = msg.op.clone().stamped(now_ms, dht.did)?;
+            dht.operate_storage_entry(now_ms, msg.placement, op, ctx.transaction.origin())
+                .await
         }
-        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(_)) => {
-            reset_storage_relay_destination(handler, ctx, next).await
-        }
-        action => Err(Error::unexpected_peer_ring_action(action)),
+        OperateRoute::Remote(next) => reset_storage_relay_destination(handler, ctx, next).await,
     }
 }
 
