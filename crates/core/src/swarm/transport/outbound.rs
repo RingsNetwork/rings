@@ -225,7 +225,7 @@ impl OutboundPeerHandle {
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        self.state._capacity_anchor.try_acquire(peer, class, bytes)
+        self.state._capacity_anchor.admit_now(peer, class, bytes)
     }
 
     pub(super) fn submit(

@@ -519,29 +519,6 @@ impl TransferCapacity {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn try_acquire(
-        self: &Arc<Self>,
-        peer: Did,
-        class: TransferClass,
-        bytes: usize,
-    ) -> Result<TransferCapacityPermit> {
-        let demand = TransferDemand::new(class, bytes);
-        validate_memory_request(peer, demand)?;
-        let peer_permit = self
-            .peer
-            .try_reserve(peer, demand, CapacityScope::Shared, || {
-                self.peer_permit(demand)
-            })?;
-        let global_permit =
-            self.global
-                .scope
-                .try_reserve(peer, demand, CapacityScope::Shared, || {
-                    self.global_permit(demand)
-                })?;
-        Ok(TransferCapacityPermit::held(peer_permit, global_permit))
-    }
-
     /// [`Self::acquire`] without waiting: a permit if both the peer's and the node's capacity
     /// admit `bytes` now, otherwise the refusal a wait would have started from.
     ///
@@ -836,13 +813,14 @@ impl TransferCapacityAnchor {
     }
 
     #[cfg(all(test, not(target_family = "wasm")))]
-    pub(super) fn try_acquire(
+    /// [`TransferCapacity::admit_now`] on the anchored capacity.
+    pub(super) fn admit_now(
         &self,
         peer: Did,
         class: TransferClass,
         bytes: usize,
     ) -> Result<TransferCapacityPermit> {
-        self._capacity.try_acquire(peer, class, bytes)
+        self._capacity.admit_now(peer, class, bytes)
     }
 }
 
