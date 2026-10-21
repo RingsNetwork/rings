@@ -184,17 +184,15 @@ impl PeerRing {
             .map(|(key, entry)| PlacedEntry::new(key.placement(), entry))
             .collect::<Vec<_>>();
 
-        let batches = sync_entries_batches(data, SYNC_BATCH_MAX_BYTES)?;
-        Ok(batches
-            .into_iter()
-            .map(|batch| {
-                PeerRingAction::sync_entries_for_handoff(
-                    StorageSyncDestination::PhysicalOwner(new_successor),
-                    batch,
-                )
-            })
-            .collect::<Vec<_>>()
-            .into())
+        // The wire batching happens once, in
+        // `PeerRingAction::coalesced_storage_sync_deliveries`.
+        if data.is_empty() {
+            return Ok(PeerRingAction::None);
+        }
+        Ok(PeerRingAction::sync_entries_for_handoff(
+            StorageSyncDestination::PhysicalOwner(new_successor),
+            data,
+        ))
     }
 
     /// `key ∉ (self, head]`: the placement lies beyond this node's interval up to `head`, so
@@ -207,9 +205,6 @@ impl PeerRing {
         &self,
         all_items: Vec<(StorageKey, Entry)>,
     ) -> Result<PeerRingAction> {
-        let mut by_target =
-            std::collections::BTreeMap::<StorageSyncDestination, Vec<PlacedEntry>>::new();
-
         // Pre: storage virtual nodes are enabled.
         // Model: storage_sync_target computes ownership under this node's
         // authenticated local topology view, not a globally complete membership
@@ -220,19 +215,13 @@ impl PeerRing {
         // Preservation S1'': this transition cannot create a delete-capable
         // report. Only non-virtual physical handoff has an ownership proof
         // strong enough to permit source cleanup.
+        // The coalescer groups these per-entry copies by destination and batches them.
+        let mut actions = Vec::new();
         for (key, entry) in all_items {
             if let StorageSyncTarget::Remote(target) = self.storage_sync_target(key.placement())? {
-                by_target
-                    .entry(target)
-                    .or_default()
-                    .push(PlacedEntry::new(key.placement(), entry));
-            }
-        }
-
-        let mut actions = Vec::new();
-        for (target, data) in by_target {
-            for batch in sync_entries_batches(data, SYNC_BATCH_MAX_BYTES)? {
-                actions.push(PeerRingAction::sync_entries_for_repair(target, batch));
+                actions.push(PeerRingAction::sync_entries_for_repair(target, vec![
+                    PlacedEntry::new(key.placement(), entry),
+                ]));
             }
         }
         Ok(actions.into())

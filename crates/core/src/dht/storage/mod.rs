@@ -227,7 +227,7 @@ impl PeerRingAction {
     }
 
     /// Lower this action tree into storage-sync deliveries.
-    pub(crate) fn storage_sync_deliveries(self) -> Result<Vec<StorageSyncDelivery>> {
+    fn storage_sync_deliveries(self) -> Result<Vec<StorageSyncDelivery>> {
         let mut deliveries = Vec::new();
         self.collect_storage_sync_deliveries(&mut deliveries)?;
         Ok(deliveries)

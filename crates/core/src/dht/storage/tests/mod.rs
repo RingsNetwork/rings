@@ -111,56 +111,24 @@ fn interval_key_with_virtual_successor(node: &PeerRing, owner: Did) -> Result<Di
         .ok_or_else(|| Error::InvalidMessage("missing virtual successor interval".to_string()))
 }
 
-struct ObservedStorageSyncMessage {
-    target: Did,
-    purpose: StorageSyncPurpose,
-    route: StorageSyncRoute,
-    data: Vec<PlacedEntry>,
-}
-
-fn collect_sync_batches(act: PeerRingAction) -> Result<Vec<(Did, Vec<PlacedEntry>)>> {
-    Ok(collect_sync_messages(act)?
+/// The wire deliveries `act` lowers to, as `(purpose, destination, batch)`: the production
+/// lowering, so the batch shape is the one the transport sends.
+fn collect_sync_messages(
+    act: PeerRingAction,
+) -> Result<Vec<(StorageSyncPurpose, StorageSyncDestination, Vec<PlacedEntry>)>> {
+    Ok(act
+        .coalesced_storage_sync_deliveries()?
         .into_iter()
-        .map(|message| (message.target, message.data))
+        .map(super::StorageSyncDelivery::into_message_parts)
         .collect())
 }
 
-fn collect_sync_messages(act: PeerRingAction) -> Result<Vec<ObservedStorageSyncMessage>> {
-    let mut messages = Vec::new();
-    collect_sync_messages_into(act, &mut messages)?;
-    Ok(messages)
-}
-
-fn collect_sync_messages_into(
-    act: PeerRingAction,
-    messages: &mut Vec<ObservedStorageSyncMessage>,
-) -> Result<()> {
-    match act {
-        PeerRingAction::None => Ok(()),
-        PeerRingAction::RemoteAction(
-            target,
-            RemoteAction::SyncEntriesWithSuccessor {
-                purpose,
-                route,
-                data,
-            },
-        ) => {
-            messages.push(ObservedStorageSyncMessage {
-                target,
-                purpose,
-                route,
-                data,
-            });
-            Ok(())
-        }
-        PeerRingAction::MultiActions(actions) => {
-            for action in actions {
-                collect_sync_messages_into(action, messages)?;
-            }
-            Ok(())
-        }
-        act => Err(Error::unexpected_peer_ring_action(act)),
-    }
+/// The wire batches `act` lowers to, keyed by their destination DID.
+fn collect_sync_batches(act: PeerRingAction) -> Result<Vec<(Did, Vec<PlacedEntry>)>> {
+    Ok(collect_sync_messages(act)?
+        .into_iter()
+        .map(|(_, destination, data)| (destination.did(), data))
+        .collect())
 }
 
 fn placed_entries_by_key(entries: impl IntoIterator<Item = PlacedEntry>) -> BTreeMap<Did, Entry> {
@@ -448,15 +416,14 @@ async fn test_virtual_storage_sync_copies_entries_to_observed_virtual_owner() ->
         collect_sync_messages(node.sync_entries_with_successor(Did::from(99u32)).await?)?;
 
     assert_eq!(messages.len(), 1);
-    let Some(message) = messages.into_iter().next() else {
+    let Some((purpose, destination, data)) = messages.into_iter().next() else {
         return Err(Error::InvalidMessage(
             "missing virtual sync batch".to_string(),
         ));
     };
-    assert_eq!(message.target, remote);
-    assert_eq!(message.purpose, StorageSyncPurpose::AdditiveRepair);
-    assert_eq!(message.route, StorageSyncRoute::PhysicalOwner);
-    assert_eq!(message.data, vec![PlacedEntry::new(placement, entry)]);
+    assert_eq!(purpose, StorageSyncPurpose::AdditiveRepair);
+    assert_eq!(destination, StorageSyncDestination::PhysicalOwner(remote));
+    assert_eq!(data, vec![PlacedEntry::new(placement, entry)]);
     Ok(())
 }
 
