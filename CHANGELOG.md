@@ -39,6 +39,16 @@
 - The browser `BrowserOnionProxy.exit_service()` export, which had no caller, is removed: the
   proxy always selects `https` (#990).
 
+- Onion and gateway API cleanup (#990). Breaking for `rings-node` library callers:
+  - `NativeOnionGatewayConnector::new(processor, onion)` drops its `proxy` parameter, which
+    could only be `OnionProxyProtocol::TcpConnect`;
+  - `NativeOnionCircuitHandle::relay_tcp_stream` is replaced by `open_tcp_target(processor,
+    target)`, which selects the `tcp` route and opens the session (then call `relay`);
+  - `OnionProxyRoute` drops its unread `protocol` field.
+
+  `rings-gateway` gains a `test-support` feature exposing `rings_gateway::testing`, the
+  in-memory packet fixtures; the `gateway-bench` example requires it.
+
 ## 0.34.0
 
 - Onion circuits are client-sealed loops of registered operation symbols (#834, Onion Kleisli
