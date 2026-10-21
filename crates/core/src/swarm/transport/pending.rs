@@ -355,7 +355,7 @@ impl SwarmTransport {
         &self,
         peer: Did,
     ) -> Result<PendingConnectionAttempt> {
-        self.reserve_pending_connection_for(peer, Handshake::offering(OfferOwner::External))
+        self.reserve_pending_connection_for(peer, Handshake::TEST_DEFAULT)
             .await
     }
 
@@ -428,7 +428,7 @@ impl SwarmTransport {
         self.prepare_pending_reservation(peer).await?;
         observe_after_prepare();
         observe_before_commit();
-        self.commit_pending_reservation(peer, Handshake::offering(OfferOwner::External))
+        self.commit_pending_reservation(peer, Handshake::TEST_DEFAULT)
     }
 
     #[cfg(all(test, feature = "dummy"))]

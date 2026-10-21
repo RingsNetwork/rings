@@ -62,6 +62,11 @@ pub(crate) enum Handshake {
 }
 
 impl Handshake {
+    /// The signaling state a test reserves a generation in by default: an external offer still
+    /// being created.
+    #[cfg(test)]
+    pub(crate) const TEST_DEFAULT: Self = Self::offering(OfferOwner::External);
+
     /// A new offering attempt of `owner`, still creating its offer.
     pub(crate) const fn offering(owner: OfferOwner) -> Self {
         Self::Offering {

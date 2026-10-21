@@ -244,11 +244,7 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
         now_ms: i64,
     ) -> Result<PendingConnectionAttempt> {
-        self.reserve_for(
-            peer,
-            now_ms,
-            Handshake::offering(super::handshake::OfferOwner::External),
-        )
+        self.reserve_for(peer, now_ms, Handshake::TEST_DEFAULT)
     }
 
     /// Reserve a pending generation for `peer` whose signaling starts in `handshake`.
