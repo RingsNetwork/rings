@@ -31,7 +31,6 @@ use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
 use crate::onion::https::OnionHttpsClient;
 use crate::onion::https_onion_exit_services;
-use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::OnionEntryGuardStorage;
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
@@ -517,7 +516,6 @@ impl Provider {
         let runtime = self.onion_runtime().map_err(JsError::from)?;
         Ok(BrowserOnionProxy {
             processor: self.processor.clone(),
-            config: OnionProxyProtocol::HttpsProxy,
             client: OnionHttpsClient::new(runtime),
             directory_endpoint: self.onion_directory_endpoint().map_err(JsError::from)?,
         })

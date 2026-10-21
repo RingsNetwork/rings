@@ -36,6 +36,9 @@
   `Provider::onion_circuit` returns the native handle of that runtime, installing it on first
   use, and replaces `NativeOnionCircuitHandle::install`.
 
+- The browser `BrowserOnionProxy.exit_service()` export, which had no caller, is removed: the
+  proxy always selects `https` (#990).
+
 ## 0.34.0
 
 - Onion circuits are client-sealed loops of registered operation symbols (#834, Onion Kleisli
