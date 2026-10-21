@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::future::select;
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
@@ -62,6 +63,7 @@ use crate::ice_server::parse_ice_servers_or_warn;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::wait_for_data_channel_open;
+use crate::notifier::within;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
@@ -238,12 +240,11 @@ impl WebSysWebrtcConnection {
             notifier.wake();
         }
 
-        notifier
-            .either_notified_within(
-                &self.local_close,
-                Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()),
-            )
-            .await?;
+        within(
+            select(notifier, self.local_close.clone()),
+            Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()),
+        )
+        .await?;
         if self.connection_state.snapshot().webrtc() == WebrtcConnectionState::Closed {
             return Err(Error::WebrtcLocalSdpGenerationError(
                 "Local connection closed".to_string(),

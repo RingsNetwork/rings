@@ -30,9 +30,9 @@ struct NotifierState {
     pub(crate) wakers: Vec<std::task::Waker>,
 }
 
-/// A notifier that can be woken by calling `wake`, and awaited with or without a timeout.
-/// Used to notify the data channel state changing in `webrtc_wait_for_data_channel_open` of
-/// [crate::core::transport::ConnectionInterface].
+/// A notifier that can be woken by calling `wake`, and awaited with or without a timeout: a
+/// one-shot event of a connection, such as its data channels changing state, its ICE gathering
+/// completing, or its local close.
 #[derive(Clone, Default)]
 pub struct Notifier(Arc<Mutex<NotifierState>>);
 
@@ -62,39 +62,19 @@ impl Notifier {
     pub async fn notified_within(&self, timeout: Duration) -> std::result::Result<(), TimerError> {
         within(self.clone(), timeout).await
     }
-
-    /// Wait until this notifier or `other` is woken, or `timeout` has elapsed, whichever comes
-    /// first; the post-condition is that of [`Self::notified_within`].
-    #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
-    pub(crate) async fn either_notified_within(
-        &self,
-        other: &Self,
-        timeout: Duration,
-    ) -> std::result::Result<(), TimerError> {
-        let (mut first, mut second) = (self.clone(), other.clone());
-        let woken = poll_fn(|context| {
-            match (
-                Pin::new(&mut first).poll(context),
-                Pin::new(&mut second).poll(context),
-            ) {
-                (Poll::Pending, Poll::Pending) => Poll::Pending,
-                _ => Poll::Ready(()),
-            }
-        });
-        within(woken, timeout).await
-    }
 }
 
 /// Wait until `woken` completes or `timeout` has elapsed, whichever comes first, composed in
-/// place: the timeout ends only this wait.
-async fn within(
-    woken: impl Future<Output = ()>,
+/// place: the timeout ends only this wait. The post-condition is that of
+/// [`Notifier::notified_within`].
+pub(crate) async fn within(
+    woken: impl Future,
     timeout: Duration,
 ) -> std::result::Result<(), TimerError> {
     let mut woken = pin!(woken);
     let mut elapsed = pin!(rings_runtime::sleep(timeout));
     poll_fn(|context| match woken.as_mut().poll(context) {
-        Poll::Ready(()) => Poll::Ready(Ok(())),
+        Poll::Ready(_) => Poll::Ready(Ok(())),
         Poll::Pending => elapsed.as_mut().poll(context),
     })
     .await
