@@ -33,7 +33,7 @@ use super::OnionSessionArguments;
 use super::OnionSessionId;
 use super::OnionTargetDigest;
 use crate::onion::circuit::OnionExpiry;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 use crate::onion::sphinx::builder::build_surb;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
@@ -305,10 +305,10 @@ fn test_reorder_fails_closed_on_a_persisting_gap() {
         .expect("inside the window")
         .is_empty());
     assert!(stalled
-        .expire(NOW_MS + ONION_FORWARD_MAX_VALIDITY_MS - 1)
+        .expire(NOW_MS + ONION_ADMISSION_WINDOW_MS - 1)
         .is_ok());
     assert_eq!(
-        stalled.expire(NOW_MS + ONION_FORWARD_MAX_VALIDITY_MS).err(),
+        stalled.expire(NOW_MS + ONION_ADMISSION_WINDOW_MS).err(),
         Some(OnionSequenceGap { missing: 0 })
     );
 }
@@ -582,10 +582,7 @@ fn test_reorder_releases_the_last_sequence_then_fails() {
         reorder.accept(NOW_MS, OnionSequence::new(u32::MAX), 7),
         Ok(vec![7])
     );
-    assert_eq!(
-        reorder.expire(NOW_MS + ONION_FORWARD_MAX_VALIDITY_MS),
-        Ok(())
-    );
+    assert_eq!(reorder.expire(NOW_MS + ONION_ADMISSION_WINDOW_MS), Ok(()));
     assert!(reorder.accept(NOW_MS, OnionSequence::new(0), 8).is_err());
 }
 
@@ -622,7 +619,7 @@ fn test_held_bytes_are_cut_to_each_blocks_capacity_then_fin() {
     assert!(kinds(&session.world(expired_ms, OnionWorldRead::Bytes(wide))).is_empty());
     assert!(kinds(&session.world(expired_ms, OnionWorldRead::Eof)).is_empty());
 
-    let large = OnionLoopClass::from(crate::onion::circuit::OnionCellBucket::KiB64);
+    let large = OnionLoopClass::KiB64;
     assert!(OnionFrame::data_capacity(large) > small + 5);
     // The loop's own 16 KiB block arrives first and carries one 16 KiB cut; the 64 KiB block of
     // its credit carries the rest, which exceeds a 16 KiB block; the held fin waits for a block.
@@ -737,12 +734,11 @@ fn test_exit_session_closes_after_v_without_forward_loops() {
     let mut session = OnionExitSession::new(arguments().digest, NOW_MS);
     session.forward(NOW_MS, opening(0, b""), surb(48));
     assert!(session
-        .tick(NOW_MS + ONION_FORWARD_MAX_VALIDITY_MS - 1)
+        .tick(NOW_MS + ONION_ADMISSION_WINDOW_MS - 1)
         .is_empty());
-    assert_eq!(
-        kinds(&session.tick(NOW_MS + ONION_FORWARD_MAX_VALIDITY_MS)),
-        ["close"]
-    );
+    assert_eq!(kinds(&session.tick(NOW_MS + ONION_ADMISSION_WINDOW_MS)), [
+        "close"
+    ]);
 }
 
 // ---- client ------------------------------------------------------------------------------------

@@ -15,6 +15,7 @@ use super::NOW_MS;
 use crate::onion::circuit::OnionAdmissionLink;
 use crate::onion::session::OnionSessionArguments;
 use crate::onion::sphinx::cell::OnionCell;
+use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::OnionServiceName;
 
@@ -53,7 +54,7 @@ fn test_noise_of_a_class_width_is_charged_then_dropped_at_the_peel() {
 #[test]
 fn test_a_cell_is_charged_the_units_of_its_class() {
     let mut fixture = Fixture::new();
-    let class = OnionLoopClass::from(crate::onion::circuit::OnionCellBucket::MiB1);
+    let class = OnionLoopClass::MiB1;
     let noise = OnionCell::parse(&vec![0x5a; class.cell_bytes()]).expect("width");
 
     assert!(matches!(
@@ -62,7 +63,7 @@ fn test_a_cell_is_charged_the_units_of_its_class() {
     ));
     assert_eq!(
         fixture.hops[0].admission.sender_units(Did::from(CLIENT)),
-        class.units()
+        class.units().get()
     );
     let refused = OnionCell::parse(&vec![0; OnionLoopClass::DEFAULT.cell_bytes()]).expect("width");
     assert!(matches!(
@@ -81,7 +82,8 @@ fn test_a_relayed_layer_is_admitted_at_most_once_and_keeps_its_width() {
     let received = OnionCell::parse(&bytes).expect("width");
     let class = received.class();
 
-    let OnionHopOutcome::Relayed { next, cell } = fixture.hops[0].step(Did::from(CLIENT), received)
+    let OnionHopOutcome::Stepped(OnionStep::Relayed { next, cell }) =
+        fixture.hops[0].step(Did::from(CLIENT), received)
     else {
         panic!("the guard relays");
     };
@@ -124,12 +126,12 @@ fn test_a_loop_runs_to_its_symbol_and_returns_to_the_client() {
     let cell = fixture.run_forward_segment(built.cell);
     let from = fixture.hops[1].did();
 
-    let OnionHopOutcome::Consumed {
+    let OnionHopOutcome::Stepped(OnionStep::Consumed {
         symbol,
         arguments: consumed,
         value,
         surb,
-    } = fixture.hops[2].step(from, cell)
+    }) = fixture.hops[2].step(from, cell)
     else {
         panic!("h consumes");
     };

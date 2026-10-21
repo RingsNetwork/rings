@@ -15,7 +15,7 @@ use super::surbs;
 use super::NOW_MS;
 use super::QUANTUM_MS;
 use super::TARGET;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 use crate::onion::session::client::OnionClientEvent;
 use crate::onion::session::client::OnionClientFailure;
 use crate::onion::session::client::OnionClientSession;
@@ -29,7 +29,7 @@ use crate::onion::session::frame::OnionSequence;
 use crate::onion::sphinx::cell::OnionSurb;
 
 /// `V`, the forward validity.
-const V: u128 = ONION_FORWARD_MAX_VALIDITY_MS;
+const V: u128 = ONION_ADMISSION_WINDOW_MS;
 
 /// One reply block admissible at `at`: its expiry `(3 + ⌊at / Q⌋)·Q` lies in `(at, at + V]`.
 fn block_at(seed: u64, at_ms: u128) -> OnionSurb {

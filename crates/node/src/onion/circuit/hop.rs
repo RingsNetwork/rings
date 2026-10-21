@@ -40,16 +40,12 @@ use rings_core::dht::Did;
 use super::admission::OnionAdmissionRejection;
 use super::admission::OnionAdmissionState;
 use super::admission::OnionChargeRejection;
-use crate::onion::sphinx::carry::OnionCarryValue;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::cell::OnionStepError;
-use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::header::OnionLoopTag;
 use crate::onion::sphinx::header::OnionPeelError;
-use crate::onion::sphinx::layer::OnionArguments;
 use crate::onion::sphinx::layer::OnionLayerApplication;
-use crate::onion::OnionServiceName;
 
 /// What one received cell became at this hop.
 #[derive(Debug)]
@@ -58,24 +54,9 @@ pub(crate) enum OnionHopOutcome {
     Refused(OnionChargeRejection),
     /// The cell was charged and then dropped.
     Dropped(OnionHopDrop),
-    /// A relay layer: forward the cell to `next`.
-    Relayed {
-        /// `next_i`.
-        next: Did,
-        /// The cell, one layer peeled, in the received buffer.
-        cell: OnionCell,
-    },
-    /// A symbol layer: the application `(f, ā)`, its input and the reply block of its output.
-    Consumed {
-        /// `f`.
-        symbol: OnionServiceName,
-        /// `ā`.
-        arguments: OnionArguments,
-        /// `v`.
-        value: OnionCarryValue,
-        /// `υ`.
-        surb: Box<OnionSurb>,
-    },
+    /// The layer's carry step: a relay layer forwards the cell to `next`, a symbol layer yields
+    /// the application `(f, ā)`, its input and the reply block of its output.
+    Stepped(OnionStep),
     /// A cell for this node as the client of a loop: its tag `t_⋄` names a live entry.
     Returned {
         /// `t_⋄`.
@@ -146,19 +127,8 @@ pub(crate) fn hop(
             return OnionHopOutcome::Dropped(OnionHopDrop::NextNotLive);
         }
     }
-    match admitted.step() {
-        Ok(OnionStep::Relayed { next, cell }) => OnionHopOutcome::Relayed { next, cell },
-        Ok(OnionStep::Consumed {
-            symbol,
-            arguments,
-            value,
-            surb,
-        }) => OnionHopOutcome::Consumed {
-            symbol,
-            arguments,
-            value,
-            surb,
-        },
-        Err(error) => OnionHopOutcome::Dropped(error.into()),
-    }
+    admitted.step().map_or_else(
+        |error| OnionHopOutcome::Dropped(error.into()),
+        OnionHopOutcome::Stepped,
+    )
 }

@@ -88,15 +88,15 @@ use super::frame::OnionSequence;
 use super::order::OnionReorder;
 use super::pool::OnionSurbPool;
 use super::OnionTargetDigest;
-use crate::onion::circuit::ONION_FORWARD_EXPIRY_QUANTUM_MS;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
+use crate::onion::circuit::ONION_EXPIRY_QUANTUM_MS;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionSurb;
 
 /// `V/2`, the echo horizon: a forward loop is echoed when no reply of its session has left for
 /// this long (Law Echo). It equals the client's keep-alive period, so an idle session costs one
 /// echo per keep-alive.
-pub(crate) const ONION_SESSION_ECHO_HORIZON_MS: u128 = ONION_FORWARD_MAX_VALIDITY_MS / 2;
+pub(crate) const ONION_SESSION_ECHO_HORIZON_MS: u128 = ONION_ADMISSION_WINDOW_MS / 2;
 
 /// A sequenced frame of a stream direction, as the reorder window releases it.
 #[derive(Debug)]
@@ -326,12 +326,12 @@ impl OnionExitSession {
             return effects;
         }
         if self.phase == OnionExitPhase::Unbound
-            && now_ms.saturating_sub(self.created_ms) >= ONION_FORWARD_EXPIRY_QUANTUM_MS
+            && now_ms.saturating_sub(self.created_ms) >= ONION_EXPIRY_QUANTUM_MS
         {
             self.close(&mut effects);
         } else if self.forward.expire(now_ms).is_err() {
             self.abort(now_ms, &mut effects);
-        } else if now_ms.saturating_sub(self.last_forward_ms) >= ONION_FORWARD_MAX_VALIDITY_MS
+        } else if now_ms.saturating_sub(self.last_forward_ms) >= ONION_ADMISSION_WINDOW_MS
             || (self.read_closed && self.write_closed)
         {
             self.close(&mut effects);

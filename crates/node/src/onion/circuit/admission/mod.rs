@@ -175,26 +175,18 @@ use self::bloom::ReplayStore;
 use self::ledger::QuantumLedger;
 use super::OnionExpiry;
 use super::OnionReplayNonce;
-use super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
-use super::ONION_FORWARD_MAX_VALIDITY_MS;
-use super::ONION_FORWARD_PAYLOAD_TTL_MS;
+use super::ONION_ADMISSION_WINDOW_MS;
+use super::ONION_EXPIRY_OFFSET_MS;
+use super::ONION_EXPIRY_QUANTUM_MS;
 use crate::onion::sphinx::cell::Charged;
 use crate::onion::sphinx::cell::OnionCell;
-use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::OnionProcessEpoch;
-
-/// Admission window `V = 150 s`: a layer is admissible at `arr` iff `arr < x ≤ arr + V`.
-const ONION_ADMISSION_WINDOW_MS: u128 = ONION_FORWARD_MAX_VALIDITY_MS;
 
 /// Arrival quanta per window, `N = V / Q = 5`, as the ledger's array length.
 const ADMISSION_WINDOW_QUANTA: usize = 5;
 
-/// Build-to-expiry offset `X₀ = V − Q`, the rollback threshold of the monotone clock.
-const ONION_EXPIRY_OFFSET_MS: u128 = ONION_FORWARD_PAYLOAD_TTL_MS;
-
 /// `N = V / Q` in the quantum domain.
-const ADMISSION_WINDOW_QUANTA_WIDE: u128 =
-    ONION_ADMISSION_WINDOW_MS / ONION_FORWARD_EXPIRY_QUANTUM_MS;
+const ADMISSION_WINDOW_QUANTA_WIDE: u128 = ONION_ADMISSION_WINDOW_MS / ONION_EXPIRY_QUANTUM_MS;
 
 /// Per-sender budget `B`: units of 16 KiB per DID per aligned window of `N` quanta.
 pub(crate) const ONION_ADMISSION_SENDER_UNITS: u32 = 16_384;
@@ -215,11 +207,6 @@ impl OnionAdmissionUnits {
     #[cfg(all(test, rings_native))]
     pub(super) const fn new(units: NonZeroU32) -> Self {
         Self(units)
-    }
-
-    /// `u(b) = b / 16 KiB`, the units of one class-`b` cell.
-    fn of_class(class: OnionLoopClass) -> Self {
-        Self(NonZeroU32::new(class.units()).unwrap_or(NonZeroU32::MIN))
     }
 
     /// The unit count.
@@ -531,7 +518,7 @@ impl OnionAdmissionState {
         link: OnionAdmissionLink,
         cell: OnionCell,
     ) -> Result<Charged<OnionCell>, OnionChargeRejection> {
-        let units = OnionAdmissionUnits::of_class(cell.class());
+        let units = OnionAdmissionUnits(cell.class().units());
         self.charge_units(now_ms, link, units)
             .map(|charge| Charged::new(cell, charge))
     }
@@ -590,9 +577,7 @@ impl OnionAdmissionState {
     #[cfg(all(test, rings_native))]
     pub(crate) fn sender_units(&self, did: Did) -> u32 {
         self.senders.get(&did).map_or(0, |sender| {
-            sender
-                .ledger
-                .load(self.clock_ms / ONION_FORWARD_EXPIRY_QUANTUM_MS)
+            sender.ledger.load(self.clock_ms / ONION_EXPIRY_QUANTUM_MS)
         })
     }
 
@@ -656,7 +641,7 @@ impl OnionAdmissionState {
     fn advance(&mut self, now_ms: u128) -> u128 {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.replay.forget_through(self.clock_ms);
-        let quantum = self.clock_ms / ONION_FORWARD_EXPIRY_QUANTUM_MS;
+        let quantum = self.clock_ms / ONION_EXPIRY_QUANTUM_MS;
         if quantum > self.swept_quantum {
             self.senders
                 .retain(|_, sender| !sender.is_releasable_at(quantum));

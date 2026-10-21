@@ -12,30 +12,26 @@ use super::schedule::is_active;
 use super::schedule::is_credited;
 use super::schedule::plan;
 use super::schedule::slot_micros;
-use super::schedule::units_of;
 use super::schedule::Emission;
 use super::schedule::LinkClock;
 use super::schedule::OnionIdleFloor;
 use super::schedule::Plan;
 use super::schedule::ONION_LINK_BUDGET_UNITS;
 use super::schedule::ONION_LINK_DWELL_US;
+use super::schedule::WINDOW_US;
 use super::MAX_PENDING_ONION_SENDS_PER_PEER;
+use super::MAX_PENDING_ONION_SEND_BYTES;
 use super::MAX_PENDING_ONION_SEND_BYTES_PER_PEER;
 use crate::error::Error;
 use crate::error::OnionQueueAdmissionReason;
 use crate::error::Result;
-use crate::onion::circuit::OnionCellBucket;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
 use crate::onion::sphinx::class::OnionLoopClass;
-
-/// `V` in microseconds.
-const WINDOW_US: u128 = ONION_FORWARD_MAX_VALIDITY_MS * 1_000;
 
 /// The emission starts of one link over `[0, horizon)` under the pure schedule, with real
 /// cells enqueued at `reals` (each one emitted in the first slot it is due), as the emitter
 /// produces them: at each due instant, or at an enqueue that wakes it.
 fn schedule(reals: &[u128], floor: OnionIdleFloor, horizon_us: u128) -> Vec<(u128, bool)> {
-    let units = units_of(OnionLoopClass::DEFAULT);
+    let units = u128::from(OnionLoopClass::DEFAULT.units().get());
     let mut clock = LinkClock::default();
     let mut queued = 0_usize;
     let mut pending = reals.iter().copied().peekable();
@@ -75,7 +71,10 @@ fn count_in(starts: &[(u128, bool)], from_us: u128, to_us: u128) -> u128 {
 
 #[test]
 fn test_slot_is_the_reciprocal_of_the_emission_rate() {
-    assert_eq!(slot_micros(units_of(OnionLoopClass::DEFAULT)), 10_173);
+    assert_eq!(
+        slot_micros(u128::from(OnionLoopClass::DEFAULT.units().get())),
+        10_173
+    );
     for units in [1, 4, 16, 64, 256, 768] {
         assert_eq!(
             slot_micros(units),
@@ -108,7 +107,7 @@ fn test_the_credit_gate_needs_room_for_one_frame_only() {
     assert!(!is_credited(Some(0)));
     assert!(!is_credited(None));
 
-    let units = units_of(OnionLoopClass::DEFAULT);
+    let units = u128::from(OnionLoopClass::DEFAULT.units().get());
     let clock = LinkClock {
         last_real_us: Some(0),
         last_start: Some((0, units)),
@@ -130,7 +129,7 @@ fn test_the_credit_gate_needs_room_for_one_frame_only() {
 #[test]
 fn test_no_credit_emits_nothing_and_credit_only_delays() {
     let floor = OnionIdleFloor::DEFAULT;
-    let units = units_of(OnionLoopClass::DEFAULT);
+    let units = u128::from(OnionLoopClass::DEFAULT.units().get());
     let clock = LinkClock {
         last_real_us: Some(0),
         last_start: Some((0, units)),
@@ -161,9 +160,7 @@ fn test_an_uncredited_lane_holds_its_queue_until_credit_returns() {
     let floor = OnionIdleFloor::DEFAULT;
     let mut state = OrderedSendState::<u32>::default();
     let epoch = state.open(peer, 0).expect("a new lane");
-    assert!(state
-        .enqueue(peer, 7, 1, class, 0, QueueRole::Relay)
-        .is_ok());
+    assert!(state.enqueue(peer, 7, class, 0, QueueRole::Relay).is_ok());
 
     assert!(matches!(
         state.next(peer, epoch, floor, false, 0),
@@ -190,7 +187,7 @@ fn test_an_unsent_real_cell_is_requeued_at_the_head() {
     let epoch = state.open(peer, 0).expect("a new lane");
     for item in [1, 2] {
         assert!(state
-            .enqueue(peer, item, 1, class, 0, QueueRole::Relay)
+            .enqueue(peer, item, class, 0, QueueRole::Relay)
             .is_ok());
     }
     let EmitterStep::Emit(Emission::Real(unsent)) = state.next(peer, epoch, floor, true, 0) else {
@@ -199,7 +196,7 @@ fn test_an_unsent_real_cell_is_requeued_at_the_head() {
 
     assert!(state.requeue(peer, epoch, unsent));
     assert_eq!(state.quota.total(), 2, "its quota is kept");
-    let slot_us = slot_micros(units_of(class));
+    let slot_us = slot_micros(u128::from(class.units().get()));
     assert!(matches!(
         state.next(peer, epoch, floor, true, slot_us),
         EmitterStep::Emit(Emission::Real(1))
@@ -217,23 +214,18 @@ fn test_local_control_cells_are_not_in_the_relay_share() {
     state.open(peer, 0).expect("a new lane");
     for item in 0..super::RELAY_SHARE_CELLS {
         assert!(state
-            .enqueue(peer, item, 1, class, 0, QueueRole::Relay)
+            .enqueue(peer, item, class, 0, QueueRole::Relay)
             .is_ok());
     }
     for item in 0..MAX_PENDING_ONION_SENDS_PER_PEER - super::RELAY_SHARE_CELLS - 1 {
-        assert!(state
-            .enqueue(peer, 500 + item, 1, class, 0, endpoint)
-            .is_ok());
+        assert!(state.enqueue(peer, 500 + item, class, 0, endpoint).is_ok());
     }
-    assert!(state
-        .enqueue(peer, 900, 1, class, 0, QueueRole::Local)
-        .is_ok());
-    let Err(Refusal { space: Some(_), .. }) = state.enqueue(peer, 901, 1, class, 0, endpoint)
-    else {
+    assert!(state.enqueue(peer, 900, class, 0, QueueRole::Local).is_ok());
+    let Err(Refusal { space: Some(_), .. }) = state.enqueue(peer, 901, class, 0, endpoint) else {
         panic!("the full lane registers the endpoint");
     };
     assert!(matches!(
-        state.enqueue(peer, 902, 1, class, 0, QueueRole::Relay),
+        state.enqueue(peer, 902, class, 0, QueueRole::Relay),
         Err(Refusal { space: None, .. })
     ));
     assert_eq!(
@@ -350,12 +342,8 @@ fn test_state_substitutes_real_cells_and_stops_on_close() {
     let mut state = OrderedSendState::default();
     let epoch = state.open(peer, 0).expect("a new lane");
 
-    assert!(state
-        .enqueue(peer, 1, 7, class, 0, QueueRole::Relay)
-        .is_ok());
-    assert!(state
-        .enqueue(peer, 2, 7, class, 0, QueueRole::Relay)
-        .is_ok());
+    assert!(state.enqueue(peer, 1, class, 0, QueueRole::Relay).is_ok());
+    assert!(state.enqueue(peer, 2, class, 0, QueueRole::Relay).is_ok());
     assert!(matches!(
         state.next(peer, epoch, floor, true, 0),
         EmitterStep::Emit(Emission::Real(1))
@@ -394,7 +382,7 @@ fn test_only_an_open_link_has_a_lane() {
     let mut state = OrderedSendState::<u32>::default();
 
     assert!(matches!(
-        state.enqueue(peer, 7, 1, OnionLoopClass::DEFAULT, 0, QueueRole::Relay),
+        state.enqueue(peer, 7, OnionLoopClass::DEFAULT, 0, QueueRole::Relay),
         Err(Refusal {
             reason: OnionQueueAdmissionReason::LinkDown,
             item: 7,
@@ -405,7 +393,7 @@ fn test_only_an_open_link_has_a_lane() {
     assert!(state.open(peer, 0).is_some());
     assert!(state.open(peer, 0).is_none());
     assert!(state
-        .enqueue(peer, 8, 1, OnionLoopClass::DEFAULT, 0, QueueRole::Relay)
+        .enqueue(peer, 8, OnionLoopClass::DEFAULT, 0, QueueRole::Relay)
         .is_ok());
 }
 
@@ -436,15 +424,15 @@ fn test_an_emitter_of_a_closed_lane_stops_on_its_reopened_successor() {
 #[test]
 fn test_a_real_emission_is_charged_its_own_class() -> Result<()> {
     let peer = Did::from(8_u32);
-    let large = OnionLoopClass::from(OnionCellBucket::MiB1);
+    let large = OnionLoopClass::MiB1;
     let floor = OnionIdleFloor::DEFAULT;
     let mut state = OrderedSendState::default();
     let epoch = state.open(peer, 0).ok_or(Error::InvalidData)?;
     state
-        .enqueue(peer, 1, large.cell_bytes(), large, 0, QueueRole::Relay)
+        .enqueue(peer, 1, large, 0, QueueRole::Relay)
         .map_err(|_| Error::InvalidData)?;
     state
-        .enqueue(peer, 2, 1, OnionLoopClass::DEFAULT, 0, QueueRole::Relay)
+        .enqueue(peer, 2, OnionLoopClass::DEFAULT, 0, QueueRole::Relay)
         .map_err(|_| Error::InvalidData)?;
 
     assert!(matches!(
@@ -452,7 +440,7 @@ fn test_a_real_emission_is_charged_its_own_class() -> Result<()> {
         EmitterStep::Emit(Emission::Real(1))
     ));
     state.complete(peer, epoch);
-    let large_slot = slot_micros(units_of(large));
+    let large_slot = slot_micros(u128::from(large.units().get()));
     assert!(matches!(
         state.next(peer, epoch, floor, true, slot_micros(1)),
         EmitterStep::Wait(due, _) if due == large_slot
@@ -483,7 +471,7 @@ fn test_an_enqueue_wakes_the_waiting_emitter() {
     assert_eq!(due, floor.slot_micros(1));
 
     assert!(state
-        .enqueue(peer, 9, 1, class, 20_000, QueueRole::Relay)
+        .enqueue(peer, 9, class, 20_000, QueueRole::Relay)
         .is_ok());
     assert_eq!(woken.try_recv(), Ok(Some(())));
     assert!(matches!(
@@ -505,21 +493,21 @@ fn test_a_completion_wakes_one_waiting_endpoint_and_relays_yield_beyond_half() {
     let epoch = state.open(peer, 0).expect("a new lane");
     for item in 0..MAX_PENDING_ONION_SENDS_PER_PEER {
         assert!(state
-            .enqueue(peer, item, 1, class, 0, QueueRole::Relay)
+            .enqueue(peer, item, class, 0, QueueRole::Relay)
             .is_ok());
     }
     let Err(Refusal {
         reason: OnionQueueAdmissionReason::PeerFull,
         space: Some(mut first),
         ..
-    }) = state.enqueue(peer, 900, 1, class, 0, endpoint)
+    }) = state.enqueue(peer, 900, class, 0, endpoint)
     else {
         panic!("a full lane registers the endpoint");
     };
     let Err(Refusal {
         space: Some(mut second),
         ..
-    }) = state.enqueue(peer, 901, 1, class, 0, endpoint)
+    }) = state.enqueue(peer, 901, class, 0, endpoint)
     else {
         panic!("a second endpoint registers too");
     };
@@ -532,7 +520,7 @@ fn test_a_completion_wakes_one_waiting_endpoint_and_relays_yield_beyond_half() {
     assert_eq!(first.try_recv(), Ok(Some(())));
     assert_eq!(second.try_recv(), Ok(None), "one place wakes one waiter");
     assert!(matches!(
-        state.enqueue(peer, 999, 1, class, 0, QueueRole::Relay),
+        state.enqueue(peer, 999, class, 0, QueueRole::Relay),
         Err(Refusal {
             reason: OnionQueueAdmissionReason::PeerFull,
             space: None,
@@ -540,9 +528,7 @@ fn test_a_completion_wakes_one_waiting_endpoint_and_relays_yield_beyond_half() {
         })
     ));
     assert!(state
-        .enqueue(peer, 900, 1, class, 0, QueueRole::Endpoint {
-            holding: true
-        })
+        .enqueue(peer, 900, class, 0, QueueRole::Endpoint { holding: true })
         .is_ok());
 }
 
@@ -558,17 +544,17 @@ fn test_relays_below_half_keep_their_share_while_an_endpoint_waits() {
     let mut state = OrderedSendState::<usize>::default();
     let epoch = state.open(peer, 0).expect("a new lane");
     for item in 0..MAX_PENDING_ONION_SENDS_PER_PEER - relays {
-        assert!(state.enqueue(peer, item, 1, class, 0, endpoint).is_ok());
+        assert!(state.enqueue(peer, item, class, 0, endpoint).is_ok());
     }
     for item in 0..relays {
         assert!(state
-            .enqueue(peer, 1_000 + item, 1, class, 0, QueueRole::Relay)
+            .enqueue(peer, 1_000 + item, class, 0, QueueRole::Relay)
             .is_ok());
     }
     let Err(Refusal {
         space: Some(mut woken),
         ..
-    }) = state.enqueue(peer, 900, 1, class, 0, endpoint)
+    }) = state.enqueue(peer, 900, class, 0, endpoint)
     else {
         panic!("a full lane registers the endpoint");
     };
@@ -580,9 +566,7 @@ fn test_relays_below_half_keep_their_share_while_an_endpoint_waits() {
     state.complete(peer, epoch);
     assert_eq!(woken.try_recv(), Ok(Some(())));
     assert!(
-        state
-            .enqueue(peer, 999, 1, class, 0, QueueRole::Relay)
-            .is_ok(),
+        state.enqueue(peer, 999, class, 0, QueueRole::Relay).is_ok(),
         "relays hold less than half, so the freed place is theirs to take"
     );
     assert_eq!(
@@ -627,17 +611,9 @@ fn test_a_reopened_lane_keeps_its_emission_clock() {
         EmitterStep::Wait(due, _) if due == floor.slot_micros(1)
     ));
     state.close(peer, 0);
-    let third = state
-        .open(peer, ONION_FORWARD_MAX_VALIDITY_MS * 1_000)
-        .expect("a new lane");
+    let third = state.open(peer, WINDOW_US).expect("a new lane");
     assert!(matches!(
-        state.next(
-            peer,
-            third,
-            floor,
-            true,
-            ONION_FORWARD_MAX_VALIDITY_MS * 1_000
-        ),
+        state.next(peer, third, floor, true, WINDOW_US),
         EmitterStep::Emit(Emission::Cover(_))
     ));
 }
@@ -646,12 +622,12 @@ fn test_a_reopened_lane_keeps_its_emission_clock() {
 #[test]
 fn test_cover_takes_the_class_of_the_last_real_cell() -> Result<()> {
     let peer = Did::from(2_u32);
-    let large = OnionLoopClass::from(OnionCellBucket::MiB1);
+    let large = OnionLoopClass::MiB1;
     let floor = OnionIdleFloor::DEFAULT;
     let mut state = OrderedSendState::default();
     let epoch = state.open(peer, 0).ok_or(Error::InvalidData)?;
     state
-        .enqueue(peer, 1, 1, large, 0, QueueRole::Relay)
+        .enqueue(peer, 1, large, 0, QueueRole::Relay)
         .map_err(|_| Error::InvalidData)?;
     assert!(matches!(
         state.next(peer, epoch, floor, true, 0),
@@ -659,13 +635,13 @@ fn test_cover_takes_the_class_of_the_last_real_cell() -> Result<()> {
     ));
     state.complete(peer, epoch);
     assert!(matches!(
-        state.next(peer, epoch, floor, true, slot_micros(units_of(large))),
+        state.next(peer, epoch, floor, true, slot_micros(u128::from(large.units().get()))),
         EmitterStep::Emit(Emission::Cover(class)) if class == large
     ));
     Ok(())
 }
 
-/// One link cannot exceed its queue share, and the global byte bound holds exactly.
+/// One link cannot exceed its queue share, and the global byte bound holds.
 #[test]
 fn test_queue_bounds_hold_per_link_and_globally() {
     let class = OnionLoopClass::DEFAULT;
@@ -676,11 +652,11 @@ fn test_queue_bounds_hold_per_link_and_globally() {
     state.open(other, 0);
     for value in 0..MAX_PENDING_ONION_SENDS_PER_PEER {
         assert!(state
-            .enqueue(peer, value, 1, class, 0, QueueRole::Relay)
+            .enqueue(peer, value, class, 0, QueueRole::Relay)
             .is_ok());
     }
     assert!(matches!(
-        state.enqueue(peer, 200, 1, class, 0, QueueRole::Relay),
+        state.enqueue(peer, 200, class, 0, QueueRole::Relay),
         Err(Refusal {
             reason: OnionQueueAdmissionReason::PeerFull,
             item: 200,
@@ -688,35 +664,35 @@ fn test_queue_bounds_hold_per_link_and_globally() {
         })
     ));
     assert!(state
-        .enqueue(other, 201, 1, class, 0, QueueRole::Relay)
+        .enqueue(other, 201, class, 0, QueueRole::Relay)
         .is_ok());
 
+    // One cell of the largest class per link: `⌊bound / b⌋` links fill the global bound, and
+    // the next link's cell would exceed it.
+    let largest = OnionLoopClass::MiB12;
+    assert!(largest.cell_bytes() <= MAX_PENDING_ONION_SEND_BYTES_PER_PEER);
+    let filled = u32::try_from(MAX_PENDING_ONION_SEND_BYTES / largest.cell_bytes())
+        .expect("a handful of links");
+    let next = Did::from(20 + filled);
     let mut global = OrderedSendState::default();
-    for peer_id in 20_u32..25 {
+    for peer_id in 20..=20 + filled {
         global.open(Did::from(peer_id), 0);
     }
-    for peer_id in 20_u32..24 {
+    for peer_id in 20..20 + filled {
         assert!(global
-            .enqueue(
-                Did::from(peer_id),
-                peer_id,
-                MAX_PENDING_ONION_SEND_BYTES_PER_PEER,
-                class,
-                0,
-                QueueRole::Relay,
-            )
+            .enqueue(Did::from(peer_id), peer_id, largest, 0, QueueRole::Relay)
             .is_ok());
     }
     assert!(matches!(
-        global.enqueue(Did::from(24_u32), 24, 1, class, 0, QueueRole::Relay),
+        global.enqueue(next, 99, largest, 0, QueueRole::Relay),
         Err(Refusal {
             reason: OnionQueueAdmissionReason::GlobalFull,
-            item: 24,
+            item: 99,
             ..
         })
     ));
     assert_eq!(global.close(Did::from(20_u32), 0), vec![20]);
     assert!(global
-        .enqueue(Did::from(24_u32), 24, 1, class, 0, QueueRole::Relay)
+        .enqueue(next, 99, largest, 0, QueueRole::Relay)
         .is_ok());
 }

@@ -20,7 +20,6 @@ use rand_chacha::ChaCha20Rng;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
-use rings_core::ecc::SecretKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::message::MessageSigner;
 use sha2::Digest;
@@ -38,15 +37,18 @@ use crate::onion::session::OnionSessionId;
 use crate::onion::session::OnionTargetDigest;
 use crate::onion::sphinx::builder::build_loop;
 use crate::onion::sphinx::builder::build_surb;
-use crate::onion::sphinx::builder::OnionApplication;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeaderMac;
+use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::sphinx::layer::OnionLayer;
 use crate::onion::sphinx::layer::OnionLayerApplication;
 use crate::onion::sphinx::layer::OnionLayerHead;
 use crate::onion::sphinx::seed::OnionCarrySeed;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
+use crate::onion::tests::fixture::fixture_secret;
+use crate::onion::tests::fixture::grid_expiry;
+use crate::onion::tests::fixture::session_loop;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
@@ -112,35 +114,23 @@ fn digest(bytes: &[u8]) -> String {
     hex(Sha256::digest(bytes).as_slice())
 }
 
-/// The fixed secret `(seed)·0x0101…01`.
-fn secret(seed: u8) -> SecretKey {
-    SecretKey::try_from(format!("{seed:02x}").repeat(32).as_str()).expect("fixture scalar")
-}
-
 /// The route hop `seed`: DID and session key both fixed by `seed`.
 fn hop(seed: u8) -> OnionRouteHop {
     OnionRouteHop::new(
         Did::from(u32::from(seed)),
-        secret(seed).pubkey(),
+        fixture_secret(seed).pubkey(),
         FIXTURE_EPOCH,
     )
 }
 
 /// The fixture loop `g = 1, r₀₂ = 2, h = 3, r₁₁ = 4, g = 1`.
 fn fixture_loop() -> OnionLoop<OnionRouteHop> {
-    let mut relays = [1, 2, 4].into_iter();
-    OnionLoop::try_unfold(Vec::new(), hop(3), |_| {
-        relays
-            .next()
-            .map(hop)
-            .ok_or(crate::error::Error::InvalidData)
-    })
-    .expect("the fixture loop")
+    session_loop([1, 2, 3, 4].map(hop))
 }
 
 /// The fixture expiry `x = 5Q`.
 fn fixture_expiry() -> OnionExpiry {
-    OnionExpiry::from_ms(150_000).expect("on the grid")
+    grid_expiry(5)
 }
 
 /// The fixture session's arguments.
@@ -225,10 +215,10 @@ fn layer(application: OnionLayerApplication) -> OnionLayer {
 fn test_uniform_layers_are_pinned() {
     let mac = OnionHeaderMac::new([0x26; 16]);
     let relay = layer(OnionLayerApplication::Relay).encode(&mac);
-    let symbol = layer(OnionLayerApplication::Apply {
+    let symbol = layer(OnionLayerApplication::Apply(OnionApplication {
         symbol: OnionServiceName::tcp(),
         arguments: session_arguments().encode(),
-    })
+    }))
     .encode(&mac);
 
     assert_eq!(hex(relay.as_slice()), GOLDEN_RELAY_LAYER);
@@ -358,7 +348,7 @@ fn exit_descriptor_body() -> OnionExitDescriptorBody {
 fn test_exit_descriptor_signing_data_is_pinned() {
     let body = exit_descriptor_body();
     let signing_data = body.body_signing_data().expect("descriptor signing data");
-    let session = DelegateeKey::new_with_seckey(&secret(9)).expect("fixture delegation");
+    let session = DelegateeKey::new_with_seckey(&fixture_secret(9)).expect("fixture delegation");
     let signature = MessageSigner::new(&session, TEST_NETWORK_ID)
         .sign(OnionExitDescriptorBody::DOMAIN_TAG, signing_data.as_slice())
         .expect("sign descriptor");

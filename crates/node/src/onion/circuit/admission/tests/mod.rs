@@ -27,11 +27,11 @@ use super::OnionExpiry;
 use super::OnionReplayFilterKey;
 use super::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::OnionReplayNonce;
-use crate::onion::circuit::ONION_FORWARD_EXPIRY_QUANTUM_MS;
+use crate::onion::circuit::ONION_EXPIRY_QUANTUM_MS;
 use crate::onion::OnionProcessEpoch;
 
 /// `Q` in milliseconds.
-pub(super) const Q: u128 = ONION_FORWARD_EXPIRY_QUANTUM_MS;
+pub(super) const Q: u128 = ONION_EXPIRY_QUANTUM_MS;
 
 /// An aligned origin far from zero, so no window arithmetic saturates.
 pub(super) const ORIGIN_MS: u128 = 1_000 * Q;

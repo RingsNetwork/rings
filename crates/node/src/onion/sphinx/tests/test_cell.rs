@@ -26,6 +26,7 @@ use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeaderHop;
 use crate::onion::sphinx::header::OnionHeaderRoute;
+use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::sphinx::layer::OnionArguments;
 use crate::onion::sphinx::layer::OnionLayer;
 use crate::onion::sphinx::layer::OnionLayerApplication;
@@ -83,10 +84,10 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
         ),
         layer(
             2,
-            OnionLayerApplication::Apply {
+            OnionLayerApplication::Apply(OnionApplication {
                 symbol: OnionServiceName::tcp(),
                 arguments: OnionArguments::new([3; 64]),
-            },
+            }),
             first.seeds().consumer,
             OnionSegmentSeed::new(*second.as_bytes()),
         ),

@@ -53,7 +53,6 @@ use rand::RngCore;
 use rings_aez::KeyError;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
-use rings_core::ecc::PublicKeyAddress;
 
 use super::carry;
 use super::carry::OnionCarryValue;
@@ -68,10 +67,17 @@ use super::header::OnionLoopTag;
 use super::header::OnionPeelError;
 use super::header::ONION_HEADER_BYTES;
 use super::header::ONION_HEADER_MAC_BYTES;
+use super::layer::decode_expiry;
+use super::layer::decode_next;
+use super::layer::encode_expiry;
+use super::layer::encode_next;
+use super::layer::OnionApplication;
 use super::layer::OnionArguments;
 use super::layer::OnionLayer;
 use super::layer::OnionLayerApplication;
 use super::layer::OnionLayerHead;
+use super::layer::ONION_DID_BYTES;
+use super::layer::ONION_EXPIRY_BYTES;
 use super::seed::OnionCarryKey;
 use super::seed::OnionSegmentKeys;
 use super::seed::OnionSegmentSeed;
@@ -87,12 +93,6 @@ use crate::onion::OnionServiceName;
 /// in a `credit` frame (#834 D8).
 pub(crate) const ONION_SURB_BYTES: usize =
     ONION_DID_BYTES + ONION_HEADER_BYTES + ONION_CARRY_SEED_BYTES + ONION_EXPIRY_BYTES;
-
-/// `|next|`, a raw DID.
-const ONION_DID_BYTES: usize = 20;
-
-/// `|x|`, big-endian milliseconds.
-const ONION_EXPIRY_BYTES: usize = 8;
 
 // D8's figure: a reply block is 2979 bytes, whatever the class of its cell.
 const _: () = assert!(ONION_SURB_BYTES == 2979);
@@ -136,6 +136,7 @@ pub(crate) struct OnionAdmittedCell(OnionPeeledCell);
 
 /// The outcome of a hop's carry step, chosen by its layer's application. The step consumes both
 /// seeds of `λ_i`; admission has already read the rest of its head.
+#[derive(Debug)]
 pub(crate) enum OnionStep {
     /// A relay removed one AEZ layer: the cell it forwards.
     Relayed {
@@ -456,7 +457,7 @@ impl OnionAdmittedCell {
                     cell: OnionCell { class, bytes },
                 })
             }
-            OnionLayerApplication::Apply { symbol, arguments } => {
+            OnionLayerApplication::Apply(OnionApplication { symbol, arguments }) => {
                 let header = bytes
                     .first_chunk::<ONION_HEADER_BYTES>()
                     .map(OnionHeader::of)
@@ -531,10 +532,10 @@ impl OnionSurb {
     /// `υ = next ‖ χ_υ ‖ σ_υ ‖ x_υ`, the 2979-byte encoding a `credit` frame carries (D8); the
     /// class is the carrying loop's and is not encoded.
     pub(crate) fn encode_into(&self, bytes: &mut Vec<u8>) {
-        bytes.extend_from_slice(&PublicKeyAddress::from(self.next).to_fixed_bytes());
+        bytes.extend_from_slice(&encode_next(self.next));
         self.header.encode_into(bytes);
         bytes.extend_from_slice(self.outbound.as_bytes());
-        bytes.extend_from_slice(&self.expiry.to_wire_ms().to_be_bytes());
+        bytes.extend_from_slice(&encode_expiry(self.expiry));
     }
 
     /// The left inverse of [`Self::encode_into`] for a block carried in a class-`class` loop:
@@ -546,10 +547,10 @@ impl OnionSurb {
         let expiry = <[u8; ONION_EXPIRY_BYTES]>::try_from(rest).ok()?;
         Some(Self {
             class,
-            next: Did::from(PublicKeyAddress::from(*next)),
+            next: decode_next(*next),
             header: OnionHeader::of(header),
             outbound: OnionSegmentSeed::new(*outbound),
-            expiry: OnionExpiry::from_wire_ms(u64::from_be_bytes(expiry))?,
+            expiry: decode_expiry(expiry)?,
         })
     }
 

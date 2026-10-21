@@ -69,7 +69,7 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
     );
     let service_exits = directory_exits
         .into_iter()
-        .filter(|exit| exit.advertises_service_name(service_name.as_str()))
+        .filter(|exit| exit.service == service_name)
         .collect::<Vec<_>>();
     if service_exits.is_empty() {
         return Err(Error::OnionRouteError(OnionRouteError::NoLiveExit {

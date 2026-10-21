@@ -1,19 +1,19 @@
 //! The quantised expiry `x` of an onion loop: a point of the grid `Q·ℕ`.
 //!
-//! The grid is `x = ⌈t_build / Q⌉·Q + X₀` with `X₀ = ONION_FORWARD_PAYLOAD_TTL_MS`, a whole number
+//! The grid is `x = ⌈t_build / Q⌉·Q + X₀` with `X₀ = ONION_EXPIRY_OFFSET_MS`, a whole number
 //! of quanta. The type holds the quantum index `x / Q`, and its field is private to this module, so
 //! an [`OnionExpiry`] comes only from a build instant ([`OnionExpiry::of_build`]) or from parsing
 //! an on-grid wire value ([`OnionExpiry::from_ms`]).
 
-use super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
-use super::ONION_FORWARD_MAX_VALIDITY_MS;
-use super::ONION_FORWARD_PAYLOAD_TTL_MS;
+use super::ONION_ADMISSION_WINDOW_MS;
+use super::ONION_EXPIRY_OFFSET_MS;
+use super::ONION_EXPIRY_QUANTUM_MS;
 
 /// Compile-time law: `X₀` and `V` are whole numbers of quanta, so [`OnionExpiry::of_build`]
 /// stays on the grid.
 const _: () = assert!(
-    ONION_FORWARD_PAYLOAD_TTL_MS.is_multiple_of(ONION_FORWARD_EXPIRY_QUANTUM_MS)
-        && ONION_FORWARD_MAX_VALIDITY_MS.is_multiple_of(ONION_FORWARD_EXPIRY_QUANTUM_MS)
+    ONION_EXPIRY_OFFSET_MS.is_multiple_of(ONION_EXPIRY_QUANTUM_MS)
+        && ONION_ADMISSION_WINDOW_MS.is_multiple_of(ONION_EXPIRY_QUANTUM_MS)
 );
 
 /// A layer's quantised expiry `x ∈ Q·ℕ`, held as its quantum index `x / Q`, so an off-grid
@@ -28,24 +28,23 @@ impl OnionExpiry {
     pub(crate) fn of_build(built_at_ms: u128) -> Self {
         Self(
             built_at_ms
-                .div_ceil(ONION_FORWARD_EXPIRY_QUANTUM_MS)
-                .saturating_add(ONION_FORWARD_PAYLOAD_TTL_MS / ONION_FORWARD_EXPIRY_QUANTUM_MS),
+                .div_ceil(ONION_EXPIRY_QUANTUM_MS)
+                .saturating_add(ONION_EXPIRY_OFFSET_MS / ONION_EXPIRY_QUANTUM_MS),
         )
     }
 
     /// An expiry of `ms` milliseconds: `Some` iff `ms` lies on the grid `Q·ℕ`. The wire decoders
     /// use [`Self::from_wire_ms`]; this is the constructor of a time already in milliseconds.
     pub(crate) fn from_ms(ms: u128) -> Option<Self> {
-        ms.is_multiple_of(ONION_FORWARD_EXPIRY_QUANTUM_MS)
-            .then_some(Self(ms / ONION_FORWARD_EXPIRY_QUANTUM_MS))
+        ms.is_multiple_of(ONION_EXPIRY_QUANTUM_MS)
+            .then_some(Self(ms / ONION_EXPIRY_QUANTUM_MS))
     }
 
     /// The admission window (#834 L9): `arr < x ≤ arr + V`, the only instants at which a layer
     /// expiring at `x` may be admitted by any hop.
     pub(crate) const fn admissible_at(self, arrival_ms: u128) -> bool {
         let expiry_ms = self.as_ms();
-        arrival_ms < expiry_ms
-            && expiry_ms <= arrival_ms.saturating_add(ONION_FORWARD_MAX_VALIDITY_MS)
+        arrival_ms < expiry_ms && expiry_ms <= arrival_ms.saturating_add(ONION_ADMISSION_WINDOW_MS)
     }
 
     /// Whether `x` has passed at `now`, i.e. `x ≤ now`: the replay filter of `x` is gone, and no
@@ -60,7 +59,7 @@ impl OnionExpiry {
     /// in milliseconds since 1970 reaches. For every reachable expiry, `from_ms(as_ms(x)) =
     /// Some(x)`.
     pub(crate) const fn as_ms(self) -> u128 {
-        self.0.saturating_mul(ONION_FORWARD_EXPIRY_QUANTUM_MS)
+        self.0.saturating_mul(ONION_EXPIRY_QUANTUM_MS)
     }
 
     /// The expiry as the 64-bit field of a layer or reply block: `x` in milliseconds.

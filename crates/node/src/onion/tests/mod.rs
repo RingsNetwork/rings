@@ -1,3 +1,4 @@
+pub(in crate::onion) mod fixture;
 #[cfg(rings_native)]
 mod loop_network;
 mod test_exit_registry;
