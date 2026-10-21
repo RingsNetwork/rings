@@ -68,21 +68,7 @@ fn return_path() -> [OnionRouteHop; 2] {
 
 /// `count` reply blocks expiring at `(3 + offset)·Q`, from a seeded RNG.
 fn surbs(seed: u64, count: usize, offset: u128) -> Vec<OnionSurb> {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let expiry = OnionExpiry::from_ms((3 + offset) * QUANTUM_MS).expect("on the grid");
-    (0..count)
-        .map(|_| {
-            build_surb(
-                return_path().iter(),
-                Did::from(9_u32),
-                CLASS,
-                expiry,
-                &mut rng,
-            )
-            .expect("a reply block")
-            .0
-        })
-        .collect()
+    surbs_of(CLASS, seed, count, offset)
 }
 
 /// One reply block expiring at `3Q`.
