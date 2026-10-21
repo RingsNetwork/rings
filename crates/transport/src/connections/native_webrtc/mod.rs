@@ -28,6 +28,7 @@ use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::callback::admit_inbound_data_channel;
 use crate::callback::credit_pump::pump_lane_credits;
+use crate::callback::credit_pump::CREDIT_RESEND_PAUSE;
 use crate::callback::data_channel_label;
 use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
@@ -830,6 +831,7 @@ impl TransportInterface for WebrtcTransport {
                 Arc::clone(inner_cb.link_credit()),
                 connection.clone(),
                 index,
+                CREDIT_RESEND_PAUSE,
             );
             rings_runtime::spawn_detached(pump).is_ok()
         });

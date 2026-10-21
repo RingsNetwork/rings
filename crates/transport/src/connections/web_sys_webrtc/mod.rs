@@ -30,6 +30,7 @@ use web_sys::RtcSessionDescriptionInit;
 
 use crate::callback::admit_inbound_data_channel;
 use crate::callback::credit_pump::pump_lane_credits;
+use crate::callback::credit_pump::CREDIT_RESEND_PAUSE;
 use crate::callback::data_channel_label;
 use crate::callback::inbound_frame_exceeds_protocol_ceiling;
 use crate::callback::link_send::FrameSink;
@@ -623,6 +624,7 @@ impl TransportInterface for WebSysWebrtcTransport {
                 Arc::clone(inner_cb.link_credit()),
                 connection.clone(),
                 index,
+                CREDIT_RESEND_PAUSE,
             ));
         }
         Ok(connection)
