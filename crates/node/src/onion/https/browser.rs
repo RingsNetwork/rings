@@ -16,13 +16,13 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::AbortController;
 
+use super::limits::admit_body_chunk;
 use super::limits::checked_status_code;
 use super::limits::headers_bytes;
 use super::limits::reject_content_length_over_limit;
-use super::limits::usize_to_u64;
 use super::normalize_method;
-use super::FetchResponse;
 use super::OnionHttpsRequest;
+use super::OnionHttpsResponse;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::proxy::OnionProxyTarget;
@@ -36,7 +36,7 @@ pub(super) async fn execute_https_request(
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
     record_bytes: impl Fn(u64) -> Result<()>,
-) -> Result<FetchResponse> {
+) -> Result<OnionHttpsResponse> {
     validate_public_ip_literal(target)?;
     let global = js_sys::global();
     let fetch = Reflect::get(global.as_ref(), JsValue::from_str("fetch").as_ref())
@@ -68,7 +68,7 @@ pub(super) async fn execute_https_request(
         reject_content_length_over_limit(&headers, max_body_bytes)?;
         record_bytes(headers_bytes(&headers)?)?;
         let body = response_body(&response, max_body_bytes, &record_bytes).await?;
-        Ok::<FetchResponse, Error>(FetchResponse {
+        Ok::<OnionHttpsResponse, Error>(OnionHttpsResponse {
             status,
             headers,
             body,
@@ -204,15 +204,8 @@ async fn response_body(
             continue;
         }
         let bytes = Uint8Array::new(value.as_ref()).to_vec();
-        let body_len = usize_to_u64(body.len())?;
-        let bytes_len = usize_to_u64(bytes.len())?;
-        if max_body_bytes > 0 && body_len.saturating_add(bytes_len) > max_body_bytes {
-            if let Some(cancel) = &cancel {
-                let _ = cancel.call0(reader.as_ref());
-            }
-            return Err(Error::NoPermission);
-        }
-        if let Err(error) = record_bytes(bytes_len) {
+        if let Err(error) = admit_body_chunk(body.len(), bytes.len(), max_body_bytes, record_bytes)
+        {
             if let Some(cancel) = &cancel {
                 let _ = cancel.call0(reader.as_ref());
             }

@@ -274,25 +274,10 @@ async fn fetch(
         target.authority(),
         normalize_path(&request.path)?
     );
-    let response = execute_https_request(&url, target, request, body_limit, |bytes| {
+    execute_https_request(&url, target, request, body_limit, |bytes| {
         accounting.record_bytes(policy, bytes, get_epoch_ms())
     })
-    .await?;
-    Ok(OnionHttpsResponse {
-        status: response.status,
-        headers: response.headers,
-        body: response.body,
-    })
-}
-
-/// A response as a platform's fetch returns it.
-pub(super) struct FetchResponse {
-    /// HTTP status code.
-    status: u16,
-    /// Response headers.
-    headers: Vec<(String, String)>,
-    /// Response body bytes.
-    body: Vec<u8>,
+    .await
 }
 
 /// The canonical form of a method: trimmed, upper case, `GET` when empty.
