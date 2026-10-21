@@ -211,12 +211,6 @@ mod tests {
         type Sdp = String;
         type Error = Error;
 
-        async fn send_message(&self, _: Bytes) -> Result<DeliveryFuture> {
-            Err(Error::DataChannelOpen(
-                "test connection cannot send".to_string(),
-            ))
-        }
-
         async fn send_message_with_permit(
             &self,
             _: Bytes,
@@ -238,19 +232,13 @@ mod tests {
             LaneCreditView::closed()
         }
 
-        fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-            self.state
+        fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
+            let webrtc = self
+                .state
                 .lock()
                 .map(|state| *state)
-                .unwrap_or(WebrtcConnectionState::Failed)
-        }
-
-        fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
-            ConnectionStateSnapshot::new(self.webrtc_connection_state(), false)
-        }
-
-        fn data_channel_is_open(&self) -> Result<bool> {
-            Ok(false)
+                .unwrap_or(WebrtcConnectionState::Failed);
+            ConnectionStateSnapshot::new(webrtc, false)
         }
 
         fn max_message_size(&self) -> usize {

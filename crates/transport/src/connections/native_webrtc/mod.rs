@@ -28,6 +28,7 @@ use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::callback::admit_inbound_data_channel;
 use crate::callback::credit_pump::pump_lane_credits;
+use crate::callback::credit_pump::CREDIT_RESEND_PAUSE;
 use crate::callback::data_channel_label;
 use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
@@ -44,7 +45,6 @@ use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
-use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -55,7 +55,6 @@ use crate::delivery::tracker::BufferedChannel;
 use crate::delivery::tracker::DeliveryTracker;
 use crate::delivery::tracker::RoundLease;
 use crate::delivery::DeliveryFuture;
-use crate::delivery::SendCreditWait;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
@@ -520,33 +519,10 @@ impl ConnectionInterface for WebrtcConnection {
     type Sdp = String;
     type Error = Error;
 
-    async fn send_message_with_permit(
-        &self,
-        payload: Bytes,
-        lane: ChannelLane,
-        permit: SendPermit,
-    ) -> Result<DeliveryFuture> {
-        self.callback.send_custom(self, payload, lane, permit).await
-    }
-
-    fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
-        self.callback.reserve_send_credit(lane)
-    }
-
-    fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
-        self.callback.send_credit_view(lane)
-    }
-
-    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        self.connection_state.snapshot().webrtc()
-    }
+    delegate_to_callback!();
 
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
         self.connection_state.snapshot()
-    }
-
-    fn data_channel_is_open(&self) -> Result<bool> {
-        Ok(self.connection_state.snapshot().data_channel_open())
     }
 
     fn max_message_size(&self) -> usize {
@@ -596,8 +572,7 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
         wait_for_data_channel_open(
-            self.webrtc_connection_state(),
-            || self.data_channel_is_open(),
+            || self.connection_state.snapshot(),
             &self.webrtc_data_channel_state_notifier,
             WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT,
         )
@@ -856,6 +831,7 @@ impl TransportInterface for WebrtcTransport {
                 Arc::clone(inner_cb.link_credit()),
                 connection.clone(),
                 index,
+                CREDIT_RESEND_PAUSE,
             );
             rings_runtime::spawn_detached(pump).is_ok()
         });

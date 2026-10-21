@@ -26,9 +26,9 @@ use std::sync::Weak;
 #[cfg(rings_transport_backend)]
 use std::task::Poll;
 
-use super::LinkCredit;
 #[cfg(rings_transport_backend)]
-use super::SendWaiter;
+use super::CreditWait;
+use super::LinkCredit;
 use crate::core::credit::credit_index;
 use crate::core::credit::CreditIndex;
 use crate::core::pool::ChannelLane;
@@ -75,35 +75,19 @@ impl LaneCreditView {
     /// connection generation is gone (`false`). Reserves nothing (the read-only law).
     #[cfg(rings_transport_backend)]
     pub async fn credited(&self) -> bool {
-        let mut wait = ViewWait {
-            link: self.link.clone(),
-            index: self.index,
-            id: None,
-        };
+        let mut wait = CreditWait::new(self.link.clone(), self.index);
         poll_fn(|context| {
-            let Some(link) = wait.link.upgrade() else {
+            let Some(link) = self.link.upgrade() else {
                 return Poll::Ready(false);
             };
             let mut state = link.lock();
             if state.closed {
                 return Poll::Ready(false);
             }
-            if state.send[wait.index].free() > 0 {
+            if state.send[self.index].free() > 0 {
                 return Poll::Ready(true);
             }
-            let id = *wait.id.get_or_insert_with(|| {
-                let id = state.next_waiter;
-                state.next_waiter = id.wrapping_add(1);
-                id
-            });
-            let waiters = &mut state.send_waiters[wait.index];
-            match waiters.iter_mut().find(|waiter| waiter.id == id) {
-                Some(waiter) => waiter.waker.clone_from(context.waker()),
-                None => waiters.push(SendWaiter {
-                    id,
-                    waker: context.waker().clone(),
-                }),
-            }
+            state.register_waiter(self.index, &mut wait.id, context.waker());
             Poll::Pending
         })
         .await
@@ -114,26 +98,6 @@ impl LaneCreditView {
     #[cfg(not(rings_transport_backend))]
     pub async fn credited(&self) -> bool {
         false
-    }
-}
-
-/// One pending [`LaneCreditView::credited`]: its waker is removed when it ends.
-#[cfg(rings_transport_backend)]
-struct ViewWait {
-    /// The link waited on.
-    link: Weak<LinkCredit>,
-    /// The credit index of the lane.
-    index: CreditIndex,
-    /// The wait's identity, once it has registered.
-    id: Option<u64>,
-}
-
-#[cfg(rings_transport_backend)]
-impl Drop for ViewWait {
-    fn drop(&mut self) {
-        if let (Some(id), Some(link)) = (self.id, self.link.upgrade()) {
-            link.forget_waiter(self.index, id);
-        }
     }
 }
 

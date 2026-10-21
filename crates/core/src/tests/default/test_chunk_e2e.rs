@@ -193,6 +193,16 @@ fn large_storage_sync_entries() -> Result<Vec<PlacedEntry>> {
     Ok(entries)
 }
 
+/// Wait until a send reaches the dummy backend's dispatch gate, woken by its arrival.
+async fn wait_for_dispatch_gate(description: &'static str) {
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        dummy_controlled::send_message_gate_entered(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{description}"));
+}
+
 async fn wait_for_test_condition(description: &'static str, predicate: impl Fn() -> bool) {
     tokio::time::timeout(Duration::from_secs(1), async {
         while !predicate() {
@@ -498,11 +508,7 @@ async fn test_send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Res
             .send_message(ApplicationData::custom(b"stale-generation"), peer)
             .await
     });
-    wait_for_test_condition(
-        "the send must reach the final pre-dispatch boundary",
-        dummy_controlled::send_message_waiting_at_dispatch,
-    )
-    .await;
+    wait_for_dispatch_gate("the send must reach the final pre-dispatch boundary").await;
 
     let (old, replacement) = node1
         .swarm
@@ -552,11 +558,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_its_route_disappears(
         data: Vec::new(),
     };
     let send = tokio::spawn(async move { transport.send_storage_sync_tracked(msg).await });
-    wait_for_test_condition(
-        "the storage sync must reach the final pre-dispatch boundary",
-        dummy_controlled::send_message_waiting_at_dispatch,
-    )
-    .await;
+    wait_for_dispatch_gate("the storage sync must reach the final pre-dispatch boundary").await;
 
     let failed_before = measure.count(peer, MeasurementEvent::FailedToSend);
     node1.dht().remove(peer)?;
@@ -600,11 +602,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_transport_loses_readi
         data: Vec::new(),
     };
     let send = tokio::spawn(async move { transport.send_storage_sync_tracked(msg).await });
-    wait_for_test_condition(
-        "the storage sync must reach the final pre-dispatch boundary",
-        dummy_controlled::send_message_waiting_at_dispatch,
-    )
-    .await;
+    wait_for_dispatch_gate("the storage sync must reach the final pre-dispatch boundary").await;
 
     let failed_before = measure.count(peer, MeasurementEvent::FailedToSend);
     node1

@@ -34,6 +34,14 @@ impl Gate {
         }
     }
 
+    /// Wait until a send parks at the gate.
+    async fn entered(self) {
+        match self {
+            Self::PostPermit => dummy_controlled::post_permit_send_gate_entered().await,
+            Self::Irrevocable => dummy_controlled::irrevocable_send_gate_entered().await,
+        }
+    }
+
     /// Release a send parked at the gate.
     fn release(self) {
         match self {
@@ -46,15 +54,8 @@ impl Gate {
 /// Send detached until the backend parks the frame at `gate`, lose the worker there (its
 /// runtime shuts down, dropping it), and return what the caller observes.
 ///
-/// The send races the gate's entry notification, so a send that never parks fails the test
-/// by completing instead of spinning.
-///
-/// `send_gate_entered` is thread-wide: it does not name the send that parked, and a background
-/// send of this runtime could raise it first. That cannot make a row pass falsely. The worker
-/// is lost wherever this send then stands: a send lost short of the irrevocable gate is
-/// unclaimed, so the `Irrevocable` row fails. A send lost short of the post-permit gate is
-/// unclaimed as well, so the `PostPermit` row still witnesses its proposition (lost before the
-/// claim ⇒ `Cancelled`).
+/// The send races the gate's entry event, so a send that never parks fails the test by
+/// completing instead of spinning.
 fn send_losing_the_worker_at(gate: Gate) -> Result<Result<SendCompletionOutcome>> {
     let worker_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -69,7 +70,6 @@ fn send_losing_the_worker_at(gate: Gate) -> Result<Result<SendCompletionOutcome>
     )?;
     dummy_controlled::set_drop_messages(true);
     gate.pause();
-    let entered = dummy_controlled::send_gate_entered();
     let send = transport.send_payload_detached_until_for_test(
         payload,
         Duration::from_secs(60),
@@ -77,7 +77,7 @@ fn send_losing_the_worker_at(gate: Gate) -> Result<Result<SendCompletionOutcome>
     );
     pin_mut!(send);
     let parked = worker_runtime.block_on(async {
-        let entry = entered.notified();
+        let entry = gate.entered();
         pin_mut!(entry);
         matches!(select(send.as_mut(), entry).await, Either::Right(_))
     });
