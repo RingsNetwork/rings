@@ -227,7 +227,7 @@ impl PeerRingAction {
     }
 
     /// Lower this action tree into storage-sync deliveries.
-    pub(crate) fn storage_sync_deliveries(self) -> Result<Vec<StorageSyncDelivery>> {
+    fn storage_sync_deliveries(self) -> Result<Vec<StorageSyncDelivery>> {
         let mut deliveries = Vec::new();
         self.collect_storage_sync_deliveries(&mut deliveries)?;
         Ok(deliveries)
@@ -381,14 +381,16 @@ impl PeerRing {
         Ok(self.next_hop_for_storage_sync_in(&state, destination))
     }
 
+    /// Whether one topology snapshot proves this route now: the check of
+    /// [`Self::with_permitted_storage_sync_route`] with no operation.
     pub(crate) fn storage_sync_route_still_permits(
         &self,
         destination: StorageSyncDestination,
         next_hop: Did,
     ) -> Result<bool> {
-        self.with_topology_state(|state| {
-            self.storage_sync_route_permits_in(state, destination, next_hop)
-        })
+        Ok(self
+            .with_permitted_storage_sync_route(destination, next_hop, || ())?
+            .is_some())
     }
 
     /// Execute `operation` only while one topology snapshot proves this route.

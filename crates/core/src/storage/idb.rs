@@ -326,19 +326,6 @@ impl IdbStorage {
         scope.done().await
     }
 
-    /// Delete all values. The clock keeps running, so later stamps stay above earlier ones.
-    pub async fn clear(&self) -> Result<()> {
-        let scope = self.scope(TransactionMode::ReadWrite)?;
-        scope.rows.clear().await.map_err(Error::IDBError)?;
-        scope.done().await
-    }
-
-    /// Get the current storage usage.
-    pub async fn count(&self) -> Result<u32> {
-        let scope = self.scope(TransactionMode::ReadOnly)?;
-        scope.rows.count(None).await.map_err(Error::IDBError)
-    }
-
     /// The decode law of this store's authority (module docs) on one row payload: the decoded
     /// value, `None` for a payload a disposable store retires, or the decode error an
     /// authoritative store reports.
@@ -464,12 +451,17 @@ where V: DeserializeOwned + Serialize + Sized
         scope.done().await
     }
 
+    /// Delete all values. The clock keeps running, so later stamps stay above earlier ones.
     async fn clear(&self) -> Result<()> {
-        IdbStorage::clear(self).await
+        let scope = self.scope(TransactionMode::ReadWrite)?;
+        scope.rows.clear().await.map_err(Error::IDBError)?;
+        scope.done().await
     }
 
+    /// Get the current storage usage.
     async fn count(&self) -> Result<u32> {
-        IdbStorage::count(self).await
+        let scope = self.scope(TransactionMode::ReadOnly)?;
+        scope.rows.count(None).await.map_err(Error::IDBError)
     }
 }
 

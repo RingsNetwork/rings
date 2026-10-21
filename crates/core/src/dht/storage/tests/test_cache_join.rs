@@ -1,12 +1,9 @@
 //! Fetched-entry cache laws: admission and retention shared with the replica store, and the
 //! read-join (#864) under which replies cache to their join in any order.
 
-use bytes::Bytes;
-
 use super::super::super::chord::PeerRing;
 use super::data_entry;
 use crate::dht::entry::Entry;
-use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::EntryVersion;
 use crate::dht::ChordStorageCache;
@@ -15,7 +12,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::storage::MemStorage;
 use crate::tests::expired;
-use crate::tests::with_retention;
+use crate::tests::stamped_delta;
 use crate::utils::get_epoch_ms;
 
 /// The fetched-entry cache shares the admission law, and a read reports an expired value absent
@@ -52,33 +49,6 @@ async fn test_local_cache_shares_admission_and_retention() -> Result<()> {
     Ok(())
 }
 
-/// The replica shape of `operation` on `value` for the carrier `did`, stamped by `writer` at
-/// `now_ms`. The carrier is undotted, with a live retention bound, so the stamp issues its
-/// dots and register under `writer`, as a replica's write does.
-fn stamped_delta(
-    operation: fn(Entry) -> EntryOperation,
-    did: Did,
-    value: &str,
-    now_ms: u128,
-    writer: Did,
-) -> Result<Entry> {
-    let carrier = with_retention(
-        Entry::new(
-            did,
-            vec![Bytes::copy_from_slice(value.as_bytes())],
-            EntryKind::Data,
-        ),
-        now_ms + 60 * 60 * 1_000,
-    );
-    Ok(operation(carrier).stamped(now_ms, writer)?.entry().clone())
-}
-
-/// A stamped `Extend` delta that adds `value` to the carrier `did`, written by `writer` at
-/// `now_ms`: the shape a replica holds after that write.
-fn extend_delta(did: Did, value: &str, now_ms: u128, writer: Did) -> Result<Entry> {
-    stamped_delta(EntryOperation::Extend, did, value, now_ms, writer)
-}
-
 /// The carrier cached for `resource` after `replies` are put in order into a fresh cache.
 async fn cached_after(resource: Did, replies: &[&Entry]) -> Result<Option<Entry>> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
@@ -106,8 +76,20 @@ async fn assert_cached_in_any_order(
 async fn test_local_cache_joins_replies_in_any_order() -> Result<()> {
     let resource = Did::from(10u32);
     let now_ms = get_epoch_ms();
-    let first = extend_delta(resource, "a", now_ms, Did::from(1u32))?;
-    let second = extend_delta(resource, "b", now_ms, Did::from(2u32))?;
+    let first = stamped_delta(
+        EntryOperation::Extend,
+        resource,
+        &["a"],
+        now_ms,
+        Did::from(1u32),
+    )?;
+    let second = stamped_delta(
+        EntryOperation::Extend,
+        resource,
+        &["b"],
+        now_ms,
+        Did::from(2u32),
+    )?;
 
     let cached = assert_cached_in_any_order(resource, &first, &second).await?;
     assert_eq!(cached.map(|entry| entry.data.len()), Some(2));
@@ -120,8 +102,20 @@ async fn test_local_cache_joins_replies_in_any_order() -> Result<()> {
 async fn test_local_cache_breaks_a_same_instant_add_tie_by_dot() -> Result<()> {
     let resource = Did::from(10u32);
     let now_ms = get_epoch_ms();
-    let first = extend_delta(resource, "a", now_ms, Did::from(1u32))?;
-    let second = extend_delta(resource, "a", now_ms, Did::from(2u32))?;
+    let first = stamped_delta(
+        EntryOperation::Extend,
+        resource,
+        &["a"],
+        now_ms,
+        Did::from(1u32),
+    )?;
+    let second = stamped_delta(
+        EntryOperation::Extend,
+        resource,
+        &["a"],
+        now_ms,
+        Did::from(2u32),
+    )?;
     assert_ne!(first.crdt.dots, second.crdt.dots);
 
     let cached = assert_cached_in_any_order(resource, &first, &second).await?;
@@ -148,14 +142,14 @@ async fn test_local_cache_breaks_a_same_instant_overwrite_tie_by_register() -> R
     let first = stamped_delta(
         EntryOperation::Overwrite,
         resource,
-        "a",
+        &["a"],
         now_ms,
         Did::from(1u32),
     )?;
     let second = stamped_delta(
         EntryOperation::Overwrite,
         resource,
-        "b",
+        &["b"],
         now_ms,
         Did::from(2u32),
     )?;
@@ -180,7 +174,13 @@ async fn test_local_cache_breaks_a_same_instant_overwrite_tie_by_register() -> R
 async fn test_local_cache_keeps_a_tombstone_against_a_stale_reply() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let resource = Did::from(10u32);
-    let added = extend_delta(resource, "a", get_epoch_ms(), Did::from(1u32))?;
+    let added = stamped_delta(
+        EntryOperation::Extend,
+        resource,
+        &["a"],
+        get_epoch_ms(),
+        Did::from(1u32),
+    )?;
     let removed = added.tombstone(added.clone())?;
 
     node.local_cache_put(removed).await?;

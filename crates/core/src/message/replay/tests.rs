@@ -19,7 +19,8 @@ use crate::message::TransactionDigest;
 use crate::message::TransactionReplay;
 #[cfg(not(target_family = "wasm"))]
 use crate::message::TRANSACTION_REPLAY_STREAM_CAPACITY;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use crate::storage::idb::IdbStorage;
 use crate::storage::KvStorageInterface;
 
 fn digest(value: u8) -> TransactionDigest {
@@ -356,14 +357,16 @@ async fn test_new_sender_stream_fails_closed_at_the_table_bound() -> Result<()> 
 #[wasm_bindgen_test::wasm_bindgen_test]
 async fn test_browser_storage_round_trip_retains_nonempty_replay_state() {
     const STORAGE_NAME: &str = "rings-core/replay-store-round-trip";
-    let storage = crate::storage::idb::IdbStorage::new_with_cap_name_and_authority(
+    let storage = IdbStorage::new_with_cap_name_and_authority(
         2,
         STORAGE_NAME,
         crate::storage::RecordAuthority::Authoritative,
     )
     .await
     .expect("IndexedDB opens");
-    storage.clear().await.expect("IndexedDB clears");
+    <IdbStorage as KvStorageInterface<super::ReplayRecord>>::clear(&storage)
+        .await
+        .expect("IndexedDB clears");
     let origin: Did = SecretKey::random().address().into();
     let destination: Did = SecretKey::random().address().into();
     let key = StreamKey::new(7, origin, destination, MessageCategory::Application);
@@ -385,7 +388,7 @@ async fn test_browser_storage_round_trip_retains_nonempty_replay_state() {
     );
     drop(first);
 
-    let reopened = crate::storage::idb::IdbStorage::new_with_cap_name_and_authority(
+    let reopened = IdbStorage::new_with_cap_name_and_authority(
         2,
         STORAGE_NAME,
         crate::storage::RecordAuthority::Authoritative,

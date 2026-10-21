@@ -12,6 +12,8 @@ use crate::dht::entry::inbox::HeldMessage;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryDot;
 use crate::dht::entry::EntryKind;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use crate::dht::entry::EntryOperation;
 use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntry;
 #[cfg(any(
@@ -105,6 +107,63 @@ pub(crate) fn with_retention(mut entry: Entry, expires_at_ms: u128) -> Entry {
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(crate) fn expired(entry: Entry) -> Entry {
     with_retention(entry, 1)
+}
+
+/// An undotted data carrier of `values` under `did`, live for an hour from `now_ms`: what a
+/// writer issues an operation on before stamping it.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn data_carrier(did: Did, values: &[&str], now_ms: u128) -> Entry {
+    let data = values
+        .iter()
+        .map(|value| Bytes::copy_from_slice(value.as_bytes()))
+        .collect();
+    with_retention(
+        Entry::new(did, data, EntryKind::Data),
+        now_ms + FIXTURE_RETENTION_MS,
+    )
+}
+
+/// `operation` of [`data_carrier`]`(did, values, now_ms)`, stamped by `writer` at `now_ms`, as
+/// the storage API sends it: the stamp issues the carrier's dots and register under `writer`.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn stamped_operation(
+    operation: fn(Entry) -> EntryOperation,
+    did: Did,
+    values: &[&str],
+    now_ms: u128,
+    writer: Did,
+) -> Result<EntryOperation> {
+    operation(data_carrier(did, values, now_ms)).stamped(now_ms, writer)
+}
+
+/// The delta [`stamped_operation`] carries: the shape a replica holds after that write.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn stamped_delta(
+    operation: fn(Entry) -> EntryOperation,
+    did: Did,
+    values: &[&str],
+    now_ms: u128,
+    writer: Did,
+) -> Result<Entry> {
+    Ok(stamped_operation(operation, did, values, now_ms, writer)?
+        .entry()
+        .clone())
+}
+
+/// A placement outside the affine replica set of `entry_key` under `redundancy`.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn non_affine_placement(entry_key: Did, redundancy: u16) -> Result<Did> {
+    let placements = entry_key.rotate_affine(redundancy)?;
+    for attempt in 0..512 {
+        let candidate = Entry::gen_did(&format!("non-affine placement {attempt}"))?;
+        if !placements.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(crate::error::Error::InvalidMessage(
+        "could not sample non-affine placement".to_string(),
+    ))
 }
 
 /// A live inbox delta for `destination`: one custom message from a fresh sender, held now by

@@ -114,8 +114,7 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 /// - Monotone in the lattice order: while a key stays resident, successive cached carriers
 ///   ascend in `⊑`. The *visible element set* is monotone only between reset floors and
 ///   tombstones: an element leaves it when a tombstone for its dot arrives, when an overwrite
-///   floor above its dot arrives, or when the `max_data_len` cap drops it. A floor from an
-///   owner that never held an element erases that element from the join (#867).
+///   floor above its dot arrives, or when the `max_data_len` cap drops it.
 /// - Bounds: every reply is admitted like a replicated write, every carrier is capped at its
 ///   kind's `max_data_len` (oldest dropped), and the cache holds at most
 ///   [`LOCAL_CACHE_CAPACITY`](crate::consts::LOCAL_CACHE_CAPACITY) carriers.

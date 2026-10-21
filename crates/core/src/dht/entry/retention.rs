@@ -436,6 +436,11 @@ impl AdmittedEntry {
         Self(entry)
     }
 
+    /// The kind of the admitted value, which names its storage namespace.
+    pub(crate) const fn kind(&self) -> EntryKind {
+        self.0.kind
+    }
+
     /// The admitted value, owned.
     pub(crate) fn into_entry(self) -> Entry {
         self.0
