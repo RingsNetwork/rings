@@ -16,6 +16,7 @@ use crate::bridge::BridgeHandle;
 use crate::reset::bridge_reason;
 use crate::reset::closure_reason;
 use crate::reset::eof_reason;
+use crate::reset::EndpointClosure;
 use crate::reset::FlowPhase;
 use crate::BoxOnionStreamProbe;
 use crate::ExitObservation;
@@ -370,7 +371,8 @@ impl GatewayRuntime {
                     .expired_pending_flows(elapsed)
                     .map_err(GatewayFatal::gateway)?;
                 for flow in expired {
-                    self.fail_flow(flow, FlowResetReason::HandshakeExpired, elapsed)
+                    let reason = closure_reason(&self.phase(flow), EndpointClosure::ClientSilent);
+                    self.fail_flow(flow, reason, elapsed)
                         .map_err(GatewayFatal::gateway)?;
                 }
                 Ok(ReconcileScope::All)
