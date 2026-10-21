@@ -219,7 +219,7 @@ IO or public Onion throughput. See [`BENCHMARKS.md`](BENCHMARKS.md).
 ```bash
 RINGS_GATEWAY_BENCH_FLOWS=256 \
 RINGS_GATEWAY_BENCH_BYTES_PER_FLOW=1024 \
-cargo run --release -p rings-gateway --example gateway-bench
+cargo run --release -p rings-gateway --features test-support --example gateway-bench
 ```
 
 The native node integration test uses real WebRTC processors, a guard-closed Onion loop over three

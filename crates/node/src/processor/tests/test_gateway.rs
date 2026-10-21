@@ -3,7 +3,6 @@ use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::io::Write;
 use std::net::Ipv4Addr;
-#[cfg(target_os = "linux")]
 use std::net::SocketAddrV4;
 #[cfg(target_os = "linux")]
 use std::net::TcpStream;
@@ -30,19 +29,14 @@ use rings_gateway::bindings::NativeTunnelLease;
 use rings_gateway::bindings::NativeTunnelOptions;
 #[cfg(target_os = "linux")]
 use rings_gateway::bindings::TunnelControl;
+use rings_gateway::testing::receive_matching_tcp;
+use rings_gateway::testing::ChannelPacketIo;
+use rings_gateway::testing::ClientPath;
 use rings_gateway::GatewayConfig;
 use rings_gateway::GatewayPlan;
 use rings_gateway::GatewayRuntime;
 use rings_gateway::Mtu;
-use rings_gateway::PacketIo;
-use rings_gateway::PacketIoError;
-use smoltcp::phy::ChecksumCapabilities;
-use smoltcp::wire::IpProtocol;
-use smoltcp::wire::Ipv4Packet;
-use smoltcp::wire::Ipv4Repr;
 use smoltcp::wire::TcpControl;
-use smoltcp::wire::TcpPacket;
-use smoltcp::wire::TcpRepr;
 use smoltcp::wire::TcpSeqNumber;
 use tokio::sync::mpsc;
 #[cfg(target_os = "linux")]
@@ -59,61 +53,6 @@ use crate::tests::native::prepare_processor_with_onion_role;
 const PUBLIC_HTTP_PORT: u16 = 80;
 const PUBLIC_HTTP_IPV4: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
 const CLIENT_PORT: u16 = 41_000;
-
-struct ChannelPacketIo {
-    ingress: mpsc::Receiver<Vec<u8>>,
-    egress: mpsc::Sender<Vec<u8>>,
-}
-
-#[async_trait::async_trait]
-impl PacketIo for ChannelPacketIo {
-    async fn read_packet(
-        &mut self,
-        output: &mut [u8],
-    ) -> std::result::Result<usize, PacketIoError> {
-        let packet = self.ingress.recv().await.ok_or(PacketIoError::Closed)?;
-        let capacity = output.len();
-        let Some(destination) = output.get_mut(..packet.len()) else {
-            return Err(PacketIoError::InvalidLength {
-                length: packet.len(),
-                capacity,
-            });
-        };
-        destination.copy_from_slice(&packet);
-        Ok(packet.len())
-    }
-
-    async fn write_packet(&mut self, packet: &[u8]) -> std::result::Result<(), PacketIoError> {
-        self.egress.send(packet.to_vec()).await.map_err(|error| {
-            PacketIoError::Write(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                error.to_string(),
-            ))
-        })
-    }
-}
-
-struct TcpObservation {
-    sequence: TcpSeqNumber,
-    acknowledgment: Option<TcpSeqNumber>,
-    fin: bool,
-    rst: bool,
-    payload: Vec<u8>,
-}
-
-impl TcpObservation {
-    fn parse(packet: &[u8]) -> Self {
-        let ipv4 = Ipv4Packet::new_checked(packet).expect("valid gateway IPv4 packet");
-        let tcp = TcpPacket::new_checked(ipv4.payload()).expect("valid gateway TCP packet");
-        Self {
-            sequence: tcp.seq_number(),
-            acknowledgment: tcp.ack().then(|| tcp.ack_number()),
-            fin: tcp.fin(),
-            rst: tcp.rst(),
-            payload: tcp.payload().to_vec(),
-        }
-    }
-}
 
 fn gateway_config() -> GatewayConfig {
     gateway_config_for(&["1.1.1.1/32"])
@@ -135,64 +74,23 @@ fn gateway_config_for(included_routes: &[&str]) -> GatewayConfig {
     }
 }
 
+/// The captured client's path to the public HTTP target.
+const CLIENT: ClientPath = ClientPath {
+    source: SocketAddrV4::new(Ipv4Addr::new(100, 64, 0, 2), CLIENT_PORT),
+    target: SocketAddrV4::new(PUBLIC_HTTP_IPV4, PUBLIC_HTTP_PORT),
+    window_len: 16_384,
+};
+
+/// Emit one client segment on [`CLIENT`].
 fn client_packet(
-    target: Ipv4Addr,
     control: TcpControl,
     sequence: TcpSeqNumber,
     acknowledgment: Option<TcpSeqNumber>,
     payload: &[u8],
 ) -> Vec<u8> {
-    let source = Ipv4Addr::new(100, 64, 0, 2);
-    let tcp = TcpRepr {
-        src_port: CLIENT_PORT,
-        dst_port: PUBLIC_HTTP_PORT,
-        control,
-        seq_number: sequence,
-        ack_number: acknowledgment,
-        window_len: 16_384,
-        window_scale: None,
-        max_seg_size: Some(1_200),
-        sack_permitted: false,
-        sack_ranges: [None, None, None],
-        timestamp: None,
-        payload,
-    };
-    let ipv4 = Ipv4Repr {
-        src_addr: source,
-        dst_addr: target,
-        next_header: IpProtocol::Tcp,
-        payload_len: tcp.buffer_len(),
-        hop_limit: 64,
-    };
-    let mut packet = vec![0_u8; ipv4.buffer_len() + tcp.buffer_len()];
-    ipv4.emit(
-        &mut Ipv4Packet::new_unchecked(&mut packet),
-        &ChecksumCapabilities::default(),
-    );
-    tcp.emit(
-        &mut TcpPacket::new_unchecked(&mut packet[ipv4.buffer_len()..]),
-        &source.into(),
-        &target.into(),
-        &ChecksumCapabilities::default(),
-    );
-    packet
-}
-
-async fn receive_tcp(
-    egress: &mut mpsc::Receiver<Vec<u8>>,
-    predicate: impl Fn(&TcpObservation) -> bool,
-) -> TcpObservation {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let packet = egress.recv().await.expect("gateway egress remains open");
-            let observation = TcpObservation::parse(&packet);
-            if predicate(&observation) {
-                return observation;
-            }
-        }
-    })
-    .await
-    .expect("gateway TCP response deadline")
+    CLIENT
+        .packet(control, sequence, acknowledgment, payload)
+        .expect("captured client packet")
 }
 
 /// Whether `error` refuses a manual handshake because a concurrent handshake owns the edge: an
@@ -611,7 +509,6 @@ fn linux_namespace_http_request() -> std::result::Result<Vec<u8>, String> {
 #[ignore = "requires public network access and five native WebRTC processors"]
 async fn captured_tcp_reaches_public_http_only_through_onion_loop() -> Result<()> {
     let _network_guard = network_test_guard().await;
-    let target = PUBLIC_HTTP_IPV4;
     let OnionLoopGatewayFixture {
         mut runtime,
         _processors,
@@ -636,23 +533,17 @@ async fn captured_tcp_reaches_public_http_only_through_onion_loop() -> Result<()
     });
 
     ingress_tx
-        .send(client_packet(
-            target,
-            TcpControl::Syn,
-            TcpSeqNumber(7),
-            None,
-            &[],
-        ))
+        .send(client_packet(TcpControl::Syn, TcpSeqNumber(7), None, &[]))
         .await
         .expect("send captured SYN");
-    let syn_ack = receive_tcp(&mut egress_rx, |packet| {
+    let syn_ack = receive_matching_tcp(&mut egress_rx, Duration::from_secs(30), |packet| {
         packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.fin
     })
-    .await;
+    .await
+    .expect("gateway SYN-ACK");
     let server_next = syn_ack.sequence + 1;
     ingress_tx
         .send(client_packet(
-            target,
             TcpControl::None,
             TcpSeqNumber(8),
             Some(server_next),
@@ -664,7 +555,6 @@ async fn captured_tcp_reaches_public_http_only_through_onion_loop() -> Result<()
     let request = b"GET / HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\n\r\n";
     ingress_tx
         .send(client_packet(
-            target,
             TcpControl::None,
             TcpSeqNumber(8),
             Some(server_next),
@@ -672,17 +562,11 @@ async fn captured_tcp_reaches_public_http_only_through_onion_loop() -> Result<()
         ))
         .await
         .expect("send captured HTTP request");
-    let response = tokio::time::timeout(Duration::from_secs(35), async {
-        loop {
-            let packet = egress_rx.recv().await.expect("gateway egress remains open");
-            let observation = TcpObservation::parse(&packet);
-            if observation.rst || !observation.payload.is_empty() {
-                return observation;
-            }
-        }
+    let response = receive_matching_tcp(&mut egress_rx, Duration::from_secs(35), |packet| {
+        packet.rst || !packet.payload.is_empty()
     })
     .await
-    .unwrap_or_else(|_| panic!("gateway HTTP response deadline: {:?}", status.snapshot()));
+    .unwrap_or_else(|error| panic!("gateway HTTP response: {error}: {:?}", status.snapshot()));
     assert!(
         !response.rst,
         "gateway reset captured flow: {:?}",

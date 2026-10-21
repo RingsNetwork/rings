@@ -7,12 +7,17 @@
 
 use std::io;
 use std::net::Ipv4Addr;
+use std::net::SocketAddrV4;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use rings_gateway::testing::receive_matching_tcp;
+use rings_gateway::testing::ChannelPacketIo;
+use rings_gateway::testing::ClientPath;
+use rings_gateway::testing::TcpObservation;
 use rings_gateway::unobserved_stream;
 use rings_gateway::BoxGatewayDuplex;
 use rings_gateway::BoxOnionStreamProbe;
@@ -23,15 +28,7 @@ use rings_gateway::GatewayPlan;
 use rings_gateway::GatewayRuntime;
 use rings_gateway::Mtu;
 use rings_gateway::OnionStreamConnector;
-use rings_gateway::PacketIo;
-use rings_gateway::PacketIoError;
-use smoltcp::phy::ChecksumCapabilities;
-use smoltcp::wire::IpProtocol;
-use smoltcp::wire::Ipv4Packet;
-use smoltcp::wire::Ipv4Repr;
 use smoltcp::wire::TcpControl;
-use smoltcp::wire::TcpPacket;
-use smoltcp::wire::TcpRepr;
 use smoltcp::wire::TcpSeqNumber;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -43,33 +40,6 @@ const MAX_BYTES_PER_FLOW: usize = 1_200;
 const BASE_CLIENT_PORT: u16 = 20_000;
 const TARGET_PORT: u16 = 443;
 const TARGET: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 254);
-
-struct ChannelPacketIo {
-    ingress: mpsc::Receiver<Vec<u8>>,
-    egress: mpsc::Sender<Vec<u8>>,
-}
-
-#[async_trait::async_trait]
-impl PacketIo for ChannelPacketIo {
-    async fn read_packet(&mut self, output: &mut [u8]) -> Result<usize, PacketIoError> {
-        let packet = self.ingress.recv().await.ok_or(PacketIoError::Closed)?;
-        let capacity = output.len();
-        let Some(destination) = output.get_mut(..packet.len()) else {
-            return Err(PacketIoError::InvalidLength {
-                length: packet.len(),
-                capacity,
-            });
-        };
-        destination.copy_from_slice(&packet);
-        Ok(packet.len())
-    }
-
-    async fn write_packet(&mut self, packet: &[u8]) -> Result<(), PacketIoError> {
-        self.egress.send(packet.to_vec()).await.map_err(|error| {
-            PacketIoError::Write(io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))
-        })
-    }
-}
 
 struct EchoConnector;
 
@@ -86,30 +56,6 @@ impl OnionStreamConnector for EchoConnector {
             let _ = writer.shutdown().await;
         });
         Ok(unobserved_stream())
-    }
-}
-
-struct TcpObservation {
-    destination_port: u16,
-    sequence: TcpSeqNumber,
-    acknowledgment: Option<TcpSeqNumber>,
-    rst: bool,
-    payload: Vec<u8>,
-}
-
-impl TcpObservation {
-    fn parse(packet: &[u8]) -> Result<Self, io::Error> {
-        let ipv4 =
-            Ipv4Packet::new_checked(packet).map_err(|error| io::Error::other(error.to_string()))?;
-        let tcp = TcpPacket::new_checked(ipv4.payload())
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        Ok(Self {
-            destination_port: tcp.dst_port(),
-            sequence: tcp.seq_number(),
-            acknowledgment: tcp.ack().then(|| tcp.ack_number()),
-            rst: tcp.rst(),
-            payload: tcp.payload().to_vec(),
-        })
     }
 }
 
@@ -138,72 +84,25 @@ fn config(flow_count: usize) -> Result<GatewayConfig, GatewayError> {
     Ok(config)
 }
 
-fn client_packet(
-    source_port: u16,
-    control: TcpControl,
-    sequence: TcpSeqNumber,
-    acknowledgment: Option<TcpSeqNumber>,
-    payload: &[u8],
-) -> Result<Vec<u8>, io::Error> {
-    let source = Ipv4Addr::new(100, 64, 0, 2);
-    let tcp = TcpRepr {
-        src_port: source_port,
-        dst_port: TARGET_PORT,
-        control,
-        seq_number: sequence,
-        ack_number: acknowledgment,
+/// The benchmark client's path from `client_port` to the target.
+fn client_path(client_port: u16) -> ClientPath {
+    ClientPath {
+        source: SocketAddrV4::new(Ipv4Addr::new(100, 64, 0, 2), client_port),
+        target: SocketAddrV4::new(TARGET, TARGET_PORT),
         window_len: 65_535,
-        window_scale: None,
-        max_seg_size: Some(1_200),
-        sack_permitted: false,
-        sack_ranges: [None, None, None],
-        timestamp: None,
-        payload,
-    };
-    let ipv4 = Ipv4Repr {
-        src_addr: source,
-        dst_addr: TARGET,
-        next_header: IpProtocol::Tcp,
-        payload_len: tcp.buffer_len(),
-        hop_limit: 64,
-    };
-    let mut packet = vec![0_u8; ipv4.buffer_len() + tcp.buffer_len()];
-    ipv4.emit(
-        &mut Ipv4Packet::new_unchecked(&mut packet),
-        &ChecksumCapabilities::default(),
-    );
-    let Some(tcp_packet) = packet.get_mut(ipv4.buffer_len()..) else {
-        return Err(io::Error::other(
-            "benchmark packet buffer omitted its TCP payload",
-        ));
-    };
-    tcp.emit(
-        &mut TcpPacket::new_unchecked(tcp_packet),
-        &source.into(),
-        &TARGET.into(),
-        &ChecksumCapabilities::default(),
-    );
-    Ok(packet)
+    }
 }
 
+/// Read `egress` until a segment to `destination_port` satisfies `predicate`.
 async fn receive_for_port(
     egress: &mut mpsc::Receiver<Vec<u8>>,
     destination_port: u16,
     predicate: impl Fn(&TcpObservation) -> bool,
 ) -> Result<TcpObservation, io::Error> {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let packet = egress.recv().await.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "gateway egress closed")
-            })?;
-            let observation = TcpObservation::parse(&packet)?;
-            if observation.destination_port == destination_port && predicate(&observation) {
-                return Ok(observation);
-            }
-        }
+    receive_matching_tcp(egress, Duration::from_secs(10), |observation| {
+        observation.destination_port == destination_port && predicate(observation)
     })
     .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "gateway packet deadline"))?
 }
 
 fn parameter(name: &str, default: usize, maximum: usize) -> Result<usize, io::Error> {
@@ -275,13 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let port = client_port(index)?;
         let flow_started = Instant::now();
         ingress_tx
-            .send(client_packet(
-                port,
-                TcpControl::Syn,
-                TcpSeqNumber(7),
-                None,
-                &[],
-            )?)
+            .send(client_path(port).packet(TcpControl::Syn, TcpSeqNumber(7), None, &[])?)
             .await?;
         let syn_ack = receive_for_port(&mut egress_rx, port, |packet| {
             packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.rst
@@ -292,8 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let server_sequence = syn_ack.sequence + 1;
         ingress_tx
-            .send(client_packet(
-                port,
+            .send(client_path(port).packet(
                 TcpControl::None,
                 TcpSeqNumber(8),
                 Some(server_sequence),
@@ -304,8 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let fill = u8::try_from(index % 251)?;
         let payload = vec![fill; bytes_per_flow];
         ingress_tx
-            .send(client_packet(
-                port,
+            .send(client_path(port).packet(
                 TcpControl::None,
                 TcpSeqNumber(8),
                 Some(server_sequence),
@@ -324,8 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(io::Error::other("gateway benchmark payload mismatch").into());
         }
         ingress_tx
-            .send(client_packet(
-                port,
+            .send(client_path(port).packet(
                 TcpControl::None,
                 TcpSeqNumber(8) + bytes_per_flow,
                 Some(response.sequence + response.payload.len()),
