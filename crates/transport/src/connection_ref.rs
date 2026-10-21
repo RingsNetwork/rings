@@ -146,12 +146,6 @@ where
         )
     }
 
-    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        self.upgrade()
-            .map(|c| c.webrtc_connection_state())
-            .unwrap_or(WebrtcConnectionState::Closed)
-    }
-
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
         self.upgrade()
             .map(|connection| connection.connection_state_snapshot())
@@ -159,14 +153,6 @@ where
                 WebrtcConnectionState::Closed,
                 false,
             ))
-    }
-
-    fn data_channel_is_open(&self) -> Result<bool> {
-        match self.upgrade() {
-            Ok(c) => c.data_channel_is_open(),
-            Err(Error::ConnectionReleased(_)) => Ok(false),
-            Err(error) => Err(error),
-        }
     }
 
     // On a released reference this reports the interop default rather than an error, by deliberate
@@ -243,13 +229,7 @@ mod tests {
         fn send_credit_view(&self, _: ChannelLane) -> LaneCreditView {
             unreachable!("a released ref must fail before reaching the inner connection")
         }
-        fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-            unreachable!()
-        }
         fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
-            unreachable!()
-        }
-        fn data_channel_is_open(&self) -> Result<bool> {
             unreachable!()
         }
         async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {

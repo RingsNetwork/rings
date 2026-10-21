@@ -14,7 +14,7 @@ use std::time::Duration;
 use rings_runtime::TimerError;
 
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
-use crate::core::transport::WebrtcConnectionState;
+use crate::core::transport::ConnectionStateSnapshot;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use crate::error::Error;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
@@ -118,19 +118,21 @@ impl Future for Notifier {
     }
 }
 
+/// Wait until the data channels of the connection whose state `snapshot` reads are open, or
+/// fail at once if the connection is terminal, or after `timeout_seconds` without opening.
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 pub(crate) async fn wait_for_data_channel_open(
-    state: WebrtcConnectionState,
-    data_channel_is_open: impl Fn() -> Result<bool>,
+    snapshot: impl Fn() -> ConnectionStateSnapshot,
     notifier: &Notifier,
     timeout_seconds: u8,
 ) -> Result<()> {
+    let initial = snapshot();
     // `Disconnected` remains eligible: buffered bytes may flush after ICE
     // recovery, and the delivery future observes whether that happened.
-    if state.is_terminal() {
+    if initial.webrtc().is_terminal() {
         return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
     }
-    if data_channel_is_open()? {
+    if initial.data_channel_open() {
         return Ok(());
     }
 
@@ -138,7 +140,7 @@ pub(crate) async fn wait_for_data_channel_open(
         .notified_within(Duration::from_secs(timeout_seconds.into()))
         .await?;
 
-    if data_channel_is_open()? {
+    if snapshot().data_channel_open() {
         Ok(())
     } else {
         Err(Error::DataChannelOpen(format!(

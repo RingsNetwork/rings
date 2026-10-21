@@ -537,16 +537,8 @@ impl ConnectionInterface for WebrtcConnection {
         self.callback.send_credit_view(lane)
     }
 
-    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        self.connection_state.snapshot().webrtc()
-    }
-
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
         self.connection_state.snapshot()
-    }
-
-    fn data_channel_is_open(&self) -> Result<bool> {
-        Ok(self.connection_state.snapshot().data_channel_open())
     }
 
     fn max_message_size(&self) -> usize {
@@ -596,8 +588,7 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
         wait_for_data_channel_open(
-            self.webrtc_connection_state(),
-            || self.data_channel_is_open(),
+            || self.connection_state.snapshot(),
             &self.webrtc_data_channel_state_notifier,
             WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT,
         )

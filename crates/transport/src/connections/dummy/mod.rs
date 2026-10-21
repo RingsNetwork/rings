@@ -617,16 +617,8 @@ impl ConnectionInterface for DummyConnection {
         self.callback.send_credit_view(lane)
     }
 
-    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        self.connection_state().webrtc
-    }
-
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
         self.connection_state().snapshot()
-    }
-
-    fn data_channel_is_open(&self) -> Result<bool> {
-        Ok(self.connection_state_snapshot().data_channel_open())
     }
 
     fn max_message_size(&self) -> usize {
@@ -666,7 +658,7 @@ impl ConnectionInterface for DummyConnection {
         if WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.get()) {
             std::future::pending::<()>().await;
         }
-        if self.data_channel_is_open()? {
+        if self.data_channel_is_open() {
             Ok(())
         } else {
             Err(Error::DataChannelOpen(

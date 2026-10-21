@@ -98,16 +98,8 @@ impl ConnectionInterface for FlakyCreditConnection {
         LaneCreditView::closed()
     }
 
-    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        WebrtcConnectionState::Connected
-    }
-
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
         ConnectionStateSnapshot::new(WebrtcConnectionState::Connected, true)
-    }
-
-    fn data_channel_is_open(&self) -> Result<bool> {
-        Ok(true)
     }
 
     fn max_message_size(&self) -> usize {
