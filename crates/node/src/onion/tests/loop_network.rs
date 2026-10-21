@@ -18,7 +18,6 @@ use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use rings_core::dht::Did;
-use rings_core::message::MessageSigner;
 use rings_core::swarm::OfferReply;
 use rings_core::utils::get_epoch_ms;
 use rings_test_support::with_hang_guard;
@@ -34,7 +33,6 @@ use crate::onion::session::serve::OnionWorld;
 use crate::onion::session::serve::OnionWorldReader;
 use crate::onion::session::serve::OnionWorldWriter;
 use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionProxyTarget;
@@ -45,6 +43,7 @@ use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 use crate::processor::Processor;
 use crate::provider::Provider;
+use crate::tests::exit_descriptor::ExitDescriptorFixture;
 use crate::tests::native::network_test_guard;
 use crate::tests::native::prepare_processor_with_onion_role;
 
@@ -92,30 +91,11 @@ impl LoopNode {
         service: OnionServiceName,
         policy: OnionExitPolicy,
     ) -> Result<OnionExitDescriptor> {
-        let now_ms = get_epoch_ms();
-        let network_id = self.processor.swarm.network_id();
-        OnionExitDescriptor::new_signed(
-            OnionExitDescriptorBody {
-                did: self.did(),
-                public_key: self
-                    .processor
-                    .swarm
-                    .delegator_verification_pubkey()
-                    .map_err(Error::CoreError)?,
-                delegatee_public_key: self.processor.delegatee_key().delegatee_public_key(),
-                process_epoch: self.processor.onion_process_epoch().get(),
-                node_type: OnlineNodeType::Native,
-                network_id,
-                service,
-                policy,
-                started_at_ms: now_ms,
-                heartbeat_at_ms: now_ms,
-                expires_at_ms: now_ms + 90_000,
-                version: crate::util::build_version(),
-            },
-            MessageSigner::new(self.processor.delegatee_key(), network_id),
-        )
-        .map_err(Error::CoreError)
+        ExitDescriptorFixture {
+            node_type: OnlineNodeType::Native,
+            ..ExitDescriptorFixture::live(&self.processor, service, policy, get_epoch_ms())
+        }
+        .sign()
     }
 }
 

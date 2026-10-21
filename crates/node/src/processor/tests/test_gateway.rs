@@ -48,6 +48,7 @@ use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::NativeOnionGatewayConnector;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::AdmissionActivity;
+use crate::tests::exit_descriptor::ExitDescriptorFixture;
 use crate::tests::native::prepare_processor_with_onion_role;
 
 const PUBLIC_HTTP_PORT: u16 = 80;
@@ -240,12 +241,8 @@ async fn prepare_onion_loop_public_gateway(
         .await?;
     client
         .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
-            onion_exit_descriptor_for_processor_with_service(
-                &exit,
-                OnionServiceName::tcp(),
-                now_ms,
-                exit_policy,
-            )?,
+            ExitDescriptorFixture::live(&exit, OnionServiceName::tcp(), exit_policy, now_ms)
+                .sign()?,
         ])?)
         .await?;
 
