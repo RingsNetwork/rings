@@ -63,17 +63,55 @@ const CONSUMER_INFO: &[u8] = b"consumer";
 /// HKDF info label of the AEZ key.
 const KEY_INFO: &[u8] = b"aez";
 
-/// `σ_in`: the seed of the one AEZ key its holder applies to an inbound carry.
-///
-/// Zeroized on drop; compared in constant time.
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub(crate) struct OnionCarrySeed([u8; ONION_CARRY_SEED_BYTES]);
+/// Declares a seed newtype over `[u8; 32]`, with the impls every seed shares: the byte wrapper
+/// and view of the layer codec, equality in constant time, and a `Debug` that redacts the bytes.
+macro_rules! onion_seed {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        ///
+        /// Zeroized on drop; compared in constant time.
+        #[derive(Zeroize, ZeroizeOnDrop)]
+        pub(crate) struct $name([u8; ONION_CARRY_SEED_BYTES]);
 
-/// `σ_k`: the seed of one carry segment, held by its producer.
-///
-/// Zeroized on drop; compared in constant time.
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub(crate) struct OnionSegmentSeed([u8; ONION_CARRY_SEED_BYTES]);
+        impl $name {
+            /// Wrap seed bytes read from a layer.
+            pub(crate) const fn new(bytes: [u8; ONION_CARRY_SEED_BYTES]) -> Self {
+                Self(bytes)
+            }
+
+            /// Return the seed bytes, for the layer encoding.
+            pub(crate) const fn as_bytes(&self) -> &[u8; ONION_CARRY_SEED_BYTES] {
+                &self.0
+            }
+        }
+
+        impl PartialEq for $name {
+            /// Equality in time independent of the seed bytes.
+            fn eq(&self, other: &Self) -> bool {
+                self.0.ct_eq(&other.0).into()
+            }
+        }
+
+        impl Eq for $name {}
+
+        impl fmt::Debug for $name {
+            /// Redacts the seed: it is key material.
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(concat!(stringify!($name), "(..)"))
+            }
+        }
+    };
+}
+
+onion_seed! {
+    /// `σ_in`: the seed of the one AEZ key its holder applies to an inbound carry.
+    OnionCarrySeed
+}
+
+onion_seed! {
+    /// `σ_k`: the seed of one carry segment, held by its producer.
+    OnionSegmentSeed
+}
 
 /// The per-hop seeds of one segment: what the client places in the layers `σ_in` of the relays
 /// `r_{k,1} … r_{k,s}` and of the consumer `c_k`.
@@ -96,16 +134,6 @@ pub(crate) struct OnionSegmentKeys {
 }
 
 impl OnionCarrySeed {
-    /// Wrap seed bytes read from a layer.
-    pub(crate) const fn new(bytes: [u8; ONION_CARRY_SEED_BYTES]) -> Self {
-        Self(bytes)
-    }
-
-    /// Return the seed bytes, for the layer encoding.
-    pub(crate) const fn as_bytes(&self) -> &[u8; ONION_CARRY_SEED_BYTES] {
-        &self.0
-    }
-
     /// `KDF₄₈(σ_in)`, keyed into AEZ: the only way to obtain an [`OnionCarryKey`].
     ///
     /// # Errors
@@ -118,16 +146,6 @@ impl OnionCarrySeed {
 }
 
 impl OnionSegmentSeed {
-    /// Wrap seed bytes read from a layer.
-    pub(crate) const fn new(bytes: [u8; ONION_CARRY_SEED_BYTES]) -> Self {
-        Self(bytes)
-    }
-
-    /// Return the seed bytes, for the layer encoding.
-    pub(crate) const fn as_bytes(&self) -> &[u8; ONION_CARRY_SEED_BYTES] {
-        &self.0
-    }
-
     /// A uniform seed, as a relay's unused `σ_out` (D7: every layer carries one outbound seed).
     pub(crate) fn random(rng: &mut (impl CryptoRng + RngCore)) -> Self {
         let mut seed = Self([0; ONION_CARRY_SEED_BYTES]);
@@ -216,37 +234,5 @@ impl OnionSegmentKeys {
     /// `k_{c_k}`.
     pub(crate) const fn consumer(&self) -> &OnionCarryKey {
         &self.consumer
-    }
-}
-
-impl PartialEq for OnionCarrySeed {
-    /// Equality in time independent of the seed bytes.
-    fn eq(&self, other: &Self) -> bool {
-        self.0.ct_eq(&other.0).into()
-    }
-}
-
-impl PartialEq for OnionSegmentSeed {
-    /// Equality in time independent of the seed bytes.
-    fn eq(&self, other: &Self) -> bool {
-        self.0.ct_eq(&other.0).into()
-    }
-}
-
-impl Eq for OnionCarrySeed {}
-
-impl Eq for OnionSegmentSeed {}
-
-impl fmt::Debug for OnionCarrySeed {
-    /// Redacts the seed: it is key material.
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("OnionCarrySeed(..)")
-    }
-}
-
-impl fmt::Debug for OnionSegmentSeed {
-    /// Redacts the seed: it is key material.
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("OnionSegmentSeed(..)")
     }
 }
