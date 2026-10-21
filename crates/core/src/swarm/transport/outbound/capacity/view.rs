@@ -53,12 +53,13 @@ impl CapacityView<'_> {
     /// peer releases, and departures from both queues.
     pub(in crate::swarm::transport) fn room_listeners(&self) -> Vec<EventListener> {
         self.global
+            .scope
             .room_listeners()
             .into_iter()
             .chain(
                 self.capacity
                     .iter()
-                    .flat_map(|capacity| capacity.room_listeners()),
+                    .flat_map(|capacity| capacity.peer.room_listeners()),
             )
             .collect()
     }
@@ -131,7 +132,12 @@ impl PeerStamp {
     pub(in crate::swarm::transport) fn listen(&self) -> Vec<EventListener> {
         self.capacity
             .upgrade()
-            .map(|capacity| vec![capacity.progressed.listen(), capacity.releases.listen()])
+            .map(|capacity| {
+                vec![
+                    capacity.progressed.listen(),
+                    capacity.peer.releases.listen(),
+                ]
+            })
             .unwrap_or_default()
     }
 }
@@ -185,10 +191,7 @@ impl ChannelReading {
 
     /// Read `capacity`'s counts in one critical section.
     fn of(capacity: &TransferCapacity) -> Self {
-        let state = capacity
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = capacity.peer.snapshot();
         Self {
             drained: state.drained,
             admitted: state.capacity.admitted_count(),
