@@ -1,6 +1,25 @@
 //! End-to-end loops over real links (#843): `relay^k ⋙ tcp` and `relay^k ⋙ https`, with `k = 4`
 //! relay positions around one symbol hop.
+//!
+//! The data path is bounded by the client's own timeouts, not by a test duration (#985). Once a
+//! loop is open, every link of its route emits at the constant rate `r` (#880), real cells
+//! replacing cover, and a link's cell rate is `min(r / u(b), ρ_rel / f(b))`. Where the receiver
+//! releases frames slower than `r`, the lane's window stays full of cover, so a real cell waits
+//! at every hop for the window ahead of it to drain at `ρ_rel`. That rate is the transport's on
+//! the test host, not a protocol period: a debug build takes seconds per hop, and a fixed
+//! wall-clock guard on a multi-cell phase measures it. What the protocol bounds is progress, and
+//! the client reports a stall itself, as an error or a failed stream:
+//!
+//! ```text
+//! open     an answer within ONION_SESSION_OPEN_TIMEOUT              else timed out
+//! https    a response within ONION_HTTPS_RESPONSE_TIMEOUT of the open   else timed out
+//! stream   a frame within Δ = 2V of the last one heard              else Failed (D2′ Liveness)
+//! ```
+//!
+//! Each guard below is that bound plus one [`EVENT_BOUND`] for the report to arrive, so it fires
+//! only if the client's own bound fails to.
 
+use std::time::Duration;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -20,12 +39,15 @@ use crate::onion::https::OnionHttpsEgress;
 use crate::onion::https::OnionHttpsRequest;
 use crate::onion::https::OnionHttpsResponse;
 use crate::onion::https::OnionHttpsWorld;
+use crate::onion::https::ONION_HTTPS_RESPONSE_TIMEOUT;
 use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::session::client::OnionCreditWindow;
+use crate::onion::session::client::ONION_SESSION_DEADLINE_MS;
 use crate::onion::session::dial::OnionSessionRequest;
 use crate::onion::session::dial::OnionStreamEvent;
 use crate::onion::session::dial::OnionStreamReceiver;
+use crate::onion::session::dial::ONION_SESSION_OPEN_TIMEOUT;
 use crate::onion::session::serve::OnionExitSessions;
 use crate::onion::session::serve::OnionWorld;
 use crate::onion::sphinx::class::OnionLoopClass;
@@ -65,11 +87,31 @@ fn request(network: &LoopNetwork, symbol: OnionServiceName) -> Result<OnionSessi
     })
 }
 
+/// The hang guard of one awaited stream event: the session deadline `Δ = 2V`, within which the
+/// client fails a session that hears no frame, plus one [`EVENT_BOUND`] for the failure to arrive.
+fn stream_event_bound() -> Duration {
+    let deadline = u64::try_from(ONION_SESSION_DEADLINE_MS).expect("Δ fits in u64 milliseconds");
+    Duration::from_millis(deadline).saturating_add(EVENT_BOUND)
+}
+
+/// The hang guard of one HTTPS request: the client's open and response timeouts, each of which
+/// fails the request with an error, plus one [`EVENT_BOUND`] for the request's own sends and the
+/// failure to arrive.
+fn https_request_bound() -> Duration {
+    ONION_SESSION_OPEN_TIMEOUT
+        .saturating_add(ONION_HTTPS_RESPONSE_TIMEOUT)
+        .saturating_add(EVENT_BOUND)
+}
+
 /// Collect the world-to-client stream until `fin`, failing on a failed session.
+///
+/// Each event is awaited under [`stream_event_bound`], so the guard scales with the frames of
+/// the stream: it bounds a stall, never the transport's rate.
 async fn collect(receiver: &mut OnionStreamReceiver) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
+    let bound = stream_event_bound();
     loop {
-        match receiver.next().await {
+        match with_hang_guard("the loop stream's next event", bound, receiver.next()).await {
             Some(OnionStreamEvent::Data(data)) => bytes.extend_from_slice(&data),
             Some(OnionStreamEvent::Fin) => return Ok(bytes),
             Some(OnionStreamEvent::Failed) | None => {
@@ -96,12 +138,7 @@ async fn test_tcp_loop_echoes_a_multi_frame_stream() -> Result<()> {
 
     sender.send(Bytes::from(sent.clone())).await?;
     sender.fin().await?;
-    let echoed = with_hang_guard(
-        "test_tcp_loop_echoes_a_multi_frame_stream",
-        EVENT_BOUND,
-        collect(&mut receiver),
-    )
-    .await?;
+    let echoed = collect(&mut receiver).await?;
 
     assert_eq!(echoed, sent);
     Ok(())
@@ -181,7 +218,7 @@ async fn test_https_loop_fetches_through_the_session_target() -> Result<()> {
 
     let response = with_hang_guard(
         "test_https_loop_fetches_through_the_session_target",
-        EVENT_BOUND,
+        https_request_bound(),
         OnionHttpsClient::new(network.client.runtime.clone()).request(&route, call),
     )
     .await?;

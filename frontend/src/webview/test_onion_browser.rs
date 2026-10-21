@@ -216,15 +216,22 @@ async fn browser_onion_loop() -> WebviewResult<(Rc<Provider>, Vec<ProviderListen
     .await?;
     // Listening starts each node's registrations, and the first one publishes at once: started
     // after the edges, every registration reaches the overlay on its first attempt. A
-    // registration publish has no completion signal (#866), so the client's directory is polled.
-    let listeners = [&client, &guard, &exit]
-        .into_iter()
-        .chain(middle.iter())
+    // registration publish has no completion signal (#866), so the client's directory is probed
+    // on every activity, under the registry guard of the publishers' heartbeat (#985).
+    let publishers = [&guard, &exit].into_iter().chain(middle.iter());
+    let heartbeat = publishers
+        .clone()
+        .map(|node| node.registry_heartbeat)
+        .fold(Duration::ZERO, Duration::max);
+    let listeners = iter::once(&client)
+        .chain(publishers)
         .map(|node| node.provider.listen())
         .collect::<Vec<_>>();
-    poll_until("the client directory to register the loop", || {
-        loop_directory_ready(&client.provider, FIXTURE_MIDDLE_RELAYS + 2)
-    })
+    poll_until(
+        "the client directory to register the loop",
+        registry_hang_guard(heartbeat),
+        || loop_directory_ready(&client.provider, FIXTURE_MIDDLE_RELAYS + 2),
+    )
     .await?;
     Ok((client.provider, listeners))
 }
@@ -235,6 +242,8 @@ struct FixtureNode {
     provider: Rc<Provider>,
     /// Admission events of the node's backend.
     admitted: Arc<AdmittedPeers>,
+    /// The heartbeat `I` of the node's registries: the pause before it publishes them again.
+    registry_heartbeat: Duration,
 }
 
 impl FixtureNode {
@@ -347,6 +356,7 @@ async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewR
             .await
             .map_err(|error| WebviewError::transport(format!("open idb storage: {error:?}")))?,
     );
+    let registry_heartbeat = config.registry_heartbeat_interval();
     let processor = ProcessorBuilder::from_config(&config)
         .map_err(|error| WebviewError::transport(format!("build processor config: {error:?}")))?
         .storage(storage)
@@ -359,6 +369,7 @@ async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewR
     Ok(FixtureNode {
         provider: Rc::new(provider),
         admitted,
+        registry_heartbeat,
     })
 }
 
@@ -437,17 +448,47 @@ fn string_field(value: &JsValue, field: &str) -> WebviewResult<String> {
 /// The fixture preconditions (a WebRTC edge admitted, a DHT entry converged) change only through
 /// swarm traffic, which every provider's activity observer records. So `ready` is probed once,
 /// then again after each activity newer than the mark taken before the previous probe: no
-/// change is missed, and no timer paces the probes. `FLOW_HANG_GUARD` bounds a hang only.
-async fn poll_until<Ready, Check>(what: &str, mut ready: Check) -> WebviewResult<()>
+/// change is missed, and no timer paces the probes. `hang_guard` bounds a hang only.
+async fn poll_until<Ready, Check>(
+    what: &str,
+    hang_guard: Duration,
+    mut ready: Check,
+) -> WebviewResult<()>
 where
     Check: FnMut() -> Ready,
     Ready: Future<Output = WebviewResult<bool>>,
 {
-    probe_on_activity(what, FLOW_HANG_GUARD, || {
+    probe_on_activity(what, hang_guard, || {
         let probe = ready();
         async move { Ok(probe.await?.then_some(())) }
     })
     .await
+}
+
+/// The hang guard of the directory phase: the publishers' registry heartbeat `I` beyond
+/// [`FLOW_HANG_GUARD`] (#985).
+///
+/// The phase ends on an event, the client's read observing every publisher's registration, but
+/// the eventual law puts that event up to one heartbeat after the first publish. Only the writer
+/// reads its own writes (#984): another node reads a registration once it is stored at an owner
+/// its read reaches. A first publish that lands at an owner which then loses the placement
+/// reaches the new owner in a storage repair round, or at the latest with the publisher's next
+/// heartbeat, which starts `I` after the first publish ends:
+///
+/// ```text
+/// listen ── publish₁ (d₁) ── I ── publish₂ (d₂) ── read (d_r) ── ready
+///           to an owner that      to the owner the
+///           loses the placement   client's read reaches
+///
+/// phase ≤ d₁ + I + d₂ + d_r,     d₁ + d₂ + d_r ≤ FLOW_HANG_GUARD
+/// ```
+///
+/// A publish is one registry fetch, polled for at most `P = 2 s`, and its appends, and the read
+/// is one fetch: waits on events, which the one-state guard bounds together. The bound assumes
+/// the placement settles within one heartbeat: every edge is admitted before the first publish
+/// and no node leaves, so `publish₂` meets the owners the client's read reaches.
+fn registry_hang_guard(heartbeat: Duration) -> Duration {
+    heartbeat.saturating_add(FLOW_HANG_GUARD)
 }
 
 /// Return whether the client's directory holds the precondition of a loop route: the relay
