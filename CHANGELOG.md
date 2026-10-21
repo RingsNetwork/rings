@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `rustls-webpki` is bumped to 0.103.16 and `webpki-roots` to 1.0.10 for RUSTSEC-2026-0382
+  (distrusted intermediates may be accepted) and RUSTSEC-2026-0381 (bundled roots trust
+  distrusted emSign intermediates) (#997). Both are admitted ahead of the dependency cooldown,
+  like the rustls advisory bump of #956.
+
+## 0.34.1
+
 - `onion_exit_policy` refuses unknown keys (#989). This is breaking for a config that still
   carries the removed `max_circuits` or `max_streams_per_circuit`: it now fails to load instead
   of loading silently with the session limit unspecified (`max_sessions: 0`). Replace them by
