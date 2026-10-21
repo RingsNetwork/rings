@@ -212,10 +212,7 @@ impl SendCredit {
     ///
     /// Post: on `true`, `committed + reserved ≤ limit` still holds with one more reservation.
     pub(crate) fn try_reserve(&mut self) -> bool {
-        let free = self
-            .committed
-            .checked_add(self.reserved)
-            .is_some_and(|used| used < self.limit);
+        let free = self.free() > 0;
         if free {
             self.reserved = self.reserved.saturating_add(1);
         }
