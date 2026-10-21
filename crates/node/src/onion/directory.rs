@@ -104,11 +104,7 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
     let route =
         build_onion_route_from_exits(reader, request, policy_exits, first_hop_permitted).await?;
 
-    Ok(OnionProxyRoute {
-        protocol: proxy,
-        target,
-        route,
-    })
+    Ok(OnionProxyRoute { target, route })
 }
 
 async fn build_onion_route_from_exits(

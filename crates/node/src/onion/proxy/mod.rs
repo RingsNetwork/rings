@@ -47,25 +47,23 @@ impl OnionProxyProtocol {
         }
     }
 
-    /// Whether `descriptor` registers this protocol's symbol, on a runtime able to interpret it:
-    /// only native and FFI nodes have sockets, so only they serve `tcp`.
+    /// Whether `descriptor`'s runtime can interpret this protocol's symbol: only native and FFI
+    /// nodes have sockets, so only they serve `tcp`. Route selection has already kept only the
+    /// exits that register the symbol.
     pub(crate) fn accepts_exit_descriptor(self, descriptor: &OnionExitDescriptor) -> bool {
-        let runtime_serves = match self {
+        match self {
             Self::TcpConnect => matches!(
                 descriptor.node_type,
                 OnlineNodeType::Native | OnlineNodeType::Ffi
             ),
             Self::HttpsProxy => true,
-        };
-        runtime_serves && descriptor.service == self.exit_service_name()
+        }
     }
 }
 
 /// A proxy route selected for a target.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionProxyRoute {
-    /// Requested ingress protocol.
-    pub protocol: OnionProxyProtocol,
     /// Target requested by the local client.
     pub target: OnionProxyTarget,
     /// Selected route ending at the exit.
