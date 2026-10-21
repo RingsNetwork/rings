@@ -155,7 +155,7 @@ enum Queued {
 /// What one namespace's queue holds, queued or in dispatch.
 #[derive(Default)]
 struct Held {
-    /// Envelopes; retirements are not counted.
+    /// Envelopes; link facts are not counted.
     envelopes: AtomicUsize,
     /// Encoded envelope bytes.
     weight: AtomicUsize,
