@@ -5,7 +5,6 @@ use subtle::ConstantTimeEq;
 
 use super::fixture_layer;
 use super::fixture_rng;
-use crate::onion::circuit::OnionCellBucket;
 use crate::onion::loop_shape::MAX_ONION_LOOP_HOPS;
 use crate::onion::signature::ONION_SIGNATURE;
 use crate::onion::sphinx::class::OnionLoopClass;
@@ -112,17 +111,14 @@ fn test_decode_rejects_non_canonical_strings() {
     }
 }
 
-/// Every bucket is a class with `C_b = b − |χ| − F` (`C_16KiB = 13465`), the class is the cell
-/// length, a length of no bucket (4 KiB, below the header's reach) is no class, and distinct
+/// Every class has `C_b = b − |χ| − F` (`C_16KiB = 13465`), the class is the cell
+/// length, a length of no class (4 KiB, below the header's reach) is no class, and distinct
 /// classes have distinct MAC labels.
 #[test]
 fn test_carry_width_per_class() {
     assert_eq!(ONION_CELL_FRAMING_BYTES, 0);
     assert_eq!(OnionLoopClass::DEFAULT.carry_bytes(), 13_465);
-    let classes = OnionCellBucket::ALL
-        .into_iter()
-        .map(OnionLoopClass::from)
-        .collect::<Vec<_>>();
+    let classes = OnionLoopClass::ALL;
 
     for class in classes.iter().copied() {
         assert_eq!(class.carry_bytes(), class.cell_bytes() - ONION_HEADER_BYTES);

@@ -622,7 +622,7 @@ fn test_held_bytes_are_cut_to_each_blocks_capacity_then_fin() {
     assert!(kinds(&session.world(expired_ms, OnionWorldRead::Bytes(wide))).is_empty());
     assert!(kinds(&session.world(expired_ms, OnionWorldRead::Eof)).is_empty());
 
-    let large = OnionLoopClass::from(crate::onion::circuit::OnionCellBucket::KiB64);
+    let large = OnionLoopClass::KiB64;
     assert!(OnionFrame::data_capacity(large) > small + 5);
     // The loop's own 16 KiB block arrives first and carries one 16 KiB cut; the 64 KiB block of
     // its credit carries the rest, which exceeds a 16 KiB block; the held fin waits for a block.

@@ -12,7 +12,6 @@ use super::schedule::is_active;
 use super::schedule::is_credited;
 use super::schedule::plan;
 use super::schedule::slot_micros;
-use super::schedule::units_of;
 use super::schedule::Emission;
 use super::schedule::LinkClock;
 use super::schedule::OnionIdleFloor;
@@ -25,7 +24,6 @@ use super::MAX_PENDING_ONION_SEND_BYTES_PER_PEER;
 use crate::error::Error;
 use crate::error::OnionQueueAdmissionReason;
 use crate::error::Result;
-use crate::onion::circuit::OnionCellBucket;
 use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
 use crate::onion::sphinx::class::OnionLoopClass;
 
@@ -36,7 +34,7 @@ const WINDOW_US: u128 = ONION_FORWARD_MAX_VALIDITY_MS * 1_000;
 /// cells enqueued at `reals` (each one emitted in the first slot it is due), as the emitter
 /// produces them: at each due instant, or at an enqueue that wakes it.
 fn schedule(reals: &[u128], floor: OnionIdleFloor, horizon_us: u128) -> Vec<(u128, bool)> {
-    let units = units_of(OnionLoopClass::DEFAULT);
+    let units = u128::from(OnionLoopClass::DEFAULT.units().get());
     let mut clock = LinkClock::default();
     let mut queued = 0_usize;
     let mut pending = reals.iter().copied().peekable();
@@ -76,7 +74,10 @@ fn count_in(starts: &[(u128, bool)], from_us: u128, to_us: u128) -> u128 {
 
 #[test]
 fn test_slot_is_the_reciprocal_of_the_emission_rate() {
-    assert_eq!(slot_micros(units_of(OnionLoopClass::DEFAULT)), 10_173);
+    assert_eq!(
+        slot_micros(u128::from(OnionLoopClass::DEFAULT.units().get())),
+        10_173
+    );
     for units in [1, 4, 16, 64, 256, 768] {
         assert_eq!(
             slot_micros(units),
@@ -109,7 +110,7 @@ fn test_the_credit_gate_needs_room_for_one_frame_only() {
     assert!(!is_credited(Some(0)));
     assert!(!is_credited(None));
 
-    let units = units_of(OnionLoopClass::DEFAULT);
+    let units = u128::from(OnionLoopClass::DEFAULT.units().get());
     let clock = LinkClock {
         last_real_us: Some(0),
         last_start: Some((0, units)),
@@ -131,7 +132,7 @@ fn test_the_credit_gate_needs_room_for_one_frame_only() {
 #[test]
 fn test_no_credit_emits_nothing_and_credit_only_delays() {
     let floor = OnionIdleFloor::DEFAULT;
-    let units = units_of(OnionLoopClass::DEFAULT);
+    let units = u128::from(OnionLoopClass::DEFAULT.units().get());
     let clock = LinkClock {
         last_real_us: Some(0),
         last_start: Some((0, units)),
@@ -198,7 +199,7 @@ fn test_an_unsent_real_cell_is_requeued_at_the_head() {
 
     assert!(state.requeue(peer, epoch, unsent));
     assert_eq!(state.quota.total(), 2, "its quota is kept");
-    let slot_us = slot_micros(units_of(class));
+    let slot_us = slot_micros(u128::from(class.units().get()));
     assert!(matches!(
         state.next(peer, epoch, floor, true, slot_us),
         EmitterStep::Emit(Emission::Real(1))
@@ -426,7 +427,7 @@ fn test_an_emitter_of_a_closed_lane_stops_on_its_reopened_successor() {
 #[test]
 fn test_a_real_emission_is_charged_its_own_class() -> Result<()> {
     let peer = Did::from(8_u32);
-    let large = OnionLoopClass::from(OnionCellBucket::MiB1);
+    let large = OnionLoopClass::MiB1;
     let floor = OnionIdleFloor::DEFAULT;
     let mut state = OrderedSendState::default();
     let epoch = state.open(peer, 0).ok_or(Error::InvalidData)?;
@@ -442,7 +443,7 @@ fn test_a_real_emission_is_charged_its_own_class() -> Result<()> {
         EmitterStep::Emit(Emission::Real(1))
     ));
     state.complete(peer, epoch);
-    let large_slot = slot_micros(units_of(large));
+    let large_slot = slot_micros(u128::from(large.units().get()));
     assert!(matches!(
         state.next(peer, epoch, floor, true, slot_micros(1)),
         EmitterStep::Wait(due, _) if due == large_slot
@@ -632,7 +633,7 @@ fn test_a_reopened_lane_keeps_its_emission_clock() {
 #[test]
 fn test_cover_takes_the_class_of_the_last_real_cell() -> Result<()> {
     let peer = Did::from(2_u32);
-    let large = OnionLoopClass::from(OnionCellBucket::MiB1);
+    let large = OnionLoopClass::MiB1;
     let floor = OnionIdleFloor::DEFAULT;
     let mut state = OrderedSendState::default();
     let epoch = state.open(peer, 0).ok_or(Error::InvalidData)?;
@@ -645,7 +646,7 @@ fn test_cover_takes_the_class_of_the_last_real_cell() -> Result<()> {
     ));
     state.complete(peer, epoch);
     assert!(matches!(
-        state.next(peer, epoch, floor, true, slot_micros(units_of(large))),
+        state.next(peer, epoch, floor, true, slot_micros(u128::from(large.units().get()))),
         EmitterStep::Emit(Emission::Cover(class)) if class == large
     ));
     Ok(())
@@ -679,7 +680,7 @@ fn test_queue_bounds_hold_per_link_and_globally() {
 
     // One cell of the largest class per link: `⌊bound / b⌋` links fill the global bound, and
     // the next link's cell would exceed it.
-    let largest = OnionLoopClass::from(OnionCellBucket::MiB12);
+    let largest = OnionLoopClass::MiB12;
     assert!(largest.cell_bytes() <= MAX_PENDING_ONION_SEND_BYTES_PER_PEER);
     let filled = u32::try_from(MAX_PENDING_ONION_SEND_BYTES / largest.cell_bytes())
         .expect("a handful of links");

@@ -25,7 +25,6 @@
 //! Every link emits at the constant rate of `send_outbox` (#880), real cells replacing cover.
 
 mod admission;
-mod cell;
 mod codec;
 mod expiry;
 mod hop;
@@ -47,7 +46,6 @@ pub(crate) use admission::OnionAdmissionState;
 #[cfg(test)]
 pub(crate) use admission::OnionReplayFilterKey;
 pub(crate) use admission::ONION_ADMISSION_SENDER_UNITS;
-pub use cell::OnionCellBucket;
 pub(crate) use codec::OnionCircuitInput;
 pub(crate) use codec::OnionLinkFact;
 pub(crate) use expiry::OnionExpiry;

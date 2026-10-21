@@ -8,7 +8,6 @@ use futures::channel::oneshot;
 use rings_core::dht::Did;
 
 use super::schedule::plan;
-use super::schedule::units_of;
 use super::schedule::Emission;
 use super::schedule::LinkClock;
 use super::schedule::OnionIdleFloor;
@@ -414,7 +413,7 @@ impl<T> OrderedSendState<T> {
                     Some(_) => None,
                 }
                 .unwrap_or((Emission::Cover(lane.class), lane.class));
-                lane.clock.last_start = Some((now_us, units_of(class)));
+                lane.clock.last_start = Some((now_us, u128::from(class.units().get())));
                 EmitterStep::Emit(emission)
             }
         }

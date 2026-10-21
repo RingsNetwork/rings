@@ -180,7 +180,6 @@ use super::ONION_FORWARD_MAX_VALIDITY_MS;
 use super::ONION_FORWARD_PAYLOAD_TTL_MS;
 use crate::onion::sphinx::cell::Charged;
 use crate::onion::sphinx::cell::OnionCell;
-use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::OnionProcessEpoch;
 
 /// Admission window `V = 150 s`: a layer is admissible at `arr` iff `arr < x ≤ arr + V`.
@@ -215,11 +214,6 @@ impl OnionAdmissionUnits {
     #[cfg(all(test, rings_native))]
     pub(super) const fn new(units: NonZeroU32) -> Self {
         Self(units)
-    }
-
-    /// `u(b) = b / 16 KiB`, the units of one class-`b` cell.
-    fn of_class(class: OnionLoopClass) -> Self {
-        Self(NonZeroU32::new(class.units()).unwrap_or(NonZeroU32::MIN))
     }
 
     /// The unit count.
@@ -531,7 +525,7 @@ impl OnionAdmissionState {
         link: OnionAdmissionLink,
         cell: OnionCell,
     ) -> Result<Charged<OnionCell>, OnionChargeRejection> {
-        let units = OnionAdmissionUnits::of_class(cell.class());
+        let units = OnionAdmissionUnits(cell.class().units());
         self.charge_units(now_ms, link, units)
             .map(|charge| Charged::new(cell, charge))
     }

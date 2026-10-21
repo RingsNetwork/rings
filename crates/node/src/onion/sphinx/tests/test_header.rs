@@ -13,7 +13,6 @@ use super::fixture_layer;
 use super::fixture_rng;
 use super::fixture_route;
 use super::hop_key;
-use crate::onion::circuit::OnionCellBucket;
 use crate::onion::loop_shape::MAX_ONION_LOOP_HOPS;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionCellWidth;
@@ -105,7 +104,7 @@ fn test_relabelled_cell_dies_at_the_next_honest_hop() {
         panic!("position 1 is a relay");
     };
     let honest = forwarded.into_bytes();
-    let large = OnionLoopClass::from(OnionCellBucket::MiB12);
+    let large = OnionLoopClass::MiB12;
     let mut relabelled = honest.clone();
     relabelled.resize(large.cell_bytes(), 0);
 

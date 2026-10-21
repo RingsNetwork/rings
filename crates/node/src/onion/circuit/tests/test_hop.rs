@@ -53,7 +53,7 @@ fn test_noise_of_a_class_width_is_charged_then_dropped_at_the_peel() {
 #[test]
 fn test_a_cell_is_charged_the_units_of_its_class() {
     let mut fixture = Fixture::new();
-    let class = OnionLoopClass::from(crate::onion::circuit::OnionCellBucket::MiB1);
+    let class = OnionLoopClass::MiB1;
     let noise = OnionCell::parse(&vec![0x5a; class.cell_bytes()]).expect("width");
 
     assert!(matches!(
@@ -62,7 +62,7 @@ fn test_a_cell_is_charged_the_units_of_its_class() {
     ));
     assert_eq!(
         fixture.hops[0].admission.sender_units(Did::from(CLIENT)),
-        class.units()
+        class.units().get()
     );
     let refused = OnionCell::parse(&vec![0; OnionLoopClass::DEFAULT.cell_bytes()]).expect("width");
     assert!(matches!(

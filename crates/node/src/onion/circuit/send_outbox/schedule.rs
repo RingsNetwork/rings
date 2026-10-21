@@ -23,14 +23,13 @@ pub(super) const fn slot_micros(units: u128) -> u128 {
         .div_ceil(EMISSION_RATE_NUMERATOR * ONION_LINK_BUDGET_UNITS)
 }
 
-/// `u(b)` as the schedule's integer type.
-pub(super) fn units_of(class: OnionLoopClass) -> u128 {
-    u128::from(class.units())
-}
+/// `u_max = u(12 MiB) = 768`, the units of the largest class.
+pub(super) const ONION_LINK_MAX_UNITS: u128 = OnionLoopClass::MiB12.units().get() as u128;
 
 // Budget safety at the largest class: `ρ·B + u_max < B`.
 const _: () = assert!(
-    ONION_LINK_BUDGET_UNITS * EMISSION_RATE_NUMERATOR / EMISSION_RATE_DENOMINATOR + 768
+    ONION_LINK_BUDGET_UNITS * EMISSION_RATE_NUMERATOR / EMISSION_RATE_DENOMINATOR
+        + ONION_LINK_MAX_UNITS
         < ONION_LINK_BUDGET_UNITS
 );
 
