@@ -372,7 +372,7 @@ pub struct OnionExitDescriptorBody {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
-    /// Delegation public key used for encrypted onion exit frames.
+    /// Delegation public key: the Sphinx key `pk_i` a loop's header blinds the exit's layer to.
     pub delegatee_public_key: PublicKey<33>,
     /// Process epoch `e_n` of the registering process, equal to its `relay` registration's.
     pub process_epoch: OnionProcessEpoch,
@@ -486,7 +486,7 @@ pub struct OnionExitDescriptor {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
-    /// Delegation public key used for encrypted onion exit frames.
+    /// Delegation public key: the Sphinx key `pk_i` a loop's header blinds the exit's layer to.
     pub delegatee_public_key: PublicKey<33>,
     /// Process epoch `e_n` of the registering process, equal to its `relay` registration's.
     pub process_epoch: OnionProcessEpoch,

@@ -47,7 +47,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeDescriptor;
 
-/// Route-building request for an onion circuit.
+/// Route-building request for an onion loop.
 ///
 /// The request names one world-facing symbol, which stands alone in its pipeline (#834 D4a), so
 /// the loop has `n = 1` symbol hop and `H = (s + 1) + s` positions; the length is fixed by the
@@ -75,7 +75,7 @@ impl OnionRouteRequest {
     }
 }
 
-/// One hop selected for encrypted onion routing: a node process registering a symbol.
+/// One hop selected for an onion loop: a node process registering a symbol.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OnionRouteHop {
     /// Hop DID.

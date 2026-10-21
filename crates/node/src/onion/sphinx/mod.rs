@@ -42,9 +42,8 @@
 //!    receiving hop rejects at `α` decoding (`≈ 99.6 %`, before any ECDH) or at `γ`; both are one
 //!    outcome, [`header::OnionPeelError::Invalid`], charged `u(b)` by admission (#834) and
 //!    checked before any replay-store insertion (L9 counts admitted layers only).
-//! 2. **Integrity and neighbour.** No per-edge cell AEAD remains: header integrity is `γ`, carry
-//!    integrity is the consumer's AEZ authenticator, and the neighbour `from` is the authenticated
-//!    transport link.
+//! 2. **Integrity and neighbour.** Header integrity is `γ`, carry integrity is the consumer's AEZ
+//!    authenticator, and the neighbour `from` is the authenticated transport link.
 //!
 //! The module is crate-private: its one consumer is the loop data plane (`onion::circuit`), whose
 //! hop step and loop client are the only callers of the cell and the builder.

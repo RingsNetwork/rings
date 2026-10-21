@@ -1,6 +1,6 @@
 //! The onion loop data plane (#834 Phase 2a, #843).
 //!
-//! A circuit is a client-sealed loop `client → g → r → h → r′ → g → client` of Sphinx cells
+//! A loop is a client-sealed cycle `client → g → r → h → r′ → g → client` of Sphinx cells
 //! (`onion::sphinx`): every edge carries one cell `α‖β‖γ‖y` of the loop's class `b`, exactly `b`
 //! bytes, and every hop, `relay` or symbol, runs the same step `Hop_i`:
 //!
@@ -14,13 +14,13 @@
 //!                                                   lanes, and the sessions on the link
 //! ```
 //!
-//! Relays are stateless: a relay keeps no return state, since the loop returns through fresh
-//! positions the client sealed, and the only state of the data plane is the admission state
-//! (ledgers and the replay store, `admission`), which the shell owns. There is no per-edge cell
-//! AEAD: header integrity is `γ`, carry integrity is the consumer's AEZ authenticator under a key
-//! only the client and the consumer hold, and the previous hop is the authenticated transport
-//! link. A reply carries no signature of the exit (#834, Prop. Reply authentication): it opens
-//! under `k_{c_n}`, which only the client and the exit's process hold, so replies are deniable.
+//! Relays are stateless: the loop returns through fresh positions the client sealed, and the only
+//! state of the data plane is the admission state (ledgers and the replay store, `admission`),
+//! which the shell owns. Header integrity is `γ`, carry integrity is the consumer's AEZ
+//! authenticator under a key only the client and the consumer hold, and the previous hop is the
+//! authenticated transport link. A reply is authenticated by opening under `k_{c_n}`, which only
+//! the client and the exit's process hold (#834, Prop. Reply authentication), so replies are
+//! deniable.
 //!
 //! Every link emits at the constant rate of `send_outbox` (#880), real cells replacing cover.
 
