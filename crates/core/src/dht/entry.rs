@@ -136,36 +136,38 @@ impl PlacedEntryOperation {
         self.op.did()
     }
 
-    /// Return whether `placement` is in this entry's affine replica set.
-    pub fn placement_belongs_to_entry(&self, redundancy: u16) -> Result<bool> {
-        let entry_key = self.entry_key()?;
-        placement_belongs_to_entry_key(entry_key, self.placement, self.op.kind(), redundancy)
-    }
-
     /// Enforce that `placement` belongs to the operation's entry.
     pub fn validate_placement(&self, redundancy: u16) -> Result<()> {
-        if self.placement_belongs_to_entry(redundancy)? {
-            return Ok(());
-        }
-
-        Err(Error::InvalidMessage(
-            "placed entry operation targets a placement outside the entry's affine replica set"
-                .to_string(),
-        ))
+        validate_affine_placement(
+            self.entry_key()?,
+            self.placement,
+            self.op.kind(),
+            redundancy,
+            "placed entry operation",
+        )
     }
 }
 
-/// Whether `placement` lies in the affine replica set of a carrier of `kind` identified by
-/// `entry_key`: the set has `kind.replication(redundancy)` keys, one for a relay inbox.
-fn placement_belongs_to_entry_key(
+/// Enforce that `placement` lies in the affine replica set of a carrier of `kind` identified
+/// by `entry_key`: the set has `kind.replication(redundancy)` keys, one for a relay inbox. The
+/// error names the rejected carrier as `what`.
+fn validate_affine_placement(
     entry_key: Did,
     placement: Did,
     kind: EntryKind,
     redundancy: u16,
-) -> Result<bool> {
-    Ok(entry_key
+    what: &'static str,
+) -> Result<()> {
+    if entry_key
         .rotate_affine(kind.replication(redundancy))?
-        .contains(&placement))
+        .contains(&placement)
+    {
+        return Ok(());
+    }
+
+    Err(Error::InvalidMessage(format!(
+        "{what} targets a placement outside the entry's affine replica set"
+    )))
 }
 
 /// A DHT storage entry with an [`EntryKind`] and a ring key represented as [`Did`].
@@ -228,21 +230,15 @@ impl PlacedEntry {
         Self { key, entry }
     }
 
-    /// Return whether `key` is in `entry.did`'s affine replica set.
-    pub fn placement_belongs_to_entry(&self, redundancy: u16) -> Result<bool> {
-        placement_belongs_to_entry_key(self.entry.did, self.key, self.entry.kind, redundancy)
-    }
-
     /// Enforce that `key` belongs to `entry.did`'s affine replica set.
     pub fn validate_placement(&self, redundancy: u16) -> Result<()> {
-        if self.placement_belongs_to_entry(redundancy)? {
-            return Ok(());
-        }
-
-        Err(Error::InvalidMessage(
-            "synced placed entry targets a placement outside the entry's affine replica set"
-                .to_string(),
-        ))
+        validate_affine_placement(
+            self.entry.did,
+            self.key,
+            self.entry.kind,
+            redundancy,
+            "synced placed entry",
+        )
     }
 }
 

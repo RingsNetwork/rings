@@ -231,7 +231,7 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
         node.did(),
     )?;
 
-    assert!(!msg.placement_belongs_to_entry(2)?);
+    assert!(msg.validate_placement(2).is_err());
     let result = handler.handle(&context, &msg).await;
 
     assert!(matches!(
