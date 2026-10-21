@@ -211,11 +211,11 @@ impl LoopNetwork {
                 .map(LoopNode::route_hop)
                 .ok_or(Error::InvalidData)
         })?;
-        OnionRoute::new(
+        Ok(OnionRoute::new(
             service.clone(),
             hops,
             h.exit_descriptor(service, open_policy())?,
-        )
+        ))
     }
 }
 

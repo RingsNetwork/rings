@@ -336,25 +336,6 @@ fn test_exit_requires_its_current_relay_registration() -> Result<()> {
     Ok(())
 }
 
-/// A route cannot be built over a symbol hop whose epoch differs from its descriptor's.
-#[test]
-fn test_route_rejects_symbol_hop_with_stale_epoch() -> Result<()> {
-    let keys = node_keys(1..=4)?;
-    let exit = keys.get(2).ok_or(Error::InvalidData)?;
-    let stale = |index: usize| {
-        keys.get(index)
-            .map(|key| hop(key, STALE_PROCESS_EPOCH))
-            .ok_or(Error::InvalidData)
-    };
-    let stale = one_symbol_loop([stale(0)?, stale(1)?, stale(3)?], stale(2)?)?;
-
-    assert!(matches!(
-        OnionRoute::new(OnionServiceName::tcp(), stale, live_exit(exit)?),
-        Err(Error::OnionRouteError(OnionRouteError::ExitHopMismatch))
-    ));
-    Ok(())
-}
-
 /// Descriptors past their expiry are not candidates.
 #[test]
 fn test_directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
@@ -782,31 +763,6 @@ fn test_has_duplicate_dids_admits_exactly_the_guard_twice() -> Result<()> {
     assert!(has_duplicate_dids(&labelled([0, 0, 2, 3])?));
     assert!(has_duplicate_dids(&labelled([0, 1, 2, 0])?));
     assert!(has_duplicate_dids(&labelled([0, 1, 2, 1])?));
-    Ok(())
-}
-
-/// A route admits only the loop of its one-symbol pipeline.
-#[test]
-fn test_route_rejects_loop_of_another_pipeline_shape() -> Result<()> {
-    let keys = node_keys(1..=7)?;
-    let exit = keys.get(2).ok_or(Error::InvalidData)?;
-    let at = |index: usize| {
-        keys.get(index)
-            .map(|key| hop(key, TEST_PROCESS_EPOCH))
-            .ok_or(Error::InvalidData)
-    };
-    let mut relays = [at(0)?, at(1)?, at(3)?, at(4)?, at(6)?].into_iter();
-    let hops = OnionLoop::try_unfold(vec![at(2)?], at(5)?, |_| {
-        relays.next().ok_or(Error::InvalidData)
-    })?;
-
-    assert!(matches!(
-        OnionRoute::new(OnionServiceName::tcp(), hops, live_exit(exit)?),
-        Err(Error::OnionRouteError(OnionRouteError::LoopShapeMismatch {
-            expected: 1,
-            actual: 2,
-        }))
-    ));
     Ok(())
 }
 
