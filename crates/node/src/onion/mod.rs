@@ -560,12 +560,9 @@ impl OnionExitDescriptor {
         self.body_ref().signing_data()
     }
 
-    /// Return whether this descriptor advertises the requested service name.
-    pub fn advertises_service_name(&self, service: &str) -> bool {
-        self.service.matches(service)
-    }
-
-    /// Return whether this descriptor offers `service`.
+    /// Return whether this descriptor offers the service named `service`, after service-name
+    /// canonicalization: the predicate of the RPC boundary, where the name is still a string.
+    /// Typed callers compare [`Self::service`] directly.
     pub fn offers_service(&self, service: &str) -> bool {
         self.service.matches(service)
     }

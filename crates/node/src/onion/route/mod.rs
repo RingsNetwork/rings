@@ -607,7 +607,7 @@ fn eligible_exits(
 ) -> Vec<OnionExitDescriptor> {
     OnionExitDescriptor::latest_valid_by_service_did(exits, now_ms, network_id, false)
         .into_iter()
-        .filter(|descriptor| descriptor.offers_service(service.as_str()))
+        .filter(|descriptor| descriptor.service == *service)
         .collect()
 }
 
@@ -658,7 +658,7 @@ fn validate_route_hops(
     if has_duplicate_dids(hops) {
         return Err(Error::OnionRouteError(OnionRouteError::DuplicateRouteHops));
     }
-    if !exit.offers_service(service.as_str()) {
+    if exit.service != *service {
         return Err(Error::OnionRouteError(OnionRouteError::ExitServiceMismatch));
     }
     Ok(())
