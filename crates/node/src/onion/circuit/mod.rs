@@ -5,7 +5,7 @@
 //! bytes, and every hop, `relay` or symbol, runs the same step `Hop_i`:
 //!
 //! ```text
-//! wire cell ──decode──▶ Hop(from, cell) ──shell──▶ hop (pure, over the admission state)
+//! wire cell ──decode──▶ Cell(from, cell) ──shell─▶ hop (pure, over the admission state)
 //!                                                   ├─ Relayed(next, cell)   ─▶ link sender
 //!                                                   ├─ Consumed(f, ā, v, υ)  ─▶ ⟦f⟧ in the algebra
 //!                                                   ├─ Returned(t_⋄, cell)   ─▶ the tag's session
@@ -31,7 +31,6 @@ mod expiry;
 mod hop;
 mod loops;
 mod protocol;
-mod reducer;
 mod send_outbox;
 mod shell;
 mod tags;
@@ -49,11 +48,11 @@ pub(crate) use admission::OnionAdmissionState;
 pub(crate) use admission::OnionReplayFilterKey;
 pub(crate) use admission::ONION_ADMISSION_SENDER_UNITS;
 pub use cell::OnionCellBucket;
+pub(crate) use codec::OnionCircuitInput;
 pub(crate) use codec::OnionLinkFact;
 pub(crate) use expiry::OnionExpiry;
 pub(crate) use loops::OnionLoopClient;
 pub(crate) use protocol::OnionCircuitProtocol;
-pub(crate) use reducer::OnionCircuitEffect;
 use rings_core::dht::Did;
 pub use send_outbox::OnionIdleFloor;
 pub(crate) use send_outbox::OnionLinkSender;
