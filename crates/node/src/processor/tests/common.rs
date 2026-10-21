@@ -11,6 +11,8 @@ use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::record_activity;
 use crate::tests::exit_descriptor::ExitDescriptorFixture;
 use crate::tests::native::network_test_guard as native_network_lock;
+#[cfg(feature = "dummy")]
+use crate::tests::native::signal_edge;
 use crate::tests::test_processor_builder;
 use crate::tests::test_processor_config;
 
@@ -306,17 +308,10 @@ pub(super) async fn prepare_measured_processor() -> Processor {
         .unwrap()
 }
 
+/// Signal an edge from `p1` to `p2` ([`signal_edge`]) and wait until both admit it.
 #[cfg(feature = "dummy")]
 pub(super) async fn connect_processors(p1: &Processor, p2: &Processor) {
-    let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
-    let answer = p2
-        .swarm
-        .answer_offer(offer)
-        .await
-        .unwrap()
-        .answer()
-        .expect("p2 holds no offer of its own, so it answers");
-    p1.swarm.accept_answer(answer).await.unwrap();
+    signal_edge(p1, p2).await.expect("the edge is signalled");
     wait_processors_connected(p1, p2).await;
 }
 

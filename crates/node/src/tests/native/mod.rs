@@ -6,6 +6,7 @@ use rings_core::swarm::OfferReply;
 
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionRole;
+use crate::processor::handshake::HandshakeFailure;
 use crate::processor::Processor;
 use crate::tests::test_processor_builder;
 use crate::tests::test_processor_config;
@@ -41,12 +42,12 @@ pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) 
 ///
 /// `second` replies with an answer, or, when its own sent overlay offer prevails on the
 /// tie-break, with that offer, which `first` answers (#947). Chord stabilization may already be
-/// connecting the pair, so a refusal because a concurrent handshake owns the edge (an attempt
-/// under way or admitted, or the peer's handshake taking this one's slot) satisfies the
-/// request: the edge forms from that handshake.
+/// connecting the pair, so a refusal because a concurrent handshake owns the edge
+/// ([`HandshakeFailure::is_concurrent`]) satisfies the request: the edge forms from that
+/// handshake.
 pub(crate) async fn signal_edge(first: &Processor, second: &Processor) -> Result<(), CoreError> {
     match exchange_offer(first, second).await {
-        Err(CoreError::AlreadyConnected | CoreError::ConnectionAttemptSuperseded { .. }) => Ok(()),
+        Err(error) if HandshakeFailure::is_concurrent(&error) => Ok(()),
         outcome => outcome,
     }
 }
