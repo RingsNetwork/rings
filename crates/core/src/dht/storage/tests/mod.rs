@@ -34,6 +34,7 @@ use crate::storage::MemStorage;
 use crate::tests::expired;
 use crate::tests::held_inbox_for;
 use crate::tests::live_entry;
+use crate::tests::non_affine_placement;
 use crate::utils::get_epoch_ms;
 
 mod test_cache_join;
@@ -71,20 +72,6 @@ fn first_two_affine_keys(did: Did) -> Result<(Did, Did)> {
         ));
     };
     Ok((first, second))
-}
-
-fn non_affine_placement(entry_key: Did, redundancy: u16) -> Result<Did> {
-    let placements = entry_key.rotate_affine(redundancy)?;
-    for attempt in 0..512 {
-        let candidate = Entry::gen_did(&format!("non-affine placement {attempt}"))?;
-        if !placements.contains(&candidate) {
-            return Ok(candidate);
-        }
-    }
-
-    Err(Error::InvalidMessage(
-        "could not sample non-affine placement".to_string(),
-    ))
 }
 
 fn first_virtual_position(node: &PeerRing, owner: Did) -> Result<Did> {

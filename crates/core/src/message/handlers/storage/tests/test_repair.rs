@@ -3,7 +3,6 @@ use bytes::Bytes;
 #[cfg(feature = "dummy")]
 use super::test_support::install_two_node_chord_view;
 use super::test_support::next_payload_matching;
-use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::split_owner_keys;
 use super::test_support::split_redundant_entry;
@@ -42,6 +41,8 @@ use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
+use crate::tests::non_affine_placement;
+use crate::tests::stamped_delta;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 
@@ -852,15 +853,14 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
 async fn test_found_entry_replies_join_in_the_cache() -> Result<()> {
     let resource = Did::from(10u32);
     let now_ms = crate::utils::get_epoch_ms();
-    let replica = |value: &str, writer: u32| -> Result<Entry> {
-        Ok(EntryOperation::Extend(crate::tests::live_entry(
+    let replica = |value: &str, writer: u32| {
+        stamped_delta(
+            EntryOperation::Extend,
             resource,
-            vec![Bytes::copy_from_slice(value.as_bytes())],
-            EntryKind::Data,
-        ))
-        .stamped(now_ms, Did::from(writer))?
-        .entry()
-        .clone())
+            &[value],
+            now_ms,
+            Did::from(writer),
+        )
     };
     let (holds_a, holds_b) = (replica("a", 1)?, replica("b", 2)?);
 

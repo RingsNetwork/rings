@@ -14,8 +14,6 @@
 //! point, is enumerated. Without the observation some schedule reads nothing; with it every
 //! schedule reads the write, and the observation is below every replica that applied it.
 
-use bytes::Bytes;
-
 use super::super::super::chord::PeerRing;
 use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::Entry;
@@ -25,8 +23,9 @@ use crate::dht::ChordStorageCache;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::storage::MemStorage;
+use crate::tests::data_carrier;
 use crate::tests::expired;
-use crate::tests::with_retention;
+use crate::tests::stamped_operation;
 use crate::utils::get_epoch_ms;
 
 /// The carrier every test writes.
@@ -43,27 +42,23 @@ const OWNER: u32 = 3;
 
 /// The carrier of `values` under the test resource, live for an hour from `now_ms`.
 fn carrier(values: &[&str], now_ms: u128) -> Entry {
-    with_retention(
-        Entry::new(
-            Did::from(RESOURCE),
-            values
-                .iter()
-                .map(|value| Bytes::copy_from_slice(value.as_bytes()))
-                .collect(),
-            EntryKind::Data,
-        ),
-        now_ms + 60 * 60 * 1_000,
-    )
+    data_carrier(Did::from(RESOURCE), values, now_ms)
 }
 
-/// `operation` of `values`, stamped by `writer` at `now_ms`, as the storage API sends it.
+/// `operation` of `values` on the test resource, stamped by `writer` at `now_ms`.
 fn stamped(
     operation: fn(Entry) -> EntryOperation,
     values: &[&str],
     now_ms: u128,
     writer: u32,
 ) -> Result<EntryOperation> {
-    operation(carrier(values, now_ms)).stamped(now_ms, Did::from(writer))
+    stamped_operation(
+        operation,
+        Did::from(RESOURCE),
+        values,
+        now_ms,
+        Did::from(writer),
+    )
 }
 
 /// A fresh node whose cache is empty.
