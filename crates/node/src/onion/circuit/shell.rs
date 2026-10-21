@@ -297,11 +297,10 @@ impl OnionCircuitShell {
         match outcome {
             OnionHopOutcome::Relayed { next, cell } => {
                 // A full lane drops the cell: the loop's session sees a gap and fails closed.
-                if let Err(error) = self.link_sender.enqueue(
-                    scope.lifecycle(),
-                    OnionLink::new(next),
-                    Bytes::from(cell.into_bytes()),
-                ) {
+                if let Err(error) =
+                    self.link_sender
+                        .enqueue(scope.lifecycle(), OnionLink::new(next), cell)
+                {
                     tracing::debug!(%next, %error, "drop a relayed onion cell");
                 }
                 Ok(())

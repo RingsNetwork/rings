@@ -399,11 +399,10 @@ impl<W: OnionWorld> OnionExitSessions<W> {
         let Some((next, cell)) = seal(&frame, *input.surb) else {
             return;
         };
-        let queued = self.shared.link_sender.enqueue_local(
-            scope.clone(),
-            OnionLink::new(next),
-            Bytes::from(cell.into_bytes()),
-        );
+        let queued =
+            self.shared
+                .link_sender
+                .enqueue_local(scope.clone(), OnionLink::new(next), cell);
         if let Err(error) = queued {
             tracing::debug!(
                 %next,
@@ -545,11 +544,7 @@ async fn perform<W: OnionWorld>(
                 };
                 let sent = shared
                     .link_sender
-                    .send(
-                        scope.clone(),
-                        OnionLink::new(next),
-                        Bytes::from(cell.into_bytes()),
-                    )
+                    .send(scope.clone(), OnionLink::new(next), cell)
                     .await;
                 if let Err(error) = sent {
                     tracing::debug!(%next, %error, "an onion reply did not leave");

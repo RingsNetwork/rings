@@ -104,9 +104,6 @@ pub enum OnionRouteError {
         /// Service label selected by the route.
         route_service: String,
     },
-    /// A cell's length is the length of no loop class.
-    #[error("invalid onion cell")]
-    InvalidCell,
     /// A queued endpoint cell lost its drain task before the overlay reported a result.
     #[error("onion link send was cancelled before overlay completion")]
     LinkSendCancelled,

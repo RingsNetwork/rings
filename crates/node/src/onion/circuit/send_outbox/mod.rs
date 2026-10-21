@@ -98,6 +98,7 @@ use crate::error::Error;
 use crate::error::OnionQueueKind;
 use crate::error::Result;
 use crate::extension::ext::Scope;
+use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::OnionRouteError;
 use crate::sync_lock::lock;
@@ -144,6 +145,24 @@ struct OverlaySend {
     payload: Bytes,
     /// Notified with the send's result, for endpoint callers that wait.
     completion: Option<oneshot::Sender<Result<()>>>,
+}
+
+impl OverlaySend {
+    /// The queue entry of `cell` under `scope`, with its class `b`: the one conversion of a
+    /// typed cell to the bytes the overlay sends.
+    fn of_cell(
+        scope: Scope,
+        cell: OnionCell,
+        completion: Option<oneshot::Sender<Result<()>>>,
+    ) -> (OnionLoopClass, Self) {
+        let class = cell.class();
+        let send = Self {
+            scope,
+            payload: Bytes::from(cell.into_bytes()),
+            completion,
+        };
+        (class, send)
+    }
 }
 
 /// Shared endpoint and relay capability for one node's constant-rate onion link traffic.
@@ -239,15 +258,10 @@ impl OnionLinkSender {
     ///
     /// # Errors
     ///
-    /// A payload of no class length, or the queue's refusal: `LinkDown` with no up link, a full
-    /// bound, or an endpoint waiting for the lane.
-    pub(crate) fn enqueue(&self, scope: Scope, link: OnionLink, payload: Bytes) -> Result<()> {
-        let class = class_of(&payload)?;
-        let send = OverlaySend {
-            scope,
-            payload,
-            completion: None,
-        };
+    /// The queue's refusal: `LinkDown` with no up link, a full bound, or an endpoint waiting for
+    /// the lane.
+    pub(crate) fn enqueue(&self, scope: Scope, link: OnionLink, cell: OnionCell) -> Result<()> {
+        let (class, send) = OverlaySend::of_cell(scope, cell, None);
         self.try_enqueue(link, class, send, QueueRole::Relay)?
             .map_err(|refusal| refusal.into_error(link))
     }
@@ -257,20 +271,14 @@ impl OnionLinkSender {
     ///
     /// # Errors
     ///
-    /// A payload of no class length, or the queue's refusal: `LinkDown` with no up link, or a
-    /// full bound.
+    /// The queue's refusal: `LinkDown` with no up link, or a full bound.
     pub(crate) fn enqueue_local(
         &self,
         scope: Scope,
         link: OnionLink,
-        payload: Bytes,
+        cell: OnionCell,
     ) -> Result<()> {
-        let class = class_of(&payload)?;
-        let send = OverlaySend {
-            scope,
-            payload,
-            completion: None,
-        };
+        let (class, send) = OverlaySend::of_cell(scope, cell, None);
         self.try_enqueue(link, class, send, QueueRole::Local)?
             .map_err(|refusal| refusal.into_error(link))
     }
@@ -281,19 +289,13 @@ impl OnionLinkSender {
     ///
     /// # Errors
     ///
-    /// A payload of no class length, `LinkDown`, the send's own error, the lane's close before
-    /// the send, or the deadline.
-    pub(crate) async fn send(&self, scope: Scope, link: OnionLink, payload: Bytes) -> Result<()> {
+    /// `LinkDown`, the send's own error, the lane's close before the send, or the deadline.
+    pub(crate) async fn send(&self, scope: Scope, link: OnionLink, cell: OnionCell) -> Result<()> {
         let deadline = sleep(ONION_LINK_SEND_DEADLINE).fuse();
         futures::pin_mut!(deadline);
         let timed_out = || Error::OnionRouteError(OnionRouteError::LinkSendTimedOut);
-        let class = class_of(&payload)?;
         let (completion, completed) = oneshot::channel();
-        let mut send = OverlaySend {
-            scope,
-            payload,
-            completion: Some(completion),
-        };
+        let (class, mut send) = OverlaySend::of_cell(scope, cell, Some(completion));
         let mut role = QueueRole::Endpoint { holding: false };
         loop {
             let space = match self.try_enqueue(link, class, send, role)? {
@@ -346,9 +348,8 @@ impl OnionLinkSender {
         send: OverlaySend,
         role: QueueRole,
     ) -> Result<std::result::Result<(), Refusal<OverlaySend>>> {
-        let bytes = send.payload.len();
         let now_us = self.now_us();
-        Ok(lock(&self.state)?.enqueue(link.peer, send, bytes, class, now_us, role))
+        Ok(lock(&self.state)?.enqueue(link.peer, send, class, now_us, role))
     }
 }
 
@@ -379,16 +380,6 @@ impl Drop for OnionLaneWait {
             }
         }
     }
-}
-
-/// The class of a cell payload.
-///
-/// # Errors
-///
-/// [`OnionRouteError::InvalidCell`] for a length of no class.
-fn class_of(payload: &Bytes) -> Result<OnionLoopClass> {
-    OnionLoopClass::from_cell_bytes(payload.len())
-        .ok_or(Error::OnionRouteError(OnionRouteError::InvalidCell))
 }
 
 impl<T> Refusal<T> {
