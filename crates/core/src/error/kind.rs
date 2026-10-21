@@ -218,10 +218,6 @@ pub enum Error {
     #[error("private bad format")]
     PrivateKeyBadFormat,
 
-    /// Invalid Transport
-    #[error("Invalid Transport")]
-    InvalidTransport,
-
     /// InvalidPublicKey
     #[error("InvalidPublicKey")]
     InvalidPublicKey,
@@ -237,10 +233,6 @@ pub enum Error {
     /// The type of Entry is not allowed to be overwritten
     #[error("The type of Entry is not allowed to be overwritten")]
     EntryNotOverwritable,
-
-    /// The type of Entry is not allowed to be appended
-    #[error("The type of Entry is not allowed to be appended")]
-    EntryNotAppendable,
 
     /// Entry dot index {index} is out of bounds
     #[error("Entry dot index {index} is out of bounds")]
@@ -419,10 +411,6 @@ pub enum Error {
     /// Signature encoding is valid but not in its canonical form.
     #[error("Signature is not canonical")]
     NonCanonicalSignature,
-
-    /// promise timeout, state is not succeeded
-    #[error("promise timeout, state is not succeeded")]
-    PromiseStateTimeout,
 
     /// Found existing transport when answer offer from remote node
     #[error("Found existing transport when answer offer from remote node")]

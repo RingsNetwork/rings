@@ -235,7 +235,7 @@ impl Error {
             | Self::DetachedRuntimeUnavailable(_)
             // entries, inboxes and storage
             | Self::EntryKindNotEqual | Self::EntryDidNotEqual | Self::EntryNotOverwritable
-            | Self::EntryNotAppendable | Self::EntryDotIndexOutOfBounds { .. } | Self::EntryNotLive
+            | Self::EntryDotIndexOutOfBounds { .. } | Self::EntryNotLive
             | Self::EntryLifetimeExceedsMax | Self::EntryVersionAheadOfClock
             | Self::EntryPayloadExceedsMax | Self::RelayMessageNotAddressedToInbox
             | Self::RelayMessageNotCustom | Self::RelayMessageUnverifiable
@@ -257,14 +257,13 @@ impl Error {
             | Self::MessageTooLarge(_) | Self::MessageSizeOverflow
             | Self::PeerMaxMessageSizeTooSmall(_)
             // connection lifecycle
-            | Self::PromiseStateTimeout | Self::AlreadyConnected
+            | Self::AlreadyConnected
             | Self::ConnectionAttemptCancelled { .. }
             | Self::PendingConnectionCapacityExceeded { .. }
             | Self::ConnectionCapacityExceeded { .. } | Self::PendingConnectionGenerationExhausted
             | Self::NotifyPredecessorOriginMismatch { .. }
             | Self::NotifyPredecessorOriginNotAdmitted { .. } | Self::SwarmConnectionLifecycleLock
             | Self::ShouldNotConnectSelf | Self::SwarmMissTransport(_) | Self::ConnectionNotFound
-            | Self::InvalidTransport
             // local channels and schedulers
             | Self::ChannelSendMessageFailed | Self::ChannelRecvMessageFailed(_)
             | Self::OutboundSchedulerRuntimeUnavailable | Self::LockPoisoned
