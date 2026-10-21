@@ -387,16 +387,13 @@ async fn report_synced_entries(
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<SearchEntry> for MessageHandler {
-    /// Search Entry via successor
-    /// If a Entry is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
+    /// Look up the one placement `msg` interrogates: a value stored here is answered at once,
+    /// otherwise the search is forwarded toward the placement's owner.
     async fn handle(&self, ctx: &MessagePayload, msg: &SearchEntry) -> Result<()> {
-        // For relay message, set redundant to 1
-        match self.dht.entry_lookup(msg.placement, 1).await {
-            Ok(action) => {
-                handle_storage_search_act(self, ctx, action, msg.resource, msg.redundancy).await
-            }
-            Err(e) => Err(e),
-        }
+        // Redundancy 1: the lookup covers `msg.placement` alone, the sender's other placements
+        // are interrogated by their own searches.
+        let action = self.dht.entry_lookup(msg.placement, 1).await?;
+        handle_storage_search_act(self, ctx, action, msg.resource, msg.redundancy).await
     }
 }
 
