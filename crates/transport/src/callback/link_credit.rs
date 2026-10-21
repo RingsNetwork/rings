@@ -199,6 +199,30 @@ struct LinkCreditState {
     closed: bool,
 }
 
+#[cfg(rings_transport_backend)]
+impl LinkCreditState {
+    /// Register `waker` for the wait `id` on credit index `index`, giving the wait its identity
+    /// on its first registration; a wait that registers again only refreshes its waker.
+    ///
+    /// Law (no lost wakeup). The caller found no credit under the same lock, so the transition
+    /// that next frees a credit or ends the link finds this waker and wakes it.
+    fn register_waiter(&mut self, index: CreditIndex, id: &mut Option<u64>, waker: &Waker) {
+        let id = *id.get_or_insert_with(|| {
+            let id = self.next_waiter;
+            self.next_waiter = id.wrapping_add(1);
+            id
+        });
+        let waiters = &mut self.send_waiters[index];
+        match waiters.iter_mut().find(|waiter| waiter.id == id) {
+            Some(waiter) => waiter.waker.clone_from(waker),
+            None => waiters.push(SendWaiter {
+                id,
+                waker: waker.clone(),
+            }),
+        }
+    }
+}
+
 /// Per-lane credit flow control of one connection; see the module documentation.
 pub(crate) struct LinkCredit {
     /// The peer, for logs.
@@ -247,11 +271,7 @@ impl LinkCredit {
     /// [`CreditReservation::bind`]); `Err` once the connection is gone. Dropping the future
     /// before it completes reserves nothing. A wait is logged at `warn` once, when it starts.
     pub(crate) async fn reserve(self: &Arc<Self>, lane: ChannelLane) -> Result<CreditReservation> {
-        let mut wait = CreditWait {
-            link: self,
-            index: credit_index(lane),
-            id: None,
-        };
+        let mut wait = CreditWait::new(Arc::downgrade(self), credit_index(lane));
         poll_fn(|context| self.poll_reserve(wait.index, &mut wait.id, context)).await
     }
 
@@ -287,19 +307,7 @@ impl LinkCredit {
                  the send waits for credit"
             );
         }
-        let wait = *id.get_or_insert_with(|| {
-            let wait = state.next_waiter;
-            state.next_waiter = wait.wrapping_add(1);
-            wait
-        });
-        let waiters = &mut state.send_waiters[index];
-        match waiters.iter_mut().find(|waiter| waiter.id == wait) {
-            Some(waiter) => waiter.waker.clone_from(context.waker()),
-            None => waiters.push(SendWaiter {
-                id: wait,
-                waker: context.waker().clone(),
-            }),
-        }
+        state.register_waiter(index, id, context.waker());
         Poll::Pending
     }
 
@@ -461,11 +469,12 @@ impl LinkCredit {
 }
 
 #[cfg(rings_transport_backend)]
-/// One pending [`LinkCredit::reserve`]: its registration is removed when it ends, granted or
-/// abandoned, so an abandoned wait leaves no waker behind.
-struct CreditWait<'a> {
+/// One pending credit wait, of [`LinkCredit::reserve`] or [`LaneCreditView::credited`]: its
+/// registration is removed when it ends, granted or abandoned, so an abandoned wait leaves no
+/// waker behind. It holds the link weakly: a link already gone holds no waker of it.
+struct CreditWait {
     /// The link waited on.
-    link: &'a Arc<LinkCredit>,
+    link: Weak<LinkCredit>,
     /// The credit index of the lane.
     index: CreditIndex,
     /// The wait's identity, once it has registered.
@@ -473,10 +482,22 @@ struct CreditWait<'a> {
 }
 
 #[cfg(rings_transport_backend)]
-impl Drop for CreditWait<'_> {
+impl CreditWait {
+    /// A wait on credit index `index` of `link`, not yet registered.
+    fn new(link: Weak<LinkCredit>, index: CreditIndex) -> Self {
+        Self {
+            link,
+            index,
+            id: None,
+        }
+    }
+}
+
+#[cfg(rings_transport_backend)]
+impl Drop for CreditWait {
     fn drop(&mut self) {
-        if let Some(id) = self.id {
-            self.link.forget_waiter(self.index, id);
+        if let (Some(id), Some(link)) = (self.id, self.link.upgrade()) {
+            link.forget_waiter(self.index, id);
         }
     }
 }
