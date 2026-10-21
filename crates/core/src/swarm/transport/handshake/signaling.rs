@@ -263,7 +263,7 @@ impl SwarmTransport {
     /// nothing. The answer, which waits on ICE gathering, is created and sent through the
     /// protocol egress on a detached task (`Law (inbound locality)`). An answer that cannot be
     /// handed to its carrier abandons its generation, so the peer's next offer is not refused
-    /// for the pending timeout; a delivered one marks its generation `Answering(reply_sent)`.
+    /// for the pending timeout.
     pub(crate) async fn answer_signaled_offer(
         self: &Arc<Self>,
         callback: SwarmTransportCallback,
@@ -292,8 +292,8 @@ impl SwarmTransport {
         }
     }
 
-    /// Send the answer of `attempt` to the offer `request` carried along `carrier`, and mark it
-    /// sent; a failure abandons the answering generation.
+    /// Send the answer of `attempt` to the offer `request` carried along `carrier`; a failure
+    /// abandons the answering generation.
     async fn send_signaled_answer(
         &self,
         attempt: PendingConnectionAttempt,
@@ -308,7 +308,7 @@ impl SwarmTransport {
             .send_reply(request, carrier, tx_id, reply)
             .await
         {
-            Ok(()) => self.mark_reply_sent(attempt).map(|_| ()),
+            Ok(()) => Ok(()),
             Err(error) => {
                 self.abandon_pending_connection(attempt, "sending connection answer")
                     .await;

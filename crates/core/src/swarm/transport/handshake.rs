@@ -206,14 +206,6 @@ impl SwarmTransport {
         }
     }
 
-    /// Apply `Answering(false) -> Answering(true)` to `attempt`; returns whether it applied.
-    pub(in crate::swarm) fn mark_reply_sent(
-        &self,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<bool> {
-        self.with_connection_lifecycle(|| Ok(self.peer_lifecycles()?.mark_reply_sent(attempt)))
-    }
-
     /// Reserve an overlay connection generation for `peer` and produce its offer without
     /// sending it, so a test can deliver it by hand; see
     /// [`Self::prepare_connection_offer_owned_by`]. Compiled for the tests that call it: the
@@ -477,7 +469,7 @@ impl SwarmTransport {
                 self.open_reserved_connection(answering, callback).await?
             }
             IncomingOfferSlot::Vacant => {
-                self.open_pending_connection(peer, callback, Handshake::answering())
+                self.open_pending_connection(peer, callback, Handshake::Answering)
                     .await?
             }
         };
@@ -486,8 +478,7 @@ impl SwarmTransport {
 
     /// Reply to the offer of remote connection, waiting on ICE gathering (the application
     /// boundary): answer it, or return this node's own prevailing offer (`Law (Tie-break)`).
-    /// The caller marks a delivered answer sent ([`Self::mark_reply_sent`]) or abandons its
-    /// generation.
+    /// The caller abandons the generation if the answer cannot be delivered.
     pub(in crate::swarm) async fn answer_remote_connection(
         &self,
         peer: Did,

@@ -550,10 +550,7 @@ impl Swarm {
                     .originate(Message::ConnectNodeReport(report), peer, Some(self.did()))
                     .await;
                 match wrapped {
-                    Ok(payload) => {
-                        self.transport.mark_reply_sent(attempt)?;
-                        Ok(OfferReply::Answer(payload))
-                    }
+                    Ok(payload) => Ok(OfferReply::Answer(payload)),
                     Err(error) => {
                         self.transport
                             .abandon_pending_connection(attempt, "wrapping connection answer")
