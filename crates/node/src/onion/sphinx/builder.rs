@@ -48,7 +48,7 @@ use super::header::OnionHeaderHop;
 use super::header::OnionHeaderRoute;
 use super::header::OnionHeaderRouteError;
 use super::header::OnionLoopTag;
-use super::layer::OnionArguments;
+use super::layer::OnionApplication;
 use super::layer::OnionLayer;
 use super::layer::OnionLayerApplication;
 use super::layer::OnionLayerHead;
@@ -60,17 +60,7 @@ use crate::onion::circuit::OnionReplayNonce;
 use crate::onion::OnionLoop;
 use crate::onion::OnionLoopRole;
 use crate::onion::OnionRouteHop;
-use crate::onion::OnionServiceName;
 use crate::onion::ONION_SEGMENT_RELAYS;
-
-/// The application `(f_k, ā_k)` a loop's symbol hop `h_k` evaluates.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OnionApplication {
-    /// `f_k`.
-    pub(crate) symbol: OnionServiceName,
-    /// `ā_k`, encoded to `A` bytes.
-    pub(crate) arguments: OnionArguments,
-}
 
 /// What the client keeps for one returning cell (D6′): the tag it arrives with, the key its
 /// value opens under, and the expiry after which it can no longer arrive.
@@ -175,10 +165,7 @@ pub(crate) fn build_loop(
                 let outbound = OnionSegmentSeed::new(*produced.as_bytes());
                 last = produced;
                 (
-                    OnionLayerApplication::Apply {
-                        symbol: application.symbol.clone(),
-                        arguments: application.arguments,
-                    },
+                    OnionLayerApplication::Apply(application.clone()),
                     inbound.consumer,
                     outbound,
                 )

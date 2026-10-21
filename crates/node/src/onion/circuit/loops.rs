@@ -28,10 +28,10 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::sphinx::builder::build_loop;
 use crate::onion::sphinx::builder::build_surb;
-use crate::onion::sphinx::builder::OnionApplication;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
+use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 

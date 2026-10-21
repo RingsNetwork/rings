@@ -139,12 +139,16 @@ pub(crate) enum OnionLayerApplication {
     /// The identity symbol `relay` with `ā = ()`.
     Relay,
     /// A symbol of `Σ_W` with its encoded arguments.
-    Apply {
-        /// The applied symbol.
-        symbol: OnionServiceName,
-        /// Its arguments `ā`.
-        arguments: OnionArguments,
-    },
+    Apply(OnionApplication),
+}
+
+/// The application `(f, ā)` of a symbol of `Σ_W`: what a loop's symbol hop evaluates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OnionApplication {
+    /// `f`.
+    pub(crate) symbol: OnionServiceName,
+    /// `ā`, encoded to `A` bytes.
+    pub(crate) arguments: OnionArguments,
 }
 
 /// The uniform layer `λ_i` without its header MAC `γ_{i+1}` (see the module documentation): the
@@ -201,9 +205,10 @@ impl OnionLayer {
     pub(crate) fn encode(&self, next_mac: &OnionHeaderMac) -> Zeroizing<[u8; ONION_LAYER_BYTES]> {
         let (symbol, arguments) = match &self.head.application {
             OnionLayerApplication::Relay => (OnionSymbol::Relay, [0; ONION_ARGUMENT_BYTES]),
-            OnionLayerApplication::Apply { symbol, arguments } => {
-                (OnionSymbol::WorldFacing(symbol.clone()), arguments.0)
-            }
+            OnionLayerApplication::Apply(application) => (
+                OnionSymbol::WorldFacing(application.symbol.clone()),
+                application.arguments.0,
+            ),
         };
         LayerRecord {
             code: [symbol.code()],
@@ -229,16 +234,17 @@ impl OnionLayer {
     pub(crate) fn decode(bytes: &[u8]) -> Result<(Self, OnionHeaderMac), OnionLayerError> {
         let record = LayerRecord::decode(bytes).ok_or(OnionLayerError::Width(bytes.len()))?;
         let [code] = record.code;
-        let application =
-            match OnionSymbol::from_code(code).ok_or(OnionLayerError::UnknownSymbol(code))? {
-                OnionSymbol::Relay => (record.arguments == [0; ONION_ARGUMENT_BYTES])
-                    .then_some(OnionLayerApplication::Relay)
-                    .ok_or(OnionLayerError::RelayArguments)?,
-                OnionSymbol::WorldFacing(symbol) => OnionLayerApplication::Apply {
-                    symbol,
-                    arguments: OnionArguments(record.arguments),
-                },
-            };
+        let application = match OnionSymbol::from_code(code)
+            .ok_or(OnionLayerError::UnknownSymbol(code))?
+        {
+            OnionSymbol::Relay => (record.arguments == [0; ONION_ARGUMENT_BYTES])
+                .then_some(OnionLayerApplication::Relay)
+                .ok_or(OnionLayerError::RelayArguments)?,
+            OnionSymbol::WorldFacing(symbol) => OnionLayerApplication::Apply(OnionApplication {
+                symbol,
+                arguments: OnionArguments(record.arguments),
+            }),
+        };
         Ok((
             Self {
                 head: OnionLayerHead {

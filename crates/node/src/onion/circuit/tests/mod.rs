@@ -26,11 +26,12 @@ use crate::onion::session::OnionSessionArguments;
 use crate::onion::session::OnionSessionId;
 use crate::onion::session::OnionTargetDigest;
 use crate::onion::sphinx::builder::build_loop;
-use crate::onion::sphinx::builder::OnionApplication;
 use crate::onion::sphinx::builder::OnionBuiltLoop;
 use crate::onion::sphinx::cell::OnionCell;
+use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionLoopTag;
+use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::OnionLoop;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionRouteHop;
@@ -189,7 +190,7 @@ fn arguments() -> OnionSessionArguments {
 /// The cell of a `Relayed` outcome, which must go to `next`.
 fn relayed(outcome: OnionHopOutcome, next: Did) -> OnionCell {
     match outcome {
-        OnionHopOutcome::Relayed { next: to, cell } => {
+        OnionHopOutcome::Stepped(OnionStep::Relayed { next: to, cell }) => {
             assert_eq!(to, next);
             cell
         }

@@ -16,6 +16,7 @@ use crate::onion::session::frame::OnionFrame;
 use crate::onion::session::frame::OnionSequence;
 use crate::onion::sphinx::builder::OnionReplyKey;
 use crate::onion::sphinx::cell::OnionCell;
+use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::class::OnionLoopClass;
 
 /// The reply frame `h` sends in the fixture.
@@ -34,7 +35,9 @@ fn returned(seed: u64) -> (OnionReplyKey, OnionCell) {
     let built = fixture.build(seed, b"value");
     let cell = fixture.run_forward_segment(built.cell);
     let from = fixture.hops[1].did();
-    let OnionHopOutcome::Consumed { surb, .. } = fixture.hops[2].step(from, cell) else {
+    let OnionHopOutcome::Stepped(OnionStep::Consumed { surb, .. }) =
+        fixture.hops[2].step(from, cell)
+    else {
         panic!("h consumes");
     };
     let frame = reply_frame().encode(OnionLoopClass::DEFAULT).expect("fits");

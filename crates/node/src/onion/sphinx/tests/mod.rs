@@ -26,6 +26,7 @@ use super::cell::OnionAdmittedCell;
 use super::cell::OnionCell;
 use super::header::OnionHeaderHop;
 use super::header::OnionHeaderRoute;
+use super::layer::OnionApplication;
 use super::layer::OnionArguments;
 use super::layer::OnionLayer;
 use super::layer::OnionLayerApplication;
@@ -121,10 +122,10 @@ fn fixture_layer(seed: u64, position: usize, hops: usize) -> OnionLayer {
     let application = if position + 1 == hops {
         let mut arguments = [0; ONION_ARGUMENT_BYTES];
         rng.fill_bytes(&mut arguments);
-        OnionLayerApplication::Apply {
+        OnionLayerApplication::Apply(OnionApplication {
             symbol: OnionServiceName::tcp(),
             arguments: OnionArguments::new(arguments),
-        }
+        })
     } else {
         OnionLayerApplication::Relay
     };

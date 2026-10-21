@@ -68,6 +68,7 @@ use super::header::OnionLoopTag;
 use super::header::OnionPeelError;
 use super::header::ONION_HEADER_BYTES;
 use super::header::ONION_HEADER_MAC_BYTES;
+use super::layer::OnionApplication;
 use super::layer::OnionArguments;
 use super::layer::OnionLayer;
 use super::layer::OnionLayerApplication;
@@ -136,6 +137,7 @@ pub(crate) struct OnionAdmittedCell(OnionPeeledCell);
 
 /// The outcome of a hop's carry step, chosen by its layer's application. The step consumes both
 /// seeds of `λ_i`; admission has already read the rest of its head.
+#[derive(Debug)]
 pub(crate) enum OnionStep {
     /// A relay removed one AEZ layer: the cell it forwards.
     Relayed {
@@ -456,7 +458,7 @@ impl OnionAdmittedCell {
                     cell: OnionCell { class, bytes },
                 })
             }
-            OnionLayerApplication::Apply { symbol, arguments } => {
+            OnionLayerApplication::Apply(OnionApplication { symbol, arguments }) => {
                 let header = bytes
                     .first_chunk::<ONION_HEADER_BYTES>()
                     .map(OnionHeader::of)

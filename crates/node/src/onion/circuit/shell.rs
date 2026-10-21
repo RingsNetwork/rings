@@ -69,6 +69,7 @@ use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
 use crate::onion::sphinx::carry::OnionCarryValue;
+use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::layer::OnionArguments;
 use crate::onion::OnionProcessEpoch;
@@ -295,7 +296,7 @@ impl OnionCircuitShell {
             )
         };
         match outcome {
-            OnionHopOutcome::Relayed { next, cell } => {
+            OnionHopOutcome::Stepped(OnionStep::Relayed { next, cell }) => {
                 // A full lane drops the cell: the loop's session sees a gap and fails closed.
                 if let Err(error) =
                     self.link_sender
@@ -305,12 +306,12 @@ impl OnionCircuitShell {
                 }
                 Ok(())
             }
-            OnionHopOutcome::Consumed {
+            OnionHopOutcome::Stepped(OnionStep::Consumed {
                 symbol,
                 arguments,
                 value,
                 surb,
-            } => {
+            }) => {
                 let input = OnionApplicationInput {
                     from,
                     arguments,

@@ -38,10 +38,10 @@ use crate::onion::session::OnionSessionId;
 use crate::onion::session::OnionTargetDigest;
 use crate::onion::sphinx::builder::build_loop;
 use crate::onion::sphinx::builder::build_surb;
-use crate::onion::sphinx::builder::OnionApplication;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::header::OnionHeaderMac;
+use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::sphinx::layer::OnionLayer;
 use crate::onion::sphinx::layer::OnionLayerApplication;
 use crate::onion::sphinx::layer::OnionLayerHead;
@@ -225,10 +225,10 @@ fn layer(application: OnionLayerApplication) -> OnionLayer {
 fn test_uniform_layers_are_pinned() {
     let mac = OnionHeaderMac::new([0x26; 16]);
     let relay = layer(OnionLayerApplication::Relay).encode(&mac);
-    let symbol = layer(OnionLayerApplication::Apply {
+    let symbol = layer(OnionLayerApplication::Apply(OnionApplication {
         symbol: OnionServiceName::tcp(),
         arguments: session_arguments().encode(),
-    })
+    }))
     .encode(&mac);
 
     assert_eq!(hex(relay.as_slice()), GOLDEN_RELAY_LAYER);
