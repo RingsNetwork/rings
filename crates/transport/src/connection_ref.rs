@@ -113,10 +113,6 @@ where
     type Sdp = C::Sdp;
     type Error = C::Error;
 
-    async fn send_message(&self, payload: Bytes) -> Result<DeliveryFuture> {
-        self.upgrade()?.send_message(payload).await
-    }
-
     async fn send_message_with_permit(
         &self,
         payload: Bytes,
@@ -212,9 +208,6 @@ mod tests {
             4242
         }
 
-        async fn send_message(&self, _: Bytes) -> Result<DeliveryFuture> {
-            unreachable!("a released ref must fail before reaching the inner connection")
-        }
         async fn send_message_with_permit(
             &self,
             _: Bytes,

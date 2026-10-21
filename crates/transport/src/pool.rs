@@ -211,12 +211,6 @@ mod tests {
         type Sdp = String;
         type Error = Error;
 
-        async fn send_message(&self, _: Bytes) -> Result<DeliveryFuture> {
-            Err(Error::DataChannelOpen(
-                "test connection cannot send".to_string(),
-            ))
-        }
-
         async fn send_message_with_permit(
             &self,
             _: Bytes,
