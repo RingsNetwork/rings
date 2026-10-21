@@ -14,9 +14,6 @@ use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionExitDescriptorBody;
-use crate::onion::OnionExitPolicy;
-use crate::onion::OnionExitTarget;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
@@ -25,6 +22,7 @@ use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
+use crate::tests::exit_descriptor::ExitDescriptorFixture;
 
 /// Network of every fixture unless a test names another.
 const TEST_NETWORK_ID: u32 = 1;
@@ -71,32 +69,11 @@ fn exit_descriptor(
     network_id: u32,
     expires_at_ms: u128,
 ) -> Result<OnionExitDescriptor> {
-    OnionExitDescriptor::new_signed(
-        OnionExitDescriptorBody {
-            did: key.delegator_did(),
-            public_key: key
-                .delegation()
-                .delegator_verification_pubkey()
-                .map_err(Error::CoreError)?,
-            delegatee_public_key: key.delegatee_public_key(),
-            process_epoch: epoch,
-            node_type: OnlineNodeType::Native,
-            network_id,
-            service: OnionServiceName::tcp(),
-            policy: OnionExitPolicy {
-                allowed_targets: vec![OnionExitTarget::parse("example.com:443")?],
-                denied_targets: vec![],
-                max_sessions: 16,
-                max_bytes_per_minute: 1024,
-            },
-            started_at_ms: 1,
-            heartbeat_at_ms: HEARTBEAT_MS,
-            expires_at_ms,
-            version: "test".to_string(),
-        },
-        MessageSigner::new(key, network_id),
-    )
-    .map_err(Error::CoreError)
+    ExitDescriptorFixture {
+        network_id,
+        ..ExitDescriptorFixture::offline(key, epoch, HEARTBEAT_MS, expires_at_ms)?
+    }
+    .sign()
 }
 
 /// A live `tcp` registration of `key` at the current epoch.

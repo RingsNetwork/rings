@@ -40,7 +40,6 @@ use crate::onion::https::OnionHttpsRequest;
 use crate::onion::https::OnionHttpsResponse;
 use crate::onion::https::OnionHttpsWorld;
 use crate::onion::https::ONION_HTTPS_RESPONSE_TIMEOUT;
-use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::session::client::OnionCreditWindow;
 use crate::onion::session::client::ONION_SESSION_DEADLINE_MS;
@@ -211,7 +210,6 @@ async fn test_https_loop_fetches_through_the_session_target() -> Result<()> {
         },
     )?;
     let route = OnionProxyRoute {
-        protocol: OnionProxyProtocol::HttpsProxy,
         target,
         route: network.route(OnionServiceName::https())?,
     };

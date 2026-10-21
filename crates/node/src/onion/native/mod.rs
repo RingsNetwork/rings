@@ -5,17 +5,17 @@
 //! native fetch. One interpretation per symbol, never a fallback to another (#834 D1′).
 //!
 //! ```text
+//! open_tcp_target(t)         ─▶ route(tcp, t) ─▶ open_tcp_stream
 //! open_tcp_stream(route, t)  ─▶ session(tcp, t) ─▶ NativeOnionOpenStream ─relay─▶ local stream
 //! request_https(route, call) ─▶ session(https, route.target) ─▶ response
 //! ```
-
-use tokio::net::TcpStream;
 
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::https::OnionHttpsCall;
 use crate::onion::https::OnionHttpsClient;
 use crate::onion::https::OnionHttpsResponse;
+use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::runtime::OnionRuntime;
 use crate::onion::session::client::OnionCreditWindow;
@@ -26,6 +26,7 @@ use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
+use crate::processor::Processor;
 
 /// Native handle for TCP streams and HTTPS requests over onion loops.
 #[derive(Clone)]
@@ -41,20 +42,22 @@ impl NativeOnionCircuitHandle {
         Self { runtime }
     }
 
-    /// Relay an already-accepted TCP stream over `route` to `target`.
+    /// Select a `tcp` route to `target` from `processor`'s directory and open a session over it
+    /// ([`Self::open_tcp_stream`]): the one pipeline of every byte-tunnel ingress, HTTP CONNECT
+    /// and the packet gateway alike.
     ///
     /// # Errors
     ///
-    /// As for [`Self::open_tcp_stream`].
-    pub async fn relay_tcp_stream(
+    /// The route selection's failure, or as for [`Self::open_tcp_stream`].
+    pub async fn open_tcp_target(
         &self,
-        stream: TcpStream,
-        route: OnionRoute,
+        processor: &Processor,
         target: OnionProxyTarget,
-    ) -> Result<()> {
-        self.open_tcp_stream(route, target)
-            .await
-            .map(|opened| opened.relay(stream))
+    ) -> Result<NativeOnionOpenStream> {
+        let route = processor
+            .build_onion_proxy_route(OnionProxyProtocol::TcpConnect, target)
+            .await?;
+        self.open_tcp_stream(route.route, route.target).await
     }
 
     /// Open a `tcp` session over `route` and wait until the exit has connected `target`.
@@ -91,8 +94,7 @@ impl NativeOnionCircuitHandle {
     /// Send `call` to `route.target` over `route` and wait for the exit's response.
     ///
     /// Obtain the target and call from [`OnionHttpsCall::from_url`], then select `route` for that
-    /// target under
-    /// [`OnionProxyProtocol::HttpsProxy`](crate::onion::proxy::OnionProxyProtocol::HttpsProxy).
+    /// target under [`OnionProxyProtocol::HttpsProxy`].
     /// Dropping the future ends the session, and a silent exit yields
     /// [`Error::OnionProxyRequestTimedOut`].
     ///

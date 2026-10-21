@@ -26,7 +26,7 @@ timeouts, with constant-time socket access for every visited flow.
 Reproduce the 1,024-flow reference run after warming the release binary:
 
 ```bash
-cargo build --release -p rings-gateway --example gateway-bench
+cargo build --release -p rings-gateway --features test-support --example gateway-bench
 RINGS_GATEWAY_BENCH_FLOWS=1024 \
   /usr/bin/time -l target/aarch64-apple-darwin/release/examples/gateway-bench
 ```

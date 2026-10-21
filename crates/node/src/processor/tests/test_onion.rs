@@ -5,6 +5,7 @@ use super::*;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionProcessEpochCell;
 use crate::onion::OnionServiceName;
+use crate::tests::exit_descriptor::ExitDescriptorFixture;
 
 #[tokio::test]
 async fn test_onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
@@ -161,94 +162,21 @@ async fn test_onion_proxy_route_uses_protocol_service_class() -> Result<()> {
     Ok(())
 }
 
-/// HTTPS route construction matches the singular canonical service descriptor.
-#[tokio::test]
-async fn test_onion_route_accepts_https_service() -> Result<()> {
-    let processor = prepare_processor().await;
-    let exit = prepare_processor().await;
-    let descriptor = onion_exit_descriptor_for_processor_with_service(
-        &exit,
-        OnionServiceName::https(),
-        get_epoch_ms(),
-        {
-            let mut policy = onion_policy(&["example.com:443"], &[])?;
-            policy.max_sessions = 8;
-            policy.max_bytes_per_minute = 4096;
-            policy
-        },
-    )?;
-
-    processor
-        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
-            descriptor,
-        ])?)
-        .await?;
-    store_onion_relays(&processor, &[&exit], 3).await?;
-
-    let route = processor
-        .build_onion_proxy_route(
-            OnionProxyProtocol::HttpsProxy,
-            OnionProxyTarget::parse_authority("example.com:443")?,
-        )
-        .await?
-        .route;
-
-    assert_eq!(route.exit_did(), exit.did());
-    assert_eq!(route.service(), "https");
-    Ok(())
-}
-
-/// The proxy route accepts an HTTPS service descriptor without a transport field.
-#[tokio::test]
-async fn test_onion_proxy_route_accepts_https_service() -> Result<()> {
-    let processor = prepare_processor().await;
-    let exit = prepare_processor().await;
-    let descriptor = onion_exit_descriptor_for_processor_with_service(
-        &exit,
-        OnionServiceName::https(),
-        get_epoch_ms(),
-        {
-            let mut policy = onion_policy(&["example.com:443"], &[])?;
-            policy.max_sessions = 8;
-            policy.max_bytes_per_minute = 4096;
-            policy
-        },
-    )?;
-
-    processor
-        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
-            descriptor,
-        ])?)
-        .await?;
-    store_onion_relays(&processor, &[&exit], 3).await?;
-
-    let target = OnionProxyTarget::parse_authority("example.com:443")?;
-    let route = processor
-        .build_onion_proxy_route(OnionProxyProtocol::HttpsProxy, target)
-        .await?;
-
-    assert_eq!(route.exit_did(), exit.did());
-    assert_eq!(route.exit_service(), "https");
-    Ok(())
-}
-
 #[tokio::test]
 async fn test_tcp_connect_route_rejects_browser_tcp_exit_descriptor() -> Result<()> {
     let processor = prepare_processor().await;
     let browser_exit = prepare_processor().await;
     // A browser has no sockets, so a `tcp` registration from one cannot carry a tunnel.
-    let descriptor = onion_exit_descriptor_for_processor_with_node_type_service(
-        &browser_exit,
-        OnlineNodeType::Browser,
-        OnionServiceName::tcp(),
-        get_epoch_ms(),
-        {
-            let mut policy = onion_policy(&["example.com:443"], &[])?;
-            policy.max_sessions = 8;
-            policy.max_bytes_per_minute = 4096;
-            policy
-        },
-    )?;
+    let descriptor = ExitDescriptorFixture {
+        node_type: OnlineNodeType::Browser,
+        ..ExitDescriptorFixture::live(
+            &browser_exit,
+            OnionServiceName::tcp(),
+            bounded_policy(&["example.com:443"], &[])?,
+            get_epoch_ms(),
+        )
+    }
+    .sign()?;
 
     processor
         .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
@@ -277,20 +205,20 @@ async fn test_onion_proxy_route_filters_exits_by_target_policy() -> Result<()> {
     let allowed_exit = prepare_processor().await;
     let denied_exit = prepare_processor().await;
     let now_ms = get_epoch_ms();
-    let allowed_descriptor =
-        onion_exit_descriptor_for_processor_with_policy(&allowed_exit, "https", now_ms, {
-            let mut policy = onion_policy(&["example.com:443"], &[])?;
-            policy.max_sessions = 8;
-            policy.max_bytes_per_minute = 4096;
-            policy
-        })?;
-    let denied_descriptor =
-        onion_exit_descriptor_for_processor_with_policy(&denied_exit, "https", now_ms, {
-            let mut policy = onion_policy(&["example.com:443"], &["example.com:443"])?;
-            policy.max_sessions = 8;
-            policy.max_bytes_per_minute = 4096;
-            policy
-        })?;
+    let allowed_descriptor = ExitDescriptorFixture::live(
+        &allowed_exit,
+        OnionServiceName::https(),
+        bounded_policy(&["example.com:443"], &[])?,
+        now_ms,
+    )
+    .sign()?;
+    let denied_descriptor = ExitDescriptorFixture::live(
+        &denied_exit,
+        OnionServiceName::https(),
+        bounded_policy(&["example.com:443"], &["example.com:443"])?,
+        now_ms,
+    )
+    .sign()?;
 
     processor
         .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
@@ -314,13 +242,13 @@ async fn test_onion_proxy_route_reports_policy_denied_target() -> Result<()> {
     let processor = prepare_processor().await;
     let denied_exit = prepare_processor().await;
     let now_ms = get_epoch_ms();
-    let denied_descriptor =
-        onion_exit_descriptor_for_processor_with_policy(&denied_exit, "https", now_ms, {
-            let mut policy = onion_policy(&["other.example.com:443"], &[])?;
-            policy.max_sessions = 8;
-            policy.max_bytes_per_minute = 4096;
-            policy
-        })?;
+    let denied_descriptor = ExitDescriptorFixture::live(
+        &denied_exit,
+        OnionServiceName::https(),
+        bounded_policy(&["other.example.com:443"], &[])?,
+        now_ms,
+    )
+    .sign()?;
 
     processor
         .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
