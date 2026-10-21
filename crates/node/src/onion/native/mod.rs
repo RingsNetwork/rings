@@ -13,7 +13,6 @@ use tokio::net::TcpStream;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::extension::ext::Extensions;
 use crate::onion::https::OnionHttpsCall;
 use crate::onion::https::OnionHttpsClient;
 use crate::onion::https::OnionHttpsResponse;
@@ -36,16 +35,10 @@ pub struct NativeOnionCircuitHandle {
 }
 
 impl NativeOnionCircuitHandle {
-    /// Install the onion runtime of the processor behind `extensions`.
-    ///
-    /// Everything is read from that processor: its session key, its role and, on the exit
-    /// rung, its exit offer, so what the node publishes and what it evaluates agree.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::ExtensionError`] if the data plane is already installed.
-    pub fn install(extensions: &Extensions) -> Result<Self> {
-        OnionRuntime::install(extensions).map(|runtime| Self { runtime })
+    /// The native handle of `runtime`, which a provider installed once in its registry
+    /// ([`Provider::onion_circuit`](crate::provider::Provider::onion_circuit)).
+    pub(crate) const fn new(runtime: OnionRuntime) -> Self {
+        Self { runtime }
     }
 
     /// Relay an already-accepted TCP stream over `route` to `target`.

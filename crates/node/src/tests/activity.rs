@@ -30,7 +30,7 @@ where
     rings_test_support::activity::probe_on_activity(label, hang_guard, probe).await
 }
 
-/// Backend observer that records an activity on every admission and retirement, so a test
+/// Backend observer that records an activity on every link fact, so a test
 /// awaiting an edge between providers probes again exactly when a node's admitted peers change.
 /// Used by the real-network gateway tests, which the `dummy` build does not run.
 #[cfg(all(rings_native, not(feature = "dummy")))]
@@ -38,11 +38,7 @@ pub(crate) struct AdmissionActivity;
 
 #[cfg(all(rings_native, not(feature = "dummy")))]
 impl crate::extension::BackendObserver for AdmissionActivity {
-    fn peer_admitted(&self, _peer: rings_core::dht::Did) {
-        record_activity();
-    }
-
-    fn peer_retired(&self, _peer: rings_core::dht::Did) {
+    fn link_fact(&self, _fact: crate::extension::ext::LinkFact) {
         record_activity();
     }
 }

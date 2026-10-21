@@ -27,6 +27,18 @@
   through `reply_via` and connect signaling retraces its recorded path (#947); the 0.34.0 notes
   below state the `SwarmEvent` variants and core API additions correctly.
 
+- Removed options have no tombstones (#990): `gateway.onion_service`, `gateway.onion_hop_count`
+  and `gateway.onion_allow_short_paths` fail as an unknown gateway key, and the removed
+  `ONION_HTTP_PROXY_HOP_COUNT` and `ONION_HTTP_PROXY_ALLOW_SHORT_PATHS` variables are no longer
+  read, like the other variables the onion loop cutover removed.
+
+- A provider installs its onion runtime in one slot, native and browser alike (#990):
+  `Provider::onion_circuit` returns the native handle of that runtime, installing it on first
+  use, and replaces `NativeOnionCircuitHandle::install`.
+
+- The browser `BrowserOnionProxy.exit_service()` export, which had no caller, is removed: the
+  proxy always selects `https` (#990).
+
 ## 0.34.0
 
 - Onion circuits are client-sealed loops of registered operation symbols (#834, Onion Kleisli

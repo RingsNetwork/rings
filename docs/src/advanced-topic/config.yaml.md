@@ -210,8 +210,7 @@ gateway starts ⟺ section present ∧ (enabled = true ∨ rings run --gateway)
   and macOS; must match the helper's `--socket`.
 * `status_refresh_secs`: refresh interval of onion-exit availability in `/gateway/status`.
 Captured flows are byte tunnels, so they always use a `tcp` exit, and route length follows the
-onion loop shape (see [HTTP CONNECT proxy](#http-connect-proxy)); the removed keys
-`onion_service`, `onion_hop_count` and `onion_allow_short_paths` are rejected by name.
+onion loop shape (see [HTTP CONNECT proxy](#http-connect-proxy)).
 
 Any other key in the section is rejected rather than ignored, so a misspelt key cannot fall back
 to its default.

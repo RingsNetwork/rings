@@ -220,10 +220,6 @@ impl Processor {
         RegistrationContext::new(self)
     }
 
-    fn registration_context_with_stop(&self, stop: StopToken) -> RegistrationContext<'_> {
-        RegistrationContext::new_with_stop(self, stop)
-    }
-
     #[cfg(all(test, feature = "node"))]
     fn online_node_descriptor_at(&self, now_ms: u128) -> Result<OnlineNodeDescriptor> {
         self.online_node_registration
@@ -260,8 +256,7 @@ impl Processor {
     /// The registry carrier is the join of every reply this node has observed (#864), with its
     /// own writes applied (#982): it ascends in the lattice order while cached and live, so this
     /// node lists what it registered itself whichever owner its lookup reaches, but a descriptor
-    /// still leaves it on a tombstone, on an overwrite or compaction floor (#867), or at the
-    /// element cap. Rerouted as [`Self::storage_fetch`] documents.
+    /// still leaves it on a tombstone, on an overwrite's reset floor, or at the element cap. Rerouted as [`Self::storage_fetch`] documents.
     pub async fn lookup_online_nodes(
         &self,
         include_expired: bool,
@@ -301,7 +296,7 @@ impl Processor {
             return Ok(vec![]);
         };
 
-        Ok(self.select_onion_exits_from_entry(&entry, service.trim(), include_expired))
+        Ok(self.select_onion_exits_from_entry(&entry, service, include_expired))
     }
 
     /// Select the newest live exit registration per `(DID, service)` of `entry` offering
@@ -410,7 +405,7 @@ impl Processor {
         task: &dyn RegistrationTask,
         stop: StopToken,
     ) -> Result<()> {
-        let context = self.registration_context_with_stop(stop);
+        let context = RegistrationContext::new_with_stop(self, stop);
         task.register_once(&context).await
     }
 

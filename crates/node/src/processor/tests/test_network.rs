@@ -40,7 +40,6 @@ async fn test_provider_listen_with_pre_stopped_token_returns_before_first_tick()
 #[tokio::test]
 async fn test_provider_listen_installs_the_onion_runtime_of_relay_roles() {
     use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
-    use crate::onion::native::NativeOnionCircuitHandle;
     use crate::onion::OnionRole;
     use crate::tests::native::prepare_processor_with_onion_role;
 
@@ -53,7 +52,7 @@ async fn test_provider_listen_installs_the_onion_runtime_of_relay_roles() {
     let installed = Provider::from_processor(Arc::new(
         prepare_processor_with_onion_role(OnionRole::Relay).await,
     ));
-    let _handle = NativeOnionCircuitHandle::install(&installed.extensions()).expect("install");
+    let _handle = installed.onion_circuit().expect("install");
 
     for provider in [&client, &relay, &installed] {
         provider

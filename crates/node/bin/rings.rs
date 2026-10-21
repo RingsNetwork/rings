@@ -5,7 +5,6 @@
 #[cfg(all(feature = "dummy", not(test)))]
 compile_error!("the `dummy` test transport cannot run a node; build `rings` without it");
 
-use std::env;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -38,7 +37,6 @@ use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api_with_gateway;
 use rings_node::native::gateway::NativeGatewayRunner;
-use rings_node::onion::native::NativeOnionCircuitHandle;
 use rings_node::onion::proxy::http::run_onion_http_proxy;
 use rings_node::onion::proxy::http::OnionHttpProxyOptions;
 use rings_node::onion::OnionEntryGuardStorage;
@@ -121,30 +119,8 @@ async fn serve_application(
     }
 }
 
-/// Environment variables of the run options removed by the onion loop cutover (#834 D5). Clap
-/// ignores an environment variable no argument reads, so a set one is rejected here instead.
-const REMOVED_ONION_ROUTE_ENV: [&str; 2] = [
-    "ONION_HTTP_PROXY_HOP_COUNT",
-    "ONION_HTTP_PROXY_ALLOW_SHORT_PATHS",
-];
-
-/// Reject every variable of [`REMOVED_ONION_ROUTE_ENV`] that `is_set` reports as set.
-fn reject_removed_onion_route_env(is_set: impl Fn(&str) -> bool) -> anyhow::Result<()> {
-    match REMOVED_ONION_ROUTE_ENV
-        .into_iter()
-        .find(|name| is_set(name))
-    {
-        Some(name) => Err(anyhow::anyhow!(
-            "{name} was removed: the onion route length is fixed by the loop shape (#834 D5); \
-             unset it"
-        )),
-        None => Ok(()),
-    }
-}
-
 /// Run the node in the foreground until a signal or a service stops it.
 async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
-    reject_removed_onion_route_env(|name| env::var_os(name).is_some())?;
     let config_path = args.config_args.config.clone();
     let mut c = config::Config::read_fs(&config_path)?;
     apply_run_overrides(&mut c, &mut args, &config_path).await?;
@@ -173,7 +149,7 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
     // registered interpreters.
     let _relay =
         rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
-    let onion = NativeOnionCircuitHandle::install(&provider.extensions())?;
+    let onion = provider.onion_circuit()?;
     let gateway_runner = c
         .enabled_gateway()
         .cloned()
@@ -828,27 +804,9 @@ mod tests {
     use super::await_task_cleanup;
     use super::onion_entry_guard_storage_path;
     use super::provisional_evidence_storage_path;
-    use super::reject_removed_onion_route_env;
     use super::transaction_replay_storage_path;
     use super::Cli;
-    use super::REMOVED_ONION_ROUTE_ENV;
     use super::TRANSACTION_REPLAY_STORAGE_CAPACITY;
-
-    /// A set environment variable of a removed route-length option is rejected by name; an
-    /// environment without one passes.
-    #[test]
-    fn test_removed_onion_route_env_is_rejected() {
-        assert!(reject_removed_onion_route_env(|_| false).is_ok());
-        for removed in REMOVED_ONION_ROUTE_ENV {
-            let error = reject_removed_onion_route_env(|name| name == removed)
-                .err()
-                .map(|error| error.to_string())
-                .unwrap_or_default();
-
-            assert!(error.starts_with(removed));
-            assert!(error.contains("loop shape"));
-        }
-    }
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
         let matches = Cli::command()

@@ -104,7 +104,7 @@ impl Core {
             .map_err(Error::InternalError)
     }
 
-    /// This node's session key.
+    /// This node's delegatee key.
     pub(crate) fn delegatee_key(&self) -> &rings_core::delegation::DelegateeKey {
         self.processor.delegatee_key()
     }

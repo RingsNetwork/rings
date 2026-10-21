@@ -10,7 +10,8 @@ use crate::consts::DATA_REDUNDANT;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::record_activity;
 use crate::tests::native::network_test_guard as native_network_lock;
-use crate::tests::TEST_ICE_SERVERS;
+use crate::tests::test_processor_builder;
+use crate::tests::test_processor_config;
 
 pub(super) fn onion_policy(
     allowed_targets: &[&str],
@@ -115,16 +116,8 @@ pub(super) async fn prepare_processor_with_identity_key_network_and_virtual_node
     network_id: u32,
     dht_virtual_nodes: u16,
 ) -> Processor {
-    let delegatee_key = DelegateeKey::new_with_seckey(&identity_key).unwrap();
-    let config = ProcessorConfig::new(network_id, TEST_ICE_SERVERS.to_string(), delegatee_key, 3)
-        .dht_virtual_nodes(dht_virtual_nodes);
-    let storage = Box::new(MemStorage::new());
-
-    ProcessorBuilder::from_config(&config)
-        .unwrap()
-        .storage(storage)
-        .dht_finger_table_size(8)
-        .observer(crate::tests::activity::activity_observer())
+    test_processor_builder(&test_processor_config(&identity_key, network_id))
+        .dht_virtual_nodes(dht_virtual_nodes)
         .build()
         .unwrap()
 }
@@ -183,19 +176,12 @@ pub(super) async fn prepare_processor_with_network_and_virtual_nodes(
     network_id: u32,
     dht_virtual_nodes: u16,
 ) -> Processor {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(network_id, TEST_ICE_SERVERS.to_string(), delegatee_key, 3)
-        .dht_virtual_nodes(dht_virtual_nodes);
-    let storage = Box::new(MemStorage::new());
-
-    ProcessorBuilder::from_config(&config)
-        .unwrap()
-        .storage(storage)
-        .dht_finger_table_size(8)
-        .observer(crate::tests::activity::activity_observer())
-        .build()
-        .unwrap()
+    prepare_processor_with_identity_key_network_and_virtual_nodes(
+        SecretKey::random(),
+        network_id,
+        dht_virtual_nodes,
+    )
+    .await
 }
 
 #[cfg(feature = "dummy")]
@@ -212,17 +198,8 @@ pub(super) fn owns_entry_placement(processor: &Processor, placement_key: Did) ->
 pub(super) async fn prepare_processor_with_online_node_type(
     node_type: OnlineNodeType,
 ) -> Processor {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 3);
-    let storage = Box::new(MemStorage::new());
-
-    ProcessorBuilder::from_config(&config)
-        .unwrap()
-        .storage(storage)
+    test_processor_builder(&test_processor_config(&SecretKey::random(), 0))
         .online_node_type(node_type)
-        .dht_finger_table_size(8)
-        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }
@@ -362,20 +339,12 @@ pub(super) fn mismatched_storage_redundancy(value: u16) -> u16 {
 }
 
 pub(super) async fn prepare_measured_processor() -> Processor {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 3);
-    let storage = Box::new(MemStorage::new());
     let measure = PeriodicMeasure::new(Box::new(MemStorage::new()))
         .await
         .unwrap();
 
-    ProcessorBuilder::from_config(&config)
-        .unwrap()
-        .storage(storage)
+    test_processor_builder(&test_processor_config(&SecretKey::random(), 0))
         .measure(measure)
-        .dht_finger_table_size(8)
-        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }

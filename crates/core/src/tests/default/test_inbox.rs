@@ -1,6 +1,7 @@
 //! End-to-end law of the relay inbox: a message to an offline peer is held in the peer's inbox
 //! carrier by whichever node owns it, handed to the peer with its storage interval when the peer
-//! returns, delivered to the peer's application on stabilization, and compacted afterwards.
+//! returns, delivered to the peer's application on stabilization, and retired from the carrier
+//! by its dot afterwards.
 //!
 //! The hand-off is the placement invariant of the owner's storage repair pass, so it holds however
 //! the owner learns of the returning peer: through its successor's topology report, or through a

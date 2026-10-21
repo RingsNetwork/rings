@@ -54,8 +54,7 @@ has the full model.
 
 ## Where Rings fits
 
-✅ supported · ❌ not provided. Browser P2P means the browser itself is a peer. Structured
-P2P means DHT-based discovery. Privacy means metadata protection, not payload encryption.
+✅ supported · ❌ not provided. Qualifications are listed below the table.
 
 | Network | Browser P2P | Structured P2P | Privacy layer | E2E encryption |
 |---|:---:|:---:|:---:|:---:|
@@ -80,14 +79,6 @@ metadata protection, separate from payload encryption.
 5. Nostr supports encrypted messages, such as NIP-44 payloads; public events are not encrypted.
 6. Between Nym clients or I2P destinations. Traffic beyond an exit/outproxy needs application encryption.
 7. Tor provides E2E for onion services; ordinary websites need HTTPS beyond the exit. A privacy layer is not an unconditional anonymity guarantee.
-
-1. After the E2E handshake; plain overlay messages are not E2E-encrypted.
-2. libp2p's Kademlia DHT is optional. I2P's netDb is for discovery; messages travel through tunnels.
-3. Encrypted connections only; published content and pubsub forwarding are not E2E.
-4. aMule obfuscation is not secure E2E. eD2k uses indexing servers.
-5. Encrypted messages such as NIP-44; public events are not encrypted.
-6. Between Nym clients or I2P destinations; traffic past an exit needs its own encryption.
-7. For onion services; ordinary sites need HTTPS past the exit.
 
 [Primary sources](./docs/src/README.md#primary-sources)
 
