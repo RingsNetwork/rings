@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rings_core::lifecycle::StopToken;
-use rings_core::swarm::OfferReply;
 #[cfg(target_os = "linux")]
 use rings_gateway::bindings::NativePacketIo;
 #[cfg(target_os = "linux")]
@@ -50,6 +49,7 @@ use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::AdmissionActivity;
 use crate::tests::exit_descriptor::ExitDescriptorFixture;
 use crate::tests::native::prepare_processor_with_onion_role;
+use crate::tests::native::signal_edge;
 
 const PUBLIC_HTTP_PORT: u16 = 80;
 const PUBLIC_HTTP_IPV4: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
@@ -94,50 +94,14 @@ fn client_packet(
         .expect("captured client packet")
 }
 
-/// Whether `error` refuses a manual handshake because a concurrent handshake owns the edge: an
-/// attempt is under way or admitted, or the peer's handshake took this one's slot (#947). The
-/// edge then forms from that handshake.
-fn refused_by_concurrent_handshake(error: &rings_core::error::Error) -> bool {
-    matches!(
-        error,
-        rings_core::error::Error::AlreadyConnected
-            | rings_core::error::Error::ConnectionAttemptSuperseded { .. }
-    )
-}
-
-/// One manual handshake from `first` to `second`. `second` replies with an answer, or, when
-/// its own sent overlay offer prevails on the tie-break, with that offer, which `first`
-/// answers (#947).
-async fn exchange_edge_signaling(
-    first: &Processor,
-    second: &Processor,
-) -> std::result::Result<(), rings_core::error::Error> {
-    let (attempt, offer) = first.swarm.offer_connection(second.did()).await?;
-    match second.swarm.answer_offer(offer).await? {
-        OfferReply::Answer(answer) => first.swarm.accept_answer_for(attempt, answer).await,
-        OfferReply::CounterOffer(counter_offer) => {
-            let answer = first
-                .swarm
-                .answer_offer(counter_offer)
-                .await?
-                .answer()
-                .ok_or(rings_core::error::Error::AlreadyConnected)?;
-            second.swarm.accept_answer(answer).await
-        }
-    }
-}
-
 /// Connect `first` to `second` and await, on admission activity, both admitting the edge.
 ///
 /// Stabilization connects overlay neighbours by itself once some edges exist, so the manual
-/// handshake may meet the overlay's own: a refusal because that handshake owns the edge
-/// ([`refused_by_concurrent_handshake`]) satisfies the request, and the tie-break guarantees
-/// the crossing handshakes end with one edge (#947).
+/// handshake may meet the overlay's own ([`signal_edge`]); the tie-break guarantees the
+/// crossing handshakes end with one edge (#947).
 async fn connect_gateway_edge(first: &Processor, second: &Processor, label: &str) {
-    match exchange_edge_signaling(first, second).await {
-        Ok(()) => {}
-        Err(error) if refused_by_concurrent_handshake(&error) => {}
-        Err(error) => panic!("gateway WebRTC edge {label} handshake: {error:?}"),
+    if let Err(error) = signal_edge(first, second).await {
+        panic!("gateway WebRTC edge {label} handshake: {error:?}");
     }
     probe_on_activity(
         &format!("gateway WebRTC edge {label} admitted on both ends"),

@@ -18,7 +18,6 @@ use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use rings_core::dht::Did;
-use rings_core::swarm::OfferReply;
 use rings_core::utils::get_epoch_ms;
 use rings_test_support::with_hang_guard;
 
@@ -46,6 +45,7 @@ use crate::provider::Provider;
 use crate::tests::exit_descriptor::ExitDescriptorFixture;
 use crate::tests::native::network_test_guard;
 use crate::tests::native::prepare_processor_with_onion_role;
+use crate::tests::native::signal_edge;
 
 /// The hang guard of one awaited event: a failure bound, never a pacing.
 pub(super) const EVENT_BOUND: Duration = Duration::from_secs(30);
@@ -101,46 +101,15 @@ impl LoopNode {
 
 /// Link `a` and `b` and wait until both link tables hold the link.
 ///
-/// Chord stabilization may already have connected (or be connecting) the pair once they share a
-/// neighbour, so a refusal because that handshake owns the edge is the link being made, not a
-/// failure (#947): the wait on both link tables decides.
+/// The edge may form from a concurrent handshake ([`signal_edge`]): the wait on both link
+/// tables decides.
 async fn link(a: &LoopNode, b: &LoopNode) -> Result<()> {
-    if let Err(error) = dial(a, b).await {
-        if !matches!(
-            error,
-            Error::CoreError(
-                rings_core::error::Error::AlreadyConnected
-                    | rings_core::error::Error::ConnectionAttemptSuperseded { .. }
-            )
-        ) {
-            return Err(error);
-        }
-    }
+    signal_edge(&a.processor, &b.processor).await?;
     with_hang_guard("the loop network's link", EVENT_BOUND, async {
         a.runtime.links().live(b.did()).await;
         b.runtime.links().live(a.did()).await;
     })
     .await;
-    Ok(())
-}
-
-/// One offer/answer exchange from `a` to `b`: `b` answers, or, when its own sent overlay offer
-/// prevails on the tie-break, replies with that offer, which `a` answers (#947).
-async fn dial(a: &LoopNode, b: &LoopNode) -> Result<()> {
-    let (attempt, offer) = a.processor.swarm.offer_connection(b.did()).await?;
-    match b.processor.swarm.answer_offer(offer).await? {
-        OfferReply::Answer(answer) => a.processor.swarm.accept_answer_for(attempt, answer).await?,
-        OfferReply::CounterOffer(counter_offer) => {
-            let answer = a
-                .processor
-                .swarm
-                .answer_offer(counter_offer)
-                .await?
-                .answer()
-                .ok_or(rings_core::error::Error::AlreadyConnected)?;
-            b.processor.swarm.accept_answer(answer).await?;
-        }
-    }
     Ok(())
 }
 
