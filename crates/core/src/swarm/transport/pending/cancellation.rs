@@ -1,14 +1,11 @@
 //! Cancellation and expiry of unadmitted generations: the transitions that release a pending
 //! or admitting record, with its signaling state, and close its transport object.
 
-use rings_transport::core::transport::TransportInterface;
-
 use super::Handshake;
 use super::PendingConnectionAttempt;
 use super::SwarmConnection;
 use super::SwarmTransport;
 use super::PENDING_CONNECTION_TIMEOUT_MS;
-use crate::error::Error;
 use crate::error::Result;
 use crate::utils::get_epoch_ms_i64;
 
@@ -79,10 +76,7 @@ impl SwarmTransport {
         );
         // The answering generation has no transport yet, so the raw connection is the yielded one.
         if let Some(connection) = connection {
-            self.transport
-                .close_connection_if_current(&connection.connection)
-                .await
-                .map_err(Error::Transport)?;
+            self.close_if_current(&connection).await?;
         }
         Ok(Some(answering))
     }
@@ -116,10 +110,7 @@ impl SwarmTransport {
             "pending connection cancelled"
         );
         if let Some(connection) = retired.connection {
-            self.transport
-                .close_connection_if_current(&connection.connection)
-                .await
-                .map_err(Error::Transport)?;
+            self.close_if_current(&connection).await?;
         }
         Ok(true)
     }
@@ -193,10 +184,7 @@ impl SwarmTransport {
                 "connection attempt timed out before admission commit"
             );
             if let Some(connection) = connection {
-                self.transport
-                    .close_connection_if_current(&connection.connection)
-                    .await
-                    .map_err(Error::Transport)?;
+                self.close_if_current(&connection).await?;
             }
         }
         Ok(())

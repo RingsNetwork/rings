@@ -288,6 +288,15 @@ impl SwarmTransport {
         Ok(())
     }
 
+    /// Close `connection`'s physical generation iff it is still the backend's current one;
+    /// returns whether it was.
+    pub(super) async fn close_if_current(&self, connection: &SwarmConnection) -> Result<bool> {
+        self.transport
+            .close_connection_if_current(&connection.connection)
+            .await
+            .map_err(Error::Transport)
+    }
+
     pub(super) fn get_raw_connection(&self, peer: Did) -> Option<SwarmConnection> {
         self.transport
             .connection(&peer.to_string())
@@ -821,11 +830,7 @@ impl SwarmTransport {
         let still_current = match self.is_current_connection_attempt(attempt) {
             Ok(still_current) => still_current,
             Err(error) => {
-                if let Err(close_error) = self
-                    .transport
-                    .close_connection_if_current(&connection.connection().connection)
-                    .await
-                {
+                if let Err(close_error) = self.close_if_current(connection.connection()).await {
                     tracing::warn!(
                         peer = %attempt.peer,
                         generation = attempt.generation,
@@ -837,10 +842,7 @@ impl SwarmTransport {
             }
         };
         if !still_current {
-            self.transport
-                .close_connection_if_current(&connection.connection().connection)
-                .await
-                .map_err(Error::Transport)?;
+            self.close_if_current(connection.connection()).await?;
             return Err(Error::ConnectionAttemptSuperseded {
                 peer: attempt.peer,
                 generation: attempt.generation,

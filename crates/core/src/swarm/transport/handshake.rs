@@ -21,7 +21,6 @@
 use std::future::Future;
 
 use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::TransportInterface;
 
 use super::pending::crossing_offer_verdict;
 use super::pending::AnswerSlot;
@@ -424,12 +423,7 @@ impl SwarmTransport {
         if let Some(swarm_conn) = self.get_raw_connection(peer) {
             match self.raw_connection_owner(peer)? {
                 RawConnectionOwner::Orphan => {
-                    if !self
-                        .transport
-                        .close_connection_if_current(&swarm_conn.connection)
-                        .await
-                        .map_err(Error::Transport)?
-                    {
+                    if !self.close_if_current(&swarm_conn).await? {
                         return Err(Error::AlreadyConnected);
                     }
                 }

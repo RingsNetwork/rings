@@ -6,7 +6,6 @@ use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
 use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::TransportInterface;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use rings_transport::core::transport::WebrtcConnectionState;
 
@@ -443,10 +442,7 @@ impl SwarmTransport {
                 .map(|_| ());
         }
         if let Some(connection) = self.get_raw_connection(peer) {
-            self.transport
-                .close_connection_if_current(&connection.connection)
-                .await
-                .map_err(Error::Transport)?;
+            self.close_if_current(&connection).await?;
         }
         Ok(())
     }
@@ -639,13 +635,7 @@ impl SwarmTransport {
     }
 
     async fn close_connection_for_disconnect(&self, connection: &SwarmConnection) -> Result<()> {
-        let close = async {
-            self.transport
-                .close_connection_if_current(&connection.connection)
-                .await
-                .map(|_| ())
-                .map_err(Error::Transport)
-        };
+        let close = async { self.close_if_current(connection).await.map(|_| ()) };
         if !await_bounded_connection_close(close).await? {
             tracing::warn!(
                 peer = %connection.peer,
