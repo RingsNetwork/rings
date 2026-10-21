@@ -10,9 +10,7 @@ use super::OnionHttpsRequest;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::proxy::OnionProxyTarget;
-use crate::onion::target::resolve_target_addresses;
-use crate::onion::target::select_public_exit_addresses;
-use crate::onion::target::PublicAddressSelection;
+use crate::onion::target::resolve_public_target;
 
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -68,8 +66,10 @@ pub(super) async fn execute_https_request(
     max_body_bytes: u64,
     record_bytes: impl Fn(u64) -> Result<()>,
 ) -> Result<FetchResponse> {
-    let addresses = resolve_target_addresses(target).await?;
-    let egress = select_native_https_egress(target, addresses)?;
+    let egress = NativeHttpsEgress {
+        host: target.host().to_string(),
+        addresses: resolve_public_target(target).await?,
+    };
     native_fetch_with_timeout(
         url,
         request,
@@ -79,25 +79,6 @@ pub(super) async fn execute_https_request(
         record_bytes,
     )
     .await
-}
-
-/// Select native HTTPS egress from an immutable resolution result.
-///
-/// Post: public resolution selects the pinned path; every non-public result is denied.
-pub(super) fn select_native_https_egress(
-    target: &OnionProxyTarget,
-    addresses: Vec<SocketAddr>,
-) -> Result<NativeHttpsEgress> {
-    match select_public_exit_addresses(addresses) {
-        PublicAddressSelection::Public(addresses) => Ok(NativeHttpsEgress {
-            host: target.host().to_string(),
-            addresses,
-        }),
-        PublicAddressSelection::Denied => Err(Error::NoPermission),
-        PublicAddressSelection::Empty => Err(Error::OnionTargetResolvedEmpty {
-            authority: target.authority(),
-        }),
-    }
 }
 
 fn native_http_error(context: &str, error: reqwest::Error) -> Error {

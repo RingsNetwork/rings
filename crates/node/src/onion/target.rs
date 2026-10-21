@@ -121,13 +121,11 @@ pub(crate) async fn resolve_public_target(target: &OnionProxyTarget) -> Result<V
     }
 }
 
-/// Resolve one target into a single DNS snapshot without assigning egress authority.
-///
-/// Callers must pass the complete snapshot through a closed address-selection policy before using
-/// it. Keeping resolution separate lets an explicitly configured proxy recognize its synthetic
-/// DNS placeholders without treating ordinary private or loopback results as public.
+/// Resolve one target into a single DNS snapshot without assigning egress authority:
+/// [`resolve_public_target`] passes the complete snapshot through
+/// [`select_public_exit_addresses`] before any address is used.
 #[cfg(rings_native)]
-pub(crate) async fn resolve_target_addresses(target: &OnionProxyTarget) -> Result<Vec<SocketAddr>> {
+async fn resolve_target_addresses(target: &OnionProxyTarget) -> Result<Vec<SocketAddr>> {
     Ok(lookup_host((target.host(), target.port()))
         .await
         .map_err(|error| Error::OnionTargetResolve {
@@ -139,7 +137,7 @@ pub(crate) async fn resolve_target_addresses(target: &OnionProxyTarget) -> Resul
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg(any(test, rings_native))]
-pub(crate) enum PublicAddressSelection {
+enum PublicAddressSelection {
     Empty,
     Denied,
     Public(Vec<SocketAddr>),
@@ -147,7 +145,7 @@ pub(crate) enum PublicAddressSelection {
 
 /// Select a stable, de-duplicated public projection from one DNS result snapshot.
 #[cfg(any(test, rings_native))]
-pub(crate) fn select_public_exit_addresses(addresses: Vec<SocketAddr>) -> PublicAddressSelection {
+fn select_public_exit_addresses(addresses: Vec<SocketAddr>) -> PublicAddressSelection {
     if addresses.is_empty() {
         return PublicAddressSelection::Empty;
     }
