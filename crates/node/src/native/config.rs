@@ -136,25 +136,6 @@ const GATEWAY_KEYS: [&str; 10] = [
     "status_refresh_secs",
 ];
 
-/// Keys of the `gateway:` section removed by the onion loop cutover, each rejected with the
-/// reason it went: the route length is fixed by the loop shape (#834 D5), and a captured flow is
-/// a byte tunnel, which is always `tcp` since `https` is a fetch only (#834 D1′).
-const REMOVED_GATEWAY_KEYS: [(&str, &str); 3] = [
-    (
-        "onion_hop_count",
-        "the onion route length is fixed by the loop shape (#834 D5)",
-    ),
-    (
-        "onion_allow_short_paths",
-        "the onion route length is fixed by the loop shape (#834 D5)",
-    ),
-    (
-        "onion_service",
-        "captured flows are byte tunnels, which always use the tcp exit service; restrict \
-         egress with the exit policy (for example *:443) instead (#834 D1′)",
-    ),
-];
-
 /// Deserialize the `gateway:` section, rejecting every key outside [`GATEWAY_KEYS`].
 ///
 /// The section flattens [`GatewayConfig`], so serde cannot deny unknown keys there; without this
@@ -174,19 +155,10 @@ where D: serde::Deserializer<'de> {
         .map(String::as_str)
         .find(|key| !GATEWAY_KEYS.contains(key))
     {
-        return Err(serde::de::Error::custom(
-            if let Some((_, reason)) = REMOVED_GATEWAY_KEYS
-                .iter()
-                .find(|(removed, _)| *removed == key)
-            {
-                format!("gateway.{key} was removed: {reason}")
-            } else {
-                format!(
-                    "unknown gateway key {key:?}; expected one of {}",
-                    GATEWAY_KEYS.join(", ")
-                )
-            },
-        ));
+        return Err(serde::de::Error::custom(format!(
+            "unknown gateway key {key:?}; expected one of {}",
+            GATEWAY_KEYS.join(", ")
+        )));
     }
     serde_json::from_value(serde_json::Value::Object(section))
         .map(Some)
@@ -733,49 +705,6 @@ gateway:
         };
 
         assert!(error.contains("unknown gateway key \"onion_services\""));
-    }
-
-    /// The route-length keys removed by the onion loop cutover are rejected by name, not ignored
-    /// by the flattened gateway section.
-    #[test]
-    fn gateway_section_rejects_removed_route_length_keys() {
-        for (key, value) in [
-            ("onion_hop_count", "3"),
-            ("onion_allow_short_paths", "true"),
-        ] {
-            let document = format!(
-                "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  \
-                 {key}: {value}\n"
-            );
-
-            let error = match serde_saphyr::from_str::<Config>(&document) {
-                Ok(_) => panic!("gateway.{key} must be rejected"),
-                Err(error) => error.to_string(),
-            };
-
-            assert!(error.contains(&format!("gateway.{key} was removed")));
-            assert!(error.contains("loop shape"));
-        }
-    }
-
-    /// `gateway.onion_service` is rejected by name: a captured flow is a byte tunnel, which is
-    /// always `tcp`, so there is nothing left to select.
-    #[test]
-    fn gateway_section_rejects_removed_onion_service_key() {
-        for value in ["tcp", "https"] {
-            let document = format!(
-                "{CONFIG_WITHOUT_GATEWAY_SECTION}{GATEWAY_SECTION_WITHOUT_ENABLED}  \
-                 onion_service: {value}\n"
-            );
-
-            let error = match serde_saphyr::from_str::<Config>(&document) {
-                Ok(_) => panic!("gateway.onion_service must be rejected"),
-                Err(error) => error.to_string(),
-            };
-
-            assert!(error.contains("gateway.onion_service was removed"));
-            assert!(error.contains("*:443"));
-        }
     }
 
     #[test]

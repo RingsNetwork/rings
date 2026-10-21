@@ -27,6 +27,11 @@
   through `reply_via` and connect signaling retraces its recorded path (#947); the 0.34.0 notes
   below state the `SwarmEvent` variants and core API additions correctly.
 
+- Removed options have no tombstones (#990): `gateway.onion_service`, `gateway.onion_hop_count`
+  and `gateway.onion_allow_short_paths` fail as an unknown gateway key, and the removed
+  `ONION_HTTP_PROXY_HOP_COUNT` and `ONION_HTTP_PROXY_ALLOW_SHORT_PATHS` variables are no longer
+  read, like the other variables the onion loop cutover removed.
+
 ## 0.34.0
 
 - Onion circuits are client-sealed loops of registered operation symbols (#834, Onion Kleisli
