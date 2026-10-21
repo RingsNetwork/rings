@@ -11,7 +11,6 @@ delegatee_key: ./node1-delegatee-key
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 3
 external_ip: null
-backend: []
 data_storage:
   path: /Users/foo/.rings/data2
   capacity: 200000000
@@ -30,7 +29,6 @@ delegatee_key: ./node2-delegatee-key
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 3
 external_ip: null
-backend: []
 data_storage:
   path: /Users/ryan/.rings/data1
   capacity: 200000000
