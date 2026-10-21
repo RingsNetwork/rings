@@ -210,9 +210,11 @@ async fn prepare_onion_loop_public_gateway(
         ])?)
         .await?;
 
-    let proxy = OnionProxyProtocol::TcpConnect;
     let preview = client
-        .build_onion_proxy_route(proxy, OnionProxyTarget::parse_authority(&authority)?)
+        .build_onion_proxy_route(
+            OnionProxyProtocol::TcpConnect,
+            OnionProxyTarget::parse_authority(&authority)?,
+        )
         .await?;
     let relay_dids = relays.iter().map(|relay| relay.did()).collect::<Vec<_>>();
     assert_eq!(preview.route.hops().positions().count(), 5);
@@ -222,7 +224,6 @@ async fn prepare_onion_loop_public_gateway(
     let connector = Arc::new(NativeOnionGatewayConnector::new(
         Arc::clone(&client),
         client_onion,
-        proxy,
     ));
     let runtime =
         GatewayRuntime::new(config, connector, 23).expect("construct gateway runtime fixture");
