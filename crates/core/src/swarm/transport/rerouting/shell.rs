@@ -14,8 +14,7 @@ use crate::dht::Did;
 use crate::error::DeferralTrigger;
 use crate::error::Result;
 use crate::message::types::Message;
-use crate::message::types::MessageKind;
-use crate::message::MessagePayload;
+use crate::message::PayloadSender;
 use crate::swarm::transport::delivery::SendCompletionOutcome;
 use crate::swarm::transport::egress::QueueAdmission;
 use crate::swarm::transport::outbound::CapacityView;
@@ -96,8 +95,11 @@ impl SwarmTransport {
             Ok(link) => link,
             Err(error) => return Verdict::Failed(error),
         };
+        // The egress discipline governs only sending; signing and the sequence are the
+        // transport's under every discipline.
         let payload = match self
-            .originated_payload(*message, hop, destination, origination.reply_via)
+            .protocol_egress()
+            .originate_through(*message, hop, destination, origination.reply_via)
             .await
         {
             Ok(payload) => payload,
@@ -115,30 +117,6 @@ impl SwarmTransport {
                 .map(|()| SendCompletionOutcome::Succeeded),
         };
         Verdict::remote(hop.peer, generation, demand, result)
-    }
-
-    /// Build a locally originated payload through `hop`, naming `reply_via`, after durably
-    /// reserving its stream sequence: `PayloadSender::originate` with the hop already decided.
-    async fn originated_payload(
-        &self,
-        message: Message,
-        hop: NextHop,
-        destination: Did,
-        reply_via: Option<Did>,
-    ) -> Result<MessagePayload> {
-        let class = MessageKind::from_message(&message).class();
-        let sequence = *self
-            .reserve_transaction_sequences(destination, class, std::num::NonZeroU64::MIN)
-            .await?
-            .start();
-        MessagePayload::new_send_with_sequence(
-            message,
-            self.message_signer(),
-            hop,
-            destination,
-            sequence,
-            reply_via,
-        )
     }
 
     /// Stamp the channel progress of `awaiting`'s hop, after its refusal was published.

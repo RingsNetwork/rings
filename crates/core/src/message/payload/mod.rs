@@ -441,18 +441,20 @@ pub trait PayloadSender {
             .ok_or(Error::RelayDestinationUnreachable { destination })
     }
 
-    /// Build a locally originated payload for `destination`: the only constructor of a
-    /// transaction this node authors, other than a reply to a received request
-    /// ([`Self::send_reply`], which authors both a report and a connect-signaling reply).
+    /// Build a locally originated payload for `destination`: with [`Self::originate_through`],
+    /// which it ends in, the only constructor of a transaction this node authors, other than a
+    /// reply to a received request ([`Self::send_reply`], which authors both a report and a
+    /// connect-signaling reply).
     ///
     /// The first hop is `next_hop` when the caller fixed it, otherwise the delivery decision;
     /// the transaction names this node's [`reply_via`](crate::dht::delivery::reply_via). When
     /// the hop is decided here, both come from one topology snapshot
-    /// ([`origination`](crate::dht::delivery::origination)). Every locally originated payload
-    /// passes through here, so the law "a node without a predecessor names its nearest linked
-    /// successor" holds for all of them. That includes a manually signalled connection answer,
-    /// which names the hint harmlessly: no report is ever sent for it, and its only reader is
-    /// the peer it is sent to.
+    /// ([`origination`](crate::dht::delivery::origination)), as they do for a rerouted
+    /// placement, which decides its hop itself and calls [`Self::originate_through`]. Every
+    /// locally originated payload passes through one of the two, so the law "a node without a
+    /// predecessor names its nearest linked successor" holds for all of them. That includes a
+    /// manually signalled connection answer, which names the hint harmlessly: no report is ever
+    /// sent for it, and its only reader is the peer it is sent to.
     async fn originate(
         &self,
         msg: Message,
@@ -474,11 +476,21 @@ pub trait PayloadSender {
                 (hop, origination.reply_via)
             }
         };
-        let class = MessageKind::from_message(&msg).class();
-        let sequence = *self
-            .reserve_transaction_sequences(destination, class, NonZeroU64::MIN)
-            .await?
-            .start();
+        self.originate_through(msg, hop, destination, reply_via)
+            .await
+    }
+
+    /// Build a locally originated payload for `destination` through the decided first `hop`,
+    /// naming `reply_via`, after durably reserving its stream sequence: [`Self::originate`]
+    /// once the hop is decided.
+    async fn originate_through(
+        &self,
+        msg: Message,
+        hop: NextHop,
+        destination: Did,
+        reply_via: Option<Did>,
+    ) -> Result<MessagePayload> {
+        let sequence = self.next_sequence(destination, &msg).await?;
         MessagePayload::new_send_with_sequence(
             msg,
             self.message_signer(),
@@ -487,6 +499,16 @@ pub trait PayloadSender {
             sequence,
             reply_via,
         )
+    }
+
+    /// Durably reserve the next sender sequence of `msg`'s class toward `destination`: the one
+    /// sequence a transaction this node signs for `msg` carries.
+    async fn next_sequence(&self, destination: Did, msg: &Message) -> Result<u64> {
+        let class = MessageKind::from_message(msg).class();
+        Ok(*self
+            .reserve_transaction_sequences(destination, class, NonZeroU64::MIN)
+            .await?
+            .start())
     }
 
     /// Alias for `do_send_payload` that sets the next hop to `payload.relay.next_hop`.
@@ -552,11 +574,7 @@ pub trait PayloadSender {
     ) -> Result<()> {
         let origin = request.transaction.origin();
         let signer = self.message_signer();
-        let class = MessageKind::from_message(&msg).class();
-        let sequence = *self
-            .reserve_transaction_sequences(origin, class, NonZeroU64::MIN)
-            .await?
-            .start();
+        let sequence = self.next_sequence(origin, &msg).await?;
         let transaction = Transaction::new(origin, tx_id, sequence, None, msg, signer)?;
         let payload = MessagePayload::new(transaction, signer, relay)?;
         self.send_payload(payload).await
