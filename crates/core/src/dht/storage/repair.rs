@@ -177,7 +177,7 @@ impl PeerRing {
             return Ok(PeerRingAction::None);
         }
 
-        let entry = entry.try_into_storage_entry()?;
+        // `entry` is a stored value, so it is normalized already (`Entry::retired_at`).
         let mut actions = Vec::new();
         for placement_key in entry.did.rotate_affine(redundancy)? {
             let action = self
