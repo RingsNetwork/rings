@@ -186,6 +186,22 @@ impl SwarmTransport {
         Ok(failure)
     }
 
+    /// Await `step` of `attempt`'s handshake (wrapping or sending an offer or an answer); a
+    /// failure abandons the generation, logged as `operation`, so the peer's next offer is not
+    /// refused for the pending timeout, and is returned.
+    pub(in crate::swarm) async fn settle_handshake_step<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        operation: &str,
+        step: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let settled = step.await;
+        if settled.is_err() {
+            self.abandon_pending_connection(attempt, operation).await;
+        }
+        settled
+    }
+
     /// Apply `Creating -> Sent(offer, tx_id)` to `attempt`; when it no longer owns its slot,
     /// the error says why ([`Self::lost_slot`]).
     pub(in crate::swarm) fn mark_offer_sent(
