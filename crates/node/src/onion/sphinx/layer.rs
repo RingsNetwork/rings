@@ -44,6 +44,32 @@ use crate::onion::signature::OnionSymbol;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionServiceName;
 
+/// `|next|`, a raw DID: the width of a layer's and of a reply block's `next` field.
+pub(crate) const ONION_DID_BYTES: usize = 20;
+
+/// `|x|`, big-endian milliseconds: the width of a layer's and of a reply block's `x` field.
+pub(crate) const ONION_EXPIRY_BYTES: usize = 8;
+
+/// `next` as its raw `|next|`-byte field.
+pub(crate) fn encode_next(next: Did) -> [u8; ONION_DID_BYTES] {
+    PublicKeyAddress::from(next).to_fixed_bytes()
+}
+
+/// The left inverse of [`encode_next`].
+pub(crate) fn decode_next(bytes: [u8; ONION_DID_BYTES]) -> Did {
+    Did::from(PublicKeyAddress::from(bytes))
+}
+
+/// `x` as its big-endian `|x|`-byte field.
+pub(crate) fn encode_expiry(expiry: OnionExpiry) -> [u8; ONION_EXPIRY_BYTES] {
+    expiry.to_wire_ms().to_be_bytes()
+}
+
+/// The left inverse of [`encode_expiry`]: `None` for an `x` off the grid.
+pub(crate) fn decode_expiry(bytes: [u8; ONION_EXPIRY_BYTES]) -> Option<OnionExpiry> {
+    OnionExpiry::from_wire_ms(u64::from_be_bytes(bytes))
+}
+
 /// Width `A` of the argument field `ā`: every application's arguments are encoded into exactly
 /// this many bytes by its symbol's argument codec.
 pub(crate) const ONION_ARGUMENT_BYTES: usize = 64;
@@ -88,11 +114,11 @@ layer_record! {
     /// `ā`.
     arguments: ONION_ARGUMENT_BYTES,
     /// `next`, the raw DID.
-    next: 20,
+    next: ONION_DID_BYTES,
     /// `e`, the process epoch.
     epoch: 16,
     /// `x`, big-endian milliseconds.
-    expiry: 8,
+    expiry: ONION_EXPIRY_BYTES,
     /// `ν`.
     nonce: 16,
     /// `σ_in`.
@@ -213,9 +239,9 @@ impl OnionLayer {
         LayerRecord {
             code: [symbol.code()],
             arguments,
-            next: PublicKeyAddress::from(self.head.next).to_fixed_bytes(),
+            next: encode_next(self.head.next),
             epoch: self.head.epoch.to_bytes(),
-            expiry: self.head.expiry.to_wire_ms().to_be_bytes(),
+            expiry: encode_expiry(self.head.expiry),
             nonce: self.head.nonce.to_bytes(),
             inbound: *self.inbound.as_bytes(),
             outbound: *self.outbound.as_bytes(),
@@ -249,11 +275,11 @@ impl OnionLayer {
             Self {
                 head: OnionLayerHead {
                     application,
-                    next: Did::from(PublicKeyAddress::from(record.next)),
+                    next: decode_next(record.next),
                     epoch: OnionProcessEpoch::new(record.epoch),
-                    expiry: OnionExpiry::from_wire_ms(u64::from_be_bytes(record.expiry)).ok_or(
-                        OnionLayerError::OffGridExpiry(u64::from_be_bytes(record.expiry)),
-                    )?,
+                    expiry: decode_expiry(record.expiry).ok_or(OnionLayerError::OffGridExpiry(
+                        u64::from_be_bytes(record.expiry),
+                    ))?,
                     nonce: OnionReplayNonce::new(record.nonce),
                 },
                 inbound: OnionCarrySeed::new(record.inbound),

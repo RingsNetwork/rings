@@ -14,6 +14,8 @@ use crate::onion::sphinx::header::ONION_HEADER_ROUTING_BYTES;
 use crate::onion::sphinx::layer::OnionLayer;
 use crate::onion::sphinx::layer::OnionLayerError;
 use crate::onion::sphinx::layer::ONION_ARGUMENT_BYTES;
+use crate::onion::sphinx::layer::ONION_DID_BYTES;
+use crate::onion::sphinx::layer::ONION_EXPIRY_BYTES;
 use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
 use crate::onion::OnionServiceName;
 
@@ -43,7 +45,7 @@ fn test_decode_inverts_encode() {
 }
 
 /// The offset of `x` in a layer: `f`, `ā`, `next` and `e` precede it.
-const LAYER_EXPIRY_OFFSET: usize = 1 + ONION_ARGUMENT_BYTES + 20 + 16;
+const LAYER_EXPIRY_OFFSET: usize = 1 + ONION_ARGUMENT_BYTES + ONION_DID_BYTES + 16;
 
 /// `decode(w) = Right(λ, γ) ⇒ encode(λ, γ) = w`: every accepted string is canonical.
 #[test]
@@ -60,7 +62,7 @@ fn test_accepted_strings_are_canonical() {
             bytes[1..=ONION_ARGUMENT_BYTES].fill(0);
         }
         // `x` must lie on the grid `Q·ℕ`; zero does, and every other field stays random.
-        bytes[LAYER_EXPIRY_OFFSET..LAYER_EXPIRY_OFFSET + 8].fill(0);
+        bytes[LAYER_EXPIRY_OFFSET..LAYER_EXPIRY_OFFSET + ONION_EXPIRY_BYTES].fill(0);
 
         if let Ok((layer, mac)) = OnionLayer::decode(&bytes) {
             accepted += 1;
