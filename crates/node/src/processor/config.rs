@@ -135,7 +135,8 @@ impl FromStr for ProcessorConfig {
 }
 
 /// `ProcessorConfigSerialized` is a serialized version of `ProcessorConfig`.
-/// Instead of storing the `DelegateeKey` instance, it stores the dumped string representation of the session secret key.
+/// Instead of storing the `DelegateeKey` instance, it stores the dumped string representation of
+/// the delegatee key.
 #[derive(Serialize, Deserialize, Clone)]
 #[wasm_export]
 pub struct ProcessorConfigSerialized {

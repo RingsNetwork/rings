@@ -299,9 +299,9 @@ pub struct Config {
 impl TryFrom<Config> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(config: Config) -> Result<Self> {
-        let session_path = expand_home(&config.delegatee_key)?;
-        let delegatee_key = fs::read_to_string(&session_path).map_err(|error| {
-            Error::OpenFileError(format!("{}: {error}", session_path.display()))
+        let delegatee_key_path = expand_home(&config.delegatee_key)?;
+        let delegatee_key = fs::read_to_string(&delegatee_key_path).map_err(|error| {
+            Error::OpenFileError(format!("{}: {error}", delegatee_key_path.display()))
         })?;
 
         let udp_range = crate::processor::parse_webrtc_udp_port_range(
@@ -454,9 +454,9 @@ mod tests {
     }
 
     /// Write a valid delegatee key to an isolated file and return its config plus cleanup path.
-    fn config_with_session_file() -> (Config, PathBuf) {
+    fn config_with_delegatee_key_file() -> (Config, PathBuf) {
         let path =
-            std::env::temp_dir().join(format!("rings-session-{}.yaml", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("rings-delegatee-key-{}.yaml", uuid::Uuid::new_v4()));
         fs::write(&path, dumped_delegatee_key()).expect("write test delegatee key");
         (Config::new(&path), path)
     }
@@ -751,12 +751,12 @@ gateway:
 
     #[test]
     fn test_config_with_valid_webrtc_udp_range_builds_processor_config() {
-        let (mut config, session_path) = config_with_session_file();
+        let (mut config, delegatee_key_path) = config_with_delegatee_key_file();
         config.webrtc_udp_port_min = Some(49160);
         config.webrtc_udp_port_max = Some(49200);
 
         let processor_config = ProcessorConfig::try_from(config);
-        let _ = fs::remove_file(session_path);
+        let _ = fs::remove_file(delegatee_key_path);
 
         assert!(matches!(
             processor_config.and_then(|config| config.webrtc_udp_port_range()),
@@ -766,11 +766,11 @@ gateway:
 
     #[test]
     fn test_config_with_partial_webrtc_udp_range_is_rejected() {
-        let (mut config, session_path) = config_with_session_file();
+        let (mut config, delegatee_key_path) = config_with_delegatee_key_file();
         config.webrtc_udp_port_min = Some(49160);
 
         let processor_config = ProcessorConfig::try_from(config);
-        let _ = fs::remove_file(session_path);
+        let _ = fs::remove_file(delegatee_key_path);
 
         assert!(matches!(
             processor_config,
