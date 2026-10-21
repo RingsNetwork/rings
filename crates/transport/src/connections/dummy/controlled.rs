@@ -178,11 +178,11 @@ pub fn set_max_message_size(n: usize) {
     MAX_MESSAGE_SIZE.with(|m| m.set(n));
 }
 
-/// Test hook: rewrite the next queued lifecycle callback to use `cid`.
+/// Rewrite the next queued lifecycle callback to use `cid`.
 ///
 /// This applies only to peer-state and data-channel events delivered through
 /// [`deliver`]. Message events keep their real connection id.
-pub fn set_next_callback_cid(cid: impl Into<String>) {
+fn set_next_callback_cid(cid: impl Into<String>) {
     NEXT_CALLBACK_CID.with(|next| {
         *next.borrow_mut() = Some(cid.into());
     });
