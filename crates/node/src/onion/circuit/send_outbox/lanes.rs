@@ -8,7 +8,6 @@ use futures::channel::oneshot;
 use rings_core::dht::Did;
 
 use super::schedule::plan;
-use super::schedule::units_of;
 use super::schedule::Emission;
 use super::schedule::LinkClock;
 use super::schedule::OnionIdleFloor;
@@ -24,13 +23,11 @@ use crate::error::OnionQueueAdmissionReason;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::peer_quota::PeerQuota;
 
-/// One queued real cell with its byte size and class: the emission of a real cell is charged
-/// its own units.
+/// One queued real cell with its class, whose length `b` is its byte size: the emission of a
+/// real cell is charged its own units.
 pub(super) struct Queued<T> {
     /// The cell.
     pub(super) item: T,
-    /// Its bytes.
-    pub(super) bytes: usize,
     /// Its class.
     pub(super) class: OnionLoopClass,
     /// Whether a relay queued it: it counts against the relay share.
@@ -69,11 +66,10 @@ impl RelayShare {
     }
 }
 
-/// The cell in flight on a lane: its bytes, its class, and whether a relay queued it.
+/// The cell in flight on a lane: its class, whose length `b` is its byte size, and whether a
+/// relay queued it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct InFlight {
-    /// Its bytes.
-    pub(super) bytes: usize,
     /// Its class.
     pub(super) class: OnionLoopClass,
     /// Whether a relay queued it.
@@ -235,7 +231,8 @@ impl<T> OrderedSendState<T> {
         }
     }
 
-    /// Queue one cell of `class` for `peer` at `now` as `role`; the cell makes the link active.
+    /// Queue one cell of `class`, `b` bytes, for `peer` at `now` as `role`; the cell makes the
+    /// link active.
     ///
     /// # Errors
     ///
@@ -246,11 +243,11 @@ impl<T> OrderedSendState<T> {
         &mut self,
         peer: Did,
         item: T,
-        item_bytes: usize,
         class: OnionLoopClass,
         now_us: u128,
         role: QueueRole,
     ) -> std::result::Result<(), Refusal<T>> {
+        let item_bytes = class.cell_bytes();
         let refuse = |reason, item| Refusal {
             reason,
             item,
@@ -281,7 +278,6 @@ impl<T> OrderedSendState<T> {
         }
         lane.queued.push_back(Queued {
             item,
-            bytes: item_bytes,
             class,
             relayed,
         });
@@ -409,7 +405,6 @@ impl<T> OrderedSendState<T> {
                 let (emission, class) = match lane.in_flight {
                     None => lane.queued.pop_front().map(|queued| {
                         lane.in_flight = Some(InFlight {
-                            bytes: queued.bytes,
                             class: queued.class,
                             relayed: queued.relayed,
                         });
@@ -418,7 +413,7 @@ impl<T> OrderedSendState<T> {
                     Some(_) => None,
                 }
                 .unwrap_or((Emission::Cover(lane.class), lane.class));
-                lane.clock.last_start = Some((now_us, units_of(class)));
+                lane.clock.last_start = Some((now_us, u128::from(class.units().get())));
                 EmitterStep::Emit(emission)
             }
         }
@@ -432,17 +427,11 @@ impl<T> OrderedSendState<T> {
         let Some(lane) = self.lanes.get_mut(&peer).filter(|lane| lane.epoch == epoch) else {
             return false;
         };
-        let Some(InFlight {
-            bytes,
-            class,
-            relayed,
-        }) = lane.in_flight.take()
-        else {
+        let Some(InFlight { class, relayed }) = lane.in_flight.take() else {
             return false;
         };
         lane.queued.push_front(Queued {
             item,
-            bytes,
             class,
             relayed,
         });
@@ -455,9 +444,10 @@ impl<T> OrderedSendState<T> {
         let Some(lane) = self.lanes.get_mut(&peer).filter(|lane| lane.epoch == epoch) else {
             return;
         };
-        let Some(InFlight { bytes, relayed, .. }) = lane.in_flight.take() else {
+        let Some(InFlight { class, relayed }) = lane.in_flight.take() else {
             return;
         };
+        let bytes = class.cell_bytes();
         if relayed {
             lane.relayed = lane.relayed.without(bytes);
         }

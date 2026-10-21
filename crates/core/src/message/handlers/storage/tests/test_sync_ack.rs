@@ -1,5 +1,4 @@
 use super::test_support::next_payload_for_tx;
-use super::test_support::non_affine_placement;
 use super::test_support::storage_sync_report_payload;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -21,6 +20,7 @@ use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
+use crate::tests::non_affine_placement;
 
 #[tokio::test]
 async fn test_sync_entries_report_handler_deletes_only_acked_keys() -> Result<()> {

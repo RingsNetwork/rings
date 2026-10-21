@@ -3,8 +3,7 @@
 //! The exit half is the socket world (`OnionTcpWorld`): a session's target is resolved once to
 //! its public addresses and connected, and its two halves are the session's world. The client
 //! half is [`NativeOnionOpenStream`]: a session opened over a route, relayed against a local
-//! byte stream (a CONNECT tunnel, a SOCKS stream, a captured gateway flow) by the shared duplex
-//! pump.
+//! byte stream (a CONNECT tunnel or a captured gateway flow) by the shared duplex pump.
 //!
 //! ```text
 //! local ─read─▶ pump ─data─▶ session ═loops═▶ h ─write─▶ target

@@ -88,14 +88,14 @@ use super::order::OnionReorder;
 use super::order::OnionSequenceGap;
 use super::pool::ONION_SURB_POOL_CAPACITY;
 use crate::onion::circuit::OnionExpiry;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
 
 /// `Δ = 2V`: the longest a session's reply direction may stay silent before the client fails
 /// the session closed (D2′ Liveness). It exceeds the `3V/2` bound between frames of a live
 /// session (Law Deadline (i)) by `V/2`.
-pub(crate) const ONION_SESSION_DEADLINE_MS: u128 = 2 * ONION_FORWARD_MAX_VALIDITY_MS;
+pub(crate) const ONION_SESSION_DEADLINE_MS: u128 = 2 * ONION_ADMISSION_WINDOW_MS;
 
 /// What the session learned from one reply, for the client shell to act on.
 #[derive(Debug, Eq, PartialEq)]
@@ -404,7 +404,7 @@ pub(crate) const fn keep_alive_due(now_ms: u128, last_forward_ms: u128) -> bool 
 /// The instant `last_forward + V/2` at which a session whose last loop left at `last_forward`
 /// owes `h` its keep-alive, so the driver can wake exactly then.
 pub(crate) const fn keep_alive_at(last_forward_ms: u128) -> u128 {
-    last_forward_ms.saturating_add(ONION_FORWARD_MAX_VALIDITY_MS / 2)
+    last_forward_ms.saturating_add(ONION_ADMISSION_WINDOW_MS / 2)
 }
 
 /// The client's ledger of the reply blocks outstanding at `h` for one session, by expiry.

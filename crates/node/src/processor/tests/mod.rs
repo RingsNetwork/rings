@@ -18,7 +18,6 @@ use rings_core::swarm::application::ApplicationDelivery;
 use rings_rpc::method::Method;
 
 use super::*;
-use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionRouteError;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::prelude::*;

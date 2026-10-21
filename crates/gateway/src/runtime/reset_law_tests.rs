@@ -100,11 +100,11 @@ fn run_idle_clock(runtime: &mut GatewayRuntime) -> Option<FlowResetReason> {
 
 /// Whether any packet the runtime emitted carries `fin`.
 fn emitted_fin(runtime: &mut GatewayRuntime) -> bool {
-    runtime
-        .tcp
-        .take_egress()
-        .iter()
-        .any(|packet| TcpObservation::parse(packet).fin)
+    runtime.tcp.take_egress().iter().any(|packet| {
+        TcpObservation::parse(packet)
+            .expect("valid egress TCP segment")
+            .fin
+    })
 }
 
 /// Law Idle, ⇐: the client silent for `T` while the open stream is live is an idle timeout.

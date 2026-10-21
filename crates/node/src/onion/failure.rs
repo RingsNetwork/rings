@@ -34,14 +34,6 @@ pub enum OnionRouteError {
     /// of loop selection, never a property of the network.
     #[error("onion loop selection violated its invariant: a guaranteed draw had no candidate")]
     LoopDrawInvariant,
-    /// A route's loop does not have the shape of the route's pipeline.
-    #[error("onion loop has {actual} symbol hops but its pipeline has {expected}")]
-    LoopShapeMismatch {
-        /// Symbol applications of the route's pipeline.
-        expected: usize,
-        /// Symbol hops of the loop.
-        actual: usize,
-    },
     /// Route construction could not select a first hop accepted by the caller.
     #[error("no onion route has a permitted first hop")]
     NoPermittedFirstHop,
@@ -84,15 +76,6 @@ pub enum OnionRouteError {
         /// Requested target authority.
         target: String,
     },
-    /// Route construction found duplicate DIDs.
-    #[error("onion route contains duplicate hops")]
-    DuplicateRouteHops,
-    /// The selected exit descriptor does not match the loop's symbol hop.
-    #[error("onion route exit hop does not match exit descriptor")]
-    ExitHopMismatch,
-    /// The selected exit does not offer the route service.
-    #[error("onion route exit does not offer selected service")]
-    ExitServiceMismatch,
     /// A session's symbol does not match the service its route was selected for.
     #[error(
         "onion payload service {payload_service:?} does not match route service \
@@ -104,9 +87,6 @@ pub enum OnionRouteError {
         /// Service label selected by the route.
         route_service: String,
     },
-    /// A cell's length is the length of no loop class.
-    #[error("invalid onion cell")]
-    InvalidCell,
     /// A queued endpoint cell lost its drain task before the overlay reported a result.
     #[error("onion link send was cancelled before overlay completion")]
     LinkSendCancelled,

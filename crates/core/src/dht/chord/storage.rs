@@ -25,13 +25,20 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils::get_epoch_ms;
 
-/// The step one placement of a lookup takes (see [`PeerRing::lookup_placement`]).
+/// A lookup placement settled here.
 #[derive(Debug)]
-pub(crate) enum PlacementLookup {
+pub(crate) enum LookupSettlement {
     /// A live value is stored here.
     Found(Entry),
     /// This node owns the placement and stores nothing for it.
     Missed(PlacementMiss),
+}
+
+/// The step one placement of a lookup takes (see [`PeerRing::lookup_placement`]).
+#[derive(Debug)]
+pub(crate) enum PlacementLookup {
+    /// The placement settles here.
+    Settled(LookupSettlement),
     /// Ask `next` for `query`.
     Remote {
         /// The node the query goes to.
@@ -352,14 +359,19 @@ impl PeerRing {
         incoming: Entry,
     ) -> Result<Entry> {
         incoming.check_admissible_at(now_ms, self.network_id())?;
-        let kind = incoming.kind;
+        let key = StorageKey::new(incoming.kind, key).to_string();
+        let _transition = self.storage_transition.lock().await;
         // The join normalizes the union once, so the incoming value is normalized on its own
-        // only when there is nothing to join it with.
-        self.join_into_slot(now_ms, kind, key, |local| match local {
-            Some(local) => local.join(incoming),
-            None => incoming.try_into_storage_entry(),
-        })
-        .await
+        // only when there is nothing to join it with (`join_live_entry` takes an admitted value,
+        // normalized first, so it would hash every element twice).
+        let local = live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await?;
+        let stored = match local {
+            Some(local) => local.join(incoming)?,
+            None => incoming.try_into_storage_entry()?,
+        }
+        .retired_at(now_ms);
+        self.storage.put(&key, &stored).await?;
+        Ok(stored)
     }
 
     /// [`Self::join_storage_entry`] for a value already admitted, so its admission (signatures
@@ -376,30 +388,9 @@ impl PeerRing {
         key: Did,
         admitted: AdmittedEntry,
     ) -> Result<Entry> {
-        let admitted = admitted.into_entry();
-        let kind = admitted.kind;
-        self.join_into_slot(now_ms, kind, key, |local| match local {
-            Some(local) => local.join(admitted),
-            None => Ok(admitted),
-        })
-        .await
-    }
-
-    /// Write `join(live local value)` to the slot of `kind` at `key`, projected to its element
-    /// horizon at `now_ms`, under the storage transition; returns what was written.
-    async fn join_into_slot(
-        &self,
-        now_ms: u128,
-        kind: EntryKind,
-        key: Did,
-        join: impl FnOnce(Option<Entry>) -> Result<Entry>,
-    ) -> Result<Entry> {
-        let key = StorageKey::new(kind, key).to_string();
+        let key = StorageKey::new(admitted.kind(), key).to_string();
         let _transition = self.storage_transition.lock().await;
-        let local = live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await?;
-        let stored = join(local)?.retired_at(now_ms);
-        self.storage.put(&key, &stored).await?;
-        Ok(stored)
+        join_live_entry(&self.storage, &key, admitted, now_ms).await
     }
 
     /// Apply a stamped operation issued by `writer` to the value stored at `placement` at time
@@ -475,7 +466,7 @@ impl PeerRing {
                     .await?
                     .filter(|value| value.bound_live_at(now_ms));
                 if let Some(value) = served {
-                    return Ok(PlacementLookup::Found(value));
+                    return Ok(PlacementLookup::Settled(LookupSettlement::Found(value)));
                 }
                 tracing::debug!("Cannot find entry in local storage, try to query from successor");
                 if owner != self.did {
@@ -489,7 +480,10 @@ impl PeerRing {
                     };
                 Ok(match head {
                     Some(next) => PlacementLookup::Remote { next, query },
-                    None => PlacementLookup::Missed(PlacementMiss::new(query.placement, owner)),
+                    None => PlacementLookup::Settled(LookupSettlement::Missed(PlacementMiss::new(
+                        query.placement,
+                        owner,
+                    ))),
                 })
             }
             PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(id)) => {
@@ -519,12 +513,12 @@ impl PeerRing {
                 .lookup_placement(query, fallback_on_local_virtual_miss, now_ms)
                 .await?
             {
-                PlacementLookup::Found(value) => {
+                PlacementLookup::Settled(LookupSettlement::Found(value)) => {
                     return Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
                         value, misses,
                     )));
                 }
-                PlacementLookup::Missed(miss) => misses.push(miss),
+                PlacementLookup::Settled(LookupSettlement::Missed(miss)) => misses.push(miss),
                 PlacementLookup::Remote { next, query } => {
                     ret.push(PeerRingAction::RemoteAction(
                         next,

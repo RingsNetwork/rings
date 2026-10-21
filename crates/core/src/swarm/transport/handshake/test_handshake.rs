@@ -211,7 +211,7 @@ async fn test_creating_offer_yields_in_both_did_orders() -> Result<()> {
             .is_current_connection_attempt(creating)?);
         assert_eq!(
             handshake_of(local, remote.did())?,
-            Some(Handshake::Answering { reply_sent: true })
+            Some(Handshake::Answering)
         );
         assert!(
             remote
@@ -539,7 +539,7 @@ async fn test_yielded_offer_is_superseded_before_the_answer_is_created() -> Resu
     assert_ne!(answering, creating);
     assert_eq!(
         handshake_of(&node1, node2.did())?,
-        Some(Handshake::answering())
+        Some(Handshake::Answering)
     );
 
     let failure = transport

@@ -4,6 +4,7 @@ use rings_core::message::MessageSigner;
 
 use super::common::*;
 use super::*;
+use crate::tests::exit_descriptor::ExitDescriptorFixture;
 
 struct StoppedRegistration;
 
@@ -213,33 +214,31 @@ async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> 
     let processor = prepare_processor().await;
     let other = prepare_processor().await;
     let now_ms = get_epoch_ms();
-    let mut policy = onion_policy(&["example.com:443"], &[])?;
-    policy.max_sessions = 8;
-    policy.max_bytes_per_minute = 4096;
-    let stale_tcp = onion_exit_descriptor_for_processor_with_service(
+    let policy = bounded_policy(&["example.com:443"], &[])?;
+    let stale_tcp = ExitDescriptorFixture::live(
         &processor,
         OnionServiceName::tcp(),
-        now_ms.saturating_sub(30_000),
         policy.clone(),
-    )?;
-    let stale_https = onion_exit_descriptor_for_processor_with_service(
+        now_ms.saturating_sub(30_000),
+    )
+    .sign()?;
+    let stale_https = ExitDescriptorFixture::live(
         &processor,
         OnionServiceName::https(),
+        policy.clone(),
         now_ms.saturating_sub(20_000),
-        policy.clone(),
-    )?;
-    let other_https = onion_exit_descriptor_for_processor_with_service(
+    )
+    .sign()?;
+    let other_https =
+        ExitDescriptorFixture::live(&other, OnionServiceName::https(), policy.clone(), now_ms)
+            .sign()?;
+    let expired_other_https = ExitDescriptorFixture::live(
         &other,
         OnionServiceName::https(),
-        now_ms,
         policy.clone(),
-    )?;
-    let expired_other_https = onion_exit_descriptor_for_processor_with_service(
-        &other,
-        OnionServiceName::https(),
         now_ms.saturating_sub(120_000),
-        policy.clone(),
-    )?;
+    )
+    .sign()?;
     assert!(expired_other_https.is_expired_at(now_ms));
 
     processor

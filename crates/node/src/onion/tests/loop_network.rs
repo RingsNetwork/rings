@@ -18,11 +18,10 @@ use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use rings_core::dht::Did;
-use rings_core::message::MessageSigner;
-use rings_core::swarm::OfferReply;
 use rings_core::utils::get_epoch_ms;
 use rings_test_support::with_hang_guard;
 
+use super::fixture::session_loop;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::circuit::OnionAlgebra;
@@ -33,10 +32,8 @@ use crate::onion::session::serve::OnionWorld;
 use crate::onion::session::serve::OnionWorldReader;
 use crate::onion::session::serve::OnionWorldWriter;
 use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
-use crate::onion::OnionLoop;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRole;
 use crate::onion::OnionRoute;
@@ -45,8 +42,10 @@ use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 use crate::processor::Processor;
 use crate::provider::Provider;
+use crate::tests::exit_descriptor::ExitDescriptorFixture;
 use crate::tests::native::network_test_guard;
 use crate::tests::native::prepare_processor_with_onion_role;
+use crate::tests::native::signal_edge;
 
 /// The hang guard of one awaited event: a failure bound, never a pacing.
 pub(super) const EVENT_BOUND: Duration = Duration::from_secs(30);
@@ -92,75 +91,25 @@ impl LoopNode {
         service: OnionServiceName,
         policy: OnionExitPolicy,
     ) -> Result<OnionExitDescriptor> {
-        let now_ms = get_epoch_ms();
-        let network_id = self.processor.swarm.network_id();
-        OnionExitDescriptor::new_signed(
-            OnionExitDescriptorBody {
-                did: self.did(),
-                public_key: self
-                    .processor
-                    .swarm
-                    .delegator_verification_pubkey()
-                    .map_err(Error::CoreError)?,
-                delegatee_public_key: self.processor.delegatee_key().delegatee_public_key(),
-                process_epoch: self.processor.onion_process_epoch().get(),
-                node_type: OnlineNodeType::Native,
-                network_id,
-                service,
-                policy,
-                started_at_ms: now_ms,
-                heartbeat_at_ms: now_ms,
-                expires_at_ms: now_ms + 90_000,
-                version: crate::util::build_version(),
-            },
-            MessageSigner::new(self.processor.delegatee_key(), network_id),
-        )
-        .map_err(Error::CoreError)
+        ExitDescriptorFixture {
+            node_type: OnlineNodeType::Native,
+            ..ExitDescriptorFixture::live(&self.processor, service, policy, get_epoch_ms())
+        }
+        .sign()
     }
 }
 
 /// Link `a` and `b` and wait until both link tables hold the link.
 ///
-/// Chord stabilization may already have connected (or be connecting) the pair once they share a
-/// neighbour, so a refusal because that handshake owns the edge is the link being made, not a
-/// failure (#947): the wait on both link tables decides.
+/// The edge may form from a concurrent handshake ([`signal_edge`]): the wait on both link
+/// tables decides.
 async fn link(a: &LoopNode, b: &LoopNode) -> Result<()> {
-    if let Err(error) = dial(a, b).await {
-        if !matches!(
-            error,
-            Error::CoreError(
-                rings_core::error::Error::AlreadyConnected
-                    | rings_core::error::Error::ConnectionAttemptSuperseded { .. }
-            )
-        ) {
-            return Err(error);
-        }
-    }
+    signal_edge(&a.processor, &b.processor).await?;
     with_hang_guard("the loop network's link", EVENT_BOUND, async {
         a.runtime.links().live(b.did()).await;
         b.runtime.links().live(a.did()).await;
     })
     .await;
-    Ok(())
-}
-
-/// One offer/answer exchange from `a` to `b`: `b` answers, or, when its own sent overlay offer
-/// prevails on the tie-break, replies with that offer, which `a` answers (#947).
-async fn dial(a: &LoopNode, b: &LoopNode) -> Result<()> {
-    let (attempt, offer) = a.processor.swarm.offer_connection(b.did()).await?;
-    match b.processor.swarm.answer_offer(offer).await? {
-        OfferReply::Answer(answer) => a.processor.swarm.accept_answer_for(attempt, answer).await?,
-        OfferReply::CounterOffer(counter_offer) => {
-            let answer = a
-                .processor
-                .swarm
-                .answer_offer(counter_offer)
-                .await?
-                .answer()
-                .ok_or(rings_core::error::Error::AlreadyConnected)?;
-            b.processor.swarm.accept_answer(answer).await?;
-        }
-    }
     Ok(())
 }
 
@@ -203,19 +152,13 @@ impl LoopNetwork {
 
     /// The route `g, r₀₂, h, r₁₁, g` to `h`'s registration of `service`.
     pub(super) fn route(&self, service: OnionServiceName) -> Result<OnionRoute> {
-        let [g, r02, h, r11] = &self.hops;
-        let mut relays = [g, r02, r11].into_iter();
-        let hops = OnionLoop::try_unfold(Vec::new(), h.route_hop(), |_| {
-            relays
-                .next()
-                .map(LoopNode::route_hop)
-                .ok_or(Error::InvalidData)
-        })?;
-        OnionRoute::new(
+        let hops = session_loop(self.hops.each_ref().map(LoopNode::route_hop));
+        let [_, _, h, _] = &self.hops;
+        Ok(OnionRoute::new(
             service.clone(),
             hops,
             h.exit_descriptor(service, open_policy())?,
-        )
+        ))
     }
 }
 

@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use super::client_packet;
 use super::config;
 use super::handshake_ack_from_observation;
-use super::receive_matching_tcp;
-use super::ChannelPacketIo;
+use super::receive_tcp;
+use crate::testing::ChannelPacketIo;
 use crate::BoxGatewayDuplex;
 use crate::BoxOnionStreamProbe;
 use crate::FlowId;
@@ -114,7 +114,7 @@ async fn test_an_abortive_stream_end_resets_the_flow_with_its_reason() {
         .send(client_packet(TcpControl::Syn, TcpSeqNumber(7), None))
         .await
         .expect("send SYN");
-    let syn_ack = receive_matching_tcp(&mut egress_rx, |packet| {
+    let syn_ack = receive_tcp(&mut egress_rx, |packet| {
         packet.acknowledgment.is_some() && !packet.rst
     })
     .await;
@@ -128,7 +128,7 @@ async fn test_an_abortive_stream_end_resets_the_flow_with_its_reason() {
     ));
     streams.lock().expect("stream slot").clear();
 
-    let end = receive_matching_tcp(&mut egress_rx, |packet| packet.rst || packet.fin).await;
+    let end = receive_tcp(&mut egress_rx, |packet| packet.rst || packet.fin).await;
     assert!(
         end.rst && !end.fin,
         "a failed stream ended the flow with a FIN"

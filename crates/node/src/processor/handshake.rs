@@ -90,15 +90,24 @@ pub(crate) enum HandshakeFailure {
 }
 
 impl HandshakeFailure {
-    /// Sort a core refusal of one handshake stage: an offer refused because the peer already
-    /// holds a record, or an attempt superseded by the peer's own offer, is `InFlight`; any
-    /// other error is `Failed` under the stage's wrapper.
+    /// Whether `error` is a core refusal because another attempt owns the peer's slot: an offer
+    /// refused because the peer already holds a record, or an attempt superseded by the peer's
+    /// own offer (#947). `is_concurrent(e) ⟺ from_stage(p, s, e) = InFlight { p }`.
+    pub(crate) const fn is_concurrent(error: &CoreError) -> bool {
+        matches!(
+            error,
+            CoreError::AlreadyConnected | CoreError::ConnectionAttemptSuperseded { .. }
+        )
+    }
+
+    /// Sort a core refusal of one handshake stage: a concurrent refusal
+    /// ([`Self::is_concurrent`]) is `InFlight`; any other error is `Failed` under the stage's
+    /// wrapper.
     fn from_stage(peer: Did, stage: fn(CoreError) -> Error, error: CoreError) -> Self {
-        match error {
-            CoreError::AlreadyConnected | CoreError::ConnectionAttemptSuperseded { .. } => {
-                Self::InFlight { peer }
-            }
-            other => Self::Failed(stage(other)),
+        if Self::is_concurrent(&error) {
+            Self::InFlight { peer }
+        } else {
+            Self::Failed(stage(error))
         }
     }
 }

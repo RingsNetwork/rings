@@ -59,8 +59,6 @@ use crate::core::transport::SendPermit;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 #[cfg(rings_transport_backend)]
-use crate::delivery::SendCreditWait;
-#[cfg(rings_transport_backend)]
 use crate::error::Error;
 #[cfg(rings_transport_backend)]
 use crate::error::Result;
@@ -216,8 +214,9 @@ impl InnerTransportCallback {
 
     #[cfg(rings_transport_backend)]
     /// Wait for one credit to send a custom frame on `lane`; see [`LinkCredit::reserve`]. The
-    /// wait owns the link's credit state and nothing else of the connection.
-    fn reserve_credit(
+    /// wait owns the link's credit state and nothing else of the connection: boxed, it is a
+    /// backend's `ConnectionInterface::reserve_send_credit`.
+    pub(crate) fn reserve_credit(
         &self,
         lane: ChannelLane,
     ) -> impl Future<Output = Result<LaneCreditReservation>> + 'static {
@@ -229,14 +228,7 @@ impl InnerTransportCallback {
     /// A read-only view of `lane`'s send credit; see
     /// [`ConnectionInterface::send_credit_view`](crate::core::transport::ConnectionInterface).
     pub(crate) fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
-        self.link_credit.view(lane)
-    }
-
-    #[cfg(rings_transport_backend)]
-    /// [`Self::reserve_credit`], boxed as a backend's `ConnectionInterface::reserve_send_credit`
-    /// returns it.
-    pub(crate) fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
-        Box::pin(self.reserve_credit(lane))
+        LaneCreditView::new(&self.link_credit, lane)
     }
 
     #[cfg(rings_transport_backend)]

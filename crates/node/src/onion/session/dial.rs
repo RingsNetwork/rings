@@ -69,8 +69,8 @@ use crate::onion::circuit::OnionExpiry;
 use crate::onion::circuit::OnionLoopClient;
 use crate::onion::circuit::OnionReply;
 use crate::onion::circuit::OnionReplySink;
-use crate::onion::sphinx::builder::OnionApplication;
 use crate::onion::sphinx::class::OnionLoopClass;
+use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
@@ -79,7 +79,7 @@ use crate::onion::OnionServiceName;
 /// Longest wait for `h`'s answer to an open: longer than the longest world open at `h` (30 s,
 /// rounded to its 250 ms quantum) plus a loop round trip, so a refusal arrives as a refusal and
 /// not as a timeout.
-const ONION_SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(45);
+pub(crate) const ONION_SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// The longest period of the driver's tick, in milliseconds: the gap check's resolution; the
 /// keep-alive and the deadline wake the driver at their own instants.

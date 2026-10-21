@@ -4,7 +4,6 @@ use super::super::finish_storage_action;
 use super::test_support::install_two_node_chord_view;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload_for_tx;
-use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::remote_storage_placement_after;
 use crate::consts::ENTRY_DATA_MAX_LEN;
@@ -34,6 +33,7 @@ use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
+use crate::tests::non_affine_placement;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 

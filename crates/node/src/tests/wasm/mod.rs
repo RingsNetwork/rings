@@ -19,18 +19,17 @@ use uuid;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
+use crate::extension::ext::LinkFact;
 use crate::extension::BackendObserver;
 use crate::logging::browser::init_logging;
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionRole;
 use crate::prelude::rings_core::utils::js_value;
 use crate::processor::Processor;
-use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 use crate::provider::Provider;
+use crate::tests::test_processor_builder;
 use crate::tests::TEST_ICE_SERVERS;
-
-const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 
 /// Per-test hang guard of the connection tests; see [`with_hang_guard`].
 ///
@@ -41,8 +40,8 @@ const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 /// Every guard therefore fails by name before the runner's timeout.
 pub const TEST_HANG_GUARD: Duration = Duration::from_secs(20);
 
-/// A logical peer transition: an admission or retirement fact read off the application inbox.
-type Transition = SwarmEvent;
+/// A logical peer transition: a link fact read off the application inbox.
+type Transition = LinkFact;
 
 /// Write side of a peer-transition log: forwards every admission and retirement of one swarm.
 ///
@@ -52,9 +51,11 @@ type Transition = SwarmEvent;
 pub struct TransitionRecorder(mpsc::UnboundedSender<Transition>);
 
 impl TransitionRecorder {
-    /// Record the transition `event` is.
+    /// Record the transition `event` is, if it is about a link.
     pub fn record(&self, event: &SwarmEvent) {
-        self.send(*event);
+        if let Some(fact) = LinkFact::of(event) {
+            self.send(fact);
+        }
     }
 
     /// Append `transition` to the log; a log whose reader is gone has nobody left to wake.
@@ -64,12 +65,8 @@ impl TransitionRecorder {
 }
 
 impl BackendObserver for TransitionRecorder {
-    fn peer_admitted(&self, peer: Did) {
-        self.send(SwarmEvent::PeerAdmitted { peer });
-    }
-
-    fn peer_retired(&self, peer: Did) {
-        self.send(SwarmEvent::PeerRetired { peer });
+    fn link_fact(&self, fact: LinkFact) {
+        self.send(fact);
     }
 }
 
@@ -97,12 +94,12 @@ pub fn peer_transitions() -> (TransitionRecorder, PeerTransitions) {
 impl PeerTransitions {
     /// Await `peer`'s next admission: its transport is ready and it joined the local DHT.
     pub async fn admitted(&self, peer: Did) {
-        self.consume(SwarmEvent::PeerAdmitted { peer }).await
+        self.consume(LinkFact::Admitted(peer)).await
     }
 
     /// Await `peer`'s next retirement: its record left the local DHT.
     pub async fn retired(&self, peer: Did) {
-        self.consume(SwarmEvent::PeerRetired { peer }).await
+        self.consume(LinkFact::Retired(peer)).await
     }
 
     /// Consume the oldest unconsumed occurrence of `wanted`, waiting for it if necessary.
@@ -179,16 +176,8 @@ pub async fn prepare_processor() -> Processor {
 
 /// Prepare a browser test processor registering the onion symbols of `role`.
 pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) -> Processor {
-    let key = SecretKey::random();
-    let sm = DelegateeKey::new_with_seckey(&key).unwrap();
-
-    let config = serde_saphyr::to_string(&ProcessorConfig::new(
-        0,
-        TEST_ICE_SERVERS.to_string(),
-        sm,
-        200,
-    ))
-    .unwrap();
+    let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
+    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 200);
 
     let storage_name = uuid::Uuid::new_v4().to_simple().to_string();
     let storage = Box::new(
@@ -197,12 +186,9 @@ pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) 
             .unwrap(),
     );
 
-    ProcessorBuilder::from_serialized(&config)
-        .unwrap()
+    test_processor_builder(&config)
         .storage(storage)
-        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .onion_role(role)
-        .observer(crate::tests::activity::activity_observer())
         .build()
         .unwrap()
 }

@@ -24,7 +24,7 @@ use crate::error::Result;
 /// How long a lane's credit pump pauses after a failed send before it sends the credit again:
 /// a send fails transiently when one of the connection's outbound channels is closed or not yet
 /// open, and the pause keeps a send that fails at once from spinning the pump.
-const CREDIT_RESEND_PAUSE: Duration = Duration::from_secs(1);
+pub(crate) const CREDIT_RESEND_PAUSE: Duration = Duration::from_secs(1);
 
 /// Send `credit` on `lane` of `connection`, once its data channels are open. A credit frame is
 /// never charged against credit, so the send never waits on the peer.
@@ -47,23 +47,13 @@ where
 /// [`TransportMessage::Credit`] frame, until the connection is gone.
 ///
 /// A credit is cumulative, so losing one can leave the peer's sender waiting for good: a credit
-/// whose send fails is queued again and sent after [`CREDIT_RESEND_PAUSE`] (a send fails
-/// transiently while any of this end's outbound channels is closed or not yet open; credits
-/// leave on the outbound channel, frames arrive on the remote-created one), until the
-/// connection is gone, which a send failing with the connection released also says. One pump
-/// runs per lane, so a credit held up behind one lane's channel delays no other lane's.
+/// whose send fails is queued again and sent after `pause`, [`CREDIT_RESEND_PAUSE`] in a
+/// backend (a send fails transiently while any of this end's outbound channels is closed or not
+/// yet open; credits leave on the outbound channel, frames arrive on the remote-created one),
+/// until the connection is gone, which a send failing with the connection released also says.
+/// One pump runs per lane, so a credit held up behind one lane's channel delays no other
+/// lane's.
 pub(crate) async fn pump_lane_credits<C>(
-    link: Arc<LinkCredit>,
-    connection: ConnectionRef<C>,
-    index: CreditIndex,
-) where
-    C: FrameSink + MaybeSendSync,
-{
-    pump_lane_credits_pausing(link, connection, index, CREDIT_RESEND_PAUSE).await;
-}
-
-/// [`pump_lane_credits`] with `pause` between a failed credit send and its resend.
-pub(super) async fn pump_lane_credits_pausing<C>(
     link: Arc<LinkCredit>,
     connection: ConnectionRef<C>,
     index: CreditIndex,

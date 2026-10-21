@@ -10,6 +10,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# In-memory packet fixtures (`rings_gateway::testing`) for tests and the benchmark.
+test-support = []
+
 [dependencies]
 async-trait = { workspace = true }
 ipnet = { version = "2.11.0", features = ["serde"] }
@@ -44,6 +48,10 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 serde_json = "1"
 tempfile = "3"
+
+[[example]]
+name = "gateway-bench"
+required-features = ["test-support"]
 
 [[bin]]
 name = "gateway-config-unix"

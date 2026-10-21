@@ -420,7 +420,7 @@ pub(super) async fn open_dummy_data_channel_before_ice_connected(
         connection.webrtc_connection_state(),
         WebrtcConnectionState::Connecting
     );
-    assert!(connection.connection.data_channel_is_open()?);
+    assert!(connection.connection.data_channel_is_open());
     Ok(())
 }
 

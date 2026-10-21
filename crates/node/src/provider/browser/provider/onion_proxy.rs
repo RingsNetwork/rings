@@ -42,7 +42,6 @@ use crate::provider::RemoteRpcEndpoint;
 #[wasm_export]
 pub struct BrowserOnionProxy {
     pub(super) processor: Arc<Processor>,
-    pub(super) config: OnionProxyProtocol,
     pub(super) client: OnionHttpsClient,
     pub(super) directory_endpoint: Option<RemoteRpcEndpoint>,
 }
@@ -209,17 +208,19 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
     }
 }
 
+/// Build an HTTPS proxy route through `reader` whose first hop is a direct peer.
 async fn build_browser_route_from_reader(
     reader: &BrowserOnionDirectoryReader,
-    config: OnionProxyProtocol,
     target: OnionProxyTarget,
 ) -> NodeResult<OnionProxyRoute> {
     let direct_peers = reader.direct_peer_dids();
-    let route =
-        directory::build_onion_proxy_route_with_first_hop(reader, config, target, move |did| {
-            direct_peers.contains(&did)
-        })
-        .await?;
+    let route = directory::build_onion_proxy_route_with_first_hop(
+        reader,
+        OnionProxyProtocol::HttpsProxy,
+        target,
+        move |did| direct_peers.contains(&did),
+    )
+    .await?;
     if reader.route_first_hop_is_direct(&route) {
         return Ok(route);
     }
@@ -228,17 +229,16 @@ async fn build_browser_route_from_reader(
 
 async fn build_browser_onion_proxy_route(
     processor: Arc<Processor>,
-    config: OnionProxyProtocol,
     target: OnionProxyTarget,
     directory_endpoint: Option<RemoteRpcEndpoint>,
 ) -> NodeResult<OnionProxyRoute> {
     if let Some(endpoint) = directory_endpoint {
         let remote_reader = BrowserOnionDirectoryReader::remote(processor.clone(), endpoint);
-        match build_browser_route_from_reader(&remote_reader, config, target.clone()).await {
+        match build_browser_route_from_reader(&remote_reader, target.clone()).await {
             Ok(route) => return Ok(route),
             Err(remote_error) => {
                 let local_reader = BrowserOnionDirectoryReader::local(processor);
-                return build_browser_route_from_reader(&local_reader, config, target)
+                return build_browser_route_from_reader(&local_reader, target)
                     .await
                     .map_err(|_| remote_error);
             }
@@ -246,16 +246,11 @@ async fn build_browser_onion_proxy_route(
     }
 
     let local_reader = BrowserOnionDirectoryReader::local(processor);
-    build_browser_route_from_reader(&local_reader, config, target).await
+    build_browser_route_from_reader(&local_reader, target).await
 }
 
 #[wasm_export]
 impl BrowserOnionProxy {
-    /// Return the exit service class this proxy selects.
-    pub fn exit_service(&self) -> String {
-        self.config.exit_service_name().as_str().to_string()
-    }
-
     /// Build an HTTPS-over-TCP onion proxy route for `target_authority` (`host:port`).
     pub fn route(&self, target_authority: String) -> js_sys::Promise {
         let proxy = self.clone();
@@ -306,7 +301,6 @@ impl BrowserOnionProxy {
     async fn build_route(&self, target: OnionProxyTarget) -> NodeResult<OnionProxyRoute> {
         build_browser_onion_proxy_route(
             self.processor.clone(),
-            self.config,
             target,
             self.directory_endpoint.clone(),
         )

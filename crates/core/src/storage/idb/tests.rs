@@ -47,8 +47,8 @@ async fn create_db_instance(cap: u32) -> IdbStorage {
     // Every browser test owns a fresh database; never clear a user database.
     let name = format!("rings-idb-test-{}", uuid::Uuid::new_v4());
     let instance = IdbStorage::new_with_cap_and_name(cap, &name).await.unwrap();
-    instance.clear().await.unwrap();
-    let count = instance.count().await.unwrap();
+    clear_rows(&instance).await.unwrap();
+    let count = count_rows(&instance).await.unwrap();
     assert_eq!(count, 0, "store not empty");
     instance
 }
@@ -69,6 +69,16 @@ where V: DeserializeOwned + Serialize + Sized {
 /// Read a string value with the trait payload type fixed for concise browser assertions.
 async fn get_string(instance: &IdbStorage, key: &str) -> crate::error::Result<Option<String>> {
     <IdbStorage as KvStorageInterface<String>>::get(instance, key).await
+}
+
+/// Delete every row, with the trait payload type fixed.
+async fn clear_rows(instance: &IdbStorage) -> crate::error::Result<()> {
+    <IdbStorage as KvStorageInterface<String>>::clear(instance).await
+}
+
+/// The number of rows, with the trait payload type fixed.
+async fn count_rows(instance: &IdbStorage) -> crate::error::Result<u32> {
+    <IdbStorage as KvStorageInterface<String>>::count(instance).await
 }
 
 /// Raw stored row `key` as JSON, read outside the adapter's decoding.
@@ -133,7 +143,7 @@ async fn test_create_put_data() {
         content: "content1".to_string(),
     };
     instance.put(&key, &value).await.unwrap();
-    assert_eq!(instance.count().await.unwrap(), 1);
+    assert_eq!(count_rows(&instance).await.unwrap(), 1);
 
     let row = raw_row(&instance, &key).await;
     assert_eq!(row["key"], key);
@@ -154,8 +164,8 @@ async fn test_create_put_data() {
     assert_eq!(stamp_of(&instance, &key).await, 1);
     assert_eq!(clock_of(&instance).await, 2);
 
-    instance.clear().await.unwrap();
-    assert_eq!(instance.count().await.unwrap(), 0);
+    clear_rows(&instance).await.unwrap();
+    assert_eq!(count_rows(&instance).await.unwrap(), 0);
 }
 
 /// Law, observed through IndexedDB: back-to-back accesses, which share one millisecond on
@@ -187,7 +197,7 @@ async fn accesses_within_one_millisecond_receive_strictly_increasing_stamps() {
 
     // A miss is not an access; clearing rows does not rewind the clock.
     assert_eq!(get_string(&instance, "missing").await.unwrap(), None);
-    instance.clear().await.unwrap();
+    clear_rows(&instance).await.unwrap();
     instance.put("after-clear", &"x".to_owned()).await.unwrap();
     assert_eq!(stamp_of(&instance, "after-clear").await, 2 * KEYS as u64);
 }
@@ -357,7 +367,7 @@ async fn test_missing_and_invalid_reads_preserve_storage() {
     assert!(invalid.is_err());
     let retained: Option<u32> = instance.get("number").await.unwrap();
     assert_eq!(retained, Some(42));
-    assert_eq!(instance.count().await.unwrap(), 1);
+    assert_eq!(count_rows(&instance).await.unwrap(), 1);
 }
 
 /// A disposable store deletes a row the caller's type cannot decode on the read that finds it
@@ -377,12 +387,12 @@ async fn test_disposable_store_retires_undecodable_rows_on_read() {
 
     let retired: Option<TestDataStruct> = instance.get("old").await.unwrap();
     assert!(retired.is_none());
-    assert_eq!(instance.count().await.unwrap(), 2);
+    assert_eq!(count_rows(&instance).await.unwrap(), 2);
 
     let all: Vec<(String, TestDataStruct)> = instance.get_all().await.unwrap();
     assert_eq!(all.len(), 1);
     assert_eq!(all.first().map(|(key, _)| key.as_str()), Some("current"));
-    assert_eq!(instance.count().await.unwrap(), 1);
+    assert_eq!(count_rows(&instance).await.unwrap(), 1);
 }
 
 /// An authoritative scan reports a row the caller's type cannot decode and keeps every row.
@@ -399,7 +409,7 @@ async fn test_authoritative_scan_reports_and_keeps_undecodable_rows() {
 
     let scanned: crate::error::Result<Vec<(String, TestDataStruct)>> = instance.get_all().await;
     assert!(scanned.is_err());
-    assert_eq!(instance.count().await.unwrap(), 2);
+    assert_eq!(count_rows(&instance).await.unwrap(), 2);
 }
 
 /// The shape of `EntryCrdt` before #874: tombstones were bare dots.
@@ -453,7 +463,7 @@ async fn test_legacy_tombstone_entry_row_is_retired_by_the_entry_store() {
 
     let scanned: Vec<(String, Entry)> = instance.get_all().await.unwrap();
     assert!(scanned.is_empty());
-    assert_eq!(instance.count().await.unwrap(), 0);
+    assert_eq!(count_rows(&instance).await.unwrap(), 0);
 }
 
 /// The named constructor rejects zero capacity before opening IndexedDB.
@@ -477,7 +487,7 @@ async fn overwrite_at_capacity_preserves_other_rows() {
 
     // Replacing b must not evict a, despite the store already being full.
     instance.put("b", &"new-b".to_owned()).await.unwrap();
-    assert_eq!(instance.count().await.unwrap(), 2);
+    assert_eq!(count_rows(&instance).await.unwrap(), 2);
     let value_a = get_string(&instance, "a").await.unwrap();
     let value_b = get_string(&instance, "b").await.unwrap();
     assert_eq!(value_a.as_deref(), Some("old-a"));
@@ -496,7 +506,7 @@ async fn new_key_at_capacity_evicts_lru_row() {
 
     // Accessing a makes b the least-recently-accessed row.
     instance.put("c", &"c".to_owned()).await.unwrap();
-    assert_eq!(instance.count().await.unwrap(), 2);
+    assert_eq!(count_rows(&instance).await.unwrap(), 2);
     let value_a = get_string(&instance, "a").await.unwrap();
     let value_b = get_string(&instance, "b").await.unwrap();
     let value_c = get_string(&instance, "c").await.unwrap();
@@ -518,7 +528,7 @@ async fn reopening_with_smaller_capacity_removes_all_excess_rows() {
 
     // Reopening at capacity two must keep the two most recently written rows only.
     let reopened = IdbStorage::new_with_cap_and_name(2, &name).await.unwrap();
-    assert_eq!(reopened.count().await.unwrap(), 2);
+    assert_eq!(count_rows(&reopened).await.unwrap(), 2);
     let value_a = get_string(&reopened, "a").await.unwrap();
     let value_b = get_string(&reopened, "b").await.unwrap();
     let value_c = get_string(&reopened, "c").await.unwrap();
@@ -551,7 +561,7 @@ async fn concurrent_puts_never_exceed_row_capacity() {
     second.unwrap();
     third.unwrap();
     fourth.unwrap();
-    assert_eq!(instance.count().await.unwrap(), 2);
+    assert_eq!(count_rows(&instance).await.unwrap(), 2);
     // Name the payload type explicitly because only the vector length is otherwise observed.
     let entries: Vec<(String, String)> = instance.get_all().await.unwrap();
     assert_eq!(entries.len(), 2);
@@ -568,7 +578,7 @@ async fn failed_serialization_does_not_evict_existing_rows() {
     // A serialization error must occur before the write transaction can delete either row.
     let result = instance.put("c", &FailingSerialize).await;
     assert!(result.is_err());
-    assert_eq!(instance.count().await.unwrap(), 2);
+    assert_eq!(count_rows(&instance).await.unwrap(), 2);
     let value_a = get_string(&instance, "a").await.unwrap();
     let value_b = get_string(&instance, "b").await.unwrap();
     assert_eq!(value_a.as_deref(), Some("a"));

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::future::select;
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
@@ -29,6 +30,7 @@ use web_sys::RtcSessionDescriptionInit;
 
 use crate::callback::admit_inbound_data_channel;
 use crate::callback::credit_pump::pump_lane_credits;
+use crate::callback::credit_pump::CREDIT_RESEND_PAUSE;
 use crate::callback::data_channel_label;
 use crate::callback::inbound_frame_exceeds_protocol_ceiling;
 use crate::callback::link_send::FrameSink;
@@ -47,7 +49,6 @@ use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
-use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -57,13 +58,13 @@ use crate::delivery::tracker::BufferedChannel;
 use crate::delivery::tracker::DeliveryTracker;
 use crate::delivery::tracker::RoundLease;
 use crate::delivery::DeliveryFuture;
-use crate::delivery::SendCreditWait;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::wait_for_data_channel_open;
+use crate::notifier::within;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
@@ -240,12 +241,11 @@ impl WebSysWebrtcConnection {
             notifier.wake();
         }
 
-        notifier
-            .either_notified_within(
-                &self.local_close,
-                Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()),
-            )
-            .await?;
+        within(
+            select(notifier, self.local_close.clone()),
+            Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()),
+        )
+        .await?;
         if self.connection_state.snapshot().webrtc() == WebrtcConnectionState::Closed {
             return Err(Error::WebrtcLocalSdpGenerationError(
                 "Local connection closed".to_string(),
@@ -313,33 +313,10 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     type Sdp = String;
     type Error = Error;
 
-    async fn send_message_with_permit(
-        &self,
-        payload: Bytes,
-        lane: ChannelLane,
-        permit: SendPermit,
-    ) -> Result<DeliveryFuture> {
-        self.callback.send_custom(self, payload, lane, permit).await
-    }
-
-    fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
-        self.callback.reserve_send_credit(lane)
-    }
-
-    fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
-        self.callback.send_credit_view(lane)
-    }
-
-    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        self.connection_state.snapshot().webrtc()
-    }
+    delegate_to_callback!();
 
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
         self.connection_state.snapshot()
-    }
-
-    fn data_channel_is_open(&self) -> Result<bool> {
-        Ok(self.connection_state.snapshot().data_channel_open())
     }
 
     fn max_message_size(&self) -> usize {
@@ -409,8 +386,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
         wait_for_data_channel_open(
-            self.webrtc_connection_state(),
-            || self.data_channel_is_open(),
+            || self.connection_state.snapshot(),
             &self.webrtc_data_channel_state_notifier,
             WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT,
         )
@@ -648,6 +624,7 @@ impl TransportInterface for WebSysWebrtcTransport {
                 Arc::clone(inner_cb.link_credit()),
                 connection.clone(),
                 index,
+                CREDIT_RESEND_PAUSE,
             ));
         }
         Ok(connection)

@@ -3249,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "rings-aez"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "aes",
  "subtle",
@@ -3260,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "postcard",
  "serde",
@@ -3268,7 +3268,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -3338,7 +3338,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3348,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "rings-gateway"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -3367,11 +3367,11 @@ dependencies = [
 
 [[package]]
 name = "rings-logo"
-version = "0.34.1"
+version = "0.34.2"
 
 [[package]]
 name = "rings-measure"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3381,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "rings-native-example"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3396,7 +3396,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -3404,7 +3404,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -3476,7 +3476,7 @@ dependencies = [
 
 [[package]]
 name = "rings-relay-example"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "rings-core",
  "rings-node",
@@ -3485,7 +3485,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3509,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "rings-runtime"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "futures",
  "futures-timer",
@@ -3524,7 +3524,7 @@ dependencies = [
 
 [[package]]
 name = "rings-test-support"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "futures",
  "rings-core",
@@ -3533,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3565,7 +3565,7 @@ dependencies = [
 
 [[package]]
 name = "rings-webview"
-version = "0.34.1"
+version = "0.34.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3740,9 +3740,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -4946,9 +4946,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.2"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e8983c3ab33d6fb807cfcdad2491c4ea8cbc8ed839181c7dfd9c67c83e261b2"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

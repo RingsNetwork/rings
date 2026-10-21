@@ -387,16 +387,16 @@ mod tests {
 
     /// Totality (#864): of two distinct descriptors of one DID at an equal heartbeat, the same
     /// one is selected whatever order they are read in: at a different expiry, and at an equal
-    /// expiry from two session keys of one account (two processes publishing in the same
+    /// expiry from two delegatee keys of one account (two processes publishing in the same
     /// millisecond).
     #[test]
     fn test_latest_valid_by_did_breaks_an_equal_heartbeat_by_content() -> Result<()> {
         let account = SecretKey::random();
-        let session = DelegateeKey::new_with_seckey(&account)?;
-        let other_session = DelegateeKey::new_with_seckey(&account)?;
-        let shorter = descriptor_of(&session, 20, 100)?;
-        let longer = descriptor_of(&session, 20, 200)?;
-        let other_process = descriptor_of(&other_session, 20, 100)?;
+        let delegatee_key = DelegateeKey::new_with_seckey(&account)?;
+        let other_delegatee_key = DelegateeKey::new_with_seckey(&account)?;
+        let shorter = descriptor_of(&delegatee_key, 20, 100)?;
+        let longer = descriptor_of(&delegatee_key, 20, 200)?;
+        let other_process = descriptor_of(&other_delegatee_key, 20, 100)?;
         assert_eq!(other_process.did, shorter.did);
         assert_ne!(other_process, shorter);
 

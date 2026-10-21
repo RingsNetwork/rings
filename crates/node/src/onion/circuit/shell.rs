@@ -2,7 +2,7 @@
 //! performs the outcome (#834 L9, #843 item 3).
 //!
 //! ```text
-//! Hop(from, cell):  now ← clock
+//! Cell(from, cell): now ← clock
 //!                   now < clock_A − X₀ ?  ⇒ renew(fresh e′, key, A's live links); the epoch
 //!                                            cell ← e′, published at the next heartbeat
 //!                   outcome ← hop(A, d, relays, T.expects(from), from, now, cell)     (pure)
@@ -59,7 +59,7 @@ use super::admission::OnionReplayFilterKey;
 use super::codec::OnionLinkFact;
 use super::hop::hop;
 use super::hop::OnionHopOutcome;
-use super::OnionCircuitEffect;
+use super::OnionCircuitInput;
 use super::OnionClientTags;
 use super::OnionLink;
 use super::OnionLinkSender;
@@ -69,6 +69,7 @@ use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
 use crate::onion::sphinx::carry::OnionCarryValue;
+use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::layer::OnionArguments;
 use crate::onion::OnionProcessEpoch;
@@ -273,7 +274,7 @@ impl OnionCircuitShell {
         }
     }
 
-    /// `Hop(from, cell)` of the module diagram.
+    /// `Cell(from, cell)` of the module diagram.
     async fn hop(
         &self,
         scope: &EffectScope,
@@ -295,23 +296,22 @@ impl OnionCircuitShell {
             )
         };
         match outcome {
-            OnionHopOutcome::Relayed { next, cell } => {
+            OnionHopOutcome::Stepped(OnionStep::Relayed { next, cell }) => {
                 // A full lane drops the cell: the loop's session sees a gap and fails closed.
-                if let Err(error) = self.link_sender.enqueue(
-                    scope.lifecycle(),
-                    OnionLink::new(next),
-                    Bytes::from(cell.into_bytes()),
-                ) {
+                if let Err(error) =
+                    self.link_sender
+                        .enqueue(scope.lifecycle(), OnionLink::new(next), cell)
+                {
                     tracing::debug!(%next, %error, "drop a relayed onion cell");
                 }
                 Ok(())
             }
-            OnionHopOutcome::Consumed {
+            OnionHopOutcome::Stepped(OnionStep::Consumed {
                 symbol,
                 arguments,
                 value,
                 surb,
-            } => {
+            }) => {
                 let input = OnionApplicationInput {
                     from,
                     arguments,
@@ -488,12 +488,12 @@ fn live_peers(admission: &OnionAdmissionState) -> Vec<Did> {
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 impl Interpret for OnionCircuitShell {
-    type Effect = OnionCircuitEffect;
+    type Effect = OnionCircuitInput;
 
-    async fn run(&self, scope: &EffectScope, effect: OnionCircuitEffect) -> Result<Vec<Bytes>> {
+    async fn run(&self, scope: &EffectScope, effect: OnionCircuitInput) -> Result<Vec<Bytes>> {
         match effect {
-            OnionCircuitEffect::Hop { from, cell } => self.hop(scope, from, cell).await,
-            OnionCircuitEffect::Link(fact) => self.link(scope, fact).await,
+            OnionCircuitInput::Cell { from, cell } => self.hop(scope, from, cell).await,
+            OnionCircuitInput::Link(fact) => self.link(scope, fact).await,
         }
         .map(|()| Vec::new())
         .or_else(|error: Error| {

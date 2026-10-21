@@ -11,7 +11,6 @@ use rings_gateway::OnionStreamConnector;
 use rings_gateway::OnionStreamProbe;
 
 use crate::onion::native::NativeOnionCircuitHandle;
-use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::session::witness::OnionSessionCondition;
 use crate::onion::session::witness::OnionSessionWitness;
 use crate::onion::tcp::OnionLocalStream;
@@ -25,21 +24,13 @@ const ONION_SESSION_FAILED: &str = "the onion session failed closed";
 pub struct NativeOnionGatewayConnector {
     processor: Arc<Processor>,
     onion: NativeOnionCircuitHandle,
-    proxy: OnionProxyProtocol,
 }
 
 impl NativeOnionGatewayConnector {
-    /// Bind a native processor and installed Onion runtime to gateway route options.
-    pub fn new(
-        processor: Arc<Processor>,
-        onion: NativeOnionCircuitHandle,
-        proxy: OnionProxyProtocol,
-    ) -> Self {
-        Self {
-            processor,
-            onion,
-            proxy,
-        }
+    /// Bind a native processor and its installed Onion runtime: every captured flow opens a
+    /// `tcp` session ([`NativeOnionCircuitHandle::open_tcp_target`]).
+    pub fn new(processor: Arc<Processor>, onion: NativeOnionCircuitHandle) -> Self {
+        Self { processor, onion }
     }
 
     fn onion_error(flow: FlowId, error: impl std::fmt::Display) -> GatewayError {
@@ -75,14 +66,9 @@ impl OnionStreamConnector for NativeOnionGatewayConnector {
     ) -> Result<BoxOnionStreamProbe, GatewayError> {
         let target = OnionProxyTarget::parse_authority(&flow.target.to_string())
             .map_err(|error| Self::onion_error(flow, error))?;
-        let route = self
-            .processor
-            .build_onion_proxy_route(self.proxy, target)
-            .await
-            .map_err(|error| Self::onion_error(flow, error))?;
         let opened = self
             .onion
-            .open_tcp_stream(route.route, route.target)
+            .open_tcp_target(&self.processor, target)
             .await
             .map_err(|error| Self::onion_error(flow, error))?;
         Ok(Box::new(NativeOnionStreamProbe(

@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use super::super::NativeOnionCircuitHandle;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Extensions;
 use crate::onion::circuit::OnionLinkSender;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::runtime::exit_algebra;
+use crate::onion::runtime::OnionRuntime;
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionServiceName;
@@ -16,10 +16,10 @@ use crate::onion::OnionServiceName;
 async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
     let processor = Arc::new(crate::tests::native::prepare_processor().await);
     let extensions = Extensions::new(processor);
-    let _handle = NativeOnionCircuitHandle::install(&extensions)?;
+    let _runtime = OnionRuntime::install(&extensions)?;
 
     assert!(matches!(
-        NativeOnionCircuitHandle::install(&extensions),
+        OnionRuntime::install(&extensions),
         Err(Error::ExtensionError(_))
     ));
     Ok(())

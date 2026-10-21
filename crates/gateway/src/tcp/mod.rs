@@ -448,19 +448,16 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use ipnet::IpNet;
-    use smoltcp::phy::ChecksumCapabilities;
     use smoltcp::phy::Device as _;
     use smoltcp::phy::Medium;
-    use smoltcp::wire::IpProtocol;
     use smoltcp::wire::Ipv4Packet;
-    use smoltcp::wire::Ipv4Repr;
     use smoltcp::wire::TcpControl;
     use smoltcp::wire::TcpPacket;
-    use smoltcp::wire::TcpRepr;
     use smoltcp::wire::TcpSeqNumber;
 
     use super::*;
     use crate::classify_ipv4_packet;
+    use crate::testing::UNIT_CLIENT;
     use crate::GatewayPlan;
     use crate::Mtu;
     use crate::PacketDisposition;
@@ -493,41 +490,9 @@ mod tests {
         acknowledgment: Option<TcpSeqNumber>,
         payload: &[u8],
     ) -> Vec<u8> {
-        let source = Ipv4Addr::new(100, 64, 0, 2);
-        let target = Ipv4Addr::new(93, 184, 216, 34);
-        let tcp = TcpRepr {
-            src_port: 41_000,
-            dst_port: 443,
-            control,
-            seq_number: sequence,
-            ack_number: acknowledgment,
-            window_len: 8_192,
-            window_scale: None,
-            max_seg_size: Some(1_200),
-            sack_permitted: false,
-            sack_ranges: [None, None, None],
-            timestamp: None,
-            payload,
-        };
-        let ipv4 = Ipv4Repr {
-            src_addr: source,
-            dst_addr: target,
-            next_header: IpProtocol::Tcp,
-            payload_len: tcp.buffer_len(),
-            hop_limit: 64,
-        };
-        let mut packet = vec![0_u8; ipv4.buffer_len() + tcp.buffer_len()];
-        ipv4.emit(
-            &mut Ipv4Packet::new_unchecked(&mut packet),
-            &ChecksumCapabilities::default(),
-        );
-        tcp.emit(
-            &mut TcpPacket::new_unchecked(&mut packet[ipv4.buffer_len()..]),
-            &source.into(),
-            &target.into(),
-            &ChecksumCapabilities::default(),
-        );
-        packet
+        UNIT_CLIENT
+            .packet(control, sequence, acknowledgment, payload)
+            .expect("test client packet")
     }
 
     fn ingest_tcp(stack: &mut TcpStack, packet: Vec<u8>, elapsed: Duration) -> TcpSegment {

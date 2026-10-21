@@ -1,19 +1,17 @@
 use std::sync::OnceLock;
 
 use rings_core::ecc::SecretKey;
-use rings_core::storage::MemStorage;
+use rings_core::error::Error as CoreError;
+use rings_core::swarm::OfferReply;
 
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionRole;
-use crate::prelude::DelegateeKey;
+use crate::processor::handshake::HandshakeFailure;
 use crate::processor::Processor;
-use crate::processor::ProcessorBuilder;
-use crate::processor::ProcessorConfig;
-use crate::tests::TEST_ICE_SERVERS;
+use crate::tests::test_processor_builder;
+use crate::tests::test_processor_config;
 
 mod test_duplicate_namespace;
-
-const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 
 /// Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive connection
 /// callbacks; they run serially under this lock, so one test's candidates or callbacks cannot
@@ -34,25 +32,39 @@ pub async fn prepare_processor() -> Processor {
 
 /// Prepare a test processor registering the onion symbols of `role`.
 pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) -> Processor {
-    let key = SecretKey::random();
-    let sm = DelegateeKey::new_with_seckey(&key).unwrap();
-
-    let config = serde_saphyr::to_string(&ProcessorConfig::new(
-        0,
-        TEST_ICE_SERVERS.to_string(),
-        sm,
-        3,
-    ))
-    .unwrap();
-
-    let storage = Box::new(MemStorage::new());
-
-    let procssor_builder = ProcessorBuilder::from_serialized(&config)
-        .unwrap()
-        .storage(storage)
-        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+    test_processor_builder(&test_processor_config(&SecretKey::random(), 0))
         .onion_role(role)
-        .observer(crate::tests::activity::activity_observer());
+        .build()
+        .unwrap()
+}
 
-    procssor_builder.build().unwrap()
+/// Signal one WebRTC edge from `first` to `second` with a manual offer/answer exchange.
+///
+/// `second` replies with an answer, or, when its own sent overlay offer prevails on the
+/// tie-break, with that offer, which `first` answers (#947). Chord stabilization may already be
+/// connecting the pair, so a refusal because a concurrent handshake owns the edge
+/// ([`HandshakeFailure::is_concurrent`]) satisfies the request: the edge forms from that
+/// handshake.
+pub(crate) async fn signal_edge(first: &Processor, second: &Processor) -> Result<(), CoreError> {
+    match exchange_offer(first, second).await {
+        Err(error) if HandshakeFailure::is_concurrent(&error) => Ok(()),
+        outcome => outcome,
+    }
+}
+
+/// One offer/answer exchange from `first` to `second`, as [`signal_edge`] describes.
+async fn exchange_offer(first: &Processor, second: &Processor) -> Result<(), CoreError> {
+    let (attempt, offer) = first.swarm.offer_connection(second.did()).await?;
+    match second.swarm.answer_offer(offer).await? {
+        OfferReply::Answer(answer) => first.swarm.accept_answer_for(attempt, answer).await,
+        OfferReply::CounterOffer(counter_offer) => {
+            let answer = first
+                .swarm
+                .answer_offer(counter_offer)
+                .await?
+                .answer()
+                .ok_or(CoreError::AlreadyConnected)?;
+            second.swarm.accept_answer(answer).await
+        }
+    }
 }

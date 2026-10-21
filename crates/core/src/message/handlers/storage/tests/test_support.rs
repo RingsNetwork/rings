@@ -407,20 +407,6 @@ pub(super) fn split_redundant_entry(nodes: &[&Node]) -> Result<(Entry, Did, Did,
     ))
 }
 
-pub(super) fn non_affine_placement(entry_key: Did, redundancy: u16) -> Result<Did> {
-    let placements = entry_key.rotate_affine(redundancy)?;
-    for attempt in 0..512 {
-        let candidate = Entry::gen_did(&format!("non-affine placement {attempt}"))?;
-        if !placements.contains(&candidate) {
-            return Ok(candidate);
-        }
-    }
-
-    Err(Error::InvalidMessage(
-        "could not sample non-affine placement".to_string(),
-    ))
-}
-
 pub(super) async fn assert_cached_data_values(
     node: &Node,
     entry_key: Did,

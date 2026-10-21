@@ -29,7 +29,6 @@ use tokio::sync::oneshot;
 
 use super::config::NativeGatewayConfig;
 use crate::onion::native::NativeOnionCircuitHandle;
-use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::NativeOnionGatewayConnector;
 use crate::onion::OnionServiceName;
 use crate::prelude::StopSource;
@@ -62,12 +61,7 @@ impl NativeGatewayRunner {
         config: NativeGatewayConfig,
     ) -> anyhow::Result<Self> {
         validate_status_refresh_secs(config.status_refresh_secs)?;
-        let proxy = OnionProxyProtocol::TcpConnect;
-        let connector = Arc::new(NativeOnionGatewayConnector::new(
-            processor.clone(),
-            onion,
-            proxy,
-        ));
+        let connector = Arc::new(NativeOnionGatewayConnector::new(processor.clone(), onion));
         let runtime = GatewayRuntime::new(config.runtime.clone(), connector, rand::random())?;
         Ok(Self {
             processor,

@@ -15,7 +15,6 @@
 
 use std::slice;
 
-use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::utils::get_epoch_ms;
 
@@ -29,9 +28,10 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::sphinx::builder::build_loop;
 use crate::onion::sphinx::builder::build_surb;
-use crate::onion::sphinx::builder::OnionApplication;
+use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
+use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 
@@ -113,7 +113,7 @@ impl OnionLoopClient {
         class: OnionLoopClass,
         value: &[u8],
         sink: &OnionReplySink,
-    ) -> Result<(OnionLink, Bytes, OnionExpiry)> {
+    ) -> Result<(OnionLink, OnionCell, OnionExpiry)> {
         let now_ms = get_epoch_ms();
         let expiry = OnionExpiry::of_build(now_ms);
         let built = build_loop(
@@ -128,11 +128,7 @@ impl OnionLoopClient {
         .map_err(|error| Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string())))?;
         self.tags
             .register(now_ms, built.guard, built.reply, sink.clone())?;
-        Ok((
-            OnionLink::new(built.guard),
-            Bytes::from(built.cell.into_bytes()),
-            expiry,
-        ))
+        Ok((OnionLink::new(built.guard), built.cell, expiry))
     }
 
     /// Build `count` reply blocks over `route`'s return path in class `class`, registering each

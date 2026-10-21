@@ -9,7 +9,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::thread::LocalKey;
 
+use tokio::sync::watch;
 use tokio::sync::Notify;
 
 use super::controlled;
@@ -46,18 +48,17 @@ thread_local! {
     /// Optional notification gate before data-channel admission.
     pub(super) static SEND_MESSAGE_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
     /// Whether a send is currently parked at [`SEND_MESSAGE_GATE`].
-    pub(super) static SEND_MESSAGE_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
+    pub(super) static SEND_MESSAGE_GATE_PARKED: watch::Sender<bool> = watch::Sender::new(false);
     /// Optional gate after acquiring a send permit but before publication.
     pub(super) static POST_PERMIT_SEND_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
     /// Whether a send is parked after acquiring its permit.
-    pub(super) static POST_PERMIT_SEND_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
+    pub(super) static POST_PERMIT_SEND_GATE_PARKED: watch::Sender<bool> =
+        watch::Sender::new(false);
     /// Optional gate at the irrevocable data-channel publication boundary.
     pub(super) static IRREVOCABLE_SEND_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
     /// Whether a send is parked at the irrevocable publication boundary.
-    pub(super) static IRREVOCABLE_SEND_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
-    /// Notified (one stored permit) whenever a send parks at the post-permit or irrevocable
-    /// gate, so a test awaits the event instead of polling the waiting flags.
-    pub(super) static SEND_GATE_ENTERED: Arc<Notify> = Arc::new(Notify::new());
+    pub(super) static IRREVOCABLE_SEND_GATE_PARKED: watch::Sender<bool> =
+        watch::Sender::new(false);
     /// Park sends after this thread has published the configured message count.
     pub(super) static SEND_MESSAGE_PENDING_AFTER_SENT_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
     /// Force the receiver-facing delivery completion future to stay pending.
@@ -77,6 +78,12 @@ thread_local! {
     pub(super) static CONTROLLED_RNG_STATE: Cell<Option<u64>> = const { Cell::new(None) };
     /// Virtual enqueue timestamp attached to this thread's controlled events.
     pub(super) static CONTROLLED_VIRTUAL_MS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Record whether a send is parked at the gate whose parked state is `gate`, waking the tests
+/// that wait for that change (see `controlled::send_gate_parked`).
+pub(super) fn set_parked(gate: &'static LocalKey<watch::Sender<bool>>, parked: bool) {
+    gate.with(|gate| gate.send_replace(parked));
 }
 
 /// Mutable controlled queue plus stable generation and sequence counters.

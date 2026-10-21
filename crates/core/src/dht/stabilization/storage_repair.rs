@@ -6,7 +6,6 @@ use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
-use crate::error::Error;
 use crate::error::Result;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
@@ -58,10 +57,6 @@ impl StorageRepairDeferReason {
             _ => None,
         }
     }
-}
-
-fn is_storage_repair_deferral(error: &Error) -> bool {
-    error.is_deferrable_data_plane_send()
 }
 
 impl Stabilizer {
@@ -118,7 +113,7 @@ impl Stabilizer {
         let entries = msg.data.len();
         let next_hop = self.dht.next_hop_for_storage_sync(destination)?;
         if let Some(reason) = self.storage_repair_defer_reason(next_hop)? {
-            self.log_storage_repair_deferred(destination, next_hop, entries, reason, None);
+            self.log_storage_repair_deferred(destination, next_hop, entries, reason);
             return Ok(RepairDeliveryResult::Deferred);
         }
         tracing::debug!(
@@ -166,7 +161,7 @@ impl Stabilizer {
                 );
                 Ok(RepairDeliveryResult::Deferred)
             }
-            Err(error) if is_storage_repair_deferral(&error) => {
+            Err(error) if error.is_deferrable_data_plane_send() => {
                 tracing::warn!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
@@ -188,7 +183,6 @@ impl Stabilizer {
         next_hop: Option<Did>,
         entries: usize,
         reason: StorageRepairDeferReason,
-        error: Option<&Error>,
     ) {
         tracing::debug!(
             target: "rings_core::dht::stabilization",
@@ -198,7 +192,6 @@ impl Stabilizer {
             entries,
             reason = reason.as_str(),
             transport_readiness = ?reason.transport_readiness(),
-            error = ?error,
             "STABILIZATION storage repair deferred"
         );
     }

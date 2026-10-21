@@ -332,32 +332,6 @@ async fn test_native_fetch_uses_validated_url_authority_instead_of_caller_host()
     assert_eq!(response.body, b"ok");
 }
 
-#[test]
-fn test_native_egress_selection_pins_public_addresses_and_denies_the_rest() {
-    let target = OnionProxyTarget::parse_authority("example.com:443").unwrap();
-    let public = "8.8.8.8:443".parse().unwrap();
-
-    assert_eq!(
-        select_native_https_egress(&target, vec![public]).unwrap(),
-        NativeHttpsEgress {
-            host: "example.com".to_string(),
-            addresses: vec![public],
-        },
-    );
-    for (authority, address) in [
-        ("localhost:443", "127.0.0.1:443"),
-        ("internal.example:443", "10.0.0.1:443"),
-        ("example.com:443", "198.18.1.113:443"),
-        ("198.18.1.113:443", "198.18.1.113:443"),
-    ] {
-        let target = OnionProxyTarget::parse_authority(authority).unwrap();
-        assert!(matches!(
-            select_native_https_egress(&target, vec![address.parse().unwrap()]),
-            Err(Error::NoPermission),
-        ));
-    }
-}
-
 /// Render bytes as lowercase hex.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()

@@ -5,9 +5,7 @@ use subtle::ConstantTimeEq;
 
 use super::fixture_layer;
 use super::fixture_rng;
-use crate::onion::circuit::OnionCellBucket;
 use crate::onion::loop_shape::MAX_ONION_LOOP_HOPS;
-use crate::onion::signature::ONION_SIGNATURE;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::class::ONION_CELL_FRAMING_BYTES;
 use crate::onion::sphinx::header::OnionHeaderMac;
@@ -16,7 +14,10 @@ use crate::onion::sphinx::header::ONION_HEADER_ROUTING_BYTES;
 use crate::onion::sphinx::layer::OnionLayer;
 use crate::onion::sphinx::layer::OnionLayerError;
 use crate::onion::sphinx::layer::ONION_ARGUMENT_BYTES;
+use crate::onion::sphinx::layer::ONION_DID_BYTES;
+use crate::onion::sphinx::layer::ONION_EXPIRY_BYTES;
 use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
+use crate::onion::OnionServiceName;
 
 /// The widths are the specified ones (D5, D6″ with #834 H2): `Ĥ = 14`, `ℓ = 205`, `|β| = 2870`,
 /// `|χ| = 2919`.
@@ -44,7 +45,7 @@ fn test_decode_inverts_encode() {
 }
 
 /// The offset of `x` in a layer: `f`, `ā`, `next` and `e` precede it.
-const LAYER_EXPIRY_OFFSET: usize = 1 + ONION_ARGUMENT_BYTES + 20 + 16;
+const LAYER_EXPIRY_OFFSET: usize = 1 + ONION_ARGUMENT_BYTES + ONION_DID_BYTES + 16;
 
 /// `decode(w) = Right(λ, γ) ⇒ encode(λ, γ) = w`: every accepted string is canonical.
 #[test]
@@ -54,13 +55,14 @@ fn test_accepted_strings_are_canonical() {
     for _ in 0..512 {
         let mut bytes = [0_u8; ONION_LAYER_BYTES];
         rng.fill_bytes(&mut bytes);
-        // Codes `0..=|Σ|` cover every symbol and the first code outside `Σ`.
-        bytes[0] %= u8::try_from(ONION_SIGNATURE.symbols().len() + 1).expect("Σ fits a byte");
+        // Codes `0..=|Σ|`, `|Σ| = 1 + |Σ_W|`, cover every symbol and the first code outside `Σ`.
+        let symbols = 1 + OnionServiceName::world_facing().count();
+        bytes[0] %= u8::try_from(symbols + 1).expect("Σ fits a byte");
         if bytes[0] == 0 {
             bytes[1..=ONION_ARGUMENT_BYTES].fill(0);
         }
         // `x` must lie on the grid `Q·ℕ`; zero does, and every other field stays random.
-        bytes[LAYER_EXPIRY_OFFSET..LAYER_EXPIRY_OFFSET + 8].fill(0);
+        bytes[LAYER_EXPIRY_OFFSET..LAYER_EXPIRY_OFFSET + ONION_EXPIRY_BYTES].fill(0);
 
         if let Ok((layer, mac)) = OnionLayer::decode(&bytes) {
             accepted += 1;
@@ -112,17 +114,14 @@ fn test_decode_rejects_non_canonical_strings() {
     }
 }
 
-/// Every bucket is a class with `C_b = b − |χ| − F` (`C_16KiB = 13465`), the class is the cell
-/// length, a length of no bucket (4 KiB, below the header's reach) is no class, and distinct
+/// Every class has `C_b = b − |χ| − F` (`C_16KiB = 13465`), the class is the cell
+/// length, a length of no class (4 KiB, below the header's reach) is no class, and distinct
 /// classes have distinct MAC labels.
 #[test]
 fn test_carry_width_per_class() {
     assert_eq!(ONION_CELL_FRAMING_BYTES, 0);
     assert_eq!(OnionLoopClass::DEFAULT.carry_bytes(), 13_465);
-    let classes = OnionCellBucket::ALL
-        .into_iter()
-        .map(OnionLoopClass::from)
-        .collect::<Vec<_>>();
+    let classes = OnionLoopClass::ALL;
 
     for class in classes.iter().copied() {
         assert_eq!(class.carry_bytes(), class.cell_bytes() - ONION_HEADER_BYTES);

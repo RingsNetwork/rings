@@ -96,6 +96,7 @@
 //! ones.
 
 use super::delivery::SendCompletionOutcome;
+use super::egress::payload_left;
 use super::outbound::PeerProgress;
 use super::outbound::TransferDemand;
 use crate::dht::Did;
@@ -212,17 +213,17 @@ impl Verdict {
 
     /// Classify a detached send of `demand` bound to `hop` under `generation`.
     ///
-    /// `Ok(Cancelled)` is pre-acceptance by the cancellation gate of lemma (P); an error defers
-    /// iff its `send_class` is `Deferrable`.
+    /// `Ok(Cancelled)` is pre-acceptance by the cancellation gate of lemma (P) and is carried as
+    /// `OutboundTransferCancelled` ([`payload_left`]); an error defers iff its `send_class` is
+    /// `Deferrable`.
     fn remote(
         hop: Did,
         generation: Option<u64>,
         demand: TransferDemand,
         result: Result<SendCompletionOutcome>,
     ) -> Self {
-        let cause = match result {
-            Ok(SendCompletionOutcome::Succeeded) => return Self::Accepted,
-            Ok(SendCompletionOutcome::Cancelled) => SendDeferral::cancelled(hop),
+        let cause = match result.and_then(|outcome| payload_left(outcome, hop)) {
+            Ok(()) => return Self::Accepted,
             Err(error) => match SendDeferral::refused(error) {
                 Ok(cause) => cause,
                 Err(error) => return Self::Failed(error),
