@@ -530,7 +530,7 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
-        self.callback.reserve_send_credit(lane)
+        Box::pin(self.callback.reserve_credit(lane))
     }
 
     fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
