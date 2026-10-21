@@ -46,11 +46,13 @@ Traffic can enter the shared Onion egress through:
 
 - an exact host route or destination prefix installed by the packet binding;
 - an external router or policy-routing rule owned by the operator; or
-- an explicit application proxy such as HTTP CONNECT or SOCKS5.
+- an explicit application proxy: the native HTTP CONNECT listener.
 
-The existing native HTTP CONNECT proxy and packet ingress share Onion target validation, route
-construction, TCP stream opening, bidirectional transfer, half-close, timeout, and accounting.
-A future SOCKS5 frontend should add only ingress parsing and authentication policy.
+The native HTTP CONNECT proxy and packet ingress share Onion target validation, route
+construction, TCP stream opening, bidirectional transfer, half-close, and accounting. They differ
+in idleness: a CONNECT tunnel ends after the relay's own idle timeout, while a captured flow's
+idleness belongs to the gateway's `flow_idle_timeout`. A future SOCKS5 frontend should add only
+ingress parsing and authentication policy.
 
 Pointing several DNS names at one gateway address does not preserve the original generic TCP
 target. Optional DNS integration therefore needs a dedicated synthetic prefix and an explicit

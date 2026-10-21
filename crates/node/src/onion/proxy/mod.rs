@@ -24,7 +24,8 @@ pub mod http;
 /// an operator who wants HTTPS-only egress registers `tcp` restricted to `*:443` (#834 D1′).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OnionProxyProtocol {
-    /// HTTP CONNECT, SOCKS CONNECT, or any other byte tunnel. Requires a native `tcp` exit.
+    /// HTTP CONNECT, a captured gateway flow, or any other byte tunnel. Requires a native `tcp`
+    /// exit.
     TcpConnect,
     /// One HTTPS request/response exchange through an `https` exit.
     HttpsProxy,
