@@ -1,7 +1,7 @@
 # Native Gateway
 
 A native node can forward explicitly selected IPv4/TCP destinations through Rings onion
-circuits, the [privacy layer](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md#privacy-layer),
+loops, the [privacy layer](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md#privacy-layer),
 over a TUN device. The gateway is configured by the `gateway:` section of
 `config.yaml`, which `rings init` writes in full with `enabled: false`; see
 [config.yaml](advanced-topic/config.yaml.md#gateway) for the generated section.
@@ -41,7 +41,7 @@ Every captured-flow reset names its cause in `last_flow_reset` and in an info-le
 `rings_gateway::runtime` event. A silent client ends a flow as `idle-timeout` only when its onion
 stream was open and healthy; the same silence names what the flow was waiting on otherwise:
 `handshake-expired`, `open-expired` while the onion stream was still opening, `stream-stalled`
-while a frame of the stream was known missing, and `stream-reset` once its circuit had failed.
+while a frame of the stream was known missing, and `stream-reset` once its onion session had failed.
 Enable debug tracing for `rings_gateway::runtime` to also see typed packet-drop and
 flow-rejection reasons. These events contain neither packet bodies nor destination addresses. Configuration
 is checked at runtime construction before resource allocation; standalone server and TCP stack
