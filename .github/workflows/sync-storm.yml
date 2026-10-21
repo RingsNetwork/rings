@@ -8,12 +8,14 @@ on:
   push:
     branches:
       - master
+      - develop
   schedule:
     - cron: "23 19 * * *"
   workflow_dispatch:
 
-# This is the sole PR/master owner of the storm suite. Do not path-filter it:
-# Cargo features, workspace dependencies, and helper changes can affect these tests.
+# This is the sole owner of the storm suite for PRs and for pushes to develop and master. Do
+# not path-filter it: Cargo features, workspace dependencies, and helper changes can affect
+# these tests.
 concurrency:
   group: sync-storm-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -39,8 +41,12 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
+      # Both jobs compile the same storm executable, so they share one cache: the nightly job
+      # restores what a push wrote.
       - name: Cache Rust dependencies and test artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: ./.github/actions/rust-cache
+        with:
+          shared-key: sync-storm
       - name: Compile storm executable once
         run: |
           mkdir -p target/ci-evidence
@@ -82,8 +88,11 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
+      # Shares `sync-storm-pr`'s cache: the same executable.
       - name: Cache Rust dependencies and test artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: ./.github/actions/rust-cache
+        with:
+          shared-key: sync-storm
       - name: Compile storm executable once
         run: |
           mkdir -p target/ci-evidence
