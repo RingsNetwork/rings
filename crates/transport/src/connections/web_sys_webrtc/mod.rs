@@ -47,7 +47,6 @@ use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
-use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -57,7 +56,6 @@ use crate::delivery::tracker::BufferedChannel;
 use crate::delivery::tracker::DeliveryTracker;
 use crate::delivery::tracker::RoundLease;
 use crate::delivery::DeliveryFuture;
-use crate::delivery::SendCreditWait;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
@@ -313,22 +311,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     type Sdp = String;
     type Error = Error;
 
-    async fn send_message_with_permit(
-        &self,
-        payload: Bytes,
-        lane: ChannelLane,
-        permit: SendPermit,
-    ) -> Result<DeliveryFuture> {
-        self.callback.send_custom(self, payload, lane, permit).await
-    }
-
-    fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Error> {
-        Box::pin(self.callback.reserve_credit(lane))
-    }
-
-    fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
-        self.callback.send_credit_view(lane)
-    }
+    delegate_to_callback!();
 
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
         self.connection_state.snapshot()
