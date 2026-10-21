@@ -69,17 +69,17 @@ pub(crate) use tags::OnionReplySink;
 /// Namespace of the onion data plane.
 pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
 
-/// `X₀ = V − Q`, the offset of a loop's expiry from its build quantum (#834 D6).
-pub(crate) const ONION_FORWARD_PAYLOAD_TTL_MS: u128 = 120_000;
+/// `X₀ = V − Q`, the offset of a loop's expiry from its build quantum (#834 D6), and the rollback
+/// threshold of admission's monotone clock.
+pub(crate) const ONION_EXPIRY_OFFSET_MS: u128 = 120_000;
 /// `Q = 30 s`, the expiry quantum.
-pub(crate) const ONION_FORWARD_EXPIRY_QUANTUM_MS: u128 = 30_000;
+pub(crate) const ONION_EXPIRY_QUANTUM_MS: u128 = 30_000;
 /// `V = X₀ + Q = 150 s`, the admission window: a layer is admissible at `arr` iff
 /// `arr < x ≤ arr + V`.
 ///
 /// Law: the replay filter of `x` lives until `x`, so no admissible layer outlives the witness of
 /// its admission (L9).
-pub(crate) const ONION_FORWARD_MAX_VALIDITY_MS: u128 =
-    ONION_FORWARD_PAYLOAD_TTL_MS + ONION_FORWARD_EXPIRY_QUANTUM_MS;
+pub(crate) const ONION_ADMISSION_WINDOW_MS: u128 = ONION_EXPIRY_OFFSET_MS + ONION_EXPIRY_QUANTUM_MS;
 
 /// The next hop of one cell: the peer it is sent to over their direct link.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -11,7 +11,7 @@ use super::round_trip;
 use super::surbs;
 use super::CLASS;
 use super::NOW_MS;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 use crate::onion::session::exit::ONION_SESSION_ECHO_HORIZON_MS;
 use crate::onion::session::frame::OnionFrame;
 use crate::onion::session::frame::OnionSequence;
@@ -20,7 +20,7 @@ use crate::onion::session::order::OnionSequenceGap;
 use crate::onion::sphinx::cell::ONION_SURB_BYTES;
 
 /// `V`, the forward validity.
-const V: u128 = ONION_FORWARD_MAX_VALIDITY_MS;
+const V: u128 = ONION_ADMISSION_WINDOW_MS;
 
 // ---- frame -------------------------------------------------------------------------------------
 

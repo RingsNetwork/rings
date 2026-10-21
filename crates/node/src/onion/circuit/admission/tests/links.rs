@@ -36,7 +36,7 @@ use crate::onion::circuit::admission::OnionLinkTableFull;
 use crate::onion::circuit::admission::OnionReplayFilterKey;
 use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::admission::ONION_ADMISSION_SENDER_UNITS;
-use crate::onion::circuit::admission::ONION_ADMISSION_WINDOW_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 use crate::onion::OnionProcessEpoch;
 
 /// Law: there is no fixed sender limit and no lockout. With `R = 100`, 150 live links, more than

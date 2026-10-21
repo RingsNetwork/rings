@@ -18,17 +18,14 @@ use super::schedule::OnionIdleFloor;
 use super::schedule::Plan;
 use super::schedule::ONION_LINK_BUDGET_UNITS;
 use super::schedule::ONION_LINK_DWELL_US;
+use super::schedule::WINDOW_US;
 use super::MAX_PENDING_ONION_SENDS_PER_PEER;
 use super::MAX_PENDING_ONION_SEND_BYTES;
 use super::MAX_PENDING_ONION_SEND_BYTES_PER_PEER;
 use crate::error::Error;
 use crate::error::OnionQueueAdmissionReason;
 use crate::error::Result;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
 use crate::onion::sphinx::class::OnionLoopClass;
-
-/// `V` in microseconds.
-const WINDOW_US: u128 = ONION_FORWARD_MAX_VALIDITY_MS * 1_000;
 
 /// The emission starts of one link over `[0, horizon)` under the pure schedule, with real
 /// cells enqueued at `reals` (each one emitted in the first slot it is due), as the emitter
@@ -614,17 +611,9 @@ fn test_a_reopened_lane_keeps_its_emission_clock() {
         EmitterStep::Wait(due, _) if due == floor.slot_micros(1)
     ));
     state.close(peer, 0);
-    let third = state
-        .open(peer, ONION_FORWARD_MAX_VALIDITY_MS * 1_000)
-        .expect("a new lane");
+    let third = state.open(peer, WINDOW_US).expect("a new lane");
     assert!(matches!(
-        state.next(
-            peer,
-            third,
-            floor,
-            true,
-            ONION_FORWARD_MAX_VALIDITY_MS * 1_000
-        ),
+        state.next(peer, third, floor, true, WINDOW_US),
         EmitterStep::Emit(Emission::Cover(_))
     ));
 }

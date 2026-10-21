@@ -11,7 +11,7 @@ use super::super::witness::OnionSessionCondition;
 use super::super::witness::OnionSessionWitness;
 use super::NOW_MS;
 use super::TARGET;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 
 /// The reply `data(n, 0, w)`.
 fn reply(sequence: u32, payload: &'static [u8]) -> OnionFrame {
@@ -44,9 +44,7 @@ fn test_reorder_is_stalled_exactly_while_a_frame_is_held_behind_a_hole() {
         .accept(NOW_MS, OnionSequence::new(1), ())
         .expect("inside the window");
     assert!(failed.is_stalled());
-    assert!(failed
-        .expire(NOW_MS + ONION_FORWARD_MAX_VALIDITY_MS)
-        .is_err());
+    assert!(failed.expire(NOW_MS + ONION_ADMISSION_WINDOW_MS).is_err());
     assert!(!failed.is_stalled());
 }
 

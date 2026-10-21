@@ -92,7 +92,7 @@ use crate::onion::circuit::OnionApplicationInput;
 use crate::onion::circuit::OnionInterpretation;
 use crate::onion::circuit::OnionLink;
 use crate::onion::circuit::OnionLinkSender;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::sphinx::cell::OnionSurb;
@@ -209,7 +209,7 @@ impl OnionExitTable {
             }
         }
         self.closed
-            .insert(session, now_ms + ONION_FORWARD_MAX_VALIDITY_MS);
+            .insert(session, now_ms + ONION_ADMISSION_WINDOW_MS);
     }
 
     /// Where a loop of `arguments`' session goes at `now`, one that `carries_target` or not: the
@@ -621,7 +621,7 @@ mod tests {
     use super::ONION_EXIT_MAX_SESSIONS;
     use crate::error::Result;
     use crate::onion::circuit::OnionLinkSender;
-    use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+    use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
     use crate::onion::exit_accounting::OnionExitAccounting;
     use crate::onion::session::exit::OnionExitEffect;
     use crate::onion::session::exit::OnionExitSession;
@@ -770,8 +770,8 @@ mod tests {
         let session = OnionSessionId::new([3; 16]);
 
         table.bury(session, 1_000);
-        assert!(table.is_buried(&session, 1_000 + ONION_FORWARD_MAX_VALIDITY_MS - 1));
-        assert!(!table.is_buried(&session, 1_000 + ONION_FORWARD_MAX_VALIDITY_MS));
+        assert!(table.is_buried(&session, 1_000 + ONION_ADMISSION_WINDOW_MS - 1));
+        assert!(!table.is_buried(&session, 1_000 + ONION_ADMISSION_WINDOW_MS));
 
         let mut full = OnionExitTable {
             live: HashMap::new(),

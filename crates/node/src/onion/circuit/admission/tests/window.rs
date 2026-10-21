@@ -27,7 +27,7 @@ use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA;
 use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::admission::ONION_ADMISSION_GLOBAL_UNITS;
 use crate::onion::circuit::admission::ONION_ADMISSION_SENDER_UNITS;
-use crate::onion::circuit::admission::ONION_ADMISSION_WINDOW_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 use crate::onion::OnionProcessEpoch;
 
 /// Law: an expiry exists only on the grid `Q·ℕ`, and `from_ms ∘ as_ms = Some`.
