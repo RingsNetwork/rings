@@ -29,6 +29,8 @@ pub use self::client::OnionHttpsCall;
 pub(crate) use self::client::OnionHttpsClient;
 pub use self::client::OnionHttpsClientRequest;
 #[cfg(all(test, rings_native))]
+pub(crate) use self::client::ONION_HTTPS_RESPONSE_TIMEOUT;
+#[cfg(all(test, rings_native))]
 use self::limits::checked_status_code;
 use self::limits::https_response_body_limit;
 #[cfg(rings_native)]

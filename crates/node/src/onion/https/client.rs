@@ -50,7 +50,7 @@ use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
 
 /// Longest wait for the exit's whole response once the session has opened.
-const ONION_HTTPS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const ONION_HTTPS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The largest encoded response the client collects: the exit's body limit and its framing.
 const MAX_HTTPS_OUTCOME_BYTES: usize = 9 * 1024 * 1024;

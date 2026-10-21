@@ -106,6 +106,13 @@ impl ProcessorConfig {
         parse_webrtc_udp_port_range(self.webrtc_udp_port_min, self.webrtc_udp_port_max)
     }
 
+    /// The longer heartbeat of the two registries this node publishes, online nodes and onion
+    /// exits: the pause after which each of its registrations is published again.
+    pub fn registry_heartbeat_interval(&self) -> Duration {
+        self.online_node_heartbeat_interval
+            .max(self.onion_exit_heartbeat_interval)
+    }
+
     /// Sets the onion symbols this process registers (#834 D2).
     pub fn onion_role(mut self, role: OnionRole<OnionExitOffer>) -> Self {
         self.onion_role = role;
