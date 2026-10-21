@@ -25,13 +25,20 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils::get_epoch_ms;
 
-/// The step one placement of a lookup takes (see [`PeerRing::lookup_placement`]).
+/// A lookup placement settled here.
 #[derive(Debug)]
-pub(crate) enum PlacementLookup {
+pub(crate) enum LookupSettlement {
     /// A live value is stored here.
     Found(Entry),
     /// This node owns the placement and stores nothing for it.
     Missed(PlacementMiss),
+}
+
+/// The step one placement of a lookup takes (see [`PeerRing::lookup_placement`]).
+#[derive(Debug)]
+pub(crate) enum PlacementLookup {
+    /// The placement settles here.
+    Settled(LookupSettlement),
     /// Ask `next` for `query`.
     Remote {
         /// The node the query goes to.
@@ -459,7 +466,7 @@ impl PeerRing {
                     .await?
                     .filter(|value| value.bound_live_at(now_ms));
                 if let Some(value) = served {
-                    return Ok(PlacementLookup::Found(value));
+                    return Ok(PlacementLookup::Settled(LookupSettlement::Found(value)));
                 }
                 tracing::debug!("Cannot find entry in local storage, try to query from successor");
                 if owner != self.did {
@@ -473,7 +480,10 @@ impl PeerRing {
                     };
                 Ok(match head {
                     Some(next) => PlacementLookup::Remote { next, query },
-                    None => PlacementLookup::Missed(PlacementMiss::new(query.placement, owner)),
+                    None => PlacementLookup::Settled(LookupSettlement::Missed(PlacementMiss::new(
+                        query.placement,
+                        owner,
+                    ))),
                 })
             }
             PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(id)) => {
@@ -503,12 +513,12 @@ impl PeerRing {
                 .lookup_placement(query, fallback_on_local_virtual_miss, now_ms)
                 .await?
             {
-                PlacementLookup::Found(value) => {
+                PlacementLookup::Settled(LookupSettlement::Found(value)) => {
                     return Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
                         value, misses,
                     )));
                 }
-                PlacementLookup::Missed(miss) => misses.push(miss),
+                PlacementLookup::Settled(LookupSettlement::Missed(miss)) => misses.push(miss),
                 PlacementLookup::Remote { next, query } => {
                     ret.push(PeerRingAction::RemoteAction(
                         next,
