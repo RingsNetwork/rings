@@ -61,9 +61,11 @@ measure_storage:
   capacity: 200000000
 ```
 
-Alternatively, run `rings init --location ./node2/config.yaml --delegatee-key ./node2/delegatee_key`
-and change the per-node fields above (`delegatee_key`, both listeners, `endpoint_url` and the two
-storage paths) in the generated file.
+Alternatively, `rings init --location ./node2/config.yaml --delegatee-key ./node2/delegatee_key`
+replaces both steps for a node: it writes a fresh delegatee key from a random ECDSA key along with a
+complete configuration, so run it instead of `rings new-delegation`, not after it. The generated
+file already points `delegatee_key` at that key; only the two listeners, `endpoint_url` and the two
+storage paths need editing.
 
 ## Handshake !
 
