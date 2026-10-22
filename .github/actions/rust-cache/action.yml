@@ -1,0 +1,36 @@
+name: Rust cache
+description: >-
+  Swatinem/rust-cache under the repository's cache policy: only a push to develop or master
+  writes a cache; every other run (a pull request, a schedule, a manual dispatch) restores one
+  and writes none.
+
+# Why only those pushes write: a pull request's cache is scoped to its merge ref, so no other
+# PR can restore it, yet it still counts against the repository's 10 GB quota. With every open
+# PR writing a generation, the generations evicted one another before any PR reused one; with
+# only develop and master writing, the quota holds those branches' generations, and every PR
+# restores its base branch's (or the default branch's).
+#
+# The inputs pass straight through; an empty input is rust-cache's own default.
+inputs:
+  workspaces:
+    description: rust-cache `workspaces` (`$workspace -> $target` lines); empty for the root workspace.
+    required: false
+    default: ""
+  key:
+    description: rust-cache `key`, appended to the job-based key.
+    required: false
+    default: ""
+  shared-key:
+    description: rust-cache `shared-key`, which replaces the job-based key so jobs building the same graph share a cache.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        workspaces: ${{ inputs.workspaces }}
+        key: ${{ inputs.key }}
+        shared-key: ${{ inputs.shared-key }}
+        save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master') }}

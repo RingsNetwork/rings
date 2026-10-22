@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - develop
   pull_request:
     branches:
       - master
@@ -27,8 +28,9 @@ permissions:
   contents: read
 
 # Cancel superseded in-flight runs for the same PR (a new push obsoletes the previous
-# run). Scoped by head ref so parallel PRs don't cancel each other; master pushes use the
-# commit ref and are never cancelled, keeping the default-branch history intact.
+# run). Scoped by head ref so parallel PRs don't cancel each other; a run for a push to
+# develop or master is never cancelled in progress, so each branch's caches and history
+# come from completed runs.
 concurrency:
   group: qaci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -40,7 +42,8 @@ jobs:
   # `publish_artifacts` left false the PR builds all targets but does not version or upload
   # release artifacts (only the versioned rename + upload are release-only; that, and the
   # GitHub Release, live in auto-release.yml).
-  # PR-only: on master pushes Auto Release already builds these targets, so don't double-build.
+  # PR-only: on master pushes Auto Release already builds these targets, and a develop push
+  # carries a commit its PR already built them for, so don't double-build.
   # No `secrets: inherit` — the reusable workflow uses the automatic `github.token`.
   build_release_targets:
     name: Build release targets
@@ -88,40 +91,6 @@ jobs:
       - name: Build documentation book
         run: mdbook build docs
 
-  # Decode-boundary smoke tests live with the crates that own each boundary. CI generates a seed
-  # and case count per run, prints them for replay, and never checks generated corpus files into
-  # the repository.
-  decode_boundary_smoke:
-    name: Decode boundary smoke
-    timeout-minutes: 25
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
-
-      - name: Setup rust toolchain
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup default "$RUST_TOOLCHAIN"
-          rustup show
-
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-
-      - name: Generate decode-boundary inputs
-        run: |
-          python3 - <<'PY' | tee -a "$GITHUB_ENV"
-          import secrets
-
-          print(f"RINGS_DECODE_BOUNDARY_SEED={secrets.randbits(64)}")
-          print("RINGS_DECODE_BOUNDARY_CASES=1024")
-          PY
-
-      - name: Run generated decode-boundary tests
-        run: |
-          cargo test -p rings-core --features dummy --no-default-features decode_boundary -- --nocapture
-          cargo test -p rings-transport --no-default-features --features dummy decode_boundary -- --nocapture
-          cargo test -p rings-node --no-default-features --features node decode_boundary -- --nocapture
-
   miri_core:
     name: Miri core invariants
     timeout-minutes: 45
@@ -137,7 +106,7 @@ jobs:
           rustup show
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: ./.github/actions/rust-cache
 
       - name: Run Miri-compatible core tests
         env:
@@ -171,7 +140,7 @@ jobs:
           rustup show
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: ./.github/actions/rust-cache
 
       - name: Run FFI lifecycle tests under ASan and LSan
         run: |
@@ -186,13 +155,14 @@ jobs:
           fi
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' <<< "$output"
 
-  build_wasm:
-    name: Build and test for wasm
-    timeout-minutes: 45
-    strategy:
-      matrix:
-        os: ["ubuntu-latest"]
-    runs-on: ${{ matrix.os }}
+  # The wasm32 gates run as three parallel jobs, each over its own build graph: the crates'
+  # lints, the frontend and dweb applications (separate Cargo workspaces), and the crates'
+  # browser tests. None of them reuses another's artifacts, so serializing them only added
+  # their times.
+  wasm_clippy:
+    name: Clippy for wasm crates
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
 
@@ -204,11 +174,7 @@ jobs:
           rustup show
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-
-      - uses: jetli/wasm-bindgen-action@20b33e20595891ab1a0ed73145d8a21fc96e7c29 # v0.2.0
-        with:
-          version: ${{ env.WASM_BINDGEN_CLI_VERSION }}
+        uses: ./.github/actions/rust-cache
 
       - name: Run clippy for core wasm
         run: cargo clippy -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
@@ -239,6 +205,33 @@ jobs:
       - name: Run clippy for node browser
         run: cargo clippy -p rings-node --features browser_default --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
+  wasm_frontend:
+    name: Build and test the frontend and dweb for wasm
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Setup rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add wasm32-unknown-unknown
+          rustup show
+
+      # The frontend and dweb are Cargo workspaces of their own, with their own target
+      # directories; this job builds nothing in the root workspace.
+      - name: Cache cargo registry and build artifacts
+        uses: ./.github/actions/rust-cache
+        with:
+          workspaces: |
+            frontend
+            examples/dweb
+
+      - uses: jetli/wasm-bindgen-action@20b33e20595891ab1a0ed73145d8a21fc96e7c29 # v0.2.0
+        with:
+          version: ${{ env.WASM_BINDGEN_CLI_VERSION }}
+
       - name: Install wasm-pack
         uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
@@ -254,9 +247,6 @@ jobs:
       - name: Install frontend Playwright browser
         run: npx playwright install --with-deps chromium
 
-      - name: Check frontend extension scripts
-        run: npm run build:frontend-extension-scripts
-
       - name: Install extension icon renderer
         run: |
           sudo apt-get update
@@ -267,6 +257,8 @@ jobs:
         with:
           tool: trunk@${{ env.TRUNK_VERSION }}
 
+      # `package:frontend-extension` first runs `build:frontend-extension-scripts`, which checks,
+      # compiles and tests the extension scripts.
       - name: Build Rings frontend extension package
         run: npm run package:frontend-extension
 
@@ -277,10 +269,6 @@ jobs:
         run: |
           xvfb-run -a node frontend/.generated/scripts/test-extension-webview.mjs
           xvfb-run -a node frontend/.generated/scripts/test-extension-webview-regressions.mjs
-
-      - name: Check Rings frontend
-        run: cargo check --target=wasm32-unknown-unknown
-        working-directory: ./frontend
 
       - name: Run clippy for Rings frontend
         run: cargo clippy --target=wasm32-unknown-unknown --all-targets -- -D warnings
@@ -299,6 +287,27 @@ jobs:
             wasm-pack test --release --headless --chrome . -- --skip two_nodes_fetch_a_hosted_page
             wasm-pack test --release --headless --chrome . -- two_nodes_fetch_a_hosted_page --nocapture
           working-directory: ./examples/dweb
+
+  wasm_browser_tests:
+    name: Browser tests for wasm crates
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Setup rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add wasm32-unknown-unknown
+          rustup show
+
+      - name: Cache cargo registry and build artifacts
+        uses: ./.github/actions/rust-cache
+
+      - uses: jetli/wasm-bindgen-action@20b33e20595891ab1a0ed73145d8a21fc96e7c29 # v0.2.0
+        with:
+          version: ${{ env.WASM_BINDGEN_CLI_VERSION }}
 
       # The browser repair soak runs as its own test binary invocation: its 60 s hang guard
       # must not share the 120 s wasm-bindgen-test budget of the rest.
@@ -351,7 +360,7 @@ jobs:
           rustup show
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: ./.github/actions/rust-cache
 
       # Keep one feature graph and artifact set for ordinary and privileged tests.
       - name: Compile native test executables once
@@ -406,6 +415,11 @@ jobs:
           --target rings_node --ignored --exact --nocapture --sudo
           --filter processor::tests::test_gateway::real_linux_tun_tcp_reaches_public_http_through_onion_loop
 
+      # Doctests link against the libraries the test build above already compiled. They do not
+      # depend on the transport backend, so the default feature graph runs them.
+      - name: Run doctests
+        run: cargo test --locked --profile ci --workspace --doc
+
       - name: Upload native timings and test inventory
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -414,25 +428,6 @@ jobs:
           path: |
             target/ci-evidence/
             target/cargo-timings/
-
-  native_build_docs:
-    name: Native debug build and doctests
-    timeout-minutes: 20
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
-      - name: Setup Rust
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup default "$RUST_TOOLCHAIN"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Preserve native debug build coverage
-        run: cargo build --locked --workspace
-      - name: Run default and dummy doctests
-        run: |
-          cargo test --locked --doc
-          cargo test --locked -p rings-core --features dummy --doc
-          cargo test --locked -p rings-transport --no-default-features --features dummy --doc
 
   dummy_tests:
     name: Dummy transport tests
@@ -444,7 +439,18 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/rust-cache
+      # This job runs every crate's `decode_boundary` tests (core, node and transport), so it is
+      # the PR's decode-boundary smoke (#741): each run draws a seed and a case count and prints
+      # them for replay; no generated corpus is checked in.
+      - name: Generate decode-boundary inputs
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_ENV"
+          import secrets
+
+          print(f"RINGS_DECODE_BOUNDARY_SEED={secrets.randbits(64)}")
+          print("RINGS_DECODE_BOUNDARY_CASES=1024")
+          PY
       - name: Compile and run core dummy tests
         env:
           RUST_TEST_THREADS: 2
@@ -493,7 +499,7 @@ jobs:
           rustup show
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: ./.github/actions/rust-cache
 
       - name: Run clippy for node ffi
         run: cargo clippy -p rings-node --features ffi
@@ -579,7 +585,7 @@ jobs:
           rustup show
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: ./.github/actions/rust-cache
 
       - name: Check shared data plane and Wintun binding
         run: cargo check -p rings-gateway --all-targets
@@ -641,7 +647,7 @@ jobs:
           rustup show
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: ./.github/actions/rust-cache
 
       - name: Run strict clippy for node native lib
         # rings-node inherits warnings and strict Clippy denies from the workspace.
