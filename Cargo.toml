@@ -71,8 +71,24 @@ strip = true
 # Optimized test harnesses without release packaging's expensive whole-program LTO.
 # Inherit release assertion semantics so the rejoin model's exhaustive searches stay enabled.
 # Shipping binaries and browser builds continue to use the unchanged release profile.
+#
+# Optimization follows where test time is spent (#1002). A workspace crate builds at
+# `opt-level = 1`: codegen is about half of each large unit's compile, and these crates' tests
+# spend their CPU in dependencies or wait on events. Three stay at `opt-level = 3`:
+# dependencies, which are cached across runs and run every signature and hash; rings-core,
+# whose own code runs the exhaustive model searches; and rings-aez, the onion cipher.
 [profile.ci]
 inherits = "release"
+opt-level = 1
 lto = false
 strip = false
 debug-assertions = false
+
+[profile.ci.package."*"]
+opt-level = 3
+
+[profile.ci.package.rings-core]
+opt-level = 3
+
+[profile.ci.package.rings-aez]
+opt-level = 3
