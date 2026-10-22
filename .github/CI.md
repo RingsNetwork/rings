@@ -33,7 +33,7 @@ matrices, or non-vacuity assertions were reduced.
 
 The `ci` profile inherits release optimization, overflow, and assertion semantics
 but disables full LTO and stripping. `debug-assertions = false` is explicit because
-the million-state lossy-flap model is ignored when debug assertions are enabled.
+the rejoin model's exhaustive searches are ignored when debug assertions are enabled.
 The native ownership requirement fails if that test becomes ignored. The old
 unoptimized core dummy execution is replaced with this optimized profile. The
 separate debug workspace build is gone as well (#1002): clippy type-checks the debug
