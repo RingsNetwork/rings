@@ -10,6 +10,7 @@ use crate::consts::DATA_REDUNDANT;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::record_activity;
 use crate::tests::exit_descriptor::ExitDescriptorFixture;
+#[cfg(not(feature = "dummy"))]
 use crate::tests::native::network_test_guard as native_network_lock;
 #[cfg(feature = "dummy")]
 use crate::tests::native::signal_edge;
@@ -86,29 +87,28 @@ impl Drop for ApplicationRecorder {
 
 /// Exclusive use of the test network for one test.
 ///
-/// Default build: serializes the real-WebRTC tests. `dummy` build: additionally runs the test
-/// on the controlled in-memory network (see [`ControlledNetwork`]), a FIFO schedule on which
-/// no message waits on a clock.
-///
-/// Fields drop in declaration order, so the controlled network is torn down before the lock is
-/// released and the next test starts.
+/// Default build: serializes the real-WebRTC tests. `dummy` build: runs the test on its own
+/// controlled in-memory network (see [`ControlledNetwork`]), a FIFO schedule on which no
+/// message waits on a clock; it shares nothing with another test's network, so it takes no lock.
 pub(super) struct NetworkTestGuard {
     /// The controlled network of this test.
     #[cfg(feature = "dummy")]
     pub(super) network: ControlledNetwork,
     /// Serializes tests that share process-global network resources.
+    #[cfg(not(feature = "dummy"))]
     _serial: tokio::sync::MutexGuard<'static, ()>,
 }
 
 /// Take exclusive use of the test network for the calling test; see [`NetworkTestGuard`].
 ///
-/// The serial lock is the crate's one native network lock, shared with the onion loop tests.
+/// Default build: the serial lock is the crate's one native network lock, shared with the onion
+/// loop tests.
 pub(super) async fn network_test_guard() -> NetworkTestGuard {
-    let serial = native_network_lock().await;
     NetworkTestGuard {
         #[cfg(feature = "dummy")]
         network: ControlledNetwork::start(),
-        _serial: serial,
+        #[cfg(not(feature = "dummy"))]
+        _serial: native_network_lock().await,
     }
 }
 

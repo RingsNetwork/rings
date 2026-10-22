@@ -1,12 +1,12 @@
 //! Controlled in-memory network for processor tests (`dummy` builds only).
 //!
-//! Under the `dummy` feature every processor uses the dummy transport. Its default mode sleeps
-//! a random 10–100 ms per message, and only its controlled mode is deterministic: every event
-//! waits in a thread-local FIFO queue until a test delivers it. [`ControlledNetwork`] enables
-//! that mode for one test and runs a pump that delivers the oldest queued event whenever one
-//! is waiting, so the test's own awaits (admission, inbound messages, lookups) progress without
-//! any message waiting on a clock; the helpers' waits are activity-woken probes whose only
-//! timer is a hang guard:
+//! Under the `dummy` feature every processor uses the dummy transport. Its default mode lets
+//! each frame wait a random number of scheduler turns, and only its controlled mode decides
+//! the order: every event waits in a thread-local FIFO queue until a test delivers it.
+//! [`ControlledNetwork`] enables that mode for one test and runs a pump that delivers the
+//! oldest queued event whenever one is waiting, so the test's own awaits (admission, inbound
+//! messages, lookups) progress without any message waiting on a clock; the helpers' waits are
+//! activity-woken probes whose only timer is a hang guard:
 //!
 //! ```text
 //! pump:  loop { ¬paused ∧ pending() > 0 ? deliver(oldest) : () ; yield }
@@ -18,7 +18,8 @@
 //!
 //! The dummy connection ids are seeded per test. A test whose identities are also fixed (the
 //! E2E stream test) has a reproducible schedule; tests that draw random identities have a
-//! clock-free but identity-dependent schedule.
+//! clock-free but identity-dependent schedule. Neither the queue nor the seed is shared with
+//! another test, so these tests take no process-wide lock and run in parallel.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;

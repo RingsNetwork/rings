@@ -20,6 +20,11 @@ use crate::measure::MeasureImpl;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::message::OriginQuotaConfig;
+use crate::message::OriginQuotaLaneConfig;
+use crate::message::DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND;
+use crate::message::DEFAULT_ORIGIN_QUOTA_MESSAGES_PER_SECOND;
+use crate::message::DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE;
 use crate::storage::MemStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
@@ -222,6 +227,28 @@ fn prepare_node_with_optional_measure(
     prepare_node_with_ice_servers_and_measure(key, TEST_ICE_SERVERS, measure)
 }
 
+/// The origin quota of a fixture node: buckets that never empty.
+///
+/// The production quota refills at a wall-clock rate, so a test whose traffic exceeds one burst
+/// (`DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST` messages per origin and lane) would admit the excess
+/// only once enough real time had passed, and its outcome would depend on how fast the host
+/// runs. A fixture node's buckets hold `u64::MAX` tokens instead, so no admission waits for a
+/// refill. The quota's own laws are tested on explicit instants (`message::quota`) and on swarms
+/// built with explicit limits (`test_origin_quota`).
+fn fixture_origin_quota() -> Result<OriginQuotaConfig> {
+    let lane = OriginQuotaLaneConfig::new(
+        DEFAULT_ORIGIN_QUOTA_MESSAGES_PER_SECOND,
+        u64::MAX,
+        DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND,
+        u64::MAX,
+        DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE,
+    )
+    .map_err(|error| {
+        crate::error::Error::InvalidMessage(format!("fixture origin quota: {error}"))
+    })?;
+    Ok(OriginQuotaConfig::new(lane, lane, lane, lane))
+}
+
 /// Builds a node with explicit ICE servers and optional measurement recording.
 fn prepare_node_with_ice_servers_and_measure(
     key: SecretKey,
@@ -238,7 +265,8 @@ fn prepare_node_with_ice_servers_and_measure(
         delegatee_key,
     )
     .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
-    .dht_virtual_nodes(0);
+    .dht_virtual_nodes(0)
+    .origin_quota(fixture_origin_quota()?);
     let builder = match measure {
         Some(measure) => builder.measure(measure),
         None => builder,
