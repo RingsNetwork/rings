@@ -129,13 +129,18 @@ fn test_a_full_inbox_drops_and_counts_a_live_message_without_waiting() {
 }
 
 /// An empty message still weighs its own size, so empty messages cannot fill memory unbounded.
+///
+/// The bound is reached after hundreds of thousands of deliveries, all copies of one message:
+/// weight depends on neither sender nor transaction, and a fresh sender per copy would cost a key
+/// generation each.
 #[test]
 fn test_an_empty_message_still_counts_against_the_bound() {
     let outlet = ApplicationOutlet::new();
     let inbox = outlet.claim().unwrap();
+    let empty = message(0);
     let mut delivered = 0usize;
     while inbox.dropped() == 0 {
-        outlet.deliver(message(0));
+        outlet.deliver(empty.clone());
         delivered += 1;
     }
     let queued = std::iter::from_fn(|| inbox.try_next()).count();

@@ -56,13 +56,20 @@ indexing_slicing = "deny"
 # Upstream 0.8.2 with only its macro dependency redirected to maintained `pastey`.
 netlink-packet-core = { path = "crates/gateway/vendor/netlink-packet-core" }
 
+# Dependencies build optimized in the dev and test profiles; workspace crates stay at
+# `opt-level = 0`, so editing them recompiles as before. A law that signs or encrypts runs
+# in k256, p256, ark-bls12-381 or curve25519-dalek; with them unoptimized, such tests ran
+# 7–70× slower (#1002). The cost: a debugger steps through optimized dependency code.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = true
 strip = true
 
 # Optimized test harnesses without release packaging's expensive whole-program LTO.
-# Inherit release assertion semantics so the million-state rejoin search stays enabled.
+# Inherit release assertion semantics so the rejoin model's exhaustive searches stay enabled.
 # Shipping binaries and browser builds continue to use the unchanged release profile.
 [profile.ci]
 inherits = "release"

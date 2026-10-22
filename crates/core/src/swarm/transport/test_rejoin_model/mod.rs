@@ -159,10 +159,17 @@
 //! limits are the job timeouts (45 minutes) and, in the search itself,
 //! `EXPLORATION_BOUND`. The browser runner's `WASM_BINDGEN_TEST_TIMEOUT`
 //! (120 s) applies to asynchronous tests; these searches are synchronous.
-//! Measured on an Apple M-series laptop with the tests in parallel: native
-//! dev profile, the whole core suite with lossy flap skipped, 249 s (this
-//! module's searches are its longest tests; with lossy flap included the
-//! module alone is about 7 minutes); headless Chrome (`wasm32`, release,
+//!
+//! Every configuration but `departure` is release-sized, so debug builds
+//! (`debug_assertions`) ignore its search. Unoptimized, each one takes
+//! minutes: in one dev-profile run of the core suite on a loaded host, chain
+//! took 1478 s, restart 1097 s, truncation 731 s and replacement 268 s,
+//! against seconds each in the `ci` profile. The release test jobs decide
+//! them: the native `ci`-profile job, which requires each one by name
+//! (`scripts/ci-native-model-tests.txt`), and the browser job (`--release`).
+//! Run them locally with `--profile ci` or `--release`.
+//!
+//! Measured on an Apple M-series laptop: headless Chrome (`wasm32`, release,
 //! tests run serially, lossy flap included) 54 s for the module's sixteen
 //! tests. Native release timings, measured on an earlier revision with the
 //! same configurations up to a few percent of states: restart 13 s and
@@ -510,6 +517,10 @@ fn test_initial_states_satisfy_the_premise_and_only_the_mesh_is_converged() {
 /// heads reaches, and stays in, the Chord fixpoint of the live set.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "a release-sized state graph: decided by the release test jobs"
+)]
 fn test_laws_hold_when_a_peer_restarts_under_a_newer_generation() {
     assert_laws_hold_exhaustively(
         "restart",
@@ -523,6 +534,10 @@ fn test_laws_hold_when_a_peer_restarts_under_a_newer_generation() {
 /// capacity.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "a release-sized state graph: decided by the release test jobs"
+)]
 fn test_laws_hold_when_successors_exceed_capacity() {
     assert_laws_hold_exhaustively(
         "truncation",
@@ -536,6 +551,10 @@ fn test_laws_hold_when_successors_exceed_capacity() {
 /// peer never dialed are discovered only through reports.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "a release-sized state graph: decided by the release test jobs"
+)]
 fn test_laws_hold_from_a_chain_bootstrap() {
     assert_laws_hold_exhaustively(
         "chain",
@@ -548,6 +567,10 @@ fn test_laws_hold_from_a_chain_bootstrap() {
 /// Every law and conditional liveness where head replacement truncates.
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "a release-sized state graph: decided by the release test jobs"
+)]
 fn test_laws_hold_when_head_replacement_truncates() {
     assert_laws_hold_exhaustively(
         "replacement",
@@ -564,7 +587,7 @@ fn test_laws_hold_when_head_replacement_truncates() {
 #[cfg_attr(not(target_family = "wasm"), test)]
 #[cfg_attr(
     debug_assertions,
-    ignore = "a million-state graph: decided by the release test jobs"
+    ignore = "a release-sized state graph: decided by the release test jobs"
 )]
 fn test_laws_hold_under_loss_duplication_and_refusal() {
     assert_laws_hold_exhaustively(
