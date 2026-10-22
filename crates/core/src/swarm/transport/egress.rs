@@ -216,7 +216,7 @@ impl<D: Discipline> PayloadSender for Egress<'_, D> {
 /// Post: `Ok(())` iff `outcome = Succeeded`; a transfer cancelled before acceptance is
 /// `Err(OutboundTransferCancelled)`, never a success, so the caller learns that the payload did
 /// not leave and may send it again (#964). Only the waiting discipline produces `Cancelled`.
-fn payload_left(outcome: SendCompletionOutcome, peer: Did) -> Result<()> {
+pub(super) fn payload_left(outcome: SendCompletionOutcome, peer: Did) -> Result<()> {
     match outcome {
         SendCompletionOutcome::Succeeded => Ok(()),
         SendCompletionOutcome::Cancelled => Err(Error::OutboundTransferCancelled { peer }),

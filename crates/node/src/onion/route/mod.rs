@@ -19,7 +19,7 @@
 //!   length.
 //! - **Guard closure** (L7). The guard `g` is drawn once from the permitted first hops and closes
 //!   the loop at position `H`; the other `H − 2` hops are pairwise distinct and distinct from `g`
-//!   (`has_duplicate_dids`).
+//!   (`select_loop`'s `taken` set; `has_duplicate_dids` is the tests' oracle).
 //! - **Draw order** (L7). The symbol positions are drawn first, then the guard, then the relays,
 //!   so when every registrant of the first symbol `h₁` extends to a loop, its marginal is its
 //!   quality share among them; for a one-symbol pipeline `h₁` is the exit.
@@ -47,7 +47,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeDescriptor;
 
-/// Route-building request for an onion circuit.
+/// Route-building request for an onion loop.
 ///
 /// The request names one world-facing symbol, which stands alone in its pipeline (#834 D4a), so
 /// the loop has `n = 1` symbol hop and `H = (s + 1) + s` positions; the length is fixed by the
@@ -75,7 +75,7 @@ impl OnionRouteRequest {
     }
 }
 
-/// One hop selected for encrypted onion routing: a node process registering a symbol.
+/// One hop selected for an onion loop: a node process registering a symbol.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OnionRouteHop {
     /// Hop DID.
@@ -122,25 +122,25 @@ pub struct OnionRoute {
 }
 
 impl OnionRoute {
-    /// Build a route after proving the loop and exit fields agree.
+    /// The route of a loop drawn for `service` and its exit.
     ///
-    /// Invariant: the loop has one symbol hop, which is the process registering `service` in
-    /// `exit` (equal DID, session key and epoch), and no DID repeats except the guard at positions
-    /// `1` and `H` (L7).
+    /// Pre (the caller's obligation, which [`select_onion_route_from_candidates`] meets by
+    /// construction): the loop has the shape `OnionLoopShape::SESSION`, its one symbol hop is the
+    /// process registering `service` in `exit` (equal DID, session key and epoch), and no DID
+    /// repeats except the guard at positions `1` and `H` (L7).
     ///
     /// Invariant: `service` is canonical, so route/payload service equality is ordinary value
     /// equality over [`OnionServiceName`], not caller-dependent string normalization.
-    pub(crate) fn new(
+    pub(in crate::onion) fn new(
         service: OnionServiceName,
         hops: OnionLoop<OnionRouteHop>,
         exit: OnionExitDescriptor,
-    ) -> Result<Self> {
-        validate_route_hops(&service, &hops, &exit)?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             service,
             hops,
             exit,
-        })
+        }
     }
 
     /// Return the service used to select this route.
@@ -265,8 +265,12 @@ pub(crate) fn select_onion_route_from_candidates(
         entropy,
         guard_permitted,
     )?;
+    // The draw meets `OnionRoute::new`'s precondition: `select_loop` of one symbol has the
+    // `SESSION` shape and draws every DID once (its `taken` set), the symbol hop is the hop
+    // `admit` projected from `exit`, and every candidate exit offers `service`
+    // (`OnionRouteCandidates::from_validated_descriptors`).
     let (hops, (_, exit)) = drawn.project_symbols(|(hop, _)| *hop);
-    OnionRoute::new(service.clone(), hops, exit.clone())
+    Ok(OnionRoute::new(service.clone(), hops, exit.clone()))
 }
 
 /// The relay registrants of one draw: one hop per DID, in DID order.
@@ -607,7 +611,7 @@ fn eligible_exits(
 ) -> Vec<OnionExitDescriptor> {
     OnionExitDescriptor::latest_valid_by_service_did(exits, now_ms, network_id, false)
         .into_iter()
-        .filter(|descriptor| descriptor.offers_service(service.as_str()))
+        .filter(|descriptor| descriptor.service == *service)
         .collect()
 }
 
@@ -631,37 +635,15 @@ fn eligible_relays(
         .collect()
 }
 
-/// Return whether a DID repeats on the loop's open path `1 … H − 1` (L7).
+/// Return whether a DID repeats on the loop's open path `1 … H − 1` (L7): the test oracle of the
+/// guard-closure law, which `select_loop` keeps by drawing every DID once.
 ///
 /// The guard's second occurrence, at position `H`, is structural and the only repetition a loop
 /// admits: a loop without duplicates holds every DID once, except the guard exactly twice.
+#[cfg(test)]
 fn has_duplicate_dids(hops: &OnionLoop<OnionRouteHop>) -> bool {
     let mut seen = BTreeSet::new();
     hops.open_path().any(|hop| !seen.insert(hop.did))
-}
-
-/// Validate a route's loop against its pipeline and symbol descriptor (see [`OnionRoute::new`]).
-fn validate_route_hops(
-    service: &OnionServiceName,
-    hops: &OnionLoop<OnionRouteHop>,
-    exit: &OnionExitDescriptor,
-) -> Result<()> {
-    if hops.shape() != OnionLoopShape::SESSION {
-        return Err(Error::OnionRouteError(OnionRouteError::LoopShapeMismatch {
-            expected: OnionLoopShape::SESSION.symbols(),
-            actual: hops.shape().symbols(),
-        }));
-    }
-    if hops.symbol(OnionLoopShape::SESSION.symbols()) != Some(&OnionRouteHop::of_symbol(exit)) {
-        return Err(Error::OnionRouteError(OnionRouteError::ExitHopMismatch));
-    }
-    if has_duplicate_dids(hops) {
-        return Err(Error::OnionRouteError(OnionRouteError::DuplicateRouteHops));
-    }
-    if !exit.offers_service(service.as_str()) {
-        return Err(Error::OnionRouteError(OnionRouteError::ExitServiceMismatch));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

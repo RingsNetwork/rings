@@ -1,8 +1,8 @@
 use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::SecretKey;
-use rings_core::message::MessageSigner;
 
 use super::super::*;
+use crate::tests::exit_descriptor::ExitDescriptorFixture;
 use crate::tests::TEST_NETWORK_ID;
 
 /// Stable epoch used by signed descriptor fixtures; its concrete byte value is not semantic.
@@ -29,33 +29,17 @@ fn signed_exit_for_session_at(
     expires_at_ms: u128,
     version: &str,
 ) -> Result<OnionExitDescriptor> {
-    let did = delegatee_key.delegator_did();
-    OnionExitDescriptor::new_signed(
-        OnionExitDescriptorBody {
-            did,
-            public_key: delegatee_key
-                .delegation()
-                .delegator_verification_pubkey()
-                .map_err(Error::CoreError)?,
-            delegatee_public_key: delegatee_key.delegatee_public_key(),
-            process_epoch: TEST_PROCESS_EPOCH,
-            node_type: OnlineNodeType::Native,
-            network_id: 1,
-            service,
-            policy: OnionExitPolicy {
-                allowed_targets: vec![OnionExitTarget::parse("example.com:443")?],
-                denied_targets: vec![],
-                max_sessions: 16,
-                max_bytes_per_minute: 1024,
-            },
-            started_at_ms: 1,
+    ExitDescriptorFixture {
+        service,
+        version: version.to_string(),
+        ..ExitDescriptorFixture::offline(
+            delegatee_key,
+            TEST_PROCESS_EPOCH,
             heartbeat_at_ms,
             expires_at_ms,
-            version: version.to_string(),
-        },
-        MessageSigner::new(delegatee_key, TEST_NETWORK_ID),
-    )
-    .map_err(Error::CoreError)
+        )?
+    }
+    .sign()
 }
 
 #[test]
@@ -274,48 +258,21 @@ fn test_exit_descriptor_signature_covers_process_epoch() -> Result<()> {
 fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result<()> {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
-    let did = delegatee_key.delegator_did();
-    let public_key = delegatee_key
-        .delegation()
-        .delegator_verification_pubkey()
-        .map_err(Error::CoreError)?;
-
-    let older = OnionExitDescriptor::new_signed(
-        OnionExitDescriptorBody {
-            did,
-            public_key: public_key.clone(),
-            delegatee_public_key: delegatee_key.delegatee_public_key(),
-            process_epoch: TEST_PROCESS_EPOCH,
-            node_type: OnlineNodeType::Native,
-            network_id: 1,
-            service: OnionServiceName::tcp(),
+    let signed = |heartbeat_at_ms, version: &str| {
+        ExitDescriptorFixture {
             policy: OnionExitPolicy::default(),
-            started_at_ms: 1,
-            heartbeat_at_ms: 10,
-            expires_at_ms: 100,
-            version: "old".to_string(),
-        },
-        MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
-    )
-    .map_err(Error::CoreError)?;
-    let newer = OnionExitDescriptor::new_signed(
-        OnionExitDescriptorBody {
-            did,
-            public_key,
-            delegatee_public_key: delegatee_key.delegatee_public_key(),
-            process_epoch: TEST_PROCESS_EPOCH,
-            node_type: OnlineNodeType::Native,
-            network_id: 1,
-            service: OnionServiceName::tcp(),
-            policy: OnionExitPolicy::default(),
-            started_at_ms: 1,
-            heartbeat_at_ms: 20,
-            expires_at_ms: 100,
-            version: "new".to_string(),
-        },
-        MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
-    )
-    .map_err(Error::CoreError)?;
+            version: version.to_string(),
+            ..ExitDescriptorFixture::offline(
+                &delegatee_key,
+                TEST_PROCESS_EPOCH,
+                heartbeat_at_ms,
+                100,
+            )?
+        }
+        .sign()
+    };
+    let older = signed(10, "old")?;
+    let newer = signed(20, "new")?;
     let other_live = signed_exit_at(25, 100)?;
     let expired = signed_exit_at(30, 40)?;
 

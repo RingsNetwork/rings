@@ -406,10 +406,12 @@ async fn test_pending_dummy_close_fences_an_irrevocable_dispatch_synchronously()
                 .await
         })
     };
-    wait_until("dummy irrevocable send gate", || {
-        controlled::irrevocable_send_gate_waiting()
-    })
-    .await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        controlled::irrevocable_send_gate_entered(),
+    )
+    .await
+    .expect("timed out waiting for dummy irrevocable send gate");
 
     let closer = {
         let connection = Arc::clone(&connection);

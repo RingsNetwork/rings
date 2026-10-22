@@ -478,24 +478,18 @@ impl Swarm {
 
         // This payload has fake next_hop.
         // The invoker should fix it before sending.
-        let payload = match self
+        let payload = self
             .transport
-            .application_egress()
-            .originate(
-                Message::ConnectNodeSend(offer_msg.clone()),
-                peer,
-                Some(self.did()),
+            .settle_handshake_step(
+                attempt,
+                "wrapping connection offer",
+                self.transport.application_egress().originate(
+                    Message::ConnectNodeSend(offer_msg.clone()),
+                    peer,
+                    Some(self.did()),
+                ),
             )
-            .await
-        {
-            Ok(payload) => payload,
-            Err(error) => {
-                self.transport
-                    .abandon_pending_connection(attempt, "wrapping connection offer")
-                    .await;
-                return Err(error);
-            }
-        };
+            .await?;
         self.transport
             .mark_offer_sent(attempt, &offer_msg, payload.transaction.tx_id)?;
 
@@ -543,25 +537,19 @@ impl Swarm {
             .answer_remote_connection(peer, self.transport_callback(), &msg)
             .await?
         {
-            OfferReply::Answer(CreatedAnswer { attempt, report }) => {
-                let wrapped = self
-                    .transport
-                    .application_egress()
-                    .originate(Message::ConnectNodeReport(report), peer, Some(self.did()))
-                    .await;
-                match wrapped {
-                    Ok(payload) => {
-                        self.transport.mark_reply_sent(attempt)?;
-                        Ok(OfferReply::Answer(payload))
-                    }
-                    Err(error) => {
-                        self.transport
-                            .abandon_pending_connection(attempt, "wrapping connection answer")
-                            .await;
-                        Err(error)
-                    }
-                }
-            }
+            OfferReply::Answer(CreatedAnswer { attempt, report }) => self
+                .transport
+                .settle_handshake_step(
+                    attempt,
+                    "wrapping connection answer",
+                    self.transport.application_egress().originate(
+                        Message::ConnectNodeReport(report),
+                        peer,
+                        Some(self.did()),
+                    ),
+                )
+                .await
+                .map(OfferReply::Answer),
             OfferReply::CounterOffer(CounterOffer { offer, .. }) => self
                 .transport
                 .application_egress()

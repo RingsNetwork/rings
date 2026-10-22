@@ -89,8 +89,6 @@ pub use route::OnionRouteHop;
 pub use route::OnionRouteRequest;
 pub(crate) use route::SystemRouteEntropy;
 pub use signature::OnionServiceName;
-pub use signature::OnionSymbolSpec;
-pub use signature::ONION_SIGNATURE;
 pub use target::OnionProxyTarget;
 pub use target::OnionProxyTargetError;
 
@@ -184,13 +182,13 @@ pub(crate) const fn default_advertise_onion_exit() -> bool {
     false
 }
 
-/// Default native exit services: the world-facing symbols of [`ONION_SIGNATURE`] in table order.
+/// Default native exit services: the world-facing symbols of the onion signature, in table order.
 /// It is only published when onion-exit advertisement is enabled.
 pub fn default_onion_exit_services() -> Vec<OnionServiceName> {
     OnionServiceName::world_facing().collect()
 }
 
-/// Standard HTTPS onion-exit service set: the single `https` symbol of [`ONION_SIGNATURE`].
+/// Standard HTTPS onion-exit service set: the single `https` symbol of the onion signature.
 pub fn https_onion_exit_services() -> Vec<OnionServiceName> {
     vec![OnionServiceName::https()]
 }
@@ -374,7 +372,7 @@ pub struct OnionExitDescriptorBody {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
-    /// Delegation public key used for encrypted onion exit frames.
+    /// Delegation public key: the Sphinx key `pk_i` a loop's header blinds the exit's layer to.
     pub delegatee_public_key: PublicKey<33>,
     /// Process epoch `e_n` of the registering process, equal to its `relay` registration's.
     pub process_epoch: OnionProcessEpoch,
@@ -488,7 +486,7 @@ pub struct OnionExitDescriptor {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
-    /// Delegation public key used for encrypted onion exit frames.
+    /// Delegation public key: the Sphinx key `pk_i` a loop's header blinds the exit's layer to.
     pub delegatee_public_key: PublicKey<33>,
     /// Process epoch `e_n` of the registering process, equal to its `relay` registration's.
     pub process_epoch: OnionProcessEpoch,
@@ -562,12 +560,9 @@ impl OnionExitDescriptor {
         self.body_ref().signing_data()
     }
 
-    /// Return whether this descriptor advertises the requested service name.
-    pub fn advertises_service_name(&self, service: &str) -> bool {
-        self.service.matches(service)
-    }
-
-    /// Return whether this descriptor offers `service`.
+    /// Return whether this descriptor offers the service named `service`, after service-name
+    /// canonicalization: the predicate of the RPC boundary, where the name is still a string.
+    /// Typed callers compare [`Self::service`] directly.
     pub fn offers_service(&self, service: &str) -> bool {
         self.service.matches(service)
     }

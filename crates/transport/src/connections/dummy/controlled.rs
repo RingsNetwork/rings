@@ -1,8 +1,11 @@
 use std::sync::Arc;
+use std::thread::LocalKey;
 
 use bytes::Bytes;
+use tokio::sync::watch;
 
 pub use super::delay::mix_seed;
+use super::set_parked;
 use super::ACTIVE_DELIVERY_GATE;
 use super::CLOSE_PENDING;
 use super::CONNS;
@@ -15,15 +18,14 @@ use super::DELIVERY_FUTURE_PENDING;
 use super::DROP_MESSAGES;
 use super::HELD_DELIVERY_GATE;
 use super::IRREVOCABLE_SEND_GATE;
-use super::IRREVOCABLE_SEND_GATE_WAITING;
+use super::IRREVOCABLE_SEND_GATE_PARKED;
 use super::MAX_MESSAGE_SIZE;
 use super::NEXT_CALLBACK_CID;
 use super::NEXT_DELIVERY_GATE;
 use super::POST_PERMIT_SEND_GATE;
-use super::POST_PERMIT_SEND_GATE_WAITING;
-use super::SEND_GATE_ENTERED;
+use super::POST_PERMIT_SEND_GATE_PARKED;
 use super::SEND_MESSAGE_GATE;
-use super::SEND_MESSAGE_GATE_WAITING;
+use super::SEND_MESSAGE_GATE_PARKED;
 use super::SEND_MESSAGE_PENDING;
 use super::SEND_MESSAGE_PENDING_AFTER_SENT_COUNT;
 use super::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
@@ -176,11 +178,11 @@ pub fn set_max_message_size(n: usize) {
     MAX_MESSAGE_SIZE.with(|m| m.set(n));
 }
 
-/// Test hook: rewrite the next queued lifecycle callback to use `cid`.
+/// Rewrite the next queued lifecycle callback to use `cid`.
 ///
 /// This applies only to peer-state and data-channel events delivered through
 /// [`deliver`]. Message events keep their real connection id.
-pub fn set_next_callback_cid(cid: impl Into<String>) {
+fn set_next_callback_cid(cid: impl Into<String>) {
     NEXT_CALLBACK_CID.with(|next| {
         *next.borrow_mut() = Some(cid.into());
     });
@@ -209,12 +211,17 @@ pub fn release_send_message_gate() {
     if let Some(gate) = gate {
         gate.notify_waiters();
     }
-    SEND_MESSAGE_GATE_WAITING.with(|waiting| waiting.set(false));
+    set_parked(&SEND_MESSAGE_GATE_PARKED, false);
 }
 
 /// Return whether a dummy send reached the releasable dispatch gate.
 pub fn send_message_waiting_at_dispatch() -> bool {
-    SEND_MESSAGE_GATE_WAITING.with(|waiting| waiting.get())
+    is_parked(&SEND_MESSAGE_GATE_PARKED)
+}
+
+/// Wait until a dummy send reaches the releasable dispatch gate: at once if one waits there.
+pub async fn send_message_gate_entered() {
+    send_gate_parked(&SEND_MESSAGE_GATE_PARKED, true).await;
 }
 
 /// Test hook: suspend the next dummy send after its initial permit check but
@@ -231,12 +238,17 @@ pub fn release_post_permit_send_gate() {
     if let Some(gate) = gate {
         gate.notify_waiters();
     }
-    POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
+    set_parked(&POST_PERMIT_SEND_GATE_PARKED, false);
 }
 
 /// Return whether a send is suspended before its final cancellable check.
 pub fn post_permit_send_gate_waiting() -> bool {
-    POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.get())
+    is_parked(&POST_PERMIT_SEND_GATE_PARKED)
+}
+
+/// Wait until a send is suspended before its final cancellable check: at once if one is.
+pub async fn post_permit_send_gate_entered() {
+    send_gate_parked(&POST_PERMIT_SEND_GATE_PARKED, true).await;
 }
 
 /// Test hook: suspend the next dummy send after its final cancellable boundary.
@@ -252,19 +264,37 @@ pub fn release_irrevocable_send_gate() {
     if let Some(gate) = gate {
         gate.notify_waiters();
     } else {
-        IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
+        set_parked(&IRREVOCABLE_SEND_GATE_PARKED, false);
     }
 }
 
 /// Return whether a background dummy send is waiting past its irrevocable boundary.
 pub fn irrevocable_send_gate_waiting() -> bool {
-    IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.get())
+    is_parked(&IRREVOCABLE_SEND_GATE_PARKED)
 }
 
-/// The notification this thread's sends raise when they park at the post-permit or the
-/// irrevocable gate; `notified()` resolves once per parked send, even if it parked first.
-pub fn send_gate_entered() -> Arc<tokio::sync::Notify> {
-    SEND_GATE_ENTERED.with(Arc::clone)
+/// Wait until a background dummy send waits past its irrevocable boundary: at once if one does.
+pub async fn irrevocable_send_gate_entered() {
+    send_gate_parked(&IRREVOCABLE_SEND_GATE_PARKED, true).await;
+}
+
+/// Wait until no background dummy send waits past its irrevocable boundary: at once if none
+/// does.
+pub async fn irrevocable_send_gate_left() {
+    send_gate_parked(&IRREVOCABLE_SEND_GATE_PARKED, false).await;
+}
+
+/// Whether a send is parked at the gate whose parked state is `gate`.
+fn is_parked(gate: &'static LocalKey<watch::Sender<bool>>) -> bool {
+    gate.with(|gate| *gate.borrow())
+}
+
+/// Wait until the gate whose parked state is `gate` reads `parked`, woken by the change itself:
+/// at once if it reads `parked` now.
+async fn send_gate_parked(gate: &'static LocalKey<watch::Sender<bool>>, parked: bool) {
+    let mut changes = gate.with(watch::Sender::subscribe);
+    // The sender lives as long as this thread, so the wait ends only at the awaited state.
+    let _reached = changes.wait_for(|state| *state == parked).await;
 }
 
 /// Test hook: force `send_message` to stay pending once this thread has already dispatched

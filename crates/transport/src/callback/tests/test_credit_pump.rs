@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 
 use super::admit_window;
 use super::callback;
-use super::credit_pump::pump_lane_credits_pausing;
+use super::credit_pump::pump_lane_credits;
 use super::link_send::FrameSink;
 use super::wire;
 use crate::connection_ref::ConnectionRef;
@@ -98,16 +98,8 @@ impl ConnectionInterface for FlakyCreditConnection {
         LaneCreditView::closed()
     }
 
-    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        WebrtcConnectionState::Connected
-    }
-
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
         ConnectionStateSnapshot::new(WebrtcConnectionState::Connected, true)
-    }
-
-    fn data_channel_is_open(&self) -> Result<bool> {
-        Ok(true)
     }
 
     fn max_message_size(&self) -> usize {
@@ -149,7 +141,7 @@ async fn test_the_pump_resends_a_credit_whose_send_failed() {
         sent: Mutex::new(Vec::new()),
         notify: Notify::new(),
     });
-    let pump = tokio::spawn(pump_lane_credits_pausing(
+    let pump = tokio::spawn(pump_lane_credits(
         Arc::clone(callback.link_credit()),
         ConnectionRef::new("peer", &connection),
         credit_index(lane),

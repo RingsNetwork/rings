@@ -88,9 +88,7 @@ fn test_answered_and_answering_attempts_refuse() {
         owner: OfferOwner::Overlay,
         phase: OfferPhase::Answered,
     };
-    for handshake in [answered, Handshake::answering(), Handshake::Answering {
-        reply_sent: true,
-    }] {
+    for handshake in [answered, Handshake::Answering] {
         for (local, peer) in [(smaller, larger), (larger, smaller)] {
             assert_eq!(
                 crossing_offer_verdict(&handshake, local, peer),
@@ -122,7 +120,7 @@ fn test_a_yield_releases_only_the_state_it_was_decided_on() -> Result<()> {
         .expect("a yield decided on the current state applies");
     assert_ne!(answering, attempt);
     assert_eq!(registry.pending_attempt(peer), Some(answering));
-    assert_eq!(registry.handshake(answering), Some(&Handshake::answering()));
+    assert_eq!(registry.handshake(answering), Some(&Handshake::Answering));
     assert_eq!(registry.handshake(attempt), None);
     assert!(registry.superseded_by_peer(attempt));
     Ok(())

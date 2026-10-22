@@ -159,6 +159,7 @@ tower = "0.5"
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+rings-gateway = { workspace = true, features = ["test-support"] }
 tokio = { version = "1.50.0", features = ["test-util"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

@@ -24,11 +24,10 @@ async fn test_scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch()
     let sending_transport = Arc::clone(&transport);
     let send = tokio::spawn(async move { sending_transport.send_payload_admitted(payload).await });
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while !dummy_controlled::send_message_waiting_at_dispatch() {
-            tokio::task::yield_now().await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        dummy_controlled::send_message_gate_entered(),
+    )
     .await
     .map_err(|_| Error::InvalidMessage("send did not reach dispatch gate".to_string()))?;
     transport.outbound_schedulers.shutdown(peer);
@@ -58,11 +57,10 @@ async fn test_scheduler_shutdown_after_backend_acceptance_preserves_detached_suc
     let sending_transport = Arc::clone(&transport);
     let send = tokio::spawn(async move { sending_transport.send_payload_admitted(payload).await });
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while !dummy_controlled::irrevocable_send_gate_waiting() {
-            tokio::task::yield_now().await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        dummy_controlled::irrevocable_send_gate_entered(),
+    )
     .await
     .map_err(|_| Error::InvalidMessage("send did not become irrevocable".to_string()))?;
     transport.outbound_schedulers.shutdown(peer);
@@ -97,11 +95,10 @@ async fn test_scheduler_shutdown_cancels_a_send_before_queue_acceptance() -> Res
     let sending_transport = Arc::clone(&transport);
     let send = tokio::spawn(async move { sending_transport.send_payload_admitted(payload).await });
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while !dummy_controlled::post_permit_send_gate_waiting() {
-            tokio::task::yield_now().await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        dummy_controlled::post_permit_send_gate_entered(),
+    )
     .await
     .map_err(|_| Error::InvalidMessage("send did not reach its acceptance gate".to_string()))?;
     transport.outbound_schedulers.shutdown(peer);

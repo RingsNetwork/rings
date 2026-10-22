@@ -21,7 +21,6 @@
 use std::future::Future;
 
 use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::TransportInterface;
 
 use super::pending::crossing_offer_verdict;
 use super::pending::AnswerSlot;
@@ -51,20 +50,6 @@ pub enum OfferReply<A, O> {
     /// The replying node's own unanswered offer to the same peer, which prevails on the
     /// tie-break: the peer abandons its offer and answers this one.
     CounterOffer(O),
-}
-
-impl<A, O> OfferReply<A, O> {
-    /// Map the answer and the counter-offer independently.
-    pub fn map<A2, O2>(
-        self,
-        answer: impl FnOnce(A) -> A2,
-        counter_offer: impl FnOnce(O) -> O2,
-    ) -> OfferReply<A2, O2> {
-        match self {
-            Self::Answer(reply) => OfferReply::Answer(answer(reply)),
-            Self::CounterOffer(reply) => OfferReply::CounterOffer(counter_offer(reply)),
-        }
-    }
 }
 
 impl<A, O> OfferReply<A, O> {
@@ -186,6 +171,22 @@ impl SwarmTransport {
         Ok(failure)
     }
 
+    /// Await `step` of `attempt`'s handshake (wrapping or sending an offer or an answer); a
+    /// failure abandons the generation, logged as `operation`, so the peer's next offer is not
+    /// refused for the pending timeout, and is returned.
+    pub(in crate::swarm) async fn settle_handshake_step<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        operation: &str,
+        step: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let settled = step.await;
+        if settled.is_err() {
+            self.abandon_pending_connection(attempt, operation).await;
+        }
+        settled
+    }
+
     /// Apply `Creating -> Sent(offer, tx_id)` to `attempt`; when it no longer owns its slot,
     /// the error says why ([`Self::lost_slot`]).
     pub(in crate::swarm) fn mark_offer_sent(
@@ -204,14 +205,6 @@ impl SwarmTransport {
         } else {
             Err(self.lost_slot(attempt)?)
         }
-    }
-
-    /// Apply `Answering(false) -> Answering(true)` to `attempt`; returns whether it applied.
-    pub(in crate::swarm) fn mark_reply_sent(
-        &self,
-        attempt: PendingConnectionAttempt,
-    ) -> Result<bool> {
-        self.with_connection_lifecycle(|| Ok(self.peer_lifecycles()?.mark_reply_sent(attempt)))
     }
 
     /// Reserve an overlay connection generation for `peer` and produce its offer without
@@ -416,12 +409,7 @@ impl SwarmTransport {
         if let Some(swarm_conn) = self.get_raw_connection(peer) {
             match self.raw_connection_owner(peer)? {
                 RawConnectionOwner::Orphan => {
-                    if !self
-                        .transport
-                        .close_connection_if_current(&swarm_conn.connection)
-                        .await
-                        .map_err(Error::Transport)?
-                    {
+                    if !self.close_if_current(&swarm_conn).await? {
                         return Err(Error::AlreadyConnected);
                     }
                 }
@@ -477,7 +465,7 @@ impl SwarmTransport {
                 self.open_reserved_connection(answering, callback).await?
             }
             IncomingOfferSlot::Vacant => {
-                self.open_pending_connection(peer, callback, Handshake::answering())
+                self.open_pending_connection(peer, callback, Handshake::Answering)
                     .await?
             }
         };
@@ -486,8 +474,7 @@ impl SwarmTransport {
 
     /// Reply to the offer of remote connection, waiting on ICE gathering (the application
     /// boundary): answer it, or return this node's own prevailing offer (`Law (Tie-break)`).
-    /// The caller marks a delivered answer sent ([`Self::mark_reply_sent`]) or abandons its
-    /// generation.
+    /// The caller abandons the generation if the answer cannot be delivered.
     pub(in crate::swarm) async fn answer_remote_connection(
         &self,
         peer: Did,

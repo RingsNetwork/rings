@@ -9,6 +9,7 @@ pub use action::RemoteAction;
 pub use action::TopoInfo;
 pub use peer_ring::EntryStorage;
 pub use peer_ring::PeerRing;
+pub(crate) use storage::LookupSettlement;
 pub(crate) use storage::OperateRoute;
 pub(crate) use storage::PlacementLookup;
 pub(crate) use storage::StorageKey;

@@ -40,7 +40,9 @@ impl KvStorageInterface<EvidenceSnapshot<Did>> for FailingEvidenceStorage {
         _key: &str,
         _value: &EvidenceSnapshot<Did>,
     ) -> rings_core::error::Result<()> {
-        Err(CoreError::InvalidTransport)
+        Err(CoreError::ServiceIOError(std::io::Error::other(
+            "store unavailable",
+        )))
     }
 
     async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceSnapshot<Did>)>> {

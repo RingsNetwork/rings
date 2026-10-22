@@ -1,8 +1,16 @@
+//! The data plane as a protocol: stateless, and each input is its own one effect.
+//!
+//! ```text
+//! step(Cell(from, cell)) = [Cell(from, cell)]      step(Link(fact)) = [Link(fact)]
+//! ```
+//!
+//! Relays keep no state (#834 Phase 2a item 2), and the admission state, the only state of the
+//! data plane, is owned by the shell, which applies the pure hop step to it in the order `step`
+//! emits these effects: the protocol's transition gate linearises cells and link facts into one
+//! stream, which is the linearisation obligation of admission's `reconcile`.
+
 use super::codec::decode_event;
-use super::codec::OnionCircuitEvent;
 use super::codec::OnionCircuitInput;
-use super::reducer::apply;
-use super::reducer::OnionCircuitEffect;
 use super::ONION_CIRCUIT_NAMESPACE;
 use crate::extension::ext::Ctx;
 use crate::extension::ext::LinkFact;
@@ -11,14 +19,14 @@ use crate::extension::ext::Reject;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
 
-/// The onion data plane as a protocol: a stateless reducer over cells and link facts.
+/// The onion data plane as a protocol: the identity transition over cells and link facts.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct OnionCircuitProtocol;
 
 impl Protocol for OnionCircuitProtocol {
     type State = ();
-    type Event = OnionCircuitEvent;
-    type Effect = OnionCircuitEffect;
+    type Event = OnionCircuitInput;
+    type Effect = OnionCircuitInput;
 
     fn namespace(&self) -> &str {
         ONION_CIRCUIT_NAMESPACE
@@ -35,7 +43,7 @@ impl Protocol for OnionCircuitProtocol {
         _ctx: Ctx<'_, Self::State>,
         event: Self::Event,
     ) -> Transition<Self::State, Self::Effect> {
-        apply(event.input)
+        Transition::with((), vec![event])
     }
 
     /// The onion data plane admits its own direct-edge traffic (#888): every cell is charged
@@ -51,8 +59,6 @@ impl Protocol for OnionCircuitProtocol {
     /// the link live, a retirement ends it, and both a retirement and a drop end the sessions
     /// this node holds on it (`Law (Circuit fate)`, #963, #966, #969; see `circuit::shell`).
     fn link_fact(&self, fact: LinkFact) -> Option<Self::Event> {
-        Some(OnionCircuitEvent {
-            input: OnionCircuitInput::Link(fact.into()),
-        })
+        Some(OnionCircuitInput::Link(fact.into()))
     }
 }

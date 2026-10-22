@@ -213,22 +213,20 @@ impl SwarmTransport {
         payload.relay = payload.relay.with_signaling_path(SignalingPath::outbound());
         let tx_id = payload.transaction.tx_id;
         self.mark_offer_sent(attempt, &offer, tx_id)?;
-        if !self.is_current_connection_attempt(attempt)? {
-            return Err(self.lost_slot(attempt)?);
-        }
-        if let Err(error) = sender.send_payload(payload).await {
-            tracing::warn!(
-                target: "rings_core::swarm::transport::handshake",
-                local = %self.dht.did,
-                peer = %peer,
-                generation = attempt.generation,
-                error = ?error,
-                "connection offer send failed"
-            );
-            self.abandon_pending_connection(attempt, "sending connection offer")
-                .await;
-            return Err(error);
-        }
+        let send = async {
+            sender.send_payload(payload).await.inspect_err(|error| {
+                tracing::warn!(
+                    target: "rings_core::swarm::transport::handshake",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    generation = attempt.generation,
+                    error = ?error,
+                    "connection offer send failed"
+                );
+            })
+        };
+        self.settle_handshake_step(attempt, "sending connection offer", send)
+            .await?;
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
@@ -263,7 +261,7 @@ impl SwarmTransport {
     /// nothing. The answer, which waits on ICE gathering, is created and sent through the
     /// protocol egress on a detached task (`Law (inbound locality)`). An answer that cannot be
     /// handed to its carrier abandons its generation, so the peer's next offer is not refused
-    /// for the pending timeout; a delivered one marks its generation `Answering(reply_sent)`.
+    /// for the pending timeout.
     pub(crate) async fn answer_signaled_offer(
         self: &Arc<Self>,
         callback: SwarmTransportCallback,
@@ -292,8 +290,8 @@ impl SwarmTransport {
         }
     }
 
-    /// Send the answer of `attempt` to the offer `request` carried along `carrier`, and mark it
-    /// sent; a failure abandons the answering generation.
+    /// Send the answer of `attempt` to the offer `request` carried along `carrier`; a failure
+    /// abandons the answering generation.
     async fn send_signaled_answer(
         &self,
         attempt: PendingConnectionAttempt,
@@ -303,18 +301,13 @@ impl SwarmTransport {
     ) -> Result<()> {
         let tx_id = request.transaction.tx_id;
         let reply = Message::ConnectNodeReport(report);
-        match self
-            .protocol_egress()
-            .send_reply(request, carrier, tx_id, reply)
-            .await
-        {
-            Ok(()) => self.mark_reply_sent(attempt).map(|_| ()),
-            Err(error) => {
-                self.abandon_pending_connection(attempt, "sending connection answer")
-                    .await;
-                Err(error)
-            }
-        }
+        self.settle_handshake_step(
+            attempt,
+            "sending connection answer",
+            self.protocol_egress()
+                .send_reply(request, carrier, tx_id, reply),
+        )
+        .await
     }
 
     /// Accept the answer `answer` from `peer` received over the DHT under transaction `tx_id`.

@@ -408,13 +408,13 @@ fn test_transfer_capacity_is_strict_across_permit_lifetimes() {
     for _ in 0..OUTBOUND_DATA_TRANSFER_CAPACITY {
         permits.push(
             capacity
-                .try_acquire(peer, TransferClass::Application, 1)
+                .admit_now(peer, TransferClass::Application, 1)
                 .expect("non-control capacity must admit its declared bound"),
         );
     }
 
     assert!(matches!(
-        capacity.try_acquire(peer, TransferClass::Application, 1),
+        capacity.admit_now(peer, TransferClass::Application, 1),
         Err(Error::OutboundTransferCapacityExceeded {
             peer: error_peer,
             capacity: OUTBOUND_DATA_TRANSFER_CAPACITY,
@@ -423,7 +423,7 @@ fn test_transfer_capacity_is_strict_across_permit_lifetimes() {
     for _ in 0..OUTBOUND_CONTROL_RESERVED_TRANSFERS {
         permits.push(
             capacity
-                .try_acquire(peer, TransferClass::DhtControl, 1)
+                .admit_now(peer, TransferClass::DhtControl, 1)
                 .expect("reserved control capacity must remain available"),
         );
     }
@@ -431,13 +431,13 @@ fn test_transfer_capacity_is_strict_across_permit_lifetimes() {
         for _ in 0..OUTBOUND_DATA_RESERVED_TRANSFERS {
             permits.push(
                 capacity
-                    .try_acquire(peer, class, 1)
+                    .admit_now(peer, class, 1)
                     .expect("every data class retains its reserved capacity"),
             );
         }
     }
     assert!(matches!(
-        capacity.try_acquire(peer, TransferClass::DhtControl, 1),
+        capacity.admit_now(peer, TransferClass::DhtControl, 1),
         Err(Error::OutboundTransferCapacityExceeded {
             peer: error_peer,
             capacity,
@@ -451,7 +451,7 @@ fn test_transfer_capacity_is_strict_across_permit_lifetimes() {
     assert!(backpressure.is_deferrable_data_plane_send());
     assert!(!backpressure.records_peer_send_failure());
     permits.pop();
-    assert!(capacity.try_acquire(peer, TransferClass::E2e, 1).is_ok());
+    assert!(capacity.admit_now(peer, TransferClass::E2e, 1).is_ok());
 }
 
 #[test]
@@ -461,12 +461,12 @@ fn test_transfer_memory_capacity_is_weighted_and_released() {
     let peer = Did::from(9_u32);
     let data_limit = super::capacity::peer_byte_limit(TransferClass::Application);
     let permit = capacity
-        .try_acquire(peer, TransferClass::Application, data_limit)
+        .admit_now(peer, TransferClass::Application, data_limit)
         .expect("one transfer may consume the non-control byte budget");
 
     assert_eq!(capacity.admitted_bytes(), data_limit);
     assert!(matches!(
-        capacity.try_acquire(peer, TransferClass::Application, 1),
+        capacity.admit_now(peer, TransferClass::Application, 1),
         Err(Error::OutboundTransferMemoryCapacityExceeded {
             peer: error_peer,
             requested_bytes: 1,

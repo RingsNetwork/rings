@@ -158,19 +158,25 @@ pub trait ConnectionInterface {
     /// nothing.
     fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView;
 
-    /// Get current webrtc connection state.
-    fn webrtc_connection_state(&self) -> WebrtcConnectionState;
-
     /// Return one coherent WebRTC/data-channel product-state observation.
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot;
 
-    /// Return whether every data channel used by this connection is currently open.
+    /// Get current webrtc connection state: the WebRTC component of
+    /// [`connection_state_snapshot`](Self::connection_state_snapshot).
+    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
+        self.connection_state_snapshot().webrtc()
+    }
+
+    /// Return whether every data channel used by this connection is currently open: the
+    /// data-channel component of [`connection_state_snapshot`](Self::connection_state_snapshot).
     ///
     /// This is one component of routability, not the complete predicate. ICE
     /// may still report `Connecting` when SCTP has opened, while
     /// `Disconnected + Open` must not be treated as ready. Callers must classify
     /// the WebRTC/data-channel product state according to their protocol model.
-    fn data_channel_is_open(&self) -> Result<bool, Self::Error>;
+    fn data_channel_is_open(&self) -> bool {
+        self.connection_state_snapshot().data_channel_open()
+    }
 
     /// The maximum size, in bytes, of one message this connection can send - the channel's
     /// negotiated SCTP / data-channel `max_message_size`, capped at

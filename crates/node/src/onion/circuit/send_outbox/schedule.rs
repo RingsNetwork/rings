@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use super::super::ONION_ADMISSION_SENDER_UNITS;
-use super::super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
-use super::super::ONION_FORWARD_MAX_VALIDITY_MS;
+use super::super::ONION_ADMISSION_WINDOW_MS;
+use super::super::ONION_EXPIRY_QUANTUM_MS;
 use crate::onion::sphinx::class::OnionLoopClass;
 
 /// The receiver's per-sender budget `B` in units (#834 L9).
@@ -19,26 +19,25 @@ pub(super) const EMISSION_RATE_DENOMINATOR: u128 = 10;
 /// `slot(u) = u / r = u·V / (ρ·B)`, in microseconds: the emission clock granularity is one
 /// microsecond, and the slot is rounded up, which only lowers the rate.
 pub(super) const fn slot_micros(units: u128) -> u128 {
-    (units * ONION_FORWARD_MAX_VALIDITY_MS * 1_000 * EMISSION_RATE_DENOMINATOR)
+    (units * ONION_ADMISSION_WINDOW_MS * 1_000 * EMISSION_RATE_DENOMINATOR)
         .div_ceil(EMISSION_RATE_NUMERATOR * ONION_LINK_BUDGET_UNITS)
 }
 
-/// `u(b)` as the schedule's integer type.
-pub(super) fn units_of(class: OnionLoopClass) -> u128 {
-    u128::from(class.units())
-}
+/// `u_max = u(12 MiB) = 768`, the units of the largest class.
+pub(super) const ONION_LINK_MAX_UNITS: u128 = OnionLoopClass::MiB12.units().get() as u128;
 
 // Budget safety at the largest class: `ρ·B + u_max < B`.
 const _: () = assert!(
-    ONION_LINK_BUDGET_UNITS * EMISSION_RATE_NUMERATOR / EMISSION_RATE_DENOMINATOR + 768
+    ONION_LINK_BUDGET_UNITS * EMISSION_RATE_NUMERATOR / EMISSION_RATE_DENOMINATOR
+        + ONION_LINK_MAX_UNITS
         < ONION_LINK_BUDGET_UNITS
 );
 
 /// `V` in microseconds: how long a closed lane's clock is kept for a reopen.
-pub(super) const WINDOW_US: u128 = ONION_FORWARD_MAX_VALIDITY_MS * 1_000;
+pub(super) const WINDOW_US: u128 = ONION_ADMISSION_WINDOW_MS * 1_000;
 
 /// `D = Q`, the dwell: an active link stays active for `D` after its last real cell.
-pub(super) const ONION_LINK_DWELL_US: u128 = ONION_FORWARD_EXPIRY_QUANTUM_MS * 1_000;
+pub(super) const ONION_LINK_DWELL_US: u128 = ONION_EXPIRY_QUANTUM_MS * 1_000;
 
 /// The idle floor `r_idle`: the cover rate of an up link that carries no real cell, as the
 /// period of one unit. The default is one unit per second; a node may lower the rate (a longer

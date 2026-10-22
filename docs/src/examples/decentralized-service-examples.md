@@ -1,11 +1,6 @@
 # Decentralized Service Examples
 
-The old `rings send http` service proxy, `sendHttpRequestMessage` RPC, and
-`MessageType::HttpRequest`/`HttpResponse` payloads were replaced by the extension
-registry and relay protocol in #596. The associated Rust DTOs
-`rings_rpc::types::{HttpRequest, Timeout}` have also been removed.
-
-For a current local-service example, use the
+For a local-service example, use the
 [TCP/UDP relay demos](https://github.com/RingsNetwork/rings/tree/master/examples/relay).
 They register a named service and carry bytes between two Rings peers:
 

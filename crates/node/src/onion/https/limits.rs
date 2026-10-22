@@ -29,7 +29,7 @@ pub(super) fn headers_bytes(headers: &[(String, String)]) -> Result<u64> {
     )
 }
 
-pub(super) fn usize_to_u64(value: usize) -> Result<u64> {
+fn usize_to_u64(value: usize) -> Result<u64> {
     u64::try_from(value).map_err(|_| Error::InvalidData)
 }
 
@@ -37,9 +37,6 @@ pub(super) fn reject_content_length_over_limit(
     headers: &[(String, String)],
     max_body_bytes: u64,
 ) -> Result<()> {
-    if max_body_bytes == 0 {
-        return Ok(());
-    }
     let Some(length) = headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
@@ -51,4 +48,20 @@ pub(super) fn reject_content_length_over_limit(
         return Err(Error::NoPermission);
     }
     Ok(())
+}
+
+/// Admit a response body chunk of `chunk_len` bytes after `body_len` bytes: past
+/// `max_body_bytes` it is refused with [`Error::NoPermission`]; otherwise it is recorded
+/// against the exit's byte budget.
+pub(super) fn admit_body_chunk(
+    body_len: usize,
+    chunk_len: usize,
+    max_body_bytes: u64,
+    record_bytes: &impl Fn(u64) -> Result<()>,
+) -> Result<()> {
+    let chunk_len = usize_to_u64(chunk_len)?;
+    if usize_to_u64(body_len)?.saturating_add(chunk_len) > max_body_bytes {
+        return Err(Error::NoPermission);
+    }
+    record_bytes(chunk_len)
 }

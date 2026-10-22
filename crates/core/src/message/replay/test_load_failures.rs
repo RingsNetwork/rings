@@ -69,12 +69,16 @@ struct Unavailable;
 impl StorageHooks for Unavailable {
     /// Runs before a `put`.
     async fn before_put(&self, _key: &str) -> Result<()> {
-        Err(Error::InvalidTransport)
+        Err(Error::ServiceIOError(std::io::Error::other(
+            "store unavailable",
+        )))
     }
 
     /// Runs before a whole-store read.
     async fn before_scan(&self) -> Result<()> {
-        Err(Error::InvalidTransport)
+        Err(Error::ServiceIOError(std::io::Error::other(
+            "store unavailable",
+        )))
     }
 }
 
@@ -85,6 +89,8 @@ struct WritesRefused;
 impl StorageHooks for WritesRefused {
     /// Runs before a `put`.
     async fn before_put(&self, _key: &str) -> Result<()> {
-        Err(Error::InvalidTransport)
+        Err(Error::ServiceIOError(std::io::Error::other(
+            "store unavailable",
+        )))
     }
 }

@@ -19,6 +19,7 @@ use crate::onion::session::exit::OnionExitSession;
 use crate::onion::session::frame::OnionFrame;
 use crate::onion::session::frame::OnionSequence;
 use crate::onion::sphinx::builder::OnionReplyKey;
+use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
 
@@ -39,7 +40,9 @@ fn delivered(fixture: &mut Fixture, count: u64) -> (Vec<OnionSurb>, Vec<OnionRep
             let built = fixture.build(40 + seed, b"value");
             let cell = fixture.run_forward_segment(built.cell);
             let from = fixture.hops[1].did();
-            let OnionHopOutcome::Consumed { surb, .. } = fixture.hops[2].step(from, cell) else {
+            let OnionHopOutcome::Stepped(OnionStep::Consumed { surb, .. }) =
+                fixture.hops[2].step(from, cell)
+            else {
                 panic!("h consumes");
             };
             (*surb, built.reply)

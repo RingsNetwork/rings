@@ -1,13 +1,13 @@
 //! The signaling state of a pending attempt (#947).
 //!
-//! A pending generation is either offering or answering, and its offer or answer advances
-//! through the phases below. The state lives in the lifecycle registry beside the pending
+//! A pending generation is either offering or answering. An offer advances through the phases
+//! below; an answering generation has none, and holds its slot until it is admitted, released
+//! or expires. The state lives in the lifecycle registry beside the pending
 //! record and is created and dropped by the same transitions, so no reader can observe a
 //! pending attempt without its signaling state or a signaling state without its attempt.
 //!
 //! ```text
 //! Offering(o): Creating ──sent(sdp, tx)──▶ Sent(sdp, tx) ──answer──▶ Answered
-//! Answering:   reply_sent = false ──reply handed to the carrier──▶ reply_sent = true
 //! ```
 //!
 //! Law (Crossing offer): an offer from `peer` meeting this node's pending attempt for `peer`
@@ -58,24 +58,21 @@ pub(crate) enum Handshake {
     /// This node answers the peer's offer. Any further offer from the peer is refused while
     /// the answer is in flight (a copy of the answered offer included): the slot is that
     /// handshake's until it is admitted, released, or expires.
-    Answering {
-        /// Whether the answer was handed to its carrier.
-        reply_sent: bool,
-    },
+    Answering,
 }
 
 impl Handshake {
+    /// The signaling state a test reserves a generation in by default: an external offer still
+    /// being created.
+    #[cfg(test)]
+    pub(crate) const TEST_DEFAULT: Self = Self::offering(OfferOwner::External);
+
     /// A new offering attempt of `owner`, still creating its offer.
     pub(crate) const fn offering(owner: OfferOwner) -> Self {
         Self::Offering {
             owner,
             phase: OfferPhase::Creating,
         }
-    }
-
-    /// A new answering attempt whose answer is not sent yet.
-    pub(crate) const fn answering() -> Self {
-        Self::Answering { reply_sent: false }
     }
 }
 
@@ -104,7 +101,7 @@ pub(crate) enum CrossingOfferVerdict {
 ///                                ──▶ Refuse               if o = External
 /// Offering(_, Sent(_)),    l > p ──▶ Yield            the smaller DID's offer prevails
 /// Offering(_, Answered)          ──▶ Refuse           an answer is being applied
-/// Answering(_)                   ──▶ Refuse           the slot answers the peer's own offer
+/// Answering                      ──▶ Refuse           the slot answers the peer's own offer
 /// ```
 ///
 /// Law (Tie-break): of two crossing unanswered offers exactly one side yields, the larger DID,
@@ -139,7 +136,7 @@ pub(crate) fn crossing_offer_verdict(
             phase: OfferPhase::Answered,
             ..
         }
-        | Handshake::Answering { .. } => CrossingOfferVerdict::Refuse,
+        | Handshake::Answering => CrossingOfferVerdict::Refuse,
     }
 }
 

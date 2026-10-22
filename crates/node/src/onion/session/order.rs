@@ -52,7 +52,7 @@ use std::collections::VecDeque;
 
 use super::frame::OnionSequence;
 use super::pool::ONION_SURB_POOL_CAPACITY;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 
 /// The reorder window `W = Q_max`, in frames.
 const REORDER_WINDOW: u32 = ONION_SURB_POOL_CAPACITY as u32;
@@ -188,7 +188,7 @@ impl<F> OnionReorder<F> {
             .map(|(_, arrival)| *arrival)
             .chain(self.marks.iter().map(|(_, arrival)| *arrival))
             .min()
-            .is_some_and(|arrival| now_ms.saturating_sub(arrival) >= ONION_FORWARD_MAX_VALIDITY_MS);
+            .is_some_and(|arrival| now_ms.saturating_sub(arrival) >= ONION_ADMISSION_WINDOW_MS);
         if stalled {
             return Err(self.fail());
         }

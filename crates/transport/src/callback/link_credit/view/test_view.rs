@@ -13,6 +13,7 @@ use futures::task::waker;
 use futures::task::ArcWake;
 use futures::FutureExt;
 
+use crate::callback::link_credit::LaneCreditView;
 use crate::callback::link_credit::LinkCredit;
 use crate::callback::link_credit::NodeReceiveLoad;
 use crate::core::credit::LANE_CREDIT_WINDOW;
@@ -41,7 +42,7 @@ fn link() -> Arc<LinkCredit> {
 #[test]
 fn test_the_view_reads_its_lane_and_reserves_nothing() {
     let link = link();
-    let view = link.view(LANE);
+    let view = LaneCreditView::new(&link, LANE);
     assert_eq!(view.free(), Some(LANE_CREDIT_WINDOW));
     assert_eq!(view.credited().now_or_never(), Some(true));
     assert_eq!(view.free(), Some(LANE_CREDIT_WINDOW));
@@ -56,7 +57,7 @@ fn test_the_view_reads_its_lane_and_reserves_nothing() {
         .collect::<Vec<_>>();
     assert_eq!(view.free(), Some(0));
     assert_eq!(
-        link.view(ChannelLane::new(2)).free(),
+        LaneCreditView::new(&link, ChannelLane::new(2)).free(),
         Some(LANE_CREDIT_WINDOW),
         "another lane's credit is its own"
     );
@@ -71,7 +72,7 @@ fn test_the_view_reads_its_lane_and_reserves_nothing() {
 #[test]
 fn test_a_wait_ends_at_the_grant_or_at_the_close() {
     let link = link();
-    let view = link.view(LANE);
+    let view = LaneCreditView::new(&link, LANE);
     let _held = (0..LANE_CREDIT_WINDOW)
         .map(|_| link.reserve(LANE).now_or_never())
         .collect::<Vec<_>>();

@@ -11,7 +11,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
-use super::OnionProxyProtocol;
 use super::OnionProxyTarget;
 use crate::error::Error;
 use crate::error::Result;
@@ -120,17 +119,7 @@ async fn handle_connect(
             return Err(error);
         }
     };
-    let opened = match processor
-        .build_onion_proxy_route(OnionProxyProtocol::TcpConnect, target)
-        .await
-    {
-        Ok(proxy_route) => {
-            onion
-                .open_tcp_stream(proxy_route.route, proxy_route.target)
-                .await
-        }
-        Err(error) => Err(error),
-    };
+    let opened = onion.open_tcp_target(&processor, target).await;
     write_proxy_response(&mut stream, connect_status(opened.is_ok())).await?;
     opened?.relay(stream);
     Ok(())

@@ -19,10 +19,9 @@
 
 use std::sync::Arc;
 
-use crate::dht::entry::Entry;
 use crate::dht::entry::EntryLookupKey;
 use crate::dht::entry::PlacedEntryOperation;
-use crate::dht::entry::PlacementMiss;
+use crate::dht::LookupSettlement;
 use crate::dht::OperateRoute;
 use crate::dht::PeerRing;
 use crate::dht::PlacementLookup;
@@ -40,14 +39,6 @@ pub(super) struct LookupPlacement {
     pub(super) query: EntryLookupKey,
     /// Redundancy of the lookup round the response must match.
     pub(super) redundancy: u16,
-}
-
-/// A lookup placement settled here.
-pub(super) enum LookupSettlement {
-    /// A live value is stored here.
-    Found(Entry),
-    /// This node owns the placement and stores nothing for it.
-    Missed(PlacementMiss),
 }
 
 impl LookupPlacement {
@@ -70,8 +61,7 @@ impl Placement for LookupPlacement {
                 .lookup_placement(self.query, true, get_epoch_ms())
                 .await?
             {
-                PlacementLookup::Found(entry) => Route::Local(LookupSettlement::Found(entry)),
-                PlacementLookup::Missed(miss) => Route::Local(LookupSettlement::Missed(miss)),
+                PlacementLookup::Settled(settlement) => Route::Local(settlement),
                 PlacementLookup::Remote { next, query } => Route::Remote {
                     next,
                     message: self.message(query),

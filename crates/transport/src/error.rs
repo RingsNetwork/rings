@@ -22,10 +22,6 @@ pub enum IceServerError {
 /// Errors produced by transport connections, pools, and backend adapters.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// IO error: {0}
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
     #[cfg(feature = "native-webrtc")]
     /// WebRTC error: {0}
     #[error("WebRTC error: {0}")]

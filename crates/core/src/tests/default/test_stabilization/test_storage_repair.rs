@@ -503,7 +503,7 @@ async fn test_repair_storage_defers_disconnected_open_transport_without_sending(
         node1.swarm.stabilizer().repair_storage(),
     )
     .await
-    .map_err(|_| Error::PromiseStateTimeout)??;
+    .map_err(|_| Error::ServiceIOError(std::io::ErrorKind::TimedOut.into()))??;
     assert_eq!(outcome, StorageRepairOutcome::Deferred);
 
     assert_no_more_msg([&node2]).await;

@@ -1,18 +1,16 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use super::limits::admit_body_chunk;
 use super::limits::headers_bytes;
 use super::limits::reject_content_length_over_limit;
-use super::limits::usize_to_u64;
 use super::normalize_method;
-use super::FetchResponse;
 use super::OnionHttpsRequest;
+use super::OnionHttpsResponse;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::proxy::OnionProxyTarget;
-use crate::onion::target::resolve_target_addresses;
-use crate::onion::target::select_public_exit_addresses;
-use crate::onion::target::PublicAddressSelection;
+use crate::onion::target::resolve_public_target;
 
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -67,9 +65,11 @@ pub(super) async fn execute_https_request(
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
     record_bytes: impl Fn(u64) -> Result<()>,
-) -> Result<FetchResponse> {
-    let addresses = resolve_target_addresses(target).await?;
-    let egress = select_native_https_egress(target, addresses)?;
+) -> Result<OnionHttpsResponse> {
+    let egress = NativeHttpsEgress {
+        host: target.host().to_string(),
+        addresses: resolve_public_target(target).await?,
+    };
     native_fetch_with_timeout(
         url,
         request,
@@ -79,25 +79,6 @@ pub(super) async fn execute_https_request(
         record_bytes,
     )
     .await
-}
-
-/// Select native HTTPS egress from an immutable resolution result.
-///
-/// Post: public resolution selects the pinned path; every non-public result is denied.
-pub(super) fn select_native_https_egress(
-    target: &OnionProxyTarget,
-    addresses: Vec<SocketAddr>,
-) -> Result<NativeHttpsEgress> {
-    match select_public_exit_addresses(addresses) {
-        PublicAddressSelection::Public(addresses) => Ok(NativeHttpsEgress {
-            host: target.host().to_string(),
-            addresses,
-        }),
-        PublicAddressSelection::Denied => Err(Error::NoPermission),
-        PublicAddressSelection::Empty => Err(Error::OnionTargetResolvedEmpty {
-            authority: target.authority(),
-        }),
-    }
 }
 
 fn native_http_error(context: &str, error: reqwest::Error) -> Error {
@@ -115,7 +96,7 @@ pub(super) async fn native_fetch_with_timeout(
     timeout: Duration,
     egress: &NativeHttpsEgress,
     record_bytes: impl Fn(u64) -> Result<()>,
-) -> Result<FetchResponse> {
+) -> Result<OnionHttpsResponse> {
     let method = reqwest::Method::from_bytes(normalize_method(&request.method).as_bytes())
         .map_err(|error| Error::HttpRequestError(format!("invalid HTTPS proxy method: {error}")))?;
     let client = reqwest::Client::builder()
@@ -158,15 +139,10 @@ pub(super) async fn native_fetch_with_timeout(
         .await
         .map_err(|error| native_http_error("read HTTPS proxy response", error))?
     {
-        let body_len = usize_to_u64(body.len())?;
-        let chunk_len = usize_to_u64(chunk.len())?;
-        if max_body_bytes > 0 && body_len.saturating_add(chunk_len) > max_body_bytes {
-            return Err(Error::NoPermission);
-        }
-        record_bytes(chunk_len)?;
+        admit_body_chunk(body.len(), chunk.len(), max_body_bytes, &record_bytes)?;
         body.extend_from_slice(chunk.as_ref());
     }
-    Ok(FetchResponse {
+    Ok(OnionHttpsResponse {
         status,
         headers,
         body,

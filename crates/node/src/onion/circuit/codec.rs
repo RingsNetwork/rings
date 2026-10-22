@@ -58,7 +58,7 @@ impl OnionLinkFact {
     }
 }
 
-/// The typed input of the data plane's reducer.
+/// The typed input of the data plane, and the effect the shell performs for it.
 #[derive(Debug)]
 pub(crate) enum OnionCircuitInput {
     /// A cell received from the peer `from` over their direct link.
@@ -72,15 +72,9 @@ pub(crate) enum OnionCircuitInput {
     Link(OnionLinkFact),
 }
 
-/// One typed onion-circuit input accepted by the reducer.
-#[derive(Debug)]
-pub(crate) struct OnionCircuitEvent {
-    pub(super) input: OnionCircuitInput,
-}
-
 /// `decode` of the module documentation.
-pub(super) fn decode_event(wire: Wire<'_>) -> std::result::Result<OnionCircuitEvent, Reject> {
-    let input = if wire.from == wire.me {
+pub(super) fn decode_event(wire: Wire<'_>) -> std::result::Result<OnionCircuitInput, Reject> {
+    Ok(if wire.from == wire.me {
         rings_codec::deserialize::<OnionLinkFact>(wire.payload)
             .map(OnionCircuitInput::Link)
             .map_err(|error| Reject(format!("bad onion link fact: {error}")))?
@@ -89,6 +83,5 @@ pub(super) fn decode_event(wire: Wire<'_>) -> std::result::Result<OnionCircuitEv
             from: wire.from,
             cell: OnionCell::parse(wire.payload).map_err(|error| Reject(error.to_string()))?,
         }
-    };
-    Ok(OnionCircuitEvent { input })
+    })
 }

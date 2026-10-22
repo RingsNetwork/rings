@@ -97,7 +97,7 @@ fn scheduled_transfer(
         None,
     );
     let permit = capacity
-        .try_acquire(peer, TransferClass::Application, 1)
+        .admit_now(peer, TransferClass::Application, 1)
         .expect("fixture fits capacity");
     (ScheduledTransfer::new(transfer, permit), completion)
 }

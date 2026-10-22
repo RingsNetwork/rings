@@ -140,7 +140,7 @@ waiting) at its own pace, and no inbound lane ever waits for it to read:
   best-effort network drops it, and nothing tells its sender. A drop of a message from an
   admitted peer is told to the application itself, as `SwarmEvent::MessageDropped` (one per
   peer while it is unread), so a protocol whose state rides that link, such as an onion
-  circuit, can end that state instead of losing a cell silently (#969). A protocol that needs a
+  session, can end that state instead of losing a cell silently (#969). A protocol that needs a
   reliable stream detects loss end to end: the TCP relay numbers its segments and resets a
   stream whose gap outlives `REORDER_DEADLINE` (four delivery bounds: a superseded path with
   at most four hops left to cross) or the replay window, closing the local socket
@@ -152,7 +152,9 @@ waiting) at its own pace, and no inbound lane ever waits for it to read:
   kept, so a late reader still learns the peers already admitted. Once the inbox is dropped,
   everything is discarded.
 - Messages and peer facts share one queue, in the order core produced them. An unread
-  `PeerAdmitted` is withdrawn by its `PeerRetired`, so facts are bounded by twice the peers.
+  `PeerAdmitted` is withdrawn by its `PeerRetired`, together with the drops after it, and a
+  drop is told once while one waits, so a peer has at most four facts queued
+  (`[MessageDropped] [PeerRetired] [PeerAdmitted] [MessageDropped]`).
 - Mail stored for this node in its relay inbox is offered only through a reservation of room
   in the inbox, and retired from storage once the application has taken it from the inbox.
   Taking ends core's custody: what the application does with the message afterwards is its

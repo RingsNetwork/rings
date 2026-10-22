@@ -1,11 +1,11 @@
 //! The onion loop data plane (#834 Phase 2a, #843).
 //!
-//! A circuit is a client-sealed loop `client → g → r → h → r′ → g → client` of Sphinx cells
+//! A loop is a client-sealed cycle `client → g → r → h → r′ → g → client` of Sphinx cells
 //! (`onion::sphinx`): every edge carries one cell `α‖β‖γ‖y` of the loop's class `b`, exactly `b`
 //! bytes, and every hop, `relay` or symbol, runs the same step `Hop_i`:
 //!
 //! ```text
-//! wire cell ──decode──▶ Hop(from, cell) ──shell──▶ hop (pure, over the admission state)
+//! wire cell ──decode──▶ Cell(from, cell) ──shell─▶ hop (pure, over the admission state)
 //!                                                   ├─ Relayed(next, cell)   ─▶ link sender
 //!                                                   ├─ Consumed(f, ā, v, υ)  ─▶ ⟦f⟧ in the algebra
 //!                                                   ├─ Returned(t_⋄, cell)   ─▶ the tag's session
@@ -14,24 +14,22 @@
 //!                                                   lanes, and the sessions on the link
 //! ```
 //!
-//! Relays are stateless: a relay keeps no return state, since the loop returns through fresh
-//! positions the client sealed, and the only state of the data plane is the admission state
-//! (ledgers and the replay store, `admission`), which the shell owns. There is no per-edge cell
-//! AEAD: header integrity is `γ`, carry integrity is the consumer's AEZ authenticator under a key
-//! only the client and the consumer hold, and the previous hop is the authenticated transport
-//! link. A reply carries no signature of the exit (#834, Prop. Reply authentication): it opens
-//! under `k_{c_n}`, which only the client and the exit's process hold, so replies are deniable.
+//! Relays are stateless: the loop returns through fresh positions the client sealed, and the only
+//! state of the data plane is the admission state (ledgers and the replay store, `admission`),
+//! which the shell owns. Header integrity is `γ`, carry integrity is the consumer's AEZ
+//! authenticator under a key only the client and the consumer hold, and the previous hop is the
+//! authenticated transport link. A reply is authenticated by opening under `k_{c_n}`, which only
+//! the client and the exit's process hold (#834, Prop. Reply authentication), so replies are
+//! deniable.
 //!
 //! Every link emits at the constant rate of `send_outbox` (#880), real cells replacing cover.
 
 mod admission;
-mod cell;
 mod codec;
 mod expiry;
 mod hop;
 mod loops;
 mod protocol;
-mod reducer;
 mod send_outbox;
 mod shell;
 mod tags;
@@ -48,12 +46,11 @@ pub(crate) use admission::OnionAdmissionState;
 #[cfg(test)]
 pub(crate) use admission::OnionReplayFilterKey;
 pub(crate) use admission::ONION_ADMISSION_SENDER_UNITS;
-pub use cell::OnionCellBucket;
+pub(crate) use codec::OnionCircuitInput;
 pub(crate) use codec::OnionLinkFact;
 pub(crate) use expiry::OnionExpiry;
 pub(crate) use loops::OnionLoopClient;
 pub(crate) use protocol::OnionCircuitProtocol;
-pub(crate) use reducer::OnionCircuitEffect;
 use rings_core::dht::Did;
 pub use send_outbox::OnionIdleFloor;
 pub(crate) use send_outbox::OnionLinkSender;
@@ -72,17 +69,17 @@ pub(crate) use tags::OnionReplySink;
 /// Namespace of the onion data plane.
 pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
 
-/// `X₀ = V − Q`, the offset of a loop's expiry from its build quantum (#834 D6).
-pub(crate) const ONION_FORWARD_PAYLOAD_TTL_MS: u128 = 120_000;
+/// `X₀ = V − Q`, the offset of a loop's expiry from its build quantum (#834 D6), and the rollback
+/// threshold of admission's monotone clock.
+pub(crate) const ONION_EXPIRY_OFFSET_MS: u128 = 120_000;
 /// `Q = 30 s`, the expiry quantum.
-pub(crate) const ONION_FORWARD_EXPIRY_QUANTUM_MS: u128 = 30_000;
+pub(crate) const ONION_EXPIRY_QUANTUM_MS: u128 = 30_000;
 /// `V = X₀ + Q = 150 s`, the admission window: a layer is admissible at `arr` iff
 /// `arr < x ≤ arr + V`.
 ///
 /// Law: the replay filter of `x` lives until `x`, so no admissible layer outlives the witness of
 /// its admission (L9).
-pub(crate) const ONION_FORWARD_MAX_VALIDITY_MS: u128 =
-    ONION_FORWARD_PAYLOAD_TTL_MS + ONION_FORWARD_EXPIRY_QUANTUM_MS;
+pub(crate) const ONION_ADMISSION_WINDOW_MS: u128 = ONION_EXPIRY_OFFSET_MS + ONION_EXPIRY_QUANTUM_MS;
 
 /// The next hop of one cell: the peer it is sent to over their direct link.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -19,7 +19,7 @@ use crate::onion::circuit::admission::OnionChargeRejection;
 use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::admission::ONION_ADMISSION_GLOBAL_UNITS;
 use crate::onion::circuit::admission::ONION_ADMISSION_SENDER_UNITS;
-use crate::onion::circuit::admission::ONION_ADMISSION_WINDOW_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 
 /// Law (charging): a cell is charged exactly once, before its key is computed. A `γ`-failing cell
 /// drops its token and stays charged without touching the replay store. Replayed and expired

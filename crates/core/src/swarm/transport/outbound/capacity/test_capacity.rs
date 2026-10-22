@@ -87,7 +87,7 @@ async fn test_reserved_outbound_request_bypasses_borrower_waiter() {
     let peer = Did::from(90_u32);
     let unrelated_peer = Did::from(91_u32);
     let blocker = capacity
-        .try_acquire(peer, TransferClass::Application, 100 * 1024 * 1024)
+        .admit_now(peer, TransferClass::Application, 100 * 1024 * 1024)
         .expect("blocker must fit");
     let mut large = Box::pin(capacity.acquire(peer, TransferClass::Storage, 120 * 1024 * 1024));
     let mut unrelated = Box::pin(unrelated_capacity.acquire(
@@ -133,14 +133,14 @@ async fn test_global_borrowers_are_fifo_while_reserved_control_bypasses() {
     let later = Arc::new(TransferCapacity::new(global.clone()));
     let control = Arc::new(TransferCapacity::new(global));
     let first_blocker = first
-        .try_acquire(
+        .admit_now(
             Did::from(101_u32),
             TransferClass::Application,
             BLOCKER_BYTES,
         )
         .expect("first global blocker must fit");
     let _second_blocker = second
-        .try_acquire(
+        .admit_now(
             Did::from(102_u32),
             TransferClass::Application,
             BLOCKER_BYTES,
@@ -179,14 +179,14 @@ async fn test_shared_wait_budget_bounds_payloads_outside_admitted_capacity() {
     let second = Arc::new(TransferCapacity::new(global.clone()));
     let blocker_bytes = (OUTBOUND_GLOBAL_BYTE_CAPACITY - HEADROOM_BYTES) / 2;
     let _first_blocker = first
-        .try_acquire(
+        .admit_now(
             Did::from(201_u32),
             TransferClass::Application,
             blocker_bytes,
         )
         .expect("first global blocker must fit");
     let _second_blocker = second
-        .try_acquire(
+        .admit_now(
             Did::from(202_u32),
             TransferClass::Application,
             blocker_bytes,

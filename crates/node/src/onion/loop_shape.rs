@@ -18,8 +18,8 @@
 //!   `hₖ` from `hₖ₊₁` and follow `hₙ`; the only constructor emits no other segment length.
 //! - **Guard closure** (L7). An [`OnionLoop`] stores the guard once and places it at positions `1`
 //!   and `H` and nowhere else, so the guard is the only hop adjacent to the client. The remaining
-//!   `H − 2` positions are pairwise distinct and distinct from `g` for every loop a route admits
-//!   (`has_duplicate_dids` in the route module).
+//!   `H − 2` positions are pairwise distinct and distinct from `g` for every loop a route draws
+//!   (`select_loop` in the route module).
 //!
 //! The only constructor is [`OnionLoop::try_unfold`], an unfold of the non-empty, already
 //! labelled pipeline `f₁ … fₙ₋₁ ⋙ fₙ` in the failure monad: it places each symbol and labels the

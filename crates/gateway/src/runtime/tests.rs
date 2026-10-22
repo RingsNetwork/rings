@@ -1,20 +1,20 @@
 use std::net::Ipv4Addr;
+use std::net::SocketAddrV4;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use ipnet::IpNet;
-use smoltcp::phy::ChecksumCapabilities;
-use smoltcp::wire::IpProtocol;
-use smoltcp::wire::Ipv4Packet;
-use smoltcp::wire::Ipv4Repr;
 use smoltcp::wire::TcpControl;
-use smoltcp::wire::TcpPacket;
-use smoltcp::wire::TcpRepr;
 use smoltcp::wire::TcpSeqNumber;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use super::*;
+use crate::testing::receive_matching_tcp;
+use crate::testing::ChannelPacketIo;
+use crate::testing::ClientPath;
+use crate::testing::TcpObservation;
+use crate::testing::UNIT_CLIENT;
 use crate::unobserved_stream;
 use crate::BoxGatewayDuplex;
 use crate::BoxOnionStreamProbe;
@@ -22,11 +22,6 @@ use crate::ExitAvailability;
 use crate::GatewayHealth;
 use crate::GatewayPlan;
 use crate::Mtu;
-
-struct ChannelPacketIo {
-    ingress: mpsc::Receiver<Vec<u8>>,
-    egress: mpsc::Sender<Vec<u8>>,
-}
 
 struct FailingPacketIo;
 
@@ -49,31 +44,6 @@ impl PacketIo for FailingPacketIo {
             std::io::ErrorKind::BrokenPipe,
             "test cleanup write failure",
         )))
-    }
-}
-
-#[async_trait::async_trait]
-impl PacketIo for ChannelPacketIo {
-    async fn read_packet(&mut self, output: &mut [u8]) -> Result<usize, PacketIoError> {
-        let packet = self.ingress.recv().await.ok_or(PacketIoError::Closed)?;
-        let capacity = output.len();
-        let Some(destination) = output.get_mut(..packet.len()) else {
-            return Err(PacketIoError::InvalidLength {
-                length: packet.len(),
-                capacity,
-            });
-        };
-        destination.copy_from_slice(&packet);
-        Ok(packet.len())
-    }
-
-    async fn write_packet(&mut self, packet: &[u8]) -> Result<(), PacketIoError> {
-        self.egress.send(packet.to_vec()).await.map_err(|error| {
-            PacketIoError::Write(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                error.to_string(),
-            ))
-        })
     }
 }
 
@@ -169,43 +139,14 @@ impl OnionStreamConnector for FailingConnector {
     }
 }
 
-struct TcpObservation {
-    sequence: TcpSeqNumber,
-    acknowledgment: Option<TcpSeqNumber>,
-    fin: bool,
-    rst: bool,
-    payload: Vec<u8>,
-}
-
-impl TcpObservation {
-    fn parse(packet: &[u8]) -> Self {
-        let ipv4 = Ipv4Packet::new_checked(packet).expect("valid egress IPv4 packet");
-        let tcp = TcpPacket::new_checked(ipv4.payload()).expect("valid egress TCP segment");
-        Self {
-            sequence: tcp.seq_number(),
-            acknowledgment: tcp.ack().then(|| tcp.ack_number()),
-            fin: tcp.fin(),
-            rst: tcp.rst(),
-            payload: tcp.payload().to_vec(),
-        }
-    }
-}
-
-async fn receive_matching_tcp(
+/// Read `egress` until a segment satisfies `matches`, within a second.
+async fn receive_tcp(
     egress: &mut mpsc::Receiver<Vec<u8>>,
     matches: impl Fn(&TcpObservation) -> bool,
 ) -> TcpObservation {
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let packet = egress.recv().await.expect("gateway egress remains open");
-            let observation = TcpObservation::parse(&packet);
-            if matches(&observation) {
-                return observation;
-            }
-        }
-    })
-    .await
-    .expect("matching TCP packet deadline")
+    receive_matching_tcp(egress, Duration::from_secs(1), matches)
+        .await
+        .expect("matching TCP packet")
 }
 
 fn route(address: Ipv4Addr, prefix: u8) -> IpNet {
@@ -230,69 +171,9 @@ fn client_packet(
     sequence: TcpSeqNumber,
     acknowledgment: Option<TcpSeqNumber>,
 ) -> Vec<u8> {
-    client_packet_to_port(control, sequence, acknowledgment, 443)
-}
-
-fn client_packet_to_port(
-    control: TcpControl,
-    sequence: TcpSeqNumber,
-    acknowledgment: Option<TcpSeqNumber>,
-    target_port: u16,
-) -> Vec<u8> {
-    client_packet_with_payload(control, sequence, acknowledgment, target_port, &[])
-}
-
-fn client_packet_with_payload(
-    control: TcpControl,
-    sequence: TcpSeqNumber,
-    acknowledgment: Option<TcpSeqNumber>,
-    target_port: u16,
-    payload: &[u8],
-) -> Vec<u8> {
-    let source = Ipv4Addr::new(100, 64, 0, 2);
-    let target = Ipv4Addr::new(93, 184, 216, 34);
-    let tcp = TcpRepr {
-        src_port: 41_000,
-        dst_port: target_port,
-        control,
-        seq_number: sequence,
-        ack_number: acknowledgment,
-        window_len: 8_192,
-        window_scale: None,
-        max_seg_size: Some(1_200),
-        sack_permitted: false,
-        sack_ranges: [None, None, None],
-        timestamp: None,
-        payload,
-    };
-    let ipv4 = Ipv4Repr {
-        src_addr: source,
-        dst_addr: target,
-        next_header: IpProtocol::Tcp,
-        payload_len: tcp.buffer_len(),
-        hop_limit: 64,
-    };
-    let mut packet = vec![0_u8; ipv4.buffer_len() + tcp.buffer_len()];
-    ipv4.emit(
-        &mut Ipv4Packet::new_unchecked(&mut packet),
-        &ChecksumCapabilities::default(),
-    );
-    tcp.emit(
-        &mut TcpPacket::new_unchecked(&mut packet[ipv4.buffer_len()..]),
-        &source.into(),
-        &target.into(),
-        &ChecksumCapabilities::default(),
-    );
-    packet
-}
-
-fn with_source_port(mut packet: Vec<u8>, source_port: u16) -> Vec<u8> {
-    packet[20..22].copy_from_slice(&source_port.to_be_bytes());
-    TcpPacket::new_unchecked(&mut packet[20..]).fill_checksum(
-        &Ipv4Addr::new(100, 64, 0, 2).into(),
-        &Ipv4Addr::new(93, 184, 216, 34).into(),
-    );
-    packet
+    UNIT_CLIENT
+        .packet(control, sequence, acknowledgment, &[])
+        .expect("test client packet")
 }
 
 #[test]
@@ -363,10 +244,12 @@ fn stray_ack_and_capacity_refusal_emit_reset_without_failing_gateway() {
     assert!(matches!(accepted, PacketOutcome::Consumed(_)));
     let refused = runtime
         .ingest_packet(
-            with_source_port(
-                client_packet(TcpControl::Syn, TcpSeqNumber(7), None),
-                41_001,
-            ),
+            ClientPath {
+                source: SocketAddrV4::new(*UNIT_CLIENT.source.ip(), 41_001),
+                ..UNIT_CLIENT
+            }
+            .packet(TcpControl::Syn, TcpSeqNumber(7), None, &[])
+            .expect("second client packet"),
             Duration::from_millis(2),
         )
         .expect("capacity refusal is flow-scoped");
@@ -383,8 +266,7 @@ fn stray_ack_and_capacity_refusal_emit_reset_without_failing_gateway() {
         matches!(
             crate::classify_ipv4_packet(packet),
             PacketDisposition::Tcp(_)
-        ) && Ipv4Packet::new_checked(packet.as_slice())
-            .is_ok_and(|ipv4| TcpPacket::new_checked(ipv4.payload()).is_ok_and(|tcp| tcp.rst()))
+        ) && TcpObservation::parse(packet).is_ok_and(|observation| observation.rst)
     }));
 }
 
@@ -523,7 +405,9 @@ async fn test_idle_timeout_after_onion_eof_is_a_named_reset() {
         .tcp
         .take_egress()
         .iter()
-        .any(|packet| TcpObservation::parse(packet).fin));
+        .any(|packet| TcpObservation::parse(packet)
+            .expect("valid egress TCP segment")
+            .fin));
 
     let scope = runtime
         .process_input(LoopInput::Tick, &[], Duration::from_secs(2))
@@ -540,17 +424,13 @@ async fn test_idle_timeout_after_onion_eof_is_a_named_reset() {
         .tcp
         .take_egress()
         .iter()
-        .any(|packet| TcpObservation::parse(packet).rst));
+        .any(|packet| TcpObservation::parse(packet)
+            .expect("valid egress TCP segment")
+            .rst));
 }
 
 fn handshake_ack(syn_ack: &[u8]) -> Vec<u8> {
-    let ipv4 = Ipv4Packet::new_checked(syn_ack).expect("valid SYN-ACK IPv4");
-    let tcp = TcpPacket::new_checked(ipv4.payload()).expect("valid SYN-ACK TCP");
-    client_packet(
-        TcpControl::None,
-        TcpSeqNumber(8),
-        Some(tcp.seq_number() + 1),
-    )
+    handshake_ack_from_observation(&TcpObservation::parse(syn_ack).expect("valid SYN-ACK"))
 }
 
 fn handshake_ack_from_observation(syn_ack: &TcpObservation) -> Vec<u8> {
@@ -591,7 +471,7 @@ async fn packet_scoped_drop_does_not_stop_the_runtime_loop() {
         .send(client_packet(TcpControl::Syn, TcpSeqNumber(7), None))
         .await
         .expect("send SYN after malformed packet");
-    let syn_ack = receive_matching_tcp(&mut egress_rx, |packet| {
+    let syn_ack = receive_tcp(&mut egress_rx, |packet| {
         packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.rst
     })
     .await;
@@ -730,7 +610,7 @@ async fn runtime_bridges_tcp_payload_and_both_half_closes() {
         .send(client_packet(TcpControl::Syn, TcpSeqNumber(7), None))
         .await
         .expect("send SYN");
-    let syn_ack = receive_matching_tcp(&mut egress_rx, |packet| {
+    let syn_ack = receive_tcp(&mut egress_rx, |packet| {
         packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.fin
     })
     .await;
@@ -747,16 +627,19 @@ async fn runtime_bridges_tcp_payload_and_both_half_closes() {
 
     let payload = b"captured-through-onion";
     ingress_tx
-        .send(client_packet_with_payload(
-            TcpControl::None,
-            TcpSeqNumber(8),
-            Some(server_next),
-            443,
-            payload,
-        ))
+        .send(
+            UNIT_CLIENT
+                .packet(
+                    TcpControl::None,
+                    TcpSeqNumber(8),
+                    Some(server_next),
+                    payload,
+                )
+                .expect("captured payload packet"),
+        )
         .await
         .expect("send captured payload");
-    let echoed = receive_matching_tcp(&mut egress_rx, |packet| !packet.payload.is_empty()).await;
+    let echoed = receive_tcp(&mut egress_rx, |packet| !packet.payload.is_empty()).await;
     assert_eq!(echoed.payload, payload);
     let client_after_payload = TcpSeqNumber(8) + payload.len();
     let server_after_payload = echoed.sequence + echoed.payload.len();
@@ -768,7 +651,7 @@ async fn runtime_bridges_tcp_payload_and_both_half_closes() {
         ))
         .await
         .expect("send client FIN");
-    let server_fin = receive_matching_tcp(&mut egress_rx, |packet| packet.fin).await;
+    let server_fin = receive_tcp(&mut egress_rx, |packet| packet.fin).await;
     assert_eq!(server_fin.sequence, server_after_payload);
     ingress_tx
         .send(client_packet(
@@ -828,7 +711,7 @@ async fn onion_open_failure_resets_captured_flow_without_fallback() {
         .send(client_packet(TcpControl::Syn, TcpSeqNumber(7), None))
         .await
         .expect("send SYN");
-    let syn_ack = receive_matching_tcp(&mut egress_rx, |packet| {
+    let syn_ack = receive_tcp(&mut egress_rx, |packet| {
         packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.fin
     })
     .await;
@@ -841,7 +724,7 @@ async fn onion_open_failure_resets_captured_flow_without_fallback() {
         .expect("Onion attempt deadline")
         .expect("Onion attempt event");
     assert_eq!(attempted.target, "93.184.216.34:443".parse().unwrap());
-    let reset = receive_matching_tcp(&mut egress_rx, |packet| packet.rst).await;
+    let reset = receive_tcp(&mut egress_rx, |packet| packet.rst).await;
     assert!(reset.rst);
 
     tokio::time::timeout(Duration::from_secs(1), async {

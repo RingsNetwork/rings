@@ -88,15 +88,15 @@ use super::frame::OnionSequence;
 use super::order::OnionReorder;
 use super::pool::OnionSurbPool;
 use super::OnionTargetDigest;
-use crate::onion::circuit::ONION_FORWARD_EXPIRY_QUANTUM_MS;
-use crate::onion::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
+use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
+use crate::onion::circuit::ONION_EXPIRY_QUANTUM_MS;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionSurb;
 
 /// `V/2`, the echo horizon: a forward loop is echoed when no reply of its session has left for
 /// this long (Law Echo). It equals the client's keep-alive period, so an idle session costs one
 /// echo per keep-alive.
-pub(crate) const ONION_SESSION_ECHO_HORIZON_MS: u128 = ONION_FORWARD_MAX_VALIDITY_MS / 2;
+pub(crate) const ONION_SESSION_ECHO_HORIZON_MS: u128 = ONION_ADMISSION_WINDOW_MS / 2;
 
 /// A sequenced frame of a stream direction, as the reorder window releases it.
 #[derive(Debug)]
@@ -326,12 +326,12 @@ impl OnionExitSession {
             return effects;
         }
         if self.phase == OnionExitPhase::Unbound
-            && now_ms.saturating_sub(self.created_ms) >= ONION_FORWARD_EXPIRY_QUANTUM_MS
+            && now_ms.saturating_sub(self.created_ms) >= ONION_EXPIRY_QUANTUM_MS
         {
             self.close(&mut effects);
         } else if self.forward.expire(now_ms).is_err() {
             self.abort(now_ms, &mut effects);
-        } else if now_ms.saturating_sub(self.last_forward_ms) >= ONION_FORWARD_MAX_VALIDITY_MS
+        } else if now_ms.saturating_sub(self.last_forward_ms) >= ONION_ADMISSION_WINDOW_MS
             || (self.read_closed && self.write_closed)
         {
             self.close(&mut effects);
@@ -421,7 +421,15 @@ impl OnionExitSession {
     fn flush_ack(&mut self, now_ms: u128, effects: &mut Vec<OnionExitEffect>) {
         if self.phase == (OnionExitPhase::Open { acked: false }) && !self.pool.is_empty(now_ms) {
             self.phase = OnionExitPhase::Open { acked: true };
-            self.reply_frame(now_ms, ReplyKind::Data(Bytes::new()), effects);
+            self.reply_frame(
+                now_ms,
+                |sequence| OnionFrame::Data {
+                    sequence,
+                    target: None,
+                    payload: Bytes::new(),
+                },
+                effects,
+            );
         }
     }
 
@@ -442,12 +450,27 @@ impl OnionExitSession {
             if front.is_empty() {
                 self.held.pop_front();
             }
-            self.reply_frame(now_ms, ReplyKind::Data(chunk), effects);
+            self.reply_frame(
+                now_ms,
+                |sequence| OnionFrame::Data {
+                    sequence,
+                    target: None,
+                    payload: chunk,
+                },
+                effects,
+            );
         }
         if self.held.is_empty() && self.eof_held && !self.pool.is_empty(now_ms) {
             self.eof_held = false;
             self.read_closed = true;
-            self.reply_frame(now_ms, ReplyKind::Fin, effects);
+            self.reply_frame(
+                now_ms,
+                |sequence| OnionFrame::Fin {
+                    sequence,
+                    target: None,
+                },
+                effects,
+            );
             if self.write_closed {
                 self.close(effects);
             }
@@ -464,7 +487,15 @@ impl OnionExitSession {
             && now_ms.saturating_sub(self.last_reply_ms) >= ONION_SESSION_ECHO_HORIZON_MS
             && !self.pool.is_empty(now_ms);
         if quiet {
-            self.reply_frame(now_ms, ReplyKind::Data(Bytes::new()), effects);
+            self.reply_frame(
+                now_ms,
+                |sequence| OnionFrame::Data {
+                    sequence,
+                    target: None,
+                    payload: Bytes::new(),
+                },
+                effects,
+            );
         }
     }
 
@@ -482,30 +513,24 @@ impl OnionExitSession {
         }
         self.held.clear();
         self.eof_held = false;
-        self.reply_frame(now_ms, ReplyKind::Abort, effects);
+        self.reply_frame(now_ms, |sequence| OnionFrame::Abort { sequence }, effects);
         self.close(effects);
     }
 
-    /// Spend the block of least expiry on one reply frame, with the next reply sequence. With no
-    /// block or no sequence left, the session closes: a reply that cannot leave would be a gap
-    /// at the client.
-    fn reply_frame(&mut self, now_ms: u128, kind: ReplyKind, effects: &mut Vec<OnionExitEffect>) {
+    /// Spend the block of least expiry on one reply frame, which `frame` builds from the next
+    /// reply sequence. With no block or no sequence left, the session closes: a reply that cannot
+    /// leave would be a gap at the client.
+    fn reply_frame(
+        &mut self,
+        now_ms: u128,
+        frame: impl FnOnce(OnionSequence) -> OnionFrame,
+        effects: &mut Vec<OnionExitEffect>,
+    ) {
         let (Some(sequence), Some(surb)) = (self.reply, self.pool.take(now_ms)) else {
             self.close(effects);
             return;
         };
-        let frame = match kind {
-            ReplyKind::Data(payload) => OnionFrame::Data {
-                sequence,
-                target: None,
-                payload,
-            },
-            ReplyKind::Fin => OnionFrame::Fin {
-                sequence,
-                target: None,
-            },
-            ReplyKind::Abort => OnionFrame::Abort { sequence },
-        };
+        let frame = frame(sequence);
         self.reply = sequence.next();
         self.last_reply_ms = now_ms;
         effects.push(OnionExitEffect::Reply {
@@ -551,14 +576,4 @@ pub(crate) fn reply_to_unheld(frame: &OnionFrame) -> Option<OnionFrame> {
             })
         }
     }
-}
-
-/// The reply a block is spent on.
-enum ReplyKind {
-    /// `data(n, 0, w)`.
-    Data(Bytes),
-    /// `fin(n)`.
-    Fin,
-    /// `abort(n)`.
-    Abort,
 }

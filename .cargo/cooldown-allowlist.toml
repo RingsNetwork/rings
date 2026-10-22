@@ -1,7 +1,18 @@
-# This is a cooldown-gate exception, not a build pin. The fresh release is
-# admitted early because it carries the fixes for RUSTSEC-2026-0346, -0347,
-# -0348 and -0349 (#956); all older compatible rustls releases remain
-# vulnerable.
+# These are cooldown-gate exceptions, not build pins. Each fresh release is
+# admitted early because it carries a security fix that every older
+# compatible release lacks.
+
+# RUSTSEC-2026-0346, -0347, -0348 and -0349 (#956).
 [[allow.exact]]
 crate = "rustls"
 version = "0.23.46"
+
+# RUSTSEC-2026-0382: distrusted intermediates may be accepted (#997).
+[[allow.exact]]
+crate = "rustls-webpki"
+version = "0.103.16"
+
+# RUSTSEC-2026-0381: bundled roots trust distrusted emSign intermediates (#997).
+[[allow.exact]]
+crate = "webpki-roots"
+version = "1.0.10"

@@ -27,6 +27,9 @@ mod server;
 mod status;
 mod stream;
 mod tcp;
+/// In-memory packet fixtures for tests and benchmarks.
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 
 pub use config::GatewayConfig;
 pub use config::GatewayPlan;
