@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- A config file that fails to load names itself and the parser's message (#1016): a missing or
+  unknown key, a wrong type or malformed YAML no longer prints a bare `Encode error.`. Reading
+  fails with the new `Error::ConfigParse` (code 821) and writing with `Error::ConfigSerialize`
+  (code 822); both carry the config path and the `serde_saphyr` error as their source.
+
 ## 0.34.2
 
 - `rustls-webpki` is bumped to 0.103.16 and `webpki-roots` to 1.0.10 for RUSTSEC-2026-0382

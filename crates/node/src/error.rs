@@ -235,6 +235,25 @@ pub enum Error {
     /// A seed entry failed validation.
     #[error(transparent)]
     SeedPeer(#[from] crate::seed::SeedPeerError) = 820,
+    /// The node configuration file is not a valid config document: malformed YAML, a missing
+    /// or unknown key, or a value of the wrong type.
+    #[error("Parse config file {} failed", path.display())]
+    ConfigParse {
+        /// Config file that was read.
+        path: std::path::PathBuf,
+        /// The parser's error, with the key and source location, reported as this error's
+        /// source rather than in its message. Boxed as in [`Error::SerdeYamlError`].
+        source: Box<serde_saphyr::Error>,
+    } = 821,
+    /// Writing the node configuration to its file failed while serializing it.
+    #[error("Serialize config file {} failed", path.display())]
+    ConfigSerialize {
+        /// Config file that was written.
+        path: std::path::PathBuf,
+        /// The serializer's error, including any I/O error of the write, reported as this
+        /// error's source.
+        source: serde_saphyr::ser::Error,
+    } = 822,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
