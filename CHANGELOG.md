@@ -1,11 +1,33 @@
 # Changelog
 
-## Unreleased
+## 0.34.2
 
 - `rustls-webpki` is bumped to 0.103.16 and `webpki-roots` to 1.0.10 for RUSTSEC-2026-0382
   (distrusted intermediates may be accepted) and RUSTSEC-2026-0381 (bundled roots trust
   distrusted emSign intermediates) (#997). Both are admitted ahead of the dependency cooldown,
   like the rustls advisory bump of #956.
+
+- Removed options have no tombstones (#990): `gateway.onion_service`, `gateway.onion_hop_count`
+  and `gateway.onion_allow_short_paths` fail as an unknown gateway key, and the removed
+  `ONION_HTTP_PROXY_HOP_COUNT` and `ONION_HTTP_PROXY_ALLOW_SHORT_PATHS` variables are no longer
+  read, like the other variables the onion loop cutover removed.
+
+- A provider installs its onion runtime in one slot, native and browser alike (#990):
+  `Provider::onion_circuit` returns the native handle of that runtime, installing it on first
+  use, and replaces `NativeOnionCircuitHandle::install`.
+
+- The browser `BrowserOnionProxy.exit_service()` export, which had no caller, is removed: the
+  proxy always selects `https` (#990).
+
+- Onion and gateway API cleanup (#990). Breaking for `rings-node` library callers:
+  - `NativeOnionGatewayConnector::new(processor, onion)` drops its `proxy` parameter, which
+    could only be `OnionProxyProtocol::TcpConnect`;
+  - `NativeOnionCircuitHandle::relay_tcp_stream` is replaced by `open_tcp_target(processor,
+    target)`, which selects the `tcp` route and opens the session (then call `relay`);
+  - `OnionProxyRoute` drops its unread `protocol` field.
+
+  `rings-gateway` gains a `test-support` feature exposing `rings_gateway::testing`, the
+  in-memory packet fixtures; the `gateway-bench` example requires it.
 
 ## 0.34.1
 
@@ -33,28 +55,6 @@
   drop `onion_service`; the reflection-bound docs state that only `FindSuccessorReport` returns
   through `reply_via` and connect signaling retraces its recorded path (#947); the 0.34.0 notes
   below state the `SwarmEvent` variants and core API additions correctly.
-
-- Removed options have no tombstones (#990): `gateway.onion_service`, `gateway.onion_hop_count`
-  and `gateway.onion_allow_short_paths` fail as an unknown gateway key, and the removed
-  `ONION_HTTP_PROXY_HOP_COUNT` and `ONION_HTTP_PROXY_ALLOW_SHORT_PATHS` variables are no longer
-  read, like the other variables the onion loop cutover removed.
-
-- A provider installs its onion runtime in one slot, native and browser alike (#990):
-  `Provider::onion_circuit` returns the native handle of that runtime, installing it on first
-  use, and replaces `NativeOnionCircuitHandle::install`.
-
-- The browser `BrowserOnionProxy.exit_service()` export, which had no caller, is removed: the
-  proxy always selects `https` (#990).
-
-- Onion and gateway API cleanup (#990). Breaking for `rings-node` library callers:
-  - `NativeOnionGatewayConnector::new(processor, onion)` drops its `proxy` parameter, which
-    could only be `OnionProxyProtocol::TcpConnect`;
-  - `NativeOnionCircuitHandle::relay_tcp_stream` is replaced by `open_tcp_target(processor,
-    target)`, which selects the `tcp` route and opens the session (then call `relay`);
-  - `OnionProxyRoute` drops its unread `protocol` field.
-
-  `rings-gateway` gains a `test-support` feature exposing `rings_gateway::testing`, the
-  in-memory packet fixtures; the `gateway-bench` example requires it.
 
 ## 0.34.0
 
