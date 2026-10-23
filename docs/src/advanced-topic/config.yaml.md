@@ -255,7 +255,8 @@ How a managed target is supervised:
 The daemon keeps three more stores in directories beside the data store, with fixed budgets:
 `transaction-replay` (the replay windows, authoritative), `relay-inbox` (the relay carriers this
 node holds or owns, retained: flushed and never evicted, 64 MiB, #1021) and `onion-entry-guards`
-(a durable cache). Back them up and remove them together with the data store.
+(a durable cache). Back them up and remove them together with the data store; removing
+`relay-inbox` drops the mail held there.
 
 Files written before a field existed still load: an omitted field takes its default, and an
 omitted `gateway` section loads as no gateway at all.

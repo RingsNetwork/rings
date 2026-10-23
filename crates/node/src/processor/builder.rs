@@ -100,7 +100,7 @@ impl ProcessorBuilder {
 
     /// Set the storage of the relay-inbox namespace (`SwarmBuilder::relay_storage`): a
     /// `RecordAuthority::Retained` store, so held mail survives a crash and is never evicted
-    /// (#1021).
+    /// (#1021). Without one, the node takes custody of no relay carrier.
     pub fn relay_storage(mut self, storage: EntryStorage) -> Self {
         self.relay_storage = Some(storage);
         self

@@ -301,6 +301,12 @@ pub enum Error {
     #[error("Relay inbox removal was not issued by the inbox's recipient")]
     RelayInboxWriterNotRecipient,
 
+    /// This node keeps no retained relay store, so it takes custody of no relay carrier: it
+    /// neither holds mail nor accepts a carrier's hand-off, and the mail stays with its holder
+    /// (durable-records, Law 1: a relay carrier is admissible only at a durable store)
+    #[error("This node keeps no retained relay store and takes custody of no relay carrier")]
+    RelayStorageUnavailable,
+
     /// A storage count or record length does not fit its interface width
     #[error("A storage count or record length does not fit its interface width")]
     StorageCountOverflow,

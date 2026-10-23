@@ -279,13 +279,10 @@ impl PeerRing {
         now_ms: u128,
     ) -> Result<Option<Entry>> {
         let key = StorageKey::new(kind, placement).to_string();
-        live_entry(
-            self.carrier_storage(kind),
-            &key,
-            now_ms,
-            Projection::ReturnedOnly,
-        )
-        .await
+        let Some(store) = self.carrier_storage(kind) else {
+            return Ok(None);
+        };
+        live_entry(store, &key, now_ms, Projection::ReturnedOnly).await
     }
 
     /// Read the live replicated entry stored at `key`.
@@ -294,14 +291,11 @@ impl PeerRing {
         key: StorageKey,
         now_ms: u128,
     ) -> Result<Option<Entry>> {
+        let Some(store) = self.carrier_storage(key.kind()) else {
+            return Ok(None);
+        };
         let _transition = self.storage_transition.lock().await;
-        live_entry(
-            self.carrier_storage(key.kind()),
-            &key.to_string(),
-            now_ms,
-            Projection::WrittenBack,
-        )
-        .await
+        live_entry(store, &key.to_string(), now_ms, Projection::WrittenBack).await
     }
 
     /// Every live entry of both namespaces with its key, retiring the rest. Each store yields
@@ -317,7 +311,9 @@ impl PeerRing {
         let _transition = self.storage_transition.lock().await;
         let mut live = Vec::new();
         for kind in [EntryKind::Data, EntryKind::RelayMessage] {
-            let store = self.carrier_storage(kind);
+            let Some(store) = self.carrier_storage(kind) else {
+                continue;
+            };
             for (key, entry) in store.get_all().await? {
                 let slot = StorageKey::from_str(&key)?;
                 if slot.kind() != kind {
@@ -345,8 +341,10 @@ impl PeerRing {
         now_ms: u128,
         ack: &SyncedEntryAck,
     ) -> Result<()> {
+        let Some(store) = self.carrier_storage(key.kind()) else {
+            return Ok(());
+        };
         let _transition = self.storage_transition.lock().await;
-        let store = self.carrier_storage(key.kind());
         let Some(local) =
             live_entry(store, &key.to_string(), now_ms, Projection::WrittenBack).await?
         else {
@@ -374,7 +372,7 @@ impl PeerRing {
         incoming: Entry,
     ) -> Result<Entry> {
         incoming.check_admissible_at(now_ms, self.network_id())?;
-        let store = self.carrier_storage(incoming.kind);
+        let store = self.carrier_store_for_write(incoming.kind)?;
         let key = StorageKey::new(incoming.kind, key).to_string();
         let _transition = self.storage_transition.lock().await;
         // The join normalizes the union once, so the incoming value is normalized on its own
@@ -404,7 +402,7 @@ impl PeerRing {
         key: Did,
         admitted: AdmittedEntry,
     ) -> Result<Entry> {
-        let store = self.carrier_storage(admitted.kind());
+        let store = self.carrier_store_for_write(admitted.kind())?;
         let key = StorageKey::new(admitted.kind(), key).to_string();
         let _transition = self.storage_transition.lock().await;
         join_live_entry(store, &key, admitted, now_ms).await
@@ -444,7 +442,7 @@ impl PeerRing {
                 op.validate_inbox_write(writer, responsible, now_ms, self.network_id())?;
             }
         }
-        let store = self.carrier_storage(op.kind());
+        let store = self.carrier_store_for_write(op.kind())?;
         let key = StorageKey::new(op.kind(), placement).to_string();
         let _transition = self.storage_transition.lock().await;
         operate_live_entry(store, &key, op, self.did, now_ms).await

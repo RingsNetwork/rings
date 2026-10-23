@@ -68,7 +68,10 @@ impl MailboxStorageInspect {
     pub async fn inspect(dht: &PeerRing) -> crate::error::Result<Self> {
         let now_ms = get_epoch_ms();
         let mut snapshot = Self::default();
-        let stored = dht.relay_storage.get_all().await?;
+        let Some(relay_storage) = dht.relay_storage.as_ref() else {
+            return Ok(Self::default());
+        };
+        let stored = relay_storage.get_all().await?;
         for entry in stored
             .into_iter()
             .filter_map(|(_, entry)| entry.live_at(now_ms))
@@ -91,11 +94,13 @@ impl SwarmInspect {
         let peers = swarm.peers();
         let mut persistence_storage =
             StorageInspect::inspect_kv_storage(&swarm.dht().storage).await;
-        persistence_storage.items.extend(
-            StorageInspect::inspect_kv_storage(&swarm.dht().relay_storage)
-                .await
-                .items,
-        );
+        if let Some(relay_storage) = swarm.dht().relay_storage.as_ref() {
+            persistence_storage.items.extend(
+                StorageInspect::inspect_kv_storage(relay_storage)
+                    .await
+                    .items,
+            );
+        }
         let cache_storage = StorageInspect::inspect_kv_storage(&swarm.dht().cache).await;
 
         Self {

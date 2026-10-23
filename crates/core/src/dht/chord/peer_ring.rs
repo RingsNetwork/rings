@@ -94,10 +94,12 @@ pub struct PeerRing {
     /// replicated topics, rebuildable from their replicas.
     pub(crate) storage: EntryStorage,
     /// Storage of the relay-inbox namespace: the only copy of the mail this node holds or owns
-    /// (a relay carrier is never fetched, cached or replicated), so it is opened as a
-    /// `RecordAuthority::Retained` store where the node is durable (#1021). In-memory unless
-    /// [`Self::with_relay_storage`] gives it a store.
-    pub(crate) relay_storage: EntryStorage,
+    /// (a relay carrier is never fetched, cached or replicated), so it must be a
+    /// `RecordAuthority::Retained` store (#1021). `None` until [`Self::with_relay_storage`] gives
+    /// it one; without it the node takes custody of no relay carrier (Law 1 admits no volatile
+    /// relay store): every relay write is refused with `Error::RelayStorageUnavailable`, and
+    /// every relay read finds nothing.
+    pub(crate) relay_storage: Option<EntryStorage>,
     /// Local fetched-entry cache, bounded at [`LOCAL_CACHE_CAPACITY`] entries: each carrier is
     /// the join of the replies observed for its key (#864).
     pub(crate) cache: EntryStorage,
@@ -182,7 +184,7 @@ impl PeerRing {
             predecessor: Arc::new(Mutex::new(None)),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
-            relay_storage: Box::new(MemStorage::new()),
+            relay_storage: None,
             cache: Box::new(MemStorage::bounded(LOCAL_CACHE_CAPACITY)),
             storage_virtual_node_config: virtual_nodes,
             topology_transition: Mutex::new(()),
@@ -198,19 +200,29 @@ impl PeerRing {
     }
 
     /// This ring with `storage` as the store of its relay-inbox namespace (see
-    /// [`Self::relay_storage`](PeerRing#structfield.relay_storage)).
+    /// [`Self::relay_storage`](PeerRing#structfield.relay_storage)): a retained store, or, in a
+    /// test that chooses it by name, an in-memory one.
     pub fn with_relay_storage(mut self, storage: EntryStorage) -> Self {
-        self.relay_storage = storage;
+        self.relay_storage = Some(storage);
         self
     }
 
-    /// The store of the carriers of `kind`: data topics and relay inboxes live in separate
-    /// stores of their own authority, as they live in separate namespaces.
-    pub(crate) fn carrier_storage(&self, kind: EntryKind) -> &EntryStorage {
+    /// The store of the carriers of `kind`, if this node keeps one: data topics and relay
+    /// inboxes live in separate stores of their own authority, as they live in separate
+    /// namespaces, and a node with no relay store keeps no relay carrier.
+    pub(crate) fn carrier_storage(&self, kind: EntryKind) -> Option<&EntryStorage> {
         match kind {
-            EntryKind::Data => &self.storage,
-            EntryKind::RelayMessage => &self.relay_storage,
+            EntryKind::Data => Some(&self.storage),
+            EntryKind::RelayMessage => self.relay_storage.as_ref(),
         }
+    }
+
+    /// The store a write of a carrier of `kind` goes to (the custody law of #1021).
+    ///
+    /// Post: `Err(RelayStorageUnavailable)` for a relay carrier on a node with no relay store.
+    pub(crate) fn carrier_store_for_write(&self, kind: EntryKind) -> Result<&EntryStorage> {
+        self.carrier_storage(kind)
+            .ok_or(Error::RelayStorageUnavailable)
     }
 }
 

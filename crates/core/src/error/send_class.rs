@@ -243,6 +243,7 @@ impl Error {
             | Self::RelayMessageHoldStale | Self::RelayInboxDeltaExceedsCapacity
             | Self::RelayMessageHolderNotResponsible | Self::RelayInboxRegisterNotAllowed
             | Self::RelayInboxOperationNotAllowed | Self::RelayInboxWriterNotRecipient
+            | Self::RelayStorageUnavailable
             | Self::StorageCountOverflow | Self::StorageRedundancyMismatch { .. }
             | Self::InvalidCapacity | Self::StorageValueExceedsCapacity { .. }
             | Self::StorageBudgetExhausted { .. } | Self::StorageWorkUnscheduled(_)

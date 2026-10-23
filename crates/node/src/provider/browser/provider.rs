@@ -130,8 +130,9 @@ const RELAY_STORAGE_ROWS: u32 = 1024;
 
 /// Open the browser relay-inbox store as a retained store (#1021): its writes commit with
 /// strict durability and it evicts nothing, since a relay carrier is the only copy of the mail
-/// it holds. An IndexedDB that cannot open falls back to in-memory carriers, as the entry store
-/// does, and a restart then loses held mail.
+/// it holds. An IndexedDB that cannot open leaves the provider with no relay store, never an
+/// in-memory one: the node then takes custody of no relay carrier, so it holds no mail and its
+/// own mail stays with its holder.
 async fn open_browser_relay_storage(storage_name: &str) -> Option<EntryStorage> {
     let opened = IdbStorage::new_with_cap_name_and_authority(
         RELAY_STORAGE_ROWS,
@@ -145,7 +146,7 @@ async fn open_browser_relay_storage(storage_name: &str) -> Option<EntryStorage> 
             tracing::warn!(
                 storage_name = %storage_name,
                 error = %source,
-                "browser relay-inbox IndexedDB unavailable; falling back to in-memory carriers"
+                "browser relay-inbox IndexedDB unavailable; this node will hold no relay mail"
             );
             None
         }

@@ -6,6 +6,7 @@ use super::super::super::chord::PeerRing;
 use super::data_entry_with_payload_len;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::inbox::inbox_key;
+use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::Did;
 use crate::dht::StorageKey;
@@ -84,7 +85,12 @@ async fn test_a_full_relay_store_refuses_the_hold() -> Result<()> {
     let node = ring(&holder, data, relay);
     let first = Did::from(50u32);
     hold(&node, &holder, first).await?;
-    assert_eq!(node.relay_storage.count().await?, 1);
+    assert_eq!(
+        node.carrier_store_for_write(EntryKind::RelayMessage)?
+            .count()
+            .await?,
+        1
+    );
     drop(node);
 
     // Reopen the relay store with room for the one carrier it holds and no more.
@@ -108,6 +114,30 @@ async fn test_a_full_relay_store_refuses_the_hold() -> Result<()> {
         .is_some());
     assert!(node
         .live_storage_entry(StorageKey::inbox_of(second), now_ms)
+        .await?
+        .is_none());
+    Ok(())
+}
+
+/// A node with no relay store takes custody of no relay carrier (Law 1 admits no volatile
+/// relay store): it refuses a hold with `RelayStorageUnavailable`, storing nothing anywhere, and
+/// finds no carrier to read.
+#[tokio::test]
+async fn test_a_node_without_a_relay_store_refuses_custody() -> Result<()> {
+    let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let node = PeerRing::new_with_storage(
+        holder.delegator_did(),
+        3,
+        Box::new(crate::storage::MemStorage::new()),
+    );
+    let destination = Did::from(50u32);
+    assert!(matches!(
+        hold(&node, &holder, destination).await,
+        Err(Error::RelayStorageUnavailable)
+    ));
+    assert_eq!(node.storage.count().await?, 0);
+    assert!(node
+        .live_storage_entry(StorageKey::inbox_of(destination), get_epoch_ms())
         .await?
         .is_none());
     Ok(())
