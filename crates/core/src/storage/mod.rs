@@ -135,7 +135,10 @@ impl RecordAuthority {
 
     /// Whether the store keeps a witness of every record's presence (the presence law):
     /// `meaning = Authoritative`, the one meaning under which an absent record must be told
-    /// apart from one never written.
+    /// apart from one never written. Only the native file store keeps markers: IndexedDB loses
+    /// no proper subset of a database's rows and evicts no authoritative row, so it needs none
+    /// (durable-records, Prop. 3), and the predicate exists only where `FileStorage` does.
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     pub(crate) const fn witnesses(self) -> bool {
         matches!(self.meaning(), Meaning::Authoritative)
     }
@@ -250,7 +253,7 @@ pub trait KvStorageScan<V>: KvStorageInterface<V> {
     fn record_name(&self, key: &str) -> String;
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 mod test_authority;
 #[cfg(test)]
 mod test_shared;
