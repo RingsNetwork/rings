@@ -178,7 +178,11 @@ route.
   while the carrier is retained. A relay inbox is verified by its owner, readable only by
   its recipient, and removable only by its recipient or, in an ownership hand-off, by the
   previous owner once the next one acknowledged holding exactly that value; it is capped at
-  64 messages. Values are stored in the clear.
+  64 messages. Relay carriers live in a store of their own (#1021), retained: a completed hold
+  survives a crash, and the data store's budget never evicts held mail; a full relay store
+  refuses a new hold instead. A node without a retained relay store (a browser whose
+  IndexedDB cannot open, a library node built without one) takes custody of no relay carrier:
+  it refuses to hold mail, and its own mail stays with its holder. Values are stored in the clear.
   [Details](docs/src/advanced-topic/chord.md#data-topic-storage).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
   refuses no honest frame, refuses and reports a frame beyond its credit, and pushes overload

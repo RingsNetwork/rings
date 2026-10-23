@@ -7,7 +7,7 @@ use super::RecordAuthority;
 
 /// Every authority, with its point and the laws it must carry:
 /// `(authority, crash, meaning, flushes, evicts, retires_undecodable, witnesses)`.
-const TABLE: [(RecordAuthority, Crash, Meaning, bool, bool, bool, bool); 3] = [
+const TABLE: [(RecordAuthority, Crash, Meaning, bool, bool, bool, bool); 4] = [
     (
         RecordAuthority::Disposable,
         Crash::Cached,
@@ -23,6 +23,15 @@ const TABLE: [(RecordAuthority, Crash, Meaning, bool, bool, bool, bool); 3] = [
         Meaning::Rebuild,
         true,
         true,
+        true,
+        false,
+    ),
+    (
+        RecordAuthority::Retained,
+        Crash::Durable,
+        Meaning::Retained,
+        true,
+        false,
         true,
         false,
     ),

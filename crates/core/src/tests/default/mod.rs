@@ -266,6 +266,7 @@ fn prepare_node_with_ice_servers_and_measure(
     )
     .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
     .dht_virtual_nodes(0)
+    .relay_storage(crate::tests::volatile_relay_storage())
     .origin_quota(fixture_origin_quota()?);
     let builder = match measure {
         Some(measure) => builder.measure(measure),
@@ -375,7 +376,10 @@ pub async fn wait_for_storage_state(
         &format!("storage at {key}: {label}"),
         TEST_HANG_GUARD,
         || async move {
-            let stored = node.dht().storage.get(&key.to_string()).await?;
+            let stored = match node.dht().carrier_storage(key.kind()) {
+                Some(store) => store.get(&key.to_string()).await?,
+                None => None,
+            };
             Ok(ready(stored.as_ref()).then_some(stored))
         },
     )

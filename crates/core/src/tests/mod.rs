@@ -166,6 +166,14 @@ pub(crate) fn non_affine_placement(entry_key: Did, redundancy: u16) -> Result<Di
     ))
 }
 
+/// An in-memory relay store: the named choice of a fixture whose relay carriers need not
+/// survive its process. Production never builds one, since Law 1 of durable-records admits no
+/// volatile relay store (#1021): a node without a retained one refuses custody instead.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn volatile_relay_storage() -> crate::dht::EntryStorage {
+    Box::new(crate::storage::MemStorage::new())
+}
+
 /// A live inbox delta for `destination`: one custom message from a fresh sender, held now by
 /// `holder` inside [`TEST_NETWORK_ID`].
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]

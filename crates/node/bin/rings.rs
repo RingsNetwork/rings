@@ -66,38 +66,28 @@ const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
 /// fails that transition closed, so the budget must never be reached.
 const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 40 * 1024 * 1024;
 
-fn onion_entry_guard_storage_path(data_storage_path: &str) -> String {
-    let data_path = Path::new(data_storage_path);
-    let parent = data_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    parent
-        .join("onion-entry-guards")
-        .to_string_lossy()
-        .to_string()
-}
+/// Byte budget of the native relay-inbox store: the carriers this node holds or owns, each at
+/// most `RELAY_INBOX_MAX_LEN` held messages. The store is retained and evicts nothing (#1021): a
+/// hold beyond the budget is refused, so the sender's message is not held, instead of evicting
+/// mail already held.
+const RELAY_INBOX_STORAGE_CAPACITY: u32 = 64 * 1024 * 1024;
+/// Directory of the onion entry-guard store, beside the data store.
+const ONION_ENTRY_GUARD_STORAGE_DIR: &str = "onion-entry-guards";
+/// Directory of the transaction replay store, beside the data store.
+const TRANSACTION_REPLAY_STORAGE_DIR: &str = "transaction-replay";
+/// Directory of the relay-inbox store, beside the data store.
+const RELAY_INBOX_STORAGE_DIR: &str = "relay-inbox";
+/// Directory of the provisional-evidence store, beside the measure store.
+const PROVISIONAL_EVIDENCE_STORAGE_DIR: &str = "provisional-evidence";
 
-fn transaction_replay_storage_path(data_storage_path: &str) -> String {
-    let data_path = Path::new(data_storage_path);
-    let parent = data_path
+/// The path of the store directory `dir` beside the store at `storage_path`: in its parent, or
+/// in the working directory when it has none (pure).
+fn sibling_storage_path(storage_path: &str, dir: &str) -> String {
+    Path::new(storage_path)
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    parent
-        .join("transaction-replay")
-        .to_string_lossy()
-        .to_string()
-}
-
-fn provisional_evidence_storage_path(measure_storage_path: &str) -> String {
-    let measure_path = Path::new(measure_storage_path);
-    let parent = measure_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    parent
-        .join("provisional-evidence")
+        .unwrap_or_else(|| Path::new("."))
+        .join(dir)
         .to_string_lossy()
         .to_string()
 }
@@ -327,12 +317,14 @@ async fn build_processor(
         FileStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path.clone())
             .await?,
     );
-    let provisional_evidence_path = provisional_evidence_storage_path(&measure_storage.path);
+    let provisional_evidence_path =
+        sibling_storage_path(&measure_storage.path, PROVISIONAL_EVIDENCE_STORAGE_DIR);
     let per_evidence_storage = Box::new(
         FileStorage::new_with_cap_and_path(measure_storage.capacity, provisional_evidence_path)
             .await?,
     );
-    let onion_entry_guard_path = onion_entry_guard_storage_path(&data_storage.path);
+    let onion_entry_guard_path =
+        sibling_storage_path(&data_storage.path, ONION_ENTRY_GUARD_STORAGE_DIR);
     // The entry guards are a durable cache (#911): a completed guard write survives a crash, and
     // a guard record that is absent or does not decode is re-selected, logged, never fatal.
     let per_onion_entry_guard_storage: OnionEntryGuardStorage = Box::new(
@@ -348,8 +340,18 @@ async fn build_processor(
     let per_transaction_replay_storage = Box::new(
         FileStorage::new_with_cap_path_and_authority(
             TRANSACTION_REPLAY_STORAGE_CAPACITY,
-            transaction_replay_storage_path(&data_storage.path),
+            sibling_storage_path(&data_storage.path, TRANSACTION_REPLAY_STORAGE_DIR),
             RecordAuthority::Authoritative,
+        )
+        .await?,
+    );
+    // Relay carriers are the only copy of the mail they hold: their store is retained, so a
+    // completed hold survives a crash and none is evicted by the data store's budget (#1021).
+    let per_relay_inbox_storage = Box::new(
+        FileStorage::new_with_cap_path_and_authority(
+            RELAY_INBOX_STORAGE_CAPACITY,
+            sibling_storage_path(&data_storage.path, RELAY_INBOX_STORAGE_DIR),
+            RecordAuthority::Retained,
         )
         .await?,
     );
@@ -366,6 +368,7 @@ async fn build_processor(
     Ok(Arc::new(
         ProcessorBuilder::from_config(pc)?
             .storage(per_data_storage)
+            .relay_storage(per_relay_inbox_storage)
             .onion_entry_guard_storage(per_onion_entry_guard_storage)
             .replay_storage(per_transaction_replay_storage)
             .measure(measure)
@@ -805,11 +808,13 @@ mod tests {
 
     use super::await_gateway_startup;
     use super::await_task_cleanup;
-    use super::onion_entry_guard_storage_path;
-    use super::provisional_evidence_storage_path;
-    use super::transaction_replay_storage_path;
+    use super::sibling_storage_path;
     use super::Cli;
+    use super::ONION_ENTRY_GUARD_STORAGE_DIR;
+    use super::PROVISIONAL_EVIDENCE_STORAGE_DIR;
+    use super::RELAY_INBOX_STORAGE_DIR;
     use super::TRANSACTION_REPLAY_STORAGE_CAPACITY;
+    use super::TRANSACTION_REPLAY_STORAGE_DIR;
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
         let matches = Cli::command()
@@ -852,16 +857,26 @@ mod tests {
         ));
     }
 
+    /// Every store beside the data or the measure store is a sibling directory of it, in the
+    /// working directory when the store path has no parent.
     #[test]
-    fn test_entry_guard_storage_is_sibling_of_data_storage() {
-        assert_eq!(
-            onion_entry_guard_storage_path(".rings/data"),
-            ".rings/onion-entry-guards"
-        );
-        assert_eq!(
-            onion_entry_guard_storage_path("/tmp/rings/data"),
-            "/tmp/rings/onion-entry-guards"
-        );
+    fn test_sibling_stores_sit_beside_their_store() {
+        for dir in [
+            ONION_ENTRY_GUARD_STORAGE_DIR,
+            TRANSACTION_REPLAY_STORAGE_DIR,
+            RELAY_INBOX_STORAGE_DIR,
+            PROVISIONAL_EVIDENCE_STORAGE_DIR,
+        ] {
+            assert_eq!(
+                sibling_storage_path(".rings/data", dir),
+                format!(".rings/{dir}")
+            );
+            assert_eq!(
+                sibling_storage_path("/tmp/rings/data", dir),
+                format!("/tmp/rings/{dir}")
+            );
+            assert_eq!(sibling_storage_path("data", dir), format!("./{dir}"));
+        }
     }
 
     /// A full replay store always fits the native replay store's budget, so the stream-count bound,
@@ -872,30 +887,6 @@ mod tests {
         let capacity = usize::try_from(TRANSACTION_REPLAY_STORAGE_CAPACITY)?;
         assert!(TRANSACTION_REPLAY_STORE_MAX_BYTES <= capacity);
         Ok(())
-    }
-
-    #[test]
-    fn test_transaction_replay_storage_is_sibling_of_data_storage() {
-        assert_eq!(
-            transaction_replay_storage_path(".rings/data"),
-            ".rings/transaction-replay"
-        );
-        assert_eq!(
-            transaction_replay_storage_path("/tmp/rings/data"),
-            "/tmp/rings/transaction-replay"
-        );
-    }
-
-    #[test]
-    fn test_provisional_evidence_storage_is_sibling_of_measure_storage() {
-        assert_eq!(
-            provisional_evidence_storage_path(".rings/measure"),
-            ".rings/provisional-evidence"
-        );
-        assert_eq!(
-            provisional_evidence_storage_path("/tmp/rings/measure"),
-            "/tmp/rings/provisional-evidence"
-        );
     }
 
     #[tokio::test]

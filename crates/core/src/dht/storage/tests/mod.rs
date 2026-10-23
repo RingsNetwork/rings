@@ -35,12 +35,15 @@ use crate::tests::expired;
 use crate::tests::held_inbox_for;
 use crate::tests::live_entry;
 use crate::tests::non_affine_placement;
+use crate::tests::volatile_relay_storage;
 use crate::utils::get_epoch_ms;
 
 mod test_cache_join;
 mod test_handoff;
 mod test_horizon;
 mod test_own_write;
+#[cfg(not(target_family = "wasm"))]
+mod test_relay_storage;
 mod test_repair;
 
 fn data_entry(did: Did) -> Entry {
@@ -611,7 +614,8 @@ fn test_storage_key_partitions_kinds_and_keeps_the_data_rendering() -> Result<()
 async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Result<()> {
     let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     // Standing alone, the node routes every position to itself and is the hold authority.
-    let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()));
+    let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()))
+        .with_relay_storage(volatile_relay_storage());
     let destination = Did::from(50u32);
     let position = inbox_key(destination);
     let now_ms = get_epoch_ms();
@@ -637,7 +641,14 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
     assert_eq!(topic.data, vec![Bytes::from("parked")]);
     assert_eq!(inbox.kind, EntryKind::RelayMessage);
     assert_eq!(inbox.data.len(), 1);
-    assert_eq!(node.storage.count().await?, 2);
+    // Each namespace has its own store (#1021): the topic and the hold never share one.
+    assert_eq!(node.storage.count().await?, 1);
+    assert_eq!(
+        node.carrier_store_for_write(EntryKind::RelayMessage)?
+            .count()
+            .await?,
+        1
+    );
     Ok(())
 }
 
@@ -684,11 +695,9 @@ impl KvStorageInterface<Entry> for YieldingStorage {
 #[tokio::test]
 async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result<()> {
     let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let node = PeerRing::new_with_storage(
-        holder.delegator_did(),
-        3,
-        Box::new(YieldingStorage(MemStorage::new())),
-    );
+    // The slot is a relay carrier, so the yielding store is the relay store.
+    let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()))
+        .with_relay_storage(Box::new(YieldingStorage(MemStorage::new())));
     let destination = Did::from(50u32);
     let position = inbox_key(destination);
     let now_ms = get_epoch_ms();
@@ -741,7 +750,8 @@ async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result
 #[tokio::test]
 async fn test_removal_against_nothing_held_stores_nothing() -> Result<()> {
     let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()));
+    let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()))
+        .with_relay_storage(volatile_relay_storage());
     let now_ms = get_epoch_ms();
 
     let topic = Did::from(100u32);

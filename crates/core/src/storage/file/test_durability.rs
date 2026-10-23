@@ -161,6 +161,7 @@ fn test_plans_flush_before_and_after_the_rename() {
 fn test_an_authoritative_put_is_never_torn_by_a_crash() {
     for authority in [
         RecordAuthority::Authoritative,
+        RecordAuthority::Retained,
         RecordAuthority::DurableCache,
     ] {
         let plan = authority.put_plan();

@@ -30,23 +30,25 @@ pub use crate::storage::memory::MemStorage;
 ///                  crash    absent means            decode    budget    durability
 /// Disposable       cached   the owner's default     retire    evict     engine default
 /// DurableCache     durable  the owner's default     retire    evict     survives a crash
+/// Retained         durable  never written, or       retire    refuse    survives a crash
+///                           retired by its owner
 /// Authoritative    durable  never written           report    refuse    survives a crash
 /// ```
 ///
 /// Every backend that takes an authority shares three laws, each a monotone predicate of it:
 ///
-/// - **Decode.** A store whose absent record means the owner's default retires a record the
-///   current schema cannot decode, on the read that finds it, and reports it absent; an
-///   authoritative store reports the record and keeps it.
+/// - **Decode.** A store below the authoritative meaning retires a record the current schema
+///   cannot decode, on the read that finds it, and reports it absent; an authoritative store
+///   reports the record and keeps it.
 /// - **Budget (refuse, never evict).** A store whose absent record means the owner's default
-///   retires its oldest records (by the backend's own order) to make room; an authoritative
-///   store retires nothing, and a write of a new record into a full store, or an open under a
-///   lowered budget, fails with `Error::StorageBudgetExhausted` and changes nothing. An evicted
-///   authoritative record would be indistinguishable from one never written, which silently
-///   rolls its state back (#923).
-/// - **Durability.** A disposable store's latest writes may be lost by a crash; a durable cache
-///   and an authoritative store report a write complete only once it survives a process or a
-///   system crash (`FileStorage` flushes the file and its directory; `IdbStorage` commits with
+///   retires its oldest records (by the backend's own order) to make room; a retained or an
+///   authoritative store retires nothing, and a write of a new record into a full store, or an
+///   open under a lowered budget, fails with `Error::StorageBudgetExhausted` and changes
+///   nothing. An evicted retained record would be a loss its owner never chose (held mail), and
+///   an evicted authoritative one would be indistinguishable from one never written, which
+///   silently rolls its state back (#923).
+/// - **Durability.** A disposable store's latest writes may be lost by a crash; every other
+///   store reports a write complete only once it survives a process or a system crash (`FileStorage` flushes the file and its directory; `IdbStorage` commits with
 ///   `durability: "strict"`, #912).
 ///
 /// The budget's unit and the open laws are per backend and documented there (`FileStorage`
@@ -62,6 +64,11 @@ pub enum RecordAuthority {
     /// with its name, since a crash cannot produce one: only a loss outside the store, or a
     /// schema change, can.
     DurableCache,
+    /// The only copy of state whose loss is a liveness failure, not a safety one (the relay
+    /// inbox carriers, #1021): every completed write survives a crash and nothing is evicted,
+    /// so a record is gone only once its owner retired it, while a record that does not decode
+    /// is retired (and logged), since failing it closed would protect nothing.
+    Retained,
     /// The only copy of its state.
     Authoritative,
 }
@@ -97,6 +104,7 @@ impl RecordAuthority {
         match self {
             Self::Disposable => (Crash::Cached, Meaning::Rebuild),
             Self::DurableCache => (Crash::Durable, Meaning::Rebuild),
+            Self::Retained => (Crash::Durable, Meaning::Retained),
             Self::Authoritative => (Crash::Durable, Meaning::Authoritative),
         }
     }
