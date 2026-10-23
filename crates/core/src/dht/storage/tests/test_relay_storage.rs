@@ -4,6 +4,7 @@
 
 use super::super::super::chord::PeerRing;
 use super::data_entry_with_payload_len;
+use crate::consts::UNACKNOWLEDGED_RELAY_HOLDS_MAX;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::EntryKind;
@@ -13,6 +14,7 @@ use crate::dht::StorageKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::RelayHoldDigest;
 use crate::storage::file::test_root::TempRoot;
 use crate::storage::file::FileStorage;
 use crate::storage::RecordAuthority;
@@ -140,5 +142,71 @@ async fn test_a_node_without_a_relay_store_refuses_custody() -> Result<()> {
         .live_storage_entry(StorageKey::inbox_of(destination), get_epoch_ms())
         .await?
         .is_none());
+    Ok(())
+}
+
+/// The hold of one message for `destination` by `holder`, stamped by `ring`, with its digest.
+fn stamped_hold(
+    ring: &PeerRing,
+    holder: &DelegateeKey,
+    destination: Did,
+) -> Result<(RelayHoldDigest, EntryOperation)> {
+    let hold = EntryOperation::Extend(held_inbox_for(destination, holder)?)
+        .stamped(get_epoch_ms(), ring.did)?;
+    Ok((RelayHoldDigest::of(&hold)?, hold))
+}
+
+/// A kept hold is forgotten only on the acknowledgement of the node it was sent to, and only a
+/// refusal from that node names it: an answer forged by any other peer changes nothing.
+#[test]
+fn test_only_the_target_of_a_kept_hold_answers_for_it() -> Result<()> {
+    let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let ring = PeerRing::new_with_storage(
+        holder.delegator_did(),
+        3,
+        Box::new(crate::storage::MemStorage::new()),
+    );
+    let (target, forger) = (Did::from(7u32), Did::from(9u32));
+    let (digest, hold) = stamped_hold(&ring, &holder, Did::from(50u32))?;
+    ring.await_relay_hold(digest, hold.clone(), Some(target))?;
+
+    assert!(!ring.acknowledge_relay_hold(digest, forger)?);
+    assert_eq!(ring.refused_relay_hold(digest, forger)?, None);
+    assert_eq!(ring.refused_relay_hold(digest, target)?, Some(hold.clone()));
+    assert_eq!(ring.unacknowledged_relay_holds()?, vec![(digest, hold)]);
+    assert!(ring.acknowledge_relay_hold(digest, target)?);
+    assert!(ring.unacknowledged_relay_holds()?.is_empty());
+    Ok(())
+}
+
+/// `Law (Acknowledged)` bound: a writer keeps at most `UNACKNOWLEDGED_RELAY_HOLDS_MAX` holds and
+/// refuses another to its local sender, forgetting none it keeps.
+#[test]
+fn test_a_hold_beyond_the_bound_is_refused_and_none_kept_is_forgotten() -> Result<()> {
+    let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let ring = PeerRing::new_with_storage(
+        holder.delegator_did(),
+        3,
+        Box::new(crate::storage::MemStorage::new()),
+    );
+    let mut kept = Vec::new();
+    for destination in 0..UNACKNOWLEDGED_RELAY_HOLDS_MAX {
+        let (digest, hold) = stamped_hold(&ring, &holder, Did::from(1000 + destination as u32))?;
+        ring.await_relay_hold(digest, hold, None)?;
+        kept.push(digest);
+    }
+    let (digest, hold) = stamped_hold(&ring, &holder, Did::from(50u32))?;
+    assert!(matches!(
+        ring.await_relay_hold(digest, hold, None),
+        Err(Error::RelayHoldsUnacknowledgedFull)
+    ));
+    let mut still = ring
+        .unacknowledged_relay_holds()?
+        .into_iter()
+        .map(|(digest, _)| digest)
+        .collect::<Vec<_>>();
+    still.sort();
+    kept.sort();
+    assert_eq!(still, kept);
     Ok(())
 }

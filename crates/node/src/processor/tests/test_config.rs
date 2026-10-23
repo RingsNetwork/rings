@@ -1,3 +1,4 @@
+use rings_core::dht::RelayCustody;
 use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::message::OriginQuotaConfig;
@@ -325,10 +326,11 @@ async fn test_https_onion_exit_registers_relay_with_a_fresh_process_epoch() -> R
     let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
 
     assert_eq!(processor.onion_role(), &https_exit_role()?);
-    assert_eq!(
-        descriptor.capabilities,
-        OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch.get())
-    );
+    // The test processor keeps no relay store, so it declares that it holds no relay mail.
+    assert_eq!(descriptor.capabilities, OnlineNodeCapabilities {
+        relay_custody: RelayCustody::HoldsNone,
+        ..OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch.get())
+    });
     assert_ne!(
         processor.onion_process_epoch.get(),
         restarted.onion_process_epoch.get()

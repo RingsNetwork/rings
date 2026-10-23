@@ -52,6 +52,8 @@ async fn test_every_effect_returns_without_waiting_while_its_next_hop_withholds_
 ) -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
+    // The hold's view places its inbox key, so the hold is sent to the holder, `peer`.
+    *node1.dht().lock_predecessor()? = Some(peer);
     let held = starve_every_lane(&node2, &node1)?;
     let interpreter = CoreEffectInterpreter::new(&node1.swarm.transport);
     let third = DelegateeKey::new_with_seckey(&SecretKey::random())?;
@@ -114,6 +116,8 @@ async fn test_every_effect_returns_without_waiting_while_its_next_hop_withholds_
 async fn test_a_starved_protocol_send_returns_its_capacity_at_its_deadline() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
+    // The hold's view places its inbox key, so the hold is sent to the holder, `peer`.
+    *node1.dht().lock_predecessor()? = Some(peer);
     let held = starve_every_lane(&node2, &node1)?;
     let transport = &node1.swarm.transport;
     let notify = || Message::NotifyPredecessorSend(NotifyPredecessorSend { did: node1.did() });

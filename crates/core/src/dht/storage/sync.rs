@@ -12,6 +12,7 @@ use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
+use crate::dht::relay_holder::relay_handoff_targets;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::StorageKey;
@@ -119,12 +120,12 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
         let now_ms = get_epoch_ms();
         let all_items = self.live_storage_entries(now_ms).await?;
-        // Relay inboxes are placed by the ring geometry in every storage mode
-        // (see the `inbox` module); data topics follow the configured mode.
+        // Relay inboxes go to their holder in every storage mode (see `dht::relay_holder`);
+        // data topics follow the configured mode.
         let (relay, data): (Vec<_>, Vec<_>) = all_items
             .into_iter()
             .partition(|(_, entry)| entry.kind.is_relay_inbox());
-        let mut actions = vec![self.hand_off_beyond(new_successor, relay)?];
+        let mut actions = vec![self.hand_off_relay_carriers(relay)?];
         actions.push(if self.storage_virtual_nodes_enabled()? {
             self.copy_entries_to_observed_virtual_storage_owners(data)?
         } else {
@@ -193,6 +194,31 @@ impl PeerRing {
             StorageSyncDestination::PhysicalOwner(new_successor),
             data,
         ))
+    }
+
+    /// Offer every relay carrier of `items` this node does not hold under its own view to the
+    /// nodes `relay_handoff_targets` names, as an ownership hand-off (`Law (Holder)`): onward to a
+    /// new head or past a storage-less run, or back to a previous holder that joined behind this
+    /// node. A carrier with no target stays here and is offered again on a later pass.
+    ///
+    /// Post S1/S2(copy): as [`Self::hand_off_beyond`]: nothing is removed here, and every
+    /// emitted `PlacedEntry` keeps its exact local placement key.
+    fn hand_off_relay_carriers(&self, items: Vec<(StorageKey, Entry)>) -> Result<PeerRingAction> {
+        let segment = self.relay_segment()?;
+        Ok(items
+            .into_iter()
+            .flat_map(|(key, entry)| {
+                relay_handoff_targets(&segment, key.placement(), self.did)
+                    .into_iter()
+                    .map(move |holder| {
+                        PeerRingAction::sync_entries_for_handoff(
+                            StorageSyncDestination::PhysicalOwner(holder),
+                            vec![PlacedEntry::new(key.placement(), entry.clone())],
+                        )
+                    })
+            })
+            .collect::<Vec<_>>()
+            .into())
     }
 
     /// `key ∉ (self, head]`: the placement lies beyond this node's interval up to `head`, so

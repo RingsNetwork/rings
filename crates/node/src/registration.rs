@@ -25,6 +25,7 @@ use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::entry;
 use rings_core::dht::Did;
+use rings_core::dht::RelayCustody;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::lifecycle::StopToken;
 use rings_core::message::ChordStorageInterface;
@@ -182,6 +183,11 @@ impl<'a> RegistrationContext<'a> {
     /// Return storage virtual-node positions for the local DHT protocol mode.
     pub(crate) fn dht_virtual_nodes(&self) -> u16 {
         self.processor.swarm.dht_virtual_nodes()
+    }
+
+    /// Return the relay custody the local node declares: whether it holds relay mail.
+    pub(crate) fn relay_custody(&self) -> RelayCustody {
+        self.processor.swarm.dht().relay_custody()
     }
 
     /// Return the account verification public key.
@@ -417,6 +423,7 @@ impl OnlineNodeRegistration {
                 dht_virtual_nodes: context.dht_virtual_nodes(),
                 capabilities: OnlineNodeCapabilities {
                     onion_relay: self.onion_relay.as_ref().map(OnionProcessEpochCell::get),
+                    relay_custody: context.relay_custody(),
                 },
                 endpoint_hint: self.endpoint_hint.clone(),
                 started_at_ms: self.started_at_ms,

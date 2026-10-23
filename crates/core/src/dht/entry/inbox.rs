@@ -5,13 +5,16 @@
 //! so it *holds* the message: it wraps the payload in a [`HeldMessage`] carrying its own
 //! signature and the hold instant, and writes it into the carrier `inbox(d) = d + 1`
 //! (arithmetic in `Z / 2^160`, kind [`EntryKind::RelayMessage`]) through the ordinary storage
-//! write path. Relay carriers are placed by the ring geometry alone, `k ∈ (n, succ(n)]`, in every
-//! storage mode, at that one placement whatever the configured redundancy, and in their own
-//! storage namespace, so a data topic parked at `d + 1` (any node may name any position through
-//! an overwrite) never shadows the inbox kept for `d`. While `d` is offline the carrier lives at
-//! `d`'s predecessor and once `d` returns `d + 1 ∈ (d, succ(d)]` makes `d` itself the owner: the
-//! storage repair pass of the predecessor hands the carrier to `d`, which delivers it through its
-//! inbound pipeline and tombstones the delivered elements.
+//! write path. Relay carriers are placed by the ring geometry alone, at one placement whatever the
+//! configured redundancy, and in their own storage namespace, so a data topic parked at `d + 1`
+//! (any node may name any position through an overwrite) never shadows the inbox kept for `d`.
+//! The carrier is kept by its *holder* (`dht::relay_holder`): the first node at or after the
+//! owner of `d + 1` (the node `n` with `d + 1 ∈ (n, succ(n)]`) that holds relay mail, a node
+//! without a relay store declaring that it holds none. While `d` is offline the owner is `d`'s
+//! predecessor and once `d` returns `d + 1 ∈ (d, succ(d)]` makes `d` itself the owner: the
+//! storage repair pass of the old holder hands the carrier to the new one, `d` itself when it
+//! keeps a relay store. `d` delivers its inbox through its inbound pipeline, reading it from its
+//! own store or fetching it from its holder, and tombstones the delivered elements at the holder.
 //!
 //! Only [`Message::CustomMessage`] is held; every other message class (control, storage, E2E
 //! frames) is forwarded as before and lost at a dead end, which is the pre-existing behaviour.
@@ -28,19 +31,23 @@
 //! bounds replay: a holder can only hold a message inside its sender's own proof lifetime.
 //!
 //! Authority (checked by the shell, which knows who is writing): a fresh hold is admitted only
-//! from the node the owner itself routes `d` to (`find_successor(d)` answered locally), only
-//! while the held message's sender proof is still live by the owner's clock (so the hold instant
-//! a holder signs cannot lie about the past), a relocation of the carrier only from the owner's
-//! authenticated predecessor as an ownership hand-off, and a removal only from `d`; a relay
-//! carrier is never fetched, cached, or replicated. Removal is per element by the add dot the
+//! from a node the holder's view admits as responsible for `d` (the node it routes `d` to, itself
+//! for `d ∈ (pred, self]`, or a storage-less node at or after `d` on the run behind it), only
+//! while the held message's sender proof is still live by the holder's clock (so the hold instant
+//! a holder signs cannot lie about the past), a relocation of the carrier only from a node that
+//! holds relay mail, as an ownership hand-off of a key the receiver holds, and a removal only
+//! from `d`; a relay carrier is fetched by its recipient alone, and
+//! never cached or replicated. Removal is per element by the add dot the
 //! recipient holds, as a covering remove of that payload up to that dot (every hold of one
 //! payload is the same hold), never by a reset floor, so a message the recipient has not seen
 //! is never dropped by a removal it did not issue.
 //!
-//! Both "responsible for `d`" (the holder's `(pred, self]`) and "routes `d` to" (the owner's
-//! successor list) are projections of failure detection: while an owner still lists the departed
+//! Both "responsible for `d`" (the writer's `(pred, self]`) and "routes `d` to" (the holder's
+//! successor list) are projections of failure detection: while a holder still lists the departed
 //! `d` as its head, it routes `d` to `d` and refuses the hold, and the message is lost as it was
-//! before the inbox existed. The window closes when the owner retires `d`.
+//! before the inbox existed. The window closes when the holder retires `d`. A writer whose view
+//! names no holder (no node from the owner to the end of its successor list holds relay mail)
+//! refuses the hold itself, with `RelayHolderUnavailable`.
 
 use bytes::Bytes;
 use serde::Deserialize;
@@ -337,11 +344,20 @@ impl InboxElement {
 }
 
 impl EntryOperation {
-    /// The write law of a relay-carrier operation issued by `writer` at the owner's clock
-    /// `now_ms`: a hold (`Extend`) only from the node the owner routes the destination to
-    /// (`responsible`, `None` when that route is not local), every element held by that node,
-    /// and held while its sender's proof is still live by the owner's own clock; a remote
-    /// removal (`Tombstone`) only from the recipient; no other operation.
+    /// Whether every element of this hold still carries a live sender proof at `now_ms`, as the
+    /// holder's write law requires (`RelayMessageHoldStale`): past that, no holder takes it.
+    pub(crate) fn hold_is_live_at(&self, now_ms: u128) -> bool {
+        self.entry().data.iter().all(|element| {
+            HeldMessage::from_element(element)
+                .is_ok_and(|held| held.payload.transaction.verification.is_live_at(now_ms))
+        })
+    }
+
+    /// The write law of a relay-carrier operation issued by `writer` at the holder's clock
+    /// `now_ms`: a hold (`Extend`) only from a node the holder's view admits as responsible for
+    /// the destination (`admitted`, see `dht::relay_holder::HoldAuthority`), every element held
+    /// by that node, and held while its sender's proof is still live by the holder's own clock;
+    /// a remote removal (`Tombstone`) only from the recipient; no other operation.
     ///
     /// The freshness bound is what makes the hold instant honest: the holder signs it, so the
     /// witness alone would let a holder judge an old message at a time of its choosing. Judged
@@ -349,17 +365,17 @@ impl EntryOperation {
     /// delivery then judge as of the recorded instant, which keeps them monotone in time.
     ///
     /// Post: `Ok(())` implies the carried entry passed the element witness; authority is judged
-    /// before any signature is verified, so a stranger costs the owner no verification.
+    /// before any signature is verified, so a stranger costs the holder no verification.
     pub(crate) fn validate_inbox_write(
         &self,
         writer: Did,
-        responsible: Option<Did>,
+        admitted: bool,
         now_ms: u128,
         network_id: u32,
     ) -> Result<()> {
         match self {
             EntryOperation::Extend(entry) => {
-                if responsible != Some(writer) {
+                if !admitted {
                     return Err(Error::RelayMessageHolderNotResponsible);
                 }
                 for held in entry.witnessed_inbox_elements(now_ms, network_id)? {
@@ -381,14 +397,4 @@ impl EntryOperation {
             EntryOperation::Overwrite(_) => Err(Error::RelayInboxOperationNotAllowed),
         }
     }
-}
-
-/// The authority law of a relay-carrier relocation: an ownership hand-off is accepted only from
-/// the receiver's predecessor, the owner whose interval the carrier is leaving. A hand-off from
-/// anyone else is not invalid, only not this receiver's to take yet, so the law is a predicate
-/// the batch skips on rather than an error it fails with.
-///
-/// Pre: `sender` is the authenticated origin of the hand-off.
-pub(crate) fn relocates_from_predecessor(sender: Did, predecessor: Option<Did>) -> bool {
-    predecessor == Some(sender)
 }

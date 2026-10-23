@@ -7,7 +7,6 @@ use super::egress::Egress;
 use super::egress::Protocol;
 use super::SwarmTransport;
 use crate::dht::entry::inbox::is_lasting_witness_failure;
-use crate::dht::entry::inbox::relocates_from_predecessor;
 use crate::dht::entry::AdmittedEntry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -281,7 +280,8 @@ impl<'data> StorageSyncBatch<'data> {
     }
 
     /// Whether the relocation law lets this batch carry `placed`: a data topic always, a relay
-    /// inbox only as an ownership hand-off from the receiver's predecessor.
+    /// inbox only as an ownership hand-off from a node that holds relay mail (see
+    /// `RelayNeighborhood::relocates_from`).
     ///
     /// Post: `false` skips the entry without acknowledging it, so its owner keeps it and offers
     /// it again on a later pass; it does not fail the batch, as the entry is not invalid, only
@@ -297,10 +297,7 @@ impl<'data> StorageSyncBatch<'data> {
         if !self.purpose.permits_source_cleanup() {
             return Ok(false);
         }
-        let predecessor = transport
-            .dht
-            .with_topology_state(|state| state.predecessor)?;
-        Ok(relocates_from_predecessor(self.sender, predecessor))
+        transport.dht.relocates_relay_from(self.sender)
     }
 
     async fn persist_one(&mut self, transport: &SwarmTransport) -> Result<StorageSyncBatchStep> {
@@ -365,11 +362,12 @@ fn should_persist_synced_entry(
     if !storage_sync_destination_accepts_placement(destination, placed.key) {
         return Ok(false);
     }
+    // A relay carrier is persisted by its holder alone (`Law (Holder)`).
+    if placed.entry.kind.is_relay_inbox() {
+        return transport.dht.holds_relay_key(placed.key);
+    }
 
-    match transport
-        .dht
-        .find_storage_owner_for(placed.key, placed.entry.kind)?
-    {
+    match transport.dht.find_storage_owner(placed.key)? {
         // Invariant: `Some(_)` is the local-storage branch. In non-virtual
         // Chord storage the DID carried by `Some` is the successor witness used
         // for fallback lookup, not a remote-owner denial.

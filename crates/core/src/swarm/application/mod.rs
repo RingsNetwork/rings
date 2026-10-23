@@ -37,6 +37,7 @@ mod relay;
 use std::sync::Arc;
 
 use delegation::DelegatedNamespaces;
+use futures::lock::Mutex as FuturesMutex;
 pub use inbox::ApplicationInbox;
 use inbox::ApplicationOutlet;
 pub(crate) use inbox::Delivered;
@@ -66,6 +67,9 @@ pub(crate) struct ApplicationPort {
     pub(crate) delegations: DelegatedNamespaces,
     /// Relay mail handed to the inbox and not yet retired from storage.
     pub(crate) relay_in_flight: RelayInFlight,
+    /// Held by the pass over this node's relay inbox: a pass, from local storage or from a fetch,
+    /// that finds another running leaves the elements to the next one.
+    pub(crate) relay_drain: FuturesMutex<()>,
 }
 
 impl ApplicationPort {
@@ -76,6 +80,7 @@ impl ApplicationPort {
             lookups: Arc::new(ApplicationLookups::default()),
             delegations: DelegatedNamespaces::default(),
             relay_in_flight: RelayInFlight::default(),
+            relay_drain: FuturesMutex::new(()),
         }
     }
 }
@@ -123,7 +128,12 @@ impl ApplicationData {
             | Message::QueryForTopoInfoSend(_)
             | Message::QueryForTopoInfoReport(_)
             | Message::Chunk(_)
-            | Message::ProbeAcknowledgement(_) => None,
+            | Message::ProbeAcknowledgement(_)
+            | Message::AnnounceRelayHolder(_)
+            | Message::FetchRelayInbox(_)
+            | Message::RelayInboxReport(_)
+            | Message::RelayCarrierRefused(_)
+            | Message::RelayCarrierHeld(_) => None,
         }
     }
 
