@@ -13,6 +13,10 @@ use rings_transport::delivery::DeliveryFuture;
 
 use super::connection::await_bounded_connection_close;
 use super::connection::DATA_CHANNEL_CLOSE_TIMEOUT;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+use super::deadline_hold;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+use super::deadline_hold::DeadlineHold;
 use super::outbound::DetachedAdmission;
 use super::outbound::DetachedAdmissionClaim;
 use super::AdmittedConnection;
@@ -48,6 +52,32 @@ const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 const DATA_CHANNEL_DELIVERY_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.delivery;
+
+/// `deadline`, one of a frame's two deadlines (its send acceptance and its delivery stall),
+/// unless a test holds the frame deadlines on this thread.
+fn frame_deadline(deadline: Duration) -> Duration {
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    if let Some(held) = deadline_hold::held_deadline(&FRAME_DEADLINES_HELD) {
+        return held;
+    }
+    deadline
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+thread_local! {
+    /// Whether this thread's frames wait out held send-accept and delivery-stall deadlines.
+    static FRAME_DEADLINES_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test builds: hold the send-accept and delivery-stall deadlines of every frame this thread
+/// sends, until the returned guard is dropped.
+///
+/// A test that parks a frame at a dummy gate or holds its delivery open then observes the
+/// parked state for as long as it runs, instead of racing the dummy profile's deadlines.
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn hold_frame_deadlines_for_test() -> DeadlineHold {
+    deadline_hold::hold(&FRAME_DEADLINES_HELD)
+}
 
 /// Stall law of a frame's delivery wait: expired once
 /// `now − max(admitted, last_settled) ≥ deadline`, i.e. no delivery to the peer settled for a
@@ -316,7 +346,8 @@ pub(super) async fn send_data_with_timeout(
         .connection()
         .send_data(data, lane, send_permit)
         .fuse();
-    let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_TIMEOUT).fuse();
+    let accept_deadline = frame_deadline(DATA_CHANNEL_SEND_ACCEPT_TIMEOUT);
+    let timeout = sleep(accept_deadline).fuse();
     pin_mut!(send, timeout);
 
     loop {
@@ -352,7 +383,7 @@ pub(super) async fn send_data_with_timeout(
                 }
                 return ChunkSendProgress::Ready(Err(Error::DataChannelSendQueueTimeout {
                     peer: did,
-                    timeout_ms: DATA_CHANNEL_SEND_ACCEPT_TIMEOUT.as_millis(),
+                    timeout_ms: accept_deadline.as_millis(),
                     bytes,
                     context,
                 }));
@@ -555,6 +586,7 @@ pub(super) async fn await_delivery_or_cancel(
     let delivery = delivery.fuse();
     pin_mut!(delivery);
     let admitted_at = Instant::now();
+    let stall_deadline = frame_deadline(DATA_CHANNEL_DELIVERY_TIMEOUT);
 
     loop {
         if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
@@ -564,12 +596,12 @@ pub(super) async fn await_delivery_or_cancel(
             admitted_at,
             progress.last_settled(),
             Instant::now(),
-            DATA_CHANNEL_DELIVERY_TIMEOUT,
+            stall_deadline,
         ) {
             terminate_accepted_connection(admitted, "delivery_timeout").await;
             return ChunkSendProgress::Ready(Err(Error::DataChannelDeliveryTimeout {
                 peer: did,
-                timeout_ms: DATA_CHANNEL_DELIVERY_TIMEOUT.as_millis(),
+                timeout_ms: stall_deadline.as_millis(),
                 context: phase,
             }));
         }

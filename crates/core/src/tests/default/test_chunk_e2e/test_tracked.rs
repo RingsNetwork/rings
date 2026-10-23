@@ -12,6 +12,7 @@ use crate::error::Result;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::SyncEntriesWithSuccessor;
+use crate::swarm::transport::hold_frame_deadlines_for_test;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::tests::default::connected_nodes;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
@@ -20,6 +21,7 @@ use crate::tests::default::dummy_hooks::PendingCloseGuard;
 use crate::tests::default::dummy_hooks::PendingDeliveryGuard;
 use crate::tests::default::test_chunk_e2e::large_storage_sync_entries;
 use crate::tests::default::test_chunk_e2e::wait_for_test_condition;
+use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::outbound_capacity_released;
 #[tokio::test]
 async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() -> Result<()> {
@@ -90,9 +92,16 @@ async fn test_tracked_storage_sync_timeout_closes_stalled_delivery_generation() 
     Ok(())
 }
 
+/// The tracked deadline and its cleanup grace retire a generation whose delivery and close
+/// never answer.
+///
+/// The frame deadlines are held, so the frame's delivery stall cannot retire the generation
+/// first: the tracked deadline is the only deadline that starts the cleanup, and the typed
+/// cleanup timeout is the verdict. Wall time bounds only a hang.
 #[tokio::test]
 async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
+    let _frame_deadlines = hold_frame_deadlines_for_test();
 
     let peer = node2.did();
     let attempt = node1
@@ -115,14 +124,14 @@ async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() ->
     )?;
 
     let error = tokio::time::timeout(
-        Duration::from_secs(1),
+        TEST_HANG_GUARD,
         node1
             .swarm
             .transport
             .send_payload_tracked_with_matching_delivery_deadline_for_test(payload),
     )
     .await
-    .expect("tracked cleanup grace must bound a nonresponsive generation")
+    .expect("tracked cleanup grace must end a nonresponsive generation")
     .expect_err("nonresponsive cleanup must return its typed timeout");
 
     assert!(matches!(
