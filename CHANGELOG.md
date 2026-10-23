@@ -20,6 +20,25 @@
     those messages not to arrive.
   - **Operator step.** None.
 
+- Relay-inbox mail survives a restart between its admission and the application's take (#936).
+  A relay delivery enters the window and a relay custody set in one write of its stream's
+  receiver record; a delivery still in custody is queued again on redelivery instead of being
+  refused as a replay, and is released from custody once the application takes it, before its
+  element is retired. Custody follows the carrier (each drain pass drops the deliveries whose
+  element left it) and holds at most `RELAY_INBOX_MAX_LEN` deliveries over the whole store; a
+  full custody defers the drain (the new `Error::RelayCustodyFull`). A crash after a take and
+  before its release delivers the message once more, with the same `ApplicationMessage::tx_id`,
+  which an application deduplicates by. The live path is unchanged, so relay mail more than the
+  replay window behind live traffic of its origin is still refused as the live path refuses it.
+  `TRANSACTION_REPLAY_RECORD_MAX_BYTES` is now 3850 and `TRANSACTION_REPLAY_STORE_MAX_BYTES`
+  28,314,240.
+  - **Operator step.** The receiver record format changes, so a replay store written by an
+    earlier version does not decode and fails every receiver stream closed. Before upgrading,
+    stop the node and remove the replay store: the `transaction-replay` directory beside the
+    native data store, or the browser IndexedDB database `<storage name>/transaction-replay`
+    (`rings-node/transaction-replay` for the default provider). This resets every stream's
+    replay window once, as clearing a stream does.
+
 - The onion entry-guard store is a durable cache (#911): the new `RecordAuthority::DurableCache`
   flushes every write as an authoritative store does (native: file and directory; browser:
   IndexedDB `durability: "strict"`), so a crash no longer loses or tears the guard set, while a

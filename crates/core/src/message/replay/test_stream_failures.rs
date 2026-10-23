@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use super::custody::RelayCustody;
 use super::store::receiver_record;
 use super::store::record_key;
 use super::store::sender_record;
@@ -265,7 +266,8 @@ async fn test_a_native_record_removed_outside_the_store_fails_its_stream_closed(
     let removed_file = {
         let storage = open_authoritative(&root).await?;
         let (window, _) = super::observe(None, 0, digest(1));
-        let (removed_key, removed_record) = receiver_record(&stream(1), &window)?;
+        let (removed_key, removed_record) =
+            receiver_record(&stream(1), &window, &RelayCustody::new())?;
         storage.put(removed_key.as_str(), &removed_record).await?;
         let (intact_key, intact_record) = sender_record(&stream(2), 4)?;
         storage.put(intact_key.as_str(), &intact_record).await?;
@@ -298,7 +300,7 @@ async fn test_a_torn_native_record_fails_its_stream_closed_until_cleared() -> Re
     let torn_file = {
         let storage = open_authoritative(&root).await?;
         let (window, _) = super::observe(None, 0, digest(1));
-        let (torn_key, torn_record) = receiver_record(&stream(1), &window)?;
+        let (torn_key, torn_record) = receiver_record(&stream(1), &window, &RelayCustody::new())?;
         storage.put(torn_key.as_str(), &torn_record).await?;
         let (intact_key, intact_record) = sender_record(&stream(2), 4)?;
         storage.put(intact_key.as_str(), &intact_record).await?;

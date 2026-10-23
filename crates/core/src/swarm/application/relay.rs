@@ -6,11 +6,13 @@
 //!                Consumed ──retired from storage──▶ forgotten (`retain`)
 //! ```
 //!
-//! Law (at least once within a run): a stored element is retired only after the application
-//! took its message from the inbox, so a later pass, a released inbox or a failed retirement
-//! before that never loses it; a restart in between still can, as the replay window refuses
-//! the redelivery (#936). Taking ends core's custody: what the application does with the
-//! message afterwards, including dropping it beyond its own queues, is the application's.
+//! Law (at least once across restarts): a stored element is retired only after the application
+//! took its message from the inbox and its release from relay custody committed (the signal
+//! recorded here fires only then), so a later pass, a released inbox, a failed retirement or a
+//! restart before that never loses it: a restart's redelivery finds it in custody and queues it
+//! again (#936, the custody law of `message::replay`). Taking ends core's custody: what the
+//! application does with the message afterwards, including dropping it beyond its own queues,
+//! is the application's.
 //! An untaken element whose inbox discarded it (a released inbox) stays stored and is not
 //! handed over again in this process.
 //! The table holds only elements still stored: each pass keeps the entries of the elements it
