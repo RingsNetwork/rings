@@ -21,7 +21,8 @@
 //! [`record_name`](crate::storage::KvStorageScan::record_name) and `U` the names of the records
 //! that do not restore: those the storage reports undecodable for their name (a torn, corrupt or
 //! unreadable file, or one holding another key's record, reported by name and never deleted),
-//! and those that decode but fail the conditions above. Then
+//! those it reports missing (witnessed as written, and no longer held), and those that decode
+//! but fail the conditions above. Then
 //!
 //! ```text
 //! unavailable(table, key) ⟺ name(record_key(table, key)) ∈ U
@@ -41,13 +42,16 @@
 //! unavailable. [`restore`] does not re-check the table bounds: admission maintains them, so only a
 //! state outside the program could exceed one.
 //!
-//! The laws cover every record the storage holds, provided the storage drops none itself: an
-//! absent record, a stream's record moved or renamed away included, is indistinguishable from a
-//! stream never seen (tracked in #915). The native daemon opens the replay store as an
-//! authoritative file store (#909), which evicts nothing and on unix flushes each write before
-//! its rename and the directory after it, so a crash leaves a record whole at its previous or its
-//! new value; a record file that cannot be read, or that is not the whole record of its own key,
-//! is reported by its file name and never deleted.
+//! The laws cover every record the storage witnesses, provided the storage drops none itself.
+//! The native daemon opens the replay store as an authoritative file store (#909), which evicts
+//! nothing, flushes each write before its rename and the directory after it (a write-through
+//! rename on Windows), so a crash leaves a record whole at its previous or its new value, and
+//! keeps a presence marker per record (#915), so a record removed, renamed or lost outside the
+//! store is reported missing by its file name rather than read as a stream never seen; a record
+//! file that cannot be read, or that is not the whole record of its own key, is reported by its
+//! file name and never deleted. The browser store loses only whole databases and evicts
+//! nothing (#923), so it needs no marker. A store lost whole is a stream never seen, for every
+//! stream: the documented reset.
 //!
 //! The record is an opaque byte string to the storage, so browser storage never sees structured
 //! keys or `u64` counters.
@@ -217,6 +221,9 @@ pub(super) enum RestoreFailure {
     /// The storage reports the record undecodable for its name: a torn, corrupt or unreadable
     /// record, or one holding another key's record.
     Undecodable,
+    /// The storage witnessed the record as written and no longer holds it: removed, renamed or
+    /// lost outside the store (#915).
+    Missing,
     /// The record stored under `key` decodes whole but is not a valid record of that key.
     Defective {
         /// Its storage key.
@@ -319,6 +326,10 @@ fn classify(record: ScannedRecord<ReplayRecord>, name: &impl Fn(&str) -> String)
             name,
             failure: RestoreFailure::Undecodable,
         },
+        ScannedRecord::Missing(UndecodableRecord { name }) => Contribution::Unrestorable {
+            name,
+            failure: RestoreFailure::Missing,
+        },
         ScannedRecord::Filed {
             key,
             value: ReplayRecord(bytes),
@@ -342,6 +353,7 @@ fn classify(record: ScannedRecord<ReplayRecord>, name: &impl Fn(&str) -> String)
 ///
 ///   scanned record r ──▶ classify
 ///     Undecodable(r) ────────────────────────▶ U[r.name]      := Undecodable
+///     Missing(r) ────────────────────────────▶ U[r.name]      := Missing
 ///     Filed(k, v), restore_record = Err(f) ──▶ U[name(k)]     := f
 ///     Filed(k, v), restore_record = Ok(s) ───▶ tables[s]      := s.state
 /// ```

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- An authoritative file store (the native replay store) marks every record it made durable with
+  an empty `<name>.p` file, so a record removed, renamed or lost outside the store fails its
+  stream closed as missing instead of restarting it from `First` (#915). A scan reports such a
+  record as the new `ScannedRecord::Missing`, a `get` refuses it with the new
+  `Error::StorageRecordMissing`, and the root vanishing while the node runs makes every marked
+  record missing. On Windows every rename of an authoritative store is write-through
+  (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`), since a directory cannot be flushed there.
+  - No operator step at upgrade: an existing store's records are marked at its first open.
+  - Clearing one failed stream now takes two deletions with the node stopped: the record file
+    and its marker `<name>.p` in `transaction-replay`. Deleting the file alone leaves the stream
+    failed closed.
+
 - The browser replay store commits every write with IndexedDB's `durability: "strict"` (#912), so
   a completed admission survives a system crash, not only a browser crash: the default hint is
   relaxed in Chromium since 121, and Gecko and WebKit do not flush a WAL commit by default.

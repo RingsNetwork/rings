@@ -131,6 +131,10 @@ web-sys = { version = "0.3.56", optional = true, features = [
     "WorkerGlobalScope",
 ] }
 
+# The write-through rename of the authoritative file store's durability law on Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 dashmap = "5"
 pretty_assertions = "1.4.0"

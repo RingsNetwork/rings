@@ -771,6 +771,11 @@ pub enum Error {
     #[error("Storage cannot decode {0}")]
     StorageRecordUndecodable(crate::storage::UndecodableRecord),
 
+    /// An authoritative storage witnessed a record as written, and no longer holds it: it was
+    /// removed or renamed outside the store, or lost by the file system. Its marker is kept.
+    #[error("Storage is missing {0}")]
+    StorageRecordMissing(crate::storage::UndecodableRecord),
+
     /// Message invalid: {0}
     #[error("Message invalid: {0}")]
     InvalidMessage(String),

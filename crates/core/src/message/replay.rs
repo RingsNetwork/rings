@@ -27,7 +27,7 @@
 //! **Law (fail closed per stream, #910).** The first operation restores the store from one scan
 //! of the storage and caches the result, including every record that does not restore. For a
 //! stream `s` whose stored record is damaged (torn, corrupt or unreadable, or holding another
-//! key's record):
+//! key's record) or missing (witnessed as written by the store, and no longer held, #915):
 //!
 //! ```text
 //! ∀ transition t of s.   t = Err(TransactionReplayStreamUnavailable { s, record })
@@ -39,10 +39,11 @@
 //!
 //! so no replay is admitted from, and no sequence is reused by, such a stream, while every stream
 //! already in the store keeps its guarantee; a new stream sees each such record hold one slot of
-//! its table's bound. The law covers the records the storage holds: a record that is absent
-//! (deleted, or never made durable, as a rename can be on a non-unix target) is indistinguishable
-//! from a stream never seen, and its stream restarts from `First` (tracked in #915). Each record
-//! write of the native store is flushed, which bounds the node-wide transition rate (about 50 per
+//! its table's bound. The law covers the records the storage witnesses: the native store keeps a
+//! presence marker per record, so a record deleted or renamed outside it is missing, not a
+//! stream never seen; only a store lost whole (its directory, or the browser's database) reads
+//! as a stream never seen, for every stream, which is the reset below. Each record write of the
+//! native store is flushed, which bounds the node-wide transition rate (about 50 per
 //! second on macOS, see the replay chapter; group commit is tracked in #916). The unrestorable
 //! records are counted ([`ReplayCounters::unrestorable_record`]), each refusal is counted
 //! ([`ReplayCounters::unavailable_stream`]), and each is logged once at load with its storage
@@ -52,7 +53,8 @@
 //! **Recovery.** An operator clears one failed stream, accepting a replay-window reset for that
 //! stream alone, by removing the record the refusal and the log name while the node is stopped,
 //! and then starting it: the native daemon keeps each record as the file of that name in the
-//! `transaction-replay` directory beside its data store, and a browser provider keeps it as the
+//! `transaction-replay` directory beside its data store, with its presence marker `<name>.p`
+//! beside it, which the operator removes too; a browser provider keeps it as the
 //! row of that key in the IndexedDB database and object store `<storage name>/transaction-replay`
 //! (see the replay chapter for the steps). After the restart the stream starts from `First`: an
 //! unexpired transaction of a cleared receiver stream may be admitted once more, and a cleared
