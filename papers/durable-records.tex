@@ -1,0 +1,688 @@
+\documentclass[journal]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{url}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\newtheorem{law}{Law}
+\newtheorem{invariant}{Invariant}
+\newtheorem{proposition}{Proposition}
+\newtheorem{obligation}{Obligation}
+
+\newcommand{\Nm}{\mathcal{N}}
+\newcommand{\Vl}{\mathcal{V}}
+\newcommand{\dom}{\operatorname{dom}}
+\newcommand{\rec}{\operatorname{rec}}
+\newcommand{\wit}{\operatorname{wit}}
+\newcommand{\name}{\operatorname{name}}
+\newcommand{\obs}{\operatorname{observe}}
+\newcommand{\rmin}{\operatorname{rmin}}
+\newcommand{\stored}{\operatorname{stored}}
+\newcommand{\req}{\operatorname{req}}
+\newcommand{\Ok}{\mathsf{Ok}}
+\newcommand{\Err}{\mathsf{Err}}
+\newcommand{\Filed}{\mathsf{Filed}}
+\newcommand{\Undec}{\mathsf{Undecodable}}
+\newcommand{\Missing}{\mathsf{Missing}}
+\newcommand{\Exhausted}{\mathsf{BudgetExhausted}}
+\newcommand{\Volatile}{\mathsf{Vol}}
+\newcommand{\Cached}{\mathsf{Cch}}
+\newcommand{\Durable}{\mathsf{Dur}}
+\newcommand{\Rebuild}{\mathsf{Reb}}
+\newcommand{\Retained}{\mathsf{Ret}}
+\newcommand{\Auth}{\mathsf{Aut}}
+\newcommand{\Retire}{\textsc{Retire}}
+\newcommand{\Keep}{\textsc{Keep}}
+\newcommand{\Requeue}{\textsc{Requeue}}
+\newcommand{\Defer}{\textsc{Defer}}
+\newcommand{\U}{\mathcal{U}}
+\newcommand{\K}{\mathcal{K}}
+\newcommand{\W}{\mathcal{W}}
+\newcommand{\issue}[1]{\#{#1}}
+\newcommand{\jsq}[1]{\texttt{#1}}
+
+\author{Ryan~J.~Kung%
+\thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
+Manuscript created October 23, 2026.  This document specifies the durability model of the
+local stores of Rings before 1.0 (\texttt{rings-core}, modules \texttt{storage},
+\texttt{message::replay} and \texttt{swarm::inbox}; \texttt{rings-node}, module
+\texttt{onion::entry\_guard}).  It is the law for issues \issue{911}, \issue{912},
+\issue{915}, \issue{923} and \issue{936} of \texttt{RingsNetwork/rings}.}}
+\title{\huge Durable Records:\\
+One Presence and Survival Law\\
+for the Local Stores of a Rings Node}
+\date{}
+
+\IEEEaftertitletext{%
+\vspace{0.5\baselineskip}%
+\noindent\hfill
+\parbox{0.90\textwidth}{%
+{\centering\bfseries Abstract\par}%
+\vspace{0.4\baselineskip}%
+\noindent
+A Rings node keeps security state (transaction replay windows), privacy state (onion entry
+guards) and custody state (relay mail) in local key-value stores on two platform families:
+a native file system and a browser's IndexedDB.  Five open defects of these stores reduce to
+two predicates: \emph{presence}, whether a record that should exist exists, and
+\emph{survival}, whether a completed write outlives a crash.  We give one model for both.
+A store's authority is a point of the product of a crash chain
+$\Volatile\sqsubset\Cached\sqsubset\Durable$ and a meaning chain
+$\Rebuild\sqsubset\Retained\sqsubset\Auth$; each point fixes what an absent record means and
+which obligations the platform must discharge.  We choose a per-record presence marker as
+the witness that separates a lost authoritative record from a never-written one, prove it
+sound and complete for partial loss, and prove that no witness in the same failure domain
+detects total loss.  We state the crash obligation per platform, verified against the
+Chromium, Gecko and WebKit sources (only \jsq{strict} durability flushes in all three),
+forbid eviction for authoritative records, and give a custody law that makes relay mail
+survive a restart between admission and consumption, with the impossibility result that
+bounds what any receiver can do for mail that has fallen behind live traffic.
+}\hfill\null\par
+\vspace{0.5\baselineskip}}
+
+\begin{document}
+\maketitle
+\emergencystretch=1.5em
+
+\section{Problem}\label{sec:problem}
+
+The defects, each named by its issue:
+\begin{description}[leftmargin=1.2em,style=nextline]
+\item[\issue{915}] An absent native replay record is indistinguishable from a stream never
+seen, so its stream restarts from $\mathsf{First}$; on non-unix targets a completed rename
+can roll back.
+\item[\issue{923}] The browser replay store evicts its least recently used row at its row
+cap, so a retained stream can restart from $\mathsf{First}$.
+\item[\issue{912}] Browser replay writes use the default durability hint, so a completed
+admission can roll back after an OS crash.
+\item[\issue{911}] The entry-guard store is disposable: a crash can lose or tear the guard
+set, re-selecting the first hop.
+\item[\issue{936}] Relay mail admitted into the replay window and queued, but not taken
+before a restart, is refused as a replay on redelivery and lost.
+\end{description}
+\issue{915}, \issue{923} are presence defects; \issue{912}, \issue{911} are survival defects;
+\issue{936} is a presence defect of a fact that lives in no store at all (that the queued mail
+was never consumed).  Section~\ref{sec:model} fixes the model, Section~\ref{sec:lattice} the
+authority lattice, Sections~\ref{sec:witness}--\ref{sec:custody} the five laws, and
+Section~\ref{sec:plan} the order of implementation.
+
+\section{Model}\label{sec:model}
+
+\begin{definition}[Store]\label{def:store}
+A store is a finite partial map $\sigma:\Nm\rightharpoonup\Vl$ from record names to values.
+Its operations are $\mathrm{put}(n,v)$, $\mathrm{rm}(n)$ and $\mathrm{get}(n)$, each
+returning $\Ok$ or $\Err$; $\mathrm{scan}$ returns one classification per name
+(Section~\ref{sec:witness}).  For \texttt{FileStorage} the name of key $k$ is
+$\name(k)=\mathrm{hex}(\mathrm{SHA1}(k))$; for \texttt{IdbStorage} it is $k$.
+\end{definition}
+
+\begin{definition}[History, completion]\label{def:history}
+A history is $h=o_1\cdots o_k\,o_{k+1}^{?}$: operations $o_1..o_k$ returned, $o_{k+1}$ may
+be in flight.  Let $\sigma_i=o_i\circ\cdots\circ o_1(\sigma_0)$, with $\sigma_{k+1}=\sigma_k$
+when nothing is in flight.  An operation is \emph{completed} iff it returned $\Ok$.
+\end{definition}
+
+\begin{definition}[Crash, recovery image]\label{def:crash}
+A crash ends the process (\emph{process crash}) or the operating system
+(\emph{system crash}: kernel panic, power loss).  The recovery image $R_P(h)$ is the set of
+maps the next open of the store can read on platform $P$ after a crash at the end of $h$.
+\end{definition}
+
+\begin{definition}[Loss events]\label{def:loss}
+A loss event is a change of the store's physical state that no operation of the store made:
+\begin{itemize}[leftmargin=1.2em]
+\item $\lambda_{\mathrm{part}}(S)$, \emph{partial loss}: the records of $S\subsetneq\dom\sigma$
+vanish (media error repaired by \texttt{fsck}, an operator removing or renaming one file, a
+completed rename rolled back by a platform that does not discharge
+Obligation~\ref{ob:survival});
+\item $\lambda_{\mathrm{tot}}$, \emph{total loss}: the whole failure domain vanishes (the
+store's directory, an IndexedDB database or origin, a process heap).
+\end{itemize}
+\end{definition}
+
+Loss events are what the platform or the operator does, not what an adversary forges: a
+party that can write the store can also write any witness of it, so nothing below
+authenticates a store, and nothing models a state the program and platform cannot reach.
+
+\subsection{Obligations}
+
+\begin{obligation}[Atomicity, A]\label{ob:atomicity}
+$\forall\sigma'\in R_P(h).\ \forall n.\ \sigma'(n)\in\{\sigma_i(n): i\le k+1\}\cup\{\bot\}$:
+a record is never torn.
+\end{obligation}
+
+\begin{obligation}[Survival, D]\label{ob:survival}
+$\forall\sigma'\in R_P(h).\ \forall n.\ \sigma'(n)\in\{\sigma_k(n),\sigma_{k+1}(n)\}$:
+every completed write and removal survives a process or system crash, and the one in
+flight is either whole or absent.  D implies A.
+\end{obligation}
+
+\begin{obligation}[No eviction, N]\label{ob:noevict}
+$\mathrm{put}(n,v)$ on $\sigma$ yields $\sigma[n\mapsto v]$ or returns
+$\Err(\Exhausted)$ with $\sigma$ unchanged; no operation removes a name it was not given.
+\end{obligation}
+
+\begin{obligation}[Witnessed presence, W]\label{ob:witness}
+After any history and any partial loss $\lambda_{\mathrm{part}}(S)$, $\mathrm{scan}$ reports
+every $n\in S\cap\dom\sigma_k$ as $\Missing(n)$, and reports $\Missing(n)$ only for an $n$
+whose record some $\mathrm{put}$ made durable.
+\end{obligation}
+
+\begin{obligation}[Fail closed, F]\label{ob:failclosed}
+A record that does not decode is reported and kept; only its owner or an operator removes it.
+\end{obligation}
+
+\section{The authority lattice}\label{sec:lattice}
+
+\begin{definition}[Crash chain]\label{def:crashchain}
+$C=\Volatile\sqsubset\Cached\sqsubset\Durable$ with obligations
+$O(\Volatile)=\emptyset$ ($R_P(h)=\{\emptyset\}$ at every restart), $O(\Cached)=\emptyset$
+(any $\sigma_i(n)$, $\bot$ or a torn record), $O(\Durable)=\{A,D\}$.
+\end{definition}
+
+\begin{definition}[Meaning chain]\label{def:meaningchain}
+$M=\Rebuild\sqsubset\Retained\sqsubset\Auth$, read as what $\sigma'(n)=\bot$ means to the
+owner:
+\begin{itemize}[leftmargin=1.2em]
+\item $\Rebuild$: $\bot$ is the owner's default; any record may be dropped;
+\item $\Retained$: $\bot$ is ``never written, or retired by the owner''; a loss is a
+liveness failure;
+\item $\Auth$: $\bot$ is ``never written''; a loss is a safety failure.
+\end{itemize}
+$O(\Rebuild)=\emptyset$, $O(\Retained)=\{N\}$, $O(\Auth)=\{N,W,F\}$.
+\end{definition}
+
+\begin{definition}[Authority]\label{def:authority}
+An authority is $a=(c,m)\in C\times M$, ordered componentwise, with
+$O(c,m)=O(c)\cup O(m)$.  $C\times M$ is a lattice (a product of chains, meet and join
+componentwise) and $O$ is monotone: $a\sqsubseteq b\Rightarrow O(a)\subseteq O(b)$.
+\end{definition}
+
+\begin{law}[Admissibility]\label{law:admissible}
+Let $\req(\Rebuild)=\Volatile$ and $\req(\Retained)=\req(\Auth)=\Durable$.  A store may be
+opened at $(c,m)$ only if $c\sqsupseteq\req(m)$.
+\end{law}
+\begin{proof}[Justification]
+Under $c\sqsubset\Durable$ a crash may lose a completed write, so $\bot$ after recovery can
+be a loss; a meaning above $\Rebuild$ asserts that $\bot$ is not a loss.
+\end{proof}
+
+The existing \texttt{RecordAuthority} is the two-point chain
+$\mathsf{Disposable}=(\Cached,\Rebuild)\sqsubset\mathsf{Authoritative}=(\Durable,\Auth)$
+(\#909, \#910, \#914).  The law adds two points:
+$\mathsf{DurableCache}=(\Durable,\Rebuild)$ for state whose loss is a downgrade, and
+$\mathsf{Retained}=(\Durable,\Retained)$ for custody.  $\mathsf{MemStorage}$ is
+$(\Volatile,-)$: admissible only at $\Rebuild$.
+
+\begin{table}[t]
+\centering
+\caption{Stores of a node and the authority the law assigns}\label{tab:stores}
+\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+Store & Today & Law\\
+\midrule
+DHT data (native, browser) & $(\Cached,\Rebuild)$ & $(\Cached,\Rebuild)$\\
+\quad relay carriers in it & $(\Cached,\Rebuild)$ & $(\Durable,\Retained)$ \issue{1021}\\
+Measure, evidence & $(\Cached,\Rebuild)$ & $(\Cached,\Rebuild)$\\
+Entry guards & $(\Cached,\Rebuild)$ & $(\Durable,\Rebuild)$ \issue{911}\\
+Replay (native) & $(\Durable,\Auth)^{\ast}$ & $(\Durable,\Auth)$ \issue{915}\\
+Replay (browser) & $(\Cached,\Rebuild)^{\dagger}$ & $(\Durable,\Auth)$ \issue{912},\issue{923}\\
+Replay (no store given) & $(\Volatile,\Auth)$ & refused \issue{1022}\\
+\bottomrule
+\end{tabular}
+\\[2pt]
+{\footnotesize $^{\ast}$W missing; D only on unix.  $^{\dagger}$Decodes as $\Auth$ (F) but
+neither D (relaxed commit) nor N (row-cap eviction) holds.}
+\end{table}
+
+Table~\ref{tab:stores} is the whole classification.  The two rows marked with new issues are
+inadmissible points the law exposes outside the five issues: relay carriers are the only
+copy of held mail (\issue{1021}), and a provider given no replay store runs replay at
+$(\Volatile,\Auth)$ (\issue{1022}).
+
+\section{Presence witness}\label{sec:witness}
+
+\subsection{Choice}
+
+W needs, at restore, a set $\wit\subseteq\Nm$ of names that were durably written, so that
+$\wit\setminus\dom\sigma'$ are the lost names.  Fail-closed per stream (\#910) is keyed by
+record name: $\mathrm{unavailable}(s)\iff\name(\rec(s))\in\U$.  A witness that does not
+name the lost record cannot feed $\U$.  The candidates:
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lccl@{}}
+\toprule
+Witness & names loss & $O(1)$/new key & operator step\\
+\midrule
+count $|\dom\sigma|$ & no & yes & edit count\\
+epoch per record & no & yes & edit epoch\\
+manifest log & yes & yes & edit binary log\\
+per-record marker & yes & yes & remove a file\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A count or an epoch detects that something is missing but not which stream, so it can only
+fail the whole store closed: one lost file would close every stream.  A manifest names the
+loss but turns the operator's per-stream recovery into editing a binary log, and its torn
+tail needs its own law.  We choose the marker.
+
+\begin{definition}[Presence marker]\label{def:marker}
+For an authoritative native store, the marker of name $n$ is an empty file $n.\mathtt{p}$ in
+the store's own directory.  Let $R$ be the set of record names listed, $P$ the set of names
+with a marker, both from one listing.
+\end{definition}
+
+\begin{law}[Write order]\label{law:writeorder}
+An authoritative $\mathrm{put}(n,v)$ runs
+\begin{align*}
+&\mathrm{write}(n.\mathtt{tmp});\ \mathrm{sync};\ \mathrm{rename}(n.\mathtt{tmp},n);\
+\mathrm{sync}_{\mathrm{dir}};\\
+&[\,n\notin P:\ \mathrm{create}(n.\mathtt{p});\ \mathrm{sync}_{\mathrm{dir}}\,]
+\end{align*}
+and returns $\Ok$ only after the last step.  An authoritative $\mathrm{rm}(n)$ runs
+$\mathrm{remove}(n.\mathtt{p});\mathrm{sync}_{\mathrm{dir}};\mathrm{remove}(n);
+\mathrm{sync}_{\mathrm{dir}}$.
+\end{law}
+
+\begin{invariant}[Marker implies record]\label{inv:marker}
+In every physical state the program and a crash reach, $P\subseteq R$.
+\end{invariant}
+\begin{proof}
+A marker is created only after the rename that makes $n\in R$ is flushed, and removed
+before the record.  A crash between any two steps of Law~\ref{law:writeorder} leaves either
+$P$ unchanged or the record already durable; by D the flushed prefix is what recovery sees.
+\end{proof}
+
+\begin{law}[Restore]\label{law:restore}
+Restore classifies, from one listing:
+\begin{align*}
+n\in R,\ \text{decodes as its key} &\ \mapsto\ \Filed(k,v),\\
+n\in R,\ \text{otherwise} &\ \mapsto\ \Undec(n),\\
+n\in P\setminus R &\ \mapsto\ \Missing(n),
+\end{align*}
+and for $n\in R\setminus P$ creates $n.\mathtt{p}$ (flushed) before the store serves its
+first operation.  The owner's $\U$ is $\{n:\Undec(n)\}\cup\{n:\Missing(n)\}$.
+\end{law}
+
+$R\setminus P$ is the crash between the rename and the marker: the record is whole and
+present, so it witnesses itself, and the repair restores $P=R$.
+
+\begin{proposition}[W holds]\label{prop:w}
+On a platform that discharges D, Laws~\ref{law:writeorder} and \ref{law:restore} discharge
+Obligation~\ref{ob:witness} for every partial loss that leaves markers: a removed or renamed
+record file, a record lost by \texttt{fsck}, a rolled back rename of a new record.
+\end{proposition}
+\begin{proof}
+\emph{Complete.}  Let $n\in\dom\sigma_k$; its first $\mathrm{put}$ completed, so
+$n\in P$ (Law~\ref{law:writeorder}).  If $n$ is lost and its marker is not, $n\in P\setminus
+R$, reported $\Missing$.  \emph{Sound.}  $\Missing(n)$ requires $n\in P$, and a marker
+is created only after a put of $n$ flushed its rename (Law~\ref{law:writeorder}), so that
+record was durable.  A crash before the marker's creation leaves $n\in R\setminus P$, never
+$\Missing$: a put that never reached its rename is never reported lost.
+\end{proof}
+
+\begin{proposition}[Total loss is undetectable]\label{prop:total}
+No witness stored in the failure domain of the records detects $\lambda_{\mathrm{tot}}$.
+\end{proposition}
+\begin{proof}
+After $\lambda_{\mathrm{tot}}$ the physical state equals that of a store never opened; any
+function of the physical state takes the same value on both.
+\end{proof}
+
+Total loss is therefore the documented reset: it is what the operator does by removing the
+replay store, and its consequences are those of clearing every stream (the recovery law of
+\texttt{message::replay}): a receiver may admit an unexpired transaction once more, and a
+sender restarts at sequence $0$, which its destinations see as $\mathsf{Stale}$ or
+$\mathsf{Fork}$ until it passes their retained high watermark.  A witness outside the domain
+(a sibling file in the data directory) would detect a vanished store directory, but the only
+producer of that state is the operator, whose clearing step it would then have to name; we
+do not add it.
+
+\begin{law}[Read agreement]\label{law:readagree}
+An authoritative $\mathrm{get}(k)$ for $\name(k)\in P$ whose record is not readable as the
+record of $k$ returns $\Err$, never $\Ok(\bot)$; $\Ok(\bot)$ means $\name(k)\notin P$.
+\end{law}
+
+This closes the two cases added to \issue{915} in review: a store whose root vanishes while
+the node runs answers $\Err$ for every witnessed name (as its persist already fails), and an
+upper-cased record file, which a case-insensitive volume still opens through $\mathrm{get}$,
+is $\Missing$ to both $\mathrm{get}$ and $\mathrm{scan}$ because its lower-case marker
+remains.
+
+\begin{assumption}[Browsers lose whole origins]\label{as:idbloss}
+A browser deletes stored data per origin, never part of it~\cite{MDNEviction}; this
+includes storage-pressure eviction of a non-persistent origin and WebKit's deletion of
+script-written data after seven days without user interaction.
+\end{assumption}
+
+\begin{proposition}[IndexedDB needs no marker]\label{prop:idbwitness}
+Under Assumption~\ref{as:idbloss} and N, an IndexedDB store discharges W with $P=\emptyset$.
+\end{proposition}
+\begin{proof}
+Every IndexedDB write is a transaction, atomic by the specification~\cite{IndexedDB3}; with
+N the program removes no row it was not told to.  By Assumption~\ref{as:idbloss} the
+platform loses no proper subset of a database's rows, so no $\lambda_{\mathrm{part}}$ is
+reachable and W holds vacuously; total loss is Proposition~\ref{prop:total}.
+\end{proof}
+
+
+
+\textbf{Cost.}  W adds one marker creation and one directory flush to the first
+$\mathrm{put}$ of each name, and nothing to later puts; restore lists one directory, as
+today.  The replay store creates a name once per stream, so the cost is per new stream, not
+per transition.
+
+\textbf{Operator step.}  To clear one failed stream, stop the node and remove both
+\texttt{<name>} and \texttt{<name>.p} from \texttt{transaction-replay}.  A store written
+before W has $P=\emptyset$ and is repaired by Law~\ref{law:restore} at its first open: no
+migration is needed.
+
+\section{Survival per platform}\label{sec:survival}
+
+D is a property of the platform's commit, so each platform discharges it separately.
+
+\textbf{Unix.}  Law~\ref{law:writeorder} with
+$\mathrm{sync}=\mathtt{File::sync\_all}$, which the Rust standard library maps to
+$\mathtt{fcntl}(\mathtt{F\_FULLFSYNC})$ on Apple targets and to $\mathtt{fsync}$
+elsewhere~\cite{AppleFsync}, and $\mathrm{sync}_{\mathrm{dir}}$ the same on the directory.
+The store's own directory entry is flushed at open, with its ancestors.  The rename-and-sync
+pattern is the one crash-consistency studies find portable across unix file
+systems~\cite{Pillai2014}.  \texttt{test\_durability} model-checks the step plans over every
+crash point.
+
+\textbf{Windows.}  A directory cannot be opened for flushing through the standard library,
+so $\mathrm{sync}_{\mathrm{dir}}$ is a no-op today and a completed rename can roll back
+(\issue{915}).  The windows gateway is built and run in CI, so the target is in scope.
+\begin{law}[Write-through rename]\label{law:writethrough}
+On Windows every directory mutation of a $\Durable$ store is a rename by
+$\mathtt{MoveFileExW}$ with
+$\mathtt{MOVEFILE\_REPLACE\_EXISTING}\mid\mathtt{MOVEFILE\_WRITE\_THROUGH}$, which does not
+return until the move is on disk~\cite{MoveFileEx}: a put renames its flushed temporary
+file; a marker is created as a flushed temporary file renamed into place; a removal renames
+its file to \texttt{.tmp} and then deletes it.
+\end{law}
+A removal's deletion need not be durable: a \texttt{.tmp} left by a crash is removed at the
+next open (the index law of \texttt{FileStorage}), and it is not a record, so it never
+reappears.
+
+\textbf{IndexedDB.}  The specification makes the durability hint advisory~\cite{IndexedDB3}.
+What each engine does, read from its source:
+
+\begin{center}
+\footnotesize\raggedright
+\begin{tabular}{@{}p{0.17\columnwidth}p{0.42\columnwidth}p{0.31\columnwidth}@{}}
+\toprule
+Engine & \jsq{default} & \jsq{strict}\\
+\midrule
+Chromium & relaxed since 121: complete fires once the data reaches the OS
+buffer~\cite{ChromeDurability} & flush before complete\\
+Gecko & SQLite WAL, synchronous \texttt{NORMAL} (\texttt{FULL} under a
+pref)~\cite{GeckoIDB} & synchronous \texttt{EXTRA}\\
+WebKit & SQLite WAL, \texttt{synchronous} left at the library default~\cite{WebKitIDB} &
+a \texttt{FULL} WAL checkpoint after commit\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+In WAL mode a commit under \texttt{synchronous=NORMAL} survives a process crash but may roll
+back after a system crash~\cite{SQLiteWAL}, which is Chromium's relaxed behaviour too.  So
+\jsq{default} discharges D against a process crash in all three engines, and against a
+system crash in none that we can rely on.
+
+\begin{law}[Strict commit]\label{law:strict}
+Every read-write transaction of an IndexedDB store at $c=\Durable$ is opened with
+$\{\mathit{durability}:\text{\jsq{strict}}\}$, and the store reports $\Ok$ only on the
+transaction's \texttt{complete} event.
+\end{law}
+
+Under Law~\ref{law:strict} D holds to the strength of each engine's strongest commit.  We
+claim no more: whether that commit also flushes a drive's write cache is the engine's
+choice, as \texttt{F\_FULLFSYNC} is ours on native Apple targets.  \texttt{rexie}~0.4 opens
+no transaction with options; the binding is
+\texttt{IdbDatabase::\allowbreak transaction\_with\_\allowbreak str\_sequence\_\allowbreak
+  and\_mode\_\allowbreak and\_options}, which
+\texttt{web-sys} gates behind \texttt{web\_sys\_unstable\_apis}, so the implementation either
+enables that cfg for the core crate or passes the options object through \texttt{js-sys}.
+
+\begin{corollary}[Authoritative reads need no write]\label{cor:idbread}
+\texttt{IdbStorage} restamps a row on every $\mathrm{get}$ to order eviction.  Under N
+eviction never runs, so an authoritative $\mathrm{get}$ may be a read-only transaction.
+\end{corollary}
+
+\section{No eviction}\label{sec:noevict}
+
+\begin{law}[Refuse, never evict]\label{law:refuse}
+For $m\sqsupseteq\Retained$ on any backend: a $\mathrm{put}$ of a new name into a full store
+returns $\Err(\Exhausted)$ with the store unchanged; rewriting an existing name never needs
+room; an open with a capacity below the stored count fails.
+\end{law}
+
+\begin{proposition}[Eviction is a forged absence]\label{prop:evict}
+If an authoritative IndexedDB store evicts, W fails.
+\end{proposition}
+\begin{proof}
+An evicted row $n\in\dom\sigma_k$ is gone with no marker (Proposition~\ref{prop:idbwitness}
+has $P=\emptyset$), so restore reports nothing for it and its stream restarts from
+$\mathsf{First}$: exactly \issue{923}.
+\end{proof}
+
+With Law~\ref{law:refuse} the browser replay store matches the native one (\#914): a new
+stream past the bound fails closed, and the row capacity
+$\mathtt{TRANSACTION\_REPLAY\_STORE\_MAX\_RECORDS}$ becomes a refusal bound rather than a
+sizing hope.  Whether a remote peer can drive a browser node to the cap stops mattering to
+safety; reaching it costs only new streams.
+
+\section{Entry guards}\label{sec:guards}
+
+\begin{law}[Guards are a durable cache]\label{law:guards}
+The entry-guard store is opened at $(\Durable,\Rebuild)$, \texttt{DurableCache}: writes
+discharge D (native: Law~\ref{law:writeorder} without markers, Law~\ref{law:writethrough};
+browser: Law~\ref{law:strict}); a guard record that is absent or does not decode is retired
+and the set is re-selected from scratch, logged at \texttt{warn} with the record's name.
+\end{law}
+
+\begin{proposition}[Guards change only by reconciliation]\label{prop:guards}
+Across a crash, the guard set the next selection reads is the last one written, unless a
+loss event (Definition~\ref{def:loss}) removed it.
+\end{proposition}
+\begin{proof}
+D gives $\sigma'(n)\in\{\sigma_k(n),\sigma_{k+1}(n)\}$ for the one record per network; both
+are whole sets that \texttt{reconcile\_guard\_state} itself produced.
+\end{proof}
+
+The meaning stays $\Rebuild$, which answers the policy question of \issue{911}: guards are
+privacy state whose loss is a downgrade (one re-selection of the first hop), not a safety
+failure, so failing onion routing closed on an undecodable record (F) would trade
+availability for nothing the guard set protects.  Under D an undecodable guard record is no
+longer reachable by a crash, only by a loss event or a schema change, which the operator
+cleans before 1.0.  The browser fallback to an in-memory guard store when IndexedDB cannot
+open is $(\Volatile,\Rebuild)$, admissible, and already logged.
+
+\section{Relay custody}\label{sec:custody}
+
+\subsection{Model}
+
+A relay element $e$ carries a signed transaction of stream $s$ (origin account, this node,
+class) at sequence $q$ with digest $h$; write $e=(s,q,h)$.  The actors:
+\begin{itemize}[leftmargin=1.2em]
+\item the carrier $\stored(d)$: the elements held for $d$ at $d+1$, retired only by $d$'s
+covering remove up to an element's dot;
+\item the receiver window $\W_s$, persisted at $(\Durable,\Auth)$, with the pure transition
+$\obs(\W_s,q,h)\in\{\mathsf{First},\mathsf{Advance},\mathsf{Late},\mathsf{Replay},
+\mathsf{Fork},\mathsf{Stale}\}$;
+\item the application inbox, volatile; \emph{taking} a message is where core's custody
+ends.
+\end{itemize}
+Today a drain admits $h$ into $\W_s$ and queues the message; a restart before the take
+loses the queue but not $\W_s$, so the redelivery observes $\mathsf{Replay}$ and is
+retired (\issue{936}).  The fact that is lost is ``$h$ was admitted for $e$ and not taken''.
+
+\begin{definition}[Custody set]\label{def:custody}
+The custody set of stream $s$ is $\K_s\subseteq\mathbb{N}\times\mathrm{Digest}$: the relay
+deliveries of $s$ admitted and not yet taken.  The receiver record of $s$ is the pair
+$(\W_s,\K_s)$, one record under the existing key, so one write commits both atomically (A
+on both platforms).
+\end{definition}
+
+Placing $\K_s$ in the receiver record, and not in the application or a separate store, is
+forced by two constraints: core never consults the application (the layering law), and a
+second record could not be committed atomically with $\W_s$, which would reopen the window
+between admission and its custody.
+
+\begin{law}[Custody]\label{law:custody}
+A drain pass first restricts custody to the carrier,
+$\K_s\leftarrow\K_s\cap\{(q,h):(s,q,h)\in\stored(d)\}$ (written only if it changed), then
+offers each element $e=(s,q,h)$ it has not handed over in this process by
+the first arm that applies:
+\begin{enumerate}[leftmargin=1.5em]
+\item $(q,h)\in\K_s$: $\Requeue$;
+\item $|\bigcup_s\K_s|=\mathtt{RELAY\_INBOX\_MAX\_LEN}$: $\Defer$;
+\item $\obs(\W_s,q,h)=(\W_s',v)$ with $v$ permitting dispatch: commit
+$(\W_s',\K_s\cup\{(q,h)\})$, then queue;
+\item otherwise: $\Retire$,
+\end{enumerate}
+where $\Requeue$ queues the message again without touching $\W_s$, and every queueing
+reserves room first ($\Defer$ when there is none, as today).  When the application takes a
+message of $e$, core commits $(\W_s,\K_s\setminus\{(q,h)\})$, the \emph{release}; the
+element is retired from the carrier only after its release committed.  The live path is
+unchanged: it observes $\W_s$ alone.
+\end{law}
+
+\begin{lemma}[Bounded custody]\label{lem:bound}
+$|\bigcup_s\K_s|\le\mathtt{RELAY\_INBOX\_MAX\_LEN}$ ($64$), so a receiver record grows by
+at most $64$ entries of $8+32$ bytes over the whole store.
+\end{lemma}
+\begin{proof}
+The $\Defer$ arm refuses a new entry at the bound, and the restriction step keeps only
+entries of elements still stored, of which a carrier holds at most $64$.
+\end{proof}
+
+\begin{proposition}[At least once across restart]\label{prop:atleastonce}
+Let the carrier satisfy $(\Durable,\Retained)$ (\issue{1021}).  In every history with any
+number of crashes, an element $e=(s,q,h)$ leaves the carrier only if (i) the application
+took a message of $e$, (ii) the live path would drop $h$ too, or (iii) its retention bound
+elapsed.
+\end{proposition}
+\begin{proof}
+The drain retires $e$ in two arms.  After a release: the release follows a take, case (i).
+In the last arm of Law~\ref{law:custody}: $(q,h)\notin\K_s$ and $\obs$ refuses.  If $\obs$
+is $\mathsf{Replay}$, $h$ is in $\W_s$, so it was admitted earlier either live (dispatched
+to the application, case (ii)) or by a relay delivery, which entered $\K_s$ in the same
+commit and left it only by a release (case (i)) or by the restriction step, which requires
+$e\notin\stored(d)$.  $\mathsf{Fork}$ and $\mathsf{Stale}$ are refusals of the live path,
+case (ii).  A crash cannot separate the admission from its custody entry, nor a release
+from its effect, because each is one record write under D.  Case (iii) is the retention
+law of \#913.
+\end{proof}
+
+\begin{proposition}[Duplicate window]\label{prop:dup}
+The application receives a message of one element twice iff a crash falls after its take
+and before its release committed, and then at most once more per such crash.
+\end{proposition}
+\begin{proof}
+Before the release, $(q,h)\in\K_s$ survives the crash and the redelivery is a
+$\Requeue$.  After it, $(q,h)\notin\K_s$ and $h\in\W_s$ or below its window, so the
+redelivery is refused and retired.
+\end{proof}
+
+The duplicate carries the same transaction id, so an application that needs exactly-once
+delivery deduplicates by it.  Moving the release before the take returns would make the
+inbox's synchronous \texttt{try\_next} perform a store write; we keep the take synchronous
+and accept the window, which is one record write long when the release is issued on the
+take's consumption signal.
+
+\subsection{Mail behind live traffic}
+
+\issue{936} also asks that a relay message behind live traffic of the same origin be
+delivered.  Inside the window it is: an empty slot gives $\mathsf{Late}$.  Below it, no
+receiver can.
+
+\begin{proposition}[No bounded receiver admits stale mail safely]\label{prop:stale}
+Let $q<\rmin(\W_s)$ and $(q,h)\notin\K_s$.  No decision that depends only on bounded
+receiver state both admits every such $e$ whose $h$ was never dispatched and refuses every
+such $e$ whose $h$ was.
+\end{proposition}
+\begin{proof}
+Take two histories that end in the same $(\W_s,\K_s)$: in the first, $h$ arrived live,
+was dispatched, and at least $\mathtt{REORDER\_WINDOW}$ later sequences followed; in the
+second, $h$ was held, never delivered, and the same later sequences arrived live.  A holder
+may hold a payload it forwarded (any hold inside the sender's proof lifetime is
+admissible), so $e$ can be stored in both.  The window retains only the last $32$ digests,
+so the states agree, and any function of them decides both alike: admitting is a replay in
+the first, refusing is a loss in the second.  Separating them needs every digest admitted
+within the sender's proof lifetime, which no bound on the store's size covers.
+\end{proof}
+
+So below the window the drain refuses as the live path does, which is the criterion
+\issue{936} itself states (a refusal retires an element only when core would drop the same
+payload arriving live).  Delivering such mail needs the sender to put it on a stream that
+live traffic does not advance, a protocol change outside this law.
+
+\section{Implementation order}\label{sec:plan}
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}llp{0.6\columnwidth}@{}}
+\toprule
+PR & Issue & Law\\
+\midrule
+1 & \issue{923} & Law~\ref{law:refuse} on \texttt{IdbStorage}; Cor.~\ref{cor:idbread}\\
+2 & \issue{912} & Law~\ref{law:strict}; SECURITY.md next to the native text\\
+3 & \issue{915} & $\Missing$ in \texttt{ScannedRecord}; Laws~\ref{law:writeorder},
+\ref{law:restore}, \ref{law:readagree}, \ref{law:writethrough}\\
+4 & \issue{911} & \texttt{DurableCache}; Law~\ref{law:guards}\\
+5 & \issue{936} & Law~\ref{law:custody}; receiver record gains $\K_s$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The dependencies: 2 and 4 on the browser need the strict-commit seam of 2; 4 on Windows
+needs the write-through rename of 3; 5 needs nothing from 1--4, but its
+Proposition~\ref{prop:atleastonce} holds in full only with \issue{1021}.  PR~1 comes first because
+it is the only one that closes a safety gap reachable without a crash.  \issue{1021} and
+\issue{1022} follow the batch.
+
+\textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}: PR~5 changes the
+receiver record, so an old record does not decode and fails its stream closed; the operator
+removes the \texttt{transaction-replay} store (native directory, browser database
+\texttt{<storage name>/transaction-replay}) while the node is stopped, accepting the reset of
+Proposition~\ref{prop:total}.  PRs 1--4 need no step: an existing native store gains its
+markers at its first open, and the IndexedDB schema is unchanged.
+
+\section{Summary of laws}
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Predicate & Discharged by\\
+\midrule
+presence, native & markers (Laws~\ref{law:writeorder}--\ref{law:readagree})\\
+presence, browser & N and whole-origin loss (Prop.~\ref{prop:idbwitness})\\
+presence, total loss & undetectable; the documented reset\\
+survival, unix & fsync, rename, directory fsync\\
+survival, Windows & write-through rename (Law~\ref{law:writethrough})\\
+survival, browser & strict commit (Law~\ref{law:strict})\\
+presence of custody & $\K_s$ in the receiver record (Law~\ref{law:custody})\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\sloppy
+\bibliographystyle{IEEEtran}
+\bibliography{durable-records}
+
+\end{document}

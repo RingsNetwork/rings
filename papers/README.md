@@ -11,6 +11,7 @@ behavior. A design in a paper is not, by itself, a shipped feature.
 | DRanking | [PDF](dranking.pdf) | [LaTeX](dranking.tex), [BibTeX](dranking.bib) | Proposed verifiable ranking and admission; supersedes the 2023 *Ranking Protocol* draft |
 | Finger convergence | [PDF](finger-convergence.pdf) | [LaTeX](finger-convergence.tex), [BibTeX](finger-convergence.bib) | Range-proved finger-convergence specification, written for Rings 0.26.0 |
 | Onion Kleisli pipelines | [PDF](onion-kleisli-pipeline.pdf) | [LaTeX](onion-kleisli-pipeline.tex), [BibTeX](onion-kleisli-pipeline.bib) | Proposed onion circuits as client-sealed loops of registered operation symbols ([#834](https://github.com/RingsNetwork/rings/issues/834)); specification before the Phase 2 code |
+| Durable records | [PDF](durable-records.pdf) | [LaTeX](durable-records.tex), [BibTeX](durable-records.bib) | Proposed presence and survival law of a node's local stores: authority lattice, presence witness, per-platform crash obligation, relay custody ([#911](https://github.com/RingsNetwork/rings/issues/911), [#912](https://github.com/RingsNetwork/rings/issues/912), [#915](https://github.com/RingsNetwork/rings/issues/915), [#923](https://github.com/RingsNetwork/rings/issues/923), [#936](https://github.com/RingsNetwork/rings/issues/936)); specification before the code |
 
 DRanking's current implementation is limited to
 [provisional service receipts](../docs/src/advanced-topic/dranking-service-receipts.md).
@@ -33,6 +34,7 @@ latexmk -xelatex -interaction=nonstopmode -halt-on-error rings.tex
 latexmk -xelatex -interaction=nonstopmode -halt-on-error dranking.tex
 latexmk -xelatex -interaction=nonstopmode -halt-on-error finger-convergence.tex
 latexmk -xelatex -interaction=nonstopmode -halt-on-error onion-kleisli-pipeline.tex
+latexmk -xelatex -interaction=nonstopmode -halt-on-error durable-records.tex
 ```
 
 Run only the command for the paper being edited when making a focused change.
