@@ -164,11 +164,13 @@ has exactly 32 hot digest slots. A full store is at most `TRANSACTION_REPLAY_STO
 closed at the bound; there is no LRU eviction or sender-controlled reset. The native daemon keeps
 the records in a dedicated 40 MiB authoritative file store, which evicts nothing: a write beyond its
 budget fails with `StorageBudgetExhausted`, and so does an open under a lowered budget. Browser
-providers keep them in a dedicated IndexedDB store with one row more than the record bound, which
-evicts beyond its limit, and an evicted record would reopen replay for its stream. Both are sized
-never to reach their limits. A custom `SwarmBuilder` or `ProcessorBuilder` must supply durable
-`ReplayStorage` to retain the restart guarantee; their in-memory default guarantees replay rejection
-only for the lifetime of that runtime.
+providers keep them in a dedicated authoritative IndexedDB store with a row capacity of
+`TRANSACTION_REPLAY_STORE_MAX_RECORDS`, which evicts nothing either: a new record beyond it fails
+with `StorageBudgetExhausted`, and so does an open under a lowered capacity (#923). Both are sized
+never to reach their limits, so the refusal is a bound, not an expected path. A custom
+`SwarmBuilder` or `ProcessorBuilder` must supply durable `ReplayStorage` to retain the restart
+guarantee; their in-memory default guarantees replay rejection only for the lifetime of that
+runtime.
 
 Deleting or replacing the replay store deletes the guarantee for its streams. There is no safe
 incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail

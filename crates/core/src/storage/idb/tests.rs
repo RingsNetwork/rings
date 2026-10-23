@@ -584,3 +584,82 @@ async fn failed_serialization_does_not_evict_existing_rows() {
     assert_eq!(value_a.as_deref(), Some("a"));
     assert_eq!(value_b.as_deref(), Some("b"));
 }
+
+/// Budget law (#923): an authoritative store at capacity refuses a new key with
+/// `StorageBudgetExhausted` and changes nothing, while rewriting a stored key needs no room.
+#[wasm_bindgen_test]
+async fn test_authoritative_store_refuses_a_new_key_at_capacity() {
+    let instance = create_authoritative_db_instance(2).await;
+    instance.put("a", &"a".to_owned()).await.unwrap();
+    instance.put("b", &"b".to_owned()).await.unwrap();
+
+    let refused = instance.put("c", &"c".to_owned()).await;
+    assert!(matches!(
+        refused,
+        Err(crate::error::Error::StorageBudgetExhausted {
+            used: 2,
+            required: 1,
+            capacity: 2,
+        })
+    ));
+    assert_eq!(count_rows(&instance).await.unwrap(), 2);
+    assert_eq!(
+        get_string(&instance, "a").await.unwrap().as_deref(),
+        Some("a")
+    );
+    assert_eq!(
+        get_string(&instance, "b").await.unwrap().as_deref(),
+        Some("b")
+    );
+    assert_eq!(get_string(&instance, "c").await.unwrap(), None);
+
+    instance.put("a", &"a2".to_owned()).await.unwrap();
+    assert_eq!(
+        get_string(&instance, "a").await.unwrap().as_deref(),
+        Some("a2")
+    );
+}
+
+/// Budget law (#923): reopening an authoritative store under a lowered capacity fails and
+/// retires no row; reopening under its own capacity still finds every row.
+#[wasm_bindgen_test]
+async fn test_authoritative_open_under_a_lowered_capacity_fails_and_keeps_rows() {
+    let name = format!("rings-idb-authoritative-lowered-{}", uuid::Uuid::new_v4());
+    let open = |cap| {
+        IdbStorage::new_with_cap_name_and_authority(cap, &name, RecordAuthority::Authoritative)
+    };
+    let initial = open(3).await.unwrap();
+    for key in ["a", "b", "c"] {
+        initial.put(key, &key.to_owned()).await.unwrap();
+    }
+    drop(initial);
+
+    assert!(matches!(
+        open(2).await,
+        Err(crate::error::Error::StorageBudgetExhausted {
+            used: 3,
+            required: 0,
+            capacity: 2,
+        })
+    ));
+    let reopened = open(3).await.unwrap();
+    assert_eq!(count_rows(&reopened).await.unwrap(), 3);
+}
+
+/// A store that never evicts orders nothing by recency: an authoritative `get` leaves the row's
+/// stamp and the clock as the write left them.
+#[wasm_bindgen_test]
+async fn test_authoritative_get_leaves_stamp_and_clock_unchanged() {
+    let instance = create_authoritative_db_instance(2).await;
+    instance.put("a", &"a".to_owned()).await.unwrap();
+    let stamp = stamp_of(&instance, "a").await;
+    let clock = clock_of(&instance).await;
+
+    assert_eq!(
+        get_string(&instance, "a").await.unwrap().as_deref(),
+        Some("a")
+    );
+    assert_eq!(get_string(&instance, "missing").await.unwrap(), None);
+    assert_eq!(stamp_of(&instance, "a").await, stamp);
+    assert_eq!(clock_of(&instance).await, clock);
+}

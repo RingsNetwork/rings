@@ -1,11 +1,13 @@
 #![deny(missing_docs)]
 
-//! IndexedDB adapter with atomic updates and row-budget LRU eviction.
+//! IndexedDB adapter with atomic updates and a row budget.
 //!
-//! The configured capacity counts rows. When a new key would exceed it, the least recently
-//! accessed rows are retired first; rewriting an existing key does not change row count or
-//! retire another key. Opening an existing database with a smaller capacity retires every
-//! excess row in the same transaction.
+//! The configured capacity counts rows, and rewriting an existing key never needs room. The
+//! budget law is the authority's ([`RecordAuthority`]): when a new key would exceed the
+//! capacity, a disposable store retires its least recently accessed rows first, in the same
+//! transaction, and opening it with a smaller capacity retires every excess row; an
+//! authoritative store retires nothing, so that write, or that open, fails with
+//! `Error::StorageBudgetExhausted` and changes nothing.
 //!
 //! # Recency is a logical clock
 //!
@@ -28,6 +30,10 @@
 //! smallest stamps without any tie to break. `clear` keeps the clock, so stamps are never reused
 //! within one database.
 //!
+//! An authoritative store never evicts, so recency orders nothing there: its `get` is a
+//! read-only transaction that leaves the row's stamp as written. Only its writes tick the
+//! clock.
+//!
 //! # Schema
 //!
 //! `SCHEMA_VERSION` 2 is the row store keyed by `key` and indexed by `access_stamp`, and the
@@ -45,8 +51,9 @@
 //! absent. An authoritative store (the replay store, whose bad record keeps its stream closed)
 //! reports the decode error and leaves the row untouched. The authority governs the payload
 //! only; the row envelope is this store's own schema, and an envelope that does not decode is
-//! an error under either authority. The row budget above applies under either authority, so an
-//! authoritative store is sized never to reach it.
+//! an error under either authority. The budget law above is also the authority's: an
+//! authoritative store refuses a new row beyond its capacity instead of evicting, since an
+//! evicted record would be indistinguishable from one never written (#923).
 //!
 //! A `scan` (`KvStorageScan`) is outside the decode law: under either authority it reports
 //! every row, a row whose envelope or payload does not decode as an `UndecodableRecord` named
@@ -312,18 +319,37 @@ impl IdbStorage {
         })
     }
 
-    /// Restore the configured row budget by retiring every least-recently-accessed excess row.
+    /// Restore the configured row budget under the budget law: a disposable store retires every
+    /// least-recently-accessed excess row; an authoritative store over its budget fails.
     ///
     /// Counting, selection, and deletion share one read-write transaction.
+    /// Post: `Ok(())` implies at most `cap` rows; an authoritative store removed nothing.
     async fn prune(&self) -> Result<()> {
         let scope = self.scope(TransactionMode::ReadWrite)?;
         let count = scope.rows.count(None).await.map_err(Error::IDBError)?;
         if count > self.cap {
-            scope
-                .evict_least_recent(count.saturating_sub(self.cap))
-                .await?;
+            self.make_room(&scope, count, 0).await?;
         }
         scope.done().await
+    }
+
+    /// Make room for `incoming` more rows beside the `count` stored ones under the budget law:
+    /// a disposable store retires its least recently accessed rows until they fit; an
+    /// authoritative store fails instead.
+    ///
+    /// Pre: `count + incoming > cap`, observed in `scope`.
+    /// Post: `Ok(())` implies the rows that remain in `scope` plus `incoming` fit in `cap`; on
+    /// `Err`, an authoritative store queued no request.
+    async fn make_room(&self, scope: &Scope, count: u32, incoming: u32) -> Result<()> {
+        if !self.authority.evicts() {
+            return Err(Error::StorageBudgetExhausted {
+                used: u64::from(count),
+                required: u64::from(incoming),
+                capacity: u64::from(self.cap),
+            });
+        }
+        let excess = count.saturating_add(incoming).saturating_sub(self.cap);
+        scope.evict_least_recent(excess).await
     }
 
     /// The decode law of this store's authority (module docs) on one row payload: the decoded
@@ -336,6 +362,23 @@ impl IdbStorage {
             Err(_) if self.authority.retires_undecodable() => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Read `key` in a read-only transaction, leaving its stamp as written: the `get` of a store
+    /// that never evicts, where recency orders nothing (module docs). An undecodable payload is
+    /// reported under the decode law, and nothing is deleted.
+    async fn get_unstamped<V>(&self, key: &str) -> Result<Option<V>>
+    where V: DeserializeOwned {
+        let scope = self.scope(TransactionMode::ReadOnly)?;
+        let stored = scope
+            .rows
+            .get(&JsValue::from(key))
+            .await
+            .map_err(Error::IDBError)?;
+        scope.done().await?;
+        js_value::deserialize::<Option<StoredRow>>(stored)?
+            .map(|row| js_value::deserialize(row.data))
+            .transpose()
     }
 
     /// Delete each row of `keys` that still does not decode as `V`, in one read-write
@@ -364,6 +407,9 @@ impl<V> KvStorageInterface<V> for IdbStorage
 where V: DeserializeOwned + Serialize + Sized
 {
     async fn get(&self, key: &str) -> Result<Option<V>> {
+        if !self.authority.evicts() {
+            return self.get_unstamped(key).await;
+        }
         // Reading is a touch: keep lookup, restamp, and clock advance in one write transaction
         // so a concurrent put cannot be overwritten by stale data.
         let scope = self.scope(TransactionMode::ReadWrite)?;
@@ -409,9 +455,7 @@ where V: DeserializeOwned + Serialize + Sized
             // Count includes every row visible to this transaction; only a new key needs room.
             let count = scope.rows.count(None).await.map_err(Error::IDBError)?;
             if count >= self.cap {
-                // Remove every row needed to make room, rather than only the first candidate.
-                let excess = count.saturating_sub(self.cap).saturating_add(1);
-                scope.evict_least_recent(excess).await?;
+                self.make_room(&scope, count, 1).await?;
             }
         }
         scope.put_stamped(key.to_owned(), data).await?;

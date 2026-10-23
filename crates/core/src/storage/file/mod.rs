@@ -93,12 +93,6 @@ impl RecordAuthority {
         matches!(self, Self::Authoritative)
     }
 
-    /// Whether the budget retires the oldest records to make room (the budget law), and a write
-    /// recreates the root directory should it be missing.
-    const fn evicts(self) -> bool {
-        matches!(self, Self::Disposable)
-    }
-
     /// Whether every listed record file must be indexed, so that a listing that fails fails the
     /// open and a file whose metadata fails is indexed anyway (the index law).
     const fn indexes_every_entry(self) -> bool {
