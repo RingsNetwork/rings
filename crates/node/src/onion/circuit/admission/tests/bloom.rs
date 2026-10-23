@@ -28,6 +28,12 @@ use crate::onion::circuit::OnionReplayNonce;
 /// Geometry lemma: the exact expected fill of a slice after `B` insertions is
 /// `p_B = 1 − (1 − 1/M)^B ≤ ½`, and slices are independent, so a full block's false-positive rate
 /// is exactly `p_Bᴷ ≤ 2⁻²⁶`. It also checks that `M = 64·W`.
+///
+/// Filter bound: every admitted tag is charged at least one unit (`OnionAdmissionUnits` is
+/// non-zero), so the global budget `G` admits at most `G` tags and `β ≤ G / B = 64` blocks. By the
+/// union bound, the filter's expected rate is at most `β · p_Bᴷ ≤ β · 2⁻²⁶ ≤ 2⁻²⁰`. A measured
+/// block may exceed its expectation (`test_filled_blocks_meet_the_false_positive_target` allows
+/// `1.25 · 2⁻²⁶`), so the bound is on the expectation, not on a sample.
 #[test]
 fn test_block_geometry_meets_the_block_rate() {
     let slice_bits = f64::from(REPLAY_SLICE_BITS);
@@ -40,21 +46,37 @@ fn test_block_geometry_meets_the_block_rate() {
     let fill = 1.0 - (1.0 - 1.0 / slice_bits).powi(tags);
     assert!(fill <= 0.5);
     assert!(fill.powi(hashes) <= 2_f64.powi(-26));
+
+    let blocks = ONION_ADMISSION_GLOBAL_UNITS / REPLAY_BLOCK_TAGS;
+    assert_eq!(blocks * REPLAY_BLOCK_TAGS, ONION_ADMISSION_GLOBAL_UNITS);
+    assert_eq!(blocks, 64);
+    assert!(f64::from(blocks) * fill.powi(hashes) <= 2_f64.powi(-20));
 }
 
-/// Property, seeded: a filter saturated through admission by `64` senders × `B` one-unit cells has
-/// exactly `64` blocks. A false positive on a fresh tag is a drop, the safe direction, and it is
-/// charged like every other cell. The exact measured rates (the product of slice fills) stay within
-/// target: at most `1.25 · 2⁻²⁶` per block and `≤ 2⁻²⁰` for the filter. The global budget then
-/// stops the filter from growing. A smoke check with `2¹⁶` fresh probes (`2⁻⁴` hits expected at the
-/// target rate) guards the query path. The sample is far too small to estimate the rate itself.
+/// Property, seeded: the blocks admission fills meet the false-positive target the geometry lemma
+/// derives for them. Two senders × `B` one-unit cells fill a filter of exactly two blocks, the
+/// first sealed, so the cells pass the whole admission path and the query path crosses a sealed
+/// block. Each block's exact measured rate, the product of its slice fills, is at most
+/// `1.25 · 2⁻²⁶`.
+///
+/// Under the model the blocks are independent and identically filled, so a bias in the probe
+/// addresses would show in every block, and two blocks test the same law as more would. The filter
+/// bound over the `G / B` blocks that the global budget permits is the union bound in
+/// `test_block_geometry_meets_the_block_rate`. The global budget's refusal is
+/// `test_global_budget_bounds_every_sender_together`.
+///
+/// A false positive on a fresh tag is a drop, the safe direction, and it is charged like every
+/// other cell. Over `2·B` insertions, about `2⁻¹²` drops are expected, almost all of them while the
+/// second block fills against the sealed first one.
+/// A smoke check with `2¹⁶` fresh probes (`2⁻⁹` hits expected at the target rate) guards the query
+/// path. Both samples are far too small to estimate the rate itself.
 #[test]
-fn test_saturated_filter_meets_the_false_positive_target() {
+fn test_filled_blocks_meet_the_false_positive_target() {
     let mut rng = StdRng::seed_from_u64(0x0841_0008);
     let mut admission = state(&mut rng);
     let x = latest_expiry(ORIGIN_MS);
     let mut insertion_false_positives = 0_u32;
-    for sender in 0..64_u32 {
+    for sender in 0..2_u32 {
         loop {
             match send(&mut admission, ORIGIN_MS, sender, 1, layer(x, rng.gen())) {
                 Verdict::Admitted => {}
@@ -68,13 +90,7 @@ fn test_saturated_filter_meets_the_false_positive_target() {
             }
         }
     }
-    // A fresh tag is dropped at the filter's current rate, which averages `≤ 2⁻²¹` over the fill:
-    // about `0.5` expected drops over `2²⁰` insertions.
-    assert!(insertion_false_positives <= 4);
-    assert_eq!(
-        send(&mut admission, ORIGIN_MS, 64, 1, layer(x, rng.gen())),
-        Verdict::Unpaid(OnionChargeRejection::GlobalBudget)
-    );
+    assert_eq!(insertion_false_positives, 0);
 
     let rates = admission
         .replay
@@ -87,9 +103,8 @@ fn test_saturated_filter_meets_the_false_positive_target() {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    assert_eq!(rates.len(), 64);
+    assert_eq!(rates.len(), 2);
     assert!(rates.iter().all(|rate| *rate <= 1.25 * 2_f64.powi(-26)));
-    assert!(rates.iter().sum::<f64>() <= 2_f64.powi(-20));
 
     let false_positives = (0..1_u32 << 16)
         .filter(|_| {

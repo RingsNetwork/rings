@@ -121,7 +121,12 @@ edges (#843).
   later failure of the upload closes the local stream cleanly, so the local application is not
   told that the exit could not write its last bytes.
 - **Entry guards.** A client pins a persisted set of first hops, limiting how many relays
-  see its edge over time.
+  see its edge over time. The guard store is a durable cache (#911): a completed guard write
+  survives a process or system crash, as a replay write does, so a crash never rotates the
+  first hop. A guard record that is absent or does not decode (only a loss outside the store or
+  a schema change can produce one) is retired, logged at `warn`, and re-selected: losing the
+  set costs one re-selection of the first hop, never onion routing. A browser whose IndexedDB
+  cannot open keeps its guards in memory, re-selected on every start.
 
 A loop hides hops from each other and the client from the exit. It does not hide the client
 from its first hop, overlay membership, registry lookups, the loop's round-trip time from the
@@ -136,7 +141,9 @@ route.
 - **Replay.** The destination keeps a persisted 32-sequence window per
   `(network_id, origin, destination, traffic class)` stream, so a transaction is dispatched
   at most once while the store is retained; a damaged record disables only its stream.
-  Exactly-once effects are not claimed.
+  A completed replay write survives a process or system crash: the native store flushes the
+  file and its directory (on unix), and the browser store commits each IndexedDB transaction
+  with `durability: "strict"` (#912). Exactly-once effects are not claimed.
   [Details](docs/src/advanced-topic/transaction-replay.md).
 - **Rate limits.** After verification, the destination charges per-origin message and byte
   buckets keyed by the account DID, committed together with replay and before the application
@@ -150,8 +157,12 @@ route.
   that needs a reliable stream detects loss end to end: the TCP relay resets a stream with a
   segment it cannot recover, and an E2E stream with a lost frame fails as stalled, so neither
   passes on a stream with a silent gap (#939). Relay mail leaves core's
-  custody once the application takes it from the inbox; it is delivered at least once within
-  a run, and a restart before its retirement loses it (#936).
+  custody once the application takes it from the inbox. It is delivered at least once across
+  restarts: a delivery admitted and not yet taken is kept in relay custody inside its replay
+  record, so a restart redelivers it instead of refusing it as a replay (#936). A crash after
+  the take and before its release delivers it once more, with the same transaction id, which an
+  application that needs exactly-once delivery deduplicates by. The carrier itself sits in a
+  retained relay store, so a crash or the data store's budget cannot drop the mail (#1021).
   [Details](docs/src/advanced-topic/transport-flow-control.md#application-inbox).
 - **Rerouting.** A remote placement of a Swarm storage operation refused before backend
   acceptance is retried from topology recomputed after a topology, link or capacity event,
@@ -171,7 +182,11 @@ route.
   while the carrier is retained. A relay inbox is verified by its owner, readable only by
   its recipient, and removable only by its recipient or, in an ownership hand-off, by the
   previous owner once the next one acknowledged holding exactly that value; it is capped at
-  64 messages. Values are stored in the clear.
+  64 messages. Relay carriers live in a store of their own (#1021), retained: a completed hold
+  survives a crash, and the data store's budget never evicts held mail; a full relay store
+  refuses a new hold instead. A node without a retained relay store (a browser whose
+  IndexedDB cannot open, a library node built without one) takes custody of no relay carrier:
+  it refuses to hold mail, and its own mail stays with its holder. Values are stored in the clear.
   [Details](docs/src/advanced-topic/chord.md#data-topic-storage).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
   refuses no honest frame, refuses and reports a frame beyond its credit, and pushes overload
@@ -206,8 +221,6 @@ route.
 
 ## Known Limitations
 
-- #912: the browser replay store uses IndexedDB's default durability hint.
-- #915: a missing replay record restarts its stream from the first sequence.
 - #916: durable replay writes cap a node near 50 transitions per second on macOS.
 - #918: registry tombstones are bounded by the heartbeat rate per registrant, not by count
   ([bounds](docs/src/advanced-topic/chord.md#data-topic-storage)).

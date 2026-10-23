@@ -235,6 +235,76 @@ async fn test_creating_offer_yields_in_both_did_orders() -> Result<()> {
     Ok(())
 }
 
+/// An offer carried out of band prevails over a sent overlay offer in both DID orders: a node
+/// that dialed a peer over the DHT, with an offer that was never delivered, still answers the
+/// peer's HTTP handshake instead of sending that offer back, which the peer could only answer
+/// through the seed's gated `acceptAnswer`. The joining peer, meeting the overlay offer while
+/// its own is in flight, refuses it, so exactly one side yields (`Law (Tie-break)`).
+///
+/// ```text
+/// seed s, joining peer j, either DID order; no record between them
+/// s dialed j over the DHT and the offer was lost   (s: Offering(Overlay, Sent))
+/// j offers to s out of band, an HTTP join          (j: Offering(External, Sent))
+/// ⊢ j refuses s's overlay offer; s answers j's offer, releasing its own generation;
+///   ◇(admitted(s, j) ∧ admitted(j, s)), the edge being j's generation
+/// ```
+#[tokio::test]
+async fn test_out_of_band_offer_prevails_over_a_sent_overlay_offer() -> Result<()> {
+    for seed_is_smaller in [true, false] {
+        let [smaller, larger] = ring_nodes::<2>()?;
+        let (seed, joining) = if seed_is_smaller {
+            (&smaller, &larger)
+        } else {
+            (&larger, &smaller)
+        };
+        let (lost, lost_offer) = seed
+            .swarm
+            .transport
+            .prepare_connection_offer_with_attempt(
+                joining.did(),
+                SwarmTransportCallback::new(seed.swarm.transport.clone()),
+            )
+            .await?;
+        seed.swarm
+            .transport
+            .mark_offer_sent(lost, &lost_offer, uuid::Uuid::new_v4())?;
+
+        let (join, offer) = joining.swarm.offer_connection(seed.did()).await?;
+        assert!(
+            matches!(
+                joining
+                    .swarm
+                    .transport
+                    .reconcile_incoming_offer_peer(seed.did(), OfferOwner::Overlay)
+                    .await,
+                Err(Error::AlreadyConnected)
+            ),
+            "the joining peer refuses the overlay offer while its own is in flight"
+        );
+        let OfferReply::Answer(answer) = seed.swarm.answer_offer(offer).await? else {
+            return Err(Error::InvalidMessage(
+                "the seed sent its lost overlay offer back".to_string(),
+            ));
+        };
+        assert!(
+            !seed.swarm.transport.is_current_connection_attempt(lost)?,
+            "the seed released its own generation"
+        );
+        joining.swarm.accept_answer_for(join, answer).await?;
+        wait_until_result("the seed and the joining peer admit each other", || {
+            Ok(seed.swarm.is_peer_admitted(joining.did())?
+                && joining.swarm.is_peer_admitted(seed.did())?)
+        })
+        .await?;
+        assert_eq!(
+            joining.swarm.transport.active_attempt(seed.did())?,
+            Some(join.0),
+            "the edge is the joining peer's generation"
+        );
+    }
+    Ok(())
+}
+
 /// An answered offer, and an answering generation, refuse a delayed copy of a crossing offer
 /// and never counter-offer.
 #[tokio::test]
@@ -529,8 +599,9 @@ async fn test_yielded_offer_is_superseded_before_the_answer_is_created() -> Resu
         )
         .await?;
 
-    let IncomingOfferSlot::Yielded(answering) =
-        transport.reconcile_incoming_offer_peer(node2.did()).await?
+    let IncomingOfferSlot::Yielded(answering) = transport
+        .reconcile_incoming_offer_peer(node2.did(), OfferOwner::Overlay)
+        .await?
     else {
         return Err(Error::InvalidMessage(
             "a creating offer yields to a crossing offer".to_string(),

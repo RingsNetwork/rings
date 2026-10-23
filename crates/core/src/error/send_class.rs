@@ -243,10 +243,12 @@ impl Error {
             | Self::RelayMessageHoldStale | Self::RelayInboxDeltaExceedsCapacity
             | Self::RelayMessageHolderNotResponsible | Self::RelayInboxRegisterNotAllowed
             | Self::RelayInboxOperationNotAllowed | Self::RelayInboxWriterNotRecipient
+            | Self::RelayStorageUnavailable
             | Self::StorageCountOverflow | Self::StorageRedundancyMismatch { .. }
             | Self::InvalidCapacity | Self::StorageValueExceedsCapacity { .. }
             | Self::StorageBudgetExhausted { .. } | Self::StorageWorkUnscheduled(_)
-            | Self::StorageRecordUndecodable(_)
+            | Self::StorageRecordUndecodable(_) | Self::StorageRecordMissing(_)
+            | Self::RelayCustodyFull { .. }
             // encoding and payload bounds
             | Self::Encode | Self::Decode | Self::SerializeToString | Self::SerializeError
             | Self::Serialize(_) | Self::Deserialize(_) | Self::CodecSerialize(_)

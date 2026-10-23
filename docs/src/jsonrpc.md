@@ -169,9 +169,10 @@ passes it to its `answerOffer`.
 Answer an encoded offer. Public on the external listener.
 
 * Params: `offer`, as returned by `createOffer`.
-* Result: `answer`, the encoded answer, or, when this node's own pending overlay offer to the
-  offering peer prevails on the DID tie-break, that offer as a counter-offer: the caller answers
-  it with its own `answerOffer` and returns that answer with this node's `acceptAnswer`.
+* Result: `answer`, the encoded answer. The offer prevails over this node's own pending overlay
+  offer to the offering peer, which is released. A node of 0.34.2 or earlier returns that offer
+  instead, as a counter-offer, when it prevails on the DID tie-break: the caller answers it with
+  its own `answerOffer` and returns that answer with this node's `acceptAnswer`.
 
 ### acceptAnswer
 

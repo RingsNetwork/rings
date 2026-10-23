@@ -10,9 +10,8 @@ harness execution. Those historical timings are not a benchmark of this change.
 
 | Owner | Configuration | Coverage |
 | --- | --- | --- |
-| Build and test | Workspace defaults, `ci` profile | All workspace test targets; seven required exhaustive model searches; selected Onion/TUN/helper ignored tests |
-| Dummy transport tests | Core defaults + dummy; transport dummy without defaults, `ci` profile | Dummy integration, shell conformance, ordinary unit and inexpensive model tests |
-| Native debug build and doctests | Existing default/debug configuration | Workspace build plus default and dummy doctests |
+| Build and test | Workspace defaults, `ci` profile | All workspace test targets; seven required exhaustive model searches; selected Onion/TUN/helper ignored tests; the workspace's doctests |
+| Dummy transport tests | Core defaults + dummy; transport dummy without defaults, `ci` profile | Dummy integration, shell conformance, ordinary unit and inexpensive model tests; the PR decode-boundary smoke (every crate's `decode_boundary` tests, with a generated seed and 1024 cases) |
 | Ring and hotspot deterministic replay | Core dummy without defaults, `ci` profile | Entire storm family, including all 30 identical replays and protection ablations, plus N=10/25/50 |
 | Ring and hotspot N=10/25/50 | Same storm configuration, scheduled/manual | Existing scale and extended seed matrices |
 
@@ -21,24 +20,50 @@ The default native job owns the seven expensive searches listed in
 names and the storm module. Both jobs validate the ownership list before running.
 The rejoin model's native shell conformance tests remain in both applicable
 configurations, including dummy-only send-terminal conformance. WASM model
-execution, browser tests, FFI, sanitizers, Miri, decode-boundary tests, and shipping
-release builds remain unchanged.
+execution, browser tests, FFI, sanitizers, Miri, and shipping release builds keep
+their own jobs.
 
 Storm retains the dedicated workflow's no-default-features configuration. Its
 fixtures use deterministic secp256k1 keys, not the optional Ristretto adapter that
 core defaults add. The rest of the core dummy suite still tests with defaults.
-Storm now runs on every applicable PR and master push rather than using path
-filters: changes to Cargo manifests, workspace dependencies, or execution helpers
-must not bypass the sole storm owner. No repetitions, state-space bounds, seed
+Storm now runs on every applicable PR and on every push to develop or master rather
+than using path filters: changes to Cargo manifests, workspace dependencies, or
+execution helpers must not bypass the sole storm owner. No repetitions, state-space bounds, seed
 matrices, or non-vacuity assertions were reduced.
 
-The `ci` profile inherits release optimization, overflow, and assertion semantics
-but disables full LTO and stripping. `debug-assertions = false` is explicit because
-the million-state lossy-flap model is ignored when debug assertions are enabled.
+The `ci` profile inherits release overflow and assertion semantics but disables
+full LTO and stripping, and it optimizes where test time is spent: dependencies,
+rings-core (the exhaustive model searches) and rings-aez (the onion cipher) at
+`opt-level = 3`, every other workspace crate at `opt-level = 1` (#1002).
+`debug-assertions = false` is explicit because the rejoin model's exhaustive
+searches are ignored when debug assertions are enabled.
 The native ownership requirement fails if that test becomes ignored. The old
-unoptimized core dummy execution is replaced with this optimized profile; the
-debug build, doctests, and other unchanged debug jobs remain. This is a deliberate
-profile change, not a claim of preserving every previous profile/test pairing.
+unoptimized core dummy execution is replaced with this optimized profile. The
+separate debug workspace build is gone as well (#1002): clippy type-checks the debug
+configuration, the `ci` build links every target, and the doctests run against the
+`ci` libraries. This is a deliberate profile change, not a claim of preserving
+every previous profile/test pairing.
+
+## Browser jobs
+
+The wasm32 gates are three parallel jobs, each over its own build graph:
+
+| Job | Coverage |
+| --- | --- |
+| Clippy for wasm crates | Clippy for core, runtime, aez, transport, and node on wasm32; the browser graph carries no native gateway dependency |
+| Build and test the frontend and dweb for wasm | Extension scripts and package, static shell, Onion WebView, frontend clippy and tests, dweb browser tests; caches the `frontend` and `examples/dweb` workspaces |
+| Browser tests for wasm crates | Core (with the repair soak as its own invocation), runtime, aez, transport, and node browser tests |
+
+## Caches
+
+Every workflow restores Rust caches through `.github/actions/rust-cache`, which
+writes a cache only on a push to develop or master. A PR restores the caches of its
+base branch and the default branch and writes none, so the repository's 10 GB quota
+holds those branches' generations; when every open PR also wrote its own, they
+evicted one another before any PR reused one. QACI and the storm workflow run on
+pushes to develop for this reason, as well as to check the merged commit. The
+scheduled decode-boundary workflow builds a configuration no push builds, so it
+restores no cache.
 
 ## Prebuilt executable contract
 

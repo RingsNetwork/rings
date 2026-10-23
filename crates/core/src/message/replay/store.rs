@@ -6,7 +6,7 @@
 //! ```text
 //! record_key(table, key) ≜ "rings-core:transaction-replay:stream:" ‖ table ‖ ":" ‖ hex(enc(key))
 //! record(Sender, key)    ≜ enc(Sender { key, last })
-//! record(Receiver, key)  ≜ enc(Receiver { key, state })
+//! record(Receiver, key)  ≜ enc(Receiver { key, state, custody })
 //! ```
 //!
 //! **Law (locality).** A transition of one stream writes exactly that stream's record, so a
@@ -21,7 +21,8 @@
 //! [`record_name`](crate::storage::KvStorageScan::record_name) and `U` the names of the records
 //! that do not restore: those the storage reports undecodable for their name (a torn, corrupt or
 //! unreadable file, or one holding another key's record, reported by name and never deleted),
-//! and those that decode but fail the conditions above. Then
+//! those it reports missing (witnessed as written, and no longer held), and those that decode
+//! but fail the conditions above. Then
 //!
 //! ```text
 //! unavailable(table, key) ⟺ name(record_key(table, key)) ∈ U
@@ -41,13 +42,16 @@
 //! unavailable. [`restore`] does not re-check the table bounds: admission maintains them, so only a
 //! state outside the program could exceed one.
 //!
-//! The laws cover every record the storage holds, provided the storage drops none itself: an
-//! absent record, a stream's record moved or renamed away included, is indistinguishable from a
-//! stream never seen (tracked in #915). The native daemon opens the replay store as an
-//! authoritative file store (#909), which evicts nothing and on unix flushes each write before
-//! its rename and the directory after it, so a crash leaves a record whole at its previous or its
-//! new value; a record file that cannot be read, or that is not the whole record of its own key,
-//! is reported by its file name and never deleted.
+//! The laws cover every record the storage witnesses, provided the storage drops none itself.
+//! The native daemon opens the replay store as an authoritative file store (#909), which evicts
+//! nothing, flushes each write before its rename and the directory after it (a write-through
+//! rename on Windows), so a crash leaves a record whole at its previous or its new value, and
+//! keeps a presence marker per record (#915), so a record removed, renamed or lost outside the
+//! store is reported missing by its file name rather than read as a stream never seen; a record
+//! file that cannot be read, or that is not the whole record of its own key, is reported by its
+//! file name and never deleted. The browser store loses only whole databases and evicts
+//! nothing (#923), so it needs no marker. A store lost whole is a stream never seen, for every
+//! stream: the documented reset.
 //!
 //! The record is an opaque byte string to the storage, so browser storage never sees structured
 //! keys or `u64` counters.
@@ -57,6 +61,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::custody::RelayCustody;
+use super::custody::RELAY_CUSTODY_CAPACITY;
 use super::SequenceState;
 use super::StreamKey;
 use super::TRANSACTION_REPLAY_STREAM_CAPACITY;
@@ -78,8 +84,19 @@ const U64_MAX_BYTES: usize = 10;
 const SEQUENCE_STATE_MAX_BYTES: usize = U64_MAX_BYTES + TRANSACTION_REPLAY_WINDOW * (1 + 32);
 /// Largest encoded sender stream: the variant tag, the key and the last reserved sequence.
 const SENDER_STREAM_MAX_BYTES: usize = 1 + STREAM_KEY_MAX_BYTES + U64_MAX_BYTES;
-/// Largest encoded receiver stream: the variant tag, the key and the window.
-const RECEIVER_STREAM_MAX_BYTES: usize = 1 + STREAM_KEY_MAX_BYTES + SEQUENCE_STATE_MAX_BYTES;
+/// Largest canonical encoding of one relay delivery in custody: its sequence and its digest.
+const RELAY_DELIVERY_MAX_BYTES: usize = U64_MAX_BYTES + 32;
+/// Largest encoded custody of one receiver stream: a one-byte length (at most
+/// `RELAY_CUSTODY_CAPACITY` `< 2^7` entries, asserted) and its deliveries.
+const CUSTODY_MAX_BYTES: usize = 1 + RELAY_CUSTODY_CAPACITY * RELAY_DELIVERY_MAX_BYTES;
+/// Largest encoded receiver stream whose custody is empty: the variant tag, the key, the window
+/// and the empty custody's length.
+const RECEIVER_STREAM_UNHELD_MAX_BYTES: usize =
+    1 + STREAM_KEY_MAX_BYTES + SEQUENCE_STATE_MAX_BYTES + 1;
+/// Largest encoded receiver stream: the variant tag, the key, the window and a full custody.
+const RECEIVER_STREAM_MAX_BYTES: usize =
+    1 + STREAM_KEY_MAX_BYTES + SEQUENCE_STATE_MAX_BYTES + CUSTODY_MAX_BYTES;
+const _: () = assert!(RELAY_CUSTODY_CAPACITY < 1 << 7);
 /// Width of the varint length prefix of a `len`-byte string: one byte below `2^7`, two below
 /// `2^14` (records and storage keys stay below `2^14`, asserted).
 const fn length_prefix_bytes(len: usize) -> usize {
@@ -99,9 +116,9 @@ const fn stored_pair_max_bytes(table: ReplayTable, stream_bytes: usize) -> usize
     length_prefix_bytes(key_bytes) + key_bytes + length_prefix_bytes(stream_bytes) + stream_bytes
 }
 
-/// Largest single record of the replay store, in bytes: a receiver stream's key and full
-/// window. Every replay transition writes exactly one record, so this is also the largest
-/// single write of the store, whatever the number of streams it retains.
+/// Largest single record of the replay store, in bytes: a receiver stream's key, full window
+/// and full custody. Every replay transition writes exactly one record, so this is also the
+/// largest single write of the store, whatever the number of streams it retains.
 pub const TRANSACTION_REPLAY_RECORD_MAX_BYTES: usize =
     length_prefix_bytes(RECEIVER_STREAM_MAX_BYTES) + RECEIVER_STREAM_MAX_BYTES;
 /// Most records a full replay store holds: one per sender and one per receiver stream.
@@ -109,10 +126,19 @@ pub const TRANSACTION_REPLAY_STORE_MAX_RECORDS: usize = 2 * TRANSACTION_REPLAY_S
 /// Upper bound of the canonical `(storage key, record)` encodings of a full replay store,
 /// summed over its records. A byte-budgeted store must hold at least this much, or its budget
 /// would evict a retained stream and reopen replay for it (an evicting store) or refuse the
-/// writes of new streams (an authoritative file store, which evicts nothing).
+/// writes of new streams (an authoritative file store, which evicts nothing). The custody of
+/// the whole store holds at most [`RELAY_INBOX_MAX_LEN`](crate::consts::RELAY_INBOX_MAX_LEN)
+/// deliveries (the bounded custody
+/// law), so they are counted once, not per stream; a receiver record's length prefix is two
+/// bytes with or without them.
 pub const TRANSACTION_REPLAY_STORE_MAX_BYTES: usize = TRANSACTION_REPLAY_STREAM_CAPACITY
     * (stored_pair_max_bytes(ReplayTable::Sender, SENDER_STREAM_MAX_BYTES)
-        + stored_pair_max_bytes(ReplayTable::Receiver, RECEIVER_STREAM_MAX_BYTES));
+        + stored_pair_max_bytes(ReplayTable::Receiver, RECEIVER_STREAM_UNHELD_MAX_BYTES))
+    + RELAY_CUSTODY_CAPACITY * RELAY_DELIVERY_MAX_BYTES;
+const _: () = assert!(
+    length_prefix_bytes(RECEIVER_STREAM_UNHELD_MAX_BYTES)
+        == length_prefix_bytes(RECEIVER_STREAM_MAX_BYTES)
+);
 const _: () = assert!(TRANSACTION_REPLAY_RECORD_MAX_BYTES < 1 << 14);
 const _: () = assert!(record_key_max_bytes(ReplayTable::Receiver) < 1 << 14);
 
@@ -148,6 +174,9 @@ pub(super) struct ReplayTables {
     pub(super) sender: BTreeMap<StreamKey, u64>,
     /// Accepted-sequence window per receiver stream.
     pub(super) receiver: BTreeMap<StreamKey, SequenceState>,
+    /// The relay deliveries in custody per receiver stream, only for streams that hold any
+    /// (the custody law); persisted in the stream's receiver record.
+    pub(super) custody: BTreeMap<StreamKey, RelayCustody>,
 }
 
 /// One stream as a record encodes it, borrowed for encoding.
@@ -155,10 +184,11 @@ pub(super) struct ReplayTables {
 enum StoredStreamRef<'a> {
     /// A sender stream and its last reserved sequence.
     Sender { key: &'a StreamKey, last: u64 },
-    /// A receiver stream and its window.
+    /// A receiver stream, its window and its relay custody.
     Receiver {
         key: &'a StreamKey,
         state: &'a SequenceState,
+        custody: &'a RelayCustody,
     },
 }
 
@@ -172,6 +202,7 @@ enum StoredStream {
     Receiver {
         key: StreamKey,
         state: Box<SequenceState>,
+        custody: RelayCustody,
     },
 }
 
@@ -200,14 +231,20 @@ pub(super) fn sender_record(key: &StreamKey, last: u64) -> Result<(String, Repla
     ))
 }
 
-/// The storage key and record of receiver stream `key`, whose window is `state`.
+/// The storage key and record of receiver stream `key`, whose window is `state` and whose relay
+/// deliveries in custody are `custody`.
 pub(super) fn receiver_record(
     key: &StreamKey,
     state: &SequenceState,
+    custody: &RelayCustody,
 ) -> Result<(String, ReplayRecord)> {
     Ok((
         record_key(ReplayTable::Receiver, key)?,
-        encode(&StoredStreamRef::Receiver { key, state })?,
+        encode(&StoredStreamRef::Receiver {
+            key,
+            state,
+            custody,
+        })?,
     ))
 }
 
@@ -217,6 +254,9 @@ pub(super) enum RestoreFailure {
     /// The storage reports the record undecodable for its name: a torn, corrupt or unreadable
     /// record, or one holding another key's record.
     Undecodable,
+    /// The storage witnessed the record as written and no longer holds it: removed, renamed or
+    /// lost outside the store (#915).
+    Missing,
     /// The record stored under `key` decodes whole but is not a valid record of that key.
     Defective {
         /// Its storage key.
@@ -278,18 +318,20 @@ impl ReplayStore {
 enum RestoredStream {
     /// A sender stream and its last reserved sequence.
     Sender(StreamKey, u64),
-    /// A receiver stream and its window, still boxed as it decoded, so the sender variant stays
-    /// small.
-    Receiver(StreamKey, Box<SequenceState>),
+    /// A receiver stream, its window (still boxed as it decoded, so the sender variant stays
+    /// small) and its relay custody.
+    Receiver(StreamKey, Box<SequenceState>, RelayCustody),
 }
 
 /// Restore one decoded record (pure): its stream, or what is wrong with it.
 fn restore_record(bytes: &[u8]) -> std::result::Result<RestoredStream, Defect> {
     match rings_codec::deserialize::<StoredStream>(bytes) {
         Ok(StoredStream::Sender { key, last }) => Ok(RestoredStream::Sender(key, last)),
-        Ok(StoredStream::Receiver { key, state }) if state.is_valid() => {
-            Ok(RestoredStream::Receiver(key, state))
-        }
+        Ok(StoredStream::Receiver {
+            key,
+            state,
+            custody,
+        }) if state.is_valid() => Ok(RestoredStream::Receiver(key, state, custody)),
         Ok(StoredStream::Receiver { .. }) => Err(Defect::InvalidWindow),
         Err(_) => Err(Defect::NotAStream),
     }
@@ -319,6 +361,10 @@ fn classify(record: ScannedRecord<ReplayRecord>, name: &impl Fn(&str) -> String)
             name,
             failure: RestoreFailure::Undecodable,
         },
+        ScannedRecord::Missing(UndecodableRecord { name }) => Contribution::Unrestorable {
+            name,
+            failure: RestoreFailure::Missing,
+        },
         ScannedRecord::Filed {
             key,
             value: ReplayRecord(bytes),
@@ -342,6 +388,7 @@ fn classify(record: ScannedRecord<ReplayRecord>, name: &impl Fn(&str) -> String)
 ///
 ///   scanned record r ──▶ classify
 ///     Undecodable(r) ────────────────────────▶ U[r.name]      := Undecodable
+///     Missing(r) ────────────────────────────▶ U[r.name]      := Missing
 ///     Filed(k, v), restore_record = Err(f) ──▶ U[name(k)]     := f
 ///     Filed(k, v), restore_record = Ok(s) ───▶ tables[s]      := s.state
 /// ```
@@ -357,8 +404,11 @@ pub(super) fn restore(
                 Contribution::Stream(RestoredStream::Sender(key, last)) => {
                     restored.tables.sender.insert(key, last);
                 }
-                Contribution::Stream(RestoredStream::Receiver(key, state)) => {
+                Contribution::Stream(RestoredStream::Receiver(key, state, custody)) => {
                     restored.tables.receiver.insert(key, *state);
+                    if !custody.is_empty() {
+                        restored.tables.custody.insert(key, custody);
+                    }
                 }
                 Contribution::Unrestorable { name, failure } => {
                     restored.unrestorable.insert(name, failure);
@@ -376,12 +426,15 @@ mod tests {
     use super::restore;
     use super::sender_record;
     use super::Defect;
+    use super::RelayCustody;
     use super::ReplayRecord;
     use super::ReplayStore;
     use super::ReplayTable;
     use super::ReplayTables;
     use super::RestoreFailure;
     use super::RECEIVER_STREAM_MAX_BYTES;
+    use super::RELAY_CUSTODY_CAPACITY;
+    use super::RELAY_DELIVERY_MAX_BYTES;
     use super::SENDER_STREAM_MAX_BYTES;
     use super::SEQUENCE_STATE_MAX_BYTES;
     use super::STREAM_KEY_MAX_BYTES;
@@ -392,6 +445,7 @@ mod tests {
     use crate::dht::Did;
     use crate::error::Error;
     use crate::error::Result;
+    use crate::message::replay::RelayDelivery;
     use crate::message::replay::SequenceState;
     use crate::message::replay::StreamKey;
     use crate::message::replay::TransactionDigest;
@@ -425,6 +479,16 @@ mod tests {
         }
     }
 
+    /// A custody of `RELAY_CUSTODY_CAPACITY` deliveries, each at its maximal encoding.
+    fn full_custody() -> RelayCustody {
+        (0..RELAY_CUSTODY_CAPACITY)
+            .map(|slot| RelayDelivery {
+                sequence: u64::MAX - u64::try_from(slot).unwrap_or_default(),
+                digest: TransactionDigest::new([0xff; 32]),
+            })
+            .collect()
+    }
+
     /// The record and key bounds are exact at their maxima.
     #[test]
     fn test_record_bounds_are_exact_at_their_maxima() -> Result<()> {
@@ -432,9 +496,14 @@ mod tests {
         assert_eq!(encoded_len(&key)?, STREAM_KEY_MAX_BYTES);
         assert_eq!(encoded_len(&u64::MAX)?, U64_MAX_BYTES);
         assert_eq!(encoded_len(&full_window())?, SEQUENCE_STATE_MAX_BYTES);
+        let delivery = full_custody()
+            .first()
+            .copied()
+            .ok_or(Error::InvalidCapacity)?;
+        assert_eq!(encoded_len(&delivery)?, RELAY_DELIVERY_MAX_BYTES);
 
         let (sender_key, sender) = sender_record(&key, u64::MAX)?;
-        let (receiver_key, receiver) = receiver_record(&key, &full_window())?;
+        let (receiver_key, receiver) = receiver_record(&key, &full_window(), &full_custody())?;
         assert_eq!(sender.0.len(), SENDER_STREAM_MAX_BYTES);
         assert_eq!(receiver.0.len(), RECEIVER_STREAM_MAX_BYTES);
         assert_eq!(encoded_len(&receiver)?, TRANSACTION_REPLAY_RECORD_MAX_BYTES);
@@ -443,15 +512,19 @@ mod tests {
             receiver_key.len(),
             record_key_max_bytes(ReplayTable::Receiver)
         );
-        // A full store of maximal pairs reaches the store bound exactly.
-        let pair = encoded_len(&(sender_key, sender))? + encoded_len(&(receiver_key, receiver))?;
+        // A full store of maximal pairs, one of which holds the whole custody of the store,
+        // reaches the store bound exactly (the bounded custody law).
+        let (_, unheld) = receiver_record(&key, &full_window(), &RelayCustody::new())?;
+        let unheld_pair = encoded_len(&(&receiver_key, unheld))?;
+        let pair = encoded_len(&(&sender_key, sender))? + unheld_pair;
+        let held = encoded_len(&(&receiver_key, receiver))? - unheld_pair;
         assert_eq!(
-            pair * TRANSACTION_REPLAY_STREAM_CAPACITY,
+            pair * TRANSACTION_REPLAY_STREAM_CAPACITY + held,
             TRANSACTION_REPLAY_STORE_MAX_BYTES
         );
         // The figures the replay documentation states.
-        assert_eq!(TRANSACTION_REPLAY_RECORD_MAX_BYTES, 1_161);
-        assert_eq!(TRANSACTION_REPLAY_STORE_MAX_BYTES, 28_295_168);
+        assert_eq!(TRANSACTION_REPLAY_RECORD_MAX_BYTES, 3_850);
+        assert_eq!(TRANSACTION_REPLAY_STORE_MAX_BYTES, 28_314_240);
         Ok(())
     }
 
@@ -489,7 +562,7 @@ mod tests {
         let window = full_window();
         let records = decoded(vec![
             sender_record(&key, 7)?,
-            receiver_record(&key, &window)?,
+            receiver_record(&key, &window, &RelayCustody::new())?,
         ]);
         let restored = restore(records, by_key);
         let mut expected = ReplayTables::default();
@@ -509,7 +582,8 @@ mod tests {
         let garbage = record_key(ReplayTable::Receiver, &maximal_key(3))?;
         let mut invalid = full_window();
         invalid.accepted = [None; TRANSACTION_REPLAY_WINDOW];
-        let (invalid_slot, invalid_record) = receiver_record(&maximal_key(4), &invalid)?;
+        let (invalid_slot, invalid_record) =
+            receiver_record(&maximal_key(4), &invalid, &RelayCustody::new())?;
         let records = decoded(vec![
             sender_record(&intact, 3)?,
             (garbage.clone(), ReplayRecord(vec![0xff; 3])),
@@ -597,7 +671,7 @@ mod tests {
     fn table_record(table: ReplayTable, stream: &StreamKey) -> Result<(String, ReplayRecord)> {
         match table {
             ReplayTable::Sender => sender_record(stream, 7),
-            ReplayTable::Receiver => receiver_record(stream, &full_window()),
+            ReplayTable::Receiver => receiver_record(stream, &full_window(), &RelayCustody::new()),
         }
     }
 
@@ -622,7 +696,7 @@ mod tests {
             RecordState::InvalidWindow => {
                 let mut invalid = full_window();
                 invalid.accepted = [None; TRANSACTION_REPLAY_WINDOW];
-                let (_, record) = receiver_record(stream, &invalid)?;
+                let (_, record) = receiver_record(stream, &invalid, &RelayCustody::new())?;
                 (
                     filed((own.clone(), record)),
                     Some(defective(Defect::InvalidWindow)),

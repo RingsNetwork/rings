@@ -222,6 +222,7 @@ impl Provider {
     pub(crate) async fn new_provider_with_storage_internal(
         config: ProcessorConfig,
         entry_storage: Option<EntryStorage>,
+        relay_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
         evidence_storage: Option<EvidenceStorage>,
         onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
@@ -251,6 +252,10 @@ impl Provider {
             .onion_entry_guard_storage(onion_entry_guard_storage)
             .replay_storage(replay_storage)
             .measure(measure);
+        let processor_builder = match relay_storage {
+            Some(relay_storage) => processor_builder.relay_storage(relay_storage),
+            None => processor_builder,
+        };
 
         let processor = Arc::new(processor_builder.build()?);
 
@@ -284,6 +289,7 @@ impl Provider {
         account_type: String,
         signer: Signer,
         entry_storage: Option<EntryStorage>,
+        relay_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
         evidence_storage: Option<EvidenceStorage>,
         onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
@@ -297,6 +303,7 @@ impl Provider {
             account_type,
             signer,
             entry_storage,
+            relay_storage,
             measure_storage,
             evidence_storage,
             onion_entry_guard_storage,
@@ -315,6 +322,7 @@ impl Provider {
         account_type: String,
         signer: Signer,
         entry_storage: Option<EntryStorage>,
+        relay_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
         evidence_storage: Option<EvidenceStorage>,
         onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
@@ -335,6 +343,7 @@ impl Provider {
         Self::new_provider_with_storage_internal(
             config,
             entry_storage,
+            relay_storage,
             measure_storage,
             evidence_storage,
             onion_entry_guard_storage,

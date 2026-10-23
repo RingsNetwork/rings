@@ -11,6 +11,10 @@ use crate::lifecycle::StopSource;
 #[cfg(all(feature = "std", not(feature = "dummy"), not(target_family = "wasm")))]
 use crate::storage::KvStorageInterface;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::tests::activity::activity_after;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::tests::activity::activity_mark;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::activity::probe_on_activity;
 use crate::tests::live_entry;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -66,10 +70,15 @@ async fn test_stabilize_republishes_local_entries_to_missing_affine_owners() -> 
     Ok(())
 }
 
-/// Hang guard of the continuous-repair convergence probe: the maintenance loop it waits on is
-/// paced by its own 500 ms interval, so a converging run needs several rounds.
+/// The period of the maintenance loops under test. It is the loop's own pacing, production
+/// code that no test can drive by events; everything else in the test waits on events.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-const CONTINUOUS_REPAIR_HANG_GUARD: Duration = Duration::from_secs(15);
+const MAINTENANCE_PERIOD: Duration = Duration::from_millis(500);
+
+/// Hang guard of the continuous-repair convergence probe, in maintenance periods: a converging
+/// run takes about three (1.6 s in a local run), so thirty is a failure bound only.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+const CONTINUOUS_REPAIR_HANG_GUARD: Duration = MAINTENANCE_PERIOD.saturating_mul(30);
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
@@ -115,7 +124,6 @@ async fn test_continuous_storage_repair_reaches_remote_owners_across_three_nodes
     assert_eq!(tail.dht().storage.get(&tail_key.to_string()).await?, None);
 
     let stop = StopSource::new();
-    let maintenance_interval = Duration::from_millis(500);
     let maintenance = [
         node1.swarm.stabilizer(),
         node2.swarm.stabilizer(),
@@ -123,14 +131,20 @@ async fn test_continuous_storage_repair_reaches_remote_owners_across_three_nodes
     ]
     .map(|stabilizer| {
         let token = stop.token();
-        tokio::spawn(Arc::new(stabilizer).wait_with(maintenance_interval, token))
+        tokio::spawn(Arc::new(stabilizer).wait_with(MAINTENANCE_PERIOD, token))
     });
+    // Repair pressure in protocol time: a fresh request after every observed activity, at the
+    // rate the protocol moves rather than the rate a timer fires.
     let pressure_swarm = node1.swarm.clone();
     let pressure_token = stop.token();
     let repair_pressure = tokio::spawn(async move {
         while !pressure_token.should_stop() {
+            let mark = activity_mark();
             pressure_swarm.transport.request_storage_repair();
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::select! {
+                () = activity_after(mark) => {}
+                () = pressure_token.stopped() => {}
+            }
         }
     });
 

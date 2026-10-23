@@ -14,6 +14,7 @@ use crate::message::test_probe_request;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::swarm::application::ApplicationData;
+use crate::swarm::transport::hold_frame_deadlines_for_test;
 use crate::swarm::transport::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 use crate::swarm::transport::OUTBOUND_DATA_TRANSFER_CAPACITY;
 use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
@@ -149,10 +150,15 @@ async fn disconnect_and_join_capacity_transfers(
     Ok(())
 }
 
+/// Transfers that wait for delivery hold their capacity until their connection retires.
+///
+/// The frame deadlines are held, so the waiting transfers stay admitted until the test
+/// disconnects, rather than until the delivery stall deadline retires the connection.
 #[tokio::test]
 async fn test_transfer_capacity_bounds_real_waiting_and_queued_lifetimes() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
+    let _frame_deadlines = hold_frame_deadlines_for_test();
     let _pending_delivery = PendingDeliveryGuard::new();
     let mut sends = spawn_data_capacity_transfers(&node1, peer);
 

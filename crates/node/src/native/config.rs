@@ -401,7 +401,12 @@ impl Config {
         let f =
             fs::File::create(path.as_path()).map_err(|e| Error::CreateFileError(e.to_string()))?;
         let mut f_writer = io::BufWriter::new(f);
-        serde_saphyr::to_io_writer(&mut f_writer, self).map_err(|_| Error::EncodeError)?;
+        serde_saphyr::to_io_writer(&mut f_writer, self).map_err(|source| {
+            Error::ConfigSerialize {
+                path: path.clone(),
+                source,
+            }
+        })?;
         path.to_str()
             .map(str::to_owned)
             .ok_or_else(|| Error::PathUtf8Error(path.display().to_string()))
@@ -412,9 +417,12 @@ impl Config {
     where P: AsRef<std::path::Path> {
         let path = expand_home(path)?;
         tracing::debug!("Read config from: {:?}", path);
-        let f = fs::File::open(path).map_err(|e| Error::OpenFileError(e.to_string()))?;
+        let f = fs::File::open(path.as_path()).map_err(|e| Error::OpenFileError(e.to_string()))?;
         let f_rdr = io::BufReader::new(f);
-        serde_saphyr::from_reader(f_rdr).map_err(|_| Error::EncodeError)
+        serde_saphyr::from_reader(f_rdr).map_err(|source| Error::ConfigParse {
+            path,
+            source: Box::new(source),
+        })
     }
 }
 
@@ -824,5 +832,84 @@ gateway:
                 "legacy policy field {legacy_field} must be rejected"
             );
         }
+    }
+
+    /// Write `document` to an isolated config file, read it back through [`Config::read_fs`],
+    /// and return the parser's message, after checking that the error is a
+    /// [`Error::ConfigParse`] whose message names that file and whose source is the parser's
+    /// error.
+    fn parse_failure_of(document: &str) -> String {
+        let path = std::env::temp_dir().join(format!("rings-config-{}.yaml", uuid::Uuid::new_v4()));
+        fs::write(&path, document).expect("write test config");
+        let result = Config::read_fs(&path);
+        let _ = fs::remove_file(&path);
+
+        let Err(error) = result else {
+            panic!("document must fail to parse");
+        };
+        let Error::ConfigParse {
+            path: failed,
+            source,
+        } = &error
+        else {
+            panic!("expected a config parse error, got {error:?}");
+        };
+        let rendered = error.to_string();
+        let detail = source.to_string();
+        assert_eq!(failed, &path);
+        assert!(
+            rendered.contains(path.display().to_string().as_str()),
+            "error must name the config file: {rendered}"
+        );
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some(detail.clone()),
+            "error must carry the parser's error as its source"
+        );
+        detail
+    }
+
+    /// The generated document with its `network_id` line replaced by `line`.
+    fn generated_document_with_network_id_line(line: &str) -> String {
+        let network_id_line = format!("network_id: {DEFAULT_NETWORK_ID}\n");
+        let document = generated_document();
+        assert!(document.contains(network_id_line.as_str()));
+        document.replace(network_id_line.as_str(), line)
+    }
+
+    /// A config without the required `network_id` names the missing key.
+    #[test]
+    fn test_read_fs_reports_missing_network_id() {
+        let detail = parse_failure_of(&generated_document_with_network_id_line(""));
+
+        assert!(
+            detail.contains("missing field `network_id`"),
+            "detail: {detail}"
+        );
+    }
+
+    /// A key `Config` does not declare names that key.
+    #[test]
+    fn test_read_fs_reports_unknown_key() {
+        let document = format!("{}not_a_config_key: 1\n", generated_document());
+
+        let detail = parse_failure_of(&document);
+
+        assert!(
+            detail.contains("unknown field `not_a_config_key`"),
+            "detail: {detail}"
+        );
+    }
+
+    /// Malformed YAML, here a quoted scalar left open, reports the scanner's error and where
+    /// the document breaks.
+    #[test]
+    fn test_read_fs_reports_broken_yaml() {
+        let document = generated_document_with_network_id_line("network_id: \"1\n");
+
+        let detail = parse_failure_of(&document);
+
+        assert!(detail.contains("quoted scalar"), "detail: {detail}");
+        assert!(detail.contains("line 2"), "detail: {detail}");
     }
 }

@@ -1,11 +1,122 @@
 # Changelog
 
-## Unreleased
+## 0.35.0
+
+- `tokio` is bumped to 1.53.3 for RUSTSEC-2026-0386 (`AsyncFd::new` and related constructors
+  violate I/O safety) (#1047), in the workspace, `frontend` and `examples/dweb` lockfiles.
+
+- A node that rejoins its seed over HTTP is no longer refused for up to three minutes (#1040).
+  An offer carried out of band (an HTTP join through `answerOffer`) now prevails over the seed's
+  own sent, unanswered overlay offer to that node; offers carried alike keep the DID tie-break.
+  `answerOffer` no longer returns a counter-offer; the HTTP client still answers one from a peer
+  of 0.34.2 or earlier.
+
+- Relay inbox carriers have a store of their own (#1021): `RecordAuthority::Retained`, the new
+  lattice point (durable, retained), flushes every write, evicts nothing (a full store refuses
+  the hold with `Error::StorageBudgetExhausted`) and retires an undecodable record with a log.
+  The data store's budget therefore no longer evicts held mail, and a crash no longer loses or
+  tears it. The native daemon keeps it in `relay-inbox` beside the data store (64 MiB); a browser
+  provider in the IndexedDB database `<storage name>/relay-inbox` (1024 carriers).
+  `SwarmBuilder::relay_storage` and `ProcessorBuilder::relay_storage` set it. Without one, a node
+  takes custody of no relay carrier (the new `Error::RelayStorageUnavailable`): it refuses to
+  hold mail and to take its own inbox's hand-off, so that mail stays with its holder. This is the
+  default of both builders, of the FFI provider and of a browser whose IndexedDB cannot open;
+  relay carriers are never kept in memory. `Provider`'s internal constructors take the store
+  after the entry storage.
+  - **Upgrade consequence.** Mail held by an earlier version is lost once: it stays in the data
+    store, where it is no longer read, so it is never delivered, and the data store's budget
+    removes it in time. An operator of a node that held relay mail at the upgrade should expect
+    those messages not to arrive.
+  - **Operator step.** None.
+
+- Relay-inbox mail survives a restart between its admission and the application's take (#936).
+  A relay delivery enters the window and a relay custody set in one write of its stream's
+  receiver record; a delivery still in custody is queued again on redelivery instead of being
+  refused as a replay, and is released from custody once the application takes it, before its
+  element is retired. Custody follows the carrier (each drain pass drops the deliveries whose
+  element left it) and holds at most `RELAY_INBOX_MAX_LEN` deliveries over the whole store; a
+  full custody defers the drain (the new `Error::RelayCustodyFull`). A crash after a take and
+  before its release delivers the message once more, with the same `ApplicationMessage::tx_id`,
+  which an application deduplicates by. The live path is unchanged, so relay mail more than the
+  replay window behind live traffic of its origin is still refused as the live path refuses it.
+  `TRANSACTION_REPLAY_RECORD_MAX_BYTES` is now 3850 and `TRANSACTION_REPLAY_STORE_MAX_BYTES`
+  28,314,240.
+  - **Operator step.** The receiver record format changes, so a replay store written by an
+    earlier version does not decode and fails every receiver stream closed. Before upgrading,
+    stop the node and remove the replay store: the `transaction-replay` directory beside the
+    native data store, or the browser IndexedDB database `<storage name>/transaction-replay`
+    (`rings-node/transaction-replay` for the default provider). This resets every stream's
+    replay window once, as clearing a stream does.
+
+- The onion entry-guard store is a durable cache (#911): the new `RecordAuthority::DurableCache`
+  flushes every write as an authoritative store does (native: file and directory; browser:
+  IndexedDB `durability: "strict"`), so a crash no longer loses or tears the guard set, while a
+  record that is absent or does not decode is still retired, now logged at `warn`, and the
+  guards are re-selected instead of failing onion routing. Every authority now names its point of
+  the durable-records lattice (`RecordAuthority::components`, a `Crash` and a `Meaning`), and
+  every storage law is a function of those components, not of the variant. No operator step: the
+  store's layout is unchanged.
+
+- An authoritative file store (the native replay store) marks every record it made durable with
+  an empty `<name>.p` file, so a record removed, renamed or lost outside the store fails its
+  stream closed as missing instead of restarting it from `First` (#915). A scan reports such a
+  record as the new `ScannedRecord::Missing`, a `get` refuses it with the new
+  `Error::StorageRecordMissing`, and the root vanishing while the node runs makes every marked
+  record missing. On Windows every rename of an authoritative store is write-through
+  (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`), since a directory cannot be flushed there.
+  - No operator step at upgrade: an existing store's records are marked at its first open.
+  - Clearing one failed stream now takes two deletions with the node stopped: the record file
+    and its marker `<name>.p` in `transaction-replay`. Deleting the file alone leaves the stream
+    failed closed.
+
+- The browser replay store commits every write with IndexedDB's `durability: "strict"` (#912), so
+  a completed admission survives a system crash, not only a browser crash: the default hint is
+  relaxed in Chromium since 121, and Gecko and WebKit do not flush a WAL commit by default.
+  `IdbStorage` now talks to IndexedDB through `web-sys` directly instead of `rexie`, which cannot
+  pass transaction options; its durability is its authority's (`RecordAuthority::flushes`, now
+  shared by both backends). Breaking for `rings-core` callers on wasm:
+  `Error::IDBError` carries the engine's error as a `String` instead of a `rexie::Error`.
+
+- An authoritative IndexedDB store (the browser replay store) refuses instead of evicting
+  (#923): a new row beyond its capacity, or an open under a lowered capacity, fails with
+  `Error::StorageBudgetExhausted` and changes nothing, as the native authoritative store does.
+  An evicted replay record used to restart its stream from `First`. Its `get` is now a read-only
+  transaction, since a store that never evicts orders nothing by recency. The error's counts are
+  in the store's budget unit (bytes for `FileStorage`, rows for `IdbStorage`).
+
+- A config file that fails to load names itself and the parser's message (#1016): a missing or
+  unknown key, a wrong type or malformed YAML no longer prints a bare `Encode error.`. Reading
+  fails with the new `Error::ConfigParse` (code 821) and writing with `Error::ConfigSerialize`
+  (code 822); both carry the config path and the `serde_saphyr` error as their source.
+
+## 0.34.2
 
 - `rustls-webpki` is bumped to 0.103.16 and `webpki-roots` to 1.0.10 for RUSTSEC-2026-0382
   (distrusted intermediates may be accepted) and RUSTSEC-2026-0381 (bundled roots trust
   distrusted emSign intermediates) (#997). Both are admitted ahead of the dependency cooldown,
   like the rustls advisory bump of #956.
+
+- Removed options have no tombstones (#990): `gateway.onion_service`, `gateway.onion_hop_count`
+  and `gateway.onion_allow_short_paths` fail as an unknown gateway key, and the removed
+  `ONION_HTTP_PROXY_HOP_COUNT` and `ONION_HTTP_PROXY_ALLOW_SHORT_PATHS` variables are no longer
+  read, like the other variables the onion loop cutover removed.
+
+- A provider installs its onion runtime in one slot, native and browser alike (#990):
+  `Provider::onion_circuit` returns the native handle of that runtime, installing it on first
+  use, and replaces `NativeOnionCircuitHandle::install`.
+
+- The browser `BrowserOnionProxy.exit_service()` export, which had no caller, is removed: the
+  proxy always selects `https` (#990).
+
+- Onion and gateway API cleanup (#990). Breaking for `rings-node` library callers:
+  - `NativeOnionGatewayConnector::new(processor, onion)` drops its `proxy` parameter, which
+    could only be `OnionProxyProtocol::TcpConnect`;
+  - `NativeOnionCircuitHandle::relay_tcp_stream` is replaced by `open_tcp_target(processor,
+    target)`, which selects the `tcp` route and opens the session (then call `relay`);
+  - `OnionProxyRoute` drops its unread `protocol` field.
+
+  `rings-gateway` gains a `test-support` feature exposing `rings_gateway::testing`, the
+  in-memory packet fixtures; the `gateway-bench` example requires it.
 
 ## 0.34.1
 
@@ -33,28 +144,6 @@
   drop `onion_service`; the reflection-bound docs state that only `FindSuccessorReport` returns
   through `reply_via` and connect signaling retraces its recorded path (#947); the 0.34.0 notes
   below state the `SwarmEvent` variants and core API additions correctly.
-
-- Removed options have no tombstones (#990): `gateway.onion_service`, `gateway.onion_hop_count`
-  and `gateway.onion_allow_short_paths` fail as an unknown gateway key, and the removed
-  `ONION_HTTP_PROXY_HOP_COUNT` and `ONION_HTTP_PROXY_ALLOW_SHORT_PATHS` variables are no longer
-  read, like the other variables the onion loop cutover removed.
-
-- A provider installs its onion runtime in one slot, native and browser alike (#990):
-  `Provider::onion_circuit` returns the native handle of that runtime, installing it on first
-  use, and replaces `NativeOnionCircuitHandle::install`.
-
-- The browser `BrowserOnionProxy.exit_service()` export, which had no caller, is removed: the
-  proxy always selects `https` (#990).
-
-- Onion and gateway API cleanup (#990). Breaking for `rings-node` library callers:
-  - `NativeOnionGatewayConnector::new(processor, onion)` drops its `proxy` parameter, which
-    could only be `OnionProxyProtocol::TcpConnect`;
-  - `NativeOnionCircuitHandle::relay_tcp_stream` is replaced by `open_tcp_target(processor,
-    target)`, which selects the `tcp` route and opens the session (then call `relay`);
-  - `OnionProxyRoute` drops its unread `protocol` field.
-
-  `rings-gateway` gains a `test-support` feature exposing `rings_gateway::testing`, the
-  in-memory packet fixtures; the `gateway-bench` example requires it.
 
 ## 0.34.0
 

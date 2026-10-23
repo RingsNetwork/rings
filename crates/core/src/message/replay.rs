@@ -27,7 +27,7 @@
 //! **Law (fail closed per stream, #910).** The first operation restores the store from one scan
 //! of the storage and caches the result, including every record that does not restore. For a
 //! stream `s` whose stored record is damaged (torn, corrupt or unreadable, or holding another
-//! key's record):
+//! key's record) or missing (witnessed as written by the store, and no longer held, #915):
 //!
 //! ```text
 //! ∀ transition t of s.   t = Err(TransactionReplayStreamUnavailable { s, record })
@@ -39,10 +39,11 @@
 //!
 //! so no replay is admitted from, and no sequence is reused by, such a stream, while every stream
 //! already in the store keeps its guarantee; a new stream sees each such record hold one slot of
-//! its table's bound. The law covers the records the storage holds: a record that is absent
-//! (deleted, or never made durable, as a rename can be on a non-unix target) is indistinguishable
-//! from a stream never seen, and its stream restarts from `First` (tracked in #915). Each record
-//! write of the native store is flushed, which bounds the node-wide transition rate (about 50 per
+//! its table's bound. The law covers the records the storage witnesses: the native store keeps a
+//! presence marker per record, so a record deleted or renamed outside it is missing, not a
+//! stream never seen; only a store lost whole (its directory, or the browser's database) reads
+//! as a stream never seen, for every stream, which is the reset below. Each record write of the
+//! native store is flushed, which bounds the node-wide transition rate (about 50 per
 //! second on macOS, see the replay chapter; group commit is tracked in #916). The unrestorable
 //! records are counted ([`ReplayCounters::unrestorable_record`]), each refusal is counted
 //! ([`ReplayCounters::unavailable_stream`]), and each is logged once at load with its storage
@@ -52,7 +53,8 @@
 //! **Recovery.** An operator clears one failed stream, accepting a replay-window reset for that
 //! stream alone, by removing the record the refusal and the log name while the node is stopped,
 //! and then starting it: the native daemon keeps each record as the file of that name in the
-//! `transaction-replay` directory beside its data store, and a browser provider keeps it as the
+//! `transaction-replay` directory beside its data store, with its presence marker `<name>.p`
+//! beside it, which the operator removes too; a browser provider keeps it as the
 //! row of that key in the IndexedDB database and object store `<storage name>/transaction-replay`
 //! (see the replay chapter for the steps). After the restart the stream starts from `First`: an
 //! unexpired transaction of a cleared receiver stream may be admitted once more, and a cleared
@@ -98,8 +100,11 @@ use crate::storage::KvStorageScan;
 use crate::swarm::transport::DELIVERY_BOUND;
 use crate::utils::Instant;
 
+mod custody;
 mod store;
 
+pub(crate) use self::custody::RelayAdmission;
+pub(crate) use self::custody::RelayDelivery;
 use self::store::receiver_record;
 use self::store::restore;
 use self::store::sender_record;
@@ -177,7 +182,7 @@ impl StreamKey {
 }
 
 /// Digest of one exact signed transaction.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct TransactionDigest(pub(crate) [u8; 32]);
 
 impl TransactionDigest {
@@ -460,6 +465,20 @@ pub(crate) struct TransactionReplay {
     quota_counters: OriginQuotaCounterState,
 }
 
+/// One transaction presented for admission at its destination.
+struct Admission {
+    /// Its stream.
+    key: StreamKey,
+    /// Its sequence in the stream.
+    sequence: u64,
+    /// Its digest.
+    digest: TransactionDigest,
+    /// The quota charge of its class.
+    charge: OriginQuotaCharge,
+    /// Its byte cost against the origin's quota.
+    byte_cost: usize,
+}
+
 struct TransactionAdmissionState {
     /// The replay store, restored once on the first operation and cached from then on.
     store: Option<ReplayStore>,
@@ -681,7 +700,38 @@ impl TransactionReplay {
         C: FnOnce() -> OriginQuotaInstant,
     {
         let mut state = self.state.lock().await;
-        let TransactionAdmissionState { store, quota } = &mut *state;
+        let admission = Admission {
+            key,
+            sequence,
+            digest,
+            charge,
+            byte_cost,
+        };
+        self.admit_in(&mut state, admission, clock, None).await
+    }
+
+    /// The admission transition on the locked `state`: classify, read the quota clock, reserve
+    /// quota, persist the stream's record, then update the table. A `relayed` delivery enters
+    /// the stream's custody in the same record write (the custody law of `custody`); a live one
+    /// leaves the custody as it is.
+    async fn admit_in<C>(
+        &self,
+        state: &mut TransactionAdmissionState,
+        admission: Admission,
+        clock: C,
+        relayed: Option<RelayDelivery>,
+    ) -> Result<SequenceVerdict>
+    where
+        C: FnOnce() -> OriginQuotaInstant,
+    {
+        let Admission {
+            key,
+            sequence,
+            digest,
+            charge,
+            byte_cost,
+        } = admission;
+        let TransactionAdmissionState { store, quota } = state;
         let store = self.load_store(store).await?;
         self.refuse_unavailable(store, ReplayTable::Receiver, key)?;
         let previous = store.tables.receiver.get(&key);
@@ -715,7 +765,9 @@ impl TransactionReplay {
             }
         }
 
-        let record = receiver_record(&key, &next)?;
+        let mut custody = store.tables.custody.get(&key).cloned().unwrap_or_default();
+        custody.extend(relayed);
+        let record = receiver_record(&key, &next, &custody)?;
         let quota_key = OriginQuotaKey::new(
             key.network_id,
             key.origin_account,
@@ -735,6 +787,9 @@ impl TransactionReplay {
             return Err(error);
         }
         store.tables.receiver.insert(key, next);
+        if !custody.is_empty() {
+            store.tables.custody.insert(key, custody);
+        }
         Ok(verdict)
     }
 
@@ -775,6 +830,8 @@ mod tests;
 mod quota_admission_tests;
 #[cfg(all(test, feature = "wasm", target_family = "wasm"))]
 mod test_browser_store;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_custody;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_durable_throughput;
 #[cfg(all(test, not(target_family = "wasm")))]

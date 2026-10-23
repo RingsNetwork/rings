@@ -91,8 +91,10 @@ on the JSON-RPC method:
 
 The public methods are the two halves of the HTTP handshake, whose offer is already bound to the
 peer DID by its signature, so a seed can admit arbitrary peers without sharing its token.
-`answerOffer` returns the answer, or a counter-offer when the seed's own pending overlay offer to
-the caller prevails on the DID tie-break; the caller answers it and returns the answer with
+`answerOffer` returns the answer: the caller's offer prevails over a pending overlay offer the
+seed holds to the caller, which the seed releases, so the caller never needs the gated
+`acceptAnswer`. Seeds of 0.34.2 and earlier return a counter-offer instead when their own pending
+overlay offer prevails on the DID tie-break; the caller answers it and returns the answer with
 `acceptAnswer`. A batch
 is authorized by its strictest member: a batch that mixes a public and a gated method requires
 the token. Every JSON-RPC request, public or gated, must use `Content-Type: application/json`.

@@ -15,7 +15,7 @@ pub struct SwarmInspect {
     pub peers: Vec<ConnectionInspect>,
     /// DHT routing state for the local peer.
     pub dht: DHTInspect,
-    /// Persistent DHT storage contents.
+    /// Persistent DHT storage contents: the data namespace, then the relay-inbox namespace.
     pub persistence_storage: StorageInspect,
     /// Cache DHT storage contents.
     pub cache_storage: StorageInspect,
@@ -68,7 +68,10 @@ impl MailboxStorageInspect {
     pub async fn inspect(dht: &PeerRing) -> crate::error::Result<Self> {
         let now_ms = get_epoch_ms();
         let mut snapshot = Self::default();
-        let stored = dht.storage.get_all().await?;
+        let Some(relay_storage) = dht.relay_storage.as_ref() else {
+            return Ok(Self::default());
+        };
+        let stored = relay_storage.get_all().await?;
         for entry in stored
             .into_iter()
             .filter_map(|(_, entry)| entry.live_at(now_ms))
@@ -89,7 +92,15 @@ impl SwarmInspect {
     pub async fn inspect(swarm: &Swarm) -> Self {
         let dht = DHTInspect::inspect(&swarm.dht());
         let peers = swarm.peers();
-        let persistence_storage = StorageInspect::inspect_kv_storage(&swarm.dht().storage).await;
+        let mut persistence_storage =
+            StorageInspect::inspect_kv_storage(&swarm.dht().storage).await;
+        if let Some(relay_storage) = swarm.dht().relay_storage.as_ref() {
+            persistence_storage.items.extend(
+                StorageInspect::inspect_kv_storage(relay_storage)
+                    .await
+                    .items,
+            );
+        }
         let cache_storage = StorageInspect::inspect_kv_storage(&swarm.dht().cache).await;
 
         Self {

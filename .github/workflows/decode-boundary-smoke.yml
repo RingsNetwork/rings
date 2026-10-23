@@ -30,8 +30,8 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
           rustup show
 
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # No Rust cache: only pushes to develop and master write one (see QACI), and no push
+      # builds this debug configuration, so a restore here could never hit.
 
       - name: Generate decode-boundary inputs
         run: |
