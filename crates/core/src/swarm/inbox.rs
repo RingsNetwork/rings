@@ -201,7 +201,9 @@ impl InboxDelivery for SwarmInboxDelivery {
         let now_ms = get_epoch_ms();
         let key = StorageKey::inbox_of(self.transport.dht.did);
         let Some(inbox) = self.transport.dht.live_storage_entry(key, now_ms).await? else {
-            return Ok(());
+            // No carrier (expired, never held, or no relay store to keep one): nothing is
+            // stored, so custody restricts to nothing (the custody law's first step).
+            return self.transport.restrict_relay_custody([]).await;
         };
         let stored = inbox.stored_inbox_elements();
         self.transport

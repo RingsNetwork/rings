@@ -541,6 +541,32 @@ mod tests {
         ));
     }
 
+    /// Custody follows the carrier (#936): a drain pass that finds no carrier for this node, as
+    /// after its mail expired untaken or on a node with no relay store, restricts custody to
+    /// nothing, so a delivery in custody no longer outlives the mail it kept.
+    #[tokio::test]
+    async fn test_a_pass_without_a_carrier_empties_custody() {
+        use crate::dht::InboxDelivery;
+
+        let (swarm, inbox) = claimed_swarm(None);
+        let delivery = LocalDelivery::new(swarm.transport.clone());
+        let payload = payload(swarm.did(), 0).expect("payload");
+        assert!(matches!(
+            delivery.deliver(&payload).await.expect("in custody"),
+            LocalDelivered::Queued(_)
+        ));
+        assert!(inbox.try_next().is_some());
+
+        crate::swarm::inbox::SwarmInboxDelivery::new(swarm.transport.clone())
+            .deliver_inbox()
+            .await
+            .expect("a pass with no carrier");
+        assert!(matches!(
+            delivery.deliver(&payload).await,
+            Err(Error::TransactionReplay { .. })
+        ));
+    }
+
     #[tokio::test]
     async fn test_an_intermediate_relay_creates_no_origin_replay_state() {
         let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
