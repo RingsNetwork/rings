@@ -22,9 +22,10 @@ use rings_node::onion::OnionServiceName;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
+use rings_node::prelude::rings_core::message::ReplayRecord;
+use rings_node::prelude::rings_core::message::ReplayStorage;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
-use rings_node::prelude::rings_core::storage::RecordAuthority;
+use rings_node::prelude::rings_core::storage::MemStorage;
 use rings_node::prelude::uuid;
 use rings_node::prelude::StopToken;
 use rings_node::processor::Processor;
@@ -336,6 +337,16 @@ fn fixture_url(path: &str) -> String {
     format!("{}{path}", fixture_origin())
 }
 
+/// An in-memory replay store: this fixture's named choice until group commit (#916). An
+/// authoritative IndexedDB store commits each reservation and admission strictly, one at a time,
+/// at a measured p50 of about 15 ms (#1043); this flow's four requests take about 8,000 such
+/// writes over its four nodes, which outlasts its request deadline. The flow under test lives
+/// within one page's lifetime and asserts nothing about replay surviving a restart. #916 returns
+/// this fixture to the authoritative store the browser provider opens.
+fn volatile_replay_storage() -> ReplayStorage {
+    Box::new(MemStorage::<ReplayRecord>::new())
+}
+
 async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewResult<FixtureNode> {
     let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(|error| {
         WebviewError::transport(format!("build browser delegatee key: {error:?}"))
@@ -358,23 +369,11 @@ async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewR
             .await
             .map_err(|error| WebviewError::transport(format!("open idb storage: {error:?}")))?,
     );
-    // Replay needs an authoritative store (#1022), as the browser provider opens it.
-    let replay_rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS)
-        .map_err(|error| WebviewError::transport(format!("replay row capacity: {error:?}")))?;
-    let replay_storage = Box::new(
-        IdbStorage::new_with_cap_name_and_authority(
-            replay_rows,
-            &format!("{storage_name}/transaction-replay"),
-            RecordAuthority::Authoritative,
-        )
-        .await
-        .map_err(|error| WebviewError::transport(format!("open replay storage: {error:?}")))?,
-    );
     let registry_heartbeat = config.registry_heartbeat_interval();
     let processor = ProcessorBuilder::from_config(&config)
         .map_err(|error| WebviewError::transport(format!("build processor config: {error:?}")))?
         .storage(storage)
-        .replay_storage(replay_storage)
+        .replay_storage(volatile_replay_storage())
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .observer(activity_observer())
         .build()
