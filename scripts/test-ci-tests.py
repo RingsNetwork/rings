@@ -37,7 +37,7 @@ class CoverageGuards(unittest.TestCase):
         self.args = argparse.Namespace(
             artifacts=self.artifacts, inventory=self.inventory, target=None, target_libdir=self.root / "rustlib",
             filter="", exact=False, ignored=False, sudo=False, nocapture=False, skip=[],
-            skip_file=None, require_file=None, list_only=False,
+            skip_file=None, require_file=None, list_only=False, skip_modules=None, only_modules=None,
         )
         self.tests = ["unit::fast", "model::large", "gateway::privileged"]
         self.ignored = ["gateway::privileged"]
@@ -79,6 +79,78 @@ class CoverageGuards(unittest.TestCase):
         self.args.skip_file = self.root / "skips.txt"
         self.args.skip_file.write_text("model::large\n")
         with self.assertRaisesRegex(ValueError, "another test"):
+            ci_tests.run(self.args)
+        self.run_mock.assert_not_called()
+
+    def test_listed_module_runs_in_exactly_one_run(self):
+        """A module list moves a module's tests to its owner: the skipping run leaves them out and
+        the owning run executes them alone, so neither runs them twice or drops them."""
+        modules = self.root / "modules.txt"
+        modules.write_text("# owned by another job\nsample unit\n")
+        self.args.skip_modules = modules
+        ci_tests.run(self.args)
+        self.assertEqual(json.loads(self.inventory.read_text())[0]["selected"], ["model::large"])
+        self.run_mock.assert_called_once_with(
+            [str(self.root / "tests"), "--skip", "unit::"], cwd=str(self.root), env=ANY, check=True,
+        )
+        self.run_mock.reset_mock()
+        self.args.skip_modules, self.args.only_modules = None, modules
+        ci_tests.run(self.args)
+        self.assertEqual(json.loads(self.inventory.read_text())[0]["selected"], ["unit::fast"])
+        self.run_mock.assert_called_once_with(
+            [str(self.root / "tests"), "unit::"], cwd=str(self.root), env=ANY, check=True,
+        )
+
+    def test_listed_module_matching_nothing_fails(self):
+        """A renamed module must not silently stop moving its tests."""
+        self.args.skip_modules = self.root / "modules.txt"
+        self.args.skip_modules.write_text("sample renamed\n")
+        with self.assertRaisesRegex(ValueError, "matches zero tests"):
+            ci_tests.run(self.args)
+        self.run_mock.assert_not_called()
+
+    def test_listed_module_matching_inside_another_name_fails(self):
+        """libtest matches a module's prefix anywhere in a name; it must not reach another module."""
+        self.tests.append("model::unit::nested")
+        self.args.skip_modules = self.root / "modules.txt"
+        self.args.skip_modules.write_text("sample unit\n")
+        with self.assertRaisesRegex(ValueError, "inside another test name"):
+            ci_tests.run(self.args)
+        self.run_mock.assert_not_called()
+
+    def test_listed_module_cannot_hide_a_required_test(self):
+        """A required model search cannot be moved away from the job that must run it."""
+        self.args.skip_modules = self.root / "modules.txt"
+        self.args.skip_modules.write_text("sample model\n")
+        self.args.require_file = self.root / "required.txt"
+        self.args.require_file.write_text("model::large\n")
+        with self.assertRaisesRegex(ValueError, "required tests"):
+            ci_tests.run(self.args)
+        self.run_mock.assert_not_called()
+
+    def test_per_crate_runs_ignore_other_targets(self):
+        """A per-crate run acts on its own target's modules and ignores the others', in both modes."""
+        modules = self.root / "modules.txt"
+        modules.write_text("other unit\nsample unit\n")
+        self.args.only_modules = modules
+        ci_tests.run(self.args)
+        self.assertEqual(json.loads(self.inventory.read_text())[0]["selected"], ["unit::fast"])
+        self.args.only_modules, self.args.skip_modules = None, modules
+        ci_tests.run(self.args)
+        self.assertEqual(json.loads(self.inventory.read_text())[0]["selected"], ["model::large"])
+
+    def test_module_lists_combine_with_nothing_that_changes_their_meaning(self):
+        """Lists are exclusive, and `--exact` or a filter would change what a prefix selects."""
+        modules = self.root / "modules.txt"
+        modules.write_text("sample unit\n")
+        self.args.skip_modules = self.args.only_modules = modules
+        with self.assertRaisesRegex(ValueError, "exclusive"):
+            ci_tests.run(self.args)
+        self.args.skip_modules, self.args.exact = None, True
+        with self.assertRaisesRegex(ValueError, "--exact"):
+            ci_tests.run(self.args)
+        self.args.exact, self.args.filter = False, "unit"
+        with self.assertRaisesRegex(ValueError, "no --filter"):
             ci_tests.run(self.args)
         self.run_mock.assert_not_called()
 

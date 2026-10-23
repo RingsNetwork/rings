@@ -28,6 +28,8 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--skip", action="append", default=[], help="Required substring exclusion")
     parser.add_argument("--skip-file", type=Path, help="Exact test names owned by another job")
     parser.add_argument("--require-file", type=Path, help="Exact test names this job must execute")
+    parser.add_argument("--skip-modules", type=Path, help="`<target> <module>` lines whose tests another job owns")
+    parser.add_argument("--only-modules", type=Path, help="`<target> <module>` lines whose tests this run owns")
     parser.add_argument("--list-only", action="store_true", help="Validate and save inventory without execution")
     return parser.parse_args()
 
@@ -37,6 +39,19 @@ def names_file(path: Path | None) -> list[str]:
     if path is None:
         return []
     return [line.strip() for line in path.read_text().splitlines() if line.strip() and not line.startswith("#")]
+
+
+def module_entries(path: Path | None) -> list[tuple[str, str]]:
+    """Read `<target> <module>` ownership lines: a module owns every test whose name starts with
+    `module::` in the test executable of that Cargo target."""
+    entries = []
+    for line in names_file(path):
+        target, _, module = line.partition(" ")
+        module = module.strip()
+        if not target or not module or " " in module or module.endswith(":"):
+            raise ValueError(f"malformed module line: {line!r}")
+        entries.append((target, module))
+    return entries
 
 
 def executables(path: Path, target: str | None) -> list[dict]:
@@ -104,11 +119,28 @@ def test_names(artifact: dict, environment: dict, ignored: bool = False) -> list
     return names
 
 
+def owned_by_this_run(name: str, modules: list[str], args: argparse.Namespace) -> bool:
+    """Whether a run with these module lists executes `name`: an owning run executes only its
+    listed modules, a skipping run everything but them, and a run with no list everything."""
+    in_listed_module = any(name.startswith(prefix) for prefix in modules)
+    if args.only_modules:
+        return in_listed_module
+    return not (args.skip_modules and in_listed_module)
+
+
 def run(args: argparse.Namespace) -> None:
     """Validate all ownership claims, save the inventory, then execute the selection."""
     if args.sudo and not (args.target and args.filter and args.exact and args.ignored):
         raise ValueError("sudo requires one target and one exact ignored test")
+    if args.skip_modules and args.only_modules:
+        raise ValueError("--skip-modules and --only-modules are exclusive")
+    # libtest's filters and skips are substrings, and `--exact` would make them whole names.
+    if (args.skip_modules or args.only_modules) and args.exact:
+        raise ValueError("a module list cannot be combined with --exact")
+    if args.only_modules and args.filter:
+        raise ValueError("--only-modules selects by module and takes no --filter")
     artifacts = executables(args.artifacts, args.target)
+    modules = module_entries(args.skip_modules or args.only_modules)
     target_libdir = args.target_libdir or Path(subprocess.check_output(
         ["rustc", "--print", "target-libdir"], text=True,
     ).strip())
@@ -123,11 +155,13 @@ def run(args: argparse.Namespace) -> None:
         artifact["ignored"] = test_names(artifact, environment, ignored=True)
         all_names.update(artifact["tests"])
         eligible = set(artifact["ignored"]) if args.ignored else set(artifact["tests"]) - set(artifact["ignored"])
+        artifact["modules"] = [module + "::" for target, module in modules if target == artifact["target"]]
         artifact["selected"] = sorted(
             name for name in eligible
             if (name == args.filter if args.exact else args.filter in name)
             and name not in exact_skips
             and not any(skip in name for skip in args.skip)
+            and owned_by_this_run(name, artifact["modules"], args)
         )
         selected_names.update(artifact["selected"])
     for name in exact_skips:
@@ -139,6 +173,19 @@ def run(args: argparse.Namespace) -> None:
     for skip in args.skip:
         if not any(skip in name for name in all_names):
             raise ValueError(f"exclusion matches zero tests: {skip}")
+    targets = {artifact["target"] for artifact in artifacts}
+    for target, module in modules:
+        # A per-crate run sees only its own target. Every run that builds a target validates its
+        # modules, and scripts/check-transport-independent-modules.py rejects unknown targets.
+        if target not in targets:
+            continue
+        prefix = module + "::"
+        names = [name for artifact in artifacts if artifact["target"] == target for name in artifact["tests"]]
+        if not any(name.startswith(prefix) for name in names):
+            raise ValueError(f"listed module matches zero tests: {target} {module}")
+        # libtest matches the prefix anywhere in a name; it must not reach a test outside the module.
+        if any(prefix in name and not name.startswith(prefix) for name in names):
+            raise ValueError(f"listed module also matches inside another test name: {target} {module}")
     if not selected_names:
         raise ValueError("selection matches zero runnable tests")
     if missing := set(required) - selected_names:
@@ -156,13 +203,15 @@ def run(args: argparse.Namespace) -> None:
         command = (["sudo", "--", "env", f"{variable}={environment[variable]}"] if args.sudo else []) + [artifact["executable"]]
         if args.filter:
             command.append(args.filter)
+        if args.only_modules:
+            command.extend(artifact["modules"])
         if args.exact:
             command.append("--exact")
         if args.ignored:
             command.append("--ignored")
         if args.nocapture:
             command.append("--nocapture")
-        for skip in args.skip + exact_skips:
+        for skip in args.skip + exact_skips + (artifact["modules"] if args.skip_modules else []):
             command.extend(["--skip", skip])
         # Cargo normally starts each test from its own package directory.
         print(f"Running {artifact['target']} ({len(artifact['selected'])} tests)", flush=True)

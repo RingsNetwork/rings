@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -77,6 +78,35 @@ use self::state::WITHHELD_CREDIT;
 /// Exclusive bound on the scheduler turns a frame waits before it arrives
 /// (see [`yield_before_arrival`]).
 const ARRIVAL_TURNS: u64 = 16;
+
+/// Set in a test run that asserts its tests construct no transport: CI runs the
+/// transport-independent modules this way (`scripts/ci-transport-independent-modules.txt`).
+const DUMMY_TRANSPORT_FORBIDDEN_ENV: &str = "RINGS_DUMMY_TRANSPORT_FORBIDDEN";
+
+/// Abort a run under [`DUMMY_TRANSPORT_FORBIDDEN_ENV`] at the first dummy transport.
+///
+/// Law: every swarm and processor of a `dummy` build is backed by a `DummyTransport`, the backend
+/// that build substitutes for the native one. A test that reaches this check, through any helper,
+/// built one, so it depends on which backend its build has, and running it in one job only would
+/// drop its native coverage.
+///
+/// The process aborts instead of panicking, so a test cannot catch the failure. The message names
+/// the test, which libtest runs on a thread of the test's name, and goes to the stderr handle
+/// itself: libtest captures `eprintln!` per test, and an abort discards the capture.
+fn assert_transport_permitted() {
+    if std::env::var_os(DUMMY_TRANSPORT_FORBIDDEN_ENV).is_some() {
+        let test = std::thread::current()
+            .name()
+            .unwrap_or("an unnamed thread")
+            .to_owned();
+        let _ = writeln!(
+            std::io::stderr(),
+            "{test} constructed a dummy transport while {DUMMY_TRANSPORT_FORBIDDEN_ENV} is set: it \
+             is not transport-independent"
+        );
+        std::process::abort();
+    }
+}
 
 lazy_static! {
     static ref CONNS: DashMap<String, Arc<DummyConnection>> = DashMap::new();
@@ -415,6 +445,7 @@ impl DummyTransport {
         _external_address: Option<String>,
         _udp_port_range: Option<WebrtcUdpPortRange>,
     ) -> Self {
+        assert_transport_permitted();
         let _ = parse_ice_servers_or_warn(ice_servers, "dummy");
 
         Self {

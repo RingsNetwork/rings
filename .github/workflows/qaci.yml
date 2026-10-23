@@ -368,6 +368,7 @@ jobs:
           mkdir -p target/ci-evidence
           cargo test --locked --profile ci --workspace --all-targets --no-run --timings --message-format=json > target/ci-evidence/native.jsonl
 
+      # The transport-independent modules run once, in the dummy job (see .github/CI.md).
       - name: Run native tests and require the complete model gate
         env:
           # Large exhaustive searches share this runner; cap concurrent harness tests.
@@ -376,6 +377,7 @@ jobs:
           python3 scripts/run-ci-tests.py target/ci-evidence/native.jsonl
           --inventory target/ci-evidence/native-inventory.json
           --require-file scripts/ci-native-model-tests.txt
+          --skip-modules scripts/ci-transport-independent-modules.txt
           --skip message::handlers::connection::test_connection::test_relayed_connect_over_real_webrtc
 
       # The real-WebRTC relayed-connect smoke test (#882) runs serialized against the rest of the
@@ -457,17 +459,26 @@ jobs:
         run: |
           mkdir -p target/ci-evidence
           cargo test --locked --profile ci -p rings-core --features dummy --no-run --timings --message-format=json > target/ci-evidence/core-dummy.jsonl
+          # The transport-independent modules, with transport construction forbidden.
+          RINGS_DUMMY_TRANSPORT_FORBIDDEN=1 python3 scripts/run-ci-tests.py target/ci-evidence/core-dummy.jsonl \
+            --inventory target/ci-evidence/core-dummy-independent-inventory.json \
+            --only-modules scripts/ci-transport-independent-modules.txt
           python3 scripts/run-ci-tests.py target/ci-evidence/core-dummy.jsonl \
             --inventory target/ci-evidence/core-dummy-inventory.json \
             --skip-file scripts/ci-native-model-tests.txt \
+            --skip-modules scripts/ci-transport-independent-modules.txt \
             --skip tests::default::test_sync_storm::
       - name: Compile and run node dummy tests
         env:
           RUST_TEST_THREADS: 2
         run: |
           cargo test --locked --profile ci -p rings-node --features dummy --no-run --timings --message-format=json > target/ci-evidence/node-dummy.jsonl
+          RINGS_DUMMY_TRANSPORT_FORBIDDEN=1 python3 scripts/run-ci-tests.py target/ci-evidence/node-dummy.jsonl \
+            --inventory target/ci-evidence/node-dummy-independent-inventory.json \
+            --only-modules scripts/ci-transport-independent-modules.txt
           python3 scripts/run-ci-tests.py target/ci-evidence/node-dummy.jsonl \
-            --inventory target/ci-evidence/node-dummy-inventory.json
+            --inventory target/ci-evidence/node-dummy-inventory.json \
+            --skip-modules scripts/ci-transport-independent-modules.txt
       - name: Compile and run transport dummy tests
         run: |
           cargo test --locked --profile ci -p rings-transport --no-default-features --features dummy --no-run --timings --message-format=json > target/ci-evidence/transport-dummy.jsonl
@@ -626,6 +637,9 @@ jobs:
 
       - name: Test CI selection and artifact reuse guards
         run: python3 scripts/test-ci-tests.py
+
+      - name: Check the transport-independent modules compile the same in both feature sets
+        run: python3 scripts/check-transport-independent-modules.py scripts/ci-transport-independent-modules.txt
 
       - name: Check typos
         uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2

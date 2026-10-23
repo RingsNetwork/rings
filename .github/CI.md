@@ -10,10 +10,46 @@ harness execution. Those historical timings are not a benchmark of this change.
 
 | Owner | Configuration | Coverage |
 | --- | --- | --- |
-| Build and test | Workspace defaults, `ci` profile | All workspace test targets; seven required exhaustive model searches; selected Onion/TUN/helper ignored tests; the workspace's doctests |
-| Dummy transport tests | Core defaults + dummy; transport dummy without defaults, `ci` profile | Dummy integration, shell conformance, ordinary unit and inexpensive model tests; the PR decode-boundary smoke (every crate's `decode_boundary` tests, with a generated seed and 1024 cases) |
+| Build and test | Workspace defaults, `ci` profile | All workspace test targets except the transport-independent modules; seven required exhaustive model searches; selected Onion/TUN/helper ignored tests; the workspace's doctests |
+| Dummy transport tests | Core defaults + dummy; transport dummy without defaults, `ci` profile | The transport-independent modules, with transport construction forbidden; dummy integration, shell conformance, ordinary unit and inexpensive model tests; the PR decode-boundary smoke (every crate's `decode_boundary` tests, with a generated seed and 1024 cases) |
 | Ring and hotspot deterministic replay | Core dummy without defaults, `ci` profile | Entire storm family, including all 30 identical replays and protection ablations, plus N=10/25/50 |
 | Ring and hotspot N=10/25/50 | Same storm configuration, scheduled/manual | Existing scale and extended seed matrices |
+
+## Transport-independent modules
+
+`scripts/ci-transport-independent-modules.txt` lists modules of rings-core and
+rings-node whose tests run once, in the dummy job (#1002). The native job skips
+them (`run-ci-tests.py --skip-modules`); the dummy job runs them first with
+`RINGS_DUMMY_TRANSPORT_FORBIDDEN` set (`--only-modules`), then the rest. Both jobs
+build them with the same `ci` profile, `opt-level`, assertions and test threads;
+the dummy build's features are the native build's plus `dummy`.
+
+Law: a test of both builds that constructs no transport behaves the same in both.
+
+- It compiles in the native build, so it reaches only items present in both.
+- A shared item whose body differs under `dummy` is either the transport backend
+  (and the inbound pipeline, transport timeouts and send paths that only a
+  `SwarmTransport` reaches), or a test hook (the `crate::simulation` runtime, the
+  outbound test trace). A hook is inert until a dummy-only API arms it.
+- Every swarm and processor of a `dummy` build is backed by a `DummyTransport`.
+
+Each listed module meets the premise, checked twice:
+
+1. `scripts/check-transport-independent-modules.py` (the clippy job) rejects a
+   module whose files, or whose `mod` declaration, mention `feature = "dummy"`. A
+   listed module therefore has the same tests and the same code in both builds.
+2. Under `RINGS_DUMMY_TRANSPORT_FORBIDDEN`, `DummyTransport::new` aborts the run and
+   names the test. A test that builds a swarm or a processor through any helper
+   fails the dummy job.
+
+`run-ci-tests.py` validates every line in each run that builds its target: the
+module must match a test, and its prefix must not match inside another test's name.
+A required model search cannot be listed, because the native job's `--require-file`
+fails if a list skips one. The list was derived from a run that recorded which
+tests construct a transport. At the time it held 634 of the 900 rings-core tests
+and 395 of the 497 rings-node tests that both jobs had run.
+
+## Model ownership
 
 The default native job owns the seven expensive searches listed in
 `scripts/ci-native-model-tests.txt`. The dummy job excludes only those exact
