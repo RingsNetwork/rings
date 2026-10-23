@@ -130,6 +130,14 @@ durability is the file system's own. A record file that cannot be read, that doe
 or that holds a whole record of another key is reported and never deleted. The file I/O runs on the
 tokio blocking pool, so a flush never stalls an asynchronous worker.
 
+Browser providers open the replay store as an authoritative IndexedDB store, which commits every
+read-write transaction with `durability: "strict"` and reports a write only on its `complete`
+event (#912). The default hint does not survive a system crash in any engine: Chromium's default
+is relaxed since version 121, and Gecko and WebKit run SQLite in WAL mode without a flush per
+commit. `"strict"` is each engine's strongest commit; whether it also flushes a drive's write cache
+is the engine's choice. An IndexedDB transaction is atomic, so a crash leaves every record whole at
+its previous or its new value.
+
 One lock serializes all replay transitions and is held across each record write, so the store's
 write latency bounds the node-wide transition rate. Each transition runs detached from its caller
 on the runtime: lock, persist the stream's record, update the table, unlock. Cancelling a caller

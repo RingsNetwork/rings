@@ -713,9 +713,9 @@ pub enum Error {
     },
 
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// IndexedDB error, {0}
+    /// An IndexedDB open, request or commit failed; the engine's error, as text
     #[error("IndexedDB error, {0}")]
-    IDBError(rexie::Error),
+    IDBError(String),
 
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// IndexedDB access clock record is missing from an opened store

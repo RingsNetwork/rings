@@ -36,7 +36,6 @@ wasm = [
     "wasm-bindgen",
     "js-sys",
     "wasm-bindgen-futures",
-    "rexie",
     "serde-wasm-bindgen",
     "uuid/wasm-bindgen",
     "uuid/v4",
@@ -105,11 +104,22 @@ tokio = { version = "1.13.0", features = ["rt", "sync", "time"], optional = true
 
 # wasm
 js-sys = { workspace = true, optional = true }
-rexie = { version = "0.4.1", optional = true }
 serde-wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 web-sys = { version = "0.3.56", optional = true, features = [
+    "DomException",
+    "DomStringList",
+    "Event",
+    "IdbDatabase",
+    "IdbFactory",
+    "IdbIndex",
+    "IdbObjectStore",
+    "IdbObjectStoreParameters",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbTransaction",
+    "IdbTransactionMode",
     "MediaDevices",
     "MessageChannel",
     "MessageEvent",

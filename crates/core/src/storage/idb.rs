@@ -9,6 +9,11 @@
 //! authoritative store retires nothing, so that write, or that open, fails with
 //! `Error::StorageBudgetExhausted` and changes nothing.
 //!
+//! The durability law is also the authority's: a write reports success only once its
+//! transaction committed, and an authoritative store opens every read-write transaction with
+//! `durability: "strict"`, so a completed write survives a system crash as well as a process
+//! crash; a disposable store keeps the engine's default (#912, see `request`).
+//!
 //! # Recency is a logical clock
 //!
 //! Each database keeps one store-wide access clock `c ∈ ℕ` in a companion object store.
@@ -60,17 +65,18 @@
 //! by its key, and deletes nothing, so an owner restoring authoritative state fails closed on
 //! exactly the rows it cannot read.
 
+mod request;
+
 use async_trait::async_trait;
-use rexie::Index;
-use rexie::ObjectStore;
-use rexie::Rexie;
-use rexie::Store;
-use rexie::Transaction;
-use rexie::TransactionMode;
+use js_sys::Array;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
+use web_sys::IdbDatabase;
+use web_sys::IdbObjectStore;
+use web_sys::IdbTransactionMode;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -150,38 +156,96 @@ fn clock_store_name(name: &str) -> String {
 /// One IndexedDB transaction over the row store and the clock store.
 ///
 /// Every effect of the adapter runs inside a scope; writers await [`Scope::done`] before
-/// reporting durable success. A failed request aborts the whole transaction.
+/// reporting durable success (the durability law of `request`). A failed request aborts the
+/// whole transaction.
 struct Scope {
-    /// Completion witness of the transaction.
-    transaction: Transaction,
+    /// The transaction, its commit watched from the moment it opened.
+    commit: request::CommitWatch,
     /// Rows keyed by `key` and indexed by `access_stamp`.
-    rows: Store,
+    rows: IdbObjectStore,
     /// The single clock record under [`CLOCK_KEY`].
-    clock: Store,
+    clock: IdbObjectStore,
 }
 
 impl Scope {
-    /// Await the commit of every request issued in this scope.
+    /// Await the commit of every request issued in this scope: under strict durability, the
+    /// flushed commit.
     async fn done(self) -> Result<()> {
-        self.transaction.done().await.map_err(Error::IDBError)
+        self.commit.committed().await
+    }
+
+    /// The row stored under `key`, or `undefined`.
+    async fn row(&self, key: &str) -> Result<JsValue> {
+        request::request(
+            &self
+                .rows
+                .get(&JsValue::from(key))
+                .map_err(request::js_error)?,
+        )
+        .await
+    }
+
+    /// Write `row`, keyed by its inline `key`.
+    async fn put_row(&self, row: &JsValue) -> Result<()> {
+        request::request(&self.rows.put(row).map_err(request::js_error)?).await?;
+        Ok(())
+    }
+
+    /// Delete the row stored under `key`.
+    async fn delete_row(&self, key: &str) -> Result<()> {
+        request::request(
+            &self
+                .rows
+                .delete(&JsValue::from(key))
+                .map_err(request::js_error)?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The number of rows.
+    async fn count(&self) -> Result<u32> {
+        let count = request::request(&self.rows.count().map_err(request::js_error)?).await?;
+        count
+            .as_f64()
+            .filter(|count| count.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(count))
+            .map(|count| count as u32)
+            .ok_or(Error::StorageCountOverflow)
+    }
+
+    /// Every row, in primary-key order.
+    async fn all_rows(&self) -> Result<Vec<JsValue>> {
+        let rows = request::request(&self.rows.get_all().map_err(request::js_error)?).await?;
+        Ok(rows.unchecked_into::<Array>().to_vec())
+    }
+
+    /// Every primary key, in the order of [`Self::all_rows`] within one transaction.
+    async fn all_keys(&self) -> Result<Vec<JsValue>> {
+        let keys = request::request(&self.rows.get_all_keys().map_err(request::js_error)?).await?;
+        Ok(keys.unchecked_into::<Array>().to_vec())
     }
 
     /// Read the clock record; `None` before the store's first start at this schema.
     async fn clock_record(&self) -> Result<Option<AccessClock>> {
-        let record = self
-            .clock
-            .get(&JsValue::from(CLOCK_KEY))
-            .await
-            .map_err(Error::IDBError)?;
+        let record = request::request(
+            &self
+                .clock
+                .get(&JsValue::from(CLOCK_KEY))
+                .map_err(request::js_error)?,
+        )
+        .await?;
         js_value::deserialize(record)
     }
 
     /// Queue the write of an encoded clock value.
     async fn write_clock(&self, encoded: &JsValue) -> Result<()> {
-        self.clock
-            .put(encoded, Some(&JsValue::from(CLOCK_KEY)))
-            .await
-            .map_err(Error::IDBError)?;
+        request::request(
+            &self
+                .clock
+                .put_with_key(encoded, &JsValue::from(CLOCK_KEY))
+                .map_err(request::js_error)?,
+        )
+        .await?;
         Ok(())
     }
 
@@ -201,7 +265,7 @@ impl Scope {
             data,
         })?;
         let successor = js_value::serialize(&successor)?;
-        self.rows.put(&row, None).await.map_err(Error::IDBError)?;
+        self.put_row(&row).await?;
         self.write_clock(&successor).await
     }
 
@@ -210,22 +274,23 @@ impl Scope {
     /// Every candidate is decoded before any deletion is queued, so a malformed row leaves the
     /// scope with no destructive request.
     async fn evict_least_recent(&self, count: u32) -> Result<()> {
-        let candidates = self
+        let index = self
             .rows
             .index(ACCESS_STAMP_INDEX)
-            .map_err(Error::IDBError)?
-            .get_all(None, Some(count), None, None)
-            .await
-            .map_err(Error::IDBError)?;
+            .map_err(request::js_error)?;
+        let candidates = request::request(
+            &index
+                .get_all_with_key_and_limit(&JsValue::NULL, count)
+                .map_err(request::js_error)?,
+        )
+        .await?;
         let keys = candidates
-            .into_iter()
-            .map(|(_stamp, row)| js_value::deserialize::<StoredRow>(row).map(|row| row.key))
+            .unchecked_into::<Array>()
+            .iter()
+            .map(|row| js_value::deserialize::<StoredRow>(row).map(|row| row.key))
             .collect::<Result<Vec<_>>>()?;
         for key in keys {
-            self.rows
-                .delete(&JsValue::from(key))
-                .await
-                .map_err(Error::IDBError)?;
+            self.delete_row(&key).await?;
         }
         Ok(())
     }
@@ -244,7 +309,7 @@ impl Scope {
 /// Named IndexedDB key/value storage with bounded row capacity.
 pub struct IdbStorage {
     /// Open database handle; transactions own their requests until completion.
-    db: Rexie,
+    db: IdbDatabase,
     /// The authority of the stored records, which fixes the decode law (module docs).
     authority: RecordAuthority,
     /// Maximum number of stored rows.
@@ -275,24 +340,20 @@ impl IdbStorage {
         }
         let clock_store_name = clock_store_name(name);
         let storage = Self {
-            db: Rexie::builder(name)
-                .version(SCHEMA_VERSION)
-                .add_object_store(
-                    ObjectStore::new(name)
-                        .key_path("key")
-                        .auto_increment(false)
-                        .add_index(Index::new(ACCESS_STAMP_INDEX, ACCESS_STAMP_INDEX)),
-                )
-                .add_object_store(ObjectStore::new(&clock_store_name))
-                .build()
-                .await
-                .map_err(Error::IDBError)?,
+            db: request::open(name, request::Schema {
+                version: SCHEMA_VERSION,
+                rows: name.to_owned(),
+                key_path: "key",
+                index: ACCESS_STAMP_INDEX,
+                companion: clock_store_name.clone(),
+            })
+            .await?,
             authority,
             cap: row_capacity,
             storage_name: name.to_owned(),
             clock_store_name,
         };
-        let scope = storage.scope(TransactionMode::ReadWrite)?;
+        let scope = storage.scope(IdbTransactionMode::Readwrite)?;
         scope.start_clock().await?;
         scope.done().await?;
         // Opening under a smaller row budget immediately restores the configured bound.
@@ -300,20 +361,30 @@ impl IdbStorage {
         Ok(storage)
     }
 
-    /// Open a transaction over both object stores.
-    fn scope(&self, mode: TransactionMode) -> Result<Scope> {
-        let transaction = self
-            .db
-            .transaction(&[&self.storage_name, &self.clock_store_name], mode)
-            .map_err(Error::IDBError)?;
-        let rows = transaction
-            .store(&self.storage_name)
-            .map_err(Error::IDBError)?;
-        let clock = transaction
-            .store(&self.clock_store_name)
-            .map_err(Error::IDBError)?;
+    /// Open a transaction over both object stores; a read-write one commits with the durability
+    /// of this store's authority (the durability law of `request`).
+    fn scope(&self, mode: IdbTransactionMode) -> Result<Scope> {
+        let durability = if self.authority.flushes() {
+            request::Durability::Strict
+        } else {
+            request::Durability::Default
+        };
+        let commit = request::transaction(
+            &self.db,
+            &[&self.storage_name, &self.clock_store_name],
+            mode,
+            durability,
+        )?;
+        let rows = commit
+            .transaction()
+            .object_store(&self.storage_name)
+            .map_err(request::js_error)?;
+        let clock = commit
+            .transaction()
+            .object_store(&self.clock_store_name)
+            .map_err(request::js_error)?;
         Ok(Scope {
-            transaction,
+            commit,
             rows,
             clock,
         })
@@ -325,8 +396,8 @@ impl IdbStorage {
     /// Counting, selection, and deletion share one read-write transaction.
     /// Post: `Ok(())` implies at most `cap` rows; an authoritative store removed nothing.
     async fn prune(&self) -> Result<()> {
-        let scope = self.scope(TransactionMode::ReadWrite)?;
-        let count = scope.rows.count(None).await.map_err(Error::IDBError)?;
+        let scope = self.scope(IdbTransactionMode::Readwrite)?;
+        let count = scope.count().await?;
         if count > self.cap {
             self.make_room(&scope, count, 0).await?;
         }
@@ -369,12 +440,8 @@ impl IdbStorage {
     /// reported under the decode law, and nothing is deleted.
     async fn get_unstamped<V>(&self, key: &str) -> Result<Option<V>>
     where V: DeserializeOwned {
-        let scope = self.scope(TransactionMode::ReadOnly)?;
-        let stored = scope
-            .rows
-            .get(&JsValue::from(key))
-            .await
-            .map_err(Error::IDBError)?;
+        let scope = self.scope(IdbTransactionMode::Readonly)?;
+        let stored = scope.row(key).await?;
         scope.done().await?;
         js_value::deserialize::<Option<StoredRow>>(stored)?
             .map(|row| js_value::deserialize(row.data))
@@ -386,16 +453,15 @@ impl IdbStorage {
     /// between the two is the writer's, and stays.
     async fn retire_undecodable<V>(&self, keys: Vec<String>) -> Result<()>
     where V: DeserializeOwned {
-        let scope = self.scope(TransactionMode::ReadWrite)?;
+        let scope = self.scope(IdbTransactionMode::Readwrite)?;
         for key in keys {
-            let key = JsValue::from(key);
-            let stored = scope.rows.get(&key).await.map_err(Error::IDBError)?;
+            let stored = scope.row(&key).await?;
             let still_undecodable = match js_value::deserialize::<Option<StoredRow>>(stored)? {
                 Some(row) => self.decode_under_authority::<V>(row.data)?.is_none(),
                 None => false,
             };
             if still_undecodable {
-                scope.rows.delete(&key).await.map_err(Error::IDBError)?;
+                scope.delete_row(&key).await?;
             }
         }
         scope.done().await
@@ -412,12 +478,8 @@ where V: DeserializeOwned + Serialize + Sized
         }
         // Reading is a touch: keep lookup, restamp, and clock advance in one write transaction
         // so a concurrent put cannot be overwritten by stale data.
-        let scope = self.scope(TransactionMode::ReadWrite)?;
-        let stored = scope
-            .rows
-            .get(&JsValue::from(key))
-            .await
-            .map_err(Error::IDBError)?;
+        let scope = self.scope(IdbTransactionMode::Readwrite)?;
+        let stored = scope.row(key).await?;
         let Some(row) = js_value::deserialize::<Option<StoredRow>>(stored)? else {
             scope.done().await?;
             return Ok(None);
@@ -426,11 +488,7 @@ where V: DeserializeOwned + Serialize + Sized
         let value = match self.decode_under_authority(row.data.clone())? {
             Some(value) => value,
             None => {
-                scope
-                    .rows
-                    .delete(&JsValue::from(row.key))
-                    .await
-                    .map_err(Error::IDBError)?;
+                scope.delete_row(&row.key).await?;
                 scope.done().await?;
                 return Ok(None);
             }
@@ -444,16 +502,12 @@ where V: DeserializeOwned + Serialize + Sized
         // Serialize before opening a destructive transaction so serialization failure cannot
         // evict any previously stored row.
         let data = js_value::serialize(value)?;
-        let scope = self.scope(TransactionMode::ReadWrite)?;
+        let scope = self.scope(IdbTransactionMode::Readwrite)?;
         // Check existence under the same transaction that will evict and store the row.
-        let existing = scope
-            .rows
-            .get(&JsValue::from(key))
-            .await
-            .map_err(Error::IDBError)?;
+        let existing = scope.row(key).await?;
         if existing.is_undefined() || existing.is_null() {
             // Count includes every row visible to this transaction; only a new key needs room.
-            let count = scope.rows.count(None).await.map_err(Error::IDBError)?;
+            let count = scope.count().await?;
             if count >= self.cap {
                 self.make_room(&scope, count, 1).await?;
             }
@@ -463,16 +517,12 @@ where V: DeserializeOwned + Serialize + Sized
     }
 
     async fn get_all(&self) -> Result<Vec<(String, V)>> {
-        let scope = self.scope(TransactionMode::ReadOnly)?;
-        let entries = scope
-            .rows
-            .get_all(None, None, None, None)
-            .await
-            .map_err(Error::IDBError)?;
+        let scope = self.scope(IdbTransactionMode::Readonly)?;
+        let entries = scope.all_rows().await?;
 
         let mut decoded = Vec::with_capacity(entries.len());
         let mut undecodable = Vec::new();
-        for (_key, row) in entries {
+        for row in entries {
             let row: StoredRow = js_value::deserialize(row)?;
             match self.decode_under_authority(row.data)? {
                 Some(value) => decoded.push((row.key, value)),
@@ -486,26 +536,21 @@ where V: DeserializeOwned + Serialize + Sized
     }
 
     async fn remove(&self, key: &str) -> Result<()> {
-        let scope = self.scope(TransactionMode::ReadWrite)?;
-        scope
-            .rows
-            .delete(&JsValue::from(key))
-            .await
-            .map_err(Error::IDBError)?;
+        let scope = self.scope(IdbTransactionMode::Readwrite)?;
+        scope.delete_row(key).await?;
         scope.done().await
     }
 
     /// Delete all values. The clock keeps running, so later stamps stay above earlier ones.
     async fn clear(&self) -> Result<()> {
-        let scope = self.scope(TransactionMode::ReadWrite)?;
-        scope.rows.clear().await.map_err(Error::IDBError)?;
+        let scope = self.scope(IdbTransactionMode::Readwrite)?;
+        request::request(&scope.rows.clear().map_err(request::js_error)?).await?;
         scope.done().await
     }
 
     /// Get the current storage usage.
     async fn count(&self) -> Result<u32> {
-        let scope = self.scope(TransactionMode::ReadOnly)?;
-        scope.rows.count(None).await.map_err(Error::IDBError)
+        self.scope(IdbTransactionMode::Readonly)?.count().await
     }
 }
 
@@ -516,14 +561,12 @@ where V: DeserializeOwned + Serialize + Sized
 {
     /// Every row, decoded or reported by its primary key; a scan deletes nothing.
     async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
-        let scope = self.scope(TransactionMode::ReadOnly)?;
-        let entries = scope
-            .rows
-            .get_all(None, None, None, None)
-            .await
-            .map_err(Error::IDBError)?;
-        Ok(entries
+        let scope = self.scope(IdbTransactionMode::Readonly)?;
+        let keys = scope.all_keys().await?;
+        let rows = scope.all_rows().await?;
+        Ok(keys
             .into_iter()
+            .zip(rows)
             .map(|(primary_key, row)| scan_row(primary_key, row))
             .collect())
     }

@@ -136,7 +136,9 @@ route.
 - **Replay.** The destination keeps a persisted 32-sequence window per
   `(network_id, origin, destination, traffic class)` stream, so a transaction is dispatched
   at most once while the store is retained; a damaged record disables only its stream.
-  Exactly-once effects are not claimed.
+  A completed replay write survives a process or system crash: the native store flushes the
+  file and its directory (on unix), and the browser store commits each IndexedDB transaction
+  with `durability: "strict"` (#912). Exactly-once effects are not claimed.
   [Details](docs/src/advanced-topic/transaction-replay.md).
 - **Rate limits.** After verification, the destination charges per-origin message and byte
   buckets keyed by the account DID, committed together with replay and before the application
@@ -206,7 +208,6 @@ route.
 
 ## Known Limitations
 
-- #912: the browser replay store uses IndexedDB's default durability hint.
 - #915: a missing replay record restarts its stream from the first sequence.
 - #916: durable replay writes cap a node near 50 transitions per second on macOS.
 - #918: registry tombstones are bounded by the heartbeat rate per registrant, not by count
