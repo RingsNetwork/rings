@@ -370,11 +370,12 @@ record of $k$ returns $\Err$, never $\Ok(\bot)$; $\Ok(\bot)$ means $\name(k)\not
 
 This closes the two cases added to \issue{915} in review: a store whose root vanishes while
 the node runs answers $\Err$ for every witnessed name (as its persist already fails), and an
-upper-cased record file is $\Missing$ to $\mathrm{scan}$, and so in $\U$, because its
-lower-case marker remains.  On a case-insensitive volume $\mathrm{get}$ still opens that file
-and returns its value; making $\mathrm{get}$ agree would need a listing on every read.  Safety
-does not depend on $\mathrm{get}$: the owner restores from $\mathrm{scan}$ and consults $\U$
-before any transition.
+upper-cased record file is never absent: its name is no record name, so it is never indexed,
+and its lower-case marker keeps it in the scan.  On a case-sensitive volume it is
+$\Missing$ to $\mathrm{scan}$, and so in $\U$; on a case-insensitive one the read of the
+marked lower-case name opens the file, so $\mathrm{scan}$ files it with its intact state, and
+$\mathrm{get}$ returns its value too.  Either way the stream keeps its guarantee: failed closed
+in the first case, restored whole in the second.
 
 \begin{assumption}[Browsers lose whole origins]\label{as:idbloss}
 A browser deletes stored data per origin, never part of it~\cite{MDNEviction}; this
