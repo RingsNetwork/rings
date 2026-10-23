@@ -31,7 +31,9 @@ use crate::onion::circuit::OnionReplayNonce;
 ///
 /// Filter bound: every admitted tag is charged at least one unit (`OnionAdmissionUnits` is
 /// non-zero), so the global budget `G` admits at most `G` tags and `β ≤ G / B = 64` blocks. By the
-/// union bound, the filter's rate is at most `β · 2⁻²⁶ ≤ 2⁻²⁰`.
+/// union bound, the filter's expected rate is at most `β · p_Bᴷ ≤ β · 2⁻²⁶ ≤ 2⁻²⁰`. A measured
+/// block may exceed its expectation (`test_filled_blocks_meet_the_false_positive_target` allows
+/// `1.25 · 2⁻²⁶`), so the bound is on the expectation, not on a sample.
 #[test]
 fn test_block_geometry_meets_the_block_rate() {
     let slice_bits = f64::from(REPLAY_SLICE_BITS);
