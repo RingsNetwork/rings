@@ -99,12 +99,14 @@ struct ProviderHandle *rings_node_new_provider_with_callback(
     uint64_t stabilize_interval,
     const char *account,
     const char *account_type,
+    const char *storage_path,
     void (*signer)(const char *, char *)) {
   (void)network_id;
   (void)ice_server;
   (void)stabilize_interval;
   (void)account;
   (void)account_type;
+  (void)storage_path;
   if (signer == NULL || account == NULL) {
     return NULL;
   }

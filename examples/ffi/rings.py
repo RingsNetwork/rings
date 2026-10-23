@@ -7,6 +7,7 @@ import os
 import platform
 from pathlib import Path
 import re
+import tempfile
 import time
 from typing import Any
 
@@ -156,6 +157,7 @@ def request_json(runtime: FfiRuntime, provider: ProviderHandle | Any, method: st
 def create_provider(
     runtime: FfiRuntime,
     acc,
+    storage_path: str,
     network_id: int = 0,
     ice_server: str = "stun://stun.l.google.com",
     stabilize_interval: int = 10,
@@ -170,6 +172,7 @@ def create_provider(
         stabilize_interval,
         acc.address.encode(),
         "eip191".encode(),
+        storage_path.encode(),
         signer,
     )
     if _provider_is_null(runtime, provider):
@@ -326,7 +329,9 @@ def main():
     runtime = load_runtime()
     w3 = Web3()
     acc = w3.eth.account.create()
-    provider = create_provider(runtime, acc)
+    # A node keeps its stores in one directory, reused on every run of the same node.
+    storage_path = os.path.join(tempfile.gettempdir(), "rings-ffi-example")
+    provider = create_provider(runtime, acc, storage_path)
     ret = request(runtime, provider, "nodeInfo", {})
     print("node info:", ret)
     ret = request(

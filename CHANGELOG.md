@@ -15,6 +15,15 @@
   open an authoritative one, as before. Breaking for `rings-core` and `rings-node` library
   callers that relied on the in-memory default: pass `replay_storage(...)`. A relay-inbox drain
   on such a node defers its mail.
+- **Breaking (C ABI):** `rings_node_new_provider_with_callback` takes a new `storage_path`
+  argument, before `signer` (#1022). The FFI provider used to keep every store in memory, its
+  replay windows included; it now opens the native node's stores under that directory, each at
+  its authority, through the new `rings_node::native::stores::NodeStores`, which the daemon uses
+  too: `data`, `transaction-replay` (authoritative), `relay-inbox` (retained),
+  `onion-entry-guards` (durable cache), `measure` and `provisional-evidence`. Pass the same path
+  on every run of one node. `rings.h`, `docs/src/ffi.md` and the Python, Kotlin and Swift
+  wrappers take the path too (`create_provider(runtime, acc, storage_path)`,
+  `createProvider(account, storagePath, signer)`, `RingsProvider(runtime:account:storagePath:)`).
 
 ## 0.35.0
 

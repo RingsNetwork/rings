@@ -63,6 +63,7 @@ private typealias NewProvider = @convention(c) (
     UInt64,
     UnsafePointer<CChar>?,
     UnsafePointer<CChar>?,
+    UnsafePointer<CChar>?,
     CSigner?
 ) -> UnsafeMutableRawPointer?
 
@@ -142,9 +143,12 @@ public final class RingsProvider {
     private var handle: UnsafeMutableRawPointer?
     private let signerSlot: Int
 
+    /// Create a provider keeping its stores under `storagePath`, a directory it owns; pass the
+    /// same path on every run of the same node, so its replay windows survive a restart.
     public init(
         runtime: RingsRuntime,
         account: String,
+        storagePath: String,
         accountType: String = "eip191",
         networkId: UInt32 = 0,
         iceServer: String = "stun://stun.l.google.com",
@@ -156,14 +160,17 @@ public final class RingsProvider {
         let provider = iceServer.withCString { ice in
             account.withCString { account in
                 accountType.withCString { accountType in
-                    runtime.newProviderFunction(
-                        networkId,
-                        ice,
-                        stabilizeInterval,
-                        account,
-                        accountType,
-                        callback
-                    )
+                    storagePath.withCString { storagePath in
+                        runtime.newProviderFunction(
+                            networkId,
+                            ice,
+                            stabilizeInterval,
+                            account,
+                            accountType,
+                            storagePath,
+                            callback
+                        )
+                    }
                 }
             }
         }
