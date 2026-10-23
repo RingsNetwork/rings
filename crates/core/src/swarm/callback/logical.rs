@@ -371,7 +371,8 @@ mod tests {
         crate::swarm::application::ApplicationInbox,
     ) {
         let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
-        let builder = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local);
+        let builder = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
+            .replay_storage(crate::tests::volatile_replay_storage());
         let swarm = match quota {
             Some(quota) => builder.origin_quota(quota),
             None => builder,
@@ -570,8 +571,9 @@ mod tests {
     #[tokio::test]
     async fn test_an_intermediate_relay_creates_no_origin_replay_state() {
         let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
-        let swarm =
-            SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local).build();
+        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
+            .replay_storage(crate::tests::volatile_replay_storage())
+            .build();
         let logical = LogicalInbound::new(swarm.transport.clone());
         let remote_destination = SecretKey::random().address().into();
         let payload = payload(remote_destination, 0).expect("payload");

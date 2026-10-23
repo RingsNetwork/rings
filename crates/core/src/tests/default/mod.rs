@@ -261,6 +261,7 @@ fn fixture_builder(key: &SecretKey, ice_servers: &str) -> Result<SwarmBuilder> {
     )
     .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
     .dht_virtual_nodes(0)
+    .replay_storage(crate::tests::volatile_replay_storage())
     .origin_quota(fixture_origin_quota()?))
 }
 

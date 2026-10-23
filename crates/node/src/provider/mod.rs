@@ -234,7 +234,6 @@ impl Provider {
             .unwrap_or_else(|| Box::new(UnavailableEvidenceStorage) as EvidenceStorage);
         let onion_entry_guard_storage =
             onion_entry_guard_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
-        let replay_storage = replay_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
         let collector = EvidenceCollectorIdentity::new(
             config.network_id(),
@@ -250,8 +249,11 @@ impl Provider {
         let processor_builder = ProcessorBuilder::from_config(&config)?
             .storage(entry_storage)
             .onion_entry_guard_storage(onion_entry_guard_storage)
-            .replay_storage(replay_storage)
             .measure(measure);
+        let processor_builder = match replay_storage {
+            Some(replay_storage) => processor_builder.replay_storage(replay_storage),
+            None => processor_builder,
+        };
         let processor_builder = match relay_storage {
             Some(relay_storage) => processor_builder.relay_storage(relay_storage),
             None => processor_builder,
