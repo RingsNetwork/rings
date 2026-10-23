@@ -57,6 +57,8 @@ unreached | crates/core/src/swarm/transport/connection.rs | fn await_bounded_con
 transport-only | crates/core/src/swarm/transport/connection.rs | impl SwarmTransport / fn close_connection_for_disconnect | reads DATA_CHANNEL_CLOSE_TIMEOUT
 transport-only | crates/core/src/swarm/transport/delivery.rs | fn send_data_with_timeout | reads DATA_CHANNEL_SEND_ACCEPT_TIMEOUT
 transport-only | crates/core/src/swarm/transport/delivery.rs | fn expire_irrevocable_send | reads DATA_CHANNEL_SEND_ACCEPT_TIMEOUT
+inert-hook | crates/core/src/swarm/transport/delivery.rs | fn frame_deadline | if let Some(held) = deadline_hold::held_deadline(&FRAME_DEADLINES_HELD) {
+inert-hook | crates/core/src/swarm/transport/delivery.rs | - | thread_local! {
 inert-hook | crates/core/src/swarm/transport/delivery.rs | fn frame_chunk | crate::simulation::record_outbound_submission(payload.transaction.tx_id);
 transport-only | crates/core/src/swarm/transport/delivery.rs | fn await_delivery_or_cancel | reads DATA_CHANNEL_DELIVERY_TIMEOUT
 transport-only | crates/core/src/swarm/transport/delivery.rs | fn terminate_accepted_connection | reads DATA_CHANNEL_CLOSE_TIMEOUT
@@ -82,7 +84,7 @@ transport-only | crates/core/src/swarm/transport/payload_send.rs | impl SwarmTra
 transport-only | crates/core/src/swarm/transport/payload_send.rs | impl SwarmTransport / fn send_payload_tracked | reads OUTBOUND_PAYLOAD_CLEANUP_GRACE, TRACKED_PAYLOAD_COMPLETION_BOUND, TRACKED_PAYLOAD_TIMEOUT
 inert-hook | crates/core/src/swarm/transport/payload_send.rs | impl SwarmTransport / fn prepare_outbound_transfer | crate::simulation::record_outbound_submission(preparation.tx_id);
 unreached | crates/core/src/swarm/transport/payload_send/first_frame.rs | fn first_frame_deadline | reads TRANSPORT_TIMEOUT_PROFILE
-inert-hook | crates/core/src/swarm/transport/payload_send/first_frame.rs | fn first_frame_deadline | if HELD.with(std::cell::Cell::get) {
+inert-hook | crates/core/src/swarm/transport/payload_send/first_frame.rs | fn first_frame_deadline | if let Some(held) = deadline_hold::held_deadline(&HELD) {
 inert-hook | crates/core/src/swarm/transport/payload_send/first_frame.rs | - | thread_local! {
 transport-only | crates/core/src/swarm/transport/payload_send/submission.rs | impl EnqueuedDetached / fn await_admission | reads OUTBOUND_PAYLOAD_CLEANUP_GRACE
 inert-hook | crates/core/src/swarm/transport/pending.rs | struct ConnectionLifecycleBoundary | waiting: Arc<std::sync::atomic::AtomicUsize>,
