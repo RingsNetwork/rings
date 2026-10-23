@@ -34,6 +34,7 @@ use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::application::ApplicationData;
+use crate::swarm::transport::hold_frame_deadlines_for_test;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::default::connect_nodes;
@@ -671,9 +672,14 @@ async fn test_detached_storage_sync_missing_routable_transport_does_not_degrade_
     Ok(())
 }
 
+/// A DHT control frame is sent while a storage transfer waits for its first frame's delivery.
+///
+/// The frame deadlines are held, so the paused delivery waits for the test's release rather
+/// than for the delivery stall deadline to retire the connection.
 #[tokio::test]
 async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
+    let _frame_deadlines = hold_frame_deadlines_for_test();
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     let _paused_delivery = PausedDeliveryGuard::new();

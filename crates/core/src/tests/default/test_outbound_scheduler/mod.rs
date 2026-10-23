@@ -32,6 +32,7 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::swarm::application::ApplicationData;
+use crate::swarm::transport::hold_frame_deadlines_for_test;
 use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
 use crate::swarm::transport::SendCompletionOutcome;
@@ -792,10 +793,16 @@ async fn test_control_overtaking_an_application_backlog_never_makes_it_stale() -
     Ok(())
 }
 
+/// A control transfer submitted while a bulk tail is ready is sent before the tail.
+///
+/// The frame deadlines are held, so the bulk frame's paused delivery and the storage frame
+/// parked at the dispatch gate wait for the test's releases rather than for the delivery stall
+/// and send-accept deadlines.
 #[tokio::test]
 async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
+    let _frame_deadlines = hold_frame_deadlines_for_test();
     let _max_size = MaxMessageSizeGuard::new(8192);
     let _paused_bulk_delivery = PausedDeliveryGuard::new();
     dummy_controlled::reset_sent_count();

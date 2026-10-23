@@ -8,42 +8,31 @@
 
 use std::time::Duration;
 
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+use crate::swarm::transport::deadline_hold;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+use crate::swarm::transport::deadline_hold::DeadlineHold;
 use crate::swarm::transport::TRANSPORT_TIMEOUT_PROFILE;
 
 /// The deadline, unless a test holds it.
 pub(super) fn first_frame_deadline() -> Duration {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    if HELD.with(std::cell::Cell::get) {
-        return HELD_DEADLINE;
+    if let Some(held) = deadline_hold::held_deadline(&HELD) {
+        return held;
     }
     TRANSPORT_TIMEOUT_PROFILE.first_frame_admission
 }
 
-/// The deadline while held: longer than any test runs.
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-const HELD_DEADLINE: Duration = Duration::from_secs(3_600);
-
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 thread_local! {
-    /// Whether this thread's detached sends wait out [`HELD_DEADLINE`].
-    static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Live holds of this thread's first-frame deadline; while any lives, detached sends wait
+    /// out a held deadline.
+    static HELD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Test builds: hold the first-frame deadline of every detached send this thread starts, until
 /// the returned guard is dropped.
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn hold_first_frame_deadlines_for_test() -> FirstFrameDeadlineHold {
-    HELD.with(|held| held.set(true));
-    FirstFrameDeadlineHold
-}
-
-/// Releases the hold of [`hold_first_frame_deadlines_for_test`] when dropped.
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) struct FirstFrameDeadlineHold;
-
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-impl Drop for FirstFrameDeadlineHold {
-    fn drop(&mut self) {
-        HELD.with(|held| held.set(false));
-    }
+pub(crate) fn hold_first_frame_deadlines_for_test() -> DeadlineHold {
+    deadline_hold::hold(&HELD)
 }
