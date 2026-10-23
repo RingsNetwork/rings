@@ -83,14 +83,50 @@ async fn test_webview_node_fetches_page_resources_through_browser_onion_exit() {
     let installed = install_mock_exit_fetch();
     assert!(installed.is_ok(), "install mock exit fetch: {installed:?}");
 
+    let started = js_sys::Date::now();
     let result = run_browser_onion_webview_flow().await;
+    let flow_ms = js_sys::Date::now() - started;
     let restored = restore_mock_exit_fetch();
-
-    assert!(restored.is_ok(), "restore mock exit fetch: {restored:?}");
-    assert!(
-        result.is_ok(),
-        "browser onion WebView flow failed: {result:?}"
+    // MEASUREMENT ONLY (draft branch for #1038): fail with the numbers, so CI prints them.
+    let (requests_reserve, requests_admit) =
+        rings_node::prelude::rings_core::message::commit_samples::take();
+    let (setup_reserve, setup_admit) = SETUP_SAMPLES.with(|samples| samples.take());
+    let report = format!(
+        "MEASURE replay commits: flow_ms={flow_ms} requests=4 result={result:?}\n\
+         setup reserve {}\nsetup admit {}\nrequests reserve {}\nrequests admit {}",
+        summary(&setup_reserve),
+        summary(&setup_admit),
+        summary(&requests_reserve),
+        summary(&requests_admit),
     );
+    assert!(restored.is_ok(), "restore mock exit fetch: {restored:?}");
+    assert!(report.is_empty(), "{report}");
+}
+
+thread_local! {
+    /// MEASUREMENT ONLY: the replay write samples of the loop's setup, before the requests.
+    static SETUP_SAMPLES: std::cell::RefCell<(Vec<u64>, Vec<u64>)> = Default::default();
+}
+
+/// MEASUREMENT ONLY: count, sum, and p50/p90/p99/max of `samples` (microseconds).
+fn summary(samples: &[u64]) -> String {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let at = |q: f64| {
+        sorted
+            .get(((sorted.len() as f64 - 1.0) * q).round() as usize)
+            .copied()
+            .unwrap_or(0)
+    };
+    format!(
+        "n={} sum_ms={} p50_us={} p90_us={} p99_us={} max_us={}",
+        sorted.len(),
+        sorted.iter().sum::<u64>() / 1000,
+        at(0.5),
+        at(0.9),
+        at(0.99),
+        sorted.last().copied().unwrap_or(0)
+    )
 }
 
 async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
@@ -99,6 +135,8 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     let fixture_api = fixture_url("/api/data");
     let fixture_submit = fixture_url("/forms/submit");
     let (client, _listeners) = browser_onion_loop().await?;
+    let setup = rings_node::prelude::rings_core::message::commit_samples::take();
+    SETUP_SAMPLES.with(|samples| samples.replace(setup));
     let node = WebviewNode::new(client, controlled_origin()?, web_shell_bootstrap)?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
     let index = gateway_navigation(&node, &index_target).await?;

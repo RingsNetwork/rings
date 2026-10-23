@@ -53,6 +53,7 @@ pub use quota::DELEGATED_MIN_CHARGE;
 pub use types::MessageCategory;
 
 mod replay;
+pub use replay::commit_samples;
 pub use replay::observe;
 pub(crate) use replay::RelayAdmission;
 pub(crate) use replay::RelayDelivery;

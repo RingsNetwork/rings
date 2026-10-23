@@ -383,6 +383,37 @@ fn quota_clock(started_at: Instant) -> impl FnOnce() -> OriginQuotaInstant {
     }
 }
 
+/// MEASUREMENT ONLY (draft branch for #1038, never merged): the wall time of every replay
+/// record write, by table, so a CI run can report the distribution.
+pub mod commit_samples {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// Sender-table (reservation) and receiver-table (admission and custody) write times, in
+    /// microseconds.
+    static SAMPLES: Mutex<(Vec<u64>, Vec<u64>)> = Mutex::new((Vec::new(), Vec::new()));
+
+    /// Record one write of the record under `storage_key` that took `elapsed`.
+    pub(super) fn record(storage_key: &str, elapsed: Duration) {
+        let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+        if let Ok(mut samples) = SAMPLES.lock() {
+            if storage_key.contains(":sender:") {
+                samples.0.push(micros);
+            } else {
+                samples.1.push(micros);
+            }
+        }
+    }
+
+    /// Every sample so far: `(reservations, admissions)` in microseconds.
+    pub fn take() -> (Vec<u64>, Vec<u64>) {
+        SAMPLES
+            .lock()
+            .map(|mut samples| std::mem::take(&mut *samples))
+            .unwrap_or_default()
+    }
+}
+
 /// `storage`'s record naming, under which it files each record and reports the records it cannot
 /// decode.
 fn record_naming(storage: &ReplayStorage) -> impl Fn(&str) -> String + '_ {
@@ -620,16 +651,16 @@ impl TransactionReplay {
 
     /// Store one stream's `record` under `storage_key`; a failure is counted and returned.
     async fn persist(&self, (storage_key, record): (String, ReplayRecord)) -> Result<()> {
-        self.storage()?
-            .put(storage_key.as_str(), &record)
-            .await
-            .map_err(|source| {
-                self.count_persistence_failure();
-                Error::TransactionReplayPersistence {
-                    operation: "store",
-                    source: Box::new(source),
-                }
-            })
+        let started = Instant::now();
+        let put = self.storage()?.put(storage_key.as_str(), &record).await;
+        commit_samples::record(&storage_key, started.elapsed());
+        put.map_err(|source| {
+            self.count_persistence_failure();
+            Error::TransactionReplayPersistence {
+                operation: "store",
+                source: Box::new(source),
+            }
+        })
     }
 
     /// Reserve and persist `count` sender sequences before returning the range to the signer.
