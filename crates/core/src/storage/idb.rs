@@ -50,11 +50,10 @@
 //!
 //! A store is opened with a [`RecordAuthority`], which fixes its decode law: a row whose payload
 //! the caller's type cannot decode is retired by a disposable store or a durable cache (which
-//! logs it at `warn`), and reported, and kept, by an authoritative one. A disposable store holds
-//! only rows decodable as its type: `get`
-//! deletes such a row in the transaction of the read that discovers it, `get_all` deletes it in
-//! a follow-up transaction that deletes only a row still undecodable there, and both report it
-//! absent. An authoritative store (the replay store, whose bad record keeps its stream closed)
+//! logs it at `warn`), and reported, and kept, by an authoritative one. A store that retires
+//! holds only rows decodable as its type: `get` deletes such a row in the transaction of the
+//! read that discovers it, `get_all` deletes it in a follow-up transaction that deletes only a
+//! row still undecodable there, and both report it absent. An authoritative store (the replay store, whose bad record keeps its stream closed)
 //! reports the decode error and leaves the row untouched. The authority governs the payload
 //! only; the row envelope is this store's own schema, and an envelope that does not decode is
 //! an error under either authority. The budget law above is also the authority's: an

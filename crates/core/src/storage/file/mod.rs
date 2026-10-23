@@ -112,44 +112,40 @@ impl RecordAuthority {
     /// Whether every listed record file must be indexed, so that a listing that fails fails the
     /// open and a file whose metadata fails is indexed anyway (the index law).
     const fn indexes_every_entry(self) -> bool {
-        matches!(self, Self::Authoritative)
+        self.witnesses()
     }
 
-    /// Whether the store keeps a presence marker per record (the presence law).
-    const fn witnesses(self) -> bool {
-        matches!(self, Self::Authoritative)
-    }
-
-    /// The plan of a `put` (pure; the durability law).
+    /// The plan of a `put` (pure; the durability and presence laws): the flushes iff
+    /// `crash = Durable`, the marker iff the store witnesses presence.
     const fn put_plan(self) -> &'static [PutStep] {
-        match self {
-            Self::Authoritative => &[
+        match (self.flushes(), self.witnesses()) {
+            (true, true) => &[
                 PutStep::WriteTemporary,
                 PutStep::SyncTemporary,
                 PutStep::Rename,
                 PutStep::SyncDirectory,
                 PutStep::Witness,
             ],
-            Self::DurableCache => &[
+            (true, false) => &[
                 PutStep::WriteTemporary,
                 PutStep::SyncTemporary,
                 PutStep::Rename,
                 PutStep::SyncDirectory,
             ],
-            Self::Disposable => &[PutStep::WriteTemporary, PutStep::Rename],
+            (false, _) => &[PutStep::WriteTemporary, PutStep::Rename],
         }
     }
 
-    /// The plan of a removal (pure; the durability law).
+    /// The plan of a removal (pure; the durability and presence laws).
     const fn remove_plan(self) -> &'static [RemoveStep] {
-        match self {
-            Self::Authoritative => &[
+        match (self.flushes(), self.witnesses()) {
+            (true, true) => &[
                 RemoveStep::Unwitness,
                 RemoveStep::Remove,
                 RemoveStep::SyncDirectory,
             ],
-            Self::DurableCache => &[RemoveStep::Remove, RemoveStep::SyncDirectory],
-            Self::Disposable => &[RemoveStep::Remove],
+            (true, false) => &[RemoveStep::Remove, RemoveStep::SyncDirectory],
+            (false, _) => &[RemoveStep::Remove],
         }
     }
 }

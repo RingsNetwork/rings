@@ -66,33 +66,88 @@ pub enum RecordAuthority {
     Authoritative,
 }
 
+/// The crash chain of the durable-records lattice: is a completed write kept across a crash?
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Crash {
+    /// Lost at every restart (an in-memory store).
+    Volatile,
+    /// Kept unless a crash loses the latest writes or tears a record.
+    Cached,
+    /// Kept: a completed write or removal survives a process or a system crash.
+    Durable,
+}
+
+/// The meaning chain of the durable-records lattice: what does an absent record mean to its
+/// owner?
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Meaning {
+    /// The owner's default: any record may be dropped and rebuilt.
+    Rebuild,
+    /// Never written, or retired by the owner: a loss is a liveness failure.
+    Retained,
+    /// Never written: a loss is a safety failure.
+    Authoritative,
+}
+
 impl RecordAuthority {
+    /// The authority's two components, its point of the lattice (pure). Every law below is a
+    /// function of them, never of the variant, so a new point inherits the laws its components
+    /// imply.
+    pub const fn components(self) -> (Crash, Meaning) {
+        match self {
+            Self::Disposable => (Crash::Cached, Meaning::Rebuild),
+            Self::DurableCache => (Crash::Durable, Meaning::Rebuild),
+            Self::Authoritative => (Crash::Durable, Meaning::Authoritative),
+        }
+    }
+
+    /// The authority's crash component.
+    pub const fn crash(self) -> Crash {
+        self.components().0
+    }
+
+    /// The authority's meaning component.
+    pub const fn meaning(self) -> Meaning {
+        self.components().1
+    }
+
     /// Whether a read retires a record it cannot decode instead of reporting it (the decode law,
-    /// shared by every backend that takes an authority).
+    /// shared by every backend that takes an authority): every meaning below `Authoritative`
+    /// retires; only an authoritative owner, whose absent record means "never written", needs
+    /// the record kept (fail closed).
     pub(crate) const fn retires_undecodable(self) -> bool {
-        !matches!(self, Self::Authoritative)
+        !matches!(self.meaning(), Meaning::Authoritative)
     }
 
     /// Whether a completed write must survive a process or a system crash (the durability law,
-    /// shared by every backend that takes an authority): the file store flushes its writes, and
-    /// IndexedDB commits them with strict durability.
+    /// shared by every backend that takes an authority): `crash = Durable`. The file store
+    /// flushes its writes, and IndexedDB commits them with strict durability.
     pub(crate) const fn flushes(self) -> bool {
-        !matches!(self, Self::Disposable)
+        matches!(self.crash(), Crash::Durable)
     }
 
     /// Whether the budget retires the oldest records to make room, instead of refusing the write
-    /// (the budget law, shared by every backend that takes an authority).
+    /// (the budget law, shared by every backend that takes an authority): `meaning = Rebuild`,
+    /// since an evicted record of any higher meaning is a loss.
     pub(crate) const fn evicts(self) -> bool {
-        !matches!(self, Self::Authoritative)
+        matches!(self.meaning(), Meaning::Rebuild)
+    }
+
+    /// Whether the store keeps a witness of every record's presence (the presence law):
+    /// `meaning = Authoritative`, the one meaning under which an absent record must be told
+    /// apart from one never written.
+    pub(crate) const fn witnesses(self) -> bool {
+        matches!(self.meaning(), Meaning::Authoritative)
     }
 
     /// Log the retirement of the undecodable record `name` under the decode law: at `warn` for a
-    /// durable cache, whose completed writes a crash never tears, and silently otherwise.
+    /// durable store, whose completed writes a crash never tears, so that only a loss outside the
+    /// store or a schema change can explain it, and silently otherwise.
     pub(crate) fn report_retired(self, name: &str) {
-        if matches!(self, Self::DurableCache) {
+        if self.flushes() {
             tracing::warn!(
                 record = name,
-                "durable cache record does not decode; retired, its owner rebuilds it"
+                "durable record does not decode; retired, its owner rebuilds it"
             );
         }
     }
@@ -195,5 +250,7 @@ pub trait KvStorageScan<V>: KvStorageInterface<V> {
     fn record_name(&self, key: &str) -> String;
 }
 
+#[cfg(test)]
+mod test_authority;
 #[cfg(test)]
 mod test_shared;
