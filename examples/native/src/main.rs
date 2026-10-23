@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
-use rings_core::storage::MemStorage;
 use rings_native_example::build_delegatee_key;
 use rings_native_example::example_message_request;
 use rings_native_example::parse_cli_args;
@@ -14,6 +13,7 @@ use rings_native_example::REPLY_WINDOW_SECONDS;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::native::config::DEFAULT_NETWORK_ID;
+use rings_node::native::stores::NodeStores;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
@@ -45,10 +45,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("===> Use network_id: {DEFAULT_NETWORK_ID}");
 
-    let storage = Box::new(MemStorage::new());
+    // The node's stores live in one directory, reused on every run, so its replay windows
+    // survive a restart (#1022).
+    let stores = NodeStores::open_under(&std::env::temp_dir().join("rings-native-example")).await?;
     let processor = Arc::new(
         ProcessorBuilder::from_config(&config)?
-            .storage(storage)
+            .storage(stores.data)
+            .relay_storage(stores.relay)
+            .replay_storage(stores.replay)
+            .onion_entry_guard_storage(stores.guards)
             .build()?,
     );
 
