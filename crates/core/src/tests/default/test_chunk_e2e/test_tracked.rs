@@ -128,7 +128,7 @@ async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() ->
         node1
             .swarm
             .transport
-            .send_payload_tracked_with_matching_delivery_deadline_for_test(payload),
+            .send_payload_tracked_with_delivery_bound_deadline_for_test(payload),
     )
     .await
     .expect("tracked cleanup grace must end a nonresponsive generation")

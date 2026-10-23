@@ -65,8 +65,9 @@ fn frame_deadline(deadline: Duration) -> Duration {
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 thread_local! {
-    /// Whether this thread's frames wait out held send-accept and delivery-stall deadlines.
-    static FRAME_DEADLINES_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Live holds of this thread's frame deadlines; while any lives, frames wait out held
+    /// send-accept and delivery-stall deadlines.
+    static FRAME_DEADLINES_HELD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Test builds: hold the send-accept and delivery-stall deadlines of every frame this thread

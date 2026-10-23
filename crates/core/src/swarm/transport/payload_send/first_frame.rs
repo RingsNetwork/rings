@@ -25,8 +25,9 @@ pub(super) fn first_frame_deadline() -> Duration {
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 thread_local! {
-    /// Whether this thread's detached sends wait out a held first-frame deadline.
-    static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Live holds of this thread's first-frame deadline; while any lives, detached sends wait
+    /// out a held deadline.
+    static HELD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Test builds: hold the first-frame deadline of every detached send this thread starts, until

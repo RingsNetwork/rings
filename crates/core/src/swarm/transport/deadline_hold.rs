@@ -10,7 +10,8 @@
 //!                    = None                  otherwise
 //! ```
 //!
-//! A switch is thread-local. Native dummy tests run on Tokio's current-thread runtime, so the
+//! A switch counts the live holds of its family, so holds nest: the deadlines stay held until
+//! the last of them is dropped. A switch is thread-local. Native dummy tests run on Tokio's current-thread runtime, so the
 //! test's thread is the thread of every transfer it starts.
 
 use std::cell::Cell;
@@ -20,25 +21,26 @@ use std::time::Duration;
 /// A held deadline: longer than any test runs.
 const HELD_DEADLINE: Duration = Duration::from_secs(3_600);
 
-/// The per-thread switch of one family of deadlines.
-pub(super) type DeadlineSwitch = LocalKey<Cell<bool>>;
+/// The per-thread switch of one family of deadlines: the number of its live holds.
+pub(super) type DeadlineSwitch = LocalKey<Cell<u32>>;
 
 /// [`HELD_DEADLINE`] while `switch` is held on this thread; `None` leaves the deadline as is.
 pub(super) fn held_deadline(switch: &'static DeadlineSwitch) -> Option<Duration> {
-    switch.with(Cell::get).then_some(HELD_DEADLINE)
+    (switch.with(Cell::get) > 0).then_some(HELD_DEADLINE)
 }
 
 /// Hold `switch` on this thread until the returned guard is dropped.
 pub(super) fn hold(switch: &'static DeadlineSwitch) -> DeadlineHold {
-    switch.with(|held| held.set(true));
+    switch.with(|holds| holds.set(holds.get().saturating_add(1)));
     DeadlineHold(switch)
 }
 
-/// Releases the hold of [`hold`] when dropped.
+/// Releases the hold of [`hold`] when dropped; the family stays held while another lives.
 pub(crate) struct DeadlineHold(&'static DeadlineSwitch);
 
 impl Drop for DeadlineHold {
     fn drop(&mut self) {
-        self.0.with(|held| held.set(false));
+        self.0
+            .with(|holds| holds.set(holds.get().saturating_sub(1)));
     }
 }
