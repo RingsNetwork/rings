@@ -3234,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "rings-aez"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "aes",
  "subtle",
@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "postcard",
  "serde",
@@ -3253,7 +3253,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -3323,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3333,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "rings-gateway"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -3352,11 +3352,11 @@ dependencies = [
 
 [[package]]
 name = "rings-logo"
-version = "0.34.2"
+version = "0.35.0"
 
 [[package]]
 name = "rings-measure"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3366,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "rings-native-example"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3381,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -3389,7 +3389,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -3461,7 +3461,7 @@ dependencies = [
 
 [[package]]
 name = "rings-relay-example"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "rings-core",
  "rings-node",
@@ -3470,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3494,7 +3494,7 @@ dependencies = [
 
 [[package]]
 name = "rings-runtime"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "futures",
  "futures-timer",
@@ -3509,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "rings-test-support"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "futures",
  "rings-core",
@@ -3518,7 +3518,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3550,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "rings-webview"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "chrono",

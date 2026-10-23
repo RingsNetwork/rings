@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.35.0
+
+- A node that rejoins its seed over HTTP is no longer refused for up to three minutes (#1040).
+  An offer carried out of band (an HTTP join through `answerOffer`) now prevails over the seed's
+  own sent, unanswered overlay offer to that node; offers carried alike keep the DID tie-break.
+  `answerOffer` no longer returns a counter-offer; the HTTP client still answers one from a peer
+  of 0.34.2 or earlier.
 
 - Relay inbox carriers have a store of their own (#1021): `RecordAuthority::Retained`, the new
   lattice point (durable, retained), flushes every write, evicts nothing (a full store refuses
