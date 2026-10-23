@@ -8,12 +8,14 @@
 //! Law (Lock order) : topology_transition ≺ relay_neighborhood
 //! ```
 //!
-//! The neighbourhood lock is a leaf: nothing is acquired while it is held.
+//! The neighbourhood lock is a leaf: nothing is acquired while it is held. So is the lock of the
+//! unacknowledged holds, which no other lock is held across.
 
+use std::collections::BTreeMap;
 use std::sync::MutexGuard;
 
 use super::PeerRing;
-use crate::consts::REFUSED_RELAY_HOLDS_MAX;
+use crate::consts::UNACKNOWLEDGED_RELAY_HOLDS_MAX;
 use crate::dht::entry::EntryOperation;
 use crate::dht::relay_holder::relay_holder;
 use crate::dht::relay_holder::PreviousHolder;
@@ -25,6 +27,17 @@ use crate::dht::topology::TopologyState;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::RelayHoldDigest;
+
+/// A relay hold this node wrote and keeps until a holder acknowledges it.
+#[derive(Debug)]
+pub(crate) struct KeptRelayHold {
+    /// The stamped hold, resent byte for byte.
+    hold: EntryOperation,
+    /// The node it was last sent to, the only one whose acknowledgement or refusal names it;
+    /// `None` while no view names a holder.
+    target: Option<Did>,
+}
 
 impl PeerRing {
     /// Whether this node holds relay mail: it keeps a retained relay store.
@@ -121,32 +134,85 @@ impl PeerRing {
         })
     }
 
-    /// Keep `hold`, which this node wrote and which took no effect (`is_unplaced_hold`), to be
-    /// sent again by the next repair pass. A hold kept already is kept once; at
-    /// [`REFUSED_RELAY_HOLDS_MAX`] the oldest is dropped, logged at `warn`.
-    pub(crate) fn keep_refused_relay_hold(&self, hold: EntryOperation) -> Result<()> {
-        let mut kept = self
-            .refused_relay_holds
+    /// Lock the unacknowledged holds, a leaf of `Law (Lock order)`.
+    fn lock_unacknowledged_relay_holds(
+        &self,
+    ) -> Result<MutexGuard<'_, BTreeMap<RelayHoldDigest, KeptRelayHold>>> {
+        self.unacknowledged_relay_holds
             .lock()
-            .map_err(|_| Error::LockPoisoned)?;
-        if kept.contains(&hold) {
+            .map_err(|_| Error::LockPoisoned)
+    }
+
+    /// Keep `hold`, of digest `digest`, which this node is about to send to `target` (`None`
+    /// when its view names no holder), until a holder acknowledges it (`Law (Acknowledged)`).
+    ///
+    /// Post: a hold kept already has its target updated; a new hold beyond
+    /// [`UNACKNOWLEDGED_RELAY_HOLDS_MAX`] is refused with `RelayHoldsUnacknowledgedFull`, and no
+    /// earlier hold is forgotten for it.
+    pub(crate) fn await_relay_hold(
+        &self,
+        digest: RelayHoldDigest,
+        hold: EntryOperation,
+        target: Option<Did>,
+    ) -> Result<()> {
+        let mut kept = self.lock_unacknowledged_relay_holds()?;
+        if let Some(known) = kept.get_mut(&digest) {
+            known.target = target;
             return Ok(());
         }
-        if kept.len() >= REFUSED_RELAY_HOLDS_MAX {
-            kept.pop_front();
-            tracing::warn!(local = %self.did, "relay hold dropped: too many holds await a holder");
+        if kept.len() >= UNACKNOWLEDGED_RELAY_HOLDS_MAX {
+            return Err(Error::RelayHoldsUnacknowledgedFull);
         }
-        kept.push_back(hold);
+        kept.insert(digest, KeptRelayHold { hold, target });
         Ok(())
     }
 
-    /// Take every kept hold, to send again.
-    pub(crate) fn take_refused_relay_holds(&self) -> Result<Vec<EntryOperation>> {
+    /// Stop keeping the hold `digest` iff `from` is the node it was last sent to: the holder that
+    /// took it acknowledged it. The result says whether it was kept and is now forgotten.
+    pub(crate) fn acknowledge_relay_hold(
+        &self,
+        digest: RelayHoldDigest,
+        from: Did,
+    ) -> Result<bool> {
+        let mut kept = self.lock_unacknowledged_relay_holds()?;
+        let acknowledged = kept
+            .get(&digest)
+            .is_some_and(|known| known.target == Some(from));
+        if acknowledged {
+            kept.remove(&digest);
+        }
+        Ok(acknowledged)
+    }
+
+    /// The hold `digest`, iff it is kept and `from`, which refused it, is the node it was last
+    /// sent to: a refusal names only a hold this node wrote and sent there.
+    pub(crate) fn refused_relay_hold(
+        &self,
+        digest: RelayHoldDigest,
+        from: Did,
+    ) -> Result<Option<EntryOperation>> {
         Ok(self
-            .refused_relay_holds
-            .lock()
-            .map_err(|_| Error::LockPoisoned)?
-            .drain(..)
+            .lock_unacknowledged_relay_holds()?
+            .get(&digest)
+            .filter(|known| known.target == Some(from))
+            .map(|known| known.hold.clone()))
+    }
+
+    /// Stop keeping the hold `digest`: it took effect here, it is refused for good, or its
+    /// sender proof expired.
+    pub(crate) fn forget_relay_hold(&self, digest: RelayHoldDigest) -> Result<()> {
+        self.lock_unacknowledged_relay_holds()?.remove(&digest);
+        Ok(())
+    }
+
+    /// Every kept hold with its digest, to send again.
+    pub(crate) fn unacknowledged_relay_holds(
+        &self,
+    ) -> Result<Vec<(RelayHoldDigest, EntryOperation)>> {
+        Ok(self
+            .lock_unacknowledged_relay_holds()?
+            .iter()
+            .map(|(digest, known)| (*digest, known.hold.clone()))
             .collect())
     }
 

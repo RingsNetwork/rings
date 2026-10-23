@@ -30,7 +30,9 @@ use crate::message::effects::yield_core_actor_step;
 use crate::message::effects::CoreEffect;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
+use crate::message::types::RelayCarrierHeld;
 use crate::message::types::RelayCarrierRefused;
+use crate::message::types::RelayHoldDigest;
 use crate::message::types::SearchEntry;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
@@ -236,24 +238,35 @@ pub(super) async fn handle_storage_store_act(
     Ok(())
 }
 
-/// Apply or route `msg`; a relay hold this node does not take (`is_unplaced_hold`) is also
-/// handed back to its writer, which keeps it and sends it again (`RelayCarrierRefused`).
+/// Apply or route `msg`. A relay hold from another node is answered to its writer: the holder
+/// acknowledges one it took (`RelayCarrierHeld`), and a target refuses one it does not take
+/// (`is_unplaced_hold`, `RelayCarrierRefused`). The writer keeps the hold until acknowledged,
+/// so an answer that is lost costs a resend, not the hold.
 async fn handle_placed_entry_operation(
     handler: &MessageHandler,
     ctx: &MessagePayload,
     msg: &PlacedEntryOperation,
 ) -> Result<()> {
     let result = place_entry_operation(handler, ctx, msg).await;
-    if let Err(error) = &result {
-        if msg.op.kind().is_relay_inbox() && is_unplaced_hold(error) {
-            let refusal = Message::RelayCarrierRefused(RelayCarrierRefused {
-                operation: msg.clone(),
-            });
-            if let Err(report) = handler
-                .run_effects([CoreEffect::send_report_message(ctx, refusal)])
+    let is_hold = matches!(&msg.op, EntryOperation::Extend(entry) if entry.kind.is_relay_inbox());
+    if is_hold && ctx.transaction.origin() != handler.dht.did {
+        let hold = RelayHoldDigest::of(&msg.op)?;
+        let answer = match &result {
+            Ok(()) => Some(Message::RelayCarrierHeld(RelayCarrierHeld { hold })),
+            Err(error) if is_unplaced_hold(error) => {
+                Some(Message::RelayCarrierRefused(RelayCarrierRefused { hold }))
+            }
+            Err(_) => None,
+        };
+        if let Some(answer) = answer {
+            if let Err(error) = handler
+                .run_effects([CoreEffect::send_report_message(ctx, answer)])
                 .await
             {
-                tracing::warn!(?report, refused = ?error, "relay hold refusal not reported");
+                tracing::debug!(
+                    ?error,
+                    "relay hold answer not sent; the writer sends it again"
+                );
             }
         }
     }

@@ -244,7 +244,7 @@ impl Error {
             | Self::RelayMessageHolderNotResponsible | Self::RelayInboxRegisterNotAllowed
             | Self::RelayInboxOperationNotAllowed | Self::RelayInboxWriterNotRecipient
             | Self::RelayStorageUnavailable | Self::RelayHolderUnavailable
-            | Self::RelayCarrierNotHeldHere
+            | Self::RelayCarrierNotHeldHere | Self::RelayHoldsUnacknowledgedFull
             | Self::StorageCountOverflow | Self::StorageRedundancyMismatch { .. }
             | Self::InvalidCapacity | Self::StorageValueExceedsCapacity { .. }
             | Self::StorageBudgetExhausted { .. } | Self::StorageWorkUnscheduled(_)

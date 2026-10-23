@@ -319,6 +319,12 @@ pub enum Error {
     #[error("This node does not hold the relay carrier the operation was sent to")]
     RelayCarrierNotHeldHere,
 
+    /// This node keeps as many unacknowledged relay holds as it may
+    /// (`UNACKNOWLEDGED_RELAY_HOLDS_MAX`), so it refuses another to its local sender rather than
+    /// forget an earlier one
+    #[error("This node keeps as many unacknowledged relay holds as it may")]
+    RelayHoldsUnacknowledgedFull,
+
     /// A storage count or record length does not fit its interface width
     #[error("A storage count or record length does not fit its interface width")]
     StorageCountOverflow,

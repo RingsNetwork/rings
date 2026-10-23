@@ -165,10 +165,16 @@ where the run starts however long it is.
   successor list holds relay mail, the writer refuses the hold itself with
   `RelayHolderUnavailable`. A node that receives a relay carrier its own view does not make it
   hold refuses it with `RelayCarrierNotHeldHere` rather than pass it on, so two views that
-  disagree cannot bounce it, and hands it back to the writer (`RelayCarrierRefused`). Either
-  way the writer keeps the hold and sends it again on each repair pass, to the holder its view
-  then names, until a holder takes it or the message's sender proof expires (10 minutes by
-  default); it never drops a hold silently.
+  disagree cannot bounce it.
+- **Kept until acknowledged.** A writer keeps every hold it sends until the holder it sent it
+  to acknowledges taking it (`RelayCarrierHeld`), and sends every hold still kept again on each
+  repair pass, to the holder its view then names, until a holder takes it or the message's
+  sender proof expires (10 minutes by default). A resend is byte-identical, so a holder that
+  took it already only acknowledges it again. A refusal (`RelayCarrierRefused`) only lets the
+  writer send sooner, so a lost acknowledgement or refusal costs a resend, never the mail.
+  Both name the hold by its digest and count only from the node it was sent to. A writer keeps
+  at most 64 holds unacknowledged and refuses another to its local sender
+  (`RelayHoldsUnacknowledgedFull`) rather than forget an earlier one.
 - **Convergence.** A peer's declaration arrives in its handshake, before it is admitted, so a
   view places every neighbour with its declaration. The previous-holder records settle within
   `L + 1` repair passes after a membership change, `L` the longest storage-less run. Until

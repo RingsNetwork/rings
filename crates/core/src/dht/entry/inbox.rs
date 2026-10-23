@@ -344,20 +344,6 @@ impl InboxElement {
 }
 
 impl EntryOperation {
-    /// Whether this is a hold whose every element `holder` held: a hold that node wrote.
-    /// Decoding names the holder without verifying its signature, which the target verifies.
-    pub(crate) fn is_hold_by(&self, holder: Did) -> bool {
-        match self {
-            EntryOperation::Extend(entry) if entry.kind.is_relay_inbox() => {
-                !entry.data.is_empty()
-                    && entry.data.iter().all(|element| {
-                        HeldMessage::from_element(element).is_ok_and(|held| held.holder() == holder)
-                    })
-            }
-            _ => false,
-        }
-    }
-
     /// Whether every element of this hold still carries a live sender proof at `now_ms`, as the
     /// holder's write law requires (`RelayMessageHoldStale`): past that, no holder takes it.
     pub(crate) fn hold_is_live_at(&self, now_ms: u128) -> bool {

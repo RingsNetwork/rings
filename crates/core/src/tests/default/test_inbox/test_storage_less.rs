@@ -21,7 +21,9 @@ use crate::error::Result;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
+use crate::message::RelayHoldDigest;
 use crate::swarm::application::ApplicationData;
+use crate::tests::default::credit_starvation::starve_every_lane;
 use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_without_relay_storage;
 use crate::tests::default::wait_for_msgs;
@@ -145,11 +147,12 @@ async fn test_a_storage_less_recipient_fetches_its_inbox_from_its_holder() -> Re
     Ok(())
 }
 
-/// A target whose view does not make it the holder hands a hold back to its writer
-/// (`RelayCarrierRefused`) rather than dropping it; the writer keeps the hold, and its next
-/// repair pass sends it again to the holder its own view names, which takes it.
+/// A writer keeps a hold until a holder acknowledges it, so a refusal that never arrives costs
+/// nothing: node3 sends a hold to node1, which keeps no relay store and refuses it, but node1's
+/// link back to node3 is starved of credit, so the refusal is never delivered. node3 still keeps
+/// the hold, and its next repair pass places it with the holder its own view names.
 #[tokio::test]
-async fn test_a_refused_hold_returns_to_its_writer_and_is_placed_on_its_next_pass() -> Result<()> {
+async fn test_a_hold_whose_refusal_is_lost_is_still_placed() -> Result<()> {
     let [key1, key2, key3] = gen_ordered_keys::<3>();
     let node1 = prepare_node_without_relay_storage(key1)?;
     let node3 = prepare_node(key3).await;
@@ -161,8 +164,8 @@ async fn test_a_refused_hold_returns_to_its_writer_and_is_placed_on_its_next_pas
     wait_for_msgs([&node1, &node3]).await;
     wait_for_predecessor(&node3, node1.did()).await?;
 
-    // node3, responsible for `offline`, writes a hold and sends it to node1, which keeps no
-    // relay store: node1's view names node3 the holder, so it refuses the hold and hands it back.
+    // node3, responsible for `offline`, writes a hold and sends it to node1 as a writer whose
+    // view named node1 would.
     let sender = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let payload = MessagePayload::new_send(
         Message::custom(HELD_MESSAGE)?,
@@ -170,12 +173,14 @@ async fn test_a_refused_hold_returns_to_its_writer_and_is_placed_on_its_next_pas
         node3.did(),
         offline,
     )?;
-    let held = HeldMessage::hold(
-        payload,
-        node3.swarm.transport.message_signer(),
-        get_epoch_ms(),
-    )?;
-    let hold = EntryOperation::Extend(Entry::inbox_delta(&held)?);
+    let now_ms = get_epoch_ms();
+    let held = HeldMessage::hold(payload, node3.swarm.transport.message_signer(), now_ms)?;
+    let hold = EntryOperation::Extend(Entry::inbox_delta(&held)?).stamped(now_ms, node3.did())?;
+    let digest = RelayHoldDigest::of(&hold)?;
+    node3
+        .dht()
+        .await_relay_hold(digest, hold.clone(), Some(node1.did()))?;
+    let _starved = starve_every_lane(&node3, &node1)?;
     node3
         .swarm
         .send_core_message_for_test(
@@ -186,21 +191,24 @@ async fn test_a_refused_hold_returns_to_its_writer_and_is_placed_on_its_next_pas
             node1.did(),
         )
         .await?;
-    wait_for_msgs([&node1, &node3]).await;
+    // node1 takes the hold in and refuses it; its refusal waits on credit that never comes.
+    while let Some(payload) = node1.listen_once().await {
+        if matches!(
+            payload.transaction.data::<Message>()?,
+            Message::OperateEntry(_)
+        ) {
+            break;
+        }
+    }
     let inbox = StorageKey::inbox_of(offline);
-    assert!(node3
-        .dht()
-        .live_storage_entry(inbox, get_epoch_ms())
-        .await?
-        .is_none());
-    let kept = node3.dht().take_refused_relay_holds()?;
-    assert_eq!(kept, vec![hold.clone()]);
-    node3.dht().keep_refused_relay_hold(hold)?;
+    assert_eq!(node3.dht().unacknowledged_relay_holds()?, vec![(
+        digest, hold
+    )]);
 
-    // The writer's next repair pass places the kept hold with node3, the holder it names.
+    // node3's next repair pass sends the kept hold again, to node3 itself, the holder it names.
     node3.swarm.stabilizer().stabilize().await?;
     let placed = wait_for_storage_entry(&node3, inbox).await?;
     assert_eq!(placed.data.len(), 1);
-    assert!(node3.dht().take_refused_relay_holds()?.is_empty());
+    assert!(node3.dht().unacknowledged_relay_holds()?.is_empty());
     Ok(())
 }

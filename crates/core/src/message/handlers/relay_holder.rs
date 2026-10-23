@@ -1,19 +1,21 @@
 //! Handlers of relay custody (see `dht::relay_holder`): the previous holder a predecessor passes,
-//! a recipient's fetch of its inbox, the holder's report back, and a refused hold handed back to
-//! its writer.
+//! a recipient's fetch of its inbox, the holder's report back, and a holder's acknowledgement or
+//! a target's refusal of a hold, back to its writer.
 
 use async_trait::async_trait;
 
 use crate::dht::entry::inbox::inbox_key;
-use crate::dht::entry::EntryOperation;
 use crate::dht::relay_holder::PreviousHolder;
+use crate::dht::relay_holder::RelayHolder;
 use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
+use crate::message::handlers::inbox::send_relay_hold;
 use crate::message::types::AnnounceRelayHolder;
 use crate::message::types::FetchRelayInbox;
 use crate::message::types::Message;
+use crate::message::types::RelayCarrierHeld;
 use crate::message::types::RelayCarrierRefused;
 use crate::message::types::RelayInboxReport;
 use crate::message::HandleMsg;
@@ -98,30 +100,42 @@ impl HandleMsg<RelayInboxReport> for MessageHandler {
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl HandleMsg<RelayCarrierHeld> for MessageHandler {
+    /// Stop keeping a hold the node it was last sent to acknowledges; an acknowledgement from any
+    /// other node, or of a hold this node does not keep, changes nothing.
+    async fn handle(&self, ctx: &MessagePayload, msg: &RelayCarrierHeld) -> Result<()> {
+        if ctx.should_forward_from(self.dht.did) {
+            return self
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .await;
+        }
+        self.dht
+            .acknowledge_relay_hold(msg.hold, ctx.transaction.origin())
+            .map(drop)
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<RelayCarrierRefused> for MessageHandler {
-    /// Keep a hold this node wrote that its target refused, to send it again on the next repair
-    /// pass. A removal is not kept: the next drain finds its elements still stored and retires
-    /// them again. Anything else is not this node's to keep, and is refused.
+    /// Send again at once a kept hold the node it was last sent to refuses, iff this node's view
+    /// now names another holder; otherwise the next repair pass sends it again. A refusal of a
+    /// hold this node does not keep, or from another node, changes nothing.
     async fn handle(&self, ctx: &MessagePayload, msg: &RelayCarrierRefused) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
                 .await;
         }
-        let op = &msg.operation.op;
-        if op.is_hold_by(self.dht.did) {
-            return self.dht.keep_refused_relay_hold(op.clone());
-        }
-        if matches!(op, EntryOperation::Tombstone(_)) {
-            tracing::debug!(
-                local = %self.dht.did,
-                target = %ctx.transaction.origin(),
-                "relay inbox removal refused; the next drain retires it again"
-            );
+        let refuser = ctx.transaction.origin();
+        let Some(hold) = self.dht.refused_relay_hold(msg.hold, refuser)? else {
             return Ok(());
+        };
+        match self.dht.relay_holder(hold.entry().did)? {
+            RelayHolder::Holder(holder) if holder != refuser => {
+                send_relay_hold(&self.transport, hold).await
+            }
+            _ => Ok(()),
         }
-        Err(Error::InvalidMessage(
-            "refused relay operation was not written by this node".to_string(),
-        ))
     }
 }

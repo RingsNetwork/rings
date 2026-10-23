@@ -132,7 +132,8 @@ impl ApplicationData {
             | Message::AnnounceRelayHolder(_)
             | Message::FetchRelayInbox(_)
             | Message::RelayInboxReport(_)
-            | Message::RelayCarrierRefused(_) => None,
+            | Message::RelayCarrierRefused(_)
+            | Message::RelayCarrierHeld(_) => None,
         }
     }
 

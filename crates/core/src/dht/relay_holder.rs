@@ -21,8 +21,13 @@
 //! Law (Convergence) after one membership change, the previous-holder records settle within
 //!                 L + 1 repair passes, L the length of the longest storage-less run; until then
 //!                 a hold either lands where the repair passes move it on to the holder, or is
-//!                 refused, handed back to its writer (`RelayCarrierRefused`), kept, and sent
-//!                 again each pass until a holder takes it or its sender proof expires
+//!                 refused, and its writer, which keeps every hold until a holder acknowledges
+//!                 it (`Law (Acknowledged)`), sends it again each pass until a holder takes it
+//!                 or its sender proof expires
+//! Law (Acknowledged) a writer keeps each hold from before its first send until the holder it
+//!                 was last sent to acknowledges it, or its sender proof expires; it keeps at most
+//!                 `UNACKNOWLEDGED_RELAY_HOLDS_MAX` and refuses another to its local sender
+//!                 (`message::handlers::inbox::send_relay_hold`)
 //! ```
 //!
 //! The convergence law covers every single membership change and overlapping changes whose run

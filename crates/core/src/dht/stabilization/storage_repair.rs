@@ -1,6 +1,5 @@
 use super::Stabilizer;
 use super::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
-use crate::dht::relay_holder::is_unplaced_hold;
 use crate::dht::topology;
 use crate::dht::types::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
@@ -8,12 +7,11 @@ use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
 use crate::error::Result;
-use crate::message::handlers::storage::operate_entry;
+use crate::message::handlers::inbox::send_relay_hold;
 use crate::message::AnnounceRelayHolder;
 use crate::message::Message;
 use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
-use crate::swarm::transport::Attempts;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
 use crate::utils::get_epoch_ms;
@@ -279,7 +277,7 @@ impl Stabilizer {
             }
         }
         self.dht.forget_stale_relay_custody(&stale)?;
-        self.resend_refused_relay_holds().await?;
+        self.resend_unacknowledged_relay_holds().await?;
         let Some((head, previous)) = self.dht.previous_relay_holder_to_pass()? else {
             return Ok(());
         };
@@ -304,14 +302,14 @@ impl Stabilizer {
         Ok(())
     }
 
-    /// Send again every hold this node kept because it took no effect, to the holder the view
-    /// now names (`Law (Convergence)` of `dht::relay_holder`). A hold that takes no effect again
-    /// is kept again; one whose sender proof has expired, which no holder admits any longer, is
-    /// dropped and logged at `warn`.
-    async fn resend_refused_relay_holds(&self) -> Result<()> {
+    /// Send again every hold this node keeps unacknowledged, to the holder its view now names
+    /// (`Law (Acknowledged)`, `Law (Convergence)`). A hold whose sender proof has expired, which
+    /// no holder admits any longer, is forgotten and logged at `warn`.
+    async fn resend_unacknowledged_relay_holds(&self) -> Result<()> {
         let now_ms = get_epoch_ms();
-        for hold in self.dht.take_refused_relay_holds()? {
+        for (digest, hold) in self.dht.unacknowledged_relay_holds()? {
             if !hold.hold_is_live_at(now_ms) {
+                self.dht.forget_relay_hold(digest)?;
                 tracing::warn!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
@@ -319,15 +317,13 @@ impl Stabilizer {
                 );
                 continue;
             }
-            match operate_entry(&self.transport, hold.clone(), Attempts::Single).await {
-                Err(error) if is_unplaced_hold(&error) => self.dht.keep_refused_relay_hold(hold)?,
-                Err(error) => tracing::warn!(
+            if let Err(error) = send_relay_hold(&self.transport, hold).await {
+                tracing::debug!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
                     error = ?error,
-                    "STABILIZATION relay hold refused for good"
-                ),
-                Ok(()) => {}
+                    "STABILIZATION relay hold not placed on this pass"
+                );
             }
         }
         Ok(())

@@ -184,19 +184,20 @@ route.
   previous holder once the next one acknowledged holding exactly that value; it is capped at
   64 messages. Relay carriers live in a store of their own (#1021), retained: a completed hold
   survives a crash, and the data store's budget never evicts held mail; a full relay store
-  refuses a new hold instead. A node without a retained relay store (a browser whose
-  IndexedDB cannot open, a library node built without one) declares in its handshake that it
-  holds no relay mail, and relay custody moves past it: an inbox is held by the first node at or
-  after its key's owner that holds relay mail, which every relay path names by one function
-  (#1037). A hold no node within the writer's successor list can take is refused to the writer,
-  never dropped. The holder of a key behind its predecessor admits a hold only from a
-  storage-less node of the run at or after the destination, and the previous holder it learns
-  is passed from predecessor to successor, so a dishonest node of a run can at most make the
-  holder after it refuse or misplace mail whose key lies on that run. A hold its target refuses
-  is handed back to the writer, which sends it again on later repair passes until a holder takes
-  it or its sender proof expires. A holder takes a relocated carrier only for a key its own view
-  makes it hold, from a node that holds relay mail, and only elements that pass the witness.
-  Values are stored in the clear.
+  refuses a new hold instead. A node without a retained relay store (a browser whose IndexedDB
+  cannot open, a library node built without one) declares in its handshake that it holds no relay
+  mail, and relay custody moves past it: an inbox is held by the first node at or after its key's
+  owner that holds relay mail, which every relay path names by one function (#1037). A hold no node
+  within the writer's successor list can take is refused to the writer, never dropped. The holder of
+  a key behind its predecessor admits a hold only from a storage-less node of the run at or after
+  the destination, and the previous holder it learns is passed from predecessor to successor, so a
+  dishonest node of a run can at most make the holder after it refuse or misplace mail whose key
+  lies on that run. A writer keeps every hold until the holder it sent it to acknowledges it, and
+  sends it again on later repair passes until a holder takes it or its sender proof expires, so a
+  lost acknowledgement or refusal costs a resend, never the mail; only the node a hold was sent to
+  can acknowledge or refuse it, and at most 64 holds are kept, another being refused to its local
+  sender. A holder takes a relocated carrier only for a key its own view makes it hold, from a node
+  that holds relay mail, and only elements that pass the witness. Values are stored in the clear.
   [Details](docs/src/advanced-topic/chord.md#data-topic-storage),
   [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver

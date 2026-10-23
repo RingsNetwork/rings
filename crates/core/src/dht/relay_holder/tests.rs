@@ -566,7 +566,7 @@ fn assert_reaches_the_holder(
 
 /// Between a membership change and the fixpoint of the previous-holder records (`Law
 /// (Convergence)`), mail is never lost: whatever a writer sends during the window is either
-/// refused by its target, which hands it back to the writer, or accepted by a target whose
+/// refused by its target, and kept by the writer to send again, or accepted by a target whose
 /// carrier then reaches the true holder once the records settle; and a carrier its old holder
 /// offers during the window is accepted only where it reaches the true holder too.
 fn assert_window_loses_nothing(before: &Ring, after: &Ring) {

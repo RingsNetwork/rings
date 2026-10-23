@@ -101,6 +101,9 @@ async fn hold_message_for_offline_peer(
         .send_message(ApplicationData::custom(HELD_MESSAGE), offline)
         .await?;
     let held = wait_for_storage_entry(node1, StorageKey::inbox_of(offline)).await?;
+    // node1 acknowledged the hold, so node3, its writer, no longer keeps it.
+    wait_for_msgs(network.iter().copied()).await;
+    assert!(node3.dht().unacknowledged_relay_holds()?.is_empty());
     assert_eq!(held.kind, EntryKind::RelayMessage);
     assert_eq!(held.data.len(), 1);
     let deliverable = held.stored_inbox_elements();
