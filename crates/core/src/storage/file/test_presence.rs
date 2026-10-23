@@ -84,7 +84,7 @@ async fn test_a_record_removed_outside_the_store_is_missing() {
 }
 
 /// A record file renamed to upper case is not a record name, so it is never indexed; its marker
-/// keeps it in the scan (#915 R6 L5): missing on a case-sensitive volume, and filed on a
+/// keeps it in the scan (the presence law): missing on a case-sensitive volume, and filed on a
 /// case-insensitive one, which still opens the file under its own name. Never absent.
 #[tokio::test]
 async fn test_an_upper_cased_record_is_never_absent_from_the_scan() {
@@ -103,7 +103,7 @@ async fn test_an_upper_cased_record_is_never_absent_from_the_scan() {
 }
 
 /// A store whose root vanishes while it runs answers every marked name with an error, never
-/// with an absent value (#915 R4 L2.3).
+/// with an absent value (the read agreement law).
 #[tokio::test]
 async fn test_a_vanished_root_makes_every_marked_record_missing() {
     let root = temp_root("vanished");
