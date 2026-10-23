@@ -50,6 +50,7 @@ internal interface NativeRings : Library {
         stabilizeInterval: Long,
         account: String,
         accountType: String,
+        storagePath: String,
         signer: SignerCallback,
     ): Pointer?
 }
@@ -79,8 +80,13 @@ class RingsRuntime private constructor(private val native: NativeRings) {
         native.rings_node_init_logging(level.abiValue)
     }
 
+    /**
+     * Create a provider keeping its stores under [storagePath], a directory it owns; pass the same
+     * path on every run of the same node, so its replay windows survive a restart.
+     */
     fun createProvider(
         account: String,
+        storagePath: String,
         signer: RingsSigner,
         accountType: String = "eip191",
         networkId: Int = 0,
@@ -89,6 +95,7 @@ class RingsRuntime private constructor(private val native: NativeRings) {
     ): RingsProvider = RingsProvider(
         native,
         account,
+        storagePath,
         signer,
         accountType,
         networkId,
@@ -101,6 +108,7 @@ class RingsRuntime private constructor(private val native: NativeRings) {
 class RingsProvider internal constructor(
     private val native: NativeRings,
     account: String,
+    storagePath: String,
     signer: RingsSigner,
     accountType: String,
     networkId: Int,
@@ -127,6 +135,7 @@ class RingsProvider internal constructor(
         stabilizeInterval,
         account,
         accountType,
+        storagePath,
         callback,
     ) ?: run {
         val signerError = signerFailure.getAndSet(null)
