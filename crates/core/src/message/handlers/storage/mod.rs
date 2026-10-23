@@ -12,6 +12,7 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::SyncedEntryAck;
+use crate::dht::relay_holder::is_unplaced_hold;
 use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
@@ -29,6 +30,7 @@ use crate::message::effects::yield_core_actor_step;
 use crate::message::effects::CoreEffect;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
+use crate::message::types::RelayCarrierRefused;
 use crate::message::types::SearchEntry;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
@@ -234,7 +236,32 @@ pub(super) async fn handle_storage_store_act(
     Ok(())
 }
 
+/// Apply or route `msg`; a relay hold this node does not take (`is_unplaced_hold`) is also
+/// handed back to its writer, which keeps it and sends it again (`RelayCarrierRefused`).
 async fn handle_placed_entry_operation(
+    handler: &MessageHandler,
+    ctx: &MessagePayload,
+    msg: &PlacedEntryOperation,
+) -> Result<()> {
+    let result = place_entry_operation(handler, ctx, msg).await;
+    if let Err(error) = &result {
+        if msg.op.kind().is_relay_inbox() && is_unplaced_hold(error) {
+            let refusal = Message::RelayCarrierRefused(RelayCarrierRefused {
+                operation: msg.clone(),
+            });
+            if let Err(report) = handler
+                .run_effects([CoreEffect::send_report_message(ctx, refusal)])
+                .await
+            {
+                tracing::warn!(?report, refused = ?error, "relay hold refusal not reported");
+            }
+        }
+    }
+    result
+}
+
+/// Apply `msg` here when this node accepts its placement, or route it on.
+async fn place_entry_operation(
     handler: &MessageHandler,
     ctx: &MessagePayload,
     msg: &PlacedEntryOperation,

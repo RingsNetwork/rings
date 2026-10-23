@@ -14,6 +14,7 @@ use super::storage::operate_entry;
 use crate::dht::entry::inbox::HeldMessage;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
+use crate::dht::relay_holder::is_unplaced_hold;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::message::MessageHandler;
@@ -30,17 +31,23 @@ use crate::utils::get_epoch_ms;
 /// One attempt (`Attempts::Single`): this runs on the inbound lane, which a rerouting wait must
 /// never hold, and it is sent under the protocol discipline. A refusal before acceptance is `SingleAttemptRefused` (the hold had no effect);
 /// before #859 the same refusal was the send's raw error, and a detached `Cancelled` was `Ok`.
+///
+/// Post: a hold that took no effect (`is_unplaced_hold`), refused here or by its target's
+/// `RelayCarrierRefused`, is kept and sent again by the next repair pass, never dropped silently.
+/// The error is still returned, so the hold is observed as not yet placed.
 pub(crate) async fn hold_for_offline_destination(
     transport: Arc<SwarmTransport>,
     payload: &MessagePayload,
 ) -> Result<()> {
     let held = HeldMessage::hold(payload.clone(), transport.message_signer(), get_epoch_ms())?;
-    operate_entry(
-        &transport,
-        EntryOperation::Extend(Entry::inbox_delta(&held)?),
-        Attempts::Single,
-    )
-    .await
+    let hold = EntryOperation::Extend(Entry::inbox_delta(&held)?);
+    let result = operate_entry(&transport, hold.clone(), Attempts::Single).await;
+    if let Err(error) = &result {
+        if is_unplaced_hold(error) {
+            transport.dht.keep_refused_relay_hold(hold)?;
+        }
+    }
+    result
 }
 
 impl MessageHandler {

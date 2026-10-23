@@ -163,9 +163,18 @@ where the run starts however long it is.
 
 - **No holder, no hold.** When no node from the key's owner to the end of the writer's
   successor list holds relay mail, the writer refuses the hold itself with
-  `RelayHolderUnavailable`; the mail is never dropped silently. A node that receives a relay
-  carrier its own view does not make it hold refuses it with `RelayCarrierNotHeldHere` rather
-  than pass it on, so two views that disagree cannot bounce it.
+  `RelayHolderUnavailable`. A node that receives a relay carrier its own view does not make it
+  hold refuses it with `RelayCarrierNotHeldHere` rather than pass it on, so two views that
+  disagree cannot bounce it, and hands it back to the writer (`RelayCarrierRefused`). Either
+  way the writer keeps the hold and sends it again on each repair pass, to the holder its view
+  then names, until a holder takes it or the message's sender proof expires (10 minutes by
+  default); it never drops a hold silently.
+- **Convergence.** A peer's declaration arrives in its handshake, before it is admitted, so a
+  view places every neighbour with its declaration. The previous-holder records settle within
+  `L + 1` repair passes after a membership change, `L` the longest storage-less run. Until
+  then a hold lands where repair moves it on, or is refused and sent again, so no mail is lost
+  in the window. Two relay-capable nodes joining one run longer than a successor list within
+  one window are the exception (#1045).
 - **Who may hold.** The holder admits a hold only from the node responsible for the
   destination as its view places it: its successor head for a destination it owns, itself for a
   destination in `(predecessor, self]`, and otherwise a storage-less node of the run at or after
@@ -175,8 +184,10 @@ where the run starts however long it is.
   nothing. A storage-less node joining as the key's owner moves custody forward to the next
   holder; a relay-capable node joining inside a run takes custody back from the holder after
   it. Each move is an ownership hand-off acknowledged by the new holder before the old one
-  deletes, and the new holder takes a carrier only from a node that held it before: its
-  predecessor, its previous holder, or the next holder along its successor list.
+  deletes. A carrier whose owner the old holder cannot place is offered to both ends of its
+  view, and the new holder takes a carrier only for a key its own view makes it hold, from a
+  node that holds relay mail: custody can jump between holders that do not know each other,
+  as when a holder gives back the keys of a run a relay-capable node joined.
 
 ## Finger-table convergence
 

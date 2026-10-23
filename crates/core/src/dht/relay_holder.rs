@@ -15,7 +15,19 @@
 //! Law (Agreement) every relay path (hold, removal, hand-off, repair, drain, fetch) decides with
 //!                 `relay_holder`, so a writer and a reader whose views cover the same nodes name
 //!                 the same holder
+//! Law (Declared)  a peer's declaration arrives in the connection handshake, before the peer is
+//!                 admitted; so every predecessor and successor a view places is placed with its
+//!                 declaration, and only a previous holder named by a record is presumed to hold
+//! Law (Convergence) after one membership change, the previous-holder records settle within
+//!                 L + 1 repair passes, L the length of the longest storage-less run; until then
+//!                 a hold either lands where the repair passes move it on to the holder, or is
+//!                 refused, handed back to its writer (`RelayCarrierRefused`), kept, and sent
+//!                 again each pass until a holder takes it or its sender proof expires
 //! ```
+//!
+//! The convergence law covers every single membership change and overlapping changes whose run
+//! fits a successor list; two relay-capable nodes joining one longer run within one window can
+//! strand a carrier at the old holder (#1045).
 //!
 //! A view covers a clockwise [`RelaySegment`]: the nodes behind this one that it can place, this
 //! node, and its successor list; a node with no successor owns the rest of the ring, as the
@@ -48,6 +60,7 @@ use super::topology;
 use super::topology::FindSuccessorStep;
 use super::topology::TopologyState;
 use super::Did;
+use crate::error::Error;
 
 /// What a node declares about relay custody when it connects, and in its online descriptor:
 /// whether it keeps a retained relay store and so holds relay mail.
@@ -155,6 +168,22 @@ pub(crate) fn in_arc(from: Did, key: Did, to: Did) -> bool {
     key != from && Did::cmp_from_observer(from, key, to) != Ordering::Greater
 }
 
+/// Whether `error` says a relay hold had no effect and may take effect later, so its writer
+/// keeps it and sends it again on its next repair pass: a view that names no holder, a target
+/// whose view does not make it the holder or does not admit the writer, a target without a relay
+/// store, or a send refused before acceptance. Views disagree only until they converge
+/// (`Law (Convergence)`), so a kept hold reaches its holder unless its sender proof expires first.
+pub(crate) fn is_unplaced_hold(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::RelayHolderUnavailable
+            | Error::RelayCarrierNotHeldHere
+            | Error::RelayMessageHolderNotResponsible
+            | Error::RelayStorageUnavailable
+            | Error::SingleAttemptRefused { .. }
+    )
+}
+
 /// The holder a view names for a relay key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RelayHolder {
@@ -183,24 +212,29 @@ pub(crate) fn relay_holder(segment: &RelaySegment, key: Did) -> RelayHolder {
         .map_or(RelayHolder::Unheld, |node| RelayHolder::Holder(node.did))
 }
 
-/// The node a keeper of the carrier of `key` offers it to, other than `local` itself: the holder
-/// `segment` names, or, when the key's owner lies past the end of the view, the last node of the
-/// view if it holds relay mail. That node is the nearest the view knows toward the owner; it
-/// takes the carrier only if its own view names it the holder, so an offer that reaches too
-/// short moves nothing. `None`: keep the carrier.
+/// The nodes a keeper of the carrier of `key` offers it to, other than `local` itself: the
+/// holder `segment` names; or, when the view does not place the key's owner, both ends of the
+/// view that hold relay mail. The key then lies past the last node, toward which a holder's
+/// interval moves when nodes join ahead, or behind the first, the previous holder, which takes
+/// back the keys of a run a relay-capable node joined. Each end is the nearest node the view
+/// knows on its side, and takes the carrier only if its own view names it the holder, so an
+/// offer to the wrong side moves nothing. Empty: keep the carrier.
 ///
-/// Post: `Some(h)` implies `h ≠ local` and `h` holds relay mail.
-pub(crate) fn relay_handoff_target(segment: &RelaySegment, key: Did, local: Did) -> Option<Did> {
-    let target = match relay_holder(segment, key) {
-        RelayHolder::Holder(holder) => Some(holder),
-        RelayHolder::Unknown => segment
-            .nodes
-            .last()
-            .filter(|last| last.holds)
-            .map(|last| last.did),
-        RelayHolder::Unheld => None,
+/// Post: every target is not `local` and holds relay mail, and there are at most two.
+pub(crate) fn relay_handoff_targets(segment: &RelaySegment, key: Did, local: Did) -> Vec<Did> {
+    let mut targets = match relay_holder(segment, key) {
+        RelayHolder::Holder(holder) => vec![holder],
+        RelayHolder::Unknown => [segment.nodes.last(), segment.nodes.first()]
+            .into_iter()
+            .flatten()
+            .filter(|end| end.holds)
+            .map(|end| end.did)
+            .collect(),
+        RelayHolder::Unheld => Vec::new(),
     };
-    target.filter(|target| *target != local)
+    targets.dedup();
+    targets.retain(|target| *target != local);
+    targets
 }
 
 /// The nearest node behind this one that holds relay mail, and the head of its successor list:
@@ -431,20 +465,16 @@ impl RelayNeighborhood {
         }
     }
 
-    /// Whether a relay carrier relocated by `sender` comes from a node that held it before this
-    /// one: the predecessor, the previous holder, or the next holder along the successor list.
-    pub(crate) fn relocates_from(&self, state: &TopologyState, sender: Did) -> bool {
-        state.predecessor == Some(sender)
-            || self
-                .previous_holder_in(state)
-                .map(|previous| previous.holder)
-                == Some(sender)
-            || state
-                .successors
-                .iter()
-                .copied()
-                .find(|successor| self.holds(*successor))
-                == Some(sender)
+    /// Whether this node takes a relay carrier relocated by `sender`: iff `sender` holds relay
+    /// mail, the only kind of node that ever keeps a carrier. The receiver also takes only a key
+    /// its own view makes it hold, and only elements that pass the witness.
+    ///
+    /// The sender need not be a neighbour. Custody moves to the holder the sender's view names,
+    /// and the two need not know each other: a holder that gives back the keys of a run a
+    /// relay-capable node joined, or a holder after a run longer than a successor list, sends
+    /// to a node that sees neither it as predecessor nor as the next holder.
+    pub(crate) fn relocates_from(&self, sender: Did) -> bool {
+        self.holds(sender)
     }
 }
 

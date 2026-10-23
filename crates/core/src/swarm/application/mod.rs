@@ -131,7 +131,8 @@ impl ApplicationData {
             | Message::ProbeAcknowledgement(_)
             | Message::AnnounceRelayHolder(_)
             | Message::FetchRelayInbox(_)
-            | Message::RelayInboxReport(_) => None,
+            | Message::RelayInboxReport(_)
+            | Message::RelayCarrierRefused(_) => None,
         }
     }
 

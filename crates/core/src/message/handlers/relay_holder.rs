@@ -1,9 +1,11 @@
 //! Handlers of relay custody (see `dht::relay_holder`): the previous holder a predecessor passes,
-//! a recipient's fetch of its inbox, and the holder's report back.
+//! a recipient's fetch of its inbox, the holder's report back, and a refused hold handed back to
+//! its writer.
 
 use async_trait::async_trait;
 
 use crate::dht::entry::inbox::inbox_key;
+use crate::dht::entry::EntryOperation;
 use crate::dht::relay_holder::PreviousHolder;
 use crate::dht::StorageKey;
 use crate::error::Error;
@@ -12,6 +14,7 @@ use crate::message::effects::CoreEffect;
 use crate::message::types::AnnounceRelayHolder;
 use crate::message::types::FetchRelayInbox;
 use crate::message::types::Message;
+use crate::message::types::RelayCarrierRefused;
 use crate::message::types::RelayInboxReport;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
@@ -90,5 +93,35 @@ impl HandleMsg<RelayInboxReport> for MessageHandler {
         SwarmInboxDelivery::new(self.transport.clone())
             .deliver_fetched(ctx.transaction.origin(), msg.inbox.clone())
             .await
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl HandleMsg<RelayCarrierRefused> for MessageHandler {
+    /// Keep a hold this node wrote that its target refused, to send it again on the next repair
+    /// pass. A removal is not kept: the next drain finds its elements still stored and retires
+    /// them again. Anything else is not this node's to keep, and is refused.
+    async fn handle(&self, ctx: &MessagePayload, msg: &RelayCarrierRefused) -> Result<()> {
+        if ctx.should_forward_from(self.dht.did) {
+            return self
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .await;
+        }
+        let op = &msg.operation.op;
+        if op.is_hold_by(self.dht.did) {
+            return self.dht.keep_refused_relay_hold(op.clone());
+        }
+        if matches!(op, EntryOperation::Tombstone(_)) {
+            tracing::debug!(
+                local = %self.dht.did,
+                target = %ctx.transaction.origin(),
+                "relay inbox removal refused; the next drain retires it again"
+            );
+            return Ok(());
+        }
+        Err(Error::InvalidMessage(
+            "refused relay operation was not written by this node".to_string(),
+        ))
     }
 }

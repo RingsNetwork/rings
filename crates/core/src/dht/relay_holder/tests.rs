@@ -9,7 +9,7 @@
 //! holder offers each carrier to the new one, which takes it.
 
 use super::in_arc;
-use super::relay_handoff_target;
+use super::relay_handoff_targets;
 use super::relay_holder;
 use super::HoldAuthority;
 use super::RelayCustody;
@@ -119,28 +119,26 @@ fn test_a_closing_segment_owns_the_rest_of_the_ring_and_wraps_its_search() {
 }
 
 #[test]
-fn test_hand_off_target_is_the_holder_or_the_last_holding_node_of_the_view() {
+fn test_hand_off_targets_are_the_holder_or_the_holding_ends_of_the_view() {
     let segment = RelaySegment::new(vec![node(10, true), node(20, false), node(30, true)]);
-    assert_eq!(
-        relay_handoff_target(&segment, did(15), did(30)),
-        Some(did(10))
-    );
-    assert_eq!(
-        relay_handoff_target(&segment, did(25), did(10)),
-        Some(did(30))
-    );
+    assert_eq!(relay_handoff_targets(&segment, did(15), did(30)), vec![
+        did(10)
+    ]);
+    assert_eq!(relay_handoff_targets(&segment, did(25), did(10)), vec![
+        did(30)
+    ]);
     // This node holds it: nothing to offer.
-    assert_eq!(relay_handoff_target(&segment, did(15), did(10)), None);
-    // Past the view: offered to the last node, which holds relay mail.
-    assert_eq!(
-        relay_handoff_target(&segment, did(35), did(10)),
-        Some(did(30))
-    );
-    let ending_without_store = RelaySegment::new(vec![node(10, true), node(20, false)]);
-    assert_eq!(
-        relay_handoff_target(&ending_without_store, did(25), did(10)),
-        None
-    );
+    assert!(relay_handoff_targets(&segment, did(15), did(10)).is_empty());
+    // Outside the view: offered to both ends that hold relay mail, this node excepted.
+    assert_eq!(relay_handoff_targets(&segment, did(35), did(20)), vec![
+        did(30),
+        did(10)
+    ]);
+    assert_eq!(relay_handoff_targets(&segment, did(35), did(10)), vec![
+        did(30)
+    ]);
+    let ending_without_store = RelaySegment::new(vec![node(10, false), node(20, false)]);
+    assert!(relay_handoff_targets(&ending_without_store, did(25), did(10)).is_empty());
 }
 
 #[test]
@@ -244,12 +242,24 @@ impl Ring {
         TopologyState::new(self.nodes[i].did, successors, predecessor, Vec::new())
     }
 
-    /// Every node's neighbourhood once repair passes reach a fixpoint: the declarations of its
-    /// neighbours, and the previous holder its predecessor passes it.
-    fn neighborhoods(&self) -> Vec<RelayNeighborhood> {
-        let mut neighborhoods = (0..self.nodes.len())
+    /// Every node's neighbourhood right after this ring's handshakes: what it knew in `prior`,
+    /// the neighbourhoods of the ring `before` a membership change (nothing for a node that
+    /// joined), with the departed peers forgotten and its neighbours' declarations recorded, as
+    /// a handshake records them before admission.
+    fn handshaken(&self, before: &Ring, prior: &[RelayNeighborhood]) -> Vec<RelayNeighborhood> {
+        (0..self.nodes.len())
             .map(|i| {
-                let mut neighborhood = RelayNeighborhood::default();
+                let local = self.nodes[i].did;
+                let mut neighborhood = before
+                    .nodes
+                    .iter()
+                    .zip(prior)
+                    .find(|(node, _)| node.did == local)
+                    .map(|(_, known)| known.clone())
+                    .unwrap_or_default();
+                for departed in before.nodes.iter().filter(|node| !self.has(node.did)) {
+                    neighborhood.forget(departed.did);
+                }
                 let state = self.state(i);
                 for peer in state.successors.iter().chain(state.predecessor.iter()) {
                     let declared = self.nodes[self.index(*peer)].holds;
@@ -257,19 +267,38 @@ impl Ring {
                 }
                 neighborhood
             })
+            .collect()
+    }
+
+    /// One repair pass of every node at once: each passes the record it holds to its head.
+    fn repair_pass(&self, neighborhoods: &mut [RelayNeighborhood]) {
+        let passed = (0..self.nodes.len())
+            .filter_map(|i| {
+                neighborhoods[i]
+                    .record_to_pass(&self.state(i), self.nodes[i].holds)
+                    .map(|(head, previous)| (self.nodes[i].did, head, previous))
+            })
             .collect::<Vec<_>>();
+        for (from, head, previous) in passed {
+            let receiver = self.index(head);
+            neighborhoods[receiver].pass(&self.state(receiver), from, previous);
+        }
+    }
+
+    /// Every node's neighbourhood once repair passes reach a fixpoint: the declarations of its
+    /// neighbours, and the previous holder its predecessor passes it.
+    fn neighborhoods(&self) -> Vec<RelayNeighborhood> {
+        let mut neighborhoods = self.handshaken(self, &[]);
         // A record crosses one link per pass, so as many passes as nodes reach the fixpoint.
         for _ in 0..=self.nodes.len() {
-            for i in 0..self.nodes.len() {
-                let passed = neighborhoods[i].record_to_pass(&self.state(i), self.nodes[i].holds);
-                if let Some((head, previous)) = passed {
-                    let receiver = self.index(head);
-                    let from = self.nodes[i].did;
-                    neighborhoods[receiver].pass(&self.state(receiver), from, previous);
-                }
-            }
+            self.repair_pass(&mut neighborhoods);
         }
         neighborhoods
+    }
+
+    /// Whether `node` is on the ring.
+    fn has(&self, node: Did) -> bool {
+        self.nodes.iter().any(|known| known.did == node)
     }
 
     /// The segment of the node at index `i` under `neighborhoods`.
@@ -356,18 +385,28 @@ fn assert_carriers_follow_the_holder(before: &Ring, after: &Ring) {
         let Some(o) = after.nodes.iter().position(|node| node.did == old) else {
             continue;
         };
-        let offered = relay_handoff_target(&after.segment(&neighborhoods, o), key, old);
+        let offered = relay_handoff_targets(&after.segment(&neighborhoods, o), key, old);
         if old == new {
-            assert_eq!(offered, None, "{old} offers {key}, which it still holds");
+            assert!(
+                offered.is_empty(),
+                "{old} offers {key}, which it still holds"
+            );
             continue;
         }
-        assert_eq!(
-            offered,
-            Some(new),
-            "{old} offers {key} elsewhere than {new}"
+        assert!(
+            offered.contains(&new),
+            "{old} does not offer {key} to {new}"
         );
         let n = after.index(new);
-        assert!(neighborhoods[n].relocates_from(&after.state(n), old));
+        assert!(neighborhoods[n].relocates_from(old));
+        // Every other target refuses it.
+        for other in offered.iter().filter(|target| **target != new) {
+            let t = after.index(*other);
+            assert_ne!(
+                relay_holder(&after.segment(&neighborhoods, t), key),
+                RelayHolder::Holder(*other)
+            );
+        }
     }
 }
 
@@ -482,4 +521,117 @@ fn test_model_a_holder_joining_inside_a_run_takes_custody_back() {
     assert_carriers_follow_the_holder(&before, &after);
     // It leaves again: custody moves forward to 500.
     assert_carriers_follow_the_holder(&after, &before.left(250));
+}
+
+/// From `keeper`, the carrier of `key` reaches the true holder of `ring` under the settled
+/// `neighborhoods`: each keeper offers it to its hand-off targets, a target takes it only if its
+/// own view names it the holder, and every path of takes ends at the truth within as many steps
+/// as nodes.
+fn assert_reaches_the_holder(
+    ring: &Ring,
+    neighborhoods: &[RelayNeighborhood],
+    keeper: Did,
+    key: Did,
+) {
+    let truth = ring.holder(key);
+    let mut keepers = vec![keeper];
+    for _ in 0..=ring.nodes.len() {
+        keepers.retain(|keeper| Some(*keeper) != truth);
+        if keepers.is_empty() {
+            return;
+        }
+        keepers = keepers
+            .iter()
+            .flat_map(|keeper| {
+                let k = ring.index(*keeper);
+                let takers = relay_handoff_targets(&ring.segment(neighborhoods, k), key, *keeper)
+                    .into_iter()
+                    .filter(|target| {
+                        let t = ring.index(*target);
+                        relay_holder(&ring.segment(neighborhoods, t), key)
+                            == RelayHolder::Holder(*target)
+                            && neighborhoods[t].relocates_from(*keeper)
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    !takers.is_empty(),
+                    "{keeper} keeps {key}, held by {truth:?}"
+                );
+                takers
+            })
+            .collect();
+    }
+    panic!("{key} does not reach {truth:?}");
+}
+
+/// Between a membership change and the fixpoint of the previous-holder records (`Law
+/// (Convergence)`), mail is never lost: whatever a writer sends during the window is either
+/// refused by its target, which hands it back to the writer, or accepted by a target whose
+/// carrier then reaches the true holder once the records settle; and a carrier its old holder
+/// offers during the window is accepted only where it reaches the true holder too.
+fn assert_window_loses_nothing(before: &Ring, after: &Ring) {
+    let settled = after.neighborhoods();
+    let mut window = after.handshaken(before, &before.neighborhoods());
+    for _ in 0..=after.nodes.len() {
+        for key in before.keys().into_iter().chain(after.keys()) {
+            for i in 0..after.nodes.len() {
+                let RelayHolder::Holder(target) = relay_holder(&after.segment(&window, i), key)
+                else {
+                    continue;
+                };
+                let t = after.index(target);
+                if relay_holder(&after.segment(&window, t), key) == RelayHolder::Holder(target) {
+                    assert_reaches_the_holder(after, &settled, target, key);
+                }
+            }
+            let Some(old) = before.holder(key).filter(|old| after.has(*old)) else {
+                continue;
+            };
+            let o = after.index(old);
+            for target in relay_handoff_targets(&after.segment(&window, o), key, old) {
+                let t = after.index(target);
+                let takes = relay_holder(&after.segment(&window, t), key)
+                    == RelayHolder::Holder(target)
+                    && window[t].relocates_from(old);
+                if takes {
+                    assert_reaches_the_holder(after, &settled, target, key);
+                }
+            }
+        }
+        after.repair_pass(&mut window);
+    }
+}
+
+#[test]
+fn test_model_mail_survives_the_convergence_window() {
+    let run = ring(&[100, 200, 300, 400, 500, 600], &[100, 200, 300, 400], 4);
+    let transitions = [
+        (run.clone(), run.joined(node(250, true))),
+        (run.joined(node(250, true)), run.clone()),
+        (run.clone(), run.joined(node(350, false))),
+        (
+            ring(&[100, 200, 300, 400, 500, 600], &[100, 200, 300, 400], 2),
+            ring(
+                &[100, 150, 200, 300, 400, 500, 600],
+                &[100, 200, 300, 400],
+                2,
+            ),
+        ),
+        (
+            run.clone(),
+            run.joined(node(150, true)).joined(node(350, true)),
+        ),
+        (run.clone(), run.left(500)),
+        (
+            ring(&[100, 200, 300], &[], 2),
+            ring(&[100, 150, 200, 300], &[150], 2),
+        ),
+        (
+            ring(&[100, 200, 300, 400], &[200, 300], 1),
+            ring(&[100, 200, 250, 300, 400], &[200, 300], 1),
+        ),
+    ];
+    for (before, after) in transitions {
+        assert_window_loses_nothing(&before, &after);
+    }
 }

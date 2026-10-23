@@ -35,8 +35,8 @@
 //! for `d ∈ (pred, self]`, or a storage-less node at or after `d` on the run behind it), only
 //! while the held message's sender proof is still live by the holder's clock (so the hold instant
 //! a holder signs cannot lie about the past), a relocation of the carrier only from a node that
-//! held it before (the predecessor, the previous holder, or the next holder) as an ownership
-//! hand-off, and a removal only from `d`; a relay carrier is fetched by its recipient alone, and
+//! holds relay mail, as an ownership hand-off of a key the receiver holds, and a removal only
+//! from `d`; a relay carrier is fetched by its recipient alone, and
 //! never cached or replicated. Removal is per element by the add dot the
 //! recipient holds, as a covering remove of that payload up to that dot (every hold of one
 //! payload is the same hold), never by a reset floor, so a message the recipient has not seen
@@ -344,6 +344,29 @@ impl InboxElement {
 }
 
 impl EntryOperation {
+    /// Whether this is a hold whose every element `holder` held: a hold that node wrote.
+    /// Decoding names the holder without verifying its signature, which the target verifies.
+    pub(crate) fn is_hold_by(&self, holder: Did) -> bool {
+        match self {
+            EntryOperation::Extend(entry) if entry.kind.is_relay_inbox() => {
+                !entry.data.is_empty()
+                    && entry.data.iter().all(|element| {
+                        HeldMessage::from_element(element).is_ok_and(|held| held.holder() == holder)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether every element of this hold still carries a live sender proof at `now_ms`, as the
+    /// holder's write law requires (`RelayMessageHoldStale`): past that, no holder takes it.
+    pub(crate) fn hold_is_live_at(&self, now_ms: u128) -> bool {
+        self.entry().data.iter().all(|element| {
+            HeldMessage::from_element(element)
+                .is_ok_and(|held| held.payload.transaction.verification.is_live_at(now_ms))
+        })
+    }
+
     /// The write law of a relay-carrier operation issued by `writer` at the holder's clock
     /// `now_ms`: a hold (`Extend`) only from a node the holder's view admits as responsible for
     /// the destination (`admitted`, see `dht::relay_holder::HoldAuthority`), every element held

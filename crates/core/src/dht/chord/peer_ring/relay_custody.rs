@@ -13,6 +13,8 @@
 use std::sync::MutexGuard;
 
 use super::PeerRing;
+use crate::consts::REFUSED_RELAY_HOLDS_MAX;
+use crate::dht::entry::EntryOperation;
 use crate::dht::relay_holder::relay_holder;
 use crate::dht::relay_holder::PreviousHolder;
 use crate::dht::relay_holder::RelayCustody;
@@ -119,8 +121,37 @@ impl PeerRing {
         })
     }
 
-    /// Whether a relay carrier relocated by `sender` comes from a node that held it before.
+    /// Keep `hold`, which this node wrote and which took no effect (`is_unplaced_hold`), to be
+    /// sent again by the next repair pass. A hold kept already is kept once; at
+    /// [`REFUSED_RELAY_HOLDS_MAX`] the oldest is dropped, logged at `warn`.
+    pub(crate) fn keep_refused_relay_hold(&self, hold: EntryOperation) -> Result<()> {
+        let mut kept = self
+            .refused_relay_holds
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        if kept.contains(&hold) {
+            return Ok(());
+        }
+        if kept.len() >= REFUSED_RELAY_HOLDS_MAX {
+            kept.pop_front();
+            tracing::warn!(local = %self.did, "relay hold dropped: too many holds await a holder");
+        }
+        kept.push_back(hold);
+        Ok(())
+    }
+
+    /// Take every kept hold, to send again.
+    pub(crate) fn take_refused_relay_holds(&self) -> Result<Vec<EntryOperation>> {
+        Ok(self
+            .refused_relay_holds
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .drain(..)
+            .collect())
+    }
+
+    /// Whether this node takes a relay carrier relocated by `sender` (`relocates_from`).
     pub(crate) fn relocates_relay_from(&self, sender: Did) -> Result<bool> {
-        self.with_relay_view(|state, neighborhood| neighborhood.relocates_from(state, sender))
+        Ok(self.lock_relay_neighborhood()?.relocates_from(sender))
     }
 }

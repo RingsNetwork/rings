@@ -12,7 +12,7 @@ use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
-use crate::dht::relay_holder::relay_handoff_target;
+use crate::dht::relay_holder::relay_handoff_targets;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::StorageKey;
@@ -197,7 +197,7 @@ impl PeerRing {
     }
 
     /// Offer every relay carrier of `items` this node does not hold under its own view to the
-    /// node `relay_handoff_target` names, as an ownership hand-off (`Law (Holder)`): onward to a
+    /// nodes `relay_handoff_targets` names, as an ownership hand-off (`Law (Holder)`): onward to a
     /// new head or past a storage-less run, or back to a previous holder that joined behind this
     /// node. A carrier with no target stays here and is offered again on a later pass.
     ///
@@ -207,13 +207,15 @@ impl PeerRing {
         let segment = self.relay_segment()?;
         Ok(items
             .into_iter()
-            .filter_map(|(key, entry)| {
-                relay_handoff_target(&segment, key.placement(), self.did).map(|holder| {
-                    PeerRingAction::sync_entries_for_handoff(
-                        StorageSyncDestination::PhysicalOwner(holder),
-                        vec![PlacedEntry::new(key.placement(), entry)],
-                    )
-                })
+            .flat_map(|(key, entry)| {
+                relay_handoff_targets(&segment, key.placement(), self.did)
+                    .into_iter()
+                    .map(move |holder| {
+                        PeerRingAction::sync_entries_for_handoff(
+                            StorageSyncDestination::PhysicalOwner(holder),
+                            vec![PlacedEntry::new(key.placement(), entry.clone())],
+                        )
+                    })
             })
             .collect::<Vec<_>>()
             .into())

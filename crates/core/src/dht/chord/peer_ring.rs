@@ -36,6 +36,7 @@
 //! transition core, membership, finger convergence, stabilization
 //! rounds, successor-list synchronization, and test hooks.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -48,6 +49,7 @@ use super::RemoteAction;
 use crate::consts::LOCAL_CACHE_CAPACITY;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryOperation;
 use crate::dht::finger::FingerApplyOutcome;
 use crate::dht::finger::FingerConvergenceStatus;
 use crate::dht::finger::FingerDeferOutcome;
@@ -143,6 +145,8 @@ pub struct PeerRing {
     topology_epoch: Epoch,
     /// The relay custody this node knows of its neighbours (see `relay_custody`).
     relay_neighborhood: Mutex<RelayNeighborhood>,
+    /// Holds this node wrote that took no effect, kept to be sent again (see `relay_custody`).
+    refused_relay_holds: Mutex<VecDeque<EntryOperation>>,
 }
 
 /// Construction.
@@ -201,6 +205,7 @@ impl PeerRing {
             cache_transition: FuturesMutex::new(()),
             topology_epoch: Epoch::default(),
             relay_neighborhood: Mutex::new(RelayNeighborhood::default()),
+            refused_relay_holds: Mutex::new(VecDeque::new()),
             did,
         }
     }

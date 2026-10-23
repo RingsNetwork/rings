@@ -32,6 +32,7 @@ mod relay_holder;
 
 pub use relay_holder::AnnounceRelayHolder;
 pub use relay_holder::FetchRelayInbox;
+pub use relay_holder::RelayCarrierRefused;
 pub use relay_holder::RelayInboxReport;
 
 /// DHT protocol mode that must match before two peers join the same DHT.
@@ -401,6 +402,8 @@ macro_rules! with_message_variants {
             21 => FetchRelayInbox(FetchRelayInbox): Storage, NoStorageRoute,
             /// The holder's answer to FetchRelayInbox.
             22 => RelayInboxReport(RelayInboxReport): Storage, NoStorageRoute,
+            /// A relay hold refused by its target, handed back to its writer.
+            23 => RelayCarrierRefused(RelayCarrierRefused): Storage, NoStorageRoute,
         }
     };
 }
@@ -771,6 +774,12 @@ mod tests {
     sample_message_body!(FetchRelayInbox, |_fixture| FetchRelayInbox);
     sample_message_body!(RelayInboxReport, |_fixture| RelayInboxReport {
         inbox: None
+    });
+    sample_message_body!(RelayCarrierRefused, |fixture| RelayCarrierRefused {
+        operation: PlacedEntryOperation {
+            placement: fixture.did,
+            op: EntryOperation::Extend(fixture.entry.clone()),
+        },
     });
     sample_message_body!(Chunk, |fixture| Chunk {
         chunk: [0, 1],

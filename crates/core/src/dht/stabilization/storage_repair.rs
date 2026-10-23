@@ -1,5 +1,6 @@
 use super::Stabilizer;
 use super::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
+use crate::dht::relay_holder::is_unplaced_hold;
 use crate::dht::topology;
 use crate::dht::types::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
@@ -7,12 +8,15 @@ use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
 use crate::error::Result;
+use crate::message::handlers::storage::operate_entry;
 use crate::message::AnnounceRelayHolder;
 use crate::message::Message;
 use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
+use crate::swarm::transport::Attempts;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
+use crate::utils::get_epoch_ms;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Observable completion state for one bounded storage repair pass.
@@ -275,6 +279,7 @@ impl Stabilizer {
             }
         }
         self.dht.forget_stale_relay_custody(&stale)?;
+        self.resend_refused_relay_holds().await?;
         let Some((head, previous)) = self.dht.previous_relay_holder_to_pass()? else {
             return Ok(());
         };
@@ -295,6 +300,35 @@ impl Stabilizer {
                 error = ?error,
                 "STABILIZATION previous relay holder not queued; passed again next pass"
             );
+        }
+        Ok(())
+    }
+
+    /// Send again every hold this node kept because it took no effect, to the holder the view
+    /// now names (`Law (Convergence)` of `dht::relay_holder`). A hold that takes no effect again
+    /// is kept again; one whose sender proof has expired, which no holder admits any longer, is
+    /// dropped and logged at `warn`.
+    async fn resend_refused_relay_holds(&self) -> Result<()> {
+        let now_ms = get_epoch_ms();
+        for hold in self.dht.take_refused_relay_holds()? {
+            if !hold.hold_is_live_at(now_ms) {
+                tracing::warn!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    "STABILIZATION relay hold dropped: sender proof expired before a holder took it"
+                );
+                continue;
+            }
+            match operate_entry(&self.transport, hold.clone(), Attempts::Single).await {
+                Err(error) if is_unplaced_hold(&error) => self.dht.keep_refused_relay_hold(hold)?,
+                Err(error) => tracing::warn!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    error = ?error,
+                    "STABILIZATION relay hold refused for good"
+                ),
+                Ok(()) => {}
+            }
         }
         Ok(())
     }

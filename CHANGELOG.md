@@ -25,8 +25,12 @@
   message), so a holder places the keys owned on the storage-less run behind it. A hold with no
   holder within the writer's successor list is refused to the writer with the new
   `Error::RelayHolderUnavailable`; a relay operation sent to a node whose view does not make it
-  the holder is refused there with the new `Error::RelayCarrierNotHeldHere`. Online messaging and
-  data-topic ownership are unchanged.
+  the holder is refused there with the new `Error::RelayCarrierNotHeldHere` and handed back to
+  its writer (the new `RelayCarrierRefused` message). A writer keeps every hold that took no
+  effect (at most `REFUSED_RELAY_HOLDS_MAX`, 64) and sends it again on each repair pass until a
+  holder takes it or its sender proof expires. A holder takes a relocated carrier from any node
+  that holds relay mail, for a key its own view makes it hold. Online messaging and data-topic
+  ownership are unchanged.
   - **Upgrade consequence.** The handshake and the message set change with no version: a node of
     this version and one of an earlier version cannot connect, so every node of an overlay
     upgrades together.

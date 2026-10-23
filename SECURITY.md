@@ -192,8 +192,11 @@ route.
   never dropped. The holder of a key behind its predecessor admits a hold only from a
   storage-less node of the run at or after the destination, and the previous holder it learns
   is passed from predecessor to successor, so a dishonest node of a run can at most make the
-  holder after it refuse or misplace mail whose key lies on that run. Values are stored in the
-  clear.
+  holder after it refuse or misplace mail whose key lies on that run. A hold its target refuses
+  is handed back to the writer, which sends it again on later repair passes until a holder takes
+  it or its sender proof expires. A holder takes a relocated carrier only for a key its own view
+  makes it hold, from a node that holds relay mail, and only elements that pass the witness.
+  Values are stored in the clear.
   [Details](docs/src/advanced-topic/chord.md#data-topic-storage),
   [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver

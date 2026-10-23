@@ -1,10 +1,12 @@
 //! Messages of relay custody (see `dht::relay_holder`): a node passing the previous holder it
-//! knows to its successor head, and a recipient fetching its inbox from its holder.
+//! knows to its successor head, a recipient fetching its inbox from its holder, and a target
+//! handing a refused hold back to its writer.
 
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::dht::entry::Entry;
+use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::Did;
 
 /// A node passes to its successor head the previous holder it knows: itself when it holds relay
@@ -30,4 +32,13 @@ pub struct FetchRelayInbox;
 pub struct RelayInboxReport {
     /// The live carrier, or `None` when the holder keeps no mail for the recipient.
     pub inbox: Option<Entry>,
+}
+
+/// A target's refusal of a relay hold its view does not let it take, sent back to the writer
+/// with the hold, so the writer keeps it and sends it again on its next repair pass instead of
+/// the hold being dropped (`dht::relay_holder::is_unplaced_hold`).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RelayCarrierRefused {
+    /// The refused operation, as the writer sent it.
+    pub operation: PlacedEntryOperation,
 }

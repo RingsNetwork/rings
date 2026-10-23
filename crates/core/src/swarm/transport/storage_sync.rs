@@ -280,8 +280,8 @@ impl<'data> StorageSyncBatch<'data> {
     }
 
     /// Whether the relocation law lets this batch carry `placed`: a data topic always, a relay
-    /// inbox only as an ownership hand-off from a node that held it before this one (the
-    /// predecessor, the previous holder, or the next holder; see `dht::relay_holder`).
+    /// inbox only as an ownership hand-off from a node that holds relay mail (see
+    /// `RelayNeighborhood::relocates_from`).
     ///
     /// Post: `false` skips the entry without acknowledging it, so its owner keeps it and offers
     /// it again on a later pass; it does not fail the batch, as the entry is not invalid, only
