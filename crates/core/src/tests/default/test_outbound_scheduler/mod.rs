@@ -852,11 +852,16 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     dummy_controlled::release_send_message_gate();
     await_send(storage_send, "storage transfer").await?;
     await_send(control_send, "control transfer").await?;
+    // Both sends completed and the guard blocks a fourth: the wire carried exactly the first
+    // chunk, the storage frame and the control frame, so control took the turn the bulk tail
+    // was ready for.
     assert_eq!(dummy_controlled::sent_count(), 3);
 
-    let observed = timeout(Duration::from_secs(2), async {
+    // The peer receives both and no chunk before them. Storage and control ride different
+    // lanes, whose receive order the transport does not fix, so their order is not asserted.
+    let mut observed = timeout(Duration::from_secs(2), async {
         let mut observed = Vec::new();
-        loop {
+        while !(observed.contains(&"storage") && observed.contains(&"control")) {
             let payload = node2
                 .listen_once()
                 .await
@@ -864,17 +869,16 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
             match payload.transaction.data::<Message>()? {
                 Message::Chunk(_) => observed.push("bulk"),
                 Message::FoundEntry(_) => observed.push("storage"),
-                Message::ProbeRequest(_) => {
-                    observed.push("control");
-                    return Ok::<_, Error>(observed);
-                }
+                Message::ProbeRequest(_) => observed.push("control"),
                 _ => {}
             }
         }
+        Ok::<_, Error>(observed)
     })
     .await
     .map_err(|_| invalid_test_state("timed out observing control preemption"))??;
-    assert_eq!(observed, vec!["storage", "control"]);
+    observed.sort_unstable();
+    assert_eq!(observed, vec!["control", "storage"]);
     Ok(())
 }
 

@@ -31,9 +31,12 @@ than using path filters: changes to Cargo manifests, workspace dependencies, or
 execution helpers must not bypass the sole storm owner. No repetitions, state-space bounds, seed
 matrices, or non-vacuity assertions were reduced.
 
-The `ci` profile inherits release optimization, overflow, and assertion semantics
-but disables full LTO and stripping. `debug-assertions = false` is explicit because
-the rejoin model's exhaustive searches are ignored when debug assertions are enabled.
+The `ci` profile inherits release overflow and assertion semantics but disables
+full LTO and stripping, and it optimizes where test time is spent: dependencies,
+rings-core (the exhaustive model searches) and rings-aez (the onion cipher) at
+`opt-level = 3`, every other workspace crate at `opt-level = 1` (#1002).
+`debug-assertions = false` is explicit because the rejoin model's exhaustive
+searches are ignored when debug assertions are enabled.
 The native ownership requirement fails if that test becomes ignored. The old
 unoptimized core dummy execution is replaced with this optimized profile. The
 separate debug workspace build is gone as well (#1002): clippy type-checks the debug
