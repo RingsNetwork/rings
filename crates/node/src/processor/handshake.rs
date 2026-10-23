@@ -30,7 +30,8 @@ pub(crate) enum HandshakePeer {
 }
 
 /// The remote half of a handshake over HTTP: the peer's public `answerOffer`, and its
-/// `acceptAnswer` for a counter-offer this node answered.
+/// `acceptAnswer` for a counter-offer this node answered, which only a peer of 0.34.2 or
+/// earlier sends.
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 pub(crate) trait RemoteHandshake {
@@ -155,11 +156,12 @@ impl Processor {
     /// generation, so it is never applied to a handshake the peer started meanwhile; a failure
     /// after the offer was created cancels the generation iff it is still pending.
     ///
-    /// When the peer holds its own sent overlay offer to this node and that offer prevails on
-    /// the DID tie-break (#947), the peer replies with that offer instead of an answer. This
-    /// node then answers it, which releases its own losing generation, and delivers the answer
-    /// with the peer's `acceptAnswer`; the edge is the peer's handshake, still in flight, so
-    /// the outcome is `InFlight`, and nothing is abandoned.
+    /// This node's offer, carried out of band, prevails over the peer's own sent overlay offer
+    /// to this node (`Law (Tie-break)`), so the peer answers it. A peer of 0.34.2 or earlier
+    /// replies instead with its overlay offer when that offer prevails on the DID tie-break
+    /// (#947). This node then answers it, which releases its own losing generation, and
+    /// delivers the answer with the peer's `acceptAnswer`; the edge is the peer's handshake,
+    /// still in flight, so the outcome is `InFlight`, and nothing is abandoned.
     pub(crate) async fn connect_peer_via_http(
         &self,
         endpoint: &RemoteRpcEndpoint,

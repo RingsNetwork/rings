@@ -12,11 +12,13 @@
 //!
 //! Law (Crossing offer): an offer from `peer` meeting this node's pending attempt for `peer`
 //! is decided by [`crossing_offer_verdict`] alone, a pure function of the attempt's signaling
-//! state and the two DIDs.
+//! state, the offer's carrier and the two DIDs.
 
 use crate::dht::Did;
 
-/// Who drives an offering attempt.
+/// Who drives an offering attempt, and so who carries its offer. A crossing offer is carried by
+/// the overlay when it arrives over the DHT, and by an external owner when it is handed in out of
+/// band (`Swarm::answer_offer`, the HTTP handshake's `answerOffer`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(test, derive(Hash))]
 pub(crate) enum OfferOwner {
@@ -93,22 +95,29 @@ pub(crate) enum CrossingOfferVerdict {
     Refuse,
 }
 
-/// Decide an offer from `peer` meeting this node's (`local`) pending attempt in `handshake`.
+/// Decide an offer from `peer`, carried by `carrier`, meeting this node's (`local`) pending
+/// attempt in `handshake`.
 ///
 /// ```text
-/// Offering(_, Creating)          ──▶ Yield            nothing crossed yet: no tie
-/// Offering(o, Sent(s, t)), l < p ──▶ CounterOffer(s, t)   if o = Overlay
-///                                ──▶ Refuse               if o = External
-/// Offering(_, Sent(_)),    l > p ──▶ Yield            the smaller DID's offer prevails
-/// Offering(_, Answered)          ──▶ Refuse           an answer is being applied
-/// Answering                      ──▶ Refuse           the slot answers the peer's own offer
+/// Offering(_, Creating)                     ──▶ Yield     nothing crossed yet: no tie
+/// Offering(Overlay, Sent(_)),  c = External ──▶ Yield     the out-of-band offer prevails
+/// Offering(External, Sent(_)), c = Overlay  ──▶ Refuse    this node's out-of-band offer prevails
+/// Offering(o, Sent(s, t)), c = o, l < p     ──▶ CounterOffer(s, t)   if o = Overlay
+///                                           ──▶ Refuse               if o = External
+/// Offering(o, Sent(_)),    c = o, l > p     ──▶ Yield     the smaller DID's offer prevails
+/// Offering(_, Answered)                     ──▶ Refuse    an answer is being applied
+/// Answering                                 ──▶ Refuse    the slot answers the peer's own offer
 /// ```
 ///
-/// Law (Tie-break): of two crossing unanswered offers exactly one side yields, the larger DID,
+/// Law (Tie-break): of two crossing unanswered offers exactly one side yields. An offer carried
+/// out of band prevails over an overlay offer: its answer returns the way the offer came, while
+/// a counter-offer to it could be answered only through this node's `acceptAnswer`, which a
+/// node's public HTTP API does not serve. Of two offers carried alike the larger DID yields,
 /// and the other sends its own offer back unless an external owner carries it; so whenever
 /// either overlay offer is delivered the edge is established.
 pub(crate) fn crossing_offer_verdict(
     handshake: &Handshake,
+    carrier: OfferOwner,
     local: Did,
     peer: Did,
 ) -> CrossingOfferVerdict {
@@ -117,6 +126,14 @@ pub(crate) fn crossing_offer_verdict(
             phase: OfferPhase::Creating,
             ..
         } => CrossingOfferVerdict::Yield,
+        Handshake::Offering {
+            owner: OfferOwner::Overlay,
+            phase: OfferPhase::Sent { .. },
+        } if carrier == OfferOwner::External => CrossingOfferVerdict::Yield,
+        Handshake::Offering {
+            owner: OfferOwner::External,
+            phase: OfferPhase::Sent { .. },
+        } if carrier == OfferOwner::Overlay => CrossingOfferVerdict::Refuse,
         Handshake::Offering {
             phase: OfferPhase::Sent { .. },
             ..

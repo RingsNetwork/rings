@@ -3,10 +3,13 @@
 //! An offer reserves a pending generation whose signaling state ([`Handshake`]) records who
 //! drives it and how far it has got; the state lives and dies with the pending record. Two
 //! crossing offers are decided by `Law (Crossing offer)` (see `pending::handshake`): an offer
-//! still being created yields, and of two sent overlay offers the smaller DID's prevails and is
-//! sent back to the peer as a counter-offer. Over the DHT, offers record their path and every
-//! reply retraces it (#947, see the `signaling` module), so an edge both ends want is
-//! established whenever either overlay offer is delivered.
+//! still being created yields, an offer carried out of band prevails over a sent overlay offer,
+//! and of two sent overlay offers the smaller DID's prevails and is sent back to the peer as a
+//! counter-offer. Over the DHT, offers record their path and every reply retraces it (#947, see
+//! the `signaling` module), so an edge both ends want is established whenever either overlay
+//! offer is delivered. An offer carried out of band, a peer's HTTP join, is never countered: the
+//! peer could answer a counter-offer only through this node's gated `acceptAnswer`, so an overlay
+//! offer that a seed sent to the peer while it was offline would block the join until expiry.
 //!
 //! A WebRTC step of an attempt that lost its slot reports why ([`classify_step_failure`]):
 //! `ConnectionAttemptSuperseded` when the peer's own handshake took the slot, and
@@ -345,11 +348,15 @@ impl SwarmTransport {
         }
     }
 
-    /// Decide what an offer from `peer` meets here: a vacant slot or a yielded one whose
-    /// answering generation is already reserved (to be answered), or this node's own prevailing
-    /// offer to send back; any record the offer must not displace refuses it as
-    /// `AlreadyConnected`. A pending attempt is decided by `Law (Crossing offer)`.
-    async fn reconcile_incoming_offer_peer(&self, peer: Did) -> Result<IncomingOfferSlot> {
+    /// Decide what an offer from `peer`, carried by `carrier`, meets here: a vacant slot or a
+    /// yielded one whose answering generation is already reserved (to be answered), or this
+    /// node's own prevailing offer to send back; any record the offer must not displace refuses
+    /// it as `AlreadyConnected`. A pending attempt is decided by `Law (Crossing offer)`.
+    async fn reconcile_incoming_offer_peer(
+        &self,
+        peer: Did,
+        carrier: OfferOwner,
+    ) -> Result<IncomingOfferSlot> {
         self.expire_pending_connections().await?;
         match self.incoming_offer_admitted_peer(peer)? {
             IncomingOfferAdmittedPeer::Vacant => {}
@@ -378,7 +385,7 @@ impl SwarmTransport {
             let Some(handshake) = handshake else {
                 return Err(Error::AlreadyConnected);
             };
-            match crossing_offer_verdict(&handshake, self.dht.did, peer) {
+            match crossing_offer_verdict(&handshake, carrier, self.dht.did, peer) {
                 CrossingOfferVerdict::Refuse => return Err(Error::AlreadyConnected),
                 CrossingOfferVerdict::CounterOffer { sdp, tx_id } => {
                     return Ok(IncomingOfferSlot::CounterOffer(CounterOffer {
@@ -435,12 +442,14 @@ impl SwarmTransport {
         })
     }
 
-    /// Validate `offer_msg` from `peer` and decide it against the peer's slot: local work only.
-    /// Either the answering generation is opened, returned with the decoded offer, or this
-    /// node's own prevailing offer is returned to send back (`Law (Tie-break)`).
+    /// Validate `offer_msg` from `peer`, carried by `carrier`, and decide it against the peer's
+    /// slot: local work only. Either the answering generation is opened, returned with the
+    /// decoded offer, or this node's own prevailing offer is returned to send back
+    /// (`Law (Tie-break)`).
     pub(super) async fn open_answer(
         &self,
         peer: Did,
+        carrier: OfferOwner,
         callback: SwarmTransportCallback,
         offer_msg: &ConnectNodeSend,
     ) -> Result<OfferReply<(PendingTransportConnection, String), CounterOffer>> {
@@ -450,7 +459,7 @@ impl SwarmTransport {
             ));
         }
         let offer: String = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
-        let pending = match self.reconcile_incoming_offer_peer(peer).await? {
+        let pending = match self.reconcile_incoming_offer_peer(peer, carrier).await? {
             IncomingOfferSlot::CounterOffer(counter_offer) => {
                 tracing::debug!(
                     target: "rings_core::swarm::transport::handshake",
@@ -472,16 +481,20 @@ impl SwarmTransport {
         Ok(OfferReply::Answer((pending, offer)))
     }
 
-    /// Reply to the offer of remote connection, waiting on ICE gathering (the application
-    /// boundary): answer it, or return this node's own prevailing offer (`Law (Tie-break)`).
-    /// The caller abandons the generation if the answer cannot be delivered.
+    /// Reply to the offer of remote connection, carried out of band by its owner, waiting on ICE
+    /// gathering (the application boundary). The offer prevails over this node's own sent
+    /// overlay offer (`Law (Tie-break)`), so the reply is an answer whenever the slot admits
+    /// one. The caller abandons the generation if the answer cannot be delivered.
     pub(in crate::swarm) async fn answer_remote_connection(
         &self,
         peer: Did,
         callback: SwarmTransportCallback,
         offer_msg: &ConnectNodeSend,
     ) -> Result<OfferOutcome> {
-        match self.open_answer(peer, callback, offer_msg).await? {
+        match self
+            .open_answer(peer, OfferOwner::External, callback, offer_msg)
+            .await?
+        {
             OfferReply::Answer((pending, offer)) => {
                 let report = self.create_answer(&pending, offer).await?;
                 Ok(OfferReply::Answer(CreatedAnswer {
