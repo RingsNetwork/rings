@@ -11,8 +11,8 @@
 //! ```
 //!
 //! A switch counts the live holds of its family, so holds nest: the deadlines stay held until
-//! the last of them is dropped. A switch is thread-local. Native dummy tests run on Tokio's current-thread runtime, so the
-//! test's thread is the thread of every transfer it starts.
+//! the last of them is dropped. A switch is thread-local. Native dummy tests run on Tokio's
+//! current-thread runtime, so the test's thread is the thread of every transfer it starts.
 
 use std::cell::Cell;
 use std::thread::LocalKey;
