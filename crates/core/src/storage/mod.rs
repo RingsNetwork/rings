@@ -25,13 +25,20 @@ pub use crate::storage::memory::MemStorage;
 /// The authority of a store's records, fixed when the store is opened.
 ///
 /// A store is either a cache its owner can rebuild or do without, or the only copy of state
-/// whose loss would be silent (such as the transaction replay store). The law every backend
-/// that takes an authority shares is the decode law: a disposable store retires a record the
-/// current schema cannot decode, on the read that finds it, and reports it absent, while an
-/// authoritative store reports the record and keeps it. Budget, durability and open laws are
-/// per backend and documented there: the file store evicts and flushes by its authority, while
-/// IndexedDB evicts its least recently accessed rows beyond its row cap under either authority,
-/// so an authoritative IndexedDB store is sized never to reach its cap.
+/// whose loss would be silent (such as the transaction replay store). Every backend that takes
+/// an authority shares two laws:
+///
+/// - **Decode.** A disposable store retires a record the current schema cannot decode, on the
+///   read that finds it, and reports it absent; an authoritative store reports the record and
+///   keeps it.
+/// - **Budget (refuse, never evict).** A disposable store retires its oldest records (by the
+///   backend's own order) to make room; an authoritative store retires nothing, and a write of
+///   a new record into a full store, or an open under a lowered budget, fails with
+///   `Error::StorageBudgetExhausted` and changes nothing. An evicted authoritative record would
+///   be indistinguishable from one never written, which silently rolls its state back (#923).
+///
+/// The budget's unit, the durability and the open laws are per backend and documented there
+/// (`FileStorage` counts bytes and flushes by its authority; `IdbStorage` counts rows).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecordAuthority {
@@ -45,6 +52,12 @@ impl RecordAuthority {
     /// Whether a read retires a record it cannot decode instead of reporting it (the decode law,
     /// shared by every backend that takes an authority).
     pub(crate) const fn retires_undecodable(self) -> bool {
+        matches!(self, Self::Disposable)
+    }
+
+    /// Whether the budget retires the oldest records to make room, instead of refusing the write
+    /// (the budget law, shared by every backend that takes an authority).
+    pub(crate) const fn evicts(self) -> bool {
         matches!(self, Self::Disposable)
     }
 }

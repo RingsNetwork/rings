@@ -743,14 +743,17 @@ pub enum Error {
     },
 
     /// An authoritative storage is full: it evicts nothing, so a write that does not fit, or an
-    /// open over a lowered budget, fails and changes nothing.
-    #[error("Authoritative storage holds {used} of {capacity} bytes; {required} more do not fit")]
+    /// open over a lowered budget, fails and changes nothing. The three counts are in the unit
+    /// of the storage's budget: bytes for `FileStorage`, rows for `IdbStorage`.
+    #[error(
+        "Authoritative storage holds {used} of {capacity} budget units; {required} more do not fit"
+    )]
     StorageBudgetExhausted {
-        /// Bytes the stored records occupy.
+        /// Budget units the stored records occupy.
         used: u64,
-        /// Bytes the write needs (zero at open).
+        /// Budget units the write needs (zero at open).
         required: u64,
-        /// Total byte budget of the storage.
+        /// Total budget of the storage.
         capacity: u64,
     },
 

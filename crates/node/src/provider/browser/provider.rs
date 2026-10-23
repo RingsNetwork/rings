@@ -163,10 +163,10 @@ async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEnt
 }
 
 /// Open the browser replay store under a row capacity of every record of a full store
-/// ([`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]). IndexedDB evicts its least recently
-/// used row beyond the capacity, and an evicted replay record would reopen replay for its
-/// stream, so the capacity must never be reached. The store is authoritative: a record it cannot
-/// decode is reported and kept, never retired.
+/// ([`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]). The store is authoritative: it evicts nothing, so
+/// a new record beyond the capacity fails its transition closed (`StorageBudgetExhausted`)
+/// instead of reopening replay for an evicted stream (#923), and a record it cannot decode is
+/// reported and kept, never retired.
 async fn open_browser_replay_storage(storage_name: &str) -> NodeResult<ReplayStorage> {
     let open_error = |source| Error::BrowserStorageOpen {
         name: storage_name.to_string(),

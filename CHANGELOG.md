@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- An authoritative IndexedDB store (the browser replay store) refuses instead of evicting
+  (#923): a new row beyond its capacity, or an open under a lowered capacity, fails with
+  `Error::StorageBudgetExhausted` and changes nothing, as the native authoritative store does.
+  An evicted replay record used to restart its stream from `First`. Its `get` is now a read-only
+  transaction, since a store that never evicts orders nothing by recency. The error's counts are
+  in the store's budget unit (bytes for `FileStorage`, rows for `IdbStorage`).
+
 - A config file that fails to load names itself and the parser's message (#1016): a missing or
   unknown key, a wrong type or malformed YAML no longer prints a bare `Encode error.`. Reading
   fails with the new `Error::ConfigParse` (code 821) and writing with `Error::ConfigSerialize`
