@@ -66,8 +66,8 @@ pub async fn spawn_node() -> (Arc<Processor>, Arc<Provider>, RelayHandle) {
 /// Establish an overlay link between two nodes via the offer/answer handshake, then
 /// wait until the connection reports `connected` (or time out).
 ///
-/// `b` answers `a`'s offer, unless `b` holds its own unanswered offer to `a` that prevails on
-/// the tie-break: then `b` replies with that counter-offer, which `a` answers instead.
+/// `b` answers `a`'s offer. A `b` of 0.34.2 or earlier holding its own unanswered offer to `a`
+/// that prevails on the tie-break replies with that counter-offer instead, which `a` answers.
 pub async fn connect(a: &Arc<Processor>, b: &Arc<Processor>) -> Result<()> {
     let offer = a.swarm.create_offer(b.swarm.did()).await?;
     match b.swarm.answer_offer(offer).await? {

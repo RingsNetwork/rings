@@ -464,8 +464,9 @@ impl Swarm {
     /// without touching a handshake the peer started meanwhile.
     ///
     /// The caller owns the offer and carries it out of band, so the attempt never sends it
-    /// over the DHT as a counter-offer (#947): a crossing offer from a larger DID is refused,
-    /// one from a smaller DID takes the slot.
+    /// over the DHT as a counter-offer (#947). It prevails over a crossing overlay offer, which
+    /// is refused; of a crossing out-of-band offer, one from a larger DID is refused and one from
+    /// a smaller DID takes the slot (`Law (Tie-break)`).
     pub async fn offer_connection(&self, peer: Did) -> Result<(ConnectionAttempt, MessagePayload)> {
         let (attempt, offer_msg) = self
             .transport
@@ -499,12 +500,15 @@ impl Swarm {
     /// Answer the offer of remote connection. This function will verify the answer payload and
     /// will wrap the answer inside a payload with verification.
     ///
-    /// The reply is [`OfferReply::Answer`], a `ConnectNodeReport` for the peer's
-    /// `accept_answer`, or, when this node holds its own sent overlay offer to the same peer and
-    /// that offer prevails on the DID tie-break (#947), [`OfferReply::CounterOffer`]: that
-    /// offer, a `ConnectNodeSend`, which the caller hands to the peer's `answer_offer`; the peer
-    /// abandons its own offer and answers this one, and that answer goes to this node's
-    /// `accept_answer`.
+    /// The offer is carried out of band, so it prevails over this node's own sent overlay offer
+    /// to the same peer, which is released (`Law (Tie-break)`), and the reply is
+    /// [`OfferReply::Answer`], a `ConnectNodeReport` for the peer's `accept_answer`: a
+    /// counter-offer would leave the peer to deliver its answer through this node's
+    /// `accept_answer`, which a node's public HTTP API does not serve. Nodes of 0.34.2 and
+    /// earlier reply with [`OfferReply::CounterOffer`] when their sent overlay offer prevails on
+    /// the DID tie-break (#947): that offer, a `ConnectNodeSend`, which the caller hands to the
+    /// peer's `answer_offer`; the peer abandons its own offer and answers this one, and that
+    /// answer goes to the replying node's `accept_answer`.
     pub async fn answer_offer(
         &self,
         offer_payload: MessagePayload,

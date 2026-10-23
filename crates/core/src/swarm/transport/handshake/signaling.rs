@@ -270,7 +270,10 @@ impl SwarmTransport {
     ) -> Result<()> {
         let carrier = self.signaling_reply_carrier(request)?;
         let peer = request.transaction.origin();
-        match self.open_answer(peer, callback, offer).await? {
+        match self
+            .open_answer(peer, OfferOwner::Overlay, callback, offer)
+            .await?
+        {
             OfferReply::CounterOffer(CounterOffer { offer, tx_id }) => {
                 self.protocol_egress()
                     .send_reply(request, carrier, tx_id, Message::ConnectNodeSend(offer))
