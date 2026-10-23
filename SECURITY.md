@@ -157,8 +157,12 @@ route.
   that needs a reliable stream detects loss end to end: the TCP relay resets a stream with a
   segment it cannot recover, and an E2E stream with a lost frame fails as stalled, so neither
   passes on a stream with a silent gap (#939). Relay mail leaves core's
-  custody once the application takes it from the inbox; it is delivered at least once within
-  a run, and a restart before its retirement loses it (#936).
+  custody once the application takes it from the inbox. It is delivered at least once across
+  restarts: a delivery admitted and not yet taken is kept in relay custody inside its replay
+  record, so a restart redelivers it instead of refusing it as a replay (#936). A crash after
+  the take and before its release delivers it once more, with the same transaction id, which an
+  application that needs exactly-once delivery deduplicates by. The carrier itself sits in a
+  retained relay store, so a crash or the data store's budget cannot drop the mail (#1021).
   [Details](docs/src/advanced-topic/transport-flow-control.md#application-inbox).
 - **Rerouting.** A remote placement of a Swarm storage operation refused before backend
   acceptance is retried from topology recomputed after a topology, link or capacity event,

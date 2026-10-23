@@ -22,11 +22,17 @@
 //! ```
 //!
 //! Laws:
-//! - **At least once within a run.** An element is retired only once core handled it, refused
-//!   it as the live path would drop it, or the application took it, so a later pass, a released
-//!   inbox or a failed retirement before that never loses it. A restart in between still can:
-//!   the replay window refuses the redelivery (#936). An element held again between the read and
-//!   its tombstone is delivered by the next pass.
+//! - **At least once across restarts (#936).** An element is retired only once core handled it,
+//!   refused it as the live path would drop it, or the application took it and its release from
+//!   relay custody committed, so a later pass, a released inbox, a failed retirement or a restart
+//!   before that never loses it: an element admitted before a restart and never taken is in
+//!   custody, so its redelivery is queued again rather than refused as a replay (the custody
+//!   law of `message::replay`). A crash after a take and before its release delivers that
+//!   message once more, with the same transaction id. An element held again between the read
+//!   and its tombstone is delivered by the next pass.
+//! - **Custody follows the carrier.** Each pass first restricts relay custody to the elements
+//!   still stored, so custody never outlives the mail it keeps, and a pass that finds custody
+//!   full ends and leaves the rest for a later pass.
 //! - **Never waits on the application.** An application message is offered only through a
 //!   reservation in the application inbox; when it finds no room or no reader, the pass ends
 //!   and leaves this element and the rest stored for a later pass.
@@ -41,6 +47,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::channel::oneshot;
 
 use crate::dht::entry::inbox::InboxElement;
 use crate::dht::entry::Entry;
@@ -55,6 +62,7 @@ use crate::message::handlers::storage::operate_entry;
 use crate::swarm::application::RelayConsumption;
 use crate::swarm::callback::LocalDelivered;
 use crate::swarm::callback::LocalDelivery;
+use crate::swarm::detached::spawn_detached;
 use crate::swarm::transport::Attempts;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms;
@@ -74,11 +82,14 @@ enum Offered {
     EndPass,
 }
 
-/// Whether `error` is a failure of this node's own replay store rather than a refusal of the
-/// payload: the admission was not committed, so the element waits for a later pass instead of
-/// being retired as one the live path would drop.
-fn is_local_failure(error: &Error) -> bool {
-    matches!(error, Error::TransactionReplayPersistence { .. })
+/// Whether `error` defers the payload rather than refusing it: a failure of this node's own
+/// replay store, or a full relay custody. Nothing was committed, so the element waits for a
+/// later pass instead of being retired as one the live path would drop.
+fn defers(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::TransactionReplayPersistence { .. } | Error::RelayCustodyFull { .. }
+    )
 }
 
 impl SwarmInboxDelivery {
@@ -92,6 +103,45 @@ impl SwarmInboxDelivery {
     async fn retire(&self, removal: Entry) -> Result<()> {
         let removal = EntryOperation::Tombstone(removal);
         operate_entry(&self.transport, removal, Attempts::Single).await
+    }
+
+    /// The signal that `element` was taken and released from relay custody: a detached task
+    /// waits for `taken`, the application's take, then commits the release (the custody law), and
+    /// only then fires the signal, so the element is retired only after its release.
+    ///
+    /// Post: a take whose release fails, or that no runtime can schedule, never fires: the
+    /// element stays stored and in custody, and is delivered again after a restart.
+    fn release_on_take(
+        &self,
+        element: &InboxElement,
+        taken: oneshot::Receiver<()>,
+    ) -> oneshot::Receiver<()> {
+        let (release, released) = oneshot::channel();
+        let transport = self.transport.clone();
+        let transaction = element.held.payload.transaction.clone();
+        let task = async move {
+            if taken.await.is_err() {
+                return;
+            }
+            match transport.release_relayed_transaction(&transaction).await {
+                Ok(()) => {
+                    // A receiver dropped meanwhile is a pass that forgot the element.
+                    release.send(()).ok();
+                }
+                Err(error) => tracing::warn!(
+                    tx_id = %transaction.tx_id,
+                    error = ?error,
+                    "relay delivery taken but not released from custody"
+                ),
+            }
+        };
+        if spawn_detached(Box::pin(task)).is_err() {
+            tracing::warn!(
+                tx_id = %element.tx_id(),
+                "no runtime to release a relay delivery from custody"
+            );
+        }
+        released
     }
 
     /// Offer one element not yet handed over, unless its origin's quota is spent for this pass
@@ -113,10 +163,11 @@ impl SwarmInboxDelivery {
         match delivery.deliver(&element.held.payload).await {
             Ok(LocalDelivered::Handled) => Offered::Retire,
             Ok(LocalDelivered::Queued(taken)) => {
+                let released = self.release_on_take(element, taken);
                 self.transport
                     .application()
                     .relay_in_flight
-                    .queued(tx_id, taken);
+                    .queued(tx_id, released);
                 Offered::Keep
             }
             Ok(LocalDelivered::Deferred) => Offered::EndPass,
@@ -124,7 +175,7 @@ impl SwarmInboxDelivery {
                 spent.insert(origin);
                 Offered::Keep
             }
-            Err(error) if is_local_failure(&error) => {
+            Err(error) if defers(&error) => {
                 tracing::warn!(%local, %tx_id, error = ?error, "relay inbox delivery deferred");
                 Offered::EndPass
             }
@@ -153,6 +204,13 @@ impl InboxDelivery for SwarmInboxDelivery {
             return Ok(());
         };
         let stored = inbox.stored_inbox_elements();
+        self.transport
+            .restrict_relay_custody(
+                stored
+                    .iter()
+                    .map(|element| &element.held.payload.transaction),
+            )
+            .await?;
         let relay = &self.transport.application().relay_in_flight;
         relay.retain(&stored.iter().map(InboxElement::tx_id).collect());
         let delivery = LocalDelivery::new(self.transport.clone());

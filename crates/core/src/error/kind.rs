@@ -773,6 +773,14 @@ pub enum Error {
     #[error("Transaction replay transition did not run: {0}")]
     TransactionReplayUnscheduled(rings_runtime::DetachedError),
 
+    /// The receiver holds as many relay deliveries in custody as a relay inbox holds elements:
+    /// a new relay delivery waits for a later pass until one is taken or leaves the inbox.
+    #[error("Relay custody holds its capacity of {capacity} deliveries")]
+    RelayCustodyFull {
+        /// The most relay deliveries in custody.
+        capacity: usize,
+    },
+
     /// A storage holds a record it cannot read or decode; the record is kept, never deleted.
     #[error("Storage cannot decode {0}")]
     StorageRecordUndecodable(crate::storage::UndecodableRecord),

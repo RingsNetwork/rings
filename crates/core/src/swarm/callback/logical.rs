@@ -15,6 +15,7 @@ use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::OriginQuotaCharge;
+use crate::message::RelayAdmission;
 use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationMessage;
 use crate::swarm::observer::LookupCorrelation;
@@ -39,9 +40,13 @@ impl LocalDelivery {
     /// Room for application data is reserved, holding the message, before the transaction is
     /// admitted, so a payload this pass cannot hand over (no room, or no application reading)
     /// is left unadmitted for a later pass instead of being admitted, handled and lost to the
-    /// replay window. Core handles the message the room holds by reference, so it is decoded
-    /// once and never copied. A payload carrying application data is queued with a consumption
-    /// signal, so its stored copy is retired only once the application takes it.
+    /// replay window. The admission is a relay admission (the custody law of
+    /// `message::replay`): the transaction enters the window and relay custody in one record
+    /// write, and a payload already in custody (admitted before a restart, never taken) is
+    /// handled and queued again with nothing admitted. Core handles the message the room holds by
+    /// reference, so it is decoded once and never copied. A payload carrying application data is
+    /// queued with a consumption signal, so its stored copy is retired only once the
+    /// application takes it.
     ///
     /// Pre: `payload.transaction.destination` is this node and the payload was verified by the
     /// caller (the inbox witness verifies it as of its hold instant).
@@ -65,7 +70,7 @@ impl LocalDelivery {
             return Ok(LocalDelivered::Deferred);
         };
         pipeline.tap_inbound(payload);
-        pipeline.admit_local_transaction(payload, lane).await?;
+        pipeline.admit_relayed_transaction(payload, lane).await?;
         pipeline
             .handle_application(payload, &room.message().data)
             .await?;
@@ -260,6 +265,22 @@ impl LogicalInbound {
             .await
     }
 
+    /// [`Self::admit_local_transaction`] for a payload a relay inbox delivered: the admission
+    /// also enters relay custody, or finds the payload already in custody (the custody law of
+    /// `message::replay`).
+    async fn admit_relayed_transaction(
+        &self,
+        payload: &MessagePayload,
+        lane: crate::swarm::callback::InboundLane,
+    ) -> crate::error::Result<RelayAdmission> {
+        let class = lane
+            .class()
+            .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
+        self.transport
+            .admit_relayed_transaction(&payload.transaction, OriginQuotaCharge::from(class))
+            .await
+    }
+
     /// Commit admission of `payload` under the charge `charge` selects for its class, if it is
     /// addressed to this node.
     async fn admit_charged(
@@ -390,23 +411,92 @@ mod tests {
         )
     }
 
+    /// A relay delivery is admitted into the window and relay custody before it is queued; one
+    /// still in custody (never released) is queued again with nothing admitted, and one
+    /// released after its take is refused as a duplicate.
     #[tokio::test]
     async fn test_a_final_destination_persists_before_delivery_and_rejects_a_duplicate() {
         let (swarm, inbox) = claimed_swarm(None);
         let delivery = LocalDelivery::new(swarm.transport.clone());
         let payload = payload(swarm.did(), 0).expect("payload");
 
-        assert!(matches!(
-            delivery.deliver(&payload).await.expect("first delivery"),
-            LocalDelivered::Queued(_)
-        ));
+        for pass in ["first delivery", "delivery still in custody"] {
+            assert!(matches!(
+                delivery.deliver(&payload).await.expect(pass),
+                LocalDelivered::Queued(_)
+            ));
+        }
+        for _ in 0..2 {
+            assert!(matches!(
+                inbox.try_next(),
+                Some(crate::swarm::application::ApplicationDelivery::Message(_))
+            ));
+        }
+        swarm
+            .transport
+            .release_relayed_transaction(&payload.transaction)
+            .await
+            .expect("release");
         assert!(matches!(
             delivery.deliver(&payload).await,
             Err(Error::TransactionReplay { .. })
         ));
+        assert_eq!(inbox.try_next(), None);
+    }
+
+    /// The custody law across a restart (#936): relay mail admitted and queued, then lost with
+    /// the process before the application took it, is delivered once by the next run over the
+    /// same replay store, and refused once that run released it.
+    #[tokio::test]
+    async fn test_a_restart_between_queueing_and_taking_redelivers_exactly_once() {
+        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
+        let replay = std::sync::Arc::new(MemStorage::<crate::message::ReplayRecord>::new());
+        let run = || {
+            let swarm = SwarmBuilder::new(
+                TEST_NETWORK_ID,
+                "",
+                Box::new(MemStorage::new()),
+                local.clone(),
+            )
+            .replay_storage(Box::new(std::sync::Arc::clone(&replay)))
+            .build();
+            let inbox = swarm.application_inbox().expect("unclaimed inbox");
+            (swarm, inbox)
+        };
+        let payload = {
+            let (swarm, _untaken) = run();
+            let payload = payload(swarm.did(), 0).expect("payload");
+            let delivered = LocalDelivery::new(swarm.transport.clone())
+                .deliver(&payload)
+                .await
+                .expect("first run delivers");
+            assert!(matches!(delivered, LocalDelivered::Queued(_)));
+            payload
+        };
+
+        let (swarm, inbox) = run();
+        let delivery = LocalDelivery::new(swarm.transport.clone());
+        assert!(matches!(
+            delivery.deliver(&payload).await.expect("redelivered"),
+            LocalDelivered::Queued(_)
+        ));
         assert!(matches!(
             inbox.try_next(),
             Some(crate::swarm::application::ApplicationDelivery::Message(_))
+        ));
+        swarm
+            .transport
+            .release_relayed_transaction(&payload.transaction)
+            .await
+            .expect("release");
+        drop((swarm, inbox));
+
+        let (swarm, inbox) = run();
+        assert!(matches!(
+            LocalDelivery::new(swarm.transport.clone())
+                .deliver(&payload)
+                .await,
+            Err(Error::TransactionReplay { .. })
         ));
         assert_eq!(inbox.try_next(), None);
     }

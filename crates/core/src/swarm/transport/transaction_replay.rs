@@ -9,6 +9,8 @@ use crate::error::Result;
 use crate::message::MessageCategory;
 use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaCounters;
+use crate::message::RelayAdmission;
+use crate::message::RelayDelivery;
 use crate::message::ReplayCounters;
 use crate::message::StreamKey;
 use crate::message::Transaction;
@@ -76,6 +78,55 @@ impl SwarmTransport {
             )
             .await
             .map(|_| ())
+    }
+
+    /// Atomically commit final-destination replay, relay custody and origin-quota admission of
+    /// a transaction a relay inbox delivered (the custody law of `message::replay`): either it
+    /// enters the window and custody in one record write, or it is already in custody and is
+    /// queued again with nothing admitted.
+    pub(crate) async fn admit_relayed_transaction(
+        &self,
+        transaction: &Transaction,
+        charge: OriginQuotaCharge,
+    ) -> Result<RelayAdmission> {
+        let (key, delivery) = self.relay_delivery(transaction)?;
+        self.transaction_replay
+            .admit_relayed(
+                key,
+                delivery,
+                charge,
+                logical_message_byte_cost(transaction),
+            )
+            .await
+    }
+
+    /// Release a relay-delivered transaction from custody once the application took it.
+    pub(crate) async fn release_relayed_transaction(
+        &self,
+        transaction: &Transaction,
+    ) -> Result<()> {
+        let (key, delivery) = self.relay_delivery(transaction)?;
+        self.transaction_replay.release_relayed(key, delivery).await
+    }
+
+    /// Restrict relay custody to the transactions of the elements still in the inbox carrier.
+    pub(crate) async fn restrict_relay_custody<'a>(
+        &self,
+        stored: impl IntoIterator<Item = &'a Transaction>,
+    ) -> Result<()> {
+        let stored = stored
+            .into_iter()
+            .map(|transaction| self.relay_delivery(transaction))
+            .collect::<Result<_>>()?;
+        self.transaction_replay.restrict_custody(stored).await
+    }
+
+    /// The stream and the custody identity of `transaction` (pure).
+    fn relay_delivery(&self, transaction: &Transaction) -> Result<(StreamKey, RelayDelivery)> {
+        Ok((transaction.stream_key(self.network_id)?, RelayDelivery {
+            sequence: transaction.sequence,
+            digest: transaction.digest()?,
+        }))
     }
 }
 

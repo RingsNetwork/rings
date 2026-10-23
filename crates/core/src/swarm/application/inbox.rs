@@ -39,6 +39,11 @@
 //!   when the application takes it from the queue, so stored mail is retired only once taken; a
 //!   signal whose message is discarded is dropped unfired. Taking is where core's custody ends:
 //!   what the application does with the message afterwards is the application's.
+//! - **Relay mail at least once (#936).** Mail from the relay inbox survives a restart before it
+//!   is taken, and is delivered again by the next run. A crash after it is taken and before core
+//!   recorded the take delivers it once more: both copies carry the same
+//!   `ApplicationMessage::tx_id`, the key an application that needs exactly-once delivery
+//!   deduplicates by.
 
 use std::collections::VecDeque;
 use std::sync::Arc;

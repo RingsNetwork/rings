@@ -116,12 +116,13 @@ Sender and receiver state are stored as one record per stream:
 
 ```text
 rings-core:transaction-replay:stream:sender:<hex key>    ->  (key, last reserved sequence)
-rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot window)
+rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot window, relay custody)
 ```
 
 A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
-(1161 bytes: a 92-byte key and a 1066-byte window, with tag and length prefix), so the cost of an
-admission does not grow with the number of streams retained. On load, every record must decode and
+(3850 bytes: a 92-byte key, a 1066-byte window and a relay custody of up to 64 deliveries of 42
+bytes, with tag and length prefixes), so the cost of an admission does not grow with the number of
+streams retained. On load, every record must decode and
 sit under its own key, or the stream it is filed as fails closed (see [Bad records](#bad-records)).
 The native daemon opens the replay store as an authoritative file store (#909). On unix each write
 is flushed to stable storage before its rename and the directory after it (`F_FULLFSYNC` on macOS),
@@ -170,7 +171,8 @@ commit is tracked in #916.
 Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class
 stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each receiver stream
 has exactly 32 hot digest slots. A full store is at most `TRANSACTION_REPLAY_STORE_MAX_RECORDS`
-(32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,295,168 bytes). New streams fail
+(32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,314,240 bytes, counting the relay
+custody once for the whole store, since it holds at most 64 deliveries). New streams fail
 closed at the bound; there is no LRU eviction or sender-controlled reset. The native daemon keeps
 the records in a dedicated 40 MiB authoritative file store, which evicts nothing: a write beyond its
 budget fails with `StorageBudgetExhausted`, and so does an open under a lowered budget. Browser
