@@ -29,10 +29,10 @@
 //! fits a successor list; two relay-capable nodes joining one longer run within one window can
 //! strand a carrier at the old holder (#1045).
 //!
-//! A view covers a clockwise [`RelaySegment`]: the nodes behind this one that it can place, this
+//! A view covers a clockwise `RelaySegment`: the nodes behind this one that it can place, this
 //! node, and its successor list; a node with no successor owns the rest of the ring, as the
 //! topology's successor lookup answers, and its segment closes the ring. Behind it, a node sees
-//! its predecessor and the previous holder ([`PreviousHolder`]): the nearest node behind it that
+//! its predecessor and the previous holder (`PreviousHolder`): the nearest node behind it that
 //! holds relay mail, together with that node's successor head, the first node of the
 //! storage-less run between them. Every node passes the previous holder it knows to its own
 //! successor head on each repair pass: a node that holds relay mail names itself, a node that
