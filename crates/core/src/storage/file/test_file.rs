@@ -543,3 +543,32 @@ async fn test_a_record_of_another_key_is_undecodable_for_its_name() {
     );
     assert!(!root.join(&name).exists());
 }
+
+/// A durable cache (#911) flushes like an authoritative store but decodes like a disposable
+/// one: a torn record is retired and reported absent, never an error, and it keeps no markers.
+#[tokio::test]
+async fn test_a_durable_cache_retires_a_torn_record() {
+    let root = temp_root("durable-cache");
+    let open =
+        || FileStorage::new_with_cap_path_and_authority(4096, &root, RecordAuthority::DurableCache);
+    {
+        let storage = open().await.expect("open");
+        storage.put("a", &"value".to_owned()).await.expect("put");
+    }
+    let name = file_name_for("a");
+    let whole = std::fs::read(root.join(&name)).expect("read record");
+    std::fs::write(
+        root.join(&name),
+        whole.get(..whole.len() / 2).unwrap_or_default(),
+    )
+    .expect("tear record");
+
+    let reopened = open().await.expect("reopen");
+    let read = <FileStorage as KvStorageInterface<String>>::get(&reopened, "a").await;
+    assert!(matches!(read, Ok(None)));
+    assert!(!root.join(&name).exists(), "the torn record is retired");
+    assert!(
+        !root.join(format!("{name}.p")).exists(),
+        "a durable cache keeps no markers"
+    );
+}

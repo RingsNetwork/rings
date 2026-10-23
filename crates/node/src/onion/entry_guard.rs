@@ -2,6 +2,12 @@
 //!
 //! Entry guards are client-local privacy state. They deliberately live outside
 //! Chord and are persisted only in the node's local storage backend.
+//!
+//! Guard policy (#911): the store is opened as a `RecordAuthority::DurableCache`, so a guard
+//! write that completed survives a crash, while a guard record that is absent or does not decode
+//! means "no guards yet": the storage retires it (logged at `warn`) and the selection below
+//! re-selects from scratch. Losing the set costs one re-selection of the first hop; it never
+//! fails a selection, which would take onion routing down for privacy state.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -210,7 +216,9 @@ mod tests {
 
     use rings_core::ecc::SecretKey;
     use rings_core::storage::file::FileStorage;
+    use rings_core::storage::KvStorageScan;
     use rings_core::storage::MemStorage;
+    use rings_core::storage::RecordAuthority;
     use uuid::Uuid;
 
     use super::*;
@@ -246,6 +254,14 @@ mod tests {
 
     fn storage() -> OnionEntryGuardStorage {
         Box::new(MemStorage::new())
+    }
+
+    /// The entry-guard store at `root`, opened as the daemon opens it: a durable cache (#911).
+    async fn durable_cache(root: &std::path::Path) -> Result<FileStorage> {
+        Ok(
+            FileStorage::new_with_cap_path_and_authority(4096, root, RecordAuthority::DurableCache)
+                .await?,
+        )
     }
 
     #[tokio::test]
@@ -303,8 +319,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("rings-entry-guards-{}", Uuid::new_v4()));
         let relays = vec![relay()?, relay()?, relay()?];
         let first = {
-            let storage = Box::new(FileStorage::new_with_cap_and_path(4096, &root).await?)
-                as OnionEntryGuardStorage;
+            let storage = Box::new(durable_cache(&root).await?) as OnionEntryGuardStorage;
             let manager = OnionEntryGuards::new_with_target_count(storage, 2);
             let mut entropy = FixedEntropy::new([0, 0]);
             manager
@@ -312,8 +327,7 @@ mod tests {
                 .await?
         };
         let second = {
-            let storage = Box::new(FileStorage::new_with_cap_and_path(4096, &root).await?)
-                as OnionEntryGuardStorage;
+            let storage = Box::new(durable_cache(&root).await?) as OnionEntryGuardStorage;
             let manager = OnionEntryGuards::new_with_target_count(storage, 2);
             let mut entropy = FixedEntropy::new([u64::MAX, u64::MAX]);
             manager
@@ -323,6 +337,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
 
         assert_eq!(first, second);
+        Ok(())
+    }
+
+    /// Guard policy (#911): a torn guard record, which a crash cannot leave in a durable cache
+    /// but a loss outside the store can, is retired and the set re-selected from scratch, never
+    /// an error that takes onion routing down; the re-selected set is persisted whole.
+    #[tokio::test]
+    async fn test_a_torn_guard_record_is_reselected_end_to_end() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("rings-entry-guards-{}", Uuid::new_v4()));
+        let relays = vec![relay()?, relay()?, relay()?];
+        let record = {
+            let storage = durable_cache(&root).await?;
+            let record = <FileStorage as KvStorageScan<OnionEntryGuardState>>::record_name(
+                &storage,
+                &entry_guard_state_key(7),
+            );
+            let manager = OnionEntryGuards::new_with_target_count(Box::new(storage), 2);
+            let mut entropy = FixedEntropy::new([0, 0]);
+            manager
+                .select_relay_guards(7, &relays, &[], &mut entropy, |_| true)
+                .await?;
+            root.join(record)
+        };
+        let io = |error| Error::Storage(rings_core::error::Error::ServiceIOError(error));
+        let whole = std::fs::read(&record).map_err(io)?;
+        std::fs::write(&record, whole.get(..whole.len() / 2).unwrap_or_default()).map_err(io)?;
+
+        let reselected = {
+            let manager =
+                OnionEntryGuards::new_with_target_count(Box::new(durable_cache(&root).await?), 2);
+            let mut entropy = FixedEntropy::new([u64::MAX, u64::MAX]);
+            manager
+                .select_relay_guards(7, &relays, &[], &mut entropy, |_| true)
+                .await?
+        };
+        let reopened = {
+            let manager =
+                OnionEntryGuards::new_with_target_count(Box::new(durable_cache(&root).await?), 2);
+            let mut entropy = FixedEntropy::new([0, 0]);
+            manager
+                .select_relay_guards(7, &relays, &[], &mut entropy, |_| true)
+                .await?
+        };
+        let _ = std::fs::remove_dir_all(root);
+
+        assert_eq!(reselected.dids.len(), 2);
+        assert_eq!(reopened, reselected);
         Ok(())
     }
 }

@@ -148,8 +148,17 @@ async fn open_browser_evidence_storage(storage_name: &str) -> NodeResult<Evidenc
         })
 }
 
+/// Open the browser entry-guard store as a durable cache (#911): its writes commit with strict
+/// durability, and a guard record that does not decode is retired, logged, and re-selected. An
+/// IndexedDB that cannot open falls back to in-memory guards, re-selected on every start.
 async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEntryGuardStorage> {
-    match IdbStorage::new_with_cap_and_name(1024, storage_name).await {
+    let opened = IdbStorage::new_with_cap_name_and_authority(
+        1024,
+        storage_name,
+        RecordAuthority::DurableCache,
+    )
+    .await;
+    match opened {
         Ok(storage) => Some(Box::new(storage) as OnionEntryGuardStorage),
         Err(source) => {
             tracing::warn!(

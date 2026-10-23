@@ -3,16 +3,21 @@
 //! Persistent native key-value storage: one file per key under a byte budget.
 //!
 //! Authority law: every store is opened as [`RecordAuthority::Disposable`][disposable] (a cache
-//! its owner can rebuild) or [`RecordAuthority::Authoritative`][authoritative] (the only copy of
-//! security state, such as the transaction replay store). The authority fixes the budget,
-//! durability, open and decode laws below; nothing else differs. Read on this backend, a
-//! disposable store's writes are not flushed, its budget evicts the oldest records and a record
-//! the schema cannot decode is retired and reported absent; an authoritative store's writes and
-//! removals are flushed to stable storage, nothing is evicted, and a record the schema cannot
-//! decode is reported and kept; an authoritative store also keeps a presence marker per record
-//! (the presence law), so a record lost outside the store is reported missing.
+//! its owner can rebuild), [`RecordAuthority::DurableCache`][durable] (state its owner can
+//! rebuild at a cost, such as the onion entry guards) or
+//! [`RecordAuthority::Authoritative`][authoritative] (the only copy of security state, such as
+//! the transaction replay store). The authority fixes the budget, durability, open and decode
+//! laws below; nothing else differs. Read on this backend, a disposable store's writes are not
+//! flushed, its budget evicts the oldest records and a record the schema cannot decode is
+//! retired and reported absent; a durable cache flushes its writes and removals as an
+//! authoritative store does, and otherwise behaves as a disposable one, logging each record it
+//! retires; an authoritative store's writes and removals are flushed to stable storage, nothing
+//! is evicted, and a record the schema cannot decode is reported and kept; an authoritative
+//! store also keeps a presence marker per record (the presence law), so a record lost outside
+//! the store is reported missing.
 //!
 //! [disposable]: crate::storage::RecordAuthority::Disposable
+//! [durable]: crate::storage::RecordAuthority::DurableCache
 //! [authoritative]: crate::storage::RecordAuthority::Authoritative
 //!
 //! Budget law: the bytes of every stored file sum to at most `capacity`, and a value larger
@@ -125,6 +130,12 @@ impl RecordAuthority {
                 PutStep::SyncDirectory,
                 PutStep::Witness,
             ],
+            Self::DurableCache => &[
+                PutStep::WriteTemporary,
+                PutStep::SyncTemporary,
+                PutStep::Rename,
+                PutStep::SyncDirectory,
+            ],
             Self::Disposable => &[PutStep::WriteTemporary, PutStep::Rename],
         }
     }
@@ -137,6 +148,7 @@ impl RecordAuthority {
                 RemoveStep::Remove,
                 RemoveStep::SyncDirectory,
             ],
+            Self::DurableCache => &[RemoveStep::Remove, RemoveStep::SyncDirectory],
             Self::Disposable => &[RemoveStep::Remove],
         }
     }
@@ -289,6 +301,7 @@ impl FileStorage {
             return Err(Error::StorageRecordUndecodable(undecodable));
         }
         let name = undecodable.name;
+        self.store.authority.report_retired(&name);
         self.on_store(move |store| store.retire_observed(&name, &data))
             .await
     }

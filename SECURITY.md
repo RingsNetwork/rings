@@ -121,7 +121,12 @@ edges (#843).
   later failure of the upload closes the local stream cleanly, so the local application is not
   told that the exit could not write its last bytes.
 - **Entry guards.** A client pins a persisted set of first hops, limiting how many relays
-  see its edge over time.
+  see its edge over time. The guard store is a durable cache (#911): a completed guard write
+  survives a process or system crash, as a replay write does, so a crash never rotates the
+  first hop. A guard record that is absent or does not decode (only a loss outside the store or
+  a schema change can produce one) is retired, logged at `warn`, and re-selected: losing the
+  set costs one re-selection of the first hop, never onion routing. A browser whose IndexedDB
+  cannot open keeps its guards in memory, re-selected on every start.
 
 A loop hides hops from each other and the client from the exit. It does not hide the client
 from its first hop, overlay membership, registry lookups, the loop's round-trip time from the

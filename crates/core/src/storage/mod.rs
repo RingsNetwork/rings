@@ -22,24 +22,31 @@ use async_trait::async_trait;
 use crate::error::Result;
 pub use crate::storage::memory::MemStorage;
 
-/// The authority of a store's records, fixed when the store is opened.
+/// The authority of a store's records, fixed when the store is opened: a point of the
+/// durable-records lattice, the product of a crash chain (is a completed write kept across a
+/// crash?) and a meaning chain (what does an absent record mean to its owner?).
 ///
-/// A store is either a cache its owner can rebuild or do without, or the only copy of state
-/// whose loss would be silent (such as the transaction replay store). Every backend that takes
-/// an authority shares two laws:
+/// ```text
+///                  crash    absent means            decode    budget    durability
+/// Disposable       cached   the owner's default     retire    evict     engine default
+/// DurableCache     durable  the owner's default     retire    evict     survives a crash
+/// Authoritative    durable  never written           report    refuse    survives a crash
+/// ```
 ///
-/// - **Decode.** A disposable store retires a record the current schema cannot decode, on the
-///   read that finds it, and reports it absent; an authoritative store reports the record and
-///   keeps it.
-/// - **Budget (refuse, never evict).** A disposable store retires its oldest records (by the
-///   backend's own order) to make room; an authoritative store retires nothing, and a write of
-///   a new record into a full store, or an open under a lowered budget, fails with
-///   `Error::StorageBudgetExhausted` and changes nothing. An evicted authoritative record would
-///   be indistinguishable from one never written, which silently rolls its state back (#923).
+/// Every backend that takes an authority shares three laws, each a monotone predicate of it:
 ///
-/// - **Durability.** A disposable store's latest writes may be lost by a crash; an authoritative
-///   store reports a write complete only once it survives a process or a system crash
-///   (`FileStorage` flushes the file and its directory; `IdbStorage` commits with
+/// - **Decode.** A store whose absent record means the owner's default retires a record the
+///   current schema cannot decode, on the read that finds it, and reports it absent; an
+///   authoritative store reports the record and keeps it.
+/// - **Budget (refuse, never evict).** A store whose absent record means the owner's default
+///   retires its oldest records (by the backend's own order) to make room; an authoritative
+///   store retires nothing, and a write of a new record into a full store, or an open under a
+///   lowered budget, fails with `Error::StorageBudgetExhausted` and changes nothing. An evicted
+///   authoritative record would be indistinguishable from one never written, which silently
+///   rolls its state back (#923).
+/// - **Durability.** A disposable store's latest writes may be lost by a crash; a durable cache
+///   and an authoritative store report a write complete only once it survives a process or a
+///   system crash (`FileStorage` flushes the file and its directory; `IdbStorage` commits with
 ///   `durability: "strict"`, #912).
 ///
 /// The budget's unit and the open laws are per backend and documented there (`FileStorage`
@@ -47,8 +54,14 @@ pub use crate::storage::memory::MemStorage;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecordAuthority {
-    /// A cache its owner can rebuild or do without.
+    /// A cache its owner can rebuild or do without, whose latest writes a crash may lose.
     Disposable,
+    /// State its owner can rebuild, but whose loss costs it something (the onion entry guards,
+    /// #911): every completed write survives a crash, while an absent or undecodable record
+    /// still means the owner's default. A record it retires as undecodable is logged at `warn`
+    /// with its name, since a crash cannot produce one: only a loss outside the store, or a
+    /// schema change, can.
+    DurableCache,
     /// The only copy of its state.
     Authoritative,
 }
@@ -57,20 +70,31 @@ impl RecordAuthority {
     /// Whether a read retires a record it cannot decode instead of reporting it (the decode law,
     /// shared by every backend that takes an authority).
     pub(crate) const fn retires_undecodable(self) -> bool {
-        matches!(self, Self::Disposable)
+        !matches!(self, Self::Authoritative)
     }
 
     /// Whether a completed write must survive a process or a system crash (the durability law,
     /// shared by every backend that takes an authority): the file store flushes its writes, and
     /// IndexedDB commits them with strict durability.
     pub(crate) const fn flushes(self) -> bool {
-        matches!(self, Self::Authoritative)
+        !matches!(self, Self::Disposable)
     }
 
     /// Whether the budget retires the oldest records to make room, instead of refusing the write
     /// (the budget law, shared by every backend that takes an authority).
     pub(crate) const fn evicts(self) -> bool {
-        matches!(self, Self::Disposable)
+        !matches!(self, Self::Authoritative)
+    }
+
+    /// Log the retirement of the undecodable record `name` under the decode law: at `warn` for a
+    /// durable cache, whose completed writes a crash never tears, and silently otherwise.
+    pub(crate) fn report_retired(self, name: &str) {
+        if matches!(self, Self::DurableCache) {
+            tracing::warn!(
+                record = name,
+                "durable cache record does not decode; retired, its owner rebuilds it"
+            );
+        }
     }
 }
 
