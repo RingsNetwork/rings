@@ -71,6 +71,7 @@ async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
             Box::new(MemStorage::new()),
             session,
         )
+        .replay_storage(crate::tests::volatile_replay_storage())
         .dht_storage_redundancy(2)
         .dht_virtual_nodes(0),
     );
@@ -319,6 +320,7 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
             Box::new(MemStorage::new()),
             session,
         )
+        .replay_storage(crate::tests::volatile_replay_storage())
         .dht_storage_redundancy(2)
         .dht_virtual_nodes(0),
     );

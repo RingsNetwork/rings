@@ -337,6 +337,7 @@ fn build_repair_nodes(count: usize) -> Vec<Node> {
                     Box::new(MemStorage::new()),
                     session,
                 )
+                .replay_storage(crate::tests::volatile_replay_storage())
                 .dht_storage_redundancy(2)
                 .dht_virtual_nodes(0),
             )
@@ -360,6 +361,7 @@ fn build_finger_nodes(key_indices: &[usize]) -> Vec<Node> {
                     Box::new(MemStorage::new()),
                     session,
                 )
+                .replay_storage(crate::tests::volatile_replay_storage())
                 .dht_virtual_nodes(0),
             )
         })
