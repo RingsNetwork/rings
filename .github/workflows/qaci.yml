@@ -638,9 +638,6 @@ jobs:
       - name: Test CI selection and artifact reuse guards
         run: python3 scripts/test-ci-tests.py
 
-      - name: Check the transport-independent modules compile the same in both feature sets
-        run: python3 scripts/check-transport-independent-modules.py scripts/ci-transport-independent-modules.txt
-
       - name: Check typos
         uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
 
@@ -662,6 +659,10 @@ jobs:
 
       - name: Cache cargo registry and build artifacts
         uses: ./.github/actions/rust-cache
+
+      # Resolves both builds' features with `cargo tree`, so it runs after the toolchain is set up.
+      - name: Check the transport-independent modules against every divergence point
+        run: python3 scripts/check-transport-independent-modules.py scripts/ci-transport-independent-modules.txt scripts/ci-dummy-divergence.txt
 
       - name: Run strict clippy for node native lib
         # rings-node inherits warnings and strict Clippy denies from the workspace.

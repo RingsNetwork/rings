@@ -21,33 +21,65 @@ harness execution. Those historical timings are not a benchmark of this change.
 rings-node whose tests run once, in the dummy job (#1002). The native job skips
 them (`run-ci-tests.py --skip-modules`); the dummy job runs them first with
 `RINGS_DUMMY_TRANSPORT_FORBIDDEN` set (`--only-modules`), then the rest. Both jobs
-build them with the same `ci` profile, `opt-level`, assertions and test threads;
-the dummy build's features are the native build's plus `dummy`.
+build them with the same `ci` profile, `opt-level`, assertions and test threads.
 
-Law: a test of both builds that constructs no transport behaves the same in both.
+Law: a test both builds contain behaves the same in both, unless it executes a
+divergence point, code where the two builds differ.
 
-- It compiles in the native build, so it reaches only items present in both.
-- A shared item whose body differs under `dummy` is either the transport backend
-  (and the inbound pipeline, transport timeouts and send paths that only a
-  `SwarmTransport` reaches), or a test hook (the `crate::simulation` runtime, the
-  outbound test trace). A hook is inert until a dummy-only API arms it.
-- Every swarm and processor of a `dummy` build is backed by a `DummyTransport`.
+`scripts/check-transport-independent-modules.py` (the clippy job) enumerates the
+points. It does not assume which features differ: `cargo tree` resolves the native
+job's workspace build and each dummy target's package build. Then every `cfg`,
+`cfg_attr` and `cfg!` predicate of the target's workspace crates is evaluated in
+both builds. A predicate that differs in code both builds contain marks a point:
 
-Each listed module meets the premise, checked twice:
+- an item the builds define differently;
+- a statement, expression, match arm or field initializer;
+- a field or variant of a shared type;
+- an attribute only one build applies;
+- an impl one build adds to a shared type, or a macro invocation's items.
 
-1. `scripts/check-transport-independent-modules.py` (the clippy job) rejects a
-   module whose files, or whose `mod` declaration, mention `feature = "dummy"`. A
-   listed module therefore has the same tests and the same code in both builds.
-2. Under `RINGS_DUMMY_TRANSPORT_FORBIDDEN`, `DummyTransport::new` aborts the run and
-   names the test. A test that builds a swarm or a processor through any helper
-   fails the dummy job.
+An item only one build defines is no point: code both builds contain cannot name
+it. A substituted constant, static or function is a value, and so is every
+constant, static or `const fn` that reads one. Every other function that reads a
+value is a point. This is how the timeout profile that dummy tests substitute
+reaches shared protocol code (`DELIVERY_BOUND`, the lease margins, the reorder
+deadline, the maintenance budgets).
+
+`scripts/ci-dummy-divergence.txt` classifies every point outside a test function.
+Four classes are claims about the point's own code:
+
+- `backend`: it selects the backend, or acts only on values the dummy backend alone produces.
+- `transport-only`: it runs only where a transport, processor or swarm exists.
+- `inert-hook`: the difference is test state (the simulation runtime, the outbound
+  test trace, held deadlines). Unarmed, both builds act alike.
+- `failure-bound`: the value only bounds how long a failing wait takes.
+
+The fifth, `unreached`, is a claim about callers: a reader that takes no
+transport, reached only by `transport-only` code and by tests outside the list.
+
+The check fails:
+
+- on an unclassified point, or on an entry that matches no point;
+- on a listed module that contains any divergent code, or that exists in one build only;
+- on a listed module that names an `unreached` reader: the impl's self type, else
+  the function, within the function's visibility.
+
+The dummy job enforces the rest: under `RINGS_DUMMY_TRANSPORT_FORBIDDEN`,
+`DummyTransport::new` aborts the run and names the test, so a listed test that
+builds a swarm or processor through any helper fails. A listed test therefore
+reaches no `backend` or `transport-only` point, and inert hooks and failure bounds
+act as in the native build. What review alone holds is the `unreached` claim
+for indirect paths: a listed test that calls such a reader through a function
+outside the list. A precise check would need a resolved call graph.
 
 `run-ci-tests.py` validates every line in each run that builds its target: the
 module must match a test, and its prefix must not match inside another test's name.
 A required model search cannot be listed, because the native job's `--require-file`
 fails if a list skips one. The list was derived from a run that recorded which
-tests construct a transport. At the time it held 634 of the 900 rings-core tests
-and 395 of the 497 rings-node tests that both jobs had run.
+tests construct a transport, less the modules that read a value
+(`swarm::session_link`, `message::e2e`,
+`dht::stabilization::maintenance::schedule_tests`). At the time it held 595 of the
+900 rings-core tests and 395 of the 497 rings-node tests that both jobs had run.
 
 ## Model ownership
 

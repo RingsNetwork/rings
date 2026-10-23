@@ -81,6 +81,10 @@ const ARRIVAL_TURNS: u64 = 16;
 
 /// Set in a test run that asserts its tests construct no transport: CI runs the
 /// transport-independent modules this way (`scripts/ci-transport-independent-modules.txt`).
+///
+/// Only the dummy transport reads it, and the dummy transport exists only in `dummy` builds, a
+/// test feature no shipped build enables: no production path consults the variable or aborts on
+/// it.
 const DUMMY_TRANSPORT_FORBIDDEN_ENV: &str = "RINGS_DUMMY_TRANSPORT_FORBIDDEN";
 
 /// Abort a run under [`DUMMY_TRANSPORT_FORBIDDEN_ENV`] at the first dummy transport.

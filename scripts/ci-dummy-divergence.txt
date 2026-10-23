@@ -1,0 +1,126 @@
+# Divergence points: code where the native and the dummy build of a listed target differ, outside
+# test functions (scripts/check-transport-independent-modules.py derives them and fails on a point
+# without a line here, or a line without a point). Each line is
+# `<class> | <file> | <innermost scopes> | <first line of the divergent code>`; a repeated key ends
+# in ` #2`, and a reader's code is the values it reads. Classes:
+#
+# backend         selects the backend, or acts only on values the dummy backend alone produces.
+# transport-only  runs only where a transport, processor or swarm exists: its receiver or an
+#                 argument holds one, or only such code constructs its receiver.
+# inert-hook      the difference is test state that only one build's test code writes, reads or
+#                 arms (the simulation runtime, the outbound test trace, held deadlines, witness
+#                 accessors); unarmed, both builds act alike.
+# failure-bound   the value only bounds how long a failing wait takes.
+# unreached       reads a value, takes no transport, and only transport-only code and tests outside
+#                 the listed modules reach it. A listed module must not name it (its impl's self
+#                 type, else the function); review holds the indirect paths.
+
+inert-hook | crates/core/src/chunk/reassembly.rs | impl MessageReassembler / fn admit | crate::simulation::observe_reassembly_capacity(
+inert-hook | crates/core/src/chunk/reassembly.rs | impl MessageReassembler / fn admit | crate::simulation::observe_reassembly_capacity( #2
+transport-only | crates/core/src/dht/stabilization.rs | impl Stabilizer / fn stabilize | reads STABILIZATION_STEP_TIMEOUT
+unreached | crates/core/src/dht/stabilization/maintenance.rs | impl MaintenanceSchedule / fn new | reads STORAGE_REPAIR_ADMISSION_BUDGET
+transport-only | crates/core/src/dht/stabilization/maintenance.rs | impl Stabilizer / fn run_maintenance_task | reads STABILIZATION_STEP_TIMEOUT
+transport-only | crates/core/src/dht/stabilization/maintenance.rs | impl Stabilizer / fn run_requested_storage_maintenance | reads STABILIZATION_STEP_TIMEOUT
+inert-hook | crates/core/src/dht/stabilization/storage_repair.rs | impl Stabilizer / fn send_planned_storage_repair | crate::simulation::record_repair_entries(entries);
+backend | crates/core/src/error/send_class.rs | fn transport_send_class | TransportError::DummyIrrevocableSendTaskStopped => SendClass::Ambiguous,
+backend | crates/core/src/error/send_class.rs | fn transport_send_class | TransportError::DummyConnectionRetiredBeforeDispatch
+unreached | crates/core/src/message/e2e.rs | impl E2eStreamDecryptor / fn new | reads REORDER_DEADLINE
+failure-bound | crates/core/src/message/handlers/connection/test_connection.rs | fn wait_until_with_state | reads TEST_HANG_GUARD
+transport-only | crates/core/src/message/handlers/storage/tests/test_rerouting.rs | fn until_waiting | reads TEST_HANG_GUARD
+transport-only | crates/core/src/message/handlers/storage/tests/test_support.rs | fn next_payload_matching | reads TEST_HANG_GUARD
+transport-only | crates/core/src/message/handlers/storage/tests/test_support.rs | fn assert_cached_data_values | reads TEST_HANG_GUARD
+inert-hook | crates/core/src/swarm/callback.rs | - | thread_local! {
+transport-only | crates/core/src/swarm/callback/inbound.rs | struct InboundMailbox | cleanup_passes: Arc<GenerationWitness>,
+transport-only | crates/core/src/swarm/callback/inbound.rs | impl InboundMailbox / fn spawn | cleanup_passes,
+transport-only | crates/core/src/swarm/callback/inbound.rs | impl InboundActor / fn new | reads REASSEMBLY_CLEANUP_INTERVAL
+inert-hook | crates/core/src/swarm/callback/inbound.rs | impl InboundActor / fn dispatch_runnable | if lane == InboundLane::from_class(crate::message::MessageCategory::DhtControl) {
+transport-only | crates/core/src/swarm/callback/inbound.rs | impl InboundActor / fn cleanup_expired_reassembly | reads REASSEMBLY_CLEANUP_INTERVAL
+inert-hook | crates/core/src/swarm/callback/inbound.rs | fn process_event | crate::simulation::wait_reassembly_service(event.wire_bytes).await;
+inert-hook | crates/core/src/swarm/callback/inbound/barrier.rs | fn lane_waits_for_reassembly | if !crate::simulation::protection_profile().barrier_control_exemption() {
+inert-hook | crates/core/src/swarm/callback/inbound/capacity.rs | impl InboundCapacity / fn move_reservation | crate::simulation::observe_inbound_capacity(
+inert-hook | crates/core/src/swarm/callback/inbound/reassembly.rs | fn advance_chunk_event | let transaction_id = event.payload.transaction.tx_id;
+inert-hook | crates/core/src/swarm/callback/inbound/reassembly.rs | fn advance_chunk_event | if matches!(
+inert-hook | crates/core/src/swarm/callback/inbound/reassembly_clock.rs | enum ReassemblyClock | Controlled(Arc<Mutex<u128>>),
+inert-hook | crates/core/src/swarm/callback/inbound/reassembly_clock.rs | impl ReassemblyClock / fn now_ms | Self::Controlled(now_ms) => *now_ms
+inert-hook | crates/core/src/swarm/callback/inner.rs | impl TransportCallback for SwarmTransportCallback / fn on_invalid_inbound_frame | crate::simulation::record_rejected_frame();
+unreached | crates/core/src/swarm/callback/inner.rs | fn origin_expired_in_flight | reads expired_within_grace
+inert-hook | crates/core/src/swarm/callback/link_stage.rs | impl SwarmTransportCallback / fn submit_inbound_message | let _depth_guard = OnMessageRecursionDepthGuard::enter();
+unreached | crates/core/src/swarm/session_link.rs | impl DelegationTable<Lease> / fn insert_within | reads is_reclaimable_at
+unreached | crates/core/src/swarm/session_link.rs | impl DelegationLessee / fn encode | reads within_margin
+unreached | crates/core/src/swarm/session_link.rs | impl DelegationLessee / fn encode_slot | reads references_at
+unreached | crates/core/src/swarm/session_link/test_session_link.rs | fn walk | reads LEASE_GRACE_MS, MAX_CONTROL_TRANSIT_MS, MAX_TRANSIT_MS, past_grace
+backend | crates/core/src/swarm/transport.rs | - | pub use rings_transport::connections::DummyConnection as ConnectionOwner;
+backend | crates/core/src/swarm/transport.rs | - | pub use rings_transport::connections::DummyTransport as Transport;
+backend | crates/core/src/swarm/transport.rs | - | use rings_transport::connections::WebrtcConnection as ConnectionOwner;
+backend | crates/core/src/swarm/transport.rs | - | use rings_transport::connections::WebrtcTransport as Transport;
+unreached | crates/core/src/swarm/transport/connection.rs | fn await_bounded_connection_close | reads DATA_CHANNEL_CLOSE_TIMEOUT
+transport-only | crates/core/src/swarm/transport/connection.rs | impl SwarmTransport / fn close_connection_for_disconnect | reads DATA_CHANNEL_CLOSE_TIMEOUT
+transport-only | crates/core/src/swarm/transport/delivery.rs | fn send_data_with_timeout | reads DATA_CHANNEL_SEND_ACCEPT_TIMEOUT
+transport-only | crates/core/src/swarm/transport/delivery.rs | fn expire_irrevocable_send | reads DATA_CHANNEL_SEND_ACCEPT_TIMEOUT
+inert-hook | crates/core/src/swarm/transport/delivery.rs | fn frame_chunk | crate::simulation::record_outbound_submission(payload.transaction.tx_id);
+transport-only | crates/core/src/swarm/transport/delivery.rs | fn await_delivery_or_cancel | reads DATA_CHANNEL_DELIVERY_TIMEOUT
+transport-only | crates/core/src/swarm/transport/delivery.rs | fn terminate_accepted_connection | reads DATA_CHANNEL_CLOSE_TIMEOUT
+transport-only | crates/core/src/swarm/transport/link_control.rs | fn deliver_link_control | reads DELIVERY_BOUND
+inert-hook | crates/core/src/swarm/transport/link_control.rs | impl SwarmTransport / fn send_link_control | super::outbound::test_trace::record_dispatched_link_control(peer, control);
+inert-hook | crates/core/src/swarm/transport/outbound.rs | struct OutboundPeerState | peer: Did,
+inert-hook | crates/core/src/swarm/transport/outbound.rs | impl OutboundPeerHandle / fn submit | if submitted {
+inert-hook | crates/core/src/swarm/transport/outbound.rs | impl OutboundPeerHandle / fn submit | let _ = submitted;
+inert-hook | crates/core/src/swarm/transport/outbound.rs | impl OutboundSchedulers / fn handle | peer,
+inert-hook | crates/core/src/swarm/transport/outbound.rs | impl OutboundWorker / fn run | while test_trace::worker_is_paused(self.peer) && !self.stop.is_stop_requested() {
+inert-hook | crates/core/src/swarm/transport/outbound.rs | impl OutboundWorker / fn admit_active_frame | let _active_trace = test_trace::ActiveTransferGuard::enter(self.peer);
+inert-hook | crates/core/src/swarm/transport/outbound/capacity.rs | fn class_reservations_enabled | {
+inert-hook | crates/core/src/swarm/transport/outbound/capacity.rs | fn class_reservations_enabled | { #2
+inert-hook | crates/core/src/swarm/transport/outbound/capacity.rs | impl<S: ReservationState> ScopedCapacity<S> / fn try_reserve | next.observe();
+inert-hook | crates/core/src/swarm/transport/outbound/capacity.rs | struct TransferCapacity | retirement: watch::Sender<()>,
+inert-hook | crates/core/src/swarm/transport/outbound/capacity.rs | impl TransferCapacity / fn new | retirement: watch::channel(()).0,
+inert-hook | crates/core/src/swarm/transport/outbound/queue/mod.rs | impl<T> TransferQueues<T> / fn pop | if selected == TransferClass::DhtControl
+inert-hook | crates/core/src/swarm/transport/outbound/queue/mod.rs | fn bounded_control_burst_enabled | {
+inert-hook | crates/core/src/swarm/transport/outbound/queue/mod.rs | fn bounded_control_burst_enabled | { #2
+inert-hook | crates/core/src/swarm/transport/outbound/session_encoding.rs | impl SharedDelegationLessee / fn encode | super::test_trace::record_encoded_frame(
+inert-hook | crates/core/src/swarm/transport/outbound/test_trace.rs | - | thread_local! {
+transport-only | crates/core/src/swarm/transport/payload_send.rs | impl SwarmTransport / fn reserve_outbound_capacity | reads DATA_CHANNEL_SEND_ACCEPT_BUDGET
+transport-only | crates/core/src/swarm/transport/payload_send.rs | impl SwarmTransport / fn send_payload_tracked | reads OUTBOUND_PAYLOAD_CLEANUP_GRACE, TRACKED_PAYLOAD_COMPLETION_BOUND, TRACKED_PAYLOAD_TIMEOUT
+inert-hook | crates/core/src/swarm/transport/payload_send.rs | impl SwarmTransport / fn prepare_outbound_transfer | crate::simulation::record_outbound_submission(preparation.tx_id);
+unreached | crates/core/src/swarm/transport/payload_send/first_frame.rs | fn first_frame_deadline | reads TRANSPORT_TIMEOUT_PROFILE
+inert-hook | crates/core/src/swarm/transport/payload_send/first_frame.rs | fn first_frame_deadline | if HELD.with(std::cell::Cell::get) {
+inert-hook | crates/core/src/swarm/transport/payload_send/first_frame.rs | - | thread_local! {
+transport-only | crates/core/src/swarm/transport/payload_send/submission.rs | impl EnqueuedDetached / fn await_admission | reads OUTBOUND_PAYLOAD_CLEANUP_GRACE
+inert-hook | crates/core/src/swarm/transport/pending.rs | struct ConnectionLifecycleBoundary | waiting: Arc<std::sync::atomic::AtomicUsize>,
+inert-hook | crates/core/src/swarm/transport/pending.rs | impl ConnectionLifecycleBoundary / fn new | waiting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+inert-hook | crates/core/src/swarm/transport/storage_sync.rs | impl<'data> StorageSyncBatch<'data> / fn run | let mut progress_probe_epoch = None;
+inert-hook | crates/core/src/swarm/transport/storage_sync.rs | impl<'data> StorageSyncBatch<'data> / fn run | let mut progress_witness_recorded = false;
+inert-hook | crates/core/src/swarm/transport/storage_sync.rs | impl<'data> StorageSyncBatch<'data> / fn run | if persistence_steps_without_yield == 1 {
+inert-hook | crates/core/src/swarm/transport/storage_sync.rs | impl<'data> StorageSyncBatch<'data> / fn run | if persisted
+inert-hook | crates/core/src/swarm/transport/storage_sync.rs | impl<'data> StorageSyncBatch<'data> / fn run | if persisted {
+inert-hook | crates/core/src/swarm/transport/storage_sync.rs | impl<'data> StorageSyncBatch<'data> / fn run | if let Some(epoch_before_yield) = progress_probe_epoch.take() {
+inert-hook | crates/core/src/swarm/transport/storage_sync.rs | impl<'data> StorageSyncBatch<'data> / fn persist_one | crate::simulation::record_storage_persisted(transport.dht.did);
+inert-hook | crates/core/src/swarm/transport/storage_sync.rs | fn per_entry_yield_enabled | {
+inert-hook | crates/core/src/swarm/transport/storage_sync.rs | fn per_entry_yield_enabled | { #2
+transport-only | crates/core/src/swarm/transport/tests/application_recorder.rs | struct Readings | observed: usize,
+transport-only | crates/core/src/swarm/transport/tests/application_recorder.rs | struct Readings | tapped: VecDeque<MessagePayload>,
+transport-only | crates/core/src/swarm/transport/tests/application_recorder.rs | struct ApplicationRecorder | tap: Mutex<mpsc::UnboundedReceiver<MessagePayload>>,
+transport-only | crates/core/src/swarm/transport/tests/application_recorder.rs | impl ApplicationRecorder / fn attach | tap: Mutex::new(transport.inbound_tap_for_test().subscribe()),
+failure-bound | crates/core/src/tests/default/mod.rs | fn wait_until_result | reads TEST_HANG_GUARD
+transport-only | crates/core/src/tests/default/mod.rs | fn wait_for_storage_state | reads TEST_HANG_GUARD
+transport-only | crates/core/src/tests/default/mod.rs | fn wait_for_msgs | reads TEST_HANG_GUARD
+transport-only | crates/core/src/tests/default/mod.rs | fn nodes_quiescent | reads pending_transport_events
+transport-only | crates/core/src/tests/default/mod.rs | fn panic_wait_for_msgs_timeout | reads pending_transport_events
+inert-hook | crates/core/src/utils/id.rs | fn new_uuid | if let Some(uuid) = crate::simulation::next_uuid_override() {
+inert-hook | crates/core/src/utils/time.rs | fn get_epoch_ms | if let Some(now_ms) = crate::simulation::epoch_ms_override() {
+inert-hook | crates/core/src/utils/time.rs | fn try_sleep | if crate::simulation::epoch_ms_override().is_some() {
+inert-hook | crates/core/src/utils/witness.rs | - | impl<T: Copy> Witness<T> {
+inert-hook | crates/core/src/utils/witness.rs | - | impl Witness<bool> {
+transport-only | crates/node/src/onion/tests/loop_network.rs | struct LoopNetwork | _serial: tokio::sync::MutexGuard<'static, ()>,
+transport-only | crates/node/src/onion/tests/loop_network.rs | impl LoopNetwork / fn new | let serial = network_test_guard().await;
+transport-only | crates/node/src/onion/tests/loop_network.rs | impl LoopNetwork / fn new | _serial: serial,
+transport-only | crates/node/src/processor/tests/common.rs | struct NetworkTestGuard | pub(super) network: ControlledNetwork,
+transport-only | crates/node/src/processor/tests/common.rs | struct NetworkTestGuard | _serial: tokio::sync::MutexGuard<'static, ()>,
+transport-only | crates/node/src/processor/tests/common.rs | fn network_test_guard | network: ControlledNetwork::start(),
+transport-only | crates/node/src/processor/tests/common.rs | fn network_test_guard | _serial: native_network_lock().await,
+transport-only | crates/node/src/processor/tests/common.rs | fn wait_processors_connected | reads PROCESSOR_TEST_HANG_GUARD
+transport-only | crates/node/src/processor/tests/common.rs | fn wait_for_application_data | reads PROCESSOR_TEST_HANG_GUARD
+backend | crates/transport/src/connection_ref.rs | - | impl ConnectionRef<crate::connections::DummyConnection> {
+backend | crates/transport/src/error.rs | enum Error | DummyConnectionRetiredBeforeDispatch,
+backend | crates/transport/src/error.rs | enum Error | DummyRemoteConnectionUnavailable,
+backend | crates/transport/src/error.rs | enum Error | DummyRemoteConnectionClosed,
+backend | crates/transport/src/error.rs | enum Error | DummyIrrevocableSendTaskStopped,

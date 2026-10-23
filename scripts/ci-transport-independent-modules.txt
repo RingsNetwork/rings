@@ -1,8 +1,9 @@
 # Transport-independent modules: their tests run once, in the dummy job (see .github/CI.md).
 # The native job skips them (`--skip-modules`); the dummy job runs them with transport
 # construction forbidden (`--only-modules`, RINGS_DUMMY_TRANSPORT_FORBIDDEN) and then the rest.
-# A module listed here constructs no transport in any of its tests and has no `dummy` cfg in its
-# files (scripts/check-transport-independent-modules.py); each line is `<target> <module>`.
+# A module listed here constructs no transport in any of its tests, contains no code where the two
+# builds differ, and names no `unreached` reader of scripts/ci-dummy-divergence.txt
+# (scripts/check-transport-independent-modules.py); each line is `<target> <module>`.
 
 rings_core base58_check
 rings_core chunk::tests
@@ -15,7 +16,6 @@ rings_core dht::entry
 rings_core dht::finger::convergence::proof
 rings_core dht::finger::test_finger
 rings_core dht::stabilization::deadline_tests
-rings_core dht::stabilization::maintenance::schedule_tests
 rings_core dht::storage
 rings_core dht::successor
 rings_core dht::topology
@@ -33,7 +33,6 @@ rings_core lifecycle::epoch
 rings_core lifecycle::test_lifecycle
 rings_core measure
 rings_core message::admission_delegation
-rings_core message::e2e
 rings_core message::encoder
 rings_core message::handlers::connection::topology_view
 rings_core message::handlers::e2e
@@ -54,7 +53,6 @@ rings_core storage::write_ordered
 rings_core swarm::application
 rings_core swarm::callback::inbound::lane
 rings_core swarm::callback::pre_admission
-rings_core swarm::session_link
 rings_core swarm::transport::egress
 rings_core swarm::transport::liveness::test_composed_model
 rings_core swarm::transport::outbound::mailbox

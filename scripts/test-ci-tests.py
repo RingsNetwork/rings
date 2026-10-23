@@ -12,10 +12,17 @@ import unittest
 from unittest.mock import ANY
 from unittest.mock import patch
 
-# Load the executable helper without requiring a Python package in scripts/.
-spec = importlib.util.spec_from_file_location("ci_tests", Path(__file__).with_name("run-ci-tests.py"))
-ci_tests = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(ci_tests)
+
+def load(name: str, file: str):
+    """Load an executable helper without requiring a Python package in scripts/."""
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(file))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+ci_tests = load("ci_tests", "run-ci-tests.py")
+divergence = load("divergence", "check-transport-independent-modules.py")
 
 
 class CoverageGuards(unittest.TestCase):
@@ -241,6 +248,144 @@ fn deliberate_failure() { panic!("propagate test failure"); }
             subprocess.run(command + ["--ignored", "--exact", "--filter", "explicitly_selected"], check=True, capture_output=True)
             failed = subprocess.run(command + ["--ignored", "--exact", "--filter", "deliberate_failure"], capture_output=True)
             self.assertNotEqual(failed.returncode, 0)
+
+
+class DivergenceInventory(unittest.TestCase):
+    """Derive divergence points from synthetic crates, as both builds of a listed target see them."""
+
+    DUMMY = 'feature = "dummy"'
+    BOTH = 'feature = "native-webrtc"'
+
+    def points(self, files: dict[str, str], crate_under_test: bool = True):
+        """The inventory of a crate with `files` under src/, in a native and a dummy build."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        for name, text in files.items():
+            (root / "src" / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / "src" / name).write_text(text)
+        modules = divergence.library_modules(root / "src" / "lib.rs")
+        builds = divergence.Builds(
+            {"test": crate_under_test, self.DUMMY: False, self.BOTH: True},
+            {"test": crate_under_test, self.DUMMY: True, self.BOTH: True},
+        )
+        return divergence.inventory(root, [(modules, builds, root / "src")])
+
+    def shapes(self, found) -> dict[str, tuple[str, bool]]:
+        """Each point's code, with its shape and whether it needs a ledger entry."""
+        return {point.head: (point.shape, point.needs_entry) for point in found.points}
+
+    def test_differences_in_shared_code_need_entries(self):
+        """A statement, a field and an impl on a shared type differ in code both builds contain."""
+        found = self.points({"lib.rs": '''
+pub struct Shared {
+    #[cfg(feature = "dummy")]
+    extra: u8,
+}
+#[cfg(feature = "dummy")]
+impl Shared {
+    fn probe(&self) {}
+}
+fn shared() {
+    #[cfg(feature = "dummy")]
+    dummy_only();
+    let _flag = cfg!(feature = "dummy");
+}
+'''})
+        self.assertEqual(self.shapes(found), {
+            "extra: u8,": ("field or variant", True),
+            "impl Shared {": ("impl on a shared type", True),
+            "dummy_only();": ("statement", True),
+            'cfg!(feature = "dummy");': ("statement", True),
+        })
+
+    def test_code_one_build_lacks_entirely_needs_no_entry(self):
+        """An item only one build defines, and code under a predicate both builds share, are inert."""
+        found = self.points({"lib.rs": '''
+#[cfg(feature = "dummy")]
+fn dummy_only() {}
+#[cfg(feature = "dummy")]
+struct Probe;
+#[cfg(feature = "dummy")]
+impl Probe {}
+#[cfg(any(feature = "dummy", feature = "native-webrtc"))]
+fn both() {}
+'''})
+        self.assertEqual({needs for _, needs in self.shapes(found).values()}, {False})
+        self.assertNotIn("fn both() {}", self.shapes(found))
+
+    def test_test_functions_and_dependency_tests_need_no_entry(self):
+        """A test function reaches only itself; a dependency's `cfg(test)` code is in neither build."""
+        source = {"lib.rs": '''
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn case() {
+        #[cfg(feature = "dummy")]
+        let _probe = 1;
+    }
+}
+#[cfg(all(test, feature = "dummy"))]
+fn hook() {}
+'''}
+        self.assertEqual(self.shapes(self.points(source)), {
+            "let _probe = 1;": ("statement", False), "fn hook() {}": ("item in one build only", False),
+        })
+        self.assertEqual(self.points(source, crate_under_test=False).points, [])
+
+    def test_values_reach_readers_through_constants(self):
+        """A substituted constant, and a constant derived from it, make their readers points."""
+        found = self.points({"lib.rs": '''
+#[cfg(feature = "dummy")]
+const BOUND: u64 = 1;
+#[cfg(not(feature = "dummy"))]
+const BOUND: u64 = 2;
+const DERIVED: u64 = BOUND * 2;
+const fn scaled() -> u64 { DERIVED * 3 }
+mod inner {
+    pub(super) fn reads() -> u64 { super::scaled() }
+    fn unrelated() -> u64 { 3 }
+}
+'''})
+        readers = [point for point in found.points if point.shape == "reader"]
+        self.assertEqual([(point.scope, point.head) for point in readers], [("mod inner / fn reads", "reads scaled")])
+        self.assertEqual(readers[0].namer[0::2], ("reads", []))
+        self.assertEqual({p.shape for p in found.points if not p.needs_entry}, {"substituted value"})
+
+    def test_module_declared_in_one_build_is_found(self):
+        """A file whose `mod` declaration one build lacks cannot hold a listed module."""
+        found = self.points({"lib.rs": '#[cfg(feature = "dummy")]\nmod gated;\n', "gated.rs": "fn f() {}\n"})
+        self.assertEqual({path.name for path in found.one_build_files}, {"gated.rs"})
+
+    def test_predicates_differ_only_where_the_dummy_feature_decides(self):
+        """Atoms other than `test` and features take every value, the same in both builds."""
+        builds = divergence.Builds({"test": True, self.DUMMY: False}, {"test": True, self.DUMMY: True})
+        gated = divergence.parse_predicate('all(test, feature = "dummy", not(target_family = "wasm"))')
+        wasm = divergence.parse_predicate('target_family = "wasm"')
+        self.assertTrue(builds.differ([], [gated]))
+        self.assertFalse(builds.differ([wasm], [gated]))
+        self.assertFalse(builds.differ([], [wasm]))
+
+    def test_build_script_cfgs_follow_the_features_they_derive_from(self):
+        """`rings_transport_backend` agrees across the builds only while both enable a backend."""
+        derived = divergence.parse_predicate(divergence.BUILD_SCRIPT_CFGS["rings-transport"]["rings_transport_backend"])
+        backend = divergence.parse_predicate("rings_transport_backend")
+
+        def builds(native_webrtc: bool):
+            atoms = {"test": False, self.BOTH: native_webrtc, 'feature = "web-sys-webrtc"': False}
+            return divergence.Builds(
+                {**atoms, self.DUMMY: False, "rings_transport_backend": derived},
+                {**atoms, self.DUMMY: True, "rings_transport_backend": derived},
+            )
+
+        self.assertFalse(builds(native_webrtc=True).differ([], [backend]))
+        self.assertTrue(builds(native_webrtc=False).differ([], [backend]))
+
+    def test_unreached_readers_are_named_by_their_callers_handle(self):
+        """A method is named by its impl's self type; a free function by its name."""
+        self.assertEqual(divergence.reached_name("impl<'a> DelegationTable<'a, Lease> / fn insert"), "DelegationTable")
+        self.assertEqual(divergence.reached_name("impl Trait for Carrier<T> / fn send"), "Carrier")
+        self.assertEqual(divergence.reached_name("mod tests / fn walk"), "walk")
 
 
 if __name__ == "__main__":
