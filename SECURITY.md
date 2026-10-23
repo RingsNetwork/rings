@@ -208,7 +208,6 @@ route.
 
 ## Known Limitations
 
-- #915: a missing replay record restarts its stream from the first sequence.
 - #916: durable replay writes cap a node near 50 transitions per second on macOS.
 - #918: registry tombstones are bounded by the heartbeat rate per registrant, not by count
   ([bounds](docs/src/advanced-topic/chord.md#data-topic-storage)).

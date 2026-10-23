@@ -9,7 +9,8 @@
 //! disposable store's writes are not flushed, its budget evicts the oldest records and a record
 //! the schema cannot decode is retired and reported absent; an authoritative store's writes and
 //! removals are flushed to stable storage, nothing is evicted, and a record the schema cannot
-//! decode is reported and kept.
+//! decode is reported and kept; an authoritative store also keeps a presence marker per record
+//! (the presence law), so a record lost outside the store is reported missing.
 //!
 //! [disposable]: crate::storage::RecordAuthority::Disposable
 //! [authoritative]: crate::storage::RecordAuthority::Authoritative
@@ -43,8 +44,19 @@
 //! `File::sync_all`, which the standard library maps to `fcntl(F_FULLFSYNC)` on Apple targets
 //! (flushing the drive cache as well) and to `fsync` elsewhere; the law rests on that mapping. On
 //! other targets a directory cannot be flushed, so the durability of a rename or a removal is the
-//! file system's own. A disposable store's plans skip every flush: a crash may lose its latest
+//! file system's own, except that every rename of an authoritative store is write-through on
+//! Windows (`presence`). A disposable store's plans skip every flush: a crash may lose its latest
 //! writes or tear a record, which its decode law then discards.
+//!
+//! Presence law (#915): an authoritative store marks every record it made durable with an empty
+//! `<name>.p` file, created after the record's flushed rename and removed before the record, so
+//! markers always name records (`presence`). An open marks every unmarked record (a crash between
+//! a rename and its marker); a marker whose record is gone is a record lost outside the store
+//! (removed, renamed, or dropped by the file system), which a
+//! [`scan`](crate::storage::KvStorageScan::scan) reports as missing and a `get` refuses with
+//! `Error::StorageRecordMissing`, never as a key never written. A marker is never a record: it
+//! is not indexed, counted, or charged against the budget. A store lost whole (its directory) is
+//! a store never written, which no marker inside it can tell apart.
 //!
 //! Decode law: a record is the file's only if it decodes whole as `(key, V)` and its key hashes
 //! to the file name; the store writes nothing else. Any other record is undecodable for the name
@@ -76,6 +88,10 @@ use serde::Serialize;
 use sha1::Digest;
 use sha1::Sha1;
 
+mod presence;
+
+use std::collections::BTreeSet;
+
 use super::write_ordered::WriteOrderedMap;
 use crate::error::Error;
 use crate::error::Result;
@@ -94,6 +110,11 @@ impl RecordAuthority {
         matches!(self, Self::Authoritative)
     }
 
+    /// Whether the store keeps a presence marker per record (the presence law).
+    const fn witnesses(self) -> bool {
+        matches!(self, Self::Authoritative)
+    }
+
     /// The plan of a `put` (pure; the durability law).
     const fn put_plan(self) -> &'static [PutStep] {
         match self {
@@ -102,6 +123,7 @@ impl RecordAuthority {
                 PutStep::SyncTemporary,
                 PutStep::Rename,
                 PutStep::SyncDirectory,
+                PutStep::Witness,
             ],
             Self::Disposable => &[PutStep::WriteTemporary, PutStep::Rename],
         }
@@ -110,7 +132,11 @@ impl RecordAuthority {
     /// The plan of a removal (pure; the durability law).
     const fn remove_plan(self) -> &'static [RemoveStep] {
         match self {
-            Self::Authoritative => &[RemoveStep::Remove, RemoveStep::SyncDirectory],
+            Self::Authoritative => &[
+                RemoveStep::Unwitness,
+                RemoveStep::Remove,
+                RemoveStep::SyncDirectory,
+            ],
             Self::Disposable => &[RemoveStep::Remove],
         }
     }
@@ -127,22 +153,30 @@ enum PutStep {
     Rename,
     /// Flush the directory's entries (the rename, and any eviction) to stable storage.
     SyncDirectory,
+    /// Mark the record present, unless it is, and flush the directory (the presence law): only
+    /// after the rename is durable, so a marker always names a record.
+    Witness,
 }
 
 /// One file-system step of a removal, as data the store interprets (the durability law).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemoveStep {
+    /// Remove the records' presence markers and flush the directory (the presence law): before
+    /// the records, so a marker always names a record.
+    Unwitness,
     /// Remove the records and forget them.
     Remove,
     /// Flush the directory's entries (the removals) to stable storage.
     SyncDirectory,
 }
 
-/// The on-disk state known to this instance: file lengths by file name, in write order.
+/// The on-disk state known to this instance: file lengths by file name, in write order, and the
+/// record names marked present (the presence law; empty for a disposable store).
 #[derive(Debug, Default)]
 struct FileIndex {
     files: WriteOrderedMap<u64>,
     used_bytes: u64,
+    witnessed: BTreeSet<String>,
 }
 
 impl FileIndex {
@@ -186,6 +220,15 @@ struct FileStore {
 
 /// One record file as a read found it: its bytes, or the error that kept them from the reader.
 type ReadRecord = (String, std::io::Result<Vec<u8>>);
+
+/// What a read finds under one record name.
+enum Found {
+    /// The record file, read to its bytes or to the error that kept them.
+    Record(ReadRecord),
+    /// Nothing, under a name marked present: a record lost outside the store (the presence
+    /// law).
+    Missing(String),
+}
 
 impl FileStorage {
     /// Open the disposable store rooted at `path`, creating it if absent, under a budget of
@@ -263,6 +306,7 @@ impl FileStorage {
                 self.settle_undecodable(undecodable, data).await?;
                 Ok(None)
             }
+            ScannedRecord::Missing(missing) => Err(Error::StorageRecordMissing(missing)),
         }
     }
 }
@@ -299,8 +343,60 @@ impl FileStore {
         let mut index = store.write_index()?;
         *index = store.scan_directory()?;
         store.make_room(&mut index, 0)?;
+        if store.authority.witnesses() {
+            store.mark_unmarked(&mut index)?;
+        }
         drop(index);
         Ok(store)
+    }
+
+    /// Mark every record that has no presence marker (a crash between its rename and its
+    /// marker, or a store written before markers), and flush the directory once (the presence
+    /// law).
+    ///
+    /// Post: every indexed record is witnessed; the markers of records gone stay witnessed, so a
+    /// scan reports them missing.
+    fn mark_unmarked(&self, index: &mut FileIndex) -> Result<()> {
+        let unmarked = index
+            .files
+            .iter()
+            .map(|(name, _)| name.to_owned())
+            .filter(|name| !index.witnessed.contains(name))
+            .collect::<Vec<_>>();
+        if unmarked.is_empty() {
+            return Ok(());
+        }
+        for name in unmarked {
+            presence::create_marker(&self.root, &name, self.authority.flushes())
+                .map_err(Error::ServiceIOError)?;
+            index.witnessed.insert(name);
+        }
+        sync_directory(&self.root)
+    }
+
+    /// Mark the record `name` present unless it is, and flush the directory (the presence law).
+    fn witness(&self, index: &mut FileIndex, name: &str) -> Result<()> {
+        if index.witnessed.contains(name) {
+            return Ok(());
+        }
+        presence::create_marker(&self.root, name, self.authority.flushes())
+            .map_err(Error::ServiceIOError)?;
+        index.witnessed.insert(name.to_owned());
+        sync_directory(&self.root)
+    }
+
+    /// Remove the presence markers of `names` and forget them (the presence law); the caller
+    /// flushes the directory before removing the records.
+    fn unwitness(&self, index: &mut FileIndex, names: &[String]) -> Result<()> {
+        for name in names {
+            presence::remove(
+                &self.root.join(presence::marker_name(name)),
+                self.authority.flushes(),
+            )
+            .map_err(Error::ServiceIOError)?;
+            index.witnessed.remove(name);
+        }
+        Ok(())
     }
 
     /// Rebuild the index from the directory, ordering files by their modification time so the
@@ -314,6 +410,7 @@ impl FileStore {
             Err(error) => return Err(Error::ServiceIOError(error)),
         };
         let mut files = Vec::new();
+        let mut witnessed = BTreeSet::new();
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
@@ -326,6 +423,10 @@ impl FileStore {
             let path = entry.path();
             if path.extension().is_some_and(|extension| extension == "tmp") {
                 remove_file_if_present(&path)?;
+                continue;
+            }
+            if let Some(marked) = marker_entry_name(&path) {
+                witnessed.insert(marked.to_owned());
                 continue;
             }
             let Some(name) = entry_file_name(&path) else {
@@ -346,6 +447,9 @@ impl FileStore {
         let mut index = FileIndex::default();
         for (_, name, len) in files {
             index.record(name, len);
+        }
+        if self.authority.witnesses() {
+            index.witnessed = witnessed;
         }
         Ok(index)
     }
@@ -378,7 +482,8 @@ impl FileStore {
     ///
     /// Post: `name` is forgotten iff its file is gone.
     fn retire_indexed(&self, index: &mut FileIndex, name: &str) -> Result<()> {
-        remove_file_if_present(&self.root.join(name))?;
+        presence::remove(&self.root.join(name), self.authority.flushes())
+            .map_err(Error::ServiceIOError)?;
         index.forget(name);
         Ok(())
     }
@@ -401,9 +506,10 @@ impl FileStore {
         // The rewritten key does not compete with itself for the budget.
         let previous_len = index.files.get(&name).copied();
         index.forget(&name);
-        let renamed = self
-            .make_room(index, required)
-            .and_then(|()| std::fs::rename(tmp_path, path).map_err(Error::ServiceIOError));
+        let renamed = self.make_room(index, required).and_then(|()| {
+            presence::rename(tmp_path, path, self.authority.flushes())
+                .map_err(Error::ServiceIOError)
+        });
         match renamed {
             Ok(()) => {
                 index.record(name, required);
@@ -446,6 +552,7 @@ impl FileStore {
                     self.commit_record(&mut index, name.clone(), &path, &tmp_path, required)
                 }
                 PutStep::SyncDirectory => sync_directory(&self.root),
+                PutStep::Witness => self.witness(&mut index, &name),
             };
             if let Err(error) = done {
                 // The temporary file lives outside the index, so removing it changes nothing.
@@ -465,6 +572,10 @@ impl FileStore {
     fn remove_records(&self, index: &mut FileIndex, names: &[String]) -> Result<()> {
         for step in self.authority.remove_plan() {
             match step {
+                RemoveStep::Unwitness => {
+                    self.unwitness(index, names)?;
+                    sync_directory(&self.root)?;
+                }
                 RemoveStep::Remove => {
                     for name in names {
                         self.retire_indexed(index, name)?;
@@ -486,24 +597,46 @@ impl FileStore {
         self.index.write().map_err(|_| Error::LockPoisoned)
     }
 
-    /// The bytes of the record file `name`, read under the read guard; `None` if it is absent.
+    /// The bytes of the record file `name`, read under the read guard; `None` if it is absent
+    /// and was never marked present.
+    ///
+    /// Post: `Err(StorageRecordMissing)` for a name marked present whose file is gone (the
+    /// presence law), so absence is reported only for a record never made durable here.
     fn read_record(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        let _guard = self.read_index()?;
-        read_file_if_present(&self.root.join(name)).map_err(Error::ServiceIOError)
+        let index = self.read_index()?;
+        match read_file_if_present(&self.root.join(name)).map_err(Error::ServiceIOError)? {
+            None if index.witnessed.contains(name) => {
+                Err(Error::StorageRecordMissing(UndecodableRecord {
+                    name: name.to_owned(),
+                }))
+            }
+            read => Ok(read),
+        }
     }
 
-    /// Read every indexed record file under the read guard, each to its bytes or to the error
-    /// that kept them; a file removed since it was indexed is skipped. Only the index lock can
-    /// fail the read as a whole.
-    fn read_records(&self) -> Result<Vec<ReadRecord>> {
+    /// Read every indexed or marked record name under the read guard: each file to its bytes or
+    /// to the error that kept them, and each marked name whose file is gone as missing; an
+    /// unmarked file removed since it was indexed is skipped. Only the index lock can fail the
+    /// read as a whole.
+    fn read_records(&self) -> Result<Vec<Found>> {
         let index = self.read_index()?;
-        Ok(index
+        let unmarked = index
             .files
             .iter()
-            .filter_map(|(name, _)| {
-                let read = read_file_if_present(&self.root.join(name)).transpose()?;
-                Some((name.to_owned(), read))
-            })
+            .map(|(name, _)| name)
+            .filter(|name| !index.witnessed.contains(*name));
+        Ok(index
+            .witnessed
+            .iter()
+            .map(String::as_str)
+            .chain(unmarked)
+            .filter_map(
+                |name| match read_file_if_present(&self.root.join(name)).transpose() {
+                    Some(read) => Some(Found::Record((name.to_owned(), read))),
+                    None if index.witnessed.contains(name) => Some(Found::Missing(name.to_owned())),
+                    None => None,
+                },
+            )
             .collect())
     }
 
@@ -513,13 +646,17 @@ impl FileStore {
         self.remove_records(&mut index, &[name.to_owned()])
     }
 
-    /// Remove every record (the remove plan).
+    /// Remove every record and every presence marker, those of missing records included (the
+    /// remove plan).
     fn clear(&self) -> Result<()> {
         let mut index = self.write_index()?;
         let names = index
             .files
             .iter()
             .map(|(name, _)| name.to_owned())
+            .chain(index.witnessed.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         self.remove_records(&mut index, &names)
     }
@@ -606,9 +743,9 @@ fn sync_directory_io(root: &Path) -> std::io::Result<()> {
     std::fs::File::open(root).and_then(|directory| directory.sync_all())
 }
 
-/// The standard library cannot open a directory for flushing on this platform; the durability
-/// of a rename or removal is then the file system's own (the durability law holds on unix
-/// only).
+/// The standard library cannot open a directory for flushing on this platform; an authoritative
+/// store's renames are write-through on Windows instead (`presence`), and on any other target
+/// the durability of a rename or removal is the file system's own.
 #[cfg(not(unix))]
 fn sync_directory_io(_root: &Path) -> std::io::Result<()> {
     Ok(())
@@ -679,7 +816,13 @@ where V: Serialize + DeserializeOwned + Send + Sync
     async fn get_all(&self) -> Result<Vec<(String, V)>> {
         let records = self.on_store(FileStore::read_records).await?;
         let mut decoded = Vec::with_capacity(records.len());
-        for (name, read) in records {
+        for found in records {
+            let (name, read) = match found {
+                Found::Record(record) => record,
+                Found::Missing(name) => {
+                    return Err(Error::StorageRecordMissing(UndecodableRecord { name }));
+                }
+            };
             let data = read.map_err(Error::ServiceIOError)?;
             let record = scan_bytes::<V>(name, &data);
             decoded.extend(self.filed_pair(data, record).await?);
@@ -708,15 +851,19 @@ where V: Serialize + DeserializeOwned + Send + Sync
 impl<V> KvStorageScan<V> for FileStorage
 where V: Serialize + DeserializeOwned + Send + Sync
 {
-    /// Every record file, as filed or undecodable, by its file name; a file that cannot be read
-    /// is reported too, so one bad file never fails the whole scan. Unlike `get_all`, a scan
-    /// never retires, whatever the store's authority.
+    /// Every record file, as filed or undecodable, by its file name, and every name marked
+    /// present whose file is gone, as missing; a file that cannot be read is reported too, so
+    /// one bad file never fails the whole scan. Unlike `get_all`, a scan never retires,
+    /// whatever the store's authority.
     async fn scan(&self) -> Result<Vec<ScannedRecord<V>>> {
         Ok(self
             .on_store(FileStore::read_records)
             .await?
             .into_iter()
-            .map(scan_record)
+            .map(|found| match found {
+                Found::Record(record) => scan_record(record),
+                Found::Missing(name) => ScannedRecord::Missing(UndecodableRecord { name }),
+            })
             .collect())
     }
 
@@ -727,13 +874,23 @@ where V: Serialize + DeserializeOwned + Send + Sync
     }
 }
 
-/// The record name of a directory entry: a 40-character lower-case hex file name (the image of
-/// `file_name_for`), or `None` for any other entry.
+/// Whether `name` is a record name: 40 lower-case hex characters, the image of `file_name_for`
+/// (pure). A presence marker's name is not one.
+fn is_record_name(name: &str) -> bool {
+    let lower_hex = |byte: &u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte);
+    name.len() == 40 && name.as_bytes().iter().all(lower_hex)
+}
+
+/// The record name of a directory entry, or `None` for any other entry.
 fn entry_file_name(path: &Path) -> Option<&str> {
     let file_name = path.file_name().and_then(|name| name.to_str())?;
-    // The image of `file_name_for`: lower-case hex only.
-    let lower_hex = |byte: &u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte);
-    (file_name.len() == 40 && file_name.as_bytes().iter().all(lower_hex)).then_some(file_name)
+    is_record_name(file_name).then_some(file_name)
+}
+
+/// The record name a directory entry marks present, or `None` for any other entry.
+fn marker_entry_name(path: &Path) -> Option<&str> {
+    let file_name = path.file_name().and_then(|name| name.to_str())?;
+    presence::marked_record_name(file_name)
 }
 
 impl std::fmt::Debug for FileStorage {
@@ -750,5 +907,7 @@ impl std::fmt::Debug for FileStorage {
 mod test_durability;
 #[cfg(test)]
 mod test_file;
+#[cfg(test)]
+mod test_presence;
 #[cfg(test)]
 pub(crate) mod test_root;

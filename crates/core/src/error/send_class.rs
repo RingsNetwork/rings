@@ -246,7 +246,7 @@ impl Error {
             | Self::StorageCountOverflow | Self::StorageRedundancyMismatch { .. }
             | Self::InvalidCapacity | Self::StorageValueExceedsCapacity { .. }
             | Self::StorageBudgetExhausted { .. } | Self::StorageWorkUnscheduled(_)
-            | Self::StorageRecordUndecodable(_)
+            | Self::StorageRecordUndecodable(_) | Self::StorageRecordMissing(_)
             // encoding and payload bounds
             | Self::Encode | Self::Decode | Self::SerializeToString | Self::SerializeError
             | Self::Serialize(_) | Self::Deserialize(_) | Self::CodecSerialize(_)

@@ -125,8 +125,10 @@ admission does not grow with the number of streams retained. On load, every reco
 sit under its own key, or the stream it is filed as fails closed (see [Bad records](#bad-records)).
 The native daemon opens the replay store as an authoritative file store (#909). On unix each write
 is flushed to stable storage before its rename and the directory after it (`F_FULLFSYNC` on macOS),
-so a crash leaves every record whole at its previous or its new value; on other targets a rename's
-durability is the file system's own. A record file that cannot be read, that does not decode whole,
+so a crash leaves every record whole at its previous or its new value. Windows cannot flush a
+directory, so there every rename and removal of the store is write-through (`MoveFileExW` with
+`MOVEFILE_WRITE_THROUGH`, #915); on any other target a rename's durability is the file system's
+own. A record file that cannot be read, that does not decode whole,
 or that holds a whole record of another key is reported and never deleted. The file I/O runs on the
 tokio blocking pool, so a flush never stalls an asynchronous worker.
 
@@ -192,7 +194,8 @@ reads the store again. Every record is written under the record key of the strea
 a record restores its stream iff it decodes and holds a valid window. Any other record is kept and
 joins the set `U` of unrestorable records (#910): torn, corrupt, unreadable (any read error but the
 absence of the entry, such as a permission or an I/O error), holding another key's record (which
-only something outside the store can put there), or holding an invalid window. Its name is the
+only something outside the store can put there), or holding an invalid window. A record the native
+store marked present and no longer holds joins `U` too, as missing (#915). Its name is the
 storage's record name: the native file name, or the browser row key.
 
 ```text
@@ -214,11 +217,19 @@ A scan fails as a whole only when the store itself cannot be listed, for example
 lock is poisoned. Such a scan restores nothing: it is counted as a persistence failure, the call
 fails closed, and the next call scans again.
 
-The law covers the records the store holds. A record that is absent is indistinguishable from a
-stream never seen, and its stream restarts from `First` (tracked in #915). Records go absent when
-they are deleted, moved or renamed away (the file they land in is undecodable for its own name,
-so the stream that name denotes fails closed), when a file name is damaged, or when a rename is
-rolled back on a target where the directory cannot be flushed.
+The law covers the records the store witnesses (#915). The native store keeps an empty presence
+marker `<name>.p` beside every record it made durable: it creates the marker only after the
+record's rename is flushed, removes it before the record, and marks any unmarked record at open (a
+crash between a rename and its marker). A marker whose record is gone is a record removed, renamed
+or lost outside the store, and its stream fails closed as missing instead of restarting from
+`First`. A file renamed to upper case is never a record name: on a case-sensitive volume its
+stream is missing, and on a case-insensitive one (default APFS) the store still reads the file
+under its own name. The browser store needs no marker: an IndexedDB database loses no proper
+subset of its rows, and the store evicts nothing (#923).
+
+A store lost whole (the native `transaction-replay` directory, or the browser database or origin)
+is indistinguishable from a store never written, since its markers go with it. That is the reset
+of every stream described under [Clearing one stream](#clearing-one-stream).
 
 ### Clearing one stream
 
@@ -230,8 +241,9 @@ stopped and then starting the node:
 2. Stop the node. On native, stop the daemon. In a browser, close every tab of the origin that runs
    the node, then open one tab of the origin with the node not started.
 3. Delete the record:
-   - On native, delete the file of that name in the `transaction-replay` directory beside the data
-     store.
+   - On native, delete the file of that name and its presence marker `<name>.p` in the
+     `transaction-replay` directory beside the data store. Deleting the file alone leaves the
+     stream failed closed, as missing.
    - In a browser, open DevTools, go to Application, then IndexedDB, and select the database
      `<storage name>/transaction-replay`; for the default provider this is
      `rings-node/transaction-replay`. In its object store of the same name, delete the row whose

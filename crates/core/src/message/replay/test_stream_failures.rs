@@ -256,6 +256,38 @@ async fn test_clearing_the_record_restores_the_stream() -> Result<()> {
     Ok(())
 }
 
+/// End to end on the native store (#915): stream 1's receiver record removed outside the store
+/// is missing after the restart, not a stream never seen, so stream 1 fails closed instead of
+/// restarting from `First`, while stream 2 proceeds.
+#[tokio::test]
+async fn test_a_native_record_removed_outside_the_store_fails_its_stream_closed() -> Result<()> {
+    let root = TempRoot::new("replay-missing");
+    let removed_file = {
+        let storage = open_authoritative(&root).await?;
+        let (window, _) = super::observe(None, 0, digest(1));
+        let (removed_key, removed_record) = receiver_record(&stream(1), &window)?;
+        storage.put(removed_key.as_str(), &removed_record).await?;
+        let (intact_key, intact_record) = sender_record(&stream(2), 4)?;
+        storage.put(intact_key.as_str(), &intact_record).await?;
+        let name = <FileStorage as KvStorageScan<ReplayRecord>>::record_name(
+            &storage,
+            removed_key.as_str(),
+        );
+        root.join(name)
+    };
+    std::fs::remove_file(&removed_file).map_err(Error::ServiceIOError)?;
+
+    let replay = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
+    assert!(matches!(
+        replay.admit(stream(1), 0, digest(1)).await,
+        Err(Error::TransactionReplayStreamUnavailable { ref record, .. })
+            if Some(record) == file_name(&removed_file).as_ref()
+    ));
+    assert_eq!(replay.reserve(stream(2), NonZeroU64::MIN).await?, 5..=5);
+    assert_eq!(replay.counters().unrestorable_record, 1);
+    Ok(())
+}
+
 /// End to end on the native store (#909 with #910): a crash leaves stream 1's receiver record
 /// torn in an authoritative file store; after the restart the store reports it by its file,
 /// stream 1 fails closed while stream 2 proceeds, the torn file stays, and removing that file
@@ -289,7 +321,18 @@ async fn test_a_torn_native_record_fails_its_stream_closed_until_cleared() -> Re
     drop(replay);
     assert!(torn_file.exists());
 
+    // Removing the record alone leaves its presence marker: the stream is missing (#915), and
+    // stays closed until the operator removes the marker too.
     std::fs::remove_file(&torn_file).map_err(Error::ServiceIOError)?;
+    let missing = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
+    assert!(matches!(
+        missing.admit(stream(1), 0, digest(1)).await,
+        Err(Error::TransactionReplayStreamUnavailable { .. })
+    ));
+    drop(missing);
+    let mut marker = torn_file.clone().into_os_string();
+    marker.push(".p");
+    std::fs::remove_file(marker).map_err(Error::ServiceIOError)?;
     let restarted = TransactionReplay::new_shared(Box::new(open_authoritative(&root).await?));
     assert_eq!(
         restarted.admit(stream(1), 0, digest(1)).await?,

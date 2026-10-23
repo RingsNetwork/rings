@@ -74,11 +74,13 @@ impl RecordAuthority {
     }
 }
 
-/// A record a storage holds but cannot read or decode, named so that its owner can fail closed
-/// on it instead of losing it.
+/// A record a storage cannot serve, named so that its owner can fail closed on it instead of
+/// losing it: one it holds but cannot read or decode, or one it witnessed as written and no
+/// longer holds.
 ///
-/// A storage that reports such a record keeps it: only its owner, or an operator, may decide
-/// that the state it held is forfeit.
+/// A storage that reports such a record keeps whatever it has of it (the record, or its
+/// presence marker): only its owner, or an operator, may decide that the state it held is
+/// forfeit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UndecodableRecord {
     /// The name the record is filed under: [`KvStorageScan::record_name`] of the key it is
@@ -100,6 +102,10 @@ pub enum ScannedRecord<V> {
     /// Anything else found under a record's name: a record the storage cannot read or decode,
     /// or one that is not filed under its own key's name.
     Undecodable(UndecodableRecord),
+    /// Nothing found under a name the storage witnessed as written: a record lost outside the
+    /// store (the presence law of an authoritative store, #915). A storage that keeps no
+    /// witness never reports it.
+    Missing(UndecodableRecord),
 }
 
 impl std::fmt::Display for UndecodableRecord {
@@ -142,11 +148,13 @@ pub trait KvStorageInterface<V> {
 /// record back to its key.
 ///
 /// **Law (agreement).** A decoded pair is reported only under its own key's name; anything else
-/// found under a record's name is undecodable for that name:
+/// found under a record's name is undecodable for that name, and a name the storage witnessed
+/// as written with nothing filed under it is missing:
 ///
 /// ```text
 /// Filed { k, v }   ⟺  a whole record (k, v) filed under record_name(k)
 /// Undecodable(u)   ⟺  anything else filed under u.name
+/// Missing(u)       ⟺  u.name witnessed as written, and nothing filed under it
 /// ```
 ///
 /// An owner restores exactly the `Filed` records and fails closed on the names of the rest, so

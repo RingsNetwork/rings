@@ -12,7 +12,12 @@
 //!                          torn  if rename survives ∧ ¬data survives
 //!                          old   otherwise
 //! remove: removal is durable iff SyncDirectory followed it
+//! marker: Witness creates and flushes it; Unwitness removes and flushes it
 //! ```
+//!
+//! The presence law (#915) adds one invariant over the same crash points: a durable marker
+//! names a record that survives (`P ⊆ R`), so a restore never reads a record that was not
+//! made durable here as missing.
 //!
 //! The law: an authoritative plan leaves the record old or new at every crash point (never
 //! torn), and new (or removed) once the plan completes. A disposable plan, which skips the
@@ -46,6 +51,8 @@ struct PutEffects {
     renamed: bool,
     /// The rename was flushed.
     rename_durable: bool,
+    /// The record's presence marker was created and flushed.
+    marked: bool,
 }
 
 /// The effects of the first `steps` of a put plan (pure).
@@ -58,6 +65,7 @@ fn put_effects(steps: &[PutStep]) -> PutEffects {
                 PutStep::SyncTemporary => effects.data_durable = effects.data,
                 PutStep::Rename => effects.renamed = true,
                 PutStep::SyncDirectory => effects.rename_durable = effects.renamed,
+                PutStep::Witness => effects.marked = true,
             }
             effects
         })
@@ -83,9 +91,24 @@ fn put_outcomes(effects: PutEffects) -> Vec<Outcome> {
     outcomes
 }
 
+/// Presence law of a put: at every crash point, a durable marker names a durable rename, so the
+/// record it marks survives the crash (pure).
+fn marker_names_a_record(effects: PutEffects) -> bool {
+    !effects.marked || effects.rename_durable
+}
+
+/// Whether a crash after the first `steps` of a removal plan may leave the record gone while
+/// its marker survives: the removal outlives the marker's removal only if the marker's removal
+/// came first and was flushed (pure).
+fn removal_may_orphan_the_marker(steps: &[RemoveStep]) -> bool {
+    let unwitnessed = steps.contains(&RemoveStep::Unwitness);
+    steps.contains(&RemoveStep::Remove) && !unwitnessed
+}
+
 /// Every outcome a crash after the first `steps` of a removal plan may leave.
 fn remove_outcomes(steps: &[RemoveStep]) -> Vec<Outcome> {
     let removed = steps.contains(&RemoveStep::Remove);
+    // Unwitness flushes the directory itself; only a flush after the removal makes it durable.
     let durable = removed
         && steps
             .iter()
@@ -106,8 +129,10 @@ fn test_plans_flush_before_and_after_the_rename() {
         PutStep::SyncTemporary,
         PutStep::Rename,
         PutStep::SyncDirectory,
+        PutStep::Witness,
     ]);
     assert_eq!(RecordAuthority::Authoritative.remove_plan(), [
+        RemoveStep::Unwitness,
         RemoveStep::Remove,
         RemoveStep::SyncDirectory,
     ]);
@@ -162,4 +187,36 @@ fn test_a_completed_authoritative_removal_is_not_rolled_back() {
     assert_eq!(remove_outcomes(plan), [Outcome::Removed]);
     assert!(remove_outcomes(plan.get(..1).unwrap_or_default()).contains(&Outcome::Old));
     assert!(remove_outcomes(RecordAuthority::Disposable.remove_plan()).contains(&Outcome::Old));
+}
+
+/// Presence law (#915): at every crash point of an authoritative put, a durable marker names a
+/// record that survives; at every crash point of an authoritative removal, the marker is gone
+/// before the record is, so no crash leaves a marker without its record.
+#[test]
+fn test_a_marker_always_names_a_record_at_every_crash_point() {
+    let put = RecordAuthority::Authoritative.put_plan();
+    for crash in 0..=put.len() {
+        let effects = put_effects(put.get(..crash).unwrap_or_default());
+        assert!(
+            marker_names_a_record(effects),
+            "put crash after {crash} steps"
+        );
+    }
+    assert!(put_effects(put).marked);
+    let remove = RecordAuthority::Authoritative.remove_plan();
+    for crash in 0..=remove.len() {
+        assert!(
+            !removal_may_orphan_the_marker(remove.get(..crash).unwrap_or_default()),
+            "removal crash after {crash} steps"
+        );
+    }
+}
+
+/// The presence model discriminates: a plan that marks before the rename is durable, or
+/// removes the record before its marker, breaks the law.
+#[test]
+fn test_the_presence_model_rejects_a_misordered_plan() {
+    let early = put_effects(&[PutStep::WriteTemporary, PutStep::Rename, PutStep::Witness]);
+    assert!(!marker_names_a_record(early));
+    assert!(removal_may_orphan_the_marker(&[RemoveStep::Remove]));
 }
