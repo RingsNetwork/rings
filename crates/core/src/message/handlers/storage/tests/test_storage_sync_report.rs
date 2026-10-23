@@ -148,7 +148,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predeces
     assert_eq!(
         receiver
             .dht()
-            .storage
+            .relay_storage
             .get(&inbox_slot(&inbox).to_string())
             .await?,
         None
@@ -162,7 +162,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predeces
     assert_eq!(from_predecessor.len(), 2);
     assert!(receiver
         .dht()
-        .storage
+        .relay_storage
         .get(&inbox_slot(&inbox).to_string())
         .await?
         .is_some());

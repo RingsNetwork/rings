@@ -375,7 +375,11 @@ pub async fn wait_for_storage_state(
         &format!("storage at {key}: {label}"),
         TEST_HANG_GUARD,
         || async move {
-            let stored = node.dht().storage.get(&key.to_string()).await?;
+            let stored = node
+                .dht()
+                .carrier_storage(key.kind())
+                .get(&key.to_string())
+                .await?;
             Ok(ready(stored.as_ref()).then_some(stored))
         },
     )

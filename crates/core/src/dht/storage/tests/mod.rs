@@ -41,6 +41,8 @@ mod test_cache_join;
 mod test_handoff;
 mod test_horizon;
 mod test_own_write;
+#[cfg(not(target_family = "wasm"))]
+mod test_relay_storage;
 mod test_repair;
 
 fn data_entry(did: Did) -> Entry {
@@ -637,7 +639,9 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
     assert_eq!(topic.data, vec![Bytes::from("parked")]);
     assert_eq!(inbox.kind, EntryKind::RelayMessage);
     assert_eq!(inbox.data.len(), 1);
-    assert_eq!(node.storage.count().await?, 2);
+    // Each namespace has its own store (#1021): the topic and the hold never share one.
+    assert_eq!(node.storage.count().await?, 1);
+    assert_eq!(node.relay_storage.count().await?, 1);
     Ok(())
 }
 

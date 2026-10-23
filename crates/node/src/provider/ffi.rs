@@ -462,6 +462,7 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
                     None,
                     None,
                     None,
+                    None,
                 ))?;
                 Ok((provider, runtime))
             })
@@ -687,6 +688,7 @@ mod tests {
                 );
                 Provider::new_provider_with_storage_internal(
                     config,
+                    None,
                     None,
                     Some(Box::new(storage.clone())),
                     None,

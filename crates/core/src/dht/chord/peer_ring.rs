@@ -47,6 +47,7 @@ use super::PeerRingAction;
 use super::RemoteAction;
 use crate::consts::LOCAL_CACHE_CAPACITY;
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::finger::FingerApplyOutcome;
 use crate::dht::finger::FingerConvergenceStatus;
 use crate::dht::finger::FingerDeferOutcome;
@@ -89,8 +90,14 @@ pub struct PeerRing {
     successor_seq: SuccessorSeq,
     /// Current predecessor learned through Chord notifications.
     predecessor: Arc<Mutex<Option<Did>>>,
-    /// Persistent replicated-entry storage.
+    /// Persistent replicated-entry storage of the data namespace: a cache of the overlay's
+    /// replicated topics, rebuildable from their replicas.
     pub(crate) storage: EntryStorage,
+    /// Storage of the relay-inbox namespace: the only copy of the mail this node holds or owns
+    /// (a relay carrier is never fetched, cached or replicated), so it is opened as a
+    /// `RecordAuthority::Retained` store where the node is durable (#1021). In-memory unless
+    /// [`Self::with_relay_storage`] gives it a store.
+    pub(crate) relay_storage: EntryStorage,
     /// Local fetched-entry cache, bounded at [`LOCAL_CACHE_CAPACITY`] entries: each carrier is
     /// the join of the replies observed for its key (#864).
     pub(crate) cache: EntryStorage,
@@ -175,6 +182,7 @@ impl PeerRing {
             predecessor: Arc::new(Mutex::new(None)),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
+            relay_storage: Box::new(MemStorage::new()),
             cache: Box::new(MemStorage::bounded(LOCAL_CACHE_CAPACITY)),
             storage_virtual_node_config: virtual_nodes,
             topology_transition: Mutex::new(()),
@@ -186,6 +194,22 @@ impl PeerRing {
             cache_transition: FuturesMutex::new(()),
             topology_epoch: Epoch::default(),
             did,
+        }
+    }
+
+    /// This ring with `storage` as the store of its relay-inbox namespace (see
+    /// [`Self::relay_storage`](PeerRing#structfield.relay_storage)).
+    pub fn with_relay_storage(mut self, storage: EntryStorage) -> Self {
+        self.relay_storage = storage;
+        self
+    }
+
+    /// The store of the carriers of `kind`: data topics and relay inboxes live in separate
+    /// stores of their own authority, as they live in separate namespaces.
+    pub(crate) fn carrier_storage(&self, kind: EntryKind) -> &EntryStorage {
+        match kind {
+            EntryKind::Data => &self.storage,
+            EntryKind::RelayMessage => &self.relay_storage,
         }
     }
 }

@@ -12,6 +12,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) delegatee_key: DelegateeKey,
     pub(in crate::processor) onion_process_epoch: OnionProcessEpoch,
     pub(in crate::processor) storage: Option<EntryStorage>,
+    pub(in crate::processor) relay_storage: Option<EntryStorage>,
     pub(in crate::processor) replay_storage: Option<ReplayStorage>,
     pub(in crate::processor) origin_quota: OriginQuotaConfig,
     pub(in crate::processor) onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
@@ -49,6 +50,7 @@ impl ProcessorBuilder {
             delegatee_key: config.delegatee_key.clone(),
             onion_process_epoch: OnionProcessEpoch::random(),
             storage: None,
+            relay_storage: None,
             replay_storage: None,
             origin_quota: config.origin_quota,
             onion_entry_guard_storage: None,
@@ -93,6 +95,14 @@ impl ProcessorBuilder {
     /// Set the storage for the processor.
     pub fn storage(mut self, storage: EntryStorage) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Set the storage of the relay-inbox namespace (`SwarmBuilder::relay_storage`): a
+    /// `RecordAuthority::Retained` store, so held mail survives a crash and is never evicted
+    /// (#1021).
+    pub fn relay_storage(mut self, storage: EntryStorage) -> Self {
+        self.relay_storage = Some(storage);
         self
     }
 
@@ -224,6 +234,9 @@ impl ProcessorBuilder {
         swarm_builder = swarm_builder.dht_virtual_nodes(self.dht_virtual_nodes);
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
         swarm_builder = swarm_builder.replay_storage(replay_storage);
+        if let Some(relay_storage) = self.relay_storage {
+            swarm_builder = swarm_builder.relay_storage(relay_storage);
+        }
         swarm_builder = swarm_builder.origin_quota(self.origin_quota);
         let observer: rings_core::swarm::observer::SharedSwarmObserver = match self.observer {
             Some(extra) => Arc::new(ChainedObserver {

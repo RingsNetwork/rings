@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Relay inbox carriers have a store of their own (#1021): `RecordAuthority::Retained`, the new
+  lattice point (durable, retained), flushes every write, evicts nothing (a full store refuses
+  the hold with `Error::StorageBudgetExhausted`) and retires an undecodable record with a log.
+  The data store's budget therefore no longer evicts held mail, and a crash no longer loses or
+  tears it. The native daemon keeps it in `relay-inbox` beside the data store (64 MiB); a browser
+  provider in the IndexedDB database `<storage name>/relay-inbox` (1024 carriers).
+  `SwarmBuilder::relay_storage` and `ProcessorBuilder::relay_storage` set it; without one, relay
+  carriers live in memory. `Provider`'s internal constructors take it after the entry storage.
+  - **Operator step.** None. Mail held by an earlier version stays in the data store, where it is
+    no longer read, so it is not delivered, and the data store's budget removes it in time.
+
 - The onion entry-guard store is a durable cache (#911): the new `RecordAuthority::DurableCache`
   flushes every write as an authoritative store does (native: file and directory; browser:
   IndexedDB `durability: "strict"`), so a crash no longer loses or tears the guard set, while a

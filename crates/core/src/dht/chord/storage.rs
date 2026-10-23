@@ -90,6 +90,11 @@ impl StorageKey {
     pub(crate) const fn placement(self) -> Did {
         self.placement
     }
+
+    /// The kind of the carrier, which names the store it lives in.
+    pub(crate) const fn kind(self) -> EntryKind {
+        self.kind
+    }
 }
 
 impl fmt::Display for StorageKey {
@@ -274,7 +279,13 @@ impl PeerRing {
         now_ms: u128,
     ) -> Result<Option<Entry>> {
         let key = StorageKey::new(kind, placement).to_string();
-        live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await
+        live_entry(
+            self.carrier_storage(kind),
+            &key,
+            now_ms,
+            Projection::ReturnedOnly,
+        )
+        .await
     }
 
     /// Read the live replicated entry stored at `key`.
@@ -285,7 +296,7 @@ impl PeerRing {
     ) -> Result<Option<Entry>> {
         let _transition = self.storage_transition.lock().await;
         live_entry(
-            &self.storage,
+            self.carrier_storage(key.kind()),
             &key.to_string(),
             now_ms,
             Projection::WrittenBack,
@@ -293,7 +304,9 @@ impl PeerRing {
         .await
     }
 
-    /// Every live replicated entry with its key, retiring the rest.
+    /// Every live entry of both namespaces with its key, retiring the rest. Each store yields
+    /// only the carriers of its own kind: a relay carrier an earlier version kept in the data
+    /// store is never read again, and leaves that store with its budget (#1021).
     ///
     /// Post: every returned entry satisfies `is_live_at(now_ms)`; every stored entry that does
     /// not has been removed.
@@ -303,12 +316,18 @@ impl PeerRing {
     ) -> Result<Vec<(StorageKey, Entry)>> {
         let _transition = self.storage_transition.lock().await;
         let mut live = Vec::new();
-        for (key, entry) in self.storage.get_all().await? {
-            if let Some(entry) =
-                retire_unless_live(&self.storage, &key, entry, now_ms, Projection::WrittenBack)
-                    .await?
-            {
-                live.push((StorageKey::from_str(&key)?, entry));
+        for kind in [EntryKind::Data, EntryKind::RelayMessage] {
+            let store = self.carrier_storage(kind);
+            for (key, entry) in store.get_all().await? {
+                let slot = StorageKey::from_str(&key)?;
+                if slot.kind() != kind {
+                    continue;
+                }
+                if let Some(entry) =
+                    retire_unless_live(store, &key, entry, now_ms, Projection::WrittenBack).await?
+                {
+                    live.push((slot, entry));
+                }
             }
         }
         Ok(live)
@@ -327,18 +346,14 @@ impl PeerRing {
         ack: &SyncedEntryAck,
     ) -> Result<()> {
         let _transition = self.storage_transition.lock().await;
-        let Some(local) = live_entry(
-            &self.storage,
-            &key.to_string(),
-            now_ms,
-            Projection::WrittenBack,
-        )
-        .await?
+        let store = self.carrier_storage(key.kind());
+        let Some(local) =
+            live_entry(store, &key.to_string(), now_ms, Projection::WrittenBack).await?
         else {
             return Ok(());
         };
         if ack.confirms_local_value(&local, now_ms) {
-            self.storage.remove(&key.to_string()).await?;
+            store.remove(&key.to_string()).await?;
         }
         Ok(())
     }
@@ -359,18 +374,19 @@ impl PeerRing {
         incoming: Entry,
     ) -> Result<Entry> {
         incoming.check_admissible_at(now_ms, self.network_id())?;
+        let store = self.carrier_storage(incoming.kind);
         let key = StorageKey::new(incoming.kind, key).to_string();
         let _transition = self.storage_transition.lock().await;
         // The join normalizes the union once, so the incoming value is normalized on its own
         // only when there is nothing to join it with (`join_live_entry` takes an admitted value,
         // normalized first, so it would hash every element twice).
-        let local = live_entry(&self.storage, &key, now_ms, Projection::ReturnedOnly).await?;
+        let local = live_entry(store, &key, now_ms, Projection::ReturnedOnly).await?;
         let stored = match local {
             Some(local) => local.join(incoming)?,
             None => incoming.try_into_storage_entry()?,
         }
         .retired_at(now_ms);
-        self.storage.put(&key, &stored).await?;
+        store.put(&key, &stored).await?;
         Ok(stored)
     }
 
@@ -388,9 +404,10 @@ impl PeerRing {
         key: Did,
         admitted: AdmittedEntry,
     ) -> Result<Entry> {
+        let store = self.carrier_storage(admitted.kind());
         let key = StorageKey::new(admitted.kind(), key).to_string();
         let _transition = self.storage_transition.lock().await;
-        join_live_entry(&self.storage, &key, admitted, now_ms).await
+        join_live_entry(store, &key, admitted, now_ms).await
     }
 
     /// Apply a stamped operation issued by `writer` to the value stored at `placement` at time
@@ -427,9 +444,10 @@ impl PeerRing {
                 op.validate_inbox_write(writer, responsible, now_ms, self.network_id())?;
             }
         }
+        let store = self.carrier_storage(op.kind());
         let key = StorageKey::new(op.kind(), placement).to_string();
         let _transition = self.storage_transition.lock().await;
-        operate_live_entry(&self.storage, &key, op, self.did, now_ms).await
+        operate_live_entry(store, &key, op, self.did, now_ms).await
     }
 
     /// The step one placement of a lookup takes under the topology and local storage at
