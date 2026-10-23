@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The browser replay store commits every write with IndexedDB's `durability: "strict"` (#912), so
+  a completed admission survives a system crash, not only a browser crash: the default hint is
+  relaxed in Chromium since 121, and Gecko and WebKit do not flush a WAL commit by default.
+  `IdbStorage` now talks to IndexedDB through `web-sys` directly instead of `rexie`, which cannot
+  pass transaction options; its durability is its authority's (`RecordAuthority::flushes`, now
+  shared by both backends). Breaking for `rings-core` callers on wasm:
+  `Error::IDBError` carries the engine's error as a `String` instead of a `rexie::Error`.
+
 - An authoritative IndexedDB store (the browser replay store) refuses instead of evicting
   (#923): a new row beyond its capacity, or an open under a lowered capacity, fails with
   `Error::StorageBudgetExhausted` and changes nothing, as the native authoritative store does.

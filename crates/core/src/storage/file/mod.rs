@@ -88,11 +88,6 @@ use crate::storage::UndecodableRecord;
 /// The file-store reading of the authority laws (module docs); the predicates are local to
 /// this backend, as each backend states the laws of its authority.
 impl RecordAuthority {
-    /// Whether the open flushes the store's directory entry (the durability law).
-    const fn flushes(self) -> bool {
-        matches!(self, Self::Authoritative)
-    }
-
     /// Whether every listed record file must be indexed, so that a listing that fails fails the
     /// open and a file whose metadata fails is indexed anyway (the index law).
     const fn indexes_every_entry(self) -> bool {

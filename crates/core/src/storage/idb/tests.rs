@@ -1,7 +1,6 @@
 //! Browser witnesses for the access-clock law, stored row shape, atomic touches, errors,
 //! and LRU eviction. No test waits on or reads wall-clock time.
 
-use rexie::TransactionMode;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
@@ -9,6 +8,7 @@ use serde::Serializer;
 use serde_json::Value as JsonValue;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
+use web_sys::IdbTransactionMode;
 
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryDot;
@@ -23,6 +23,7 @@ use crate::storage::idb::ACCESS_STAMP_INDEX;
 use crate::storage::idb::CLOCK_LIMIT;
 use crate::storage::KvStorageInterface;
 use crate::storage::RecordAuthority;
+use crate::utils::js_value;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TestDataStruct {
@@ -83,8 +84,8 @@ async fn count_rows(instance: &IdbStorage) -> crate::error::Result<u32> {
 
 /// Raw stored row `key` as JSON, read outside the adapter's decoding.
 async fn raw_row(instance: &IdbStorage, key: &str) -> JsonValue {
-    let scope = instance.scope(TransactionMode::ReadOnly).unwrap();
-    let row = scope.rows.get(&JsValue::from(key)).await.unwrap();
+    let scope = instance.scope(IdbTransactionMode::Readonly).unwrap();
+    let row = scope.row(key).await.unwrap();
     serde_wasm_bindgen::from_value(row).unwrap()
 }
 
@@ -97,7 +98,7 @@ async fn stamp_of(instance: &IdbStorage, key: &str) -> u64 {
 
 /// Value of the store-wide access clock.
 async fn clock_of(instance: &IdbStorage) -> u64 {
-    let scope = instance.scope(TransactionMode::ReadOnly).unwrap();
+    let scope = instance.scope(IdbTransactionMode::Readonly).unwrap();
     scope.clock_record().await.unwrap().unwrap().0
 }
 
@@ -152,11 +153,10 @@ async fn test_create_put_data() {
     assert!(row.get("last_visit_time").is_none());
     assert!(row.get("visit_count").is_none());
     assert!(row.get("created_time").is_none());
-    let scope = instance.scope(TransactionMode::ReadOnly).unwrap();
-    assert_eq!(
-        scope.rows.index_names(),
-        vec![ACCESS_STAMP_INDEX.to_owned()]
-    );
+    let scope = instance.scope(IdbTransactionMode::Readonly).unwrap();
+    let indexes = scope.rows.index_names();
+    assert_eq!(indexes.length(), 1);
+    assert_eq!(indexes.get(0).as_deref(), Some(ACCESS_STAMP_INDEX));
     drop(scope);
 
     let read: TestDataStruct = instance.get(&key).await.unwrap().unwrap();
@@ -662,4 +662,81 @@ async fn test_authoritative_get_leaves_stamp_and_clock_unchanged() {
     assert_eq!(get_string(&instance, "missing").await.unwrap(), None);
     assert_eq!(stamp_of(&instance, "a").await, stamp);
     assert_eq!(clock_of(&instance).await, clock);
+}
+
+/// The durability hint a read-write transaction was opened with, as the engine reports it.
+fn durability_of(scope: &super::Scope) -> Option<String> {
+    js_sys::Reflect::get(&scope.transaction, &JsValue::from("durability"))
+        .unwrap()
+        .as_string()
+}
+
+/// Durability law (#912): an authoritative store opens every read-write transaction with
+/// `durability: "strict"`, while a disposable one keeps the engine's default.
+#[wasm_bindgen_test]
+async fn test_read_write_transactions_take_the_authority_durability() {
+    let authoritative = create_authoritative_db_instance(2).await;
+    let disposable = create_db_instance(2).await;
+
+    let strict = authoritative.scope(IdbTransactionMode::Readwrite).unwrap();
+    let default = disposable.scope(IdbTransactionMode::Readwrite).unwrap();
+    assert_eq!(durability_of(&strict).as_deref(), Some("strict"));
+    assert_eq!(durability_of(&default).as_deref(), Some("default"));
+    strict.done().await.unwrap();
+    default.done().await.unwrap();
+
+    authoritative.put("a", &"a".to_owned()).await.unwrap();
+    assert_eq!(
+        get_string(&authoritative, "a").await.unwrap().as_deref(),
+        Some("a")
+    );
+}
+
+/// Settlement law: a failed request (adding a key that exists, a `ConstraintError`) settles its
+/// future with the request's error and aborts its transaction, so the scope's commit reports the
+/// failure and an earlier request of the scope is rolled back.
+#[wasm_bindgen_test]
+async fn test_a_failed_request_fails_the_commit_and_changes_nothing() {
+    let instance = create_db_instance(2).await;
+    instance.put("a", &"a".to_owned()).await.unwrap();
+    instance.put("b", &"b".to_owned()).await.unwrap();
+    let duplicate = js_value::serialize(&raw_row(&instance, "a").await).unwrap();
+
+    let scope = instance.scope(IdbTransactionMode::Readwrite).unwrap();
+    scope.delete_row("b").await.unwrap();
+    let failed = super::request::request(&scope.rows.add(&duplicate).unwrap()).await;
+    assert!(matches!(failed, Err(crate::error::Error::IDBError(_))));
+    assert!(scope.done().await.is_err());
+
+    assert_eq!(
+        get_string(&instance, "b").await.unwrap().as_deref(),
+        Some("b")
+    );
+}
+
+/// Upgrade law of `request::open`: opening a database of an older schema version brings it to
+/// the current schema, deleting every store and row index the schema does not name.
+#[wasm_bindgen_test]
+async fn test_open_upgrades_an_older_schema_to_the_current_one() {
+    let name = format!("rings-idb-upgrade-test-{}", uuid::Uuid::new_v4());
+    let older = super::request::open(&name, super::request::Schema {
+        version: 1,
+        rows: name.clone(),
+        key_path: "key",
+        index: "last_visit_time",
+        companion: "legacy".to_owned(),
+    })
+    .await
+    .unwrap();
+    older.close();
+
+    let instance = IdbStorage::new_with_cap_and_name(2, &name).await.unwrap();
+    let stores = instance.db.object_store_names();
+    assert_eq!(stores.length(), 2);
+    assert!(stores.contains(&name));
+    assert!(stores.contains(&super::clock_store_name(&name)));
+    let scope = instance.scope(IdbTransactionMode::Readonly).unwrap();
+    let indexes = scope.rows.index_names();
+    assert_eq!(indexes.length(), 1);
+    assert_eq!(indexes.get(0).as_deref(), Some(ACCESS_STAMP_INDEX));
 }

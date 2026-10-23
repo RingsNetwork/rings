@@ -37,8 +37,13 @@ pub use crate::storage::memory::MemStorage;
 ///   `Error::StorageBudgetExhausted` and changes nothing. An evicted authoritative record would
 ///   be indistinguishable from one never written, which silently rolls its state back (#923).
 ///
-/// The budget's unit, the durability and the open laws are per backend and documented there
-/// (`FileStorage` counts bytes and flushes by its authority; `IdbStorage` counts rows).
+/// - **Durability.** A disposable store's latest writes may be lost by a crash; an authoritative
+///   store reports a write complete only once it survives a process or a system crash
+///   (`FileStorage` flushes the file and its directory; `IdbStorage` commits with
+///   `durability: "strict"`, #912).
+///
+/// The budget's unit and the open laws are per backend and documented there (`FileStorage`
+/// counts bytes; `IdbStorage` counts rows).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecordAuthority {
@@ -53,6 +58,13 @@ impl RecordAuthority {
     /// shared by every backend that takes an authority).
     pub(crate) const fn retires_undecodable(self) -> bool {
         matches!(self, Self::Disposable)
+    }
+
+    /// Whether a completed write must survive a process or a system crash (the durability law,
+    /// shared by every backend that takes an authority): the file store flushes its writes, and
+    /// IndexedDB commits them with strict durability.
+    pub(crate) const fn flushes(self) -> bool {
+        matches!(self, Self::Authoritative)
     }
 
     /// Whether the budget retires the oldest records to make room, instead of refusing the write
