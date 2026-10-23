@@ -41,7 +41,12 @@ native node opens beside its data store, each at its authority: `data` (the DHT 
 `onion-entry-guards` (a durable cache), and `measure` with `provisional-evidence`. Pass the same
 path on every run of the same node: the replay windows must survive a restart, or the node
 would accept replayed transactions and re-sign used sequences (#1022). A fresh path is a fresh
-node state; two live providers must not share one.
+node state.
+
+The provider owns `storage_path` exclusively while it lives: at most one live provider uses a
+given root, and it is never a native daemon's storage directory. Every store assumes it is its
+directory's only writer, so two writers would interleave their writes to one authoritative
+replay store. Nothing enforces this yet (#1039); keep one root per node.
 
 ## Lifecycle
 

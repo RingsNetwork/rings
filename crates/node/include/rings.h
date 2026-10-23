@@ -67,6 +67,12 @@ void rings_node_provider_destroy(struct ProviderHandle *provider_ptr);
  * and the measurement stores). Reusing the path across runs keeps the replay
  * windows, held mail and entry guards; a fresh path is a fresh node state.
  *
+ * Precondition: the provider owns `storage_path` exclusively while it lives.
+ * At most one live provider uses a given root, and it is never a native
+ * daemon's storage directory: every store assumes it is its directory's only
+ * writer, and two writers would interleave writes to one authoritative replay
+ * store. Nothing enforces this yet (#1039).
+ *
  * # Safety
  *
  * String pointers, `storage_path` included, must be valid null-terminated

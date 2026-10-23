@@ -411,6 +411,11 @@ pub unsafe extern "C" fn rings_node_provider_destroy(provider_ptr: *mut Provider
 /// mail and entry guards (#1022); a fresh path is a fresh node state. Creation fails, returning
 /// NULL, when a store cannot be opened.
 ///
+/// Precondition: the provider owns `storage_path` exclusively while it lives. At most one live
+/// provider uses a given root, and it is never a native daemon's storage directory: every store
+/// assumes it is the only writer of its directory, and two writers would interleave their writes
+/// to one authoritative replay store. Nothing enforces this yet (#1039).
+///
 /// Installs the extension [`Backend`] so inbound custom messages are decoded as
 /// namespaced envelopes and routed to the protocol registry. (The old per-variant C
 /// message callback is gone with `BackendMessage`; an FFI protocol-registration path
