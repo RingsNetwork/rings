@@ -11,6 +11,15 @@
   `answerOffer` no longer returns a counter-offer; the HTTP client still answers one from a peer
   of 0.34.2 or earlier.
 
+- A node given no transaction replay store refuses every replay transition (#1022): a
+  reservation or an admission fails with the new `Error::TransactionReplayStorageUnavailable`,
+  so it neither sends nor accepts a transaction, instead of keeping its replay windows in memory
+  and reopening every stream at each restart. `SwarmBuilder`, `ProcessorBuilder` and `Provider`
+  no longer default the replay store to `MemStorage`; the native daemon and the browser provider
+  open an authoritative one, as before. Breaking for `rings-core` and `rings-node` library
+  callers that relied on the in-memory default: pass `replay_storage(...)`. A relay-inbox drain
+  on such a node defers its mail.
+
 - Relay inbox carriers have a store of their own (#1021): `RecordAuthority::Retained`, the new
   lattice point (durable, retained), flushes every write, evicts nothing (a full store refuses
   the hold with `Error::StorageBudgetExhausted`) and retires an undecodable record with a log.

@@ -260,6 +260,7 @@ pub(super) fn prepare_node_with_storage_redundancy(
             Box::new(MemStorage::new()),
             delegatee_key,
         )
+        .replay_storage(crate::tests::volatile_replay_storage())
         .dht_storage_redundancy(redundancy)
         .dht_virtual_nodes(0)
         .dht_finger_table_size(8),
@@ -279,6 +280,7 @@ pub(super) fn prepare_node_with_virtual_nodes(
             Box::new(MemStorage::new()),
             delegatee_key,
         )
+        .replay_storage(crate::tests::volatile_replay_storage())
         .dht_virtual_nodes(positions_per_peer)
         .dht_finger_table_size(8),
     );

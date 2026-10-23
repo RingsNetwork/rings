@@ -82,13 +82,15 @@ enum Offered {
     EndPass,
 }
 
-/// Whether `error` defers the payload rather than refusing it: a failure of this node's own
-/// replay store, or a full relay custody. Nothing was committed, so the element waits for a
+/// Whether `error` defers the payload rather than refusing it: a failure or the absence of this
+/// node's own replay store, or a full relay custody. Nothing was committed, so the element waits for a
 /// later pass instead of being retired as one the live path would drop.
 fn defers(error: &Error) -> bool {
     matches!(
         error,
-        Error::TransactionReplayPersistence { .. } | Error::RelayCustodyFull { .. }
+        Error::TransactionReplayPersistence { .. }
+            | Error::RelayCustodyFull { .. }
+            | Error::TransactionReplayStorageUnavailable
     )
 }
 
