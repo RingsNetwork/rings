@@ -297,6 +297,7 @@ mod tests {
                 storage,
                 delegatee_key,
             )
+            .replay_storage(crate::tests::volatile_replay_storage())
             .dht_finger_table_size(SCHEDULE_FINGER_TABLE_SIZE)
             .dht_virtual_nodes(0),
         );

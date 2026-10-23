@@ -174,6 +174,13 @@ pub(crate) fn volatile_relay_storage() -> crate::dht::EntryStorage {
     Box::new(crate::storage::MemStorage::new())
 }
 
+/// An in-memory replay store: the named choice of a fixture whose replay windows need not
+/// survive its process. Production never builds one (#1022): a node without an authoritative
+/// replay store refuses every replay transition instead.
+pub(crate) fn volatile_replay_storage() -> crate::message::ReplayStorage {
+    Box::new(crate::storage::MemStorage::<crate::message::ReplayRecord>::new())
+}
+
 /// A live inbox delta for `destination`: one custom message from a fresh sender, held now by
 /// `holder` inside [`TEST_NETWORK_ID`].
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]

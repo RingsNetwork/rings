@@ -48,6 +48,7 @@ async fn test_stabilize_republishes_local_entries_to_missing_affine_owners() -> 
             Box::new(MemStorage::new()),
             session,
         )
+        .replay_storage(crate::tests::volatile_replay_storage())
         .dht_storage_redundancy(2)
         .dht_virtual_nodes(0),
     );

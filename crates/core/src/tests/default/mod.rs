@@ -267,6 +267,7 @@ fn prepare_node_with_ice_servers_and_measure(
     .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
     .dht_virtual_nodes(0)
     .relay_storage(crate::tests::volatile_relay_storage())
+    .replay_storage(crate::tests::volatile_replay_storage())
     .origin_quota(fixture_origin_quota()?);
     let builder = match measure {
         Some(measure) => builder.measure(measure),
