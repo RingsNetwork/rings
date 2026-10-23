@@ -1,0 +1,64 @@
+@inproceedings{Pillai2014,
+  author    = {Thanumalayan Sankaranarayana Pillai and Vijay Chidambaram and Ramnatthan Alagappan and Samer Al-Kiswany and Andrea C. Arpaci-Dusseau and Remzi H. Arpaci-Dusseau},
+  title     = {All File Systems Are Not Created Equal: On the Complexity of Crafting Crash-Consistent Applications},
+  booktitle = {11th USENIX Symposium on Operating Systems Design and Implementation (OSDI '14)},
+  pages     = {433--448},
+  year      = {2014},
+  publisher = {USENIX Association}
+}
+
+@misc{IndexedDB3,
+  author       = {{W3C Web Applications Working Group}},
+  title        = {Indexed Database {API} 3.0},
+  howpublished = {W3C Editor's Draft, \url{https://w3c.github.io/IndexedDB/}},
+  note         = {Section ``Transaction durability''; accessed 2026-10-23}
+}
+
+@misc{ChromeDurability,
+  author       = {{Chrome for Developers}},
+  title        = {A change to the default durability mode in {IndexedDB}},
+  howpublished = {\url{https://developer.chrome.com/blog/indexeddb-durability-mode-now-defaults-to-relaxed}},
+  note         = {Default changes from strict to relaxed in Chrome 121; accessed 2026-10-23}
+}
+
+@misc{GeckoIDB,
+  author       = {{Mozilla}},
+  title        = {{IndexedDB} parent actors (\texttt{ActorsParent.cpp})},
+  howpublished = {\url{https://github.com/mozilla-firefox/firefox/blob/main/dom/indexedDB/ActorsParent.cpp}},
+  note         = {\texttt{BeginWriteTransaction} and \texttt{GetDefaultSynchronousMode}; accessed 2026-10-23}
+}
+
+@misc{WebKitIDB,
+  author       = {{WebKit}},
+  title        = {{IndexedDB} {SQLite} backing store (\texttt{SQLiteIDBBackingStore.cpp})},
+  howpublished = {\url{https://github.com/WebKit/WebKit/blob/main/Source/WebCore/Modules/indexeddb/server/SQLiteIDBBackingStore.cpp}},
+  note         = {\texttt{commitTransaction}; accessed 2026-10-23}
+}
+
+@misc{SQLiteWAL,
+  author       = {{SQLite}},
+  title        = {Write-Ahead Logging, and {PRAGMA} synchronous},
+  howpublished = {\url{https://www.sqlite.org/wal.html}, \url{https://www.sqlite.org/pragma.html}},
+  note         = {Accessed 2026-10-23}
+}
+
+@misc{MDNEviction,
+  author       = {{MDN Web Docs}},
+  title        = {Storage quotas and eviction criteria},
+  howpublished = {\url{https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria}},
+  note         = {Accessed 2026-10-23}
+}
+
+@misc{AppleFsync,
+  author       = {{Apple}},
+  title        = {\texttt{fsync(2)} and \texttt{fcntl(2)}: \texttt{F\_FULLFSYNC}},
+  howpublished = {macOS manual pages},
+  note         = {Accessed 2026-10-23}
+}
+
+@misc{MoveFileEx,
+  author       = {{Microsoft}},
+  title        = {\texttt{MoveFileExW} function (\texttt{winbase.h}): \texttt{MOVEFILE\_WRITE\_THROUGH}},
+  howpublished = {\url{https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw}},
+  note         = {Accessed 2026-10-23}
+}
