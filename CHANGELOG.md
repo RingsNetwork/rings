@@ -2,6 +2,9 @@
 
 ## 0.35.0
 
+- `tokio` is bumped to 1.53.3 for RUSTSEC-2026-0386 (`AsyncFd::new` and related constructors
+  violate I/O safety) (#1047), in the workspace, `frontend` and `examples/dweb` lockfiles.
+
 - A node that rejoins its seed over HTTP is no longer refused for up to three minutes (#1040).
   An offer carried out of band (an HTTP join through `answerOffer`) now prevails over the seed's
   own sent, unanswered overlay offer to that node; offers carried alike keep the DID tie-break.
