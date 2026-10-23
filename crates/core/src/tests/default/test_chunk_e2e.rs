@@ -805,6 +805,8 @@ async fn test_negotiated_size_too_small_errors_without_partial_send() {
     wait_for_connection_state(&node2, node1.did(), WebrtcConnectionState::Connected)
         .await
         .unwrap();
+    // Count from quiescence: the join traffic the connection started is no send of this test's.
+    wait_for_msgs([&node1, &node2]).await;
 
     // One byte below `chunk reserve + MIN_CHUNK_DATA`: no usable chunk size exists, so framing
     // must reject *before* any chunk is sent (the `None` is returned ahead of the send loop).
