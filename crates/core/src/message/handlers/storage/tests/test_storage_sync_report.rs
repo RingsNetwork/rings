@@ -111,11 +111,12 @@ fn inbox_slot(inbox: &Entry) -> StorageKey {
     StorageKey::new(EntryKind::RelayMessage, inbox.did)
 }
 
-/// Relocation law: a relay carrier is accepted from the receiver's predecessor and skipped
-/// without an acknowledgement from anyone else, while the data entries sharing its batch are
-/// accepted either way; the carrier is not invalid, only not this receiver's to take yet.
+/// Relocation law: a relay carrier is accepted from a node that held it before (here the
+/// receiver's predecessor) and skipped without an acknowledgement from anyone else, while the
+/// data entries sharing its batch are accepted either way; the carrier is not invalid, only not
+/// this receiver's to take yet.
 #[tokio::test]
-async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predecessor_alone(
+async fn test_persist_synced_entries_relocates_a_relay_carrier_from_a_previous_holder_alone(
 ) -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
     let predecessor: Did = SecretKey::random().address().into();

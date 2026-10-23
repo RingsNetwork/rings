@@ -7,6 +7,9 @@ use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
 use crate::error::Result;
+use crate::message::AnnounceRelayHolder;
+use crate::message::Message;
+use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
@@ -260,12 +263,51 @@ impl Stabilizer {
         Ok(None)
     }
 
+    /// Pass the previous relay holder this node knows (itself, when it holds relay mail) to its
+    /// successor head (`dht::relay_holder`), and forget the relay declarations of peers it no
+    /// longer deals with. A record that is not queued is passed again by the next pass, as the
+    /// periodic repair pass repeats it anyway, so a node that restarted learns its run again.
+    async fn maintain_relay_custody(&self) -> Result<()> {
+        let mut stale = Vec::new();
+        for peer in self.dht.relay_storage_less_peers()? {
+            if !self.transport.has_connection_attempt(peer)? {
+                stale.push(peer);
+            }
+        }
+        self.dht.forget_stale_relay_custody(&stale)?;
+        let Some((head, previous)) = self.dht.previous_relay_holder_to_pass()? else {
+            return Ok(());
+        };
+        let record = Message::AnnounceRelayHolder(AnnounceRelayHolder {
+            holder: previous.holder,
+            run_start: previous.run_start,
+        });
+        if let Err(error) = self
+            .transport
+            .protocol_egress()
+            .send_message(record, head)
+            .await
+        {
+            tracing::debug!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                %head,
+                error = ?error,
+                "STABILIZATION previous relay holder not queued; passed again next pass"
+            );
+        }
+        Ok(())
+    }
+
     /// One bounded pass restoring the placement invariant of local storage.
     ///
-    /// Invariant: every live local entry lies in `(self, head]` and at each of its affine
-    /// owners. The pass offers the entries beyond the head to the head (ownership hand-off,
-    /// whose local cleanup is ack-gated) and republishes local entries to missing affine owners
-    /// (additive), then sends the deliveries through one repair window. Placement is a function
+    /// Invariant: every live local data entry lies in `(self, head]` and at each of its affine
+    /// owners, and every relay carrier lies with its holder (`dht::relay_holder`). The pass
+    /// offers the data entries beyond the head to the head and each relay carrier this node does
+    /// not hold to its holder (ownership hand-offs, whose local cleanup is ack-gated), and
+    /// republishes local entries to missing affine owners (additive), then sends the deliveries
+    /// through one repair window; last, it passes the previous relay holder it knows to the head.
+    /// Placement is a function
     /// of the ring state, so the pass is the same whichever input moved the head; a head change
     /// only requests it. A ready, locally admitted next hop needs no connection-age grace:
     /// the receiver's bounded pre-admission hold queues early frames until its own admission
@@ -288,6 +330,7 @@ impl Stabilizer {
             .await?;
         let action = PeerRingAction::MultiActions(vec![handoff, republish]);
         let outcome = self.handle_storage_repair_action(action).await?;
+        self.maintain_relay_custody().await?;
         tracing::debug!(
             target: "rings_core::dht::stabilization",
             local = %self.dht.did,

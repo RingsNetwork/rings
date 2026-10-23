@@ -307,6 +307,18 @@ pub enum Error {
     #[error("This node keeps no retained relay store and takes custody of no relay carrier")]
     RelayStorageUnavailable,
 
+    /// No node from the relay inbox key's owner to the end of this node's successor list holds
+    /// relay mail, so the carrier has no holder this view can name, and the hold is refused to
+    /// its sender (`dht::relay_holder`, Law (Bound))
+    #[error("No node from the relay inbox key's owner on this successor list holds relay mail")]
+    RelayHolderUnavailable,
+
+    /// A relay carrier operation reached a node that does not hold the carrier under its own
+    /// view; it is refused there rather than routed on, so two views that disagree cannot pass
+    /// it back and forth
+    #[error("This node does not hold the relay carrier the operation was sent to")]
+    RelayCarrierNotHeldHere,
+
     /// A storage count or record length does not fit its interface width
     #[error("A storage count or record length does not fit its interface width")]
     StorageCountOverflow,

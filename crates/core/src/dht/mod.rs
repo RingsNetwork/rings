@@ -11,6 +11,8 @@ pub mod did;
 pub mod entry;
 /// Finger table for Rings
 pub mod finger;
+/// The holder of a relay inbox key: the first node from the key's owner on that holds relay mail.
+pub mod relay_holder;
 /// Periodic DHT topology, storage, and finger maintenance runner.
 ///
 /// ```text
@@ -63,6 +65,7 @@ pub use did::Did;
 pub use finger::FingerFixRequest;
 pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
+pub use relay_holder::RelayCustody;
 /// Test helper exposing the scheduler deadline for an in-flight finger lookup.
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use stabilization::finger_awaiting_report_deadline_for_test;

@@ -53,6 +53,7 @@ use crate::dht::finger::FingerConvergenceStatus;
 use crate::dht::finger::FingerDeferOutcome;
 use crate::dht::finger::FingerRetireOutcome;
 use crate::dht::finger::DEFAULT_FINGER_TABLE_SIZE;
+use crate::dht::relay_holder::RelayNeighborhood;
 use crate::dht::successor::SuccessorSeq;
 use crate::dht::topology;
 use crate::dht::topology::FindSuccessorStep;
@@ -75,6 +76,7 @@ use crate::storage::MemStorage;
 use crate::utils::new_uuid;
 use crate::utils::Instant;
 
+mod relay_custody;
 mod views;
 
 /// Storage accepted by [`PeerRing::new_with_storage`].
@@ -93,12 +95,13 @@ pub struct PeerRing {
     /// Persistent replicated-entry storage of the data namespace: a cache of the overlay's
     /// replicated topics, rebuildable from their replicas.
     pub(crate) storage: EntryStorage,
-    /// Storage of the relay-inbox namespace: the only copy of the mail this node holds or owns
-    /// (a relay carrier is never fetched, cached or replicated), so it must be a
-    /// `RecordAuthority::Retained` store (#1021). `None` until [`Self::with_relay_storage`] gives
-    /// it one; without it the node takes custody of no relay carrier (Law 1 admits no volatile
-    /// relay store): every relay write is refused with `Error::RelayStorageUnavailable`, and
-    /// every relay read finds nothing.
+    /// Storage of the relay-inbox namespace: the only copy of the mail this node holds (a relay
+    /// carrier is never cached or replicated, and fetched by its recipient alone), so it must be
+    /// a `RecordAuthority::Retained` store (#1021). `None` until [`Self::with_relay_storage`]
+    /// gives it one; without it the node takes custody of no relay carrier (Law 1 admits no
+    /// volatile relay store): it declares that it holds no relay mail, so the holder law
+    /// (`dht::relay_holder`) never names it, every relay write that reaches it anyway is refused
+    /// with `Error::RelayStorageUnavailable`, and every relay read finds nothing.
     pub(crate) relay_storage: Option<EntryStorage>,
     /// Local fetched-entry cache, bounded at [`LOCAL_CACHE_CAPACITY`] entries: each carrier is
     /// the join of the replies observed for its key (#864).
@@ -138,6 +141,8 @@ pub struct PeerRing {
     pub(super) cache_transition: FuturesMutex<()>,
     /// Count of committed transitions that changed the routes (`Law (Epoch)`).
     topology_epoch: Epoch,
+    /// The relay custody this node knows of its neighbours (see `relay_custody`).
+    relay_neighborhood: Mutex<RelayNeighborhood>,
 }
 
 /// Construction.
@@ -195,6 +200,7 @@ impl PeerRing {
             storage_transition: FuturesMutex::new(()),
             cache_transition: FuturesMutex::new(()),
             topology_epoch: Epoch::default(),
+            relay_neighborhood: Mutex::new(RelayNeighborhood::default()),
             did,
         }
     }
@@ -461,6 +467,7 @@ impl PeerRing {
             };
             (self.step(state, event), removal)
         })?;
+        self.forget_relay_custody(did)?;
         Ok(removal)
     }
 }

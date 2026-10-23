@@ -249,6 +249,11 @@ async fn handle_placed_entry_operation(
             dht.operate_storage_entry(now_ms, msg.placement, op, ctx.transaction.origin())
                 .await
         }
+        // A relay carrier is sent to the holder its writer's view names, never routed toward
+        // one: a holder that disagrees refuses it rather than pass it on (`dht::relay_holder`).
+        OperateRoute::Remote(_) if msg.op.kind().is_relay_inbox() => {
+            Err(Error::RelayCarrierNotHeldHere)
+        }
         OperateRoute::Remote(next) => reset_storage_relay_destination(handler, ctx, next).await,
     }
 }

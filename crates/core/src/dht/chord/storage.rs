@@ -17,6 +17,7 @@ use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
+use crate::dht::relay_holder::RelayHolder;
 use crate::dht::topology;
 use crate::dht::types::ChordStorageCache;
 use crate::dht::Did;
@@ -433,13 +434,13 @@ impl PeerRing {
             EntryKind::RelayMessage => {
                 op.entry().validate_bounds_at(now_ms)?;
                 // Only a hold needs to know who is responsible for the recipient.
-                let responsible = match op {
+                let admitted = match op {
                     EntryOperation::Extend(_) => {
-                        self.inbox_hold_authority(inbox_destination(placement))?
+                        self.admits_relay_hold(inbox_destination(placement), writer)?
                     }
-                    _ => None,
+                    _ => false,
                 };
-                op.validate_inbox_write(writer, responsible, now_ms, self.network_id())?;
+                op.validate_inbox_write(writer, admitted, now_ms, self.network_id())?;
             }
         }
         let store = self.carrier_store_for_write(op.kind())?;
@@ -583,8 +584,20 @@ impl PeerRing {
     /// Where an operation of `kind` at `placement` is applied under the topology now: the
     /// per-placement `Compute` shared by [`Self::entry_operate`] and the rerouting of one
     /// placement.
+    ///
+    /// A relay carrier goes to its holder (`dht::relay_holder`, `Law (Holder)`), which this
+    /// node's view names whenever it writes one: a holder places the inbox key of a destination
+    /// it is responsible for, and a recipient owns its own. A view that names no holder refuses
+    /// the operation to its sender with `RelayHolderUnavailable` (`Law (Bound)`).
     pub(crate) fn operate_route(&self, placement: Did, kind: EntryKind) -> Result<OperateRoute> {
-        match self.find_storage_owner_for(placement, kind)? {
+        if kind.is_relay_inbox() {
+            return match self.relay_holder(placement)? {
+                RelayHolder::Holder(holder) if holder == self.did => Ok(OperateRoute::Owned),
+                RelayHolder::Holder(holder) => Ok(OperateRoute::Remote(holder)),
+                RelayHolder::Unheld | RelayHolder::Unknown => Err(Error::RelayHolderUnavailable),
+            };
+        }
+        match self.find_storage_owner(placement)? {
             PeerRingAction::Some(_) => Ok(OperateRoute::Owned),
             PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_)) => {
                 Ok(OperateRoute::Remote(next))

@@ -8,6 +8,7 @@
 //! direct connection from the peer.
 
 mod test_rejoin;
+mod test_storage_less;
 
 use std::time::Instant;
 
@@ -112,8 +113,9 @@ async fn hold_message_for_offline_peer(
 }
 
 /// Phase 2: the owner's storage repair pass hands the inbox carrier to the returned peer. The
-/// peer accepts a relay carrier only from its predecessor, so the owner's notify must have
-/// reached it first; the acknowledgement then removes the owner's copy.
+/// peer accepts a relay carrier only from a node that held it before, here its predecessor, so
+/// the owner's notify must have reached it first; the acknowledgement then removes the owner's
+/// copy.
 async fn hand_off_inbox(owner: &Node, peer: &Node) -> Result<()> {
     owner.swarm.stabilizer().stabilize().await?;
     wait_for_predecessor(peer, owner.did()).await?;

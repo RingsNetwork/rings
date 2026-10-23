@@ -14,6 +14,7 @@ use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
+use crate::dht::RelayCustody;
 use crate::dht::StorageSyncDelivery;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
@@ -26,6 +27,12 @@ use crate::message::e2e::E2eStreamFrame;
 use crate::message::ProbeAcknowledgement;
 use crate::message::ProbeOffer;
 use crate::message::ProbeRequest;
+
+mod relay_holder;
+
+pub use relay_holder::AnnounceRelayHolder;
+pub use relay_holder::FetchRelayInbox;
+pub use relay_holder::RelayInboxReport;
 
 /// DHT protocol mode that must match before two peers join the same DHT.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Eq, PartialEq)]
@@ -58,14 +65,16 @@ impl DhtProtocolMode {
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
 ///
 /// Wire law: the codec writes a struct as its fields in order with no framing, so
-/// `{sdp, dht_protocol_mode}` encodes byte-for-byte as `{sdp, network_id, storage_redundancy,
-/// dht_virtual_nodes}` (see the tests).
+/// `{sdp, dht_protocol_mode, relay_custody}` encodes byte-for-byte as `{sdp, network_id,
+/// storage_redundancy, dht_virtual_nodes, relay_custody}` (see the tests).
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {
     /// sdp offer of webrtc
     pub sdp: String,
     /// The DHT protocol the offering node runs; the receiver answers only a matching one.
     pub dht_protocol_mode: DhtProtocolMode,
+    /// Whether the offering node holds relay mail; relay custody moves past one that does not.
+    pub relay_custody: RelayCustody,
 }
 
 /// MessageType report to origin with own transport_uuid and handshake_info.
@@ -77,6 +86,8 @@ pub struct ConnectNodeReport {
     pub sdp: String,
     /// The DHT protocol the answering node runs; the initiator admits only a matching one.
     pub dht_protocol_mode: DhtProtocolMode,
+    /// Whether the answering node holds relay mail; relay custody moves past one that does not.
+    pub relay_custody: RelayCustody,
 }
 
 /// MessageType use to find successor in a chord ring.
@@ -384,6 +395,12 @@ macro_rules! with_message_variants {
             18 => Chunk(Chunk): Application, NoStorageRoute,
             /// Beneficiary acknowledgement completing the provisional receipt.
             19 => ProbeAcknowledgement(Box<ProbeAcknowledgement>): DhtControl, NoStorageRoute,
+            /// A node passing the previous relay holder it knows to its successor head.
+            20 => AnnounceRelayHolder(AnnounceRelayHolder): Storage, NoStorageRoute,
+            /// A recipient fetching its relay inbox from its holder.
+            21 => FetchRelayInbox(FetchRelayInbox): Storage, NoStorageRoute,
+            /// The holder's answer to FetchRelayInbox.
+            22 => RelayInboxReport(RelayInboxReport): Storage, NoStorageRoute,
         }
     };
 }
@@ -655,10 +672,12 @@ mod tests {
     sample_message_body!(ConnectNodeSend, |_fixture| ConnectNodeSend {
         sdp: String::new(),
         dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
+        relay_custody: RelayCustody::Holds,
     });
     sample_message_body!(ConnectNodeReport, |_fixture| ConnectNodeReport {
         sdp: String::new(),
         dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
+        relay_custody: RelayCustody::Holds,
     });
     sample_message_body!(FindSuccessorSend, |fixture| FindSuccessorSend {
         did: fixture.did,
@@ -744,6 +763,14 @@ mod tests {
         },
         then: QueryFor::Stabilization,
         request_id: uuid::Uuid::nil(),
+    });
+    sample_message_body!(AnnounceRelayHolder, |fixture| AnnounceRelayHolder {
+        holder: fixture.did,
+        run_start: fixture.did,
+    });
+    sample_message_body!(FetchRelayInbox, |_fixture| FetchRelayInbox);
+    sample_message_body!(RelayInboxReport, |_fixture| RelayInboxReport {
+        inbox: None
     });
     sample_message_body!(Chunk, |fixture| Chunk {
         chunk: [0, 1],
@@ -926,6 +953,7 @@ mod tests {
             network_id: u32,
             storage_redundancy: u16,
             dht_virtual_nodes: u16,
+            relay_custody: RelayCustody,
         }
 
         let flattened = Flattened {
@@ -933,15 +961,18 @@ mod tests {
             network_id: 7,
             storage_redundancy: 3,
             dht_virtual_nodes: 160,
+            relay_custody: RelayCustody::HoldsNone,
         };
         let mode = DhtProtocolMode::new(7, 3, 160);
         let offer = ConnectNodeSend {
             sdp: "v=0".to_string(),
             dht_protocol_mode: mode,
+            relay_custody: RelayCustody::HoldsNone,
         };
         let answer = ConnectNodeReport {
             sdp: "v=0".to_string(),
             dht_protocol_mode: mode,
+            relay_custody: RelayCustody::HoldsNone,
         };
 
         let expected = rings_codec::serialize(&flattened).map_err(Error::CodecSerialize)?;

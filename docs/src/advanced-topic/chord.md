@@ -128,6 +128,56 @@ An overwrite (the browser provider's `storage_store`, or `storage_store` on a no
 replaces a topic: it drops every element and tombstone older than itself, and its own elements
 expire like any other.
 
+## Relay inbox
+
+A message for a peer that has no connection is held for it: the node responsible for the peer's
+position (the first node at or after it) signs the message and writes it into the peer's inbox,
+a relay carrier at the key `peer + 1` in a store of its own. Relay mail is kept only in a
+retained relay store (#1021), so a node built or run without one (a browser whose IndexedDB
+cannot open, a library node built without one) declares, in every connection handshake and in
+its online-node descriptor (`relay_custody`), that it holds no relay mail. Such a node still
+joins the ring, routes, sends and receives online messages, and owns ordinary DHT data; only
+relay custody moves past it (#1037).
+
+The **holder** of an inbox key is the first node at or after the key's owner, along the
+successor path, that holds relay mail:
+
+```text
+holder(k) = first n in [owner(k), succ(owner(k)), succ²(owner(k)), …] with holds(n)
+```
+
+One pure function, `dht::relay_holder::relay_holder`, decides it on each node's view, and every
+relay path uses it: the hold, the recipient's removal of what it delivered, the hand-off join and
+its acknowledged cleanup, the repair pass that lists what to hand off, and the recipient's
+drain. So a writer and a reader whose views cover the same nodes always name the same holder. A
+recipient that holds relay mail reads its inbox from its own store; one that does not fetches it
+from its holder (`FetchRelayInbox`, answered only to the recipient itself) and removes what it
+delivered there.
+
+A view covers the node's predecessor, the node, and its successor list. A holder also needs the
+keys owned on the storage-less run behind it, whose owners lie behind its predecessor: every node
+passes to its successor head, each repair pass, the *previous holder* it knows (itself when it
+holds relay mail, otherwise what its own predecessor passed it), and takes that record from its
+predecessor alone. The record crosses the run one link per pass, so the holder at its end learns
+where the run starts however long it is.
+
+- **No holder, no hold.** When no node from the key's owner to the end of the writer's
+  successor list holds relay mail, the writer refuses the hold itself with
+  `RelayHolderUnavailable`; the mail is never dropped silently. A node that receives a relay
+  carrier its own view does not make it hold refuses it with `RelayCarrierNotHeldHere` rather
+  than pass it on, so two views that disagree cannot bounce it.
+- **Who may hold.** The holder admits a hold only from the node responsible for the
+  destination as its view places it: its successor head for a destination it owns, itself for a
+  destination in `(predecessor, self]`, and otherwise a storage-less node of the run at or after
+  the destination.
+- **Membership changes.** The holder moves only when the first relay-capable node after the
+  owner changes. A storage-less node joining or leaving between the key and the holder moves
+  nothing. A storage-less node joining as the key's owner moves custody forward to the next
+  holder; a relay-capable node joining inside a run takes custody back from the holder after
+  it. Each move is an ownership hand-off acknowledged by the new holder before the old one
+  deletes, and the new holder takes a carrier only from a node that held it before: its
+  predecessor, its previous holder, or the next holder along its successor list.
+
 ## Finger-table convergence
 
 ### Algorithmic basis and Rings policy

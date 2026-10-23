@@ -153,8 +153,9 @@ impl SwarmBuilder {
 
     /// Set the storage of the relay-inbox namespace: the only copy of the mail this node holds
     /// or owns, so it is a `RecordAuthority::Retained` store (#1021). Without one, the node takes
-    /// custody of no relay carrier: it refuses to hold mail and to take its own inbox's
-    /// hand-off (`Error::RelayStorageUnavailable`), so the mail stays with its holder.
+    /// custody of no relay carrier and declares in its handshake that it holds no relay mail, so
+    /// relay custody moves past it to the next node that does (`dht::relay_holder`), and it
+    /// fetches its own inbox from that holder.
     pub fn relay_storage(mut self, storage: EntryStorage) -> Self {
         self.relay_storage = Some(storage);
         self
