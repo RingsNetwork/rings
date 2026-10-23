@@ -4,15 +4,15 @@
 //!
 //! The configured capacity counts rows, and rewriting an existing key never needs room. The
 //! budget law is the authority's ([`RecordAuthority`]): when a new key would exceed the
-//! capacity, a disposable store retires its least recently accessed rows first, in the same
-//! transaction, and opening it with a smaller capacity retires every excess row; an
-//! authoritative store retires nothing, so that write, or that open, fails with
+//! capacity, a disposable store or a durable cache retires its least recently accessed rows
+//! first, in the same transaction, and opening it with a smaller capacity retires every excess
+//! row; an authoritative store retires nothing, so that write, or that open, fails with
 //! `Error::StorageBudgetExhausted` and changes nothing.
 //!
 //! The durability law is also the authority's: a write reports success only once its
-//! transaction committed, and an authoritative store opens every read-write transaction with
-//! `durability: "strict"`, so a completed write survives a system crash as well as a process
-//! crash; a disposable store keeps the engine's default (#912, see `request`).
+//! transaction committed, and a durable cache or an authoritative store opens every read-write
+//! transaction with `durability: "strict"`, so a completed write survives a system crash as well
+//! as a process crash; a disposable store keeps the engine's default (#912, see `request`).
 //!
 //! # Recency is a logical clock
 //!
@@ -49,11 +49,11 @@
 //! # Record authority
 //!
 //! A store is opened with a [`RecordAuthority`], which fixes its decode law: a row whose payload
-//! the caller's type cannot decode is retired by a disposable store and reported, and kept, by
-//! an authoritative one. A disposable store holds only rows decodable as its type: `get`
-//! deletes such a row in the transaction of the read that discovers it, `get_all` deletes it in
-//! a follow-up transaction that deletes only a row still undecodable there, and both report it
-//! absent. An authoritative store (the replay store, whose bad record keeps its stream closed)
+//! the caller's type cannot decode is retired by a disposable store or a durable cache (which
+//! logs it at `warn`), and reported, and kept, by an authoritative one. A store that retires
+//! holds only rows decodable as its type: `get` deletes such a row in the transaction of the
+//! read that discovers it, `get_all` deletes it in a follow-up transaction that deletes only a
+//! row still undecodable there, and both report it absent. An authoritative store (the replay store, whose bad record keeps its stream closed)
 //! reports the decode error and leaves the row untouched. The authority governs the payload
 //! only; the row envelope is this store's own schema, and an envelope that does not decode is
 //! an error under either authority. The budget law above is also the authority's: an
@@ -461,6 +461,7 @@ impl IdbStorage {
                 None => false,
             };
             if still_undecodable {
+                self.authority.report_retired(&key);
                 scope.delete_row(&key).await?;
             }
         }
@@ -488,6 +489,7 @@ where V: DeserializeOwned + Serialize + Sized
         let value = match self.decode_under_authority(row.data.clone())? {
             Some(value) => value,
             None => {
+                self.authority.report_retired(&row.key);
                 scope.delete_row(&row.key).await?;
                 scope.done().await?;
                 return Ok(None);

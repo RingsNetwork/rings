@@ -136,6 +136,16 @@ fn test_plans_flush_before_and_after_the_rename() {
         RemoveStep::Remove,
         RemoveStep::SyncDirectory,
     ]);
+    assert_eq!(RecordAuthority::DurableCache.put_plan(), [
+        PutStep::WriteTemporary,
+        PutStep::SyncTemporary,
+        PutStep::Rename,
+        PutStep::SyncDirectory,
+    ]);
+    assert_eq!(RecordAuthority::DurableCache.remove_plan(), [
+        RemoveStep::Remove,
+        RemoveStep::SyncDirectory,
+    ]);
     assert_eq!(RecordAuthority::Disposable.put_plan(), [
         PutStep::WriteTemporary,
         PutStep::Rename,
@@ -145,21 +155,26 @@ fn test_plans_flush_before_and_after_the_rename() {
     ]);
 }
 
-/// Durability law of an authoritative put: at every crash point the record is old or new,
-/// never torn, and new once the plan completes.
+/// Durability law of an authoritative put and of a durable cache's (#911): at every crash
+/// point the record is old or new, never torn, and new once the plan completes.
 #[test]
 fn test_an_authoritative_put_is_never_torn_by_a_crash() {
-    let plan = RecordAuthority::Authoritative.put_plan();
-    for crash in 0..=plan.len() {
-        let outcomes = put_outcomes(put_effects(plan.get(..crash).unwrap_or_default()));
-        assert!(
-            outcomes
-                .iter()
-                .all(|outcome| matches!(outcome, Outcome::Old | Outcome::New)),
-            "crash after {crash} steps: {outcomes:?}"
-        );
+    for authority in [
+        RecordAuthority::Authoritative,
+        RecordAuthority::DurableCache,
+    ] {
+        let plan = authority.put_plan();
+        for crash in 0..=plan.len() {
+            let outcomes = put_outcomes(put_effects(plan.get(..crash).unwrap_or_default()));
+            assert!(
+                outcomes
+                    .iter()
+                    .all(|outcome| matches!(outcome, Outcome::Old | Outcome::New)),
+                "{authority:?}: crash after {crash} steps: {outcomes:?}"
+            );
+        }
+        assert_eq!(put_outcomes(put_effects(plan)), [Outcome::New]);
     }
-    assert_eq!(put_outcomes(put_effects(plan)), [Outcome::New]);
 }
 
 /// The model discriminates: a disposable put, which skips the flushes, can tear its record.

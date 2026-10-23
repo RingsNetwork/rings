@@ -333,10 +333,13 @@ async fn build_processor(
             .await?,
     );
     let onion_entry_guard_path = onion_entry_guard_storage_path(&data_storage.path);
+    // The entry guards are a durable cache (#911): a completed guard write survives a crash, and
+    // a guard record that is absent or does not decode is re-selected, logged, never fatal.
     let per_onion_entry_guard_storage: OnionEntryGuardStorage = Box::new(
-        FileStorage::new_with_cap_and_path(
+        FileStorage::new_with_cap_path_and_authority(
             ONION_ENTRY_GUARD_STORAGE_CAPACITY,
             onion_entry_guard_path,
+            RecordAuthority::DurableCache,
         )
         .await?,
     );

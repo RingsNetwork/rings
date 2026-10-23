@@ -671,18 +671,26 @@ fn durability_of(scope: &super::Scope) -> Option<String> {
         .as_string()
 }
 
-/// Durability law (#912): an authoritative store opens every read-write transaction with
-/// `durability: "strict"`, while a disposable one keeps the engine's default.
+/// Durability law (#912, #911): an authoritative store and a durable cache open every read-write
+/// transaction with `durability: "strict"`, while a disposable one keeps the engine's default.
 #[wasm_bindgen_test]
 async fn test_read_write_transactions_take_the_authority_durability() {
     let authoritative = create_authoritative_db_instance(2).await;
     let disposable = create_db_instance(2).await;
+    let name = format!("rings-idb-durable-cache-test-{}", uuid::Uuid::new_v4());
+    let durable_cache =
+        IdbStorage::new_with_cap_name_and_authority(2, &name, RecordAuthority::DurableCache)
+            .await
+            .unwrap();
 
     let strict = authoritative.scope(IdbTransactionMode::Readwrite).unwrap();
+    let cached = durable_cache.scope(IdbTransactionMode::Readwrite).unwrap();
     let default = disposable.scope(IdbTransactionMode::Readwrite).unwrap();
     assert_eq!(durability_of(&strict).as_deref(), Some("strict"));
+    assert_eq!(durability_of(&cached).as_deref(), Some("strict"));
     assert_eq!(durability_of(&default).as_deref(), Some("default"));
     strict.done().await.unwrap();
+    cached.done().await.unwrap();
     default.done().await.unwrap();
 
     authoritative.put("a", &"a".to_owned()).await.unwrap();

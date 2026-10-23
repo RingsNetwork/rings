@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- The onion entry-guard store is a durable cache (#911): the new `RecordAuthority::DurableCache`
+  flushes every write as an authoritative store does (native: file and directory; browser:
+  IndexedDB `durability: "strict"`), so a crash no longer loses or tears the guard set, while a
+  record that is absent or does not decode is still retired, now logged at `warn`, and the
+  guards are re-selected instead of failing onion routing. Every authority now names its point of
+  the durable-records lattice (`RecordAuthority::components`, a `Crash` and a `Meaning`), and
+  every storage law is a function of those components, not of the variant. No operator step: the
+  store's layout is unchanged.
+
 - An authoritative file store (the native replay store) marks every record it made durable with
   an empty `<name>.p` file, so a record removed, renamed or lost outside the store fails its
   stream closed as missing instead of restarting it from `First` (#915). A scan reports such a
