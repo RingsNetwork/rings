@@ -57,6 +57,7 @@ use super::Signer;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::BackendObserver;
+use crate::native::stores::NodeStores;
 
 const FFI_SIGNATURE_LEN: usize = 65;
 
@@ -400,7 +401,15 @@ pub unsafe extern "C" fn rings_node_provider_destroy(provider_ptr: *mut Provider
     provider.shutdown();
 }
 
-/// Craft a new Provider with signer.
+/// Craft a new Provider with signer, keeping its stores under `storage_path`.
+///
+/// `storage_path` is a directory the provider owns: it opens the native node's stores under it,
+/// each at its authority, as the daemon does ([`NodeStores::open_under`]): the DHT data store in
+/// `data`, the transaction replay store in `transaction-replay` (authoritative), the relay inbox
+/// in `relay-inbox` (retained), the onion entry guards in `onion-entry-guards` (a durable cache),
+/// and the measurement stores. Reusing the same path across runs keeps the replay windows, held
+/// mail and entry guards (#1022); a fresh path is a fresh node state. Creation fails, returning
+/// NULL, when a store cannot be opened.
 ///
 /// Installs the extension [`Backend`] so inbound custom messages are decoded as
 /// namespaced envelopes and routed to the protocol registry. (The old per-variant C
@@ -411,7 +420,10 @@ pub unsafe extern "C" fn rings_node_provider_destroy(provider_ptr: *mut Provider
 ///
 /// # Safety
 ///
-/// * This function cast CStr into Str
+/// String pointers, `storage_path` included, must be valid null-terminated UTF-8 strings. The
+/// signer must write exactly 65 signature bytes into the provided output buffer. Returns NULL
+/// when provider creation fails. The returned handle must be released exactly once with
+/// `rings_node_provider_destroy`.
 #[no_mangle]
 pub unsafe extern "C" fn rings_node_new_provider_with_callback(
     network_id: u32,
@@ -419,6 +431,7 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
     stabilize_interval: u64,
     account: *const c_char,
     account_type: *const c_char,
+    storage_path: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
 ) -> *mut ProviderHandle {
     fn wrapped_signer(
@@ -443,6 +456,7 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
         let ice: String = c_char_to_string(ice_server)?;
         let acc: String = c_char_to_string(account)?;
         let acc_ty: String = c_char_to_string(account_type)?;
+        let storage_root = std::path::PathBuf::from(c_char_to_string(storage_path)?);
 
         let creation = std::thread::Builder::new()
             .name("rings-ffi-provider-init".to_owned())
@@ -450,20 +464,24 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
                 let runtime = Arc::new(Runtime::new().map_err(|error| {
                     Error::ExtensionError(format!("failed to create runtime: {error}"))
                 })?);
-                let provider = runtime.block_on(Provider::new_provider_internal(
-                    network_id,
-                    ice,
-                    stabilize_interval,
-                    acc,
-                    acc_ty,
-                    Signer::Sync(Box::new(wrapped_signer(signer))),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ))?;
+                let provider = runtime.block_on(async {
+                    let stores = NodeStores::open_under(&storage_root).await?;
+                    Provider::new_provider_internal(
+                        network_id,
+                        ice,
+                        stabilize_interval,
+                        acc,
+                        acc_ty,
+                        Signer::Sync(Box::new(wrapped_signer(signer))),
+                        Some(stores.data),
+                        Some(stores.relay),
+                        Some(stores.measure),
+                        Some(stores.evidence),
+                        Some(stores.guards),
+                        Some(stores.replay),
+                    )
+                    .await
+                })?;
                 Ok((provider, runtime))
             })
             .map_err(|error| {
@@ -603,8 +621,18 @@ mod tests {
         response_string
     }
 
+    /// A fresh storage root under the system temporary directory, as a path and a C string.
+    fn storage_root() -> (std::path::PathBuf, CString) {
+        let root = std::env::temp_dir().join(format!("rings-ffi-{}", uuid::Uuid::new_v4()));
+        let c_root = c_string(&root.to_string_lossy());
+        (root, c_root)
+    }
+
+    /// Create, use and destroy a provider three times over one storage root: each run reopens
+    /// the stores the previous one left there (#1022).
     #[test]
     fn test_ffi_provider_handle_create_listen_request_destroy_cycles() {
+        let (root, storage_path) = storage_root();
         for _ in 0..3 {
             let ice_server = c_string("stun://stun.l.google.com");
             let account = c_string(TEST_ACCOUNT);
@@ -616,6 +644,7 @@ mod tests {
                     1,
                     account.as_ptr(),
                     account_type.as_ptr(),
+                    storage_path.as_ptr(),
                     test_signer,
                 )
             };
@@ -643,6 +672,9 @@ mod tests {
                 "destroy must release the provider callback reference cycle"
             );
         }
+        assert!(root.join("transaction-replay").is_dir());
+        assert!(root.join("relay-inbox").is_dir());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -658,6 +690,7 @@ mod tests {
         let ice_server = c_string("stun://stun.l.google.com");
         let account = c_string(TEST_ACCOUNT);
         let account_type = c_string("eip191");
+        let (root, storage_path) = storage_root();
         let handle = unsafe {
             rings_node_new_provider_with_callback(
                 0,
@@ -665,12 +698,14 @@ mod tests {
                 1,
                 account.as_ptr(),
                 account_type.as_ptr(),
+                storage_path.as_ptr(),
                 test_signer,
             )
         };
 
         assert!(!handle.is_null());
         unsafe { rings_node_provider_destroy(handle) };
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
