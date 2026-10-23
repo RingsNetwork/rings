@@ -76,7 +76,6 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use web_sys::IdbDatabase;
 use web_sys::IdbObjectStore;
-use web_sys::IdbTransaction;
 use web_sys::IdbTransactionMode;
 
 use crate::error::Error;
@@ -160,8 +159,8 @@ fn clock_store_name(name: &str) -> String {
 /// reporting durable success (the durability law of `request`). A failed request aborts the
 /// whole transaction.
 struct Scope {
-    /// Completion witness of the transaction.
-    transaction: IdbTransaction,
+    /// The transaction, its commit watched from the moment it opened.
+    commit: request::CommitWatch,
     /// Rows keyed by `key` and indexed by `access_stamp`.
     rows: IdbObjectStore,
     /// The single clock record under [`CLOCK_KEY`].
@@ -172,7 +171,7 @@ impl Scope {
     /// Await the commit of every request issued in this scope: under strict durability, the
     /// flushed commit.
     async fn done(self) -> Result<()> {
-        request::commit(&self.transaction).await
+        self.commit.committed().await
     }
 
     /// The row stored under `key`, or `undefined`.
@@ -370,20 +369,22 @@ impl IdbStorage {
         } else {
             request::Durability::Default
         };
-        let transaction = request::transaction(
+        let commit = request::transaction(
             &self.db,
             &[&self.storage_name, &self.clock_store_name],
             mode,
             durability,
         )?;
-        let rows = transaction
+        let rows = commit
+            .transaction()
             .object_store(&self.storage_name)
             .map_err(request::js_error)?;
-        let clock = transaction
+        let clock = commit
+            .transaction()
             .object_store(&self.clock_store_name)
             .map_err(request::js_error)?;
         Ok(Scope {
-            transaction,
+            commit,
             rows,
             clock,
         })

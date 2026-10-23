@@ -666,7 +666,7 @@ async fn test_authoritative_get_leaves_stamp_and_clock_unchanged() {
 
 /// The durability hint a read-write transaction was opened with, as the engine reports it.
 fn durability_of(scope: &super::Scope) -> Option<String> {
-    js_sys::Reflect::get(&scope.transaction, &JsValue::from("durability"))
+    js_sys::Reflect::get(scope.commit.transaction(), &JsValue::from("durability"))
         .unwrap()
         .as_string()
 }
@@ -739,4 +739,43 @@ async fn test_open_upgrades_an_older_schema_to_the_current_one() {
     let indexes = scope.rows.index_names();
     assert_eq!(indexes.length(), 1);
     assert_eq!(indexes.get(0).as_deref(), Some(ACCESS_STAMP_INDEX));
+}
+
+/// Resolve on the event loop's next task: every event already queued (a transaction's
+/// `complete` included) is dispatched first.
+async fn next_task() {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        web_sys::window()
+            .unwrap()
+            .set_timeout_with_callback(&resolve)
+            .unwrap();
+    });
+    wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
+}
+
+/// Settlement law: a commit is watched from the moment its transaction opens, so a scope that
+/// awaits something else after its last request, long enough for the transaction to complete
+/// first, still sees the commit.
+#[wasm_bindgen_test]
+async fn test_a_commit_is_seen_whatever_runs_before_done() {
+    let instance = create_db_instance(2).await;
+    let scope = instance.scope(IdbTransactionMode::Readwrite).unwrap();
+    scope.delete_row("absent").await.unwrap();
+    next_task().await;
+    scope.done().await.unwrap();
+}
+
+/// Settlement law: a request future dropped before it settles unregisters its handlers, so the
+/// event that settles it later finds none, and its transaction still commits.
+#[wasm_bindgen_test]
+async fn test_a_dropped_request_future_leaves_no_handler() {
+    use futures::FutureExt;
+
+    let instance = create_db_instance(2).await;
+    let scope = instance.scope(IdbTransactionMode::Readwrite).unwrap();
+    let pending = scope.rows.get(&JsValue::from("absent")).unwrap();
+    assert!(super::request::request(&pending).now_or_never().is_none());
+    assert!(pending.onsuccess().is_none());
+    assert!(pending.onerror().is_none());
+    scope.done().await.unwrap();
 }

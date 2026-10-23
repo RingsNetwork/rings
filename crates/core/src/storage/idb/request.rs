@@ -11,9 +11,11 @@
 //! `IDBDatabase.transaction` only under `web_sys_unstable_apis`, a flag every dependent build
 //! would have to set, so that one call is bound here ([`transaction`]).
 //!
-//! Settlement law: every future here registers its handlers, awaits the first of them to fire,
-//! and unregisters them before it returns, so it resolves exactly once, a handler never outlives
-//! its future, and a later event of the same target finds no stale handler.
+//! Settlement law: every request and every commit is settled by handlers registered before the
+//! event can fire (a commit's when its transaction opens, [`CommitWatch`]), resolves exactly
+//! once on the first of them, and unregisters them when its watch is dropped, whether its
+//! future ran to completion or was dropped mid-await, so a handler never outlives its watch and
+//! a later event of the same target finds no stale handler.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -136,7 +138,7 @@ fn outcome() -> (Outcome, oneshot::Receiver<Result<JsValue>>) {
 }
 
 /// Await `receiver`; a sender dropped unsettled is an error, never a hang.
-async fn settled(receiver: oneshot::Receiver<Result<JsValue>>) -> Result<JsValue> {
+async fn settled(receiver: &mut oneshot::Receiver<Result<JsValue>>) -> Result<JsValue> {
     receiver
         .await
         .map_err(|_| Error::IDBError("request dropped before it settled".to_owned()))?
@@ -151,56 +153,128 @@ fn request_error(request: &IdbRequest) -> Error {
     }
 }
 
+/// The handlers one request is settled by, unregistered when this watch is dropped, whether its
+/// future ran to completion or was dropped mid-await (the settlement law).
+struct RequestWatch {
+    /// The watched request.
+    request: IdbRequest,
+    /// Its `success` and `error` handlers, kept alive while they are registered.
+    _handlers: [Closure<dyn FnMut(Event)>; 2],
+    /// The outcome the first handler to fire settles.
+    receiver: oneshot::Receiver<Result<JsValue>>,
+}
+
+impl RequestWatch {
+    /// Register the handlers that settle `request`.
+    fn new(request: &IdbRequest) -> Self {
+        let (outcome, receiver) = outcome();
+        let on_success = handler(&outcome, {
+            let request = request.clone();
+            move || request.result().map_err(js_error)
+        });
+        let on_error = handler(&outcome, {
+            let request = request.clone();
+            move || Err(request_error(&request))
+        });
+        request.set_onsuccess(Some(on_success.as_ref().unchecked_ref()));
+        request.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+        Self {
+            request: request.clone(),
+            _handlers: [on_success, on_error],
+            receiver,
+        }
+    }
+}
+
+impl Drop for RequestWatch {
+    /// Unregister both handlers before they are dropped.
+    fn drop(&mut self) {
+        self.request.set_onsuccess(None);
+        self.request.set_onerror(None);
+    }
+}
+
 /// Await `request`: its result on `success`, its error on `error` (the settlement law). A
 /// failed request also aborts its transaction, unless a handler prevents that; none does.
 pub(super) async fn request(request: &IdbRequest) -> Result<JsValue> {
-    let (outcome, receiver) = outcome();
-    let on_success = handler(&outcome, {
-        let request = request.clone();
-        move || request.result().map_err(js_error)
-    });
-    let on_error = handler(&outcome, {
-        let request = request.clone();
-        move || Err(request_error(&request))
-    });
-    request.set_onsuccess(Some(on_success.as_ref().unchecked_ref()));
-    request.set_onerror(Some(on_error.as_ref().unchecked_ref()));
-    let result = settled(receiver).await;
-    request.set_onsuccess(None);
-    request.set_onerror(None);
-    result
+    let mut watch = RequestWatch::new(request);
+    settled(&mut watch.receiver).await
 }
 
-/// Await the commit of `transaction`: `Ok` on `complete`, the transaction's error on `error` or
-/// `abort` (the settlement law). Under [`Durability::Strict`], `complete` is the flushed
-/// commit.
-pub(super) async fn commit(transaction: &IdbTransaction) -> Result<()> {
-    let (outcome, receiver) = outcome();
-    let on_complete = handler(&outcome, || Ok(JsValue::UNDEFINED));
-    let failed = {
-        let transaction = transaction.clone();
-        move || {
-            Err(transaction.error().map_or_else(
-                || Error::IDBError("transaction aborted".to_owned()),
-                |exception| js_error(exception.into()),
-            ))
+/// The commit of one transaction, watched from the moment it opens: `complete`, `error` and
+/// `abort` handlers are registered before any request is issued, so no event can precede them
+/// whatever the caller awaits between its last request and [`Self::committed`], and they are
+/// unregistered when the watch is dropped (the settlement law).
+pub(super) struct CommitWatch {
+    /// The watched transaction.
+    transaction: IdbTransaction,
+    /// Its `complete`, `error` and `abort` handlers, kept alive while they are registered.
+    _handlers: [Closure<dyn FnMut(Event)>; 3],
+    /// The outcome the first handler to fire settles.
+    receiver: oneshot::Receiver<Result<JsValue>>,
+}
+
+impl CommitWatch {
+    /// Register the handlers that settle the commit of `transaction`.
+    fn new(transaction: &IdbTransaction) -> Self {
+        let (outcome, receiver) = outcome();
+        let on_complete = handler(&outcome, || Ok(JsValue::UNDEFINED));
+        let failed = {
+            let transaction = transaction.clone();
+            move || {
+                Err(transaction.error().map_or_else(
+                    || Error::IDBError("transaction aborted".to_owned()),
+                    |exception| js_error(exception.into()),
+                ))
+            }
+        };
+        let on_error = handler(&outcome, failed.clone());
+        let on_abort = handler(&outcome, failed);
+        transaction.set_oncomplete(Some(on_complete.as_ref().unchecked_ref()));
+        transaction.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+        transaction.set_onabort(Some(on_abort.as_ref().unchecked_ref()));
+        Self {
+            transaction: transaction.clone(),
+            _handlers: [on_complete, on_error, on_abort],
+            receiver,
         }
-    };
-    let on_error = handler(&outcome, failed.clone());
-    let on_abort = handler(&outcome, failed);
-    transaction.set_oncomplete(Some(on_complete.as_ref().unchecked_ref()));
-    transaction.set_onerror(Some(on_error.as_ref().unchecked_ref()));
-    transaction.set_onabort(Some(on_abort.as_ref().unchecked_ref()));
-    let result = settled(receiver).await;
-    transaction.set_oncomplete(None);
-    transaction.set_onerror(None);
-    transaction.set_onabort(None);
-    result.map(|_| ())
+    }
+
+    /// The transaction this watch observes.
+    pub(super) fn transaction(&self) -> &IdbTransaction {
+        &self.transaction
+    }
+
+    /// Await the commit: `Ok` on `complete`, the transaction's error on `error` or `abort`.
+    /// Under [`Durability::Strict`], `complete` is the flushed commit.
+    pub(super) async fn committed(mut self) -> Result<()> {
+        settled(&mut self.receiver).await.map(|_| ())
+    }
+}
+
+impl Drop for CommitWatch {
+    /// Unregister the three handlers before they are dropped.
+    fn drop(&mut self) {
+        self.transaction.set_oncomplete(None);
+        self.transaction.set_onerror(None);
+        self.transaction.set_onabort(None);
+    }
 }
 
 /// Open a transaction over `stores` in `mode`, read-write ones with `durability` (the
-/// durability law); a read-only transaction takes no hint.
+/// durability law), and watch its commit from that moment; a read-only transaction takes no
+/// hint.
 pub(super) fn transaction(
+    db: &IdbDatabase,
+    stores: &[&str],
+    mode: IdbTransactionMode,
+    durability: Durability,
+) -> Result<CommitWatch> {
+    open_transaction(db, stores, mode, durability).map(|transaction| CommitWatch::new(&transaction))
+}
+
+/// Open the transaction of [`transaction`].
+fn open_transaction(
     db: &IdbDatabase,
     stores: &[&str],
     mode: IdbTransactionMode,
@@ -275,9 +349,30 @@ fn store_in_upgrade(
         .map_err(js_error)
 }
 
+/// The `upgradeneeded` and `blocked` handlers of one open, unregistered when dropped (the
+/// settlement law).
+struct OpenWatch {
+    /// The watched open request.
+    open: IdbOpenDbRequest,
+    /// Its handlers, kept alive while they are registered.
+    _handlers: [Closure<dyn FnMut(Event)>; 2],
+}
+
+impl Drop for OpenWatch {
+    /// Unregister both handlers before they are dropped.
+    fn drop(&mut self) {
+        self.open.set_onupgradeneeded(None);
+        self.open.set_onblocked(None);
+    }
+}
+
 /// Open the database `name` at `schema`, upgrading it in the version-change transaction when
 /// its stored version is lower. An upgrade that fails aborts that transaction, so the open
 /// fails and the stored database is unchanged.
+///
+/// An upgrade waits while another connection holds the database at an older version (another
+/// tab of the origin still running an earlier release): the open stays pending until that
+/// connection closes, and `blocked` is logged at `warn` so a stuck open is diagnosable.
 pub(super) async fn open(name: &str, schema: Schema) -> Result<IdbDatabase> {
     let open = factory()?
         .open_with_u32(name, schema.version)
@@ -295,9 +390,23 @@ pub(super) async fn open(name: &str, schema: Schema) -> Result<IdbDatabase> {
             }
         })
     };
+    let on_blocked = {
+        let name = name.to_owned();
+        Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+            tracing::warn!(
+                database = %name,
+                "IndexedDB upgrade blocked by another connection at an older version; waiting"
+            );
+        })
+    };
     open.set_onupgradeneeded(Some(on_upgrade.as_ref().unchecked_ref()));
+    open.set_onblocked(Some(on_blocked.as_ref().unchecked_ref()));
+    let watch = OpenWatch {
+        open: open.clone(),
+        _handlers: [on_upgrade, on_blocked],
+    };
     let opened = request(&open).await;
-    open.set_onupgradeneeded(None);
+    drop(watch);
     if let Some(error) = failure.borrow_mut().take() {
         return Err(error);
     }
