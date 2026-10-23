@@ -285,6 +285,13 @@ the store's own directory.  Let $R$ be the set of record names listed, $P$ the s
 with a marker, both from one listing.
 \end{definition}
 
+\begin{law}[Markers are not records]\label{law:notrecord}
+A name ending in $.\mathtt{p}$ is never a record name: the index and
+\texttt{entry\_file\_name} skip it, so it is never indexed, scanned as $\Undec$, counted
+against the byte budget, or counted by $\mathtt{TRANSACTION\_REPLAY\_STORE\_MAX\_RECORDS}$ or
+the refusal of Law~\ref{law:refuse}.  Every bound counts $R$ only.
+\end{law}
+
 \begin{law}[Write order]\label{law:writeorder}
 An authoritative $\mathrm{put}(n,v)$ runs
 \begin{align*}
@@ -320,10 +327,15 @@ first operation.  The owner's $\U$ is $\{n:\Undec(n)\}\cup\{n:\Missing(n)\}$.
 $R\setminus P$ is the crash between the rename and the marker: the record is whole and
 present, so it witnesses itself, and the repair restores $P=R$.
 
+A rolled back rename is not among them: under D a completed rename does not roll back, and
+on a platform without D the marker's creation is not ordered after the rename, so both may
+vanish together.  It stays a loss event of Definition~\ref{def:loss}, which
+Law~\ref{law:writethrough} removes on Windows.
+
 \begin{proposition}[W holds]\label{prop:w}
 On a platform that discharges D, Laws~\ref{law:writeorder} and \ref{law:restore} discharge
 Obligation~\ref{ob:witness} for every partial loss that leaves markers: a removed or renamed
-record file, a record lost by \texttt{fsck}, a rolled back rename of a new record.
+record file, or a record lost by \texttt{fsck}.
 \end{proposition}
 \begin{proof}
 \emph{Complete.}  Let $n\in\dom\sigma_k$; its first $\mathrm{put}$ completed, so
@@ -358,9 +370,11 @@ record of $k$ returns $\Err$, never $\Ok(\bot)$; $\Ok(\bot)$ means $\name(k)\not
 
 This closes the two cases added to \issue{915} in review: a store whose root vanishes while
 the node runs answers $\Err$ for every witnessed name (as its persist already fails), and an
-upper-cased record file, which a case-insensitive volume still opens through $\mathrm{get}$,
-is $\Missing$ to both $\mathrm{get}$ and $\mathrm{scan}$ because its lower-case marker
-remains.
+upper-cased record file is $\Missing$ to $\mathrm{scan}$, and so in $\U$, because its
+lower-case marker remains.  On a case-insensitive volume $\mathrm{get}$ still opens that file
+and returns its value; making $\mathrm{get}$ agree would need a listing on every read.  Safety
+does not depend on $\mathrm{get}$: the owner restores from $\mathrm{scan}$ and consults $\U$
+before any transition.
 
 \begin{assumption}[Browsers lose whole origins]\label{as:idbloss}
 A browser deletes stored data per origin, never part of it~\cite{MDNEviction}; this
