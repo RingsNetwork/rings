@@ -1,0 +1,34 @@
+[package]
+name = "rings-dns-relay"
+description = "DNS relay for Rings: names every node <did>.<zone> and relays its services to the internet."
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
+hickory-server = { version = "0.26.3", default-features = false }
+hmac = "0.12.1"
+ipnet = { version = "2.11.0", features = ["serde"] }
+ppp = "2.3.0"
+rand = { version = "0.8.5", features = ["getrandom"] }
+serde = { version = "1.0.136", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10.6"
+socket2 = "0.6.5"
+thiserror = "1"
+tokio = { version = "1.13.0", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+tracing = "0.1.37"
+zeroize = { workspace = true }
+
+[dev-dependencies]
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
+tempfile = "3"
+tokio = { version = "1.13.0", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/*",
+    "examples/mailbox",
     "examples/native",
     "examples/relay",
 ]
@@ -24,6 +25,7 @@ rings-aez = { path = "crates/aez", version = "0.35.0" }
 rings-codec = { path = "crates/codec", version = "0.35.0" }
 rings-core = { path = "crates/core", version = "0.35.0", default-features = false }
 rings-derive = { path = "crates/derive", version = "0.35.0", default-features = false }
+rings-dns-relay = { path = "crates/dns-relay", version = "0.35.0" }
 rings-gateway = { path = "crates/gateway", version = "0.35.0" }
 rings-measure = { path = "crates/measure", version = "0.35.0" }
 rings-network-policy = { path = "crates/network-policy", version = "0.35.0" }
