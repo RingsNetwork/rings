@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A writer's successive storage writes to a key keep their issue order (#1033). The storage API
+  stamped each write at its wall-clock millisecond alone, so two appends in one millisecond tied
+  on the time and were listed by the digest of their data, and a re-append in the same
+  millisecond issued the same dot and did not move to the end. A write is now stamped above
+  every version the writer's cache holds for the key, at most the clock tolerance ahead of its
+  clock, so with read-your-writes (#982) a writer's appends ascend in the dot order, and a write
+  follows every value its writer read.
 - Registry heartbeats re-append a signed lease (#918; removal-stability paper, Laws 8 and 9).
   An online-node, onion-exit or DNS-relay service descriptor no longer signs a heartbeat time:
   it signs a lease end (`expires_at_ms`, 10 minutes after it is issued) and a freshness window

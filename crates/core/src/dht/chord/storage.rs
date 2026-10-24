@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use super::PeerRing;
 use super::PeerRingAction;
 use super::RemoteAction;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::entry::inbox::inbox_destination;
 use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::AdmittedEntry;
@@ -14,6 +15,7 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryLookupEvidence;
 use crate::dht::entry::EntryLookupKey;
 use crate::dht::entry::EntryOperation;
+use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
@@ -690,6 +692,37 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         join_live_entry(&self.cache, &key, admitted, now_ms)
             .await
             .map(drop)
+    }
+
+    /// Stamp this node's own write `op` above the greatest version the cache holds for its key,
+    /// counted up to the clock tolerance `σ`:
+    ///
+    /// ```text
+    ///   floor = min(max_version(cache[k]), now + σ − 1)    op.stamped_after(now, self, floor)
+    /// ```
+    ///
+    /// Post: every version `op` issues exceeds every version of `cache[k]` below `now + σ`, so
+    /// it follows each earlier write of this node that the cache observed and each value the
+    /// node read, and it lies at or below `now + σ`, which every owner and this cache admit. A
+    /// held version at `now + σ` itself, which only a writer whose clock runs `σ` ahead issues,
+    /// can tie with the write's and is then ordered by actor and digest.
+    async fn local_cache_stamp_write(
+        &self,
+        op: EntryOperation,
+        now_ms: u128,
+    ) -> Result<EntryOperation> {
+        let below_ceiling = now_ms
+            .saturating_add(TS_OFFSET_TOLERANCE_MS)
+            .saturating_sub(1);
+        let floor = self
+            .local_cache_held(op.entry().did, now_ms)
+            .await?
+            .and_then(|held| held.max_observed_version())
+            .map(|version| EntryVersion {
+                logical_time_ms: version.logical_time_ms.min(below_ceiling),
+                ..version
+            });
+        op.stamped_after(now_ms, self.did, floor)
     }
 
     /// Observe this node's own write `op` in the cache: `cache[k] ← (cache[k] or ⊥).operate(op)`,

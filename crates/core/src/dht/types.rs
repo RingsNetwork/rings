@@ -126,6 +126,12 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 ///   With read-join this gives read-your-writes: once a write has returned `Ok`, every read of
 ///   `k` by its writer contains it while `k` stays resident and the write is live, whichever
 ///   owner a later lookup reaches.
+/// - Writer order (#1033): a node stamps its own write above every version its cache holds
+///   for the key ([`Self::local_cache_stamp_write`]). Read-your-writes puts each of its writes
+///   to `k` in its cache before the next is issued, so, while `k` stays resident, its
+///   successive writes ascend in the dot order whatever its clock reads, and every reader
+///   lists them in issue order: two writes in one millisecond, or across a step back of the
+///   clock, keep their order, as does a write after every value its writer read.
 /// - Residency: evicting a key at capacity, or retiring it under the retention law,
 ///   un-observes it, and its next read starts again from the replies it gets.
 /// - Linearization (#922): a read is pure. It projects the value it loaded at its own clock,
@@ -138,6 +144,13 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 pub trait ChordStorageCache<Action>: Chord<Action> {
     /// Join a fetched resource into the local cache.
     async fn local_cache_put(&self, entry: Entry) -> Result<()>;
+    /// Stamp this node's own write `op` at the operation boundary `now_ms`, above every version
+    /// the local cache holds for its key (the writer-order law).
+    async fn local_cache_stamp_write(
+        &self,
+        op: EntryOperation,
+        now_ms: u128,
+    ) -> Result<EntryOperation>;
     /// Apply this node's own stamped write `op` to the local cache, as every owner applies it.
     async fn local_cache_observe_write(&self, op: EntryOperation) -> Result<()>;
     /// Get a live cached entry as a lookup serves it: a carrier past its retention bound is

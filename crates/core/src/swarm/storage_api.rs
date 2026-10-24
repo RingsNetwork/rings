@@ -132,11 +132,14 @@ impl ScopedStorage<'_> {
     /// observe it in this node's cache: the read-your-writes law of
     /// [`ChordStorageInterface`].
     ///
-    /// The operation is stamped once, here: stamping is idempotent, so the owners apply and the
-    /// cache observes the same dots. An `Err` observes nothing.
+    /// The operation is stamped once, here, above every version the cache holds for its key
+    /// (the writer-order law of [`ChordStorageCache`]): stamping is idempotent, so the owners
+    /// apply and the cache observes the same dots. An `Err` observes nothing.
     async fn operate_observed(&self, operation: EntryOperation) -> Result<()> {
         let dht = &self.transport.dht;
-        let operation = operation.stamped(get_epoch_ms(), dht.did)?;
+        let operation = dht
+            .local_cache_stamp_write(operation, get_epoch_ms())
+            .await?;
         operate_entry(self.transport, operation.clone(), self.attempts()).await?;
         dht.local_cache_observe_write(operation).await
     }

@@ -366,11 +366,25 @@ impl EntryOperation {
     /// Post: every carried entry has `expires_at_ms = Some(_)`; an absent bound becomes
     /// `now_ms + kind.default_lifetime_ms()`.
     pub fn stamped(self, now_ms: u128, actor: Did) -> Result<Self> {
+        self.stamped_after(now_ms, actor, None)
+    }
+
+    /// [`Self::stamped`], issuing every new version above `floor`.
+    ///
+    /// A new version is `v = (now_ms, actor, digest)` when `v > floor`, and otherwise
+    /// `(floor.logical_time_ms + 1, actor, digest)`, so `v > floor` in the dot order whatever
+    /// `now_ms` reads. An operation that already carries its witness keeps it.
+    pub fn stamped_after(
+        self,
+        now_ms: u128,
+        actor: Did,
+        floor: Option<EntryVersion>,
+    ) -> Result<Self> {
         let stamp = self.stamp_kind();
         self.try_map_entry(|entry| {
             let entry = entry.ensure_lifetime_from(now_ms);
             match stamp {
-                Some(kind) => entry.ensure_stamp_after(now_ms, actor, None, kind),
+                Some(kind) => entry.ensure_stamp_after(now_ms, actor, floor, kind),
                 None => Ok(entry),
             }
         })
@@ -518,7 +532,9 @@ impl Entry {
             .chain(self.crdt.register)
     }
 
-    fn max_observed_version(&self) -> Option<EntryVersion> {
+    /// The greatest version this entry carries: a version issued above it follows every dot,
+    /// tombstone and reset floor here.
+    pub(crate) fn max_observed_version(&self) -> Option<EntryVersion> {
         self.versions().max()
     }
 
