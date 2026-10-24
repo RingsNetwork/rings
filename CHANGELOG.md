@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.36.0
 
 - DNS relay (#1049): every node is named `<did>.<zone>` in each zone a relay serves, and the
   services it announces are reachable there from the internet. The new crate `rings-dns-relay`
