@@ -752,9 +752,9 @@ $\Mem_r(k)$ is the first $r$ nodes $n$ of $\own(k),\nxt(\own(k)),\nxt^2(\own(k))
 with $\mathrm{holds}(n)$; its first, $h_0(k)$, is the holder of \issue{1037}.  The
 \emph{rank} of a member is $\mathrm{rank}_k(n)=|\{m\in\Mem_r(k): m\text{ before }n\}|$, and its
 \emph{next member} $\mathrm{next}_k(n)$ is the member of rank $\mathrm{rank}_k(n)+1$.  $r$ is
-configurable; the default $r=8$ keeps a held message's loss below $10^{-3}$ over its 24\,h
-retention with 90\% browser holders whose median session is 15\,s, given the repair delay of
-Law~\ref{law:eventrepair} (\issue{777}); it is to be recalibrated on \issue{773}'s churn
+configurable, default $r=8$, aimed at a held message's loss below $10^{-3}$ over its 24\,h
+retention with 90\% browser holders (\issue{777}); which session models it covers is stated
+with the departure classes below, and it is to be recalibrated on \issue{773}'s churn
 simulator.
 \end{definition}
 
@@ -838,6 +838,27 @@ once, so the hole closes along the chain in at most $r$ hops.  A missed event le
 periodic pass.
 \end{proof}
 
+\textbf{Departure classes.}  $T_d$ depends on how a member leaves.  A \emph{graceful} departure
+closes its connections, so its neighbours detect it at once: $T_d\approx0$, and
+$D_g=r\,\delta$, seconds.  A \emph{silent} one (a crash, a dropped network, a suspended tab)
+is detected only when its liveness check fails, after \texttt{PEER\_LIVENESS\_TIMEOUT\_MS} of
+45\,s: $D_s\approx45\,\mathrm{s}+r\,\delta$, about a minute.  With $\sigma$ the fraction of
+departures that are silent and $\varepsilon_r(D)$ the probability that all $r$ members of a key
+are lost within one window $D$, a held message's loss over its retention is bounded, to first
+order, by the mixture
+\[
+\varepsilon\;\le\;(1-\sigma)\,\varepsilon_r(D_g)+\sigma\,\varepsilon_r(D_s),
+\]
+since an element's window opens with the loss of its first member, whose class sets $D$ (a
+later member's class only shortens or lengthens the same window's repair).  By
+the table of \issue{777}, $r=8$ meets $10^{-3}$ for Weibull ($k=0.5$) sessions of median
+1\,min at $D=60$\,s, so for any $\sigma$; for a median of 15\,s it meets it only at $D=10$\,s,
+that is with $\sigma\approx0$, and a silent fraction at that median needs $r\approx14$.  Two
+levers move $\sigma$ and $D_s$ instead of $r$: a leave on \jsq{pagehide} (\issue{1057}) makes a
+closing tab's departure graceful, and a shorter liveness timeout between chain neighbours bounds
+$D_s$; with them $r=8$ covers the 15\,s median.  The laws hold for every $r$; these figures
+only choose its default.
+
 \begin{proposition}[Acknowledged copies survive]\label{prop:copies}
 In a window where the views agree on $\Mem_r$ (S4), an acknowledged element has $q(k)$ copies,
 and is lost only if every member holding it is lost within $D$.
@@ -885,10 +906,17 @@ node's from 64\,MiB to $64\,r$\,MiB, a cap on a store that evicts nothing, not s
 A member whose store is full still refuses a copy (N): it does not acknowledge, so the chain
 acknowledges no writer, which resends until the sender proof expires and then drops the hold
 with a warning, as a full store's refusal did before.  So exhaustion never lowers $q(k)$; it
-refuses new mail.
+refuses new mail.  Its blast radius is the keys whose chain contains the full member, those
+whose owner lies in $(p_r(m),m]$ (Lemma~\ref{lem:range}): about $r$ holders' arcs refuse new
+mail while it is full, and every other key is unaffected.  Isolating one origin's load from
+another's within a store is the per-origin share of \issue{907} and \issue{1060}, not this
+law's.
 
-\textbf{Costs.}  A hold costs $r-1$ forwarded copies, $r-1$ acknowledgements, and a
-round trip of $r$ hops before the writer's acknowledgement.  A pass offers each carrier's
+\textbf{Costs.}  A hold costs $r-1$ forwarded copies and $r-1$ acknowledgements, and the
+writer's acknowledgement waits for the chain's round trip, about $2(q-1)\,\delta\le2r\,\delta$.
+A member that leaves mid-chain stalls the acknowledgement until its loss is detected and the
+chain repaired, within $D+2r\,\delta$ of its departure ($D$ by its class); the writer keeps and
+resends the hold meanwhile, so the stall delays the acknowledgement and loses nothing.  A pass offers each carrier's
 digest to two chain neighbours and copies only on a difference.  A list of
 Law~\ref{law:previous} carries $r$ pairs.  A best-effort leave on departure (\issue{1057})
 shortens $T_d$ and is never needed for this section's laws.
