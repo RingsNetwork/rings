@@ -201,6 +201,36 @@ pub(crate) fn held_inbox_for(destination: Did, holder: &DelegateeKey) -> Result<
 }
 
 pub(crate) mod activity;
+
+/// The payload frames one node's transport dispatched since this value was taken.
+///
+/// A test that asserts how many frames it sent counts them here, not with the thread's
+/// `dummy_controlled::sent_count`. Every node of a test runs on the test's thread, so the
+/// thread's count also holds what a peer sends in answer, such as a probe offer, a storage
+/// report or a confirmation, whenever the peer's handler is polled before the assertion (#1034).
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) struct DispatchedFrames<'a> {
+    /// The node's transport.
+    transport: &'a SwarmTransport,
+    /// Its count when this value was taken.
+    before: usize,
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl<'a> DispatchedFrames<'a> {
+    /// Count the payload frames `transport` dispatches from now.
+    pub(crate) fn from_now(transport: &'a SwarmTransport) -> Self {
+        Self {
+            transport,
+            before: transport.dispatched_payload_frames_for_test(),
+        }
+    }
+
+    /// The payload frames dispatched since [`Self::from_now`].
+    pub(crate) fn count(&self) -> usize {
+        self.transport.dispatched_payload_frames_for_test() - self.before
+    }
+}
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub mod wasm;
 

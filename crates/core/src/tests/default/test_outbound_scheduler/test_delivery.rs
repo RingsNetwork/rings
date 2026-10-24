@@ -1,5 +1,6 @@
 use super::*;
 use crate::swarm::application::ApplicationData;
+use crate::tests::DispatchedFrames;
 
 #[tokio::test]
 async fn test_missing_connection_records_locally_addressed_failure() -> Result<()> {
@@ -102,7 +103,7 @@ async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_l
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let _pending_close = PendingCloseGuard::new();
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let held = fill_application_window(&node1, peer, "stalled-delivery").await?;
 
     let second_swarm = node1.swarm.clone();
@@ -140,7 +141,7 @@ async fn test_delivery_timeout_marks_generation_terminal_before_releasing_fifo_l
         ),
         "unexpected terminal-generation result: {second_result:?}"
     );
-    assert_eq!(dummy_controlled::sent_count(), OUTBOUND_LANE_WINDOW);
+    assert_eq!(dispatched.count(), OUTBOUND_LANE_WINDOW);
     timeout(
         Duration::from_secs(2),
         node1.swarm.stabilizer().clean_unavailable_connections(),

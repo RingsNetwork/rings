@@ -674,6 +674,13 @@ impl SwarmTransport {
             .map_err(Error::Transport)
     }
 
+    /// Test builds: the payload frames this node's transport has dispatched, over every
+    /// connection; see [`crate::tests::DispatchedFrames`].
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn dispatched_payload_frames_for_test(&self) -> usize {
+        self.transport.dispatched_payload_frames()
+    }
+
     pub(crate) async fn get_and_check_send_connection(
         &self,
         peer: Did,
