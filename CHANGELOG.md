@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fetch-cache linearization (#922): a cache read is pure and every cache change is one
+  transition under the cache transition (removal-stability paper, Law 7), so a read that
+  retires a dead entry can no longer drop a concurrent put. The behaviour has held since #913;
+  this release adds the law to `ChordStorageCache` and a test that parks a read between its load
+  and its return while a put completes.
+  - **Upgrade consequence.** None.
+  - **Operator step.** None.
 - DNS relay (#1049): every node is named `<did>.<zone>` in each zone a relay serves, and the
   services it announces are reachable there from the internet. The new crate `rings-dns-relay`
   is the relay: an authoritative DNS server (`hickory-server`) for the zones delegated to it, an
