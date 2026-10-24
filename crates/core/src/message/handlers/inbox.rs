@@ -41,8 +41,14 @@ pub(crate) async fn hold_for_offline_destination(
 ) -> Result<()> {
     let now_ms = get_epoch_ms();
     let held = HeldMessage::hold(payload.clone(), transport.message_signer(), now_ms)?;
-    let hold =
-        EntryOperation::Extend(Entry::inbox_delta(&held)?).stamped(now_ms, transport.dht.did)?;
+    let hold = transport
+        .dht
+        .stamp_operation(
+            EntryOperation::Extend(Entry::inbox_delta(&held)?),
+            now_ms,
+            None,
+        )
+        .await?;
     send_relay_hold(&transport, hold).await
 }
 

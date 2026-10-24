@@ -85,7 +85,11 @@ and that view changes as peers join and as stabilization runs. An owner hands it
 new owner only in its next storage repair round, so a lookup made just after a write can reach a
 new owner that does not hold it yet. The writer itself does not depend on that: it applies its
 own write to its fetch cache, as every owner applies it, so it reads its own writes at once
-(#982). Any other node reads the write once its lookup reaches an owner that holds it. That
+(#982). It also stamps each write after every write it stamped before and every version it
+read for the key, at most the 3 s clock tolerance ahead of its clock (#1033, #1075), so its
+successive writes to a topic are listed in the order it issued them, even two in one
+millisecond or across a step back of its clock. Any other node reads the write once its lookup
+reaches an owner that holds it. That
 guarantee is about the writer's own view only, not proof that the write was replicated: an owner
 can still refuse or lose it after the write returned. So a writer must never use its own
 read-back to check that something was published, such as a registry being ready (#866); only
@@ -126,7 +130,7 @@ another node's read shows that an owner holds the write.
   changes nothing, since a dropped tombstone could still cover a live write somewhere, and a
   delta carrying more is not admitted. This admits about 10 removals a minute per topic,
   sustained; an application that removes faster shards its topic (each value to one of `k`
-  topics by its hash). A full topic, removals included, encodes in at most 33.82 MB, which fits
+  topics by its hash). A full topic, removals included, encodes in at most 33.83 MB, which fits
   one transport message. Registry heartbeats remove nothing, so a registrant leaves at most 13
   descriptors (one per lease) within the horizon and no tombstone; the cap drops superseded
   leases first, since no heartbeat refreshes their dots.

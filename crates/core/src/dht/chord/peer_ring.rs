@@ -49,6 +49,7 @@ use super::RemoteAction;
 use crate::consts::LOCAL_CACHE_CAPACITY;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryVersion;
 use crate::dht::finger::FingerApplyOutcome;
 use crate::dht::finger::FingerConvergenceStatus;
 use crate::dht::finger::FingerDeferOutcome;
@@ -149,6 +150,10 @@ pub struct PeerRing {
     relay_neighborhood: Mutex<RelayNeighborhood>,
     /// The relay holds this node wrote and no holder acknowledged yet (see `relay_custody`).
     unacknowledged_relay_holds: Mutex<BTreeMap<RelayHoldDigest, KeptRelayHold>>,
+    /// The greatest version this node has stamped or forwarded through
+    /// [`Self::stamp_operation`]: the floor of its next stamp, so its own operations are
+    /// totally ordered in issue order (#1075).
+    pub(super) last_stamped: Mutex<Option<EntryVersion>>,
     /// The queries asked of, and the holders named by, the owners of the relay keys kept here
     /// that this view does not place (see `relay_custody`).
     relay_holder_hints: Mutex<RelayHolderHints>,
@@ -211,6 +216,7 @@ impl PeerRing {
             topology_epoch: Epoch::default(),
             relay_neighborhood: Mutex::new(RelayNeighborhood::default()),
             unacknowledged_relay_holds: Mutex::new(BTreeMap::new()),
+            last_stamped: Mutex::new(None),
             relay_holder_hints: Mutex::new(RelayHolderHints::default()),
             did,
         }

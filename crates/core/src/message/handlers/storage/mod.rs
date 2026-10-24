@@ -285,7 +285,9 @@ async fn place_entry_operation(
     match dht.operate_route(msg.placement, msg.op.kind())? {
         OperateRoute::Owned => {
             let now_ms = get_epoch_ms();
-            let op = msg.op.clone().stamped(now_ms, dht.did)?;
+            let op = dht
+                .stamp_operation(msg.op.clone(), now_ms, Some(msg.placement))
+                .await?;
             dht.operate_storage_entry(now_ms, msg.placement, op, ctx.transaction.origin())
                 .await
         }

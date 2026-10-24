@@ -126,6 +126,12 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 ///   With read-join this gives read-your-writes: once a write has returned `Ok`, every read of
 ///   `k` by its writer contains it while `k` stays resident and the write is live, whichever
 ///   owner a later lookup reaches.
+/// - Writer order (#1033, #1075): a node stamps its own write above every version it stamped or
+///   passed through and every version its cache holds for the key, capped one tick below
+///   `now + σ` (`PeerRing::stamp_operation`). Read-your-writes puts each of its writes to `k`
+///   in its cache before the next is issued, so its successive writes ascend in the dot order
+///   whatever its clock reads, every reader lists them in issue order, and a write follows
+///   every value its writer read.
 /// - Residency: evicting a key at capacity, or retiring it under the retention law,
 ///   un-observes it, and its next read starts again from the replies it gets.
 /// - Linearization (#922): a read is pure. It projects the value it loaded at its own clock,

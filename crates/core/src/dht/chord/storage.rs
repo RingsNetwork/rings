@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use super::PeerRing;
 use super::PeerRingAction;
 use super::RemoteAction;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::entry::inbox::inbox_destination;
 use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::AdmittedEntry;
@@ -14,6 +15,7 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryLookupEvidence;
 use crate::dht::entry::EntryLookupKey;
 use crate::dht::entry::EntryOperation;
+use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
@@ -616,6 +618,87 @@ impl PeerRing {
         }
     }
 
+    /// Stamp `op` as this node's next operation at `now_ms`: the issue law of a hybrid logical
+    /// clock (#1075, #1033; folds in #1076).
+    ///
+    /// ```text
+    ///   observed = max_version(cache[k]) ⊔ max_version(replica[placement])      what it read
+    ///   floor    = cap(last ⊔ observed)        cap(v) = v with l = min(l, now + σ − 1)
+    ///   op'      = op.stamped_after(now, self, floor)
+    ///              v = (now, 0) if it exceeds floor, else (l_floor, c_floor + 1)  the HLC pair
+    ///   last    ← floor ⊔ cap(max_version(op'))
+    /// ```
+    ///
+    /// Laws:
+    /// - Issue order: every version a call issues is strictly after every version this node
+    ///   stamped or passed through before it, below the cap, so its operations are ordered as it
+    ///   issued them: two in one millisecond, or across a step back of its clock, and an append
+    ///   after an overwrite is never shadowed by that overwrite's reset floor.
+    /// - Read order: a write follows every value its writer read at its key: the key's cached
+    ///   carrier (which holds the writer's own earlier writes, #982) and, for an owner stamping
+    ///   at `placement`, the replica it holds there.
+    /// - Bound: the floor's millisecond is capped one tick below `now + σ`, and strict ascent
+    ///   raises the counter, never the millisecond (`EntryVersion::after`), so every version a
+    ///   call issues has `l ≤ now + σ − 1`, which every owner admits, and leads this node's
+    ///   clock by less than `σ`, however many writes it issues in one millisecond and however
+    ///   far ahead the versions it read or passed through are; a value read above the cap is
+    ///   followed only up to it. A writer is never blocked to wait for its clock.
+    /// - Clock: when the clock has passed the floor, the issued version is `(now, 0, …)`, so the
+    ///   millisecond of every dot is its issue time and the counter steps only within it.
+    /// - Counter: `c < 2³²` per millisecond; at the bound the write is refused with
+    ///   `EntryVersionAheadOfClock` (`EntryVersion::after`), unreachable below `4·10¹²` writes a
+    ///   second.
+    ///
+    /// An operation that already carries its witnesses keeps them and raises the floor to them.
+    pub(crate) async fn stamp_operation(
+        &self,
+        op: EntryOperation,
+        now_ms: u128,
+        placement: Option<Did>,
+    ) -> Result<EntryOperation> {
+        let observed = self.observed_version(&op, now_ms, placement).await?;
+        let ceiling = now_ms
+            .saturating_add(TS_OFFSET_TOLERANCE_MS)
+            .saturating_sub(1);
+        let cap = |version: EntryVersion| EntryVersion {
+            logical_time_ms: version.logical_time_ms.min(ceiling),
+            ..version
+        };
+        let mut last = self.last_stamped.lock().map_err(|_| Error::LockPoisoned)?;
+        let floor = (*last).max(observed).map(cap);
+        let stamped = op.stamped_after(now_ms, self.did, floor)?;
+        // The last value is kept capped, so a version passed through above the cap leaves this
+        // node's own stamps free to ascend by the counter below it.
+        *last = floor.max(stamped.entry().max_observed_version().map(cap));
+        Ok(stamped)
+    }
+
+    /// The greatest version this node has read at `op`'s key: of the cached carrier of a data
+    /// key, and of the replica it stores at `placement`, if it is given one.
+    async fn observed_version(
+        &self,
+        op: &EntryOperation,
+        now_ms: u128,
+        placement: Option<Did>,
+    ) -> Result<Option<EntryVersion>> {
+        let entry = op.entry();
+        let cached = match entry.kind {
+            EntryKind::Data => self
+                .local_cache_held(entry.did, now_ms)
+                .await?
+                .and_then(|held| held.max_observed_version()),
+            EntryKind::RelayMessage => None,
+        };
+        let replica = match placement {
+            Some(placement) => self
+                .live_storage_entry(StorageKey::new(entry.kind, placement), now_ms)
+                .await?
+                .and_then(|held| held.max_observed_version()),
+            None => None,
+        };
+        Ok(cached.max(replica))
+    }
+
     /// Apply `op` under a runtime `redundancy`: locally at every accepted placement, and as a
     /// [`RemoteAction::FindEntryForOperate`] toward every remote one.
     pub(crate) async fn entry_operate(
@@ -624,7 +707,7 @@ impl PeerRing {
         redundancy: u16,
     ) -> Result<PeerRingAction> {
         let now_ms = get_epoch_ms();
-        let op = op.stamped(now_ms, self.did)?;
+        let op = self.stamp_operation(op, now_ms, None).await?;
         let entry_key = op.did()?;
         let kind = op.entry().kind;
         let redundancy = kind.replication(redundancy);

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- A node stamps its own writes in issue order (#1075, #1033; folds in #1076). Every operation a
+  node stamps is issued strictly after every version it stamped or passed through before and
+  every version it read for the key (its cached carrier, and the replica an owner holds), with
+  that floor capped one tick below `now + σ` (`PeerRing::stamp_operation`, a hybrid logical
+  clock). Before, a write was stamped at its millisecond alone, so two writes by one node in one
+  millisecond were ordered by their digests: an append right after an overwrite could fall
+  below the overwrite's reset floor and be dropped at every owner (#1075), and two appends could
+  be listed out of issue order (#1033). A node's writes now keep their issue order, even across
+  a step back of its clock, a write follows every value its writer read, and no stamp leads the
+  node's clock by more than the tolerance, however far ahead a value it read or forwarded was.
+  `EntryOperation::stamped_after` stamps above a given floor. `EntryVersion` gains the HLC
+  counter `counter`, ordered after the millisecond and before the issuer: a stamp after a floor
+  at the same or a later millisecond raises the counter instead of the millisecond, so a burst
+  of writes ascends strictly without running ahead of the clock.
+  - **Upgrade consequence.** The `EntryVersion` encoding changes (every dot, remove and
+    register), so stored and replicated DHT carriers of an earlier build do not decode (no
+    protocol versioning before 1.0); the carrier suprema grow by 5 bytes per dot and remove.
+  - **Operator step.** Remove the DHT data store while the node is stopped; replication
+    rebuilds it, and an undecodable stored carrier is otherwise retired on its next read. Relay
+    carriers held under an earlier build do not decode either and are retired (and logged), so
+    mail held across the upgrade is lost; drain held mail before upgrading.
 - Registry heartbeats re-append a signed lease (#918; removal-stability paper, Laws 8 and 9).
   An online-node, onion-exit or DNS-relay service descriptor no longer signs a heartbeat time:
   it signs a lease end (`expires_at_ms`, 10 minutes after it is issued) and a freshness window
