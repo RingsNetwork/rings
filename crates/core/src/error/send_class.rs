@@ -250,6 +250,7 @@ impl Error {
             | Self::InvalidCapacity | Self::StorageValueExceedsCapacity { .. }
             | Self::StorageBudgetExhausted { .. } | Self::StorageWorkUnscheduled(_)
             | Self::StorageRecordUndecodable(_) | Self::StorageRecordMissing(_)
+            | Self::StorageDirectoryLocked(_)
             | Self::RelayCustodyFull { .. }
             // encoding and payload bounds
             | Self::Encode | Self::Decode | Self::SerializeToString | Self::SerializeError

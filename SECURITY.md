@@ -261,3 +261,7 @@ route.
 - #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal
   received by sync can hold a topic live for up to the horizon past the receiver's clock.
 - #932: a reassembled message whose full-size mailbox charge does not fit is dropped.
+- #1055: one origin runs one browser node at a time. A native store locks its directory, so a
+  second daemon or FFI provider over it fails to open (#1039), but two browser tabs of one origin
+  open the same IndexedDB stores and would interleave their writes to the replay and relay
+  stores; nothing refuses the second tab yet.

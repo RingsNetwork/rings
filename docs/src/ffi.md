@@ -43,10 +43,12 @@ path on every run of the same node: the replay windows must survive a restart, o
 would accept replayed transactions and re-sign used sequences (#1022). A fresh path is a fresh
 node state.
 
-The provider owns `storage_path` exclusively while it lives: at most one live provider uses a
-given root, and it is never a native daemon's storage directory. Every store assumes it is its
-directory's only writer, so two writers would interleave their writes to one authoritative
-replay store. Nothing enforces this yet (#1039); keep one root per node.
+The provider owns its stores exclusively while it lives. Each store takes an exclusive lock on
+its own directory at open (a `.lock` file, `flock` on unix and `LockFileEx` on Windows) and
+holds it until the provider is destroyed (#1039). A second provider, or a native daemon, given a
+store this provider holds fails to open it, so `rings_node_new_provider_with_callback` returns
+`NULL` instead of interleaving its writes with this one's. The lock is per store, so providers
+with distinct roots never conflict. A file system that offers no such lock fails the open.
 
 ## Lifecycle
 

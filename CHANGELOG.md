@@ -80,6 +80,15 @@
     carriers keep their keys, and a carrier whose holder moved is handed to it by the first
     repair passes.
 
+- Each file store locks its own directory at open (#1039): `FileStorage` takes an exclusive lock
+  on a `.lock` file in the store's directory (`flock` on unix, `LockFileEx` on Windows) and holds
+  it while the store lives, so a second open of a store that is open, in the same process or
+  another, fails with the new `Error::StorageDirectoryLocked` instead of interleaving writes with
+  it. This covers the native daemon and the FFI provider alike: a second daemon or provider given
+  an open node's stores now fails to start. The lock is per store, so stores under one root open
+  together. A file system that offers no such lock fails the open. A lock is released when its
+  process exits, so a crashed node leaves nothing to clean up; the `.lock` file may stay in place.
+
 ## 0.35.0
 
 - `tokio` is bumped to 1.53.3 for RUSTSEC-2026-0386 (`AsyncFd::new` and related constructors

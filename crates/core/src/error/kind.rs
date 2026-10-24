@@ -813,6 +813,11 @@ pub enum Error {
     #[error("Storage is missing {0}")]
     StorageRecordMissing(crate::storage::UndecodableRecord),
 
+    /// Another open store holds this store directory's exclusive lock (#1039): one store
+    /// directory has one writer, so this open refuses instead of interleaving with it.
+    #[error("Storage directory {} is held by another open store", .0.display())]
+    StorageDirectoryLocked(std::path::PathBuf),
+
     /// Message invalid: {0}
     #[error("Message invalid: {0}")]
     InvalidMessage(String),

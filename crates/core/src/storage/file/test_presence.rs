@@ -140,7 +140,8 @@ async fn test_an_open_marks_an_unmarked_record() {
     assert_eq!(scanned(&reopened).await, [(file_name_for("a"), "filed")]);
 }
 
-/// `clear` removes every record and every marker, a missing record's included.
+/// `clear` removes every record and every marker, a missing record's included; only the
+/// store's lock file is left (`lock`).
 #[tokio::test]
 async fn test_clear_removes_the_markers_of_missing_records() {
     let root = temp_root("clear");
@@ -156,7 +157,12 @@ async fn test_clear_removes_the_markers_of_missing_records() {
         .await
         .expect("clear");
     assert!(scanned(&reopened).await.is_empty());
-    assert_eq!(std::fs::read_dir(&root).expect("list").count(), 0);
+    let left = std::fs::read_dir(&root)
+        .expect("list")
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .expect("entry");
+    assert_eq!(left, [super::lock::LOCK_FILE_NAME]);
 }
 
 /// A disposable store keeps no markers: a removed record is simply absent.

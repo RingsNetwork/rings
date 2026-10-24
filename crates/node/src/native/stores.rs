@@ -11,7 +11,9 @@
 //! ```
 //!
 //! Every store beside the data or the measure store is a sibling directory of it
-//! ([`sibling_storage_path`]).
+//! ([`sibling_storage_path`]). Each store locks its own directory at open (#1039), so a second
+//! daemon or FFI provider given a store an open node holds fails to open it, with
+//! `StorageDirectoryLocked`, instead of writing beside it.
 
 use std::path::Path;
 
@@ -219,5 +221,27 @@ mod tests {
             TRANSACTION_REPLAY_STORAGE_DIR,
         ]);
         Ok(())
+    }
+
+    /// A second node over the stores of an open node fails at open, at the first store it
+    /// shares (#1039), whether it is a daemon or an FFI provider: both open through
+    /// [`NodeStores`]. Once the first node drops, the root opens again.
+    #[tokio::test]
+    async fn test_a_second_node_on_open_stores_fails_at_open() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("rings-node-lock-{}", uuid::Uuid::new_v4()));
+        let first = NodeStores::open_under(&root).await;
+        let second = NodeStores::open_under(&root).await;
+        let first_opened = first.is_ok();
+        drop(first);
+        let reopened = NodeStores::open_under(&root).await;
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(first_opened);
+        assert!(matches!(
+            second,
+            Err(Error::Storage(
+                rings_core::error::Error::StorageDirectoryLocked(_)
+            ))
+        ));
+        reopened.map(drop)
     }
 }
