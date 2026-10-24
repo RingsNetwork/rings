@@ -1,10 +1,5 @@
 use super::*;
 
-/// The service `name`, which must be valid.
-fn service(name: &str) -> ServiceName {
-    ServiceName::new(name).unwrap()
-}
-
 /// The name under the owner `name`, which must be valid.
 fn sub(name: &str) -> SubName {
     SubName::new(name).unwrap()
@@ -16,26 +11,6 @@ fn txt(values: &[&str]) -> Vec<TxtValue> {
         .iter()
         .map(|value| TxtValue::new(*value).unwrap())
         .collect()
-}
-
-#[test]
-fn test_service_name_admits_visible_ascii_only() {
-    for valid in [
-        "smtp",
-        "ssh-22",
-        "a",
-        "x".repeat(MAX_SERVICE_NAME_LEN).as_str(),
-    ] {
-        assert!(ServiceName::new(valid).is_ok(), "{valid}");
-    }
-    let too_long = "x".repeat(MAX_SERVICE_NAME_LEN + 1);
-    for invalid in ["", "has space", "tab\t", "λ", too_long.as_str()] {
-        assert_eq!(
-            ServiceName::new(invalid),
-            Err(AnnouncementError::ServiceName(invalid.to_owned())),
-            "{invalid:?}"
-        );
-    }
 }
 
 #[test]
@@ -103,18 +78,19 @@ fn test_sub_name_lies_at_or_below_its_suffixes() {
 
 #[test]
 fn test_announcement_keeps_its_ports_and_records() {
-    let announcement = Announcement::new([(SMTP_PORT, service("smtp")), (22, service("ssh"))], [(
-        sub("_acme-challenge"),
-        txt(&["token"]),
-    )])
+    let announcement = Announcement::new(
+        [(SMTP_PORT, ProxyProtocol::V2), (22, ProxyProtocol::Off)],
+        [(sub("_acme-challenge"), txt(&["token"]))],
+    )
     .unwrap();
-    assert_eq!(announcement.service_at(22), Some(&service("ssh")));
-    assert_eq!(announcement.service_at(80), None);
-    assert_eq!(announcement.service_at(0), None);
+    assert_eq!(announcement.serves(22), Some(ProxyProtocol::Off));
+    assert_eq!(announcement.serves(SMTP_PORT), Some(ProxyProtocol::V2));
+    assert_eq!(announcement.serves(80), None);
+    assert_eq!(announcement.serves(0), None);
     assert!(announcement.receives_mail());
     assert_eq!(announcement.served_ports().collect::<Vec<_>>(), vec![
-        (22, &service("ssh")),
-        (SMTP_PORT, &service("smtp"))
+        (22, ProxyProtocol::Off),
+        (SMTP_PORT, ProxyProtocol::V2)
     ]);
     assert_eq!(
         announcement.txt_at(&sub("_acme-challenge")),
@@ -125,13 +101,15 @@ fn test_announcement_keeps_its_ports_and_records() {
 
 #[test]
 fn test_announcement_without_port_25_receives_no_mail() {
-    let announcement = Announcement::new([(22, service("ssh"))], []).unwrap();
+    let announcement = Announcement::new([(22, ProxyProtocol::Off)], []).unwrap();
     assert!(!announcement.receives_mail());
+    assert!(!announcement.is_empty());
+    assert!(Announcement::new([], []).unwrap().is_empty());
 }
 
 /// A refused announcement: its ports, its TXT records, and why it is refused.
 type RefusedCase = (
-    Vec<(u16, ServiceName)>,
+    Vec<(u16, ProxyProtocol)>,
     Vec<(SubName, Vec<TxtValue>)>,
     AnnouncementError,
 );
@@ -139,16 +117,20 @@ type RefusedCase = (
 #[test]
 fn test_announcement_refuses_what_breaks_a_bound() {
     let too_many_ports = (1..=u16::try_from(MAX_SERVED_PORTS + 1).unwrap())
-        .map(|port| (port, service("s")))
+        .map(|port| (port, ProxyProtocol::Off))
         .collect::<Vec<_>>();
     let too_many_names = (0..=MAX_TXT_NAMES)
         .map(|index| (sub(&format!("n{index}")), txt(&["v"])))
         .collect::<Vec<_>>();
     let too_many_values = vec!["v"; MAX_TXT_VALUES + 1];
     let cases: Vec<RefusedCase> = vec![
-        (vec![(0, service("s"))], vec![], AnnouncementError::PortZero),
         (
-            vec![(22, service("a")), (22, service("b"))],
+            vec![(0, ProxyProtocol::Off)],
+            vec![],
+            AnnouncementError::PortZero,
+        ),
+        (
+            vec![(22, ProxyProtocol::Off), (22, ProxyProtocol::V2)],
             vec![],
             AnnouncementError::DuplicatePort(22),
         ),

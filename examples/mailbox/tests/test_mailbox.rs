@@ -156,6 +156,21 @@ async fn test_a_wrong_password_is_refused() {
 }
 
 #[tokio::test]
+async fn test_a_session_whose_mailbox_is_deleted_is_told_bye_and_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let running = mailbox(dir.path(), ALICE, Arc::new(FixedExchangers::default())).await;
+    let mut reader = logged_in(&running).await;
+    let mut other = logged_in(&running).await;
+    reader.imap("a1", "CREATE Projects").await;
+    reader.imap("a2", "SELECT Projects").await;
+    let deleted = other.imap("b1", "DELETE Projects").await;
+    assert!(deleted.last().unwrap().starts_with("b1 OK"), "{deleted:?}");
+    let noop = reader.imap("a3", "NOOP").await;
+    assert!(any_contains(&noop, "* BYE"), "{noop:?}");
+    assert!(reader.is_closed().await, "the server closes after BYE");
+}
+
+#[tokio::test]
 async fn test_an_idling_client_hears_of_new_mail() {
     let dir = tempfile::tempdir().unwrap();
     let running = mailbox(dir.path(), ALICE, Arc::new(FixedExchangers::default())).await;

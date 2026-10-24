@@ -29,6 +29,12 @@ const DEFAULT_BOOK_RETENTION_SECS: u64 = 8 * 86_400;
 /// Default grace period of a vanished owner, in seconds: seven days, beyond the five days a
 /// mail server commonly retries a delivery before it bounces it.
 const DEFAULT_GRACE_SECS: u64 = 7 * 86_400;
+/// Default freshness window of an owner's last lookup, in seconds.
+const DEFAULT_FRESH_SECS: u64 = 15;
+/// Default bound on the owners the relay keeps an address and a memory for.
+const DEFAULT_MAX_OWNERS: usize = 65_536;
+/// Default bound on the directory lookups in flight.
+const DEFAULT_MAX_LOOKUPS: usize = 64;
 
 /// One zone delegated to the relay.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -36,8 +42,8 @@ const DEFAULT_GRACE_SECS: u64 = 7 * 86_400;
 pub struct ZoneConfig {
     /// The zone's origin, such as `rings.rs` or `p2p.example.com`.
     pub origin: String,
-    /// The zone's nameservers, as the parent's NS records name them. They lie outside every
-    /// relayed zone.
+    /// The zone's nameservers, as the parent's NS records name them, the primary (which the SOA
+    /// names) first. There is at least one, and they lie outside every relayed zone.
     pub nameservers: Vec<String>,
     /// The mailbox the zone's SOA names, in DNS form: `hostmaster.example.com` for
     /// `hostmaster@example.com`.
@@ -54,14 +60,15 @@ pub struct DnsRelayConfig {
     pub prefix: Ipv6Net,
     /// The ports the ingress accepts on, for every address in the prefix.
     pub ports: Vec<u16>,
-    /// The directory holding the address key and the address book.
+    /// The directory holding the address key, the address book and the memory of
+    /// announcements.
     pub state_dir: PathBuf,
     /// The addresses DNS is served on, over UDP and TCP.
     #[serde(default = "default_dns_listen")]
     pub dns_listen: Vec<SocketAddr>,
-    /// The address the ingress listens on; the wildcard receives the whole prefix.
+    /// The IPv6 address the ingress listens on; the wildcard receives the whole prefix.
     #[serde(default = "default_ingress_listen")]
-    pub ingress_listen: IpAddr,
+    pub ingress_listen: Ipv6Addr,
     /// TTL of positive answers, in seconds.
     #[serde(default = "default_ttl_secs")]
     pub ttl_secs: u32,
@@ -75,6 +82,16 @@ pub struct DnsRelayConfig {
     /// directory, in seconds.
     #[serde(default = "default_grace_secs")]
     pub grace_secs: u64,
+    /// How long an owner's last lookup answers without asking the directory again, in seconds.
+    #[serde(default = "default_fresh_secs")]
+    pub fresh_secs: u64,
+    /// Most owners the relay keeps an address binding and a memory for; at least 1.
+    #[serde(default = "default_max_owners")]
+    pub max_owners: usize,
+    /// Most directory lookups in flight; at least 1. A query that finds them all taken is
+    /// answered from memory, or with `SERVFAIL`.
+    #[serde(default = "default_max_lookups")]
+    pub max_lookups: usize,
     /// Most connections carried at once.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
@@ -92,8 +109,8 @@ fn default_dns_listen() -> Vec<SocketAddr> {
 }
 
 /// The IPv6 wildcard.
-const fn default_ingress_listen() -> IpAddr {
-    IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+const fn default_ingress_listen() -> Ipv6Addr {
+    Ipv6Addr::UNSPECIFIED
 }
 
 /// [`DEFAULT_TTL_SECS`].
@@ -114,6 +131,21 @@ const fn default_book_retention_secs() -> u64 {
 /// [`DEFAULT_GRACE_SECS`].
 const fn default_grace_secs() -> u64 {
     DEFAULT_GRACE_SECS
+}
+
+/// [`DEFAULT_FRESH_SECS`].
+const fn default_fresh_secs() -> u64 {
+    DEFAULT_FRESH_SECS
+}
+
+/// [`DEFAULT_MAX_OWNERS`].
+const fn default_max_owners() -> usize {
+    DEFAULT_MAX_OWNERS
+}
+
+/// [`DEFAULT_MAX_LOOKUPS`].
+const fn default_max_lookups() -> usize {
+    DEFAULT_MAX_LOOKUPS
 }
 
 /// [`DEFAULT_MAX_CONNECTIONS`].

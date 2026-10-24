@@ -19,6 +19,7 @@ use rings_mailbox_example::mailbox::start;
 use rings_mailbox_example::mailbox::MailboxConfig;
 use rings_mailbox_example::mailbox::Running;
 use rings_mailbox_example::outbound::Exchangers;
+use rings_mailbox_example::outbound::ExchangersError;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -36,13 +37,29 @@ pub struct FixedExchangers(pub Mutex<BTreeMap<String, SocketAddr>>);
 
 #[async_trait]
 impl Exchangers for FixedExchangers {
-    async fn exchangers(&self, domain: &str) -> Result<Vec<SocketAddr>, String> {
+    async fn exchangers(&self, domain: &str) -> Result<Vec<SocketAddr>, ExchangersError> {
         self.0
             .lock()
             .unwrap()
             .get(&domain.to_ascii_lowercase())
             .map(|address| vec![*address])
-            .ok_or_else(|| format!("no exchanger for {domain}"))
+            .ok_or_else(|| ExchangersError::NoAddress(domain.to_owned()))
+    }
+}
+
+/// The configuration of a mailbox for the owner `label`, in `dir`, listening on loopback ports
+/// of the system's choosing.
+pub fn config(dir: &std::path::Path, label: &str) -> MailboxConfig {
+    let loopback = "127.0.0.1:0".parse().unwrap();
+    MailboxConfig {
+        dir: dir.to_path_buf(),
+        label: label.to_owned(),
+        local: "me".to_owned(),
+        smtp: loopback,
+        receiver_proxy_protocol: false,
+        submission: loopback,
+        imap: loopback,
+        max_message_size: 1024 * 1024,
     }
 }
 
@@ -52,21 +69,7 @@ pub async fn mailbox(
     label: &str,
     exchangers: Arc<dyn Exchangers>,
 ) -> Running {
-    let loopback = "127.0.0.1:0".parse().unwrap();
-    start(
-        &MailboxConfig {
-            dir: dir.to_path_buf(),
-            label: label.to_owned(),
-            local: "me".to_owned(),
-            smtp: loopback,
-            submission: loopback,
-            imap: loopback,
-            max_message_size: 1024 * 1024,
-        },
-        exchangers,
-    )
-    .await
-    .unwrap()
+    start(&config(dir, label), exchangers).await.unwrap()
 }
 
 /// A plain client for a line protocol.
@@ -115,6 +118,16 @@ impl Client {
             line.push_str("\r\n");
             line.push_str(&String::from_utf8_lossy(&bytes));
         }
+    }
+
+    /// Whether the server closed the connection: the next read ends the stream.
+    pub async fn is_closed(&mut self) -> bool {
+        let mut rest = String::new();
+        let read = tokio::time::timeout(DEADLINE, self.reader.read_line(&mut rest))
+            .await
+            .expect("the server answers or closes in time")
+            .unwrap();
+        read == 0
     }
 
     /// Read an SMTP reply: its lines, up to the one with a space after the code.

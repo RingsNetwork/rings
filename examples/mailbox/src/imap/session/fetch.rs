@@ -28,9 +28,9 @@ use imap_next::imap_types::response::Data;
 use imap_next::imap_types::response::Response;
 use imap_next::imap_types::sequence::SequenceSet;
 
-use super::imap_flag;
-use super::tagged;
-use super::Failure;
+use super::names::imap_flag;
+use super::respond::tagged;
+use super::respond::Failure;
 use super::Session;
 use crate::imap::mime;
 use crate::store::Flag;

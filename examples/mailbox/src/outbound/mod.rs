@@ -5,29 +5,32 @@
 //!   <dir>/outbound/<id>.json   its delivery state (schedule::Pending)
 //!
 //!   enqueue ─▶ files written ─▶ wake ─▶ worker: for each due message, for each recipient:
-//!     exchangers(domain) ─▶ SMTP to each in turn (STARTTLS when offered, plain otherwise)
+//!     exchangers(domain) ─▶ SMTP to each in turn (client: STARTTLS when offered)
 //!     ─▶ Outcome ─▶ settle: delivered dropped, deferred rescheduled, failed bounced to INBOX
 //! ```
 //!
 //! A recipient `me@<did>.<zone>` resolves, through the relay's DNS, to the owner's own IPv6
 //! address, so one node's mailbox writes to another's through the relay like any mail server.
 //! Where a recipient's exchangers are is a capability ([`Exchangers`]): the system resolver in
-//! the program, a fixed map in tests.
+//! the program, a fixed map in tests. A domain that does not exist or takes no mail bounces at
+//! once; one DNS cannot tell about now stays queued.
 
+mod client;
+mod exchangers;
 mod schedule;
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use hickory_resolver::proto::rr::RData;
-use hickory_resolver::TokioResolver;
-use mail_send::smtp::message::Message as Envelope;
-use mail_send::SmtpClientBuilder;
+pub use client::Delivery;
+pub use client::SendError;
+pub use exchangers::exchange_hosts;
+pub use exchangers::DnsExchangers;
+pub use exchangers::Exchangers;
+pub use exchangers::ExchangersError;
 pub use schedule::Outcome;
 pub use schedule::Pending;
 pub use schedule::Settled;
@@ -38,10 +41,6 @@ use tokio::sync::Notify;
 use crate::store::Store;
 use crate::store::INBOX;
 
-/// The SMTP port mail exchangers listen on.
-const SMTP_PORT: u16 = 25;
-/// How long one SMTP exchange may take.
-const DELIVERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long the worker sleeps when nothing is queued: a wake comes with every enqueue.
 const IDLE_SLEEP: Duration = Duration::from_secs(3_600);
 
@@ -64,75 +63,6 @@ pub enum OutboundError {
         /// The failure.
         source: serde_json::Error,
     },
-}
-
-/// Where a domain's mail exchangers are.
-#[async_trait]
-pub trait Exchangers: Send + Sync + 'static {
-    /// The addresses of `domain`'s mail exchangers, most preferred first.
-    async fn exchangers(&self, domain: &str) -> Result<Vec<SocketAddr>, String>;
-}
-
-/// The exchangers DNS names: the MX records of a domain by preference, or the domain itself
-/// when it has none (RFC 5321 §5.1), each resolved to its addresses, IPv6 first.
-pub struct DnsExchangers {
-    resolver: TokioResolver,
-}
-
-impl DnsExchangers {
-    /// Exchangers found with the system's resolver configuration.
-    pub fn system() -> Result<Self, String> {
-        let resolver = TokioResolver::builder_tokio()
-            .map_err(|error| error.to_string())?
-            .build()
-            .map_err(|error| error.to_string())?;
-        Ok(Self { resolver })
-    }
-
-    /// The addresses of `host`, IPv6 first.
-    async fn addresses(&self, host: &str) -> Vec<SocketAddr> {
-        let Ok(found) = self.resolver.lookup_ip(host).await else {
-            return Vec::new();
-        };
-        let mut addresses = found
-            .iter()
-            .map(|ip| SocketAddr::new(ip, SMTP_PORT))
-            .collect::<Vec<_>>();
-        addresses.sort_by_key(|address| !address.is_ipv6());
-        addresses
-    }
-}
-
-#[async_trait]
-impl Exchangers for DnsExchangers {
-    async fn exchangers(&self, domain: &str) -> Result<Vec<SocketAddr>, String> {
-        let hosts = match self.resolver.mx_lookup(format!("{domain}.")).await {
-            Ok(lookup) => {
-                let mut exchangers = lookup
-                    .answers()
-                    .iter()
-                    .filter_map(|record| match &record.data {
-                        RData::MX(mx) => Some((mx.preference, mx.exchange.to_ascii())),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                exchangers.sort();
-                exchangers
-                    .into_iter()
-                    .map(|(_preference, host)| host)
-                    .collect()
-            }
-            Err(_) => vec![format!("{domain}.")],
-        };
-        let mut addresses = Vec::new();
-        for host in hosts {
-            addresses.extend(self.addresses(&host).await);
-        }
-        if addresses.is_empty() {
-            return Err(format!("no mail exchanger found for {domain}"));
-        }
-        Ok(addresses)
-    }
 }
 
 /// The outbound queue.
@@ -289,44 +219,26 @@ impl Outbound {
         };
         let exchangers = match self.exchangers.exchangers(domain).await {
             Ok(exchangers) => exchangers,
-            Err(reason) => return Outcome::Deferred(reason),
+            Err(error) if error.is_permanent() => return Outcome::Failed(error.to_string()),
+            Err(error) => return Outcome::Deferred(error.to_string()),
+        };
+        let delivery = Delivery {
+            helo: &self.host,
+            from,
+            recipient,
+            message,
         };
         let mut last = format!("no exchanger for {domain} answered");
         for exchanger in exchangers {
-            match self.send(exchanger, from, recipient, message).await {
+            match client::deliver(exchanger, delivery).await {
                 Ok(()) => return Outcome::Delivered,
-                Err(mail_send::Error::UnexpectedReply(reply)) if reply.code() >= 500 => {
-                    return Outcome::Failed(format!("{exchanger}: {reply}"));
+                Err(error) if error.is_permanent() => {
+                    return Outcome::Failed(format!("{exchanger}: {error}"));
                 }
                 Err(error) => last = format!("{exchanger}: {error}"),
             }
         }
         Outcome::Deferred(last)
-    }
-
-    /// One SMTP exchange with `exchanger`: STARTTLS when it offers it, plain otherwise.
-    async fn send(
-        &self,
-        exchanger: SocketAddr,
-        from: &str,
-        recipient: &str,
-        message: &[u8],
-    ) -> Result<(), mail_send::Error> {
-        let builder = SmtpClientBuilder::new(exchanger.ip().to_string(), exchanger.port())
-            .map_err(|error| mail_send::Error::Io(std::io::Error::other(error)))?
-            .helo_host(self.host.clone())
-            .implicit_tls(false)
-            // Mail servers rarely hold certificates for the addresses mail reaches them at.
-            .allow_invalid_certs()
-            .timeout(DELIVERY_TIMEOUT);
-        let envelope = Envelope::new(from, [recipient], message);
-        match builder.connect().await {
-            Ok(mut client) => client.send(envelope).await,
-            Err(mail_send::Error::MissingStartTls) => {
-                builder.connect_plain().await?.send(envelope).await
-            }
-            Err(error) => Err(error),
-        }
     }
 
     /// File a bounce for `from`'s message `message` to the recipients `bounced` in the INBOX.

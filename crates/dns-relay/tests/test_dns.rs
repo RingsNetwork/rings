@@ -30,9 +30,8 @@ use rings_dns_relay::Announcement;
 use rings_dns_relay::AnswerTtl;
 use rings_dns_relay::Directory;
 use rings_dns_relay::DnsAuthority;
-use rings_dns_relay::LookupFailure;
 use rings_dns_relay::Owner;
-use rings_dns_relay::ServiceName;
+use rings_dns_relay::ProxyProtocol;
 use rings_dns_relay::Zone;
 use rings_dns_relay::Zones;
 use rings_dns_relay::SMTP_PORT;
@@ -56,13 +55,19 @@ impl Owner for Numbered {
 /// A directory where `o1` receives mail, `o2` serves SSH only, and `o3`'s lookups fail.
 struct Fixed(BTreeMap<Numbered, Announcement>);
 
+/// The failure of `o3`'s lookups.
+#[derive(Debug, thiserror::Error)]
+#[error("the DHT is unreachable")]
+struct Unreachable;
+
 #[async_trait]
 impl Directory for Fixed {
+    type Error = Unreachable;
     type Owner = Numbered;
 
-    async fn announcement(&self, owner: Numbered) -> Result<Option<Announcement>, LookupFailure> {
+    async fn announcement(&self, owner: Numbered) -> Result<Option<Announcement>, Unreachable> {
         if owner == Numbered(3) {
-            return Err(LookupFailure("the DHT is unreachable".to_owned()));
+            return Err(Unreachable);
         }
         Ok(self.0.get(&owner).cloned())
     }
@@ -92,24 +97,26 @@ async fn relay() -> Relay {
             "2001:db8:1::/64".parse().unwrap(),
             dir.path(),
             Duration::from_secs(60),
+            64,
         )
         .await
         .unwrap(),
     );
     let zones = Zones::new(vec![Zone::new(
         name("rings.rs"),
-        vec![name("ns.example.net")],
+        name("ns.example.net"),
+        vec![],
         name("hostmaster.example.net"),
     )])
     .unwrap();
     let directory = Fixed(BTreeMap::from([
         (
             Numbered(1),
-            Announcement::new([(SMTP_PORT, ServiceName::new("smtp").unwrap())], []).unwrap(),
+            Announcement::new([(SMTP_PORT, ProxyProtocol::Off)], []).unwrap(),
         ),
         (
             Numbered(2),
-            Announcement::new([(22, ServiceName::new("ssh").unwrap())], []).unwrap(),
+            Announcement::new([(22, ProxyProtocol::Off)], []).unwrap(),
         ),
     ]));
     let authority = DnsAuthority::new(

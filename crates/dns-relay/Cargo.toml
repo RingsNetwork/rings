@@ -17,10 +17,12 @@ hickory-proto = { version = "0.26.3", default-features = false, features = ["std
 hickory-server = { version = "0.26.3", default-features = false }
 hmac = "0.12.1"
 ipnet = { version = "2.11.0", features = ["serde"] }
+ppp = "2.3.0"
 rand = { version = "0.8.5", features = ["getrandom"] }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10.6"
+socket2 = "0.6.5"
 thiserror = "1"
 tokio = { version = "1.13.0", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 tracing = "0.1.37"

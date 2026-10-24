@@ -11,10 +11,13 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::Duration;
 
 use hickory_proto::rr::Name;
+use hickory_proto::ProtoError;
+use hickory_server::net::NetError;
 use hickory_server::Server;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -28,8 +31,10 @@ use crate::config::ZoneConfig;
 use crate::ingress::AdmissionLimits;
 use crate::ingress::Ingress;
 use crate::ingress::IngressError;
+use crate::memory::MemoryWindows;
+use crate::recall::Recall;
+use crate::registry::duration_ms;
 use crate::registry::AddressRegistry;
-use crate::remember::Remembering;
 use crate::server::DnsAuthority;
 use crate::state::StateError;
 use crate::zone::Zone;
@@ -45,13 +50,16 @@ const DNS_TCP_RESPONSE_BUFFER: usize = 32;
 #[derive(Debug, Error)]
 pub enum DnsRelayError {
     /// A domain name in the configuration does not parse.
-    #[error("invalid domain name {name:?}: {reason}")]
+    #[error("invalid domain name {name:?}: {source}")]
     Name {
         /// The name as written.
         name: String,
         /// Why it does not parse.
-        reason: String,
+        source: ProtoError,
     },
+    /// A zone names no nameserver.
+    #[error("zone {0} names no nameserver")]
+    NoNameserver(String),
     /// The zones cannot be served together.
     #[error(transparent)]
     Zone(#[from] ZoneError),
@@ -61,6 +69,9 @@ pub enum DnsRelayError {
     /// No DNS listener is configured.
     #[error("DNS needs at least one listening address")]
     DnsListen,
+    /// A bound that must admit something is 0.
+    #[error("{0} must be at least 1")]
+    ZeroBound(&'static str),
     /// The state directory cannot be read or written.
     #[error(transparent)]
     State(#[from] StateError),
@@ -77,7 +88,7 @@ pub enum DnsRelayError {
     Ingress(#[from] IngressError),
     /// The DNS server failed while shutting down.
     #[error("DNS server: {0}")]
-    Dns(String),
+    Dns(#[from] NetError),
 }
 
 /// A relay opened from its configuration, ready to run.
@@ -86,9 +97,9 @@ where
     D: Directory,
     F: Forward<Owner = D::Owner>,
 {
-    authority: DnsAuthority<Remembering<D>>,
+    authority: DnsAuthority<Recall<D>>,
     dns_listen: Vec<SocketAddr>,
-    ingress: Ingress<Remembering<D>, F>,
+    ingress: Ingress<Recall<D>, F>,
 }
 
 impl<D, F> DnsRelay<D, F>
@@ -110,26 +121,32 @@ where
                 .map(zone_of)
                 .collect::<Result<Vec<_>, _>>()?,
         )?);
-        let ports = config.ports.iter().copied().collect::<BTreeSet<_>>();
-        if ports.is_empty() || ports.contains(&0) {
-            return Err(DnsRelayError::Ports);
-        }
+        let ports = ingress_ports(&config.ports)?;
         if config.dns_listen.is_empty() {
             return Err(DnsRelayError::DnsListen);
         }
+        let max_owners = at_least_one(config.max_owners, "max_owners")?;
+        let max_lookups = at_least_one(config.max_lookups, "max_lookups")?;
         let registry = Arc::new(
             AddressRegistry::open(
                 config.prefix,
                 &config.state_dir,
                 Duration::from_secs(config.book_retention_secs),
+                max_owners,
             )
             .await?,
         );
-        let directory = Arc::new(
-            Remembering::open(
+        let windows = MemoryWindows {
+            fresh_ms: duration_ms(Duration::from_secs(config.fresh_secs)),
+            grace_ms: duration_ms(Duration::from_secs(config.grace_secs)),
+        };
+        let recall = Arc::new(
+            Recall::open(
                 directory,
                 &config.state_dir,
-                Duration::from_secs(config.grace_secs),
+                windows,
+                max_owners,
+                max_lookups,
             )
             .await?,
         );
@@ -142,13 +159,13 @@ where
             per_owner: config.max_connections_per_owner,
         };
         Ok(Self {
-            authority: DnsAuthority::new(zones, ttl, Arc::clone(&registry), Arc::clone(&directory)),
+            authority: DnsAuthority::new(zones, ttl, Arc::clone(&registry), Arc::clone(&recall)),
             dns_listen: config.dns_listen.clone(),
             ingress: Ingress::new(
                 config.ingress_listen,
                 ports,
                 registry,
-                directory,
+                recall,
                 forward,
                 limits,
             ),
@@ -159,42 +176,59 @@ where
     pub async fn run(self, stop: impl Future<Output = ()>) -> Result<(), DnsRelayError> {
         let mut server = Server::new(self.authority);
         for address in &self.dns_listen {
-            let udp = UdpSocket::bind(address)
-                .await
-                .map_err(|source| DnsRelayError::DnsBind {
-                    address: *address,
-                    source,
-                })?;
-            let tcp =
-                TcpListener::bind(address)
-                    .await
-                    .map_err(|source| DnsRelayError::DnsBind {
-                        address: *address,
-                        source,
-                    })?;
+            let bind_error = |source| DnsRelayError::DnsBind {
+                address: *address,
+                source,
+            };
+            let udp = UdpSocket::bind(address).await.map_err(bind_error)?;
+            let tcp = TcpListener::bind(address).await.map_err(bind_error)?;
             server.register_socket(udp);
             server.register_listener(tcp, DNS_TCP_TIMEOUT, DNS_TCP_RESPONSE_BUFFER);
         }
-        let listeners = self.ingress.bind().await?;
+        let listeners = self.ingress.bind()?;
         let mut ingress = self.ingress.serve(listeners);
         stop.await;
         ingress.abort_all();
-        server
-            .shutdown_gracefully()
-            .await
-            .map_err(|error| DnsRelayError::Dns(error.to_string()))
+        server.shutdown_gracefully().await?;
+        Ok(())
     }
 }
 
-/// The zone `config` describes.
+/// The ingress ports `ports` names: at least one, none of them 0.
+fn ingress_ports(ports: &[u16]) -> Result<BTreeSet<NonZeroU16>, DnsRelayError> {
+    let ports = ports
+        .iter()
+        .map(|port| NonZeroU16::new(*port).ok_or(DnsRelayError::Ports))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if ports.is_empty() {
+        return Err(DnsRelayError::Ports);
+    }
+    Ok(ports)
+}
+
+/// `value`, the bound named `name`, when it admits something.
+fn at_least_one(value: usize, name: &'static str) -> Result<usize, DnsRelayError> {
+    if value == 0 {
+        return Err(DnsRelayError::ZeroBound(name));
+    }
+    Ok(value)
+}
+
+/// The zone `config` describes: its first nameserver is the primary.
 fn zone_of(config: &ZoneConfig) -> Result<Zone, DnsRelayError> {
+    let mut nameservers = config
+        .nameservers
+        .iter()
+        .map(|nameserver| fqdn(nameserver))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter();
+    let primary = nameservers
+        .next()
+        .ok_or_else(|| DnsRelayError::NoNameserver(config.origin.clone()))?;
     Ok(Zone::new(
         fqdn(&config.origin)?,
-        config
-            .nameservers
-            .iter()
-            .map(|nameserver| fqdn(nameserver))
-            .collect::<Result<Vec<_>, _>>()?,
+        primary,
+        nameservers.collect(),
         fqdn(&config.contact)?,
     ))
 }
@@ -202,9 +236,9 @@ fn zone_of(config: &ZoneConfig) -> Result<Zone, DnsRelayError> {
 /// `name` as a fully qualified domain name: a written name is absolute whether or not it ends
 /// with a dot.
 fn fqdn(name: &str) -> Result<Name, DnsRelayError> {
-    let mut parsed = Name::from_ascii(name).map_err(|error| DnsRelayError::Name {
+    let mut parsed = Name::from_ascii(name).map_err(|source| DnsRelayError::Name {
         name: name.to_owned(),
-        reason: error.to_string(),
+        source,
     })?;
     parsed.set_fqdn(true);
     Ok(parsed)

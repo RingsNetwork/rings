@@ -214,6 +214,12 @@ impl Session {
         }
     }
 
+    /// The reply that closes a session whose client fell silent.
+    pub fn timed_out(&self) -> Reply {
+        let text = format!("{} closing: no command in time", self.host);
+        Reply::line(421, "4.4.2", text)
+    }
+
     /// Answer a command the shell could not parse.
     pub fn unparsable(&self) -> Next {
         Next::Reply(Reply::line(500, "5.5.2", "Syntax error"))

@@ -220,8 +220,9 @@ to its default.
 Two optional sections, absent from the generated file, tie the node to DNS relays (#1049); see
 [DNS Relay](../dns-relay.md) for both:
 
-* `services`: the ports the node serves at `<did>.<zone>`, each mapped to a local address, and
-  the TXT records it publishes under its name. The node signs and publishes them every
+* `services`: the ports the node serves at `<did>.<zone>`, each mapped to a local address and
+  optionally preceded by a PROXY protocol v2 header (`proxy_protocol: v2`), and the TXT records
+  it publishes under its name. The node signs and publishes them every
   `heartbeat_interval_secs`; an empty section withdraws its name.
 * `dns_relay`: a DNS relay this node runs: its zones, IPv6 prefix, ingress ports and state
   directory.

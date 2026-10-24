@@ -239,7 +239,11 @@ async fn test_an_evicted_pending_accept_releases_its_hold() {
     let (stream, _client) = accepted_stream().await;
     let (hold, released) = StreamHold::new();
     let token = sessions
-        .stash_pending(Pending::Tcp(stream, Some(hold)))
+        .stash_pending(Pending::Tcp {
+            stream,
+            preamble: Bytes::new(),
+            hold: Some(hold),
+        })
         .expect("a vacant pending table takes the accept");
     sessions.evict_pending(token);
     tokio::time::timeout(std::time::Duration::from_secs(5), released.wait())
@@ -255,7 +259,11 @@ async fn test_a_bind_onto_a_taken_slot_releases_its_hold() -> crate::error::Resu
     let (stream, _client) = accepted_stream().await;
     let (hold, released) = StreamHold::new();
     let token = sessions
-        .stash_pending(Pending::Tcp(stream, Some(hold)))
+        .stash_pending(Pending::Tcp {
+            stream,
+            preamble: Bytes::new(),
+            hold: Some(hold),
+        })
         .expect("a vacant pending table takes the accept");
     let untrack =
         Arc::clone(&sessions).bind_accepted(task.scope.clone(), token, key, "svc".to_owned());

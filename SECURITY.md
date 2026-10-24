@@ -233,7 +233,14 @@ route.
   that needs confidentiality ends TLS on the node (a certificate for `<did>.<zone>` by ACME
   DNS-01 through the owner's own TXT records). The relay keeps answering for a vanished owner
   for its grace period, from the last descriptor it verified; an owner withdraws at once by
-  announcing nothing.
+  announcing nothing. A served port is a service of the node's TCP relay, so any overlay peer
+  that opens `dns-relay/<port>` reaches its target, not only relays: map only what may face the
+  internet. The PROXY protocol header of a `proxy_protocol: v2` port is unauthenticated, as the
+  relay or any such peer writes the first bytes; a service may log, rate or filter by the client
+  it names, never authorize by it. The relay bounds what strangers make it do: an `ANY` query
+  gets one record set (RFC 8482), at most `max_lookups` DHT lookups run at once (the rest are
+  answered from memory or refused), at most `max_owners` owners are kept, and the ingress takes
+  a connection's slot before routing it and IPv4 connections never reach it.
 
 ## Non-Goals
 

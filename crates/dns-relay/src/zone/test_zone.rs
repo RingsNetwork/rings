@@ -15,7 +15,8 @@ fn name(name: &str) -> Name {
 fn zone(origin: &str) -> Zone {
     Zone::new(
         name(origin),
-        vec![name("ns.example.net")],
+        name("ns.example.net"),
+        vec![name("ns2.example.net")],
         name("hostmaster.example.net"),
     )
 }
@@ -64,6 +65,16 @@ fn test_place_finds_apex_owner_sub_and_absence() {
 }
 
 #[test]
+fn test_nameservers_list_the_primary_first() {
+    let zone = zone("rings.rs");
+    assert_eq!(zone.primary(), &name("ns.example.net"));
+    assert_eq!(zone.nameservers().cloned().collect::<Vec<_>>(), vec![
+        name("ns.example.net"),
+        name("ns2.example.net")
+    ]);
+}
+
+#[test]
 fn test_zones_refuse_what_cannot_be_served() {
     assert_eq!(Zones::new(vec![]), Err(ZoneError::Empty));
     assert_eq!(
@@ -83,14 +94,7 @@ fn test_zones_refuse_what_cannot_be_served() {
     assert_eq!(
         Zones::new(vec![Zone::new(
             name("rings.rs"),
-            vec![],
-            name("h.example.net")
-        )]),
-        Err(ZoneError::NoNameserver("rings.rs.".to_owned()))
-    );
-    assert_eq!(
-        Zones::new(vec![Zone::new(
-            name("rings.rs"),
+            name("ns.example.net"),
             vec![name("ns.rings.rs")],
             name("h.example.net"),
         )]),

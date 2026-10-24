@@ -89,8 +89,10 @@ where D: Directory
             Placement::Apex(zone) => Ok(answer_in(View::Apex(zone))),
             Placement::Absent(zone) => Ok(answer_in(View::Absent(zone))),
             Placement::Owned { zone, owner, sub } => {
+                // Strangers can make lookups fail (made-up owners spend the budget), so a failure
+                // is logged at debug level, never at a level a flood could fill the log at.
                 let announcement = self.directory.announcement(owner).await.map_err(|error| {
-                    tracing::warn!("dns relay: {error}");
+                    tracing::debug!("dns relay: {}: {error}", owner.label());
                     ResponseCode::ServFail
                 })?;
                 let Some(announcement) = announcement else {

@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use rings_core::ecc::SecretKey;
+use rings_dns_relay::ProxyProtocol;
 
 use super::*;
 use crate::error::Error;
@@ -40,6 +41,7 @@ fn services(ports: &[u16], txt: &[(&str, &str)]) -> ServicesConfig {
             .map(|port| ServedPortConfig {
                 port: *port,
                 target: SocketAddr::from(([127, 0, 0, 1], 2525)),
+                proxy_protocol: ProxyProtocol::Off,
             })
             .collect(),
         txt: txt
@@ -59,9 +61,8 @@ fn test_services_section_validates_into_an_offer() {
     let offer = services(&[25, 22], &[("_acme-challenge", "token")])
         .offer()
         .unwrap();
-    assert_eq!(offer.ports().iter().copied().collect::<Vec<_>>(), vec![
-        22, 25
-    ]);
+    let ports = offer.served_ports().map(|served| served.port);
+    assert_eq!(ports.collect::<Vec<_>>(), vec![22, 25]);
     assert!(
         services(&[], &[]).offer().is_ok(),
         "an empty section withdraws"
@@ -85,4 +86,20 @@ fn test_services_section_refuses_what_a_relay_would_reject() {
             "{config:?}"
         );
     }
+}
+
+#[test]
+fn test_a_bad_schedule_names_the_settings_that_fix_it() {
+    let config = ServicesConfig {
+        heartbeat_interval_secs: 90,
+        ..services(&[25], &[])
+    };
+    let Err(Error::InvalidConfig(message)) = config.offer() else {
+        panic!("a heartbeat as long as the TTL is refused");
+    };
+    assert!(
+        message.contains("services.heartbeat_interval_secs")
+            && message.contains("services.ttl_secs"),
+        "{message}"
+    );
 }

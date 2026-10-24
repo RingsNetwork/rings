@@ -11,7 +11,7 @@ use hickory_proto::rr::RecordType;
 
 use super::*;
 use crate::announcement::Announcement;
-use crate::announcement::ServiceName;
+use crate::announcement::ProxyProtocol;
 use crate::announcement::SubName;
 use crate::announcement::TxtValue;
 use crate::announcement::SMTP_PORT;
@@ -37,7 +37,8 @@ fn name(name: &str) -> Name {
 fn zone() -> Zone {
     Zone::new(
         name("rings.rs"),
-        vec![name("ns.example.net")],
+        name("ns.example.net"),
+        vec![],
         name("hostmaster.example.net"),
     )
 }
@@ -45,10 +46,7 @@ fn zone() -> Zone {
 /// An owner serving SMTP and SSH, with a TXT record at `_acme-challenge`.
 fn mail_and_ssh() -> Announcement {
     Announcement::new(
-        [
-            (SMTP_PORT, ServiceName::new("smtp").unwrap()),
-            (22, ServiceName::new("ssh").unwrap()),
-        ],
+        [(SMTP_PORT, ProxyProtocol::Off), (22, ProxyProtocol::Off)],
         [(SubName::new("_acme-challenge").unwrap(), vec![
             TxtValue::new("token").unwrap(),
         ])],
@@ -102,7 +100,14 @@ fn test_apex_answers_soa_and_ns_and_nodata_otherwise() {
     let ns = answer(View::Apex(&zone), &apex, RecordType::NS, TTL);
     assert_eq!(rdata(&ns), vec![RData::NS(NS(name("ns.example.net")))]);
     let any = answer(View::Apex(&zone), &apex, RecordType::ANY, TTL);
-    assert_eq!(any.answers.len(), 2);
+    assert_eq!(
+        any.answers
+            .iter()
+            .map(|record| record.record_type())
+            .collect::<Vec<_>>(),
+        vec![RecordType::SOA],
+        "ANY draws one record set"
+    );
     let aaaa = answer(View::Apex(&zone), &apex, RecordType::AAAA, TTL);
     assert!(is_negative(&aaaa, ResponseCode::NoError));
 }
@@ -143,10 +148,11 @@ fn test_owner_name_answers_its_address_mail_exchanger_and_records() {
     let mx = answer(view, &qname, RecordType::MX, TTL);
     assert_eq!(rdata(&mx), vec![RData::MX(MX::new(10, qname.clone()))]);
     let any = answer(view, &qname, RecordType::ANY, TTL);
-    assert_eq!(rdata(&any), vec![
-        RData::AAAA(AAAA(ADDRESS)),
-        RData::MX(MX::new(10, qname.clone()))
-    ]);
+    assert_eq!(
+        rdata(&any),
+        vec![RData::AAAA(AAAA(ADDRESS))],
+        "ANY draws one record set: the address"
+    );
     for nodata in [RecordType::A, RecordType::TXT, RecordType::NS] {
         let answer = answer(view, &qname, nodata, TTL);
         assert!(is_negative(&answer, ResponseCode::NoError), "{nodata}");
@@ -156,7 +162,7 @@ fn test_owner_name_answers_its_address_mail_exchanger_and_records() {
 #[test]
 fn test_owner_without_port_25_has_no_mail_exchanger() {
     let zone = zone();
-    let announcement = Announcement::new([(22, ServiceName::new("ssh").unwrap())], []).unwrap();
+    let announcement = Announcement::new([(22, ProxyProtocol::Off)], []).unwrap();
     let owner = SubName::owner();
     let view = View::Owned {
         zone: &zone,

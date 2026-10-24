@@ -2,7 +2,7 @@
 //! session.
 //!
 //! ```text
-//!   <dir>/catalog.json          the mailboxes: name, id, special use
+//!   <dir>/catalog.json          the mailboxes: name, id, special use; the next ids
 //!   <dir>/m<id>/mailbox.json    one mailbox's model: validity, next UID, messages' metadata
 //!   <dir>/m<id>/<uid>.eml       one message's bytes, written once, never changed
 //! ```
@@ -120,13 +120,26 @@ pub struct Listed {
     pub special_use: Option<SpecialUse>,
 }
 
-/// The catalog file: every mailbox, and the next id to assign.
+/// The catalog file: every mailbox, and the next id and least UID validity to assign.
 #[derive(Debug, Deserialize, Serialize)]
 struct Catalog {
     /// The next mailbox id.
     next_id: u64,
+    /// The least UID validity the next mailbox may have; a catalog written without it reads
+    /// as 0, which the time then exceeds.
+    #[serde(default)]
+    next_validity: u32,
     /// The mailboxes.
     mailboxes: Vec<Listed>,
+}
+
+/// The ids the catalog assigns next.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Next {
+    /// The next mailbox id.
+    id: u64,
+    /// The least UID validity the next mailbox may have.
+    validity: u32,
 }
 
 /// The result of a copy: the target's validity, and each source UID with its copy's UID.
@@ -140,7 +153,7 @@ pub struct Copied {
 
 /// The store's state: the catalog and every mailbox's model.
 struct State {
-    next_id: u64,
+    next: Next,
     listed: Vec<Listed>,
     mailboxes: BTreeMap<MailboxId, Mailbox>,
 }
@@ -193,13 +206,16 @@ impl Store {
                     mailboxes.insert(listed.id, mailbox);
                 }
                 State {
-                    next_id: catalog.next_id,
+                    next: Next {
+                        id: catalog.next_id,
+                        validity: catalog.next_validity,
+                    },
                     listed: catalog.mailboxes,
                     mailboxes,
                 }
             }
             None => State {
-                next_id: 0,
+                next: Next { id: 0, validity: 1 },
                 listed: Vec::new(),
                 mailboxes: BTreeMap::new(),
             },
@@ -261,8 +277,8 @@ impl Store {
         if state.find(name).is_some() {
             return Err(StoreError::MailboxExists(name.to_owned()));
         }
-        let id = MailboxId(state.next_id);
-        let validity = uid_validity_now();
+        let id = MailboxId(state.next.id);
+        let validity = uid_validity(state.next.validity, chrono::Utc::now().timestamp());
         let mailbox = Mailbox::new(validity);
         let directory = mailbox_dir(&self.dir, id);
         tokio::fs::create_dir_all(&directory)
@@ -275,9 +291,12 @@ impl Store {
             id,
             special_use,
         });
-        let next_id = state.next_id.saturating_add(1);
-        self.write_catalog(next_id, &listed).await?;
-        state.next_id = next_id;
+        let next = Next {
+            id: state.next.id.saturating_add(1),
+            validity: validity.get().saturating_add(1),
+        };
+        self.write_catalog(next, &listed).await?;
+        state.next = next;
         state.listed = listed;
         state.mailboxes.insert(id, mailbox);
         Ok(id)
@@ -299,7 +318,7 @@ impl Store {
             .filter(|other| other.id != listed.id)
             .cloned()
             .collect::<Vec<_>>();
-        self.write_catalog(state.next_id, &remaining).await?;
+        self.write_catalog(state.next, &remaining).await?;
         state.listed = remaining;
         state.mailboxes.remove(&listed.id);
         let directory = mailbox_dir(&self.dir, listed.id);
@@ -337,7 +356,7 @@ impl Store {
                 }
             })
             .collect::<Vec<_>>();
-        self.write_catalog(state.next_id, &renamed).await?;
+        self.write_catalog(state.next, &renamed).await?;
         state.listed = renamed;
         Ok(())
     }
@@ -483,10 +502,11 @@ impl Store {
         .await
     }
 
-    /// Write the catalog of `listed` with next id `next_id`.
-    async fn write_catalog(&self, next_id: u64, listed: &[Listed]) -> Result<(), StoreError> {
+    /// Write the catalog of `listed`, assigning `next` next.
+    async fn write_catalog(&self, next: Next, listed: &[Listed]) -> Result<(), StoreError> {
         write_json(&self.dir.join(CATALOG_FILE), &Catalog {
-            next_id,
+            next_id: next.id,
+            next_validity: next.validity,
             mailboxes: listed.to_vec(),
         })
         .await
@@ -498,14 +518,13 @@ fn mailbox_dir(dir: &Path, id: MailboxId) -> PathBuf {
     dir.join(format!("m{}", id.0))
 }
 
-/// A UID validity for a mailbox created now: the current time in seconds, so a mailbox deleted
-/// and created again gets a new one (RFC 3501 §2.3.1.1).
-fn uid_validity_now() -> NonZeroU32 {
-    let seconds = chrono::Utc::now().timestamp();
-    u32::try_from(seconds)
-        .ok()
-        .and_then(NonZeroU32::new)
-        .unwrap_or(NonZeroU32::MIN)
+/// The UID validity of a mailbox created at `now` (seconds since the Unix epoch), when no
+/// mailbox may have one below `least`: the later of the two, so validities only grow, and a
+/// mailbox deleted and created again, within the same second even, gets a new one (RFC 3501
+/// §2.3.1.1). The time keeps them growing across a store that was wiped and made again.
+pub fn uid_validity(least: u32, now: i64) -> NonZeroU32 {
+    let now = u32::try_from(now.max(0)).unwrap_or(u32::MAX);
+    NonZeroU32::new(least.max(now)).unwrap_or(NonZeroU32::MIN)
 }
 
 /// The value the JSON file `path` holds, or `None` when there is no such file.

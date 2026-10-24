@@ -757,24 +757,32 @@ impl RelayHandle {
     ) -> crate::error::Result<()> {
         self.engine
             .clone()
-            .relay_tcp_stream(self.tcp.clone(), stream, peer, service, None)
+            .relay_tcp_stream(self.tcp.clone(), stream, peer, service, Bytes::new(), None)
             .await;
         Ok(())
     }
 
-    /// Relay one already-accepted **TCP** stream to `peer`'s `service`, and return once the
-    /// relay is done with it: its session ended, or it was refused or never opened. A caller
-    /// that bounds its live connections holds its slot for this call.
+    /// Relay one already-accepted **TCP** stream to `peer`'s `service`, `preamble` first, and
+    /// return once the relay is done with it: its session ended, or it was refused or never
+    /// opened. A caller that bounds its live connections holds its slot for this call.
     pub async fn carry_tcp_stream(
         &self,
         stream: tokio::net::TcpStream,
         peer: Did,
         service: String,
+        preamble: Bytes,
     ) -> crate::error::Result<()> {
         let (hold, released) = crate::extension::transport::engine::StreamHold::new();
         self.engine
             .clone()
-            .relay_tcp_stream(self.tcp.clone(), stream, peer, service, Some(hold))
+            .relay_tcp_stream(
+                self.tcp.clone(),
+                stream,
+                peer,
+                service,
+                preamble,
+                Some(hold),
+            )
             .await;
         released.wait().await;
         Ok(())

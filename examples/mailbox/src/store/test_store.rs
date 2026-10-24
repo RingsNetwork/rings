@@ -137,3 +137,24 @@ async fn test_every_commit_is_announced_by_mailbox() {
     let (inbox, _) = store.mailbox(INBOX).await.unwrap();
     assert_eq!(changes.recv().await.unwrap(), inbox.id);
 }
+
+#[test]
+fn test_a_validity_is_the_later_of_the_least_and_the_time() {
+    assert_eq!(uid_validity(5, 100).get(), 100);
+    assert_eq!(uid_validity(500, 100).get(), 500);
+    assert_eq!(uid_validity(0, -1).get(), 1, "never zero");
+}
+
+#[tokio::test]
+async fn test_a_mailbox_made_again_at_once_gets_a_new_validity_across_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let store = Store::open(dir.path(), MAX).await.unwrap();
+        store.create("Projects").await.unwrap();
+        let (_, mailbox) = store.mailbox("Projects").await.unwrap();
+        seen.push(mailbox.uid_validity);
+        store.delete("Projects").await.unwrap();
+    }
+    assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "{seen:?}");
+}

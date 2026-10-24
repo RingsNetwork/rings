@@ -1,14 +1,15 @@
-//! The whole path, end to end: a mail server on the internet resolves `me@<did>.<zone>` through
-//! a DNS relay, connects to the owner's IPv6 address, and the relay carries the connection over
-//! the Rings overlay to the owner's node, which hands it to its mailbox.
+//! The relay in front of the mailbox, end to end on the loopback: a mail server resolves
+//! `me@<owner>.<zone>` through the relay's DNS, connects to the owner's IPv6 address, and the
+//! ingress hands the connection to the mailbox's receiver behind a PROXY header, so the
+//! `Received` header names the mail server, not the relay.
 //!
 //! ```text
-//!   test (mail server) ─DNS─▶ node A: DNS relay           ─▶ AAAA addr(B), MX <B>.rings.rs
-//!   test (mail server) ─TCP─▶ node A: ingress (addr(B), P) ─TCP relay─▶ node B ─▶ mailbox
+//!   test (mail server) ─DNS─▶ relay: DNS authority         ─▶ AAAA addr(o1), MX o1.rings.rs
+//!   test (mail server) ─TCP─▶ relay: ingress (addr(o1), P) ─PROXY header, splice─▶ mailbox
 //! ```
 //!
-//! Like the relay example's tests, it needs a WebRTC link between two in-process nodes; where
-//! the link cannot form (no UDP), it skips with a notice instead of failing.
+//! The hop between a relay and the owner's node, over the Rings overlay, is the node's own test
+//! (`rings-node`, `processor::tests::test_dns_relay`); here the forward splices on the loopback.
 
 #![allow(
     clippy::expect_used,
@@ -26,8 +27,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use common::config;
 use common::deliver;
-use common::mailbox;
 use common::message;
 use common::FixedExchangers;
 use hickory_proto::op::Message as DnsMessage;
@@ -37,92 +39,81 @@ use hickory_proto::rr::rdata::MX;
 use hickory_proto::rr::Name;
 use hickory_proto::rr::RData;
 use hickory_proto::rr::RecordType;
-use rings_core::delegation::DelegateeKey;
-use rings_core::dht::entry::Entry;
-use rings_core::ecc::SecretKey;
-use rings_core::storage::MemStorage;
-use rings_core::swarm::OfferReply;
+use hickory_server::Server;
 use rings_dns_relay::AddressRegistry;
 use rings_dns_relay::AdmissionLimits;
+use rings_dns_relay::Announcement;
 use rings_dns_relay::AnswerTtl;
+use rings_dns_relay::Connection;
+use rings_dns_relay::Directory;
 use rings_dns_relay::DnsAuthority;
+use rings_dns_relay::Forward;
 use rings_dns_relay::Ingress;
-use rings_dns_relay::Remembering;
+use rings_dns_relay::Owner;
+use rings_dns_relay::ProxyProtocol;
 use rings_dns_relay::Zone;
 use rings_dns_relay::Zones;
+use rings_mailbox_example::mailbox::start;
 use rings_mailbox_example::store::INBOX;
-use rings_node::dns_relay::relay_service;
-use rings_node::dns_relay::service_topic;
-use rings_node::dns_relay::DhtDirectory;
-use rings_node::dns_relay::RelayForward;
-use rings_node::dns_relay::ServiceOffer;
-use rings_node::extension::protocols::relay::RelayHandle;
-use rings_node::processor::Processor;
-use rings_node::processor::ProcessorBuilder;
-use rings_node::processor::ProcessorConfig;
-use rings_node::provider::Provider;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
+use tokio::task::JoinSet;
 
-/// How long the overlay may take to link the two nodes before the test skips.
-const CONNECT_BUDGET: Duration = Duration::from_secs(45);
-/// How long the owner's descriptor may take to reach the relay's view of the DHT.
-const PUBLISH_BUDGET: Duration = Duration::from_secs(30);
+/// The one owner of the case, named `o1`.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct One;
 
-/// A node, optionally announcing `offer`, with its relay installed and its loop running.
-async fn node(offer: Option<ServiceOffer>) -> (Arc<Processor>, RelayHandle) {
-    let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
-        0,
-        "stun://stun.l.google.com:19302".to_owned(),
-        delegatee_key,
-        3,
-    );
-    let builder = ProcessorBuilder::from_config(&config)
-        .unwrap()
-        .storage(Box::new(MemStorage::new()));
-    let builder = match offer {
-        Some(offer) => builder.announce_services(offer),
-        None => builder,
-    };
-    let processor = Arc::new(builder.build().unwrap());
-    let provider = Arc::new(Provider::from_processor(processor.clone()));
-    let relay = RelayHandle::install(&provider.extensions()).unwrap();
-    provider.set_backend().unwrap();
-    let listening = processor.clone();
-    tokio::spawn(async move { listening.listen().await });
-    (processor, relay)
+impl Owner for One {
+    fn from_label(label: &str) -> Option<Self> {
+        (label == "o1").then_some(Self)
+    }
+
+    fn label(&self) -> String {
+        "o1".to_owned()
+    }
 }
 
-/// Link `a` and `b` over WebRTC; `false` when the link does not form in time.
-async fn link(a: &Arc<Processor>, b: &Arc<Processor>) -> bool {
-    let linked = async {
-        let offer = a.swarm.create_offer(b.swarm.did()).await.ok()?;
-        match b.swarm.answer_offer(offer).await.ok()? {
-            OfferReply::Answer(answer) => a.swarm.accept_answer(answer).await.ok()?,
-            OfferReply::CounterOffer(counter) => {
-                let answer = a.swarm.answer_offer(counter).await.ok()?.answer()?;
-                b.swarm.accept_answer(answer).await.ok()?;
-            }
-        }
-        let peer = b.swarm.did().to_string();
-        loop {
-            let connected = a
-                .swarm
-                .peers()
-                .iter()
-                .any(|p| p.did == peer && p.state.to_lowercase().contains("connected"));
-            if connected {
-                return Some(());
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    };
-    matches!(
-        tokio::time::timeout(CONNECT_BUDGET, linked).await,
-        Ok(Some(()))
-    )
+/// The directory failure of the case; it never happens.
+#[derive(Debug, thiserror::Error)]
+#[error("unreachable")]
+struct Unreachable;
+
+/// A directory where `o1` serves port 25, which earns its name an MX record, and the
+/// unprivileged port `port` the mail is delivered to in its stead, both behind a PROXY header.
+struct Serving {
+    port: u16,
+}
+
+#[async_trait]
+impl Directory for Serving {
+    type Error = Unreachable;
+    type Owner = One;
+
+    async fn announcement(&self, _owner: One) -> Result<Option<Announcement>, Unreachable> {
+        let ports = [(25, ProxyProtocol::V2), (self.port, ProxyProtocol::V2)];
+        Ok(Some(Announcement::new(ports, []).unwrap()))
+    }
+}
+
+/// A forward that splices every connection with the mailbox's receiver, its preamble first.
+struct Splice {
+    receiver: SocketAddr,
+}
+
+#[async_trait]
+impl Forward for Splice {
+    type Error = std::io::Error;
+    type Owner = One;
+
+    async fn forward(&self, connection: Connection<One>) -> std::io::Result<()> {
+        let mut upstream = TcpStream::connect(self.receiver).await?;
+        upstream.write_all(&connection.preamble).await?;
+        let mut client = connection.stream;
+        tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
+        Ok(())
+    }
 }
 
 /// The absolute name `name`.
@@ -132,174 +123,120 @@ fn name(name: &str) -> Name {
     name
 }
 
-/// Ask the DNS server at `server` for `qname` of type `qtype`.
-async fn ask(server: SocketAddr, qname: &str, qtype: RecordType) -> DnsMessage {
+/// A running relay for `rings.rs.`: its DNS server, the address it answers on, its ingress, and
+/// its state directory.
+struct Relay {
+    _dns: Server<DnsAuthority<Serving>>,
+    dns: SocketAddr,
+    _ingress: JoinSet<()>,
+    _state: tempfile::TempDir,
+}
+
+/// The relay of the case, every owner on `::1`, its ingress on `ingress`, splicing to
+/// `receiver`.
+async fn relay(ingress: TcpListener, receiver: SocketAddr) -> Relay {
+    let state = tempfile::tempdir().unwrap();
+    let retention = Duration::from_secs(600);
+    let prefix = "::1/128".parse().unwrap();
+    let registry = Arc::new(
+        AddressRegistry::open(prefix, state.path(), retention, 8)
+            .await
+            .unwrap(),
+    );
+    let port = ingress.local_addr().unwrap().port();
+    let directory = Arc::new(Serving { port });
+    let zone = Zone::new(
+        name("rings.rs"),
+        name("ns.example.net"),
+        vec![],
+        name("hostmaster.example.net"),
+    );
+    let ttl = AnswerTtl {
+        positive: 60,
+        negative: 60,
+    };
+    let zones = Arc::new(Zones::new(vec![zone]).unwrap());
+    let authority = DnsAuthority::new(zones, ttl, Arc::clone(&registry), Arc::clone(&directory));
+    let socket = UdpSocket::bind("[::1]:0").await.unwrap();
+    let dns = socket.local_addr().unwrap();
+    let mut server = Server::new(authority);
+    server.register_socket(socket);
+    let forward = Arc::new(Splice { receiver });
+    let limits = AdmissionLimits::default();
+    let ingress = Ingress::new(
+        Ipv6Addr::LOCALHOST,
+        BTreeSet::new(),
+        registry,
+        directory,
+        forward,
+        limits,
+    )
+    .serve(vec![ingress]);
+    Relay {
+        _dns: server,
+        dns,
+        _ingress: ingress,
+        _state: state,
+    }
+}
+
+/// The records of type `qtype` the DNS server at `server` answers for `qname`.
+async fn ask(server: SocketAddr, qname: &str, qtype: RecordType) -> Vec<RData> {
     let socket = UdpSocket::bind("[::1]:0").await.unwrap();
     let mut query = DnsMessage::query();
     query.metadata.id = 1;
     query.add_query(Query::query(name(qname), qtype));
-    socket
-        .send_to(&query.to_vec().unwrap(), server)
-        .await
-        .unwrap();
+    let bytes = query.to_vec().unwrap();
+    socket.send_to(&bytes, server).await.unwrap();
     let mut buffer = vec![0u8; 4096];
-    let (len, _) = tokio::time::timeout(Duration::from_secs(10), socket.recv_from(&mut buffer))
+    let (len, _) = tokio::time::timeout(common::DEADLINE, socket.recv_from(&mut buffer))
         .await
         .expect("the relay answers")
         .unwrap();
-    DnsMessage::from_vec(&buffer[..len]).unwrap()
+    let answer = DnsMessage::from_vec(&buffer[..len]).unwrap();
+    answer
+        .answers
+        .iter()
+        .map(|record| record.data.clone())
+        .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_mail_reaches_the_owners_mailbox_through_the_dns_relay() {
-    // The ingress listener comes first: the owner announces the port it got. Binding port 25
-    // needs privileges a test does not have, so the owner announces 25, which earns its name an
-    // MX record, and the unprivileged port the mail is delivered to in its stead.
+#[tokio::test]
+async fn test_mail_reaches_the_mailbox_through_the_relay_with_its_client_named() {
+    let mailbox_dir = tempfile::tempdir().unwrap();
+    let mut configured = config(mailbox_dir.path(), "o1");
+    configured.receiver_proxy_protocol = true;
+    let mailbox = start(&configured, Arc::new(FixedExchangers::default()))
+        .await
+        .unwrap();
     let ingress = TcpListener::bind("[::1]:0").await.unwrap();
     let port = ingress.local_addr().unwrap().port();
-    let offer = ServiceOffer::new(
-        BTreeSet::from([25, port]),
-        Vec::new(),
-        Duration::from_secs(1),
-        Duration::from_secs(3),
-    )
-    .unwrap();
-    let (relay_node, relay_handle) = node(None).await;
-    let (owner_node, owner_handle) = node(Some(offer)).await;
-    if !link(&relay_node, &owner_node).await {
-        eprintln!("SKIP: the overlay link between the two nodes did not form");
-        return;
-    }
-
-    // The owner's node serves its mailbox's receiver as the announced port.
-    let owner = owner_node.swarm.did().to_string();
-    let mailbox_dir = tempfile::tempdir().unwrap();
-    let mailbox = mailbox(
-        mailbox_dir.path(),
-        &owner,
-        Arc::new(FixedExchangers::default()),
-    )
-    .await;
-    for served in [25, port] {
-        owner_handle
-            .register_tcp_service(relay_service(served), mailbox.smtp)
-            .await
-            .unwrap();
-    }
-
-    // Wait until the owner's heartbeat has put its descriptor where the relay reads it.
-    let key = Entry::gen_did(&service_topic(owner_node.swarm.did())).unwrap();
-    let published = tokio::time::timeout(PUBLISH_BUDGET, async {
-        loop {
-            let _ = relay_node.storage_fetch(key).await;
-            if relay_node
-                .storage_check_cache(key)
-                .await
-                .is_some_and(|entry| !entry.data.is_empty())
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    })
-    .await;
-    assert!(
-        published.is_ok(),
-        "the owner's descriptor reaches the relay's DHT view"
-    );
-
-    // The relay: DNS for rings.rs, every owner on ::1 (a /128 holds one owner), and the
-    // ingress on the announced port.
-    let state = tempfile::tempdir().unwrap();
-    let registry = Arc::new(
-        AddressRegistry::open(
-            "::1/128".parse().unwrap(),
-            state.path(),
-            Duration::from_secs(600),
-        )
-        .await
-        .unwrap(),
-    );
-    let directory = Arc::new(
-        Remembering::open(
-            Arc::new(DhtDirectory::new(relay_node.clone())),
-            state.path(),
-            Duration::from_secs(600),
-        )
-        .await
-        .unwrap(),
-    );
-    let zones = Zones::new(vec![Zone::new(
-        name("rings.rs"),
-        vec![name("ns.example.net")],
-        name("hostmaster.example.net"),
-    )])
-    .unwrap();
-    let authority = DnsAuthority::new(
-        Arc::new(zones),
-        AnswerTtl {
-            positive: 60,
-            negative: 60,
-        },
-        Arc::clone(&registry),
-        Arc::clone(&directory),
-    );
-    let dns_socket = UdpSocket::bind("[::1]:0").await.unwrap();
-    let dns = dns_socket.local_addr().unwrap();
-    let mut dns_server = hickory_server::Server::new(authority);
-    dns_server.register_socket(dns_socket);
-    let _ingress_tasks = Ingress::new(
-        IpAddr::V6(Ipv6Addr::LOCALHOST),
-        BTreeSet::new(),
-        registry,
-        directory,
-        Arc::new(RelayForward::new(relay_handle, relay_node.swarm.did(), [])),
-        AdmissionLimits::default(),
-    )
-    .serve(vec![ingress]);
+    let relay = relay(ingress, mailbox.smtp).await;
 
     // A mail server resolves the owner's domain...
-    let domain = format!("{owner}.rings.rs");
-    let mx = ask(dns, &domain, RecordType::MX).await;
-    assert_eq!(
-        mx.answers
-            .iter()
-            .map(|r| r.data.clone())
-            .collect::<Vec<_>>(),
-        vec![RData::MX(MX::new(10, name(&domain)))],
-        "the owner serves SMTP, so its name is its own mail exchanger"
-    );
-    let aaaa = ask(dns, &domain, RecordType::AAAA).await;
-    let [record] = aaaa.answers.as_slice() else {
-        panic!("one address: {aaaa:?}");
-    };
-    let RData::AAAA(AAAA(address)) = record.data else {
-        panic!("an AAAA record: {record:?}");
-    };
-    assert_eq!(address, Ipv6Addr::LOCALHOST);
+    let domain = "o1.rings.rs";
+    let mx = ask(relay.dns, domain, RecordType::MX).await;
+    assert_eq!(mx, vec![RData::MX(MX::new(10, name(domain)))]);
+    let aaaa = ask(relay.dns, domain, RecordType::AAAA).await;
+    assert_eq!(aaaa, vec![RData::AAAA(AAAA(Ipv6Addr::LOCALHOST))]);
 
-    // ...and delivers to it: the relay carries the connection to the owner's mailbox.
+    // ...and delivers to it, as `test.example`, from `::1`.
     let to = format!("me@{domain}");
     let text = message(
         "alice@example.com",
         &to,
         "through",
-        "Delivered over the overlay.",
+        "Delivered by the relay.",
     );
-    let code = deliver(
-        SocketAddr::new(IpAddr::V6(address), port),
-        "alice@example.com",
-        &to,
-        &text,
-    )
-    .await;
-    assert_eq!(code, 250);
+    let at = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port);
+    assert_eq!(deliver(at, "alice@example.com", &to, &text).await, 250);
     let (listed, inbox) = mailbox.store.mailbox(INBOX).await.unwrap();
-    let delivered = inbox
-        .messages
-        .first()
-        .expect("the message is in the owner's inbox");
+    let delivered = inbox.messages.first().expect("the message is in the inbox");
     let bytes = mailbox.store.read(listed.id, delivered.uid).await.unwrap();
-    assert!(String::from_utf8_lossy(&bytes).contains("Delivered over the overlay."));
-    drop(dns_server);
+    let bytes = String::from_utf8_lossy(&bytes);
+    assert!(bytes.contains("Delivered by the relay."), "{bytes}");
+    assert!(
+        bytes.contains("Received: from test.example ([IPv6:::1])"),
+        "the receiver names the client the PROXY header named: {bytes}"
+    );
 }

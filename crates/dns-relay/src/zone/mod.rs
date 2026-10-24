@@ -12,8 +12,9 @@
 //! ```
 //!
 //! Zones are pairwise disjoint (no origin lies in another zone), so at most one zone contains a
-//! name and `place` is a function. Nameservers lie outside every zone, so the relay never needs
-//! glue for them: their addresses come from their own zones.
+//! name and `place` is a function. A zone has a primary nameserver by construction, and every
+//! nameserver lies outside every zone, so the relay never needs glue for them: their addresses
+//! come from their own zones.
 
 use hickory_proto::rr::LowerName;
 use hickory_proto::rr::Name;
@@ -36,9 +37,6 @@ pub enum ZoneError {
         /// The zone containing it.
         outer: String,
     },
-    /// A zone has no nameserver.
-    #[error("zone {0} has no nameserver")]
-    NoNameserver(String),
     /// A nameserver lies in a relayed zone, where the relay would have to answer for it.
     #[error("nameserver {nameserver} lies in relayed zone {zone}")]
     NameserverInZone {
@@ -49,21 +47,24 @@ pub enum ZoneError {
     },
 }
 
-/// One zone delegated to the relay: its origin, its nameservers and the contact its SOA names.
+/// One zone delegated to the relay: its origin, its nameservers (a primary, which its SOA names,
+/// and any others) and the contact its SOA names.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Zone {
     origin: LowerName,
-    nameservers: Vec<Name>,
+    primary: Name,
+    secondaries: Vec<Name>,
     contact: Name,
 }
 
 impl Zone {
-    /// A zone with origin `origin`, served by `nameservers`, whose SOA names `contact` (the
-    /// mailbox `hostmaster@example.com` is written `hostmaster.example.com.`).
-    pub fn new(origin: Name, nameservers: Vec<Name>, contact: Name) -> Self {
+    /// A zone with origin `origin`, served by `primary` and `secondaries`, whose SOA names
+    /// `contact` (the mailbox `hostmaster@example.com` is written `hostmaster.example.com.`).
+    pub fn new(origin: Name, primary: Name, secondaries: Vec<Name>, contact: Name) -> Self {
         Self {
             origin: LowerName::new(&origin.to_lowercase()),
-            nameservers,
+            primary,
+            secondaries,
             contact,
         }
     }
@@ -73,9 +74,14 @@ impl Zone {
         &self.origin
     }
 
-    /// The zone's nameservers.
-    pub fn nameservers(&self) -> &[Name] {
-        &self.nameservers
+    /// The zone's primary nameserver, which its SOA names.
+    pub fn primary(&self) -> &Name {
+        &self.primary
+    }
+
+    /// The zone's nameservers, the primary first.
+    pub fn nameservers(&self) -> impl Iterator<Item = &Name> {
+        std::iter::once(&self.primary).chain(self.secondaries.iter())
     }
 
     /// The mailbox the zone's SOA names.
@@ -109,8 +115,8 @@ pub enum Placement<'z, O> {
     Absent(&'z Zone),
 }
 
-/// The zones a relay serves: non-empty and pairwise disjoint, each with a nameserver outside
-/// every zone.
+/// The zones a relay serves: non-empty and pairwise disjoint, every nameserver outside every
+/// zone.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Zones(Vec<Zone>);
 
@@ -121,9 +127,6 @@ impl Zones {
             return Err(ZoneError::Empty);
         }
         for (index, outer) in zones.iter().enumerate() {
-            if outer.nameservers.is_empty() {
-                return Err(ZoneError::NoNameserver(outer.origin.to_string()));
-            }
             for inner in zones.iter().skip(index.saturating_add(1)) {
                 let (inside, around) = if outer.contains(&inner.origin) {
                     (inner, outer)
@@ -140,7 +143,7 @@ impl Zones {
         }
         let zones = Self(zones);
         for zone in &zones.0 {
-            for nameserver in &zone.nameservers {
+            for nameserver in zone.nameservers() {
                 if let Some(around) = zones.containing(&LowerName::new(nameserver)) {
                     return Err(ZoneError::NameserverInZone {
                         nameserver: nameserver.to_string(),

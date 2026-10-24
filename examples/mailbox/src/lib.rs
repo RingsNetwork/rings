@@ -14,5 +14,6 @@ mod files;
 pub mod imap;
 pub mod mailbox;
 pub mod outbound;
+mod serve;
 pub mod smtp;
 pub mod store;

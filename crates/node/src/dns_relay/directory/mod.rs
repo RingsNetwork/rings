@@ -7,21 +7,17 @@
 //!                   = Err                the DHT fetch failed
 //! ```
 //!
-//! Every DNS query for an owner and every connection to its address reads its announcement, so
-//! fetched answers are cached for [`LOOKUP_CACHE_TTL_MS`]: an owner's change of services reaches
-//! the relay that much later at most, and the DHT sees one fetch per owner per period, however
-//! many queries arrive. Failed fetches are not cached.
+//! Each call is one fetch: the relay keeps its own memory of answers in front of it
+//! ([`Recall`](rings_dns_relay::Recall)), so a query or a connection rarely reaches the DHT.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use async_trait::async_trait;
 use rings_core::dht::entry::Entry;
 use rings_core::utils::get_epoch_ms;
 use rings_dns_relay::Announcement;
 use rings_dns_relay::Directory;
-use rings_dns_relay::LookupFailure;
+use thiserror::Error;
 
 use super::descriptor::service_topic;
 use super::descriptor::ServiceDescriptor;
@@ -30,77 +26,25 @@ use crate::descriptor::RegistryElement;
 use crate::prelude::rings_core::dht::Did;
 use crate::processor::Processor;
 
-/// How long a fetched announcement is answered from the cache, in milliseconds.
-pub const LOOKUP_CACHE_TTL_MS: u128 = 15_000;
-/// Most owners the cache holds; past it, the oldest fetch is evicted first.
-const LOOKUP_CACHE_CAPACITY: usize = 4_096;
-
-/// One cached fetch: its answer and when it was fetched.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Fetched {
-    /// The announcement fetched, or `None` when the owner announced nothing valid.
-    announcement: Option<Announcement>,
-    /// When it was fetched, in milliseconds since the Unix epoch.
-    at_ms: u128,
-}
-
-/// The fetch cache: pure, the caller supplies the time.
-///
-/// ```text
-///   get(c, d, t) = c d                     if t − at(c d) < ttl
-///   Invariant: |c| ≤ capacity
-/// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct LookupCache {
-    entries: BTreeMap<Did, Fetched>,
-    ttl_ms: u128,
-    capacity: usize,
-}
-
-impl LookupCache {
-    /// An empty cache keeping fetches for `ttl_ms`, at most `capacity` of them.
-    fn new(ttl_ms: u128, capacity: usize) -> Self {
-        Self {
-            entries: BTreeMap::new(),
-            ttl_ms,
-            capacity,
-        }
-    }
-
-    /// The cached answer for `did` at `now_ms`, if a fresh one is held; `Some(None)` is a fresh
-    /// negative answer.
-    fn get(&self, did: &Did, now_ms: u128) -> Option<Option<Announcement>> {
-        self.entries
-            .get(did)
-            .filter(|fetched| now_ms.saturating_sub(fetched.at_ms) < self.ttl_ms)
-            .map(|fetched| fetched.announcement.clone())
-    }
-
-    /// Cache `announcement` as fetched for `did` at `now_ms`.
-    ///
-    /// Preservation: when the cache is full, it first drops every stale fetch, then the oldest
-    /// one, so it never exceeds its capacity.
-    fn put(&mut self, did: Did, announcement: Option<Announcement>, now_ms: u128) {
-        if !self.entries.contains_key(&did) && self.entries.len() >= self.capacity {
-            let ttl_ms = self.ttl_ms;
-            self.entries
-                .retain(|_did, fetched| now_ms.saturating_sub(fetched.at_ms) < ttl_ms);
-            if self.entries.len() >= self.capacity {
-                let oldest = self
-                    .entries
-                    .iter()
-                    .min_by_key(|(_did, fetched)| fetched.at_ms)
-                    .map(|(did, _fetched)| *did);
-                if let Some(oldest) = oldest {
-                    self.entries.remove(&oldest);
-                }
-            }
-        }
-        self.entries.insert(did, Fetched {
-            announcement,
-            at_ms: now_ms,
-        });
-    }
+/// Why the DHT could not tell what an owner announces.
+#[derive(Debug, Error)]
+pub enum DirectoryError {
+    /// The DHT key of the owner's service topic cannot be derived.
+    #[error("no DHT key for {did}'s service topic: {source}")]
+    Key {
+        /// The owner.
+        did: Did,
+        /// Why.
+        source: rings_core::error::Error,
+    },
+    /// The fetch of the owner's service topic failed.
+    #[error("cannot fetch {did}'s service descriptor: {source}")]
+    Fetch {
+        /// The owner.
+        did: Did,
+        /// Why.
+        source: crate::error::Error,
+    },
 }
 
 /// The announcement the newest valid descriptor among `elements` makes for `did`, at `now_ms`
@@ -127,53 +71,32 @@ fn announcement_in(
 /// The directory over a node's DHT.
 pub struct DhtDirectory {
     processor: Arc<Processor>,
-    cache: Mutex<LookupCache>,
 }
 
 impl DhtDirectory {
     /// The directory reading `processor`'s DHT.
     pub fn new(processor: Arc<Processor>) -> Self {
-        Self {
-            processor,
-            cache: Mutex::new(LookupCache::new(LOOKUP_CACHE_TTL_MS, LOOKUP_CACHE_CAPACITY)),
-        }
-    }
-
-    /// The fresh cached answer for `did` at `now_ms`, if any.
-    fn cached(&self, did: &Did, now_ms: u128) -> Option<Option<Announcement>> {
-        self.cache.lock().ok()?.get(did, now_ms)
-    }
-
-    /// Cache `announcement` for `did`, fetched at `now_ms`.
-    fn remember(&self, did: Did, announcement: Option<Announcement>, now_ms: u128) {
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.put(did, announcement, now_ms);
-        }
+        Self { processor }
     }
 }
 
 #[async_trait]
 impl Directory for DhtDirectory {
+    type Error = DirectoryError;
     type Owner = DidOwner;
 
-    async fn announcement(&self, owner: DidOwner) -> Result<Option<Announcement>, LookupFailure> {
+    async fn announcement(&self, owner: DidOwner) -> Result<Option<Announcement>, DirectoryError> {
         let did = owner.0;
-        let now_ms = get_epoch_ms();
-        if let Some(cached) = self.cached(&did, now_ms) {
-            return Ok(cached);
-        }
         let key = Entry::gen_did(&service_topic(did))
-            .map_err(|error| LookupFailure(error.to_string()))?;
+            .map_err(|source| DirectoryError::Key { did, source })?;
         let entry = self
             .processor
             .fetch_storage_entry(key)
             .await
-            .map_err(|error| LookupFailure(error.to_string()))?;
-        let announcement = entry.and_then(|entry| {
-            announcement_in(&entry.data, did, now_ms, self.processor.swarm.network_id())
-        });
-        self.remember(did, announcement.clone(), now_ms);
-        Ok(announcement)
+            .map_err(|source| DirectoryError::Fetch { did, source })?;
+        let now_ms = get_epoch_ms();
+        let network_id = self.processor.swarm.network_id();
+        Ok(entry.and_then(|entry| announcement_in(&entry.data, did, now_ms, network_id)))
     }
 }
 

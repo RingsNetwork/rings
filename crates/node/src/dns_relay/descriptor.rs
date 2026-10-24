@@ -6,11 +6,12 @@
 //! signed for the DID the name holds (`latest_valid_by_did`). The descriptor states only ports,
 //! never service names: the node serves port `p` as [`relay_service(p)`](super::relay_service),
 //! so the relay's ingress can only ever ask the node for a service the node registered for its
-//! name.
+//! name. Each port says whether its service reads a PROXY protocol header first.
 //!
 //! ```text
-//!   σ(d) = (d, pk, network, ports ⊆ Port, txt : SubName ⇀ [Value], heartbeat, expiry, sig)
-//!   announcement(σ) = Announcement(ports ↦ relay_service, txt)       validated, or rejected
+//!   σ(d) = (d, pk, network, ports : Port ⇀ ProxyProtocol, txt : SubName ⇀ [Value],
+//!           heartbeat, expiry, sig)
+//!   announcement(σ) = Announcement(ports, txt)       validated, or rejected
 //! ```
 
 use rings_core::delegation::DelegateeKey;
@@ -24,13 +25,12 @@ use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
 use rings_dns_relay::Announcement;
 use rings_dns_relay::AnnouncementError;
-use rings_dns_relay::ServiceName;
+use rings_dns_relay::ProxyProtocol;
 use rings_dns_relay::SubName;
 use rings_dns_relay::TxtValue;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::relay_service;
 use crate::descriptor::latest_valid_by_did;
 use crate::descriptor::sign_descriptor_body;
 use crate::descriptor::RegistryElement;
@@ -48,16 +48,14 @@ pub fn service_topic(did: Did) -> String {
     format!("dns_relay:{did}")
 }
 
-/// What a node serving `ports` and publishing `txt` announces: each port served as its
-/// [`relay_service`], and the TXT records as published, validated together.
+/// What a node serving `ports` and publishing `txt` announces, validated together.
 pub(crate) fn announcement_of(
-    ports: impl IntoIterator<Item = u16>,
+    ports: impl IntoIterator<Item = ServedPort>,
     txt: &[ServedTxt],
 ) -> std::result::Result<Announcement, AnnouncementError> {
     let ports = ports
         .into_iter()
-        .map(|port| ServiceName::new(relay_service(port)).map(|service| (port, service)))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .map(|served| (served.port, served.proxy_protocol));
     let txt = txt
         .iter()
         .map(|served| {
@@ -70,6 +68,15 @@ pub(crate) fn announcement_of(
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Announcement::new(ports, txt)
+}
+
+/// One port a node serves at its relayed address.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct ServedPort {
+    /// The port.
+    pub port: u16,
+    /// Whether the port's service reads a PROXY protocol header before the client's bytes.
+    pub proxy_protocol: ProxyProtocol,
 }
 
 /// TXT records a node publishes at one name under its own.
@@ -91,7 +98,7 @@ pub struct ServiceDescriptorBody {
     /// Network identifier.
     pub network_id: u32,
     /// The ports the node serves at its address, ascending.
-    pub ports: Vec<u16>,
+    pub ports: Vec<ServedPort>,
     /// The TXT records the node publishes under its name.
     pub txt: Vec<ServedTxt>,
     /// Heartbeat timestamp in milliseconds since Unix epoch.
@@ -158,7 +165,7 @@ impl ServiceDescriptor {
         )
     }
 
-    /// What this descriptor announces, validated ([`announcement_of`] its ports and records).
+    /// What this descriptor announces: its ports and records, validated as one announcement.
     pub fn announcement(&self) -> std::result::Result<Announcement, AnnouncementError> {
         announcement_of(self.body.ports.iter().copied(), &self.body.txt)
     }

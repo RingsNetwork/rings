@@ -147,9 +147,14 @@ impl StreamReleased {
 /// A locally-accepted connection/flow that has been reported to the pure relay (`Accepted`)
 /// and is waiting for the core to mint its delegatee key (`OpenAccepted` → `bind_accepted`).
 enum Pending {
-    /// An accepted TCP connection, and the hold its owner waits on, if any. The hold travels
-    /// with the stream, so it is dropped exactly when the stream is.
-    Tcp(TcpStream, Option<StreamHold>),
+    /// An accepted TCP connection, the bytes the peer's service reads before the stream's (empty
+    /// for none), and the hold its owner waits on, if any. The hold travels with the stream, so
+    /// it is dropped exactly when the stream is.
+    Tcp {
+        stream: TcpStream,
+        preamble: Bytes,
+        hold: Option<StreamHold>,
+    },
     /// A new UDP flow: the shared listener socket, the local client address, and the first
     /// datagram (carried so it isn't lost during the round-trip to the core).
     Udp {
@@ -248,7 +253,7 @@ impl TransportSessions {
             match kind {
                 TransportKind::Tcp => {
                     match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
-                        Ok(Ok(stream)) => tcp::relay_tcp(task, stream).await,
+                        Ok(Ok(stream)) => tcp::relay_tcp(task, stream, Bytes::new()).await,
                         _ => task.refuse().await,
                     }
                 }
@@ -277,17 +282,23 @@ impl TransportSessions {
         }
     }
 
-    /// Client side. Relay an already-accepted TCP stream to `peer`'s `service`; `hold`, when
-    /// given, is dropped when the relay releases the stream.
+    /// Client side. Relay an already-accepted TCP stream to `peer`'s `service`, `preamble`
+    /// first; `hold`, when given, is dropped when the relay releases the stream.
     pub async fn relay_tcp_stream(
         self: Arc<Self>,
         scope: Scope,
         stream: TcpStream,
         peer: Did,
         service: String,
+        preamble: Bytes,
         hold: Option<StreamHold>,
     ) {
-        let Some(token) = self.stash_pending(Pending::Tcp(stream, hold)) else {
+        let pending = Pending::Tcp {
+            stream,
+            preamble,
+            hold,
+        };
+        let Some(token) = self.stash_pending(pending) else {
             return;
         };
         if inject_accepted(&scope, token, peer, service).await.is_err() {
@@ -389,7 +400,11 @@ impl TransportSessions {
             return Some(key);
         };
         match pending {
-            Pending::Tcp(stream, hold) => {
+            Pending::Tcp {
+                stream,
+                preamble,
+                hold,
+            } => {
                 let task = match RelayTask::register(self.clone(), scope.clone(), key.clone()) {
                     SlotRegistration::Registered(task) => task,
                     SlotRegistration::AlreadyPresent => return None,
@@ -407,7 +422,7 @@ impl TransportSessions {
                     }
                     match task.sessions.current_generation(&task.key) {
                         Some(generation) if generation == task.generation => {
-                            tcp::relay_tcp(task, stream).await;
+                            tcp::relay_tcp(task, stream, preamble).await;
                         }
                         None => cancel_open(&task.scope, &task.key).await,
                         Some(_) => {}

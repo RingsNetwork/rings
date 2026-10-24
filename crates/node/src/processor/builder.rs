@@ -2,6 +2,10 @@ use super::config::validate_dht_virtual_nodes;
 use super::config::validate_onion_role_config;
 use super::*;
 use crate::consts::DATA_REDUNDANT;
+#[cfg(rings_native)]
+use crate::dns_relay::ServiceOffer;
+#[cfg(rings_native)]
+use crate::dns_relay::ServiceRegistration;
 
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {
@@ -31,9 +35,9 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
     /// An observer chained after the processor's own `Observability`.
     pub(in crate::processor) observer: Option<rings_core::swarm::observer::SharedSwarmObserver>,
-    /// The services this node announces through DNS relays (#1049), if any.
+    /// The heartbeat announcing this node's services through DNS relays (#1049), if any.
     #[cfg(rings_native)]
-    pub(in crate::processor) service_offer: Option<crate::dns_relay::ServiceOffer>,
+    pub(in crate::processor) service_registration: Option<Arc<dyn RegistrationTask>>,
 }
 
 impl ProcessorBuilder {
@@ -72,15 +76,16 @@ impl ProcessorBuilder {
             reassembly_limits: ReassemblyLimits::production(),
             observer: None,
             #[cfg(rings_native)]
-            service_offer: None,
+            service_registration: None,
         })
     }
 
     /// Announce `offer` through DNS relays: the processor publishes this node's service
     /// descriptor on every heartbeat of the offer (#1049).
     #[cfg(rings_native)]
-    pub fn announce_services(mut self, offer: crate::dns_relay::ServiceOffer) -> Self {
-        self.service_offer = Some(offer);
+    pub fn announce_services(mut self, offer: ServiceOffer) -> Self {
+        let did = self.delegatee_key.delegator_did();
+        self.service_registration = Some(Arc::new(ServiceRegistration::new(did, offer)));
         self
     }
 
@@ -234,12 +239,7 @@ impl ProcessorBuilder {
             registration_tasks.push(Arc::new(onion_exit_registration));
         }
         #[cfg(rings_native)]
-        if let Some(offer) = self.service_offer {
-            registration_tasks.push(Arc::new(crate::dns_relay::ServiceRegistration::new(
-                delegatee_key.delegator_did(),
-                offer,
-            )));
-        }
+        registration_tasks.extend(self.service_registration);
 
         // One recorder is shared between core protocol hooks and node-level snapshot assembly.
         let observability = Arc::new(crate::observability::Observability::new());

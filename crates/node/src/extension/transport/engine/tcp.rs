@@ -57,7 +57,12 @@ impl TransportSessions {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        let Some(token) = self.stash_pending(Pending::Tcp(stream, None)) else {
+                        let pending = Pending::Tcp {
+                            stream,
+                            preamble: Bytes::new(),
+                            hold: None,
+                        };
+                        let Some(token) = self.stash_pending(pending) else {
                             continue;
                         };
                         if inject_accepted(&scope, token, peer, service.clone())
@@ -77,9 +82,10 @@ impl TransportSessions {
     }
 }
 
-/// Bidirectional TCP relay with true half-close and abrupt-close handling.
-pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
-    relay_tcp_with_timeouts(task, stream, RELAY_IDLE_TIMEOUT, REORDER_DEADLINE).await;
+/// Bidirectional TCP relay with true half-close and abrupt-close handling; the peer reads
+/// `preamble` (empty for none) before the stream's bytes.
+pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream, preamble: Bytes) {
+    relay_tcp_with_timeouts(task, stream, preamble, RELAY_IDLE_TIMEOUT, REORDER_DEADLINE).await;
 }
 
 /// [`relay_tcp`] with its idle timeout and its gap deadline given: the law of
@@ -89,6 +95,7 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
 async fn relay_tcp_with_timeouts(
     task: RelayTask,
     stream: TcpStream,
+    preamble: Bytes,
     idle_timeout: Duration,
     reorder_deadline: Duration,
 ) {
@@ -106,7 +113,11 @@ async fn relay_tcp_with_timeouts(
     let (mut local_read, mut local_write) = stream.into_split();
     let mut local_read_open = true;
     let mut local_write_open = true;
-    let mut sent: u64 = 0;
+    let preamble = send_preamble(&scope, &key, from_opener, &preamble).await;
+    let mut sent = preamble.unwrap_or_else(|| {
+        cancel.cancel();
+        0
+    });
     let mut inbound = StreamReorder::default();
     let mut gap: Option<u64> = None;
     let mut buf = vec![0u8; TCP_BUF];
@@ -114,7 +125,8 @@ async fn relay_tcp_with_timeouts(
     tokio::pin!(idle);
     let gap_deadline = tokio::time::sleep(reorder_deadline);
     tokio::pin!(gap_deadline);
-    'relay: while local_read_open || local_write_open {
+    // A cancelled session never starts, so no local byte goes out after a lost preamble.
+    'relay: while !cancel.is_cancelled() && (local_read_open || local_write_open) {
         tokio::select! {
             _ = cancel.cancelled() => break,
             read = local_read.read(buf.as_mut_slice()), if local_read_open => {
@@ -211,6 +223,29 @@ async fn relay_tcp_with_timeouts(
     }
 }
 
+/// Send `preamble` to `key`'s peer as the session's first segments, so the peer reads it before
+/// any byte of the local stream; return how many segments it took, or `None` when one could not
+/// be sent.
+async fn send_preamble(
+    scope: &Scope,
+    key: &SessionKey,
+    from_opener: bool,
+    preamble: &Bytes,
+) -> Option<u64> {
+    let mut sent = 0u64;
+    for chunk in preamble.chunks(TCP_BUF) {
+        let frame = Frame::Data {
+            session: key.session,
+            from_opener,
+            seq: sent,
+            bytes: preamble.slice_ref(chunk),
+        };
+        send_frame(scope, key.peer, frame).await.ok()?;
+        sent += 1;
+    }
+    Some(sent)
+}
+
 /// Reset the session `key` for `fault`: its stream cannot continue without a silent gap.
 fn reset(key: &SessionKey, fault: StreamFault, cancel: &CancellationToken) {
     tracing::warn!(
@@ -248,6 +283,7 @@ mod tests {
             relay_tcp_with_timeouts(
                 task,
                 server,
+                Bytes::new(),
                 Duration::from_millis(20),
                 Duration::from_secs(60),
             ),
@@ -277,6 +313,7 @@ mod tests {
         let relay = tokio::spawn(relay_tcp_with_timeouts(
             task,
             server,
+            Bytes::new(),
             Duration::from_secs(60),
             deadline,
         ));

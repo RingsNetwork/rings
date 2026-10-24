@@ -85,6 +85,9 @@ pub struct MailboxConfig {
     pub local: String,
     /// Where the receiver listens: the target of the node's served port 25.
     pub smtp: SocketAddr,
+    /// Whether the receiver's connections start with a PROXY protocol v2 header: set it when
+    /// the node serves port 25 with `proxy_protocol: v2`.
+    pub receiver_proxy_protocol: bool,
     /// Where submission listens.
     pub submission: SocketAddr,
     /// Where IMAP listens.
@@ -154,6 +157,7 @@ pub async fn start(
             host: host.clone(),
             max_size: config.max_message_size,
             sink: Sink::Inbox(Arc::clone(&store)),
+            proxy_protocol: config.receiver_proxy_protocol,
         }
         .serve(smtp),
     );
@@ -163,6 +167,7 @@ pub async fn start(
             host,
             max_size: config.max_message_size,
             sink: Sink::Outbound(Arc::clone(&outbound)),
+            proxy_protocol: false,
         }
         .serve(submission),
     );

@@ -118,18 +118,50 @@ pub(crate) fn validate_registration_timing(
     if !advertised {
         return Ok(());
     }
+    let keys = TimingKeys {
+        heartbeat_interval: &format!("{registry}_heartbeat_interval"),
+        ttl: &format!("{registry}_ttl"),
+        enabled_by: Some(advertise_setting),
+    };
+    validate_schedule(&keys, heartbeat_interval, ttl)
+}
+
+/// The settings that schedule one registry, as its timing errors name them.
+pub(crate) struct TimingKeys<'a> {
+    /// The setting of the heartbeat interval.
+    pub(crate) heartbeat_interval: &'a str,
+    /// The setting of the descriptor time-to-live.
+    pub(crate) ttl: &'a str,
+    /// The switch that enables the registry, if one does.
+    pub(crate) enabled_by: Option<&'a str>,
+}
+
+/// Validate a registry's scheduling: the heartbeat interval is below the descriptor TTL and
+/// below [`registry_refresh_bound`]; an error names the settings in `keys`.
+pub(crate) fn validate_schedule(
+    keys: &TimingKeys<'_>,
+    heartbeat_interval: Duration,
+    ttl: Duration,
+) -> Result<()> {
+    let TimingKeys {
+        heartbeat_interval: heartbeat_key,
+        ttl: ttl_key,
+        enabled_by,
+    } = keys;
     if heartbeat_interval >= ttl {
+        let condition = enabled_by
+            .map(|switch| format!(" when {switch} is enabled"))
+            .unwrap_or_default();
         return Err(Error::InvalidConfig(format!(
-            "{registry}_heartbeat_interval ({heartbeat_interval:?}) must be less than \
-             {registry}_ttl ({ttl:?}) when {advertise_setting} is enabled"
+            "{heartbeat_key} ({heartbeat_interval:?}) must be less than {ttl_key} \
+             ({ttl:?}){condition}"
         )));
     }
     let bound = registry_refresh_bound();
     if heartbeat_interval >= bound {
         return Err(Error::InvalidConfig(format!(
-            "{registry}_heartbeat_interval ({heartbeat_interval:?}) must be less than {bound:?}, \
-             the lifetime of a registry write less the clock-skew tolerance and the fetch-poll \
-             budget"
+            "{heartbeat_key} ({heartbeat_interval:?}) must be less than {bound:?}, the lifetime \
+             of a registry write less the clock-skew tolerance and the fetch-poll budget"
         )));
     }
     Ok(())

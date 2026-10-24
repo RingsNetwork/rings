@@ -6,16 +6,18 @@
 //! node stops. A node that stops serving publishes an offer with no port and no record, which a
 //! relay reads as a withdrawal.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::utils::get_epoch_ms;
 use rings_dns_relay::AnnouncementError;
+use rings_dns_relay::ProxyProtocol;
 
 use super::descriptor::announcement_of;
 use super::descriptor::service_topic;
+use super::descriptor::ServedPort;
 use super::descriptor::ServedTxt;
 use super::descriptor::ServiceDescriptor;
 use super::descriptor::ServiceDescriptorBody;
@@ -26,11 +28,12 @@ use crate::registration::DhtRegistrationPublisher;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
 
-/// What a node offers through DNS relays: the ports it serves and its TXT records, validated as
-/// an announcement, with the timing of the heartbeat that publishes them.
+/// What a node offers through DNS relays: the ports it serves, each with how its service learns
+/// a connection's origin, and its TXT records, validated as an announcement, with the timing of
+/// the heartbeat that publishes them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceOffer {
-    ports: BTreeSet<u16>,
+    ports: BTreeMap<u16, ProxyProtocol>,
     txt: Vec<ServedTxt>,
     heartbeat_interval: Duration,
     ttl: Duration,
@@ -43,7 +46,7 @@ impl ServiceOffer {
     /// [`Announcement`](rings_dns_relay::Announcement); a relay never rejects what a node
     /// publishes.
     pub fn new(
-        ports: BTreeSet<u16>,
+        ports: BTreeMap<u16, ProxyProtocol>,
         txt: Vec<ServedTxt>,
         heartbeat_interval: Duration,
         ttl: Duration,
@@ -54,13 +57,16 @@ impl ServiceOffer {
             heartbeat_interval,
             ttl,
         };
-        announcement_of(offer.ports.iter().copied(), &offer.txt)?;
+        announcement_of(offer.served_ports(), &offer.txt)?;
         Ok(offer)
     }
 
-    /// The ports this offer serves.
-    pub fn ports(&self) -> &BTreeSet<u16> {
-        &self.ports
+    /// The ports this offer serves, ascending.
+    pub fn served_ports(&self) -> impl Iterator<Item = ServedPort> + '_ {
+        self.ports.iter().map(|(port, proxy_protocol)| ServedPort {
+            port: *port,
+            proxy_protocol: *proxy_protocol,
+        })
     }
 
     /// How often the descriptor is published.
@@ -86,7 +92,7 @@ impl ServiceOffer {
             did,
             public_key,
             network_id,
-            ports: self.ports.iter().copied().collect(),
+            ports: self.served_ports().collect(),
             txt: self.txt.clone(),
             heartbeat_at_ms: now_ms,
             expires_at_ms: now_ms.saturating_add(self.ttl.as_millis()),

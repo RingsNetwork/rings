@@ -16,7 +16,11 @@
 //!
 //! Every answer inside a zone is authoritative. A `NOERROR` answer with no records (NODATA) and
 //! an `NXDOMAIN` both carry the zone's SOA, whose minimum field is the negative-caching TTL
-//! (RFC 2308). `ANY` is answered with every record the name has (RFC 8482 allows a subset).
+//! (RFC 2308).
+//!
+//! `ANY` is answered with one record set (RFC 8482): the SOA at an apex, the address at an
+//! owner's name, the TXT records below it. A small question then never draws a large answer, so
+//! the relay amplifies no reflected traffic.
 
 use std::net::Ipv6Addr;
 
@@ -163,24 +167,34 @@ pub fn answer(view: View<'_>, qname: &Name, qtype: RecordType, ttl: AnswerTtl) -
     }
 }
 
+/// The record type a query for `qtype` asks for, at a name whose `ANY` answer is the record set
+/// of type `for_any` (the module doc).
+fn asked(qtype: RecordType, for_any: RecordType) -> RecordType {
+    if qtype == RecordType::ANY {
+        for_any
+    } else {
+        qtype
+    }
+}
+
 /// The records of type `qtype` at `zone`'s apex.
 fn apex_records(zone: &Zone, qtype: RecordType, ttl: AnswerTtl) -> Vec<Record> {
-    let wanted = |rtype: RecordType| qtype == rtype || qtype == RecordType::ANY;
-    let mut records = Vec::new();
-    if wanted(RecordType::SOA) {
-        records.push(soa_record(zone, ttl));
+    match asked(qtype, RecordType::SOA) {
+        RecordType::SOA => vec![soa_record(zone, ttl)],
+        RecordType::NS => {
+            let origin = Name::from(zone.origin());
+            zone.nameservers()
+                .map(|nameserver| {
+                    Record::from_rdata(
+                        origin.clone(),
+                        ttl.positive,
+                        RData::NS(NS(nameserver.clone())),
+                    )
+                })
+                .collect()
+        }
+        _ => Vec::new(),
     }
-    if wanted(RecordType::NS) {
-        let origin = Name::from(zone.origin());
-        records.extend(zone.nameservers().iter().map(|nameserver| {
-            Record::from_rdata(
-                origin.clone(),
-                ttl.positive,
-                RData::NS(NS(nameserver.clone())),
-            )
-        }));
-    }
-    records
 }
 
 /// The records of type `qtype` at `qname`, the name `sub` under an owner that announces
@@ -194,40 +208,34 @@ fn owned_records(
     qtype: RecordType,
     ttl: AnswerTtl,
 ) -> Vec<Record> {
-    let wanted = |rtype: RecordType| qtype == rtype || qtype == RecordType::ANY;
     let record = |rdata: RData| Record::from_rdata(qname.clone(), ttl.positive, rdata);
-    let mut records = Vec::new();
-    if sub.is_owner() && wanted(RecordType::AAAA) {
-        records.push(record(RData::AAAA(AAAA(announced.address))));
+    let for_any = if sub.is_owner() {
+        RecordType::AAAA
+    } else {
+        RecordType::TXT
+    };
+    match asked(qtype, for_any) {
+        RecordType::AAAA if sub.is_owner() => vec![record(RData::AAAA(AAAA(announced.address)))],
+        RecordType::MX if sub.is_owner() && announced.announcement.receives_mail() => {
+            vec![record(RData::MX(MX::new(MX_PREFERENCE, qname.clone())))]
+        }
+        RecordType::TXT => announced
+            .announcement
+            .txt_at(sub)
+            .iter()
+            .map(|value| record(RData::TXT(TXT::new(vec![value.as_str().to_owned()]))))
+            .collect(),
+        _ => Vec::new(),
     }
-    if sub.is_owner() && wanted(RecordType::MX) && announced.announcement.receives_mail() {
-        records.push(record(RData::MX(MX::new(MX_PREFERENCE, qname.clone()))));
-    }
-    if wanted(RecordType::TXT) {
-        records.extend(
-            announced
-                .announcement
-                .txt_at(sub)
-                .iter()
-                .map(|value| record(RData::TXT(TXT::new(vec![value.as_str().to_owned()])))),
-        );
-    }
-    records
 }
 
 /// `zone`'s SOA record, whose minimum is the negative TTL.
 fn soa_record(zone: &Zone, ttl: AnswerTtl) -> Record {
-    let origin = Name::from(zone.origin());
-    let primary = zone
-        .nameservers()
-        .first()
-        .cloned()
-        .unwrap_or_else(|| origin.clone());
     Record::from_rdata(
-        origin,
+        Name::from(zone.origin()),
         ttl.negative,
         RData::SOA(SOA::new(
-            primary,
+            zone.primary().clone(),
             zone.contact().clone(),
             SOA_SERIAL,
             SOA_REFRESH_SECS,

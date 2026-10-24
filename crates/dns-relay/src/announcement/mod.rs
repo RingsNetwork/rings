@@ -5,16 +5,21 @@
 //! and the ingress never meet an oversized or malformed announcement.
 //!
 //! ```text
-//!   Announcement = (ports : Port ⇀ ServiceName,  txt : SubName ⇀ [TxtValue]⁺)
+//!   Announcement = (ports : Port ⇀ ProxyProtocol,  txt : SubName ⇀ [TxtValue]⁺)
 //!   |ports| ≤ MAX_SERVED_PORTS,  |txt| ≤ MAX_TXT_NAMES,  ∀s. 1 ≤ |txt(s)| ≤ MAX_TXT_VALUES
 //!   receives_mail(a)  ⇔  SMTP_PORT ∈ dom(ports)
 //!   exists(a, s)      ⇔  s = ε  ∨  ∃t ∈ dom(txt). t = s ∨ t ends with "." ‖ s
 //! ```
+//!
+//! A port names the service it reaches: which local service a port maps to is the owner's own
+//! business, so the relay keeps nothing but the port and how to tell the service a connection's
+//! origin.
 
 use std::collections::BTreeMap;
-use std::fmt;
 use std::num::NonZeroU16;
 
+use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error;
 
 /// The port of SMTP: an owner that serves it receives mail, and its name gets an MX record.
@@ -27,8 +32,6 @@ pub const MAX_TXT_NAMES: usize = 8;
 pub const MAX_TXT_VALUES: usize = 4;
 /// Longest TXT value: one DNS character-string.
 pub const MAX_TXT_VALUE_LEN: usize = 255;
-/// Longest service name.
-pub const MAX_SERVICE_NAME_LEN: usize = 64;
 /// Most labels a name under an owner may have.
 pub const MAX_SUB_NAME_LABELS: usize = 4;
 /// Longest DNS label.
@@ -37,9 +40,6 @@ pub const MAX_LABEL_LEN: usize = 63;
 /// Why an announcement, or one of its parts, is malformed.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AnnouncementError {
-    /// A service name is empty, too long, or holds a byte outside visible ASCII.
-    #[error("invalid service name {0:?}")]
-    ServiceName(String),
     /// A TXT value is longer than one character-string.
     #[error("TXT value of {0} bytes exceeds {MAX_TXT_VALUE_LEN}")]
     TxtValue(usize),
@@ -71,32 +71,19 @@ pub enum AnnouncementError {
     DuplicateTxtName(String),
 }
 
-/// The name of a service an owner registered with its relay: what the ingress asks the owner's
-/// node to dial. Visible ASCII, from 1 to [`MAX_SERVICE_NAME_LEN`] bytes.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct ServiceName(String);
-
-impl ServiceName {
-    /// Validate `name` as a service name.
-    pub fn new(name: impl Into<String>) -> Result<Self, AnnouncementError> {
-        let name = name.into();
-        let visible = name.bytes().all(|byte| byte.is_ascii_graphic());
-        if name.is_empty() || name.len() > MAX_SERVICE_NAME_LEN || !visible {
-            return Err(AnnouncementError::ServiceName(name));
-        }
-        Ok(Self(name))
-    }
-
-    /// The name as text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ServiceName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
+/// How the ingress tells a served port's service where a connection came from.
+///
+/// The relay carries a connection's bytes and nothing else, so without a header the service
+/// sees every connection come from the owner's node itself. Written `off` or `v2`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyProtocol {
+    /// Nothing precedes the client's bytes.
+    #[default]
+    Off,
+    /// A PROXY protocol version 2 header naming the client's and the relayed address precedes
+    /// the client's bytes ([`crate::proxy_v2_header`]).
+    V2,
 }
 
 /// One TXT record's text: a single DNS character-string, at most [`MAX_TXT_VALUE_LEN`] bytes.
@@ -184,11 +171,11 @@ fn is_sub_label(label: &str) -> bool {
         })
 }
 
-/// What an owner announces through the relay: the ports it serves, each mapped to a service its
-/// node registered, and the TXT records it publishes under its name.
+/// What an owner announces through the relay: the ports it serves, each with how its service
+/// learns a connection's origin, and the TXT records it publishes under its name.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Announcement {
-    ports: BTreeMap<NonZeroU16, ServiceName>,
+    ports: BTreeMap<NonZeroU16, ProxyProtocol>,
     txt: BTreeMap<SubName, Vec<TxtValue>>,
 }
 
@@ -196,23 +183,27 @@ impl Announcement {
     /// Validate an announcement from its served ports and its TXT records.
     ///
     /// Post: every bound in the module doc holds, no port is 0 or repeated, and no TXT name is
-    /// repeated.
+    /// repeated. A bound is checked as each entry arrives, so an oversized input is refused
+    /// without being collected first.
     pub fn new(
-        ports: impl IntoIterator<Item = (u16, ServiceName)>,
+        ports: impl IntoIterator<Item = (u16, ProxyProtocol)>,
         txt: impl IntoIterator<Item = (SubName, Vec<TxtValue>)>,
     ) -> Result<Self, AnnouncementError> {
         let mut served = BTreeMap::new();
-        for (port, service) in ports {
+        for (count, (port, proxy)) in ports.into_iter().enumerate() {
+            if count >= MAX_SERVED_PORTS {
+                return Err(AnnouncementError::TooManyPorts(count.saturating_add(1)));
+            }
             let port = NonZeroU16::new(port).ok_or(AnnouncementError::PortZero)?;
-            if served.insert(port, service).is_some() {
+            if served.insert(port, proxy).is_some() {
                 return Err(AnnouncementError::DuplicatePort(port.get()));
             }
         }
-        if served.len() > MAX_SERVED_PORTS {
-            return Err(AnnouncementError::TooManyPorts(served.len()));
-        }
         let mut published = BTreeMap::new();
-        for (name, values) in txt {
+        for (count, (name, values)) in txt.into_iter().enumerate() {
+            if count >= MAX_TXT_NAMES {
+                return Err(AnnouncementError::TooManyTxtNames(count.saturating_add(1)));
+            }
             if values.is_empty() || values.len() > MAX_TXT_VALUES {
                 return Err(AnnouncementError::TxtValueCount {
                     name: name.0,
@@ -223,9 +214,6 @@ impl Announcement {
                 return Err(AnnouncementError::DuplicateTxtName(name.0));
             }
             published.insert(name, values);
-        }
-        if published.len() > MAX_TXT_NAMES {
-            return Err(AnnouncementError::TooManyTxtNames(published.len()));
         }
         Ok(Self {
             ports: served,
@@ -239,21 +227,19 @@ impl Announcement {
         self.ports.is_empty() && self.txt.is_empty()
     }
 
-    /// The service this owner serves at `port`, if any.
-    pub fn service_at(&self, port: u16) -> Option<&ServiceName> {
-        NonZeroU16::new(port).and_then(|port| self.ports.get(&port))
+    /// How this owner serves `port`, if it serves it.
+    pub fn serves(&self, port: u16) -> Option<ProxyProtocol> {
+        NonZeroU16::new(port).and_then(|port| self.ports.get(&port).copied())
     }
 
-    /// The ports this owner serves, ascending, with their services.
-    pub fn served_ports(&self) -> impl Iterator<Item = (u16, &ServiceName)> {
-        self.ports
-            .iter()
-            .map(|(port, service)| (port.get(), service))
+    /// The ports this owner serves, ascending, each with how its service learns origins.
+    pub fn served_ports(&self) -> impl Iterator<Item = (u16, ProxyProtocol)> + '_ {
+        self.ports.iter().map(|(port, proxy)| (port.get(), *proxy))
     }
 
     /// Whether this owner receives mail: it serves [`SMTP_PORT`].
     pub fn receives_mail(&self) -> bool {
-        self.service_at(SMTP_PORT).is_some()
+        self.serves(SMTP_PORT).is_some()
     }
 
     /// The TXT records this owner publishes at `name`; empty when it publishes none there.

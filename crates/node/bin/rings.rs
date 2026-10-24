@@ -25,11 +25,7 @@ use cli::ServiceCommand;
 use futures::pin_mut;
 use futures::StreamExt;
 use rings_gateway::GatewayStatusHandle;
-use rings_node::dns_relay::relay_service;
-use rings_node::dns_relay::DhtDirectory;
-use rings_node::dns_relay::DnsRelay;
-use rings_node::dns_relay::DnsRelayConfig;
-use rings_node::dns_relay::RelayForward;
+use rings_node::dns_relay;
 use rings_node::dns_relay::ServiceOffer;
 use rings_node::dns_relay::ServicesConfig;
 use rings_node::extension::protocols::relay::RelayHandle;
@@ -59,7 +55,6 @@ use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
 use rings_node::seed::Seed;
-use rings_node::util::expand_home;
 use rings_node::util::loader::ResourceLoader;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
@@ -145,18 +140,11 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
     .await?;
     println!("Did: {}", processor.swarm.did());
     let provider = Arc::new(Provider::from_processor(processor.clone()));
-    // The relay is an opt-in extension owning its own engine; install it so the daemon can
-    // serve TCP/UDP tunnels. Its handle registers the targets of the ports this node serves
-    // through DNS relays, and carries the connections a DNS relay this node runs accepts.
+    // The relay is an opt-in extension owning its own engine: it serves TCP/UDP tunnels, the
+    // ports this node serves through DNS relays, and the ingress of a DNS relay it runs.
     let relay = RelayHandle::install(&provider.extensions())?;
-    register_served_ports(&relay, c.services.as_ref()).await?;
-    let dns_relay = open_dns_relay(
-        c.dns_relay.as_ref(),
-        c.services.as_ref(),
-        &processor,
-        &relay,
-    )
-    .await?;
+    let (services, relaying) = (c.services.as_ref(), c.dns_relay.as_ref());
+    let dns_relay = dns_relay::open(services, relaying, &processor, &relay).await?;
     let onion = provider.onion_circuit()?;
     let gateway_runner = c
         .enabled_gateway()
@@ -327,50 +315,6 @@ fn run_storage_configs(
         config::StorageConfig::new(&data_path, capacity),
         config::StorageConfig::new(&measure_path, capacity),
     )
-}
-
-/// Register the local target of every port this node serves through DNS relays as the TCP
-/// relay service the relays' ingress asks for (#1049).
-async fn register_served_ports(
-    relay: &RelayHandle,
-    services: Option<&ServicesConfig>,
-) -> anyhow::Result<()> {
-    for (port, target) in services.into_iter().flat_map(ServicesConfig::targets) {
-        relay
-            .register_tcp_service(relay_service(port), target)
-            .await
-            .with_context(|| format!("cannot serve port {port} at {target}"))?;
-    }
-    Ok(())
-}
-
-/// The DNS relay the configuration asks this node to run, opened over its DHT and its TCP
-/// relay, with the node's own `services` dialed directly (#1049); `None` when it asks for none.
-async fn open_dns_relay(
-    config: Option<&DnsRelayConfig>,
-    services: Option<&ServicesConfig>,
-    processor: &Arc<Processor>,
-    relay: &RelayHandle,
-) -> anyhow::Result<Option<DnsRelay<DhtDirectory, RelayForward>>> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
-    let config = DnsRelayConfig {
-        state_dir: expand_home(&config.state_dir)?,
-        ..config.clone()
-    };
-    let opened = DnsRelay::open(
-        &config,
-        Arc::new(DhtDirectory::new(Arc::clone(processor))),
-        Arc::new(RelayForward::new(
-            relay.clone(),
-            processor.did(),
-            services.into_iter().flat_map(ServicesConfig::targets),
-        )),
-    )
-    .await
-    .context("cannot open the DNS relay")?;
-    Ok(Some(opened))
 }
 
 /// Open the run's stores and build its processor over them, announcing `service_offer` through

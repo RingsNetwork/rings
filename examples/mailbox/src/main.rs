@@ -26,6 +26,10 @@ struct Args {
     /// Where the receiver listens: map the node's served port 25 here.
     #[arg(long, default_value = "127.0.0.1:2525")]
     smtp: SocketAddr,
+    /// The receiver's connections start with a PROXY protocol v2 header naming the client: set
+    /// it when the node serves port 25 with `proxy_protocol: v2`.
+    #[arg(long)]
+    receiver_proxy_protocol: bool,
     /// Where submission listens, for the user's mail client.
     #[arg(long, default_value = "127.0.0.1:1587")]
     submission: SocketAddr,
@@ -65,6 +69,7 @@ async fn main() -> ExitCode {
         label: label.clone(),
         local: args.local.clone(),
         smtp: args.smtp,
+        receiver_proxy_protocol: args.receiver_proxy_protocol,
         submission: args.submission,
         imap: args.imap,
         max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
