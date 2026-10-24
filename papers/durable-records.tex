@@ -789,9 +789,29 @@ reaches the next member however long the run between them, and the successor lis
 capacity of 3: with browsers holding relay mail (\issue{1036}) storage-less runs are short, and
 the query covers the rest.
 
+\begin{law}[Age gate]\label{law:agegate}
+A node declares that it holds relay mail only once it has been online for $A$, at least four
+stabilization periods (default 2\,min); until then it routes, and fetches its own mail from its
+holder (\issue{1037}), but is no member and takes no copy.
+\end{law}
+
+Replica maintenance costs each node about $r\,B/(N\bar L)$ bytes per unit time, $B$ the held
+bytes of the overlay, $N$ its nodes and $\bar L$ the mean member session~\cite{BlakeRodrigues}: at $r=8$, $10^5$ nodes
+and a fifth of them receiving a full carrier of 4\,KiB elements, about 27\,KiB/s per node at
+$\bar L=15$\,s against 0.7\,KiB/s at 10\,min, and a node that leaves within its first session
+pays its join copy before it is of use.  The gate excludes such nodes, and it makes members
+length-biased, which is the session model the default $r$ assumes.
+
+A member caches $\mathrm{next}_k(n)$ for the range of keys whose next member it is, until its
+view changes: every key of the range has the same next member, so one owner query serves them
+all, and a member asks at most one per view change.  The successor capacity is revisited only if
+measured runs routinely exceed it: raising it from 3 to 8 costs five more keep-alives a node,
+less than routed queries per hold.
+
 \begin{law}[Chain replication]\label{law:fanout}
 A hold goes to $h_0$, under the writer authority of \issue{1037}.  $h_0$ joins the element and
-forwards the hold to $\mathrm{next}_k(h_0)$.  A member of rank $j$ that admits it
+forwards the hold to $\mathrm{next}_k(h_0)$, digest first: the bytes follow only when the next
+member lacks the element.  A member of rank $j$ that admits it
 (Law~\ref{law:admitcopy}) forwards it to its next member while $j<q(k)-1$, and the member of
 rank $q(k)-1$ acknowledges it to the member it came from; every member acknowledges the
 member it came from once its own next member acknowledged.  $h_0$ acknowledges the writer once
@@ -811,17 +831,22 @@ copy is a join (S3).
 \end{law}
 
 \begin{law}[Chain repair]\label{law:memberrepair}
-Each repair pass every member keeping a carrier offers its join to its previous and its next
-member, and a member whose carrier an admitted copy changed offers it on to its other neighbour
-at once.  A keeper that is no member offers the carrier to the member it can name and deletes
-its copy only after a delete-capable acknowledgement from a member holding $\sqsupseteq$ its
-state (S1$''$, S2$'$ with member for holder).
+Chain order is ring order over the holders, so every carrier a member $m$ keeps has the same
+chain neighbours, its previous holder $p_1(m)$ and its next holder $n_1(m)$, but at the ends of
+its range (rank 0 has no previous member, rank $r-1$ no next).  A repair pass, periodic or
+event-driven, sends at most one message to each of the two: the digest set of every carrier $m$
+keeps whose chain includes that neighbour, the bytes following only for the carriers it lacks.
+A member whose carriers an admitted copy changed offers them on to its other neighbour at once,
+in the same bundled form.  A keeper that is no member offers the carrier to the member it can
+name and deletes its copy only after a delete-capable acknowledgement from a member holding
+$\sqsupseteq$ its state (S1$''$, S2$'$ with member for holder).
 \end{law}
 
 \begin{law}[Event-driven repair]\label{law:eventrepair}
 A member that loses a node of its view, by a closed connection or a failed liveness check, runs
-Law~\ref{law:memberrepair} at once, on its new view, for every carrier it keeps of a key whose
-previous or next member that node was.  The periodic pass of period $T$ remains the backstop.
+Law~\ref{law:memberrepair} at once, on its new view, when that node was $p_1(m)$ or $n_1(m)$: one
+bundled exchange with each replacement neighbour, whatever the number of carriers.  The
+periodic pass of period $T$ remains the backstop.
 \end{law}
 
 \begin{proposition}[Repair delay]\label{prop:delay}
@@ -855,8 +880,9 @@ the table of \issue{777}, $r=8$ meets $10^{-3}$ for Weibull ($k=0.5$) sessions o
 1\,min at $D=60$\,s, so for any $\sigma$; for a median of 15\,s it meets it only at $D=10$\,s,
 that is with $\sigma\approx0$, and a silent fraction at that median needs $r\approx14$.  Two
 levers move $\sigma$ and $D_s$ instead of $r$: a leave on \jsq{pagehide} (\issue{1057}) makes a
-closing tab's departure graceful, and a shorter liveness timeout between chain neighbours bounds
-$D_s$; with them $r=8$ covers the 15\,s median.  The laws hold for every $r$; these figures
+closing tab's departure graceful, and a shorter liveness timeout between chain neighbours
+(\issue{1070}), which are only $p_1(m)$ and $n_1(m)$, bounds $D_s$; with them $r=8$ covers the
+15\,s median.  The laws hold for every $r$; these figures
 only choose its default.
 
 \begin{proposition}[Acknowledged copies survive]\label{prop:copies}
@@ -912,12 +938,24 @@ mail while it is full, and every other key is unaffected.  Isolating one origin'
 another's within a store is the per-origin share of \issue{907} and \issue{1060}, not this
 law's.
 
+\begin{proposition}[Message budget]\label{prop:budget}
+Per node and per repair pass: one list of Law~\ref{law:previous} and at most two bundled repair
+messages, so at most three, whatever the carriers it keeps; plus $2r$ for each hold it relays,
+and one bundled exchange per change of $p_1$ or $n_1$.
+\end{proposition}
+\begin{proof}
+Laws~\ref{law:previous}, \ref{law:memberrepair} and~\ref{law:eventrepair} as stated; a hold is
+one send to $h_0$, $r-1$ forwards, $r-1$ chain acknowledgements and one to the writer, and the
+owner queries of its hops are served by the cached next members.
+\end{proof}
+
 \textbf{Costs.}  A hold costs $r-1$ forwarded copies and $r-1$ acknowledgements, and the
 writer's acknowledgement waits for the chain's round trip, about $2(q-1)\,\delta\le2r\,\delta$.
 A member that leaves mid-chain stalls the acknowledgement until its loss is detected and the
 chain repaired, within $D+2r\,\delta$ of its departure ($D$ by its class); the writer keeps and
 resends the hold meanwhile, so the stall delays the acknowledgement and loses nothing.  A pass offers each carrier's
-digest to two chain neighbours and copies only on a difference.  A list of
+digest set to two chain neighbours in one message each and copies only on a difference.  A
+list of
 Law~\ref{law:previous} carries $r$ pairs.  A best-effort leave on departure (\issue{1057})
 shortens $T_d$ and is never needed for this section's laws.
 
