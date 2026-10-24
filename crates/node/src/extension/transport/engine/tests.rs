@@ -5,10 +5,13 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 
 use super::Outbound;
 use super::Pending;
+use super::StreamHold;
 use super::TransportSessions;
 use super::MAX_PENDING_ACCEPTS;
 use crate::extension::transport::EffectEnqueue;
@@ -213,4 +216,52 @@ async fn test_failed_udp_accept_releases_its_source_reservation() {
     assert!(sessions
         .reserve_pending_udp(socket, src, Bytes::new())
         .is_some());
+}
+
+/// An accepted loopback TCP stream, and its client end, which must outlive the test's use of it.
+async fn accepted_stream() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test TCP listener");
+    let address = listener.local_addr().expect("listener address");
+    let client = TcpStream::connect(address)
+        .await
+        .expect("connect test TCP client");
+    let (accepted, _) = listener.accept().await.expect("accept test TCP client");
+    (accepted, client)
+}
+
+/// A held stream is released with its pending accept: an accept whose `Accepted` was never
+/// answered is evicted, and its hold drops with the stream.
+#[tokio::test]
+async fn test_an_evicted_pending_accept_releases_its_hold() {
+    let sessions = TransportSessions::new();
+    let (stream, _client) = accepted_stream().await;
+    let (hold, released) = StreamHold::new();
+    let token = sessions
+        .stash_pending(Pending::Tcp(stream, Some(hold)))
+        .expect("a vacant pending table takes the accept");
+    sessions.evict_pending(token);
+    tokio::time::timeout(std::time::Duration::from_secs(5), released.wait())
+        .await
+        .expect("the hold is released with the evicted stream");
+}
+
+/// A held stream whose session slot is already taken is dropped by the bind, and its hold with
+/// it, so its owner never waits on a stream no session carries.
+#[tokio::test]
+async fn test_a_bind_onto_a_taken_slot_releases_its_hold() -> crate::error::Result<()> {
+    let (task, sessions, key) = super::relay_task_for_test("tcp")?;
+    let (stream, _client) = accepted_stream().await;
+    let (hold, released) = StreamHold::new();
+    let token = sessions
+        .stash_pending(Pending::Tcp(stream, Some(hold)))
+        .expect("a vacant pending table takes the accept");
+    let untrack =
+        Arc::clone(&sessions).bind_accepted(task.scope.clone(), token, key, "svc".to_owned());
+    assert_eq!(untrack, None, "the live owner of the slot keeps it");
+    tokio::time::timeout(std::time::Duration::from_secs(5), released.wait())
+        .await
+        .expect("the hold is released with the refused stream");
+    Ok(())
 }

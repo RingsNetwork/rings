@@ -57,7 +57,7 @@ impl TransportSessions {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        let Some(token) = self.stash_pending(Pending::Tcp(stream)) else {
+                        let Some(token) = self.stash_pending(Pending::Tcp(stream, None)) else {
                             continue;
                         };
                         if inject_accepted(&scope, token, peer, service.clone())

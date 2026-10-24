@@ -117,11 +117,39 @@ struct SessionHandle {
     generation: u64,
 }
 
+/// What the relay holds for as long as it holds one accepted TCP stream: dropped when the relay
+/// releases the stream, whether its session ended, was refused, was cancelled, or never opened.
+/// Its owner learns the stream's release by waiting on the paired [`StreamReleased`].
+pub(crate) struct StreamHold {
+    /// Never sent on: held only to close its channel when the hold is dropped.
+    _released: tokio::sync::oneshot::Sender<()>,
+}
+
+/// The release of a held stream: completes once its [`StreamHold`] is dropped.
+pub(crate) struct StreamReleased(tokio::sync::oneshot::Receiver<()>);
+
+impl StreamHold {
+    /// A hold and the release it signals.
+    pub(crate) fn new() -> (Self, StreamReleased) {
+        let (hold, released) = tokio::sync::oneshot::channel();
+        (Self { _released: hold }, StreamReleased(released))
+    }
+}
+
+impl StreamReleased {
+    /// Wait until the hold is dropped. The hold never sends, so its channel completes only by
+    /// closing.
+    pub(crate) async fn wait(self) {
+        let _closed = self.0.await;
+    }
+}
+
 /// A locally-accepted connection/flow that has been reported to the pure relay (`Accepted`)
 /// and is waiting for the core to mint its delegatee key (`OpenAccepted` → `bind_accepted`).
 enum Pending {
-    /// An accepted TCP connection.
-    Tcp(TcpStream),
+    /// An accepted TCP connection, and the hold its owner waits on, if any. The hold travels
+    /// with the stream, so it is dropped exactly when the stream is.
+    Tcp(TcpStream, Option<StreamHold>),
     /// A new UDP flow: the shared listener socket, the local client address, and the first
     /// datagram (carried so it isn't lost during the round-trip to the core).
     Udp {
@@ -249,15 +277,17 @@ impl TransportSessions {
         }
     }
 
-    /// Client side. Relay an already-accepted TCP stream to `peer`'s `service`.
+    /// Client side. Relay an already-accepted TCP stream to `peer`'s `service`; `hold`, when
+    /// given, is dropped when the relay releases the stream.
     pub async fn relay_tcp_stream(
         self: Arc<Self>,
         scope: Scope,
         stream: TcpStream,
         peer: Did,
         service: String,
+        hold: Option<StreamHold>,
     ) {
-        let Some(token) = self.stash_pending(Pending::Tcp(stream)) else {
+        let Some(token) = self.stash_pending(Pending::Tcp(stream, hold)) else {
             return;
         };
         if inject_accepted(&scope, token, peer, service).await.is_err() {
@@ -359,13 +389,15 @@ impl TransportSessions {
             return Some(key);
         };
         match pending {
-            Pending::Tcp(stream) => {
+            Pending::Tcp(stream, hold) => {
                 let task = match RelayTask::register(self.clone(), scope.clone(), key.clone()) {
                     SlotRegistration::Registered(task) => task,
                     SlotRegistration::AlreadyPresent => return None,
                     SlotRegistration::Failed => return Some(key),
                 };
                 spawner.spawn(async move {
+                    // Released when this task ends, however it ends.
+                    let _hold = hold;
                     if open(&task.scope, &task.key, service.as_str())
                         .await
                         .is_err()

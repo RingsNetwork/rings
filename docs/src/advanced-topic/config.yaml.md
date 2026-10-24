@@ -215,6 +215,19 @@ onion loop shape (see [HTTP CONNECT proxy](#http-connect-proxy)).
 Any other key in the section is rejected rather than ignored, so a misspelt key cannot fall back
 to its default.
 
+## Services and DNS relay
+
+Two optional sections, absent from the generated file, tie the node to DNS relays (#1049); see
+[DNS Relay](../dns-relay.md) for both:
+
+* `services`: the ports the node serves at `<did>.<zone>`, each mapped to a local address, and
+  the TXT records it publishes under its name. The node signs and publishes them every
+  `heartbeat_interval_secs`; an empty section withdraws its name.
+* `dns_relay`: a DNS relay this node runs: its zones, IPv6 prefix, ingress ports and state
+  directory.
+
+Any other key in either section is rejected rather than ignored.
+
 ## Bootstrap
 
 The `bootstrap` section lists peers that `rings run` keeps reachable for the life of the

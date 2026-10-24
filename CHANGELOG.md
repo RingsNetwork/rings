@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- DNS relay (#1049): every node is named `<did>.<zone>` in each zone a relay serves, and the
+  services it announces are reachable there from the internet. The new crate `rings-dns-relay`
+  is the relay: an authoritative DNS server (`hickory-server`) for the zones delegated to it, an
+  address map giving every DID its own IPv6 address in the relay's prefix (keyed by a secret,
+  its inverse kept across restarts), a memory that keeps a vanished owner named for a grace
+  period, and an ingress that relays a TCP connection to `(address, port)` to the owner's
+  announced service over the TCP relay. On the node, the `services` section of `config.yaml`
+  maps ports to local addresses: the node registers each as the TCP relay service
+  `dns-relay/<port>` and publishes a signed service descriptor (`ServiceDescriptor`, domain tag
+  `rings-node:service-descriptor`) on the DHT topic `dns_relay:<did>` every heartbeat
+  (`ProcessorBuilder::announce_services`). The `dns_relay` section runs a relay
+  (`rings_node::dns_relay::{DhtDirectory, RelayForward}`); a relay node's own served ports are
+  dialed directly, since the overlay has no hop to itself. Both sections are absent by default.
+  The new `RelayHandle::carry_tcp_stream` relays an accepted stream like `relay_tcp_stream` but
+  returns only once the relay is done with it, so a caller bounding its live connections (the
+  ingress's per-owner admission) holds its slot for the connection's life.
+  The new `examples/mailbox` is `me@<did>.<zone>` as a program: SMTP receiver, mailbox store,
+  IMAP4rev1 server and SMTP submission with an outbound queue.
+  - **Upgrade consequence.** None: the descriptor is a new registry, and a node without the new
+    sections publishes and runs nothing new.
+  - **Operator step.** None, unless running a relay: see the DNS Relay chapter.
+
 ## 0.35.0
 
 - `tokio` is bumped to 1.53.3 for RUSTSEC-2026-0386 (`AsyncFd::new` and related constructors

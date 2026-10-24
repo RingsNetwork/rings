@@ -25,6 +25,14 @@ use cli::ServiceCommand;
 use futures::pin_mut;
 use futures::StreamExt;
 use rings_gateway::GatewayStatusHandle;
+use rings_node::dns_relay::relay_service;
+use rings_node::dns_relay::DhtDirectory;
+use rings_node::dns_relay::DnsRelay;
+use rings_node::dns_relay::DnsRelayConfig;
+use rings_node::dns_relay::RelayForward;
+use rings_node::dns_relay::ServiceOffer;
+use rings_node::dns_relay::ServicesConfig;
+use rings_node::extension::protocols::relay::RelayHandle;
 use rings_node::logging::init_logging;
 use rings_node::measure::EvidenceCollectorIdentity;
 use rings_node::measure::PeriodicMeasure;
@@ -51,6 +59,7 @@ use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
 use rings_node::seed::Seed;
+use rings_node::util::expand_home;
 use rings_node::util::loader::ResourceLoader;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
@@ -125,20 +134,29 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
     let onion_http_proxy = onion_http_proxy_options(&c)?;
     let (data_storage, measure_storage) =
         run_storage_configs(args.storage_path, args.storage_capacity, &c);
+    let service_offer = c.services.as_ref().map(ServicesConfig::offer).transpose()?;
     let processor = build_processor(
         &pc,
         data_storage,
         measure_storage,
         args.reassembly_profile.limits(),
+        service_offer,
     )
     .await?;
     println!("Did: {}", processor.swarm.did());
     let provider = Arc::new(Provider::from_processor(processor.clone()));
     // The relay is an opt-in extension owning its own engine; install it so the daemon can
-    // serve TCP/UDP tunnels. The handle is unused server-side — the engine lives on inside the
-    // registered interpreters.
-    let _relay =
-        rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
+    // serve TCP/UDP tunnels. Its handle registers the targets of the ports this node serves
+    // through DNS relays, and carries the connections a DNS relay this node runs accepts.
+    let relay = RelayHandle::install(&provider.extensions())?;
+    register_served_ports(&relay, c.services.as_ref()).await?;
+    let dns_relay = open_dns_relay(
+        c.dns_relay.as_ref(),
+        c.services.as_ref(),
+        &processor,
+        &relay,
+    )
+    .await?;
     let onion = provider.onion_circuit()?;
     let gateway_runner = c
         .enabled_gateway()
@@ -180,6 +198,15 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
             // Returns only on stop, which the select below requests before aborting the set.
             supervisor.run(bootstrap_stop).await;
             Ok(())
+        });
+    }
+    if let Some(dns_relay) = dns_relay {
+        let dns_relay_stop = stop.token();
+        tasks.spawn(async move {
+            dns_relay
+                .run(dns_relay_stop.stopped())
+                .await
+                .context("DNS relay stopped")
         });
     }
     if let Some(proxy_options) = onion_http_proxy {
@@ -302,12 +329,58 @@ fn run_storage_configs(
     )
 }
 
-/// Open the run's stores and build its processor over them.
+/// Register the local target of every port this node serves through DNS relays as the TCP
+/// relay service the relays' ingress asks for (#1049).
+async fn register_served_ports(
+    relay: &RelayHandle,
+    services: Option<&ServicesConfig>,
+) -> anyhow::Result<()> {
+    for (port, target) in services.into_iter().flat_map(ServicesConfig::targets) {
+        relay
+            .register_tcp_service(relay_service(port), target)
+            .await
+            .with_context(|| format!("cannot serve port {port} at {target}"))?;
+    }
+    Ok(())
+}
+
+/// The DNS relay the configuration asks this node to run, opened over its DHT and its TCP
+/// relay, with the node's own `services` dialed directly (#1049); `None` when it asks for none.
+async fn open_dns_relay(
+    config: Option<&DnsRelayConfig>,
+    services: Option<&ServicesConfig>,
+    processor: &Arc<Processor>,
+    relay: &RelayHandle,
+) -> anyhow::Result<Option<DnsRelay<DhtDirectory, RelayForward>>> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let config = DnsRelayConfig {
+        state_dir: expand_home(&config.state_dir)?,
+        ..config.clone()
+    };
+    let opened = DnsRelay::open(
+        &config,
+        Arc::new(DhtDirectory::new(Arc::clone(processor))),
+        Arc::new(RelayForward::new(
+            relay.clone(),
+            processor.did(),
+            services.into_iter().flat_map(ServicesConfig::targets),
+        )),
+    )
+    .await
+    .context("cannot open the DNS relay")?;
+    Ok(Some(opened))
+}
+
+/// Open the run's stores and build its processor over them, announcing `service_offer` through
+/// DNS relays when there is one.
 async fn build_processor(
     pc: &ProcessorConfig,
     data_storage: config::StorageConfig,
     measure_storage: config::StorageConfig,
     reassembly_limits: ReassemblyLimits,
+    service_offer: Option<ServiceOffer>,
 ) -> anyhow::Result<Arc<Processor>> {
     let per_data_storage = Box::new(
         FileStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path.clone())
@@ -365,16 +438,18 @@ async fn build_processor(
     )
     .await?;
 
-    Ok(Arc::new(
-        ProcessorBuilder::from_config(pc)?
-            .storage(per_data_storage)
-            .relay_storage(per_relay_inbox_storage)
-            .onion_entry_guard_storage(per_onion_entry_guard_storage)
-            .replay_storage(per_transaction_replay_storage)
-            .measure(measure)
-            .reassembly_limits(reassembly_limits)
-            .build()?,
-    ))
+    let builder = ProcessorBuilder::from_config(pc)?
+        .storage(per_data_storage)
+        .relay_storage(per_relay_inbox_storage)
+        .onion_entry_guard_storage(per_onion_entry_guard_storage)
+        .replay_storage(per_transaction_replay_storage)
+        .measure(measure)
+        .reassembly_limits(reassembly_limits);
+    let builder = match service_offer {
+        Some(offer) => builder.announce_services(offer),
+        None => builder,
+    };
+    Ok(Arc::new(builder.build()?))
 }
 
 /// The onion HTTP proxy the configuration asks for, if any.
