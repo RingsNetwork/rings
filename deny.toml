@@ -3,6 +3,13 @@ all-features = true
 
 [advisories]
 git-fetch-with-cli = false
+ignore = [
+    # crypto-bigint 0.5.5 has secret-dependent branches in operations meant to be constant-time.
+    # The only fix is 0.7.6, and no 0.5.x release fixes it. 0.5.5 reaches us only through
+    # elliptic-curve 0.13 (k256 0.13 in rings-core; p256 0.13 via webrtc's dtls), so leaving it
+    # needs elliptic-curve 0.14 there and upstream. Tracked, and removed once fixed, in #1051.
+    { id = "RUSTSEC-2026-0387", reason = "no crypto-bigint 0.5.x fix; elliptic-curve 0.14 upgrade tracked in #1051" },
+]
 
 [licenses]
 allow = [

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- RUSTSEC-2026-0387 (`crypto-bigint`: secret-dependent branches in constant-time operations) is
+  ignored in `deny.toml` for now (#1051). The fix exists only in `crypto-bigint` 0.7.6, while
+  0.5.5 reaches us through `elliptic-curve` 0.13 (`k256` in rings-core, `p256` via webrtc's
+  `dtls`), which no 0.5.x release fixes; #1051 tracks the `elliptic-curve` 0.14 upgrade.
+
 ## 0.35.0
 
 - `tokio` is bumped to 1.53.3 for RUSTSEC-2026-0386 (`AsyncFd::new` and related constructors
