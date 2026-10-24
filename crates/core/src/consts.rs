@@ -97,13 +97,58 @@ pub const UNACKNOWLEDGED_RELAY_HOLDS_MAX: usize = RELAY_INBOX_MAX_LEN;
 /// Maximum bytes of one element in a DHT storage entry.
 ///
 /// The bound is per element so that filtering by it is a lattice morphism; with
-/// [`ENTRY_DATA_MAX_LEN`] it bounds every carrier at `ENTRY_DATA_MAX_LEN * ENTRY_PAYLOAD_MAX_BYTES`.
+/// [`ENTRY_DATA_MAX_LEN`] and [`DATA_TOMBSTONE_MAX_LEN`] it bounds every data carrier at
+/// [`DATA_CARRIER_WIRE_MAX`] encoded bytes.
 pub const ENTRY_PAYLOAD_MAX_BYTES: usize = 32 * 1024;
-/// Carrier law: a full carrier must still be one transport message, since a hand-off, a
-/// republish, and a lookup answer each carry a whole carrier. Elements are already in their
-/// wire encoding; the carrier's wire form adds only codec framing, dots, and the message
-/// envelope, for which a quarter of [`TRANSPORT_MAX_SIZE`] is reserved.
+/// The most unstable removes one data carrier holds, `T_max` (#921; removal-stability paper,
+/// Def. 6): its element cap, so a lookup reply's removes are no larger than its elements' count.
+///
+/// Law: a delta carrying more removes is inadmissible, and a join or an operation whose result
+/// would hold more is refused, changing nothing; a data carrier's removes are never truncated,
+/// since dropping an unstable remove resurrects the adds it covers. It admits `T_max / (H + σ)`,
+/// about 10 removes a minute per topic, sustained; an application that needs more shards the
+/// topic.
+pub const DATA_TOMBSTONE_MAX_LEN: usize = ENTRY_DATA_MAX_LEN;
+/// Encoded bytes of one element's length prefix, at most: the varint of
+/// [`ENTRY_PAYLOAD_MAX_BYTES`].
+///
+/// Derivation: `32 768 < 2^21`, three 7-bit groups; witnessed with equality by
+/// `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_ELEMENT_PREFIX_WIRE_MAX: usize = 3;
+/// Encoded bytes of one element dot, at most.
+///
+/// Derivation: a varint `u128` (19 bytes at its maximum), two DIDs encoded as `0x`-prefixed hex
+/// strings (a one-byte length and 42 characters each) and a varint `u32` (5 bytes),
+/// `19 + 43 + 43 + 5 = 110`; witnessed with equality by
+/// `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_DOT_WIRE_MAX: usize = 110;
+/// Encoded bytes of one remove, at most: its 32-byte digest and its dot, `32 + 110 = 142`;
+/// witnessed with equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_TOMBSTONE_WIRE_MAX: usize = 32 + ENTRY_DOT_WIRE_MAX;
+/// Encoded bytes of a carrier's register, at most: the option tag and a version,
+/// `1 + 19 + 43 + 43 = 106`; witnessed with equality by
+/// `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_REGISTER_WIRE_MAX: usize = 106;
+/// Encoded bytes of a full data carrier's fixed fields, at most: its DID (43), the length
+/// prefixes of its elements, dots and removes (2 each at 1024), its kind (1), and its retention
+/// bound (an option tag and a varint `u128`, 20), `43 + 2 + 1 + 2 + 2 + 20 = 70`; witnessed with
+/// equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_CARRIER_HEADER_WIRE_MAX: usize = 70;
+/// Encoded bytes of a data carrier, at most (#921; removal-stability paper, Prop. 4): every
+/// element at [`ENTRY_PAYLOAD_MAX_BYTES`] with its prefix and dot, [`DATA_TOMBSTONE_MAX_LEN`]
+/// removes and a register, `W = w_0 + D_max (P_max + λ + w_D) + T_max w_T + w_ρ`, about 33.82 MB.
+///
+/// Witnessed with equality by `test_carrier_wire_suprema_are_the_widest_encodings`, which
+/// encodes a carrier at every bound.
+pub const DATA_CARRIER_WIRE_MAX: usize = ENTRY_CARRIER_HEADER_WIRE_MAX
+    + ENTRY_DATA_MAX_LEN
+        * (ENTRY_PAYLOAD_MAX_BYTES + ENTRY_ELEMENT_PREFIX_WIRE_MAX + ENTRY_DOT_WIRE_MAX)
+    + DATA_TOMBSTONE_MAX_LEN * ENTRY_TOMBSTONE_WIRE_MAX
+    + ENTRY_REGISTER_WIRE_MAX;
+/// Carrier law: a full carrier, removes included, must still be one transport message, since a
+/// hand-off, a republish, and a lookup answer each carry a whole carrier. A quarter of
+/// [`TRANSPORT_MAX_SIZE`] is reserved for the message and envelope around it.
 const _: () = assert!(
-    ENTRY_DATA_MAX_LEN * ENTRY_PAYLOAD_MAX_BYTES <= TRANSPORT_MAX_SIZE / 4 * 3,
+    DATA_CARRIER_WIRE_MAX <= TRANSPORT_MAX_SIZE / 4 * 3,
     "a full carrier must fit one transport message with room for its envelope"
 );

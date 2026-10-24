@@ -304,14 +304,32 @@ impl<'data> StorageSyncBatch<'data> {
         let Some((key, admitted)) = self.accepted.get(self.persist_index) else {
             return Ok(self.complete());
         };
+        let (key, admitted) = (*key, admitted.clone());
 
-        transport
+        match transport
             .dht
-            .join_admitted_storage_entry(self.now_ms, *key, admitted.clone())
-            .await?;
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        crate::simulation::record_storage_persisted(transport.dht.did);
-        self.persist_index += 1;
+            .join_admitted_storage_entry(self.now_ms, key, admitted)
+            .await
+        {
+            Ok(_) => {
+                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                crate::simulation::record_storage_persisted(transport.dht.did);
+                self.persist_index += 1;
+            }
+            // The join would hold more removes than the bound (#921): it changed nothing and is
+            // not acknowledged, so the sender keeps the entry and offers it again once removes
+            // here are collected; the rest of the batch persists.
+            Err(Error::EntryTombstonesExceedMax { count, bound }) => {
+                tracing::debug!(
+                    %key,
+                    count,
+                    bound,
+                    "refusing a synced entry past its tombstone bound; its owner keeps it"
+                );
+                self.accepted.remove(self.persist_index);
+            }
+            Err(error) => return Err(error),
+        }
 
         if self.persist_index == self.accepted.len() {
             Ok(self.complete())

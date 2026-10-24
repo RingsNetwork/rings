@@ -121,11 +121,15 @@ another node's read shows that an owner holds the write.
   operation: a reset stamped by one owner would erase every concurrent write that owner had
   not yet received.
 - **Bounds.** A topic holds at most 1024 elements (the oldest are dropped when the cap binds) and
-  one tombstone per value removed within the last `H + σ`. This is a rate bound, not a count
-  cap: a capped tombstone could be dropped while a write it covers is still live somewhere.
-  Registry heartbeats remove nothing, so a registrant leaves at most 13 descriptors (one per
-  lease) within the horizon and no tombstone; the cap drops superseded leases first, since no
-  heartbeat refreshes their dots.
+  at most 1024 tombstones not yet collected (#921). The tombstone bound refuses, it never
+  drops: a removal, a replication, or a repair whose result would hold more is refused and
+  changes nothing, since a dropped tombstone could still cover a live write somewhere, and a
+  delta carrying more is not admitted. This admits about 10 removals a minute per topic,
+  sustained; an application that removes faster shards its topic (each value to one of `k`
+  topics by its hash). A full topic, removals included, encodes in at most 33.82 MB, which fits
+  one transport message. Registry heartbeats remove nothing, so a registrant leaves at most 13
+  descriptors (one per lease) within the horizon and no tombstone; the cap drops superseded
+  leases first, since no heartbeat refreshes their dots.
 
 An overwrite (the browser provider's `storage_store`, or `storage_store` on a node) still
 replaces a topic: it drops every element and tombstone older than itself, and its own elements

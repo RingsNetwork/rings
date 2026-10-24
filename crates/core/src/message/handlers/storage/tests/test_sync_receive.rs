@@ -6,6 +6,7 @@ use super::test_support::next_generated_key;
 use super::test_support::next_payload_for_tx;
 use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::remote_storage_placement_after;
+use crate::consts::DATA_TOMBSTONE_MAX_LEN;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::EntryKind;
@@ -34,6 +35,7 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::non_affine_placement;
+use crate::tests::removes_only_carrier;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 
@@ -262,6 +264,49 @@ async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() 
             ))
         }
     }
+    Ok(())
+}
+
+/// A synced carrier whose join would pass the tombstone bound (#921) is refused without an ack
+/// and holds back no other entry of its batch: the slot it targets keeps what it held, and its
+/// owner keeps it to offer again once removes here are collected.
+#[tokio::test]
+async fn test_storage_sync_batch_refuses_a_join_past_the_tombstone_bound_without_failing_it(
+) -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let now = get_epoch_ms();
+    let full_key = Did::from(43u32);
+    node.dht()
+        .join_storage_entry(
+            now,
+            full_key,
+            removes_only_carrier(full_key, DATA_TOMBSTONE_MAX_LEN, now, "held")?,
+        )
+        .await?;
+    let held = node.dht().storage.get(&full_key.to_string()).await?;
+    let admissible = live_entry(Did::from(41u32), vec![Bytes::from("kept")], EntryKind::Data);
+    let admissible_key = admissible.did;
+    let admissible_stored = admissible.clone().try_into_storage_entry()?;
+    let msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
+        destination: StorageSyncDestination::PhysicalOwner(node.did()),
+        data: vec![
+            PlacedEntry::new(full_key, removes_only_carrier(full_key, 1, now, "more")?),
+            PlacedEntry::new(admissible_key, admissible),
+        ],
+    };
+    let mut batch = StorageSyncBatch::new(&msg, Did::from(1u32), now);
+    let acks = loop {
+        if let StorageSyncBatchStep::Complete(acks) = batch.step(&node.swarm.transport).await? {
+            break acks;
+        }
+    };
+
+    assert_eq!(acks, vec![SyncedEntryAck::new(
+        admissible_key,
+        admissible_stored
+    )]);
+    assert_eq!(node.dht().storage.get(&full_key.to_string()).await?, held);
     Ok(())
 }
 

@@ -257,6 +257,17 @@ pub enum Error {
     #[error("Entry payload exceeds the per-payload size bound")]
     EntryPayloadExceedsMax,
 
+    /// A data carrier would hold more unstable removes than its bound (#921): a delta carrying
+    /// more is inadmissible, and a join or operation whose result would hold more is refused,
+    /// changing nothing.
+    #[error("Data carrier would hold {count} removes, past its bound of {bound}")]
+    EntryTombstonesExceedMax {
+        /// Removes the delta carries, or the result would hold.
+        count: usize,
+        /// The carrier's bound, `DATA_TOMBSTONE_MAX_LEN`.
+        bound: usize,
+    },
+
     /// Relay inbox element is not addressed to the peer the inbox is kept for
     #[error("Relay inbox element is not addressed to the peer the inbox is kept for")]
     RelayMessageNotAddressedToInbox,
