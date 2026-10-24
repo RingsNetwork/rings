@@ -199,6 +199,16 @@ pub(crate) fn volatile_relay_storage() -> crate::dht::EntryStorage {
     Box::new(crate::storage::MemStorage::new())
 }
 
+/// Relay replication with the default `r` and no age gate: the named choice of a fixture whose
+/// nodes hold relay mail from their first moment, where production waits for the age gate
+/// (`Law (Age gate)`, #777).
+pub(crate) fn ungated_relay_replication() -> crate::dht::RelayReplication {
+    crate::dht::RelayReplication {
+        age_gate_ms: 0,
+        ..crate::dht::RelayReplication::default()
+    }
+}
+
 /// An in-memory replay store: the named choice of a fixture whose replay windows need not
 /// survive its process. Production never builds one (#1022): a node without an authoritative
 /// replay store refuses every replay transition instead.

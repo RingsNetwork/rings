@@ -135,7 +135,11 @@ impl ApplicationData {
             | Message::RelayCarrierRefused(_)
             | Message::RelayCarrierHeld(_)
             | Message::FindRelayHolder(_)
-            | Message::RelayHolderFound(_) => None,
+            | Message::RelayHolderFound(_)
+            | Message::ReplicateRelayHold(_)
+            | Message::DeclareRelayCustody(_)
+            | Message::RelayCarrierDigests(_)
+            | Message::RelayCarriersWanted(_) => None,
         }
     }
 

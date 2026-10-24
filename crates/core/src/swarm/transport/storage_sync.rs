@@ -279,9 +279,10 @@ impl<'data> StorageSyncBatch<'data> {
         Ok(Some(StorageSyncBatchStep::Pending))
     }
 
-    /// Whether the relocation law lets this batch carry `placed`: a data topic always, a relay
-    /// inbox only as an ownership hand-off from a node that holds relay mail (see
-    /// `RelayNeighborhood::relocates_from`).
+    /// Whether the relocation law lets this batch carry `placed`: a data topic always; a relay
+    /// inbox as an ownership hand-off from a node that holds relay mail (see
+    /// `RelayNeighborhood::relocates_from`), or as an additive copy from another member of its
+    /// key (`Law (Replica admission)`, #777).
     ///
     /// Post: `false` skips the entry without acknowledging it, so its owner keeps it and offers
     /// it again on a later pass; it does not fail the batch, as the entry is not invalid, only
@@ -295,7 +296,7 @@ impl<'data> StorageSyncBatch<'data> {
             return Ok(true);
         }
         if !self.purpose.permits_source_cleanup() {
-            return Ok(false);
+            return transport.dht.admits_relay_copy(placed.key, self.sender);
         }
         transport.dht.relocates_relay_from(self.sender)
     }
@@ -383,9 +384,9 @@ fn should_persist_synced_entry(
     if !storage_sync_destination_accepts_placement(destination, placed.key) {
         return Ok(false);
     }
-    // A relay carrier is persisted by its holder alone (`Law (Holder)`).
+    // A relay carrier is persisted by the members of its key alone (`Law (Members)`).
     if placed.entry.kind.is_relay_inbox() {
-        return transport.dht.holds_relay_key(placed.key);
+        return transport.dht.is_relay_member(placed.key);
     }
 
     match transport.dht.find_storage_owner(placed.key)? {

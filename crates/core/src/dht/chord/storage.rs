@@ -714,6 +714,28 @@ impl PeerRing {
         Ok(cached.max(replica))
     }
 
+    /// The recipient's removal `op` of elements of its inbox, sent to `member`, the member of its
+    /// inbox key it read them from (#777): applied here when this node is that member, otherwise
+    /// a [`RemoteAction::FindEntryForOperate`] to it, which it applies as a member of the key.
+    pub(crate) async fn operate_relay_removal_at(
+        &self,
+        op: EntryOperation,
+        member: Did,
+    ) -> Result<PeerRingAction> {
+        let now_ms = get_epoch_ms();
+        let op = self.stamp_operation(op, now_ms, None).await?;
+        let placement = op.did()?;
+        if member == self.did {
+            self.operate_storage_entry(now_ms, placement, op, self.did)
+                .await?;
+            return Ok(PeerRingAction::None);
+        }
+        Ok(PeerRingAction::RemoteAction(
+            member,
+            RemoteAction::FindEntryForOperate(Box::new(PlacedEntryOperation { placement, op })),
+        ))
+    }
+
     /// Apply `op` under a runtime `redundancy`: locally at every accepted placement, and as a
     /// [`RemoteAction::FindEntryForOperate`] toward every remote one.
     pub(crate) async fn entry_operate(

@@ -31,13 +31,19 @@ use crate::message::ProbeRequest;
 mod relay_holder;
 
 pub use relay_holder::AnnounceRelayHolder;
+pub use relay_holder::DeclareRelayCustody;
 pub use relay_holder::FetchRelayInbox;
 pub use relay_holder::FindRelayHolder;
+pub use relay_holder::PreviousRelayHolder;
+pub use relay_holder::RelayCarrierDigest;
+pub use relay_holder::RelayCarrierDigests;
 pub use relay_holder::RelayCarrierHeld;
 pub use relay_holder::RelayCarrierRefused;
+pub use relay_holder::RelayCarriersWanted;
 pub use relay_holder::RelayHoldDigest;
 pub use relay_holder::RelayHolderFound;
 pub use relay_holder::RelayInboxReport;
+pub use relay_holder::ReplicateRelayHold;
 
 /// DHT protocol mode that must match before two peers join the same DHT.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Eq, PartialEq)]
@@ -414,6 +420,14 @@ macro_rules! with_message_variants {
             25 => FindRelayHolder(FindRelayHolder): Storage, NoStorageRoute,
             /// The owner's answer to FindRelayHolder.
             26 => RelayHolderFound(RelayHolderFound): Storage, NoStorageRoute,
+            /// A holder forwarding a hold it took to another member of the hold's key.
+            27 => ReplicateRelayHold(ReplicateRelayHold): Storage, NoStorageRoute,
+            /// A node's declaration of relay custody once it changes after the handshake.
+            28 => DeclareRelayCustody(DeclareRelayCustody): Storage, NoStorageRoute,
+            /// A member's coalesced repair offer to one chain neighbour.
+            29 => RelayCarrierDigests(RelayCarrierDigests): Storage, NoStorageRoute,
+            /// A chain neighbour asking for the carriers it lacks.
+            30 => RelayCarriersWanted(RelayCarriersWanted): Storage, NoStorageRoute,
         }
     };
 }

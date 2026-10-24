@@ -5,10 +5,12 @@
 //! so it *holds* the message: it wraps the payload in a [`HeldMessage`] carrying its own
 //! signature and the hold instant, and writes it into the carrier `inbox(d) = d + 1`
 //! (arithmetic in `Z / 2^160`, kind [`EntryKind::RelayMessage`]) through the ordinary storage
-//! write path. Relay carriers are placed by the ring geometry alone, at one placement whatever the
+//! write path. Relay carriers are placed by the ring geometry alone, at one key whatever the
 //! configured redundancy, and in their own storage namespace, so a data topic parked at `d + 1`
 //! (any node may name any position through an overwrite) never shadows the inbox kept for `d`.
-//! The carrier is kept by its *holder* (`dht::relay_holder`): the first node at or after the
+//! The carrier is kept by its *holder* (`dht::relay_holder`), which replicates it to the other
+//! *members* of the key down a chain, the next nodes after it that hold relay mail, `r` in all
+//! (8 by default, #777): the holder is the first node at or after the
 //! owner of `d + 1` (the node `n` with `d + 1 ∈ (n, succ(n)]`) that holds relay mail, a node
 //! without a relay store declaring that it holds none. While `d` is offline the owner is `d`'s
 //! predecessor and once `d` returns `d + 1 ∈ (d, succ(d)]` makes `d` itself the owner: the
@@ -35,9 +37,9 @@
 //! for `d ∈ (pred, self]`, or a storage-less node at or after `d` on the run behind it), only
 //! while the held message's sender proof is still live by the holder's clock (so the hold instant
 //! a holder signs cannot lie about the past), a relocation of the carrier only from a node that
-//! holds relay mail, as an ownership hand-off of a key the receiver holds, and a removal only
-//! from `d`; a relay carrier is fetched by its recipient alone, and
-//! never cached or replicated. Removal is per element by the add dot the
+//! holds relay mail, as an ownership hand-off of a key the receiver is a member of, a copy only
+//! from another member of the key, and a removal only from `d`; a relay carrier is fetched by its
+//! recipient alone, from any member, and never cached. Removal is per element by the add dot the
 //! recipient holds, as a covering remove of that payload up to that dot (every hold of one
 //! payload is the same hold), never by a reset floor, so a message the recipient has not seen
 //! is never dropped by a removal it did not issue.

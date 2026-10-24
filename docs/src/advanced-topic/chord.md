@@ -163,17 +163,58 @@ holder(k) = first n in [owner(k), succ(owner(k)), succ²(owner(k)), …] with ho
 One pure function, `dht::relay_holder::relay_holder`, decides it on each node's view, and every
 relay path uses it: the hold, the recipient's removal of what it delivered, the hand-off join and
 its acknowledged cleanup, the repair pass that lists what to hand off, and the recipient's
-drain. So a writer and a reader whose views cover the same nodes always name the same holder. A
-recipient that holds relay mail reads its inbox from its own store; one that does not fetches it
-from its holder (`FetchRelayInbox`, answered only to the recipient itself) and removes what it
-delivered there.
+drain. So a writer and a reader whose views cover the same nodes always name the same holder.
+
+The carrier is **replicated** to the key's **members** (#777, durable-records Section X): the
+first `r` nodes from the key's owner that hold relay mail, the holder first, `r` configurable and
+8 by default (`RelayReplication`). The members form a chain in ring order, and a held message is
+lost only if every member holding it is lost within one repair delay (Propositions 10 and 11), so
+a member's tab closing or its private session ending costs nothing while another member
+survives.
+
+- **Age gate.** A node with a relay store declares that it holds relay mail only once it has
+  been online for 2 minutes (at least four stabilization periods). Until then it routes and
+  fetches its own mail, but is no member, so a node that leaves within its first minutes never
+  pays a member's copies. When its gate opens it declares the change to its connected peers
+  (`DeclareRelayCustody`); later peers read it in the handshake.
+- **Chain replication.** The holder takes a hold and forwards it byte for byte to its next
+  member (`ReplicateRelayHold`), which forwards it on to the chain's end. Acknowledgements return
+  from the end, each member acknowledging the member it came from once the rest of the chain
+  did, and the holder acknowledges the writer last: an acknowledged hold is held by every member,
+  `r` of them, or every holder of a ring with fewer. A forward sent again, on the writer's resend,
+  carries the hold's digest alone.
+- **Next member.** A member's next member is the first holder after it. It is in the member's
+  successor list, or past it: then the member asks the owner of the key just past its list
+  (`FindRelayHolder`), which names the first holder at or after it, or the last node it places to
+  ask past again, and the member caches the answer until its successor list changes.
+- **Chain repair.** Every carrier a member keeps has the same chain neighbours, its previous
+  holder `p₁` and its next holder `n₁`, but at the chain's ends, so each repair pass sends one
+  digest set to each (`RelayCarrierDigests`), and a neighbour asks only for the carriers it lacks
+  or holds otherwise (`RelayCarriersWanted`): at most two repair messages per node and pass,
+  whatever the carriers it keeps. A node that keeps a carrier and is no member any more hands it
+  to the members and deletes its copy only after a member acknowledges holding it.
+- **Event-driven repair.** The loss of a chain neighbour, by a closed connection or a failed
+  liveness check, wakes a task beside the maintenance loop that runs the chain exchange at once,
+  outside the repair schedule's admission window, which guards bulk storage sync and not these
+  two digest messages. So a lost member is replaced within its detection time plus `r` hops; the
+  periodic pass is the backstop.
+- **Who is a member.** A node decides membership and its rank on its own view: it is a member of
+  `k` iff `k` lies in `(succ(p_r), succ(self)]`, `p_r` the `r`-th previous holder behind it. A
+  copy is admitted only from its previous or its next member.
+- **Fetch and removal.** A recipient that holds relay mail reads its inbox from its own store;
+  one that does not fetches it from its members, the holder first and then down the chain to
+  the next it can reach (`FetchRelayInbox`, answered only to the recipient itself), and removes what it
+  delivered at the member it read it from. Only the holder's report restricts relay custody; a
+  lagging member's copy may miss an element that still exists (#1059).
 
 A view covers the node's predecessor, the node, and its successor list. A holder also needs the
-keys owned on the storage-less run behind it, whose owners lie behind its predecessor: every node
-passes to its successor head, each repair pass, the *previous holder* it knows (itself when it
-holds relay mail, otherwise what its own predecessor passed it), and takes that record from its
-predecessor alone. The record crosses the run one link per pass, so the holder at its end learns
-where the run starts however long it is.
+keys owned on the storage-less runs behind it, whose owners lie behind its predecessor: every node
+passes to its successor head, each repair pass, the list of its `r` nearest *previous holders*
+(itself and the nearer ones its predecessor passed it when it holds relay mail, otherwise what
+its own predecessor passed it), and takes that list from its predecessor alone. The list crosses
+each run one link per pass, so every holder learns where the runs behind its previous holders
+start, however long they are. A list that comes round the ring names every holder, and the view
+then searches round the ring for members.
 
 - **No holder, no hold.** When no node from the key's owner to the end of the writer's
   successor list holds relay mail, the writer refuses the hold itself with
@@ -190,8 +231,8 @@ where the run starts however long it is.
   at most 64 holds unacknowledged and refuses another to its local sender
   (`RelayHoldsUnacknowledgedFull`) rather than forget an earlier one.
 - **Convergence.** A peer's declaration arrives in its handshake, before it is admitted, so a
-  view places every neighbour with its declaration. The previous-holder records settle within
-  `L + 1` repair passes after a membership change, `L` the longest storage-less run. Until
+  view places every neighbour with its declaration. The previous-holder lists settle within
+  `r(L + 1)` repair passes after a membership change, `L` the longest storage-less run. Until
   then a hold lands where repair moves it on, or is refused and sent again, so no mail is lost
   in the window, including when several relay-capable nodes join one long run within it
   (#1045).

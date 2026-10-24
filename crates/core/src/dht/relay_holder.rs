@@ -1,4 +1,5 @@
-//! The holder of a relay inbox key: which node keeps the mail held for an offline peer.
+//! The holder of a relay inbox key: which node keeps the mail held for an offline peer, and
+//! the members the mail is replicated to down a chain (`members`, #777).
 //!
 //! A relay carrier lives in a retained store only (#1021), and a node built or run without one
 //! declares, in its connection handshake, that it holds no relay mail ([`RelayCustody`]). Such a
@@ -18,8 +19,14 @@
 //! Law (Declared)  a peer's declaration arrives in the connection handshake, before the peer is
 //!                 admitted; so every predecessor and successor a view places is placed with its
 //!                 declaration, and only a previous holder named by a record is presumed to hold
-//! Law (Convergence) after one membership change, the previous-holder records settle within
-//!                 L + 1 repair passes, L the length of the longest storage-less run; until then
+//! Law (Previous holders) each repair pass a node passes to its successor head the list of its
+//!                 nearest previous holders, at most r, nearest first: itself
+//!                 and the nearer ones its predecessor passed it when it holds relay mail, the
+//!                 predecessor's list otherwise; a list that comes round the ring names every
+//!                 holder, and the view then searches round the ring for holders
+//! Law (Convergence) after one membership change, the previous-holder lists settle within
+//!                 r(L + 1) repair passes, L the length of the longest storage-less run and r the
+//!                 replicas (L + 1 for the nearest previous holder alone); until then
 //!                 a hold either lands where the repair passes move it on to the holder, or is
 //!                 refused, and its writer, which keeps every hold until a holder acknowledges
 //!                 it (`Law (Acknowledged)`), sends it again each pass until a holder takes it
@@ -43,22 +50,21 @@
 //! A view covers a clockwise `RelaySegment`: the nodes behind this one that it can place, this
 //! node, and its successor list; a node with no successor owns the rest of the ring, as the
 //! topology's successor lookup answers, and its segment closes the ring. Behind it, a node sees
-//! its predecessor and the previous holder (`PreviousHolder`): the nearest node behind it that
-//! holds relay mail, together with that node's successor head, the first node of the
-//! storage-less run between them. Every node passes the previous holder it knows to its own
-//! successor head on each repair pass: a node that holds relay mail names itself, a node that
-//! holds none passes on what its predecessor passed it, and a node takes the record from its
-//! predecessor alone. By induction along the run, every node of a storage-less run, and the
-//! holder that ends it, learns the run's previous holder, however long the run is. Every node of
-//! the run holds no relay mail, so the run stands in the segment as one storage-less node, and a
-//! holder places every key it holds even when the key's owner lies several storage-less hops
-//! behind it.
+//! its predecessor and its previous holders (`PreviousHolder`, `Law (Previous holders)`): the
+//! nearest nodes behind it that hold relay mail, each together with its successor head, the
+//! first node of the storage-less run after it. A node takes the list from its predecessor
+//! alone. By induction along each run, every node of a storage-less run, and the holder that
+//! ends it, learns the previous holders, however long the runs are. Every node of a run holds no
+//! relay mail, so the run stands in the segment as one storage-less node, and a holder places
+//! every key whose owner lies on a run behind one of its previous holders, which is what a
+//! member decides its membership on (Lemma 2 of durable-records).
 //!
 //! ```text
-//!   c ──▶ y ──▶ … ──▶ p ──▶ n ──▶ s₁ ──▶ … ──▶ s_r     c, n hold relay mail; y … p hold none
-//!   passed head-ward:  c ─(c, y)▶ y ─(c, y)▶ … ─(c, y)▶ p ─(c, y)▶ n
+//!   b ──▶ x ──▶ c ──▶ y ──▶ … ──▶ p ──▶ n ──▶ s₁ ──▶ … ──▶ s_r   b, c, n hold; x, y … p hold none
+//!   passed head-ward:  c ─[(c, y), (b, x)]▶ y ─ … ─▶ p ─[(c, y), (b, x)]▶ n
 //!
-//!   segment(n) = [c ✓, y ✗, n ✓, s₁ …, s_r]   owner(k) = the segment node whose arc holds k
+//!   segment(n) = [b ✓, x ✗, c ✓, y ✗, n ✓, s₁ …, s_r]   owner(k) = the segment node whose arc
+//!                                                           holds k
 //! ```
 
 use std::cmp::Ordering;
@@ -71,6 +77,8 @@ use super::topology;
 use super::topology::FindSuccessorStep;
 use super::topology::TopologyState;
 use super::Did;
+use crate::consts::DEFAULT_RELAY_AGE_GATE_MS;
+use crate::consts::DEFAULT_RELAY_INBOX_REPLICAS;
 use crate::error::Error;
 
 /// What a node declares about relay custody when it connects, and in its online descriptor:
@@ -102,6 +110,29 @@ impl RelayCustody {
     }
 }
 
+/// How relay custody is replicated (#777, durable-records Section X): the members each carrier
+/// is replicated to, and how long a node is online before it declares that it holds relay mail
+/// (`Law (Age gate)`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RelayReplication {
+    /// The members `r` a carrier is replicated to: the first `r` nodes from its key's owner
+    /// that hold relay mail. At least one.
+    pub replicas: usize,
+    /// How long a node with a relay store is online before it declares that it holds relay
+    /// mail; until then it routes and fetches its own mail, but is no member.
+    pub age_gate_ms: u64,
+}
+
+impl Default for RelayReplication {
+    /// [`DEFAULT_RELAY_INBOX_REPLICAS`] members, after [`DEFAULT_RELAY_AGE_GATE_MS`] online.
+    fn default() -> Self {
+        Self {
+            replicas: DEFAULT_RELAY_INBOX_REPLICAS,
+            age_gate_ms: DEFAULT_RELAY_AGE_GATE_MS,
+        }
+    }
+}
+
 /// One node of a [`RelaySegment`] and its declaration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RelayNode {
@@ -126,6 +157,10 @@ pub(crate) struct RelaySegment {
     /// position up to the first node, as the topology's successor lookup answers, and a node
     /// alone owns every position.
     closes: bool,
+    /// Whether the view knows every node of the ring that holds relay mail: its previous
+    /// holders came round the ring to it (`Law (Previous holders)`). A search for holders that
+    /// reaches the end of the view then continues from its start, where the rest of them are.
+    knows_every_holder: bool,
 }
 
 impl RelaySegment {
@@ -134,6 +169,7 @@ impl RelaySegment {
         Self {
             nodes,
             closes: false,
+            knows_every_holder: false,
         }
     }
 
@@ -143,6 +179,15 @@ impl RelaySegment {
         Self {
             nodes,
             closes: true,
+            knows_every_holder: false,
+        }
+    }
+
+    /// This segment, whose view knows every node of the ring that holds relay mail.
+    pub(crate) fn knowing_every_holder(self) -> Self {
+        Self {
+            knows_every_holder: true,
+            ..self
         }
     }
 
@@ -164,9 +209,13 @@ impl RelaySegment {
     }
 
     /// The nodes from index `owner` on, clockwise: to the end of the view, and round to the
-    /// start when the segment closes the ring.
+    /// start when the segment closes the ring or knows every holder.
     fn clockwise_from(&self, owner: usize) -> impl Iterator<Item = &RelayNode> {
-        let wrapped = if self.closes { owner } else { 0 };
+        let wrapped = if self.closes || self.knows_every_holder {
+            owner
+        } else {
+            0
+        };
         self.nodes
             .iter()
             .skip(owner)
@@ -223,47 +272,6 @@ pub(crate) fn relay_holder(segment: &RelaySegment, key: Did) -> RelayHolder {
         .map_or(RelayHolder::Unheld, |node| RelayHolder::Holder(node.did))
 }
 
-/// The nodes a keeper of the carrier of `key` offers it to, other than `local` itself: the
-/// holder `segment` names; or, when the view does not place the key's owner, the holder the
-/// owner named (`owner_named`, `Law (Owner places)`) and both ends of the view that hold relay
-/// mail. The key then lies past the last node, toward which a holder's interval moves when
-/// nodes join ahead, or behind the first, the previous holder, which takes back the keys of a
-/// run a relay-capable node joined. The owner's answer reaches a holder neither end knows, such
-/// as one behind several holders that joined within one window (#1045). Every target takes the
-/// carrier only if its own view names it the holder, so an offer to a node that does not hold
-/// it moves nothing. Empty: keep the carrier.
-///
-/// Post: every target is not `local` and appears once; there are at most three, and every one
-/// but `owner_named` holds relay mail as the view knows it.
-pub(crate) fn relay_handoff_targets(
-    segment: &RelaySegment,
-    key: Did,
-    local: Did,
-    owner_named: Option<Did>,
-) -> Vec<Did> {
-    let candidates = match relay_holder(segment, key) {
-        RelayHolder::Holder(holder) => vec![holder],
-        RelayHolder::Unknown => owner_named
-            .into_iter()
-            .chain(
-                [segment.nodes.last(), segment.nodes.first()]
-                    .into_iter()
-                    .flatten()
-                    .filter(|end| end.holds)
-                    .map(|end| end.did),
-            )
-            .collect(),
-        RelayHolder::Unheld => Vec::new(),
-    };
-    let mut targets = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if candidate != local && !targets.contains(&candidate) {
-            targets.push(candidate);
-        }
-    }
-    targets
-}
-
 /// The holder the owner of `key` names to a keeper that asks (`FindRelayHolder`): the holder its
 /// own `segment` names. The owner places every key of its own arc, so its answer is a holder or
 /// `None` for a key without one, and `None` too when this node does not own `key`.
@@ -291,13 +299,16 @@ pub(crate) struct PreviousHolder {
     pub(crate) run_start: Did,
 }
 
-/// A previous holder as the predecessor `from` passed it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The previous holders as the predecessor `from` passed them.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Passed {
     /// The predecessor that passed the record.
     from: Did,
-    /// The record.
-    previous: PreviousHolder,
+    /// The record: the nearest previous holder first, at most `r`.
+    previous: Vec<PreviousHolder>,
+    /// Whether the record came round the ring to the receiver, so that it names every node of
+    /// the ring that holds relay mail but the receiver.
+    closed: bool,
 }
 
 /// Who may hold a message for a destination, as the holder of its inbox key sees it.
@@ -331,19 +342,37 @@ impl HoldAuthority {
 }
 
 /// The relay custody this node knows of its neighbours: the peers that declared they hold no
-/// relay mail, and the previous holder its predecessor passed it.
+/// relay mail, and the previous holders its predecessor passed it.
 ///
 /// A peer is presumed to hold relay mail until it declares otherwise, as every node did before
 /// the declaration existed, so a node not yet heard from is never skipped.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct RelayNeighborhood {
     /// Peers that declared [`RelayCustody::HoldsNone`].
     storage_less: BTreeSet<Did>,
-    /// The previous holder the predecessor last passed.
+    /// The previous holders the predecessor last passed.
     passed: Option<Passed>,
+    /// The members a carrier is replicated to, `r`, and so the previous holders a list keeps.
+    replicas: usize,
+}
+
+impl Default for RelayNeighborhood {
+    /// No declaration and no list yet, at [`DEFAULT_RELAY_INBOX_REPLICAS`].
+    fn default() -> Self {
+        Self::with_replicas(DEFAULT_RELAY_INBOX_REPLICAS)
+    }
 }
 
 impl RelayNeighborhood {
+    /// No declaration and no list yet, replicating to `replicas` members (at least one).
+    pub(crate) fn with_replicas(replicas: usize) -> Self {
+        Self {
+            storage_less: BTreeSet::new(),
+            passed: None,
+            replicas: replicas.max(1),
+        }
+    }
+
     /// Whether `peer` holds relay mail, as far as this node knows.
     pub(crate) fn holds(&self, peer: Did) -> bool {
         !self.storage_less.contains(&peer)
@@ -356,16 +385,34 @@ impl RelayNeighborhood {
             self.storage_less.remove(&peer);
         } else {
             self.storage_less.insert(peer);
-            self.passed = self.passed.filter(|passed| passed.previous.holder != peer);
+            self.forget_previous_holder(peer);
         }
     }
 
     /// Forget `peer`, which left this node's topology, with any record it passed or names.
     pub(crate) fn forget(&mut self, peer: Did) {
         self.storage_less.remove(&peer);
+        self.passed = self.passed.take().filter(|passed| passed.from != peer);
+        self.forget_previous_holder(peer);
+    }
+
+    /// Cut the passed record before `peer`, which is no previous holder (any more): the holders
+    /// nearer than it are still the nearest ones, and the next pass refills the rest.
+    fn forget_previous_holder(&mut self, peer: Did) {
+        if let Some(passed) = self.passed.as_mut() {
+            if let Some(at) = passed
+                .previous
+                .iter()
+                .position(|known| known.holder == peer)
+            {
+                passed.previous.truncate(at);
+                passed.closed = false;
+            }
+        }
         self.passed = self
             .passed
-            .filter(|passed| passed.from != peer && passed.previous.holder != peer);
+            .take()
+            .filter(|passed| !passed.previous.is_empty());
     }
 
     /// The peers that declared they hold no relay mail.
@@ -378,67 +425,140 @@ impl RelayNeighborhood {
         self.storage_less.retain(|peer| keep(*peer));
     }
 
-    /// Take the previous holder `previous` that `from` passed to `local`, iff `from` is the
-    /// predecessor of `state`, `previous` names a node that may hold relay mail, and its run
-    /// starts after it and ends at `local`. A record naming `local` itself has come round the
-    /// whole ring: `local` is the only holder, and the run is every other node.
+    /// Take the previous holders `previous` that `from` passed to `local`, nearest first, iff
+    /// `from` is the predecessor of `state`, the nearest names a node that may hold relay mail,
+    /// and its run starts after it and ends at `local` (`Law (Previous holders)`). A record
+    /// naming `local` itself has come round the whole ring: `local` is the only holder, and the
+    /// run is every other node. Of the farther holders, the longest prefix that is a chain is
+    /// kept ([`Self::chain`]).
     ///
     /// Post: the result says whether the record was taken; it replaces the one taken before.
     pub(crate) fn pass(
         &mut self,
         state: &TopologyState,
         from: Did,
-        previous: PreviousHolder,
+        previous: Vec<PreviousHolder>,
     ) -> bool {
-        let run_ends_here = if previous.holder == state.local {
-            previous.run_start != state.local
-        } else {
-            in_arc(previous.holder, previous.run_start, state.local)
+        let Some(nearest) = previous.first().copied() else {
+            return false;
         };
-        let taken = state.predecessor == Some(from) && self.holds(previous.holder) && run_ends_here;
+        let run_ends_here = if nearest.holder == state.local {
+            nearest.run_start != state.local
+        } else {
+            in_arc(nearest.holder, nearest.run_start, state.local)
+        };
+        let taken = state.predecessor == Some(from) && self.holds(nearest.holder) && run_ends_here;
         if taken {
-            self.passed = Some(Passed { from, previous });
+            let (previous, closed) = self.chain(state.local, previous);
+            self.passed = Some(Passed {
+                from,
+                previous,
+                closed,
+            });
         }
         taken
     }
 
-    /// The previous holder, iff the current predecessor passed it and it agrees with that
-    /// predecessor: one that holds relay mail is the previous holder itself, with this node as
-    /// its head, and a storage-less one lies on the run.
-    fn previous_holder_in(&self, state: &TopologyState) -> Option<PreviousHolder> {
-        let Passed { from, previous } = self.passed?;
+    /// The longest prefix of `previous` that is a chain of previous holders behind `local`: at
+    /// most `r` distinct holders, each presumed to hold relay mail, each one
+    /// behind the one before it with its run between them (`run_start ∈ (holder, nearer]`), and
+    /// none past `local` itself, where a record that came round the ring closes; and whether it
+    /// did close, naming every holder of the ring but `local`.
+    ///
+    /// Pre: `previous[0]` was checked by [`Self::pass`].
+    fn chain(&self, local: Did, previous: Vec<PreviousHolder>) -> (Vec<PreviousHolder>, bool) {
+        let mut chain: Vec<PreviousHolder> = Vec::with_capacity(self.replicas);
+        let mut closed = false;
+        for link in previous.into_iter().take(self.replicas) {
+            if link.holder == local {
+                closed = true;
+                if chain.is_empty() {
+                    chain.push(link);
+                }
+                break;
+            }
+            let follows = match chain.last() {
+                None => true,
+                Some(nearer) => {
+                    self.holds(link.holder)
+                        && in_arc(link.holder, link.run_start, nearer.holder)
+                        && chain.iter().all(|known| known.holder != link.holder)
+                }
+            };
+            if !follows {
+                break;
+            }
+            chain.push(link);
+        }
+        (chain, closed)
+    }
+
+    /// The previous holders, nearest first, iff the current predecessor passed them and the
+    /// nearest agrees with that predecessor: one that holds relay mail is the nearest previous
+    /// holder itself, with this node as its head, and a storage-less one lies on its run.
+    fn previous_holders_in(&self, state: &TopologyState) -> Option<&Passed> {
+        let passed = self.passed.as_ref()?;
         let predecessor = state
             .predecessor
-            .filter(|predecessor| *predecessor == from)?;
+            .filter(|predecessor| *predecessor == passed.from)?;
+        let nearest = passed.previous.first()?;
         let agrees = if self.holds(predecessor) {
-            predecessor == previous.holder && previous.run_start == state.local
+            predecessor == nearest.holder && nearest.run_start == state.local
         } else {
-            predecessor == previous.run_start
-                || in_arc(previous.run_start, predecessor, state.local)
+            predecessor == nearest.run_start || in_arc(nearest.run_start, predecessor, state.local)
         };
-        agrees.then_some(previous)
+        agrees.then_some(passed)
+    }
+
+    /// The nearest node behind this one that holds relay mail, `p₁`: the nearest previous holder
+    /// passed, or, before any list, the predecessor when it holds relay mail.
+    pub(crate) fn nearest_previous_holder(&self, state: &TopologyState) -> Option<Did> {
+        match self.previous_holders_in(state) {
+            Some(passed) => passed
+                .previous
+                .first()
+                .map(|nearest| nearest.holder)
+                .filter(|holder| *holder != state.local),
+            None => state
+                .predecessor
+                .filter(|predecessor| self.holds(*predecessor)),
+        }
     }
 
     /// The segment the view `state` covers, this node holding relay mail iff `local_holds`.
+    ///
+    /// Behind this node it places its previous holders, farthest first, each followed by the
+    /// first node of its storage-less run, which stands in for the whole run: so a holder
+    /// places every key whose owner lies on a run behind one of its previous holders.
     pub(crate) fn segment(&self, state: &TopologyState, local_holds: bool) -> RelaySegment {
         let local = RelayNode {
             did: state.local,
             holds: local_holds,
         };
-        let mut nodes = Vec::with_capacity(state.successors.len() + 3);
-        match (self.previous_holder_in(state), state.predecessor) {
+        let mut nodes = Vec::with_capacity(state.successors.len() + 2 * self.replicas + 1);
+        let passed = self.previous_holders_in(state);
+        match (
+            passed.map(|passed| passed.previous.as_slice()),
+            state.predecessor,
+        ) {
             (Some(previous), _) => {
-                if previous.holder != state.local {
-                    nodes.push(RelayNode {
-                        did: previous.holder,
-                        holds: true,
-                    });
-                }
-                if previous.run_start != state.local {
-                    nodes.push(RelayNode {
-                        did: previous.run_start,
-                        holds: false,
-                    });
+                for (at, link) in previous.iter().enumerate().rev() {
+                    if link.holder != state.local {
+                        nodes.push(RelayNode {
+                            did: link.holder,
+                            holds: true,
+                        });
+                    }
+                    let after = at
+                        .checked_sub(1)
+                        .and_then(|nearer| previous.get(nearer))
+                        .map_or(state.local, |nearer| nearer.holder);
+                    if link.run_start != after {
+                        nodes.push(RelayNode {
+                            did: link.run_start,
+                            holds: false,
+                        });
+                    }
                 }
             }
             (None, Some(predecessor)) => nodes.push(self.node(predecessor)),
@@ -454,7 +574,17 @@ impl RelayNeighborhood {
                 .iter()
                 .map(|successor| self.node(*successor)),
         );
-        RelaySegment::new(nodes)
+        let segment = RelaySegment::new(nodes);
+        // A list that came round the ring names every holder; a successor list that reaches the
+        // predecessor covers every node of the ring.
+        let whole_ring = passed.is_some_and(|passed| passed.closed)
+            || state
+                .predecessor
+                .is_some_and(|predecessor| state.successors.contains(&predecessor));
+        if whole_ring {
+            return segment.knowing_every_holder();
+        }
+        segment
     }
 
     /// `peer` with its declaration.
@@ -465,22 +595,39 @@ impl RelayNeighborhood {
         }
     }
 
-    /// The record this node passes to its successor head: itself when it holds relay mail
-    /// (`local_holds`), otherwise the previous holder its predecessor passed it. `None` without
-    /// a head, or for a storage-less node that knows no previous holder.
+    /// The record this node passes to its successor head (`Law (Previous holders)`): itself
+    /// followed by the nearer previous holders it knows when it holds relay mail
+    /// (`local_holds`), at most `r` in all, otherwise the previous holders
+    /// its predecessor passed it. `None` without a head, or for a storage-less node that knows
+    /// no previous holder.
     pub(crate) fn record_to_pass(
         &self,
         state: &TopologyState,
         local_holds: bool,
-    ) -> Option<(Did, PreviousHolder)> {
+    ) -> Option<(Did, Vec<PreviousHolder>)> {
         let head = *state.successors.first()?;
+        let known = self
+            .previous_holders_in(state)
+            .map(|passed| passed.previous.as_slice())
+            .unwrap_or_default();
         let previous = if local_holds {
-            PreviousHolder {
+            let own = PreviousHolder {
                 holder: state.local,
                 run_start: head,
-            }
+            };
+            std::iter::once(own)
+                .chain(
+                    known
+                        .iter()
+                        .copied()
+                        .take_while(|link| link.holder != state.local),
+                )
+                .take(self.replicas)
+                .collect()
+        } else if known.is_empty() {
+            return None;
         } else {
-            self.previous_holder_in(state)?
+            known.to_vec()
         };
         Some((head, previous))
     }
@@ -494,7 +641,11 @@ impl RelayNeighborhood {
         if topology::is_responsible_for(state, destination) {
             return HoldAuthority::Node(state.local);
         }
-        match (self.previous_holder_in(state), state.predecessor) {
+        match (
+            self.previous_holders_in(state)
+                .and_then(|passed| passed.previous.first()),
+            state.predecessor,
+        ) {
             (Some(previous), Some(last))
                 if !self.holds(last)
                     && (destination == previous.run_start
@@ -522,5 +673,16 @@ impl RelayNeighborhood {
     }
 }
 
+mod members;
+pub(crate) use members::chain_position;
+pub(crate) use members::relay_carrier_offer;
+pub(crate) use members::relay_members;
+pub(crate) use members::CarrierOffer;
+pub(crate) use members::ChainNext;
+pub(crate) use members::ChainPosition;
+pub(crate) use members::RelayMembers;
+
+#[cfg(test)]
+mod test_members;
 #[cfg(test)]
 mod tests;

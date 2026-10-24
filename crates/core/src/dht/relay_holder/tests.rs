@@ -10,7 +10,7 @@
 
 use super::in_arc;
 use super::owner_answer;
-use super::relay_handoff_targets;
+use super::relay_carrier_offer;
 use super::relay_holder;
 use super::HoldAuthority;
 use super::RelayCustody;
@@ -18,16 +18,17 @@ use super::RelayHolder;
 use super::RelayNeighborhood;
 use super::RelayNode;
 use super::RelaySegment;
+use crate::consts::DEFAULT_RELAY_INBOX_REPLICAS;
 use crate::dht::topology::TopologyState;
 use crate::dht::Did;
 
 /// The node at ring position `position`.
-fn did(position: u32) -> Did {
+pub(super) fn did(position: u32) -> Did {
     Did::from(position)
 }
 
 /// `did(position)`, declaring `holds`.
-fn node(position: u32, holds: bool) -> RelayNode {
+pub(super) fn node(position: u32, holds: bool) -> RelayNode {
     RelayNode {
         did: did(position),
         holds,
@@ -123,37 +124,45 @@ fn test_a_closing_segment_owns_the_rest_of_the_ring_and_wraps_its_search() {
 fn test_hand_off_targets_are_the_holder_or_the_holding_ends_of_the_view() {
     let segment = RelaySegment::new(vec![node(10, true), node(20, false), node(30, true)]);
     assert_eq!(
-        relay_handoff_targets(&segment, did(15), did(30), None),
+        relay_carrier_offer(&segment, did(15), did(30), None, 1).targets,
         vec![did(10)]
     );
     assert_eq!(
-        relay_handoff_targets(&segment, did(25), did(10), None),
+        relay_carrier_offer(&segment, did(25), did(10), None, 1).targets,
         vec![did(30)]
     );
     // This node holds it: nothing to offer.
-    assert!(relay_handoff_targets(&segment, did(15), did(10), None).is_empty());
+    assert!(relay_carrier_offer(&segment, did(15), did(10), None, 1)
+        .targets
+        .is_empty());
     // Outside the view: offered to both ends that hold relay mail, this node excepted.
     assert_eq!(
-        relay_handoff_targets(&segment, did(35), did(20), None),
+        relay_carrier_offer(&segment, did(35), did(20), None, 1).targets,
         vec![did(30), did(10)]
     );
     assert_eq!(
-        relay_handoff_targets(&segment, did(35), did(10), None),
+        relay_carrier_offer(&segment, did(35), did(10), None, 1).targets,
         vec![did(30)]
     );
     let ending_without_store = RelaySegment::new(vec![node(10, false), node(20, false)]);
-    assert!(relay_handoff_targets(&ending_without_store, did(25), did(10), None).is_empty());
+    assert!(
+        relay_carrier_offer(&ending_without_store, did(25), did(10), None, 1)
+            .targets
+            .is_empty()
+    );
     // The owner's answer comes first, and only for a key the view does not place.
     assert_eq!(
-        relay_handoff_targets(&segment, did(35), did(20), Some(did(90))),
+        relay_carrier_offer(&segment, did(35), did(20), Some(did(90)), 1).targets,
         vec![did(90), did(30), did(10)]
     );
     assert_eq!(
-        relay_handoff_targets(&segment, did(15), did(30), Some(did(90))),
+        relay_carrier_offer(&segment, did(15), did(30), Some(did(90)), 1).targets,
         vec![did(10)]
     );
     assert!(
-        relay_handoff_targets(&ending_without_store, did(25), did(20), Some(did(20))).is_empty()
+        relay_carrier_offer(&ending_without_store, did(25), did(20), Some(did(20)), 1)
+            .targets
+            .is_empty()
     );
 }
 
@@ -187,9 +196,9 @@ fn test_hold_authority_admits_the_responsible_node_or_a_storage_less_node_of_the
 
 /// A whole ring: every node, clockwise from position 0, with its declaration.
 #[derive(Clone, Debug)]
-struct Ring {
+pub(super) struct Ring {
     /// The nodes, sorted by position.
-    nodes: Vec<RelayNode>,
+    pub(super) nodes: Vec<RelayNode>,
     /// The successor list capacity `r` of every node.
     successors: usize,
 }
@@ -202,14 +211,14 @@ impl Ring {
     }
 
     /// This ring with `node` joined.
-    fn joined(&self, node: RelayNode) -> Self {
+    pub(super) fn joined(&self, node: RelayNode) -> Self {
         let mut nodes = self.nodes.clone();
         nodes.push(node);
         Self::new(nodes, self.successors)
     }
 
     /// This ring without the node at `position`.
-    fn left(&self, position: u32) -> Self {
+    pub(super) fn left(&self, position: u32) -> Self {
         let nodes = self
             .nodes
             .iter()
@@ -220,7 +229,7 @@ impl Ring {
     }
 
     /// The index of `node`.
-    fn index(&self, node: Did) -> usize {
+    pub(super) fn index(&self, node: Did) -> usize {
         self.nodes
             .iter()
             .position(|known| known.did == node)
@@ -228,12 +237,12 @@ impl Ring {
     }
 
     /// The node `steps` after the node at index `i`.
-    fn after(&self, i: usize, steps: usize) -> RelayNode {
+    pub(super) fn after(&self, i: usize, steps: usize) -> RelayNode {
         self.nodes[(i + steps) % self.nodes.len()]
     }
 
     /// The index of the owner of `key`: the node `n` with `key ∈ (n, succ(n)]`.
-    fn owner(&self, key: Did) -> usize {
+    pub(super) fn owner(&self, key: Did) -> usize {
         (0..self.nodes.len())
             .find(|i| {
                 self.nodes.len() == 1 || in_arc(self.nodes[*i].did, key, self.after(*i, 1).did)
@@ -313,10 +322,11 @@ impl Ring {
 
     /// Every node's neighbourhood once repair passes reach a fixpoint: the declarations of its
     /// neighbours, and the previous holder its predecessor passes it.
-    fn neighborhoods(&self) -> Vec<RelayNeighborhood> {
+    pub(super) fn neighborhoods(&self) -> Vec<RelayNeighborhood> {
         let mut neighborhoods = self.handshaken(self, &[]);
-        // A record crosses one link per pass, so as many passes as nodes reach the fixpoint.
-        for _ in 0..=self.nodes.len() {
+        // A record crosses one link per pass, and a list of r previous holders reaches its last
+        // node through at most r runs, so r times as many passes as nodes reach the fixpoint.
+        for _ in 0..=DEFAULT_RELAY_INBOX_REPLICAS * self.nodes.len() {
             self.repair_pass(&mut neighborhoods);
         }
         neighborhoods
@@ -338,12 +348,12 @@ impl Ring {
     }
 
     /// The segment of the node at index `i` under `neighborhoods`.
-    fn segment(&self, neighborhoods: &[RelayNeighborhood], i: usize) -> RelaySegment {
+    pub(super) fn segment(&self, neighborhoods: &[RelayNeighborhood], i: usize) -> RelaySegment {
         neighborhoods[i].segment(&self.state(i), self.nodes[i].holds)
     }
 
     /// The keys worth judging: every arc's first and middle position.
-    fn keys(&self) -> Vec<Did> {
+    pub(super) fn keys(&self) -> Vec<Did> {
         (0..self.nodes.len())
             .flat_map(|i| {
                 let start = self.nodes[i].did;
@@ -354,7 +364,7 @@ impl Ring {
 }
 
 /// The ring of `positions` with `storage_less` declaring no relay store.
-fn ring(positions: &[u32], storage_less: &[u32], successors: usize) -> Ring {
+pub(super) fn ring(positions: &[u32], storage_less: &[u32], successors: usize) -> Ring {
     let nodes = positions
         .iter()
         .map(|position| node(*position, !storage_less.contains(position)))
@@ -422,7 +432,8 @@ fn assert_carriers_follow_the_holder(before: &Ring, after: &Ring) {
             continue;
         };
         let named = after.owner_named(&neighborhoods, key);
-        let offered = relay_handoff_targets(&after.segment(&neighborhoods, o), key, old, named);
+        let offered =
+            relay_carrier_offer(&after.segment(&neighborhoods, o), key, old, named, 1).targets;
         if old == new {
             assert!(
                 offered.is_empty(),
@@ -583,7 +594,8 @@ fn assert_reaches_the_holder(
                 let k = ring.index(*keeper);
                 let named = ring.owner_named(neighborhoods, key);
                 let takers =
-                    relay_handoff_targets(&ring.segment(neighborhoods, k), key, *keeper, named)
+                    relay_carrier_offer(&ring.segment(neighborhoods, k), key, *keeper, named, 1)
+                        .targets
                         .into_iter()
                         .filter(|target| {
                             let t = ring.index(*target);
@@ -628,7 +640,9 @@ fn assert_window_loses_nothing(before: &Ring, after: &Ring) {
             };
             let o = after.index(old);
             let named = after.owner_named(&window, key);
-            for target in relay_handoff_targets(&after.segment(&window, o), key, old, named) {
+            for target in
+                relay_carrier_offer(&after.segment(&window, o), key, old, named, 1).targets
+            {
                 let t = after.index(target);
                 let takes = relay_holder(&after.segment(&window, t), key)
                     == RelayHolder::Holder(target)
