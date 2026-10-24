@@ -300,46 +300,69 @@ async fn missing_durable_evidence_backend_never_returns_admitted() {
         .is_empty());
 }
 
+/// Admit one provisional evidence record into fresh measure and evidence stores at the two
+/// paths, then crash: the instance's runtime is dropped before the instance, so its persistence
+/// worker is cancelled before any final flush, and the stores are released with the instance,
+/// as a dead process releases them (one store directory has one writer, #1039).
+fn admit_then_crash(
+    measure_path: &'static str,
+    evidence_path: &'static str,
+    clock: Arc<ManualMeasureClock>,
+) -> EvidenceCollectorIdentity {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new()
+            .unwrap_or_else(|error| panic!("crashing runtime must start: {error}"));
+        let (measure, collector) = runtime.block_on(async move {
+            let measure_storage: MeasureStorage = Box::new(
+                FileStorage::new_with_cap_and_path(1024 * 1024, measure_path)
+                    .await
+                    .unwrap_or_else(|error| panic!("measurement storage must open: {error}")),
+            );
+            let evidence_storage: EvidenceStorage = Box::new(
+                FileStorage::new_with_cap_and_path(1024 * 1024, evidence_path)
+                    .await
+                    .unwrap_or_else(|error| panic!("evidence storage must open: {error}")),
+            );
+            measure_storage
+                .clear()
+                .await
+                .unwrap_or_else(|error| panic!("measurement storage must clear: {error}"));
+            evidence_storage
+                .clear()
+                .await
+                .unwrap_or_else(|error| panic!("evidence storage must clear: {error}"));
+            let (record, collector) = provisional_evidence_fixture(4);
+            let measure = PeriodicMeasure::new_with_clock_and_evidence(
+                measure_storage,
+                evidence_storage,
+                Some(collector),
+                clock.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+            assert!(matches!(
+                measure
+                    .admit_provisional_evidence(record)
+                    .await
+                    .map(|report| report.admission()),
+                Ok(rings_measure::EvidenceAdmission::Admitted)
+            ));
+            (measure, collector)
+        });
+        drop(runtime);
+        drop(measure);
+        collector
+    })
+    .join()
+    .unwrap_or_else(|_| panic!("the crashing instance must run"))
+}
+
 #[tokio::test]
 async fn successful_admission_survives_native_restart_without_flush() {
     let measure_path = "tmp/measure_with_evidence_test_db";
     let evidence_path = "tmp/provisional_evidence_test_db";
-    let measure_storage: MeasureStorage = Box::new(
-        FileStorage::new_with_cap_and_path(1024 * 1024, measure_path)
-            .await
-            .unwrap_or_else(|error| panic!("measurement storage must open: {error}")),
-    );
-    let evidence_storage: EvidenceStorage = Box::new(
-        FileStorage::new_with_cap_and_path(1024 * 1024, evidence_path)
-            .await
-            .unwrap_or_else(|error| panic!("evidence storage must open: {error}")),
-    );
-    measure_storage
-        .clear()
-        .await
-        .unwrap_or_else(|error| panic!("measurement storage must clear: {error}"));
-    evidence_storage
-        .clear()
-        .await
-        .unwrap_or_else(|error| panic!("evidence storage must clear: {error}"));
     let clock = Arc::new(ManualMeasureClock::new(10));
-    let (record, collector) = provisional_evidence_fixture(4);
-    let measure = PeriodicMeasure::new_with_clock_and_evidence(
-        measure_storage,
-        evidence_storage,
-        Some(collector),
-        clock.clone(),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
-    assert!(matches!(
-        measure
-            .admit_provisional_evidence(record)
-            .await
-            .map(|report| report.admission()),
-        Ok(rings_measure::EvidenceAdmission::Admitted)
-    ));
-    drop(measure);
+    let collector = admit_then_crash(measure_path, evidence_path, clock.clone());
 
     let restored = PeriodicMeasure::new_with_clock_and_evidence(
         Box::new(
