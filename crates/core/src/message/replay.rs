@@ -24,6 +24,11 @@
 //! record, at most [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`], so the cost of an admission does not
 //! grow with the number of streams retained.
 //!
+//! An admission writes its stream's record every time; a reservation writes it only when it
+//! outruns the stream's durable lease of sender sequences, which then covers the next
+//! `TRANSACTION_SEQUENCE_LEASE` sequences (#1043). A restart resumes past the lease: it may
+//! skip sequences, never reuse one (the laws of [`lease`]).
+//!
 //! **Law (fail closed per stream, #910).** The first operation restores the store from one scan
 //! of the storage and caches the result, including every record that does not restore. For a
 //! stream `s` whose stored record is damaged (torn, corrupt or unreadable, or holding another
@@ -34,7 +39,7 @@
 //!                        until the record is cleared and the node restarts
 //! ∀ s′ ≠ s restored.     state(s′) and the verdicts of s′ are those of a store without s
 //! ∀ s′ new.              s′ opens iff its table's streams + |U| < capacity
-//! cost(restore) = O(|store|), once;  cost(call) = 0 store reads + 1 record write
+//! cost(restore) = O(|store|), once;  cost(call) = 0 store reads + at most 1 record write
 //! ```
 //!
 //! so no replay is admitted from, and no sequence is reused by, such a stream, while every stream
@@ -101,10 +106,12 @@ use crate::swarm::transport::DELIVERY_BOUND;
 use crate::utils::Instant;
 
 mod custody;
+mod lease;
 mod store;
 
 pub(crate) use self::custody::RelayAdmission;
 pub(crate) use self::custody::RelayDelivery;
+use self::lease::allocate;
 use self::store::receiver_record;
 use self::store::restore;
 use self::store::sender_record;
@@ -632,7 +639,8 @@ impl TransactionReplay {
             })
     }
 
-    /// Reserve and persist `count` sender sequences before returning the range to the signer.
+    /// Reserve `count` sender sequences, persisting the stream's lease first whenever they
+    /// outrun it, before returning the range to the signer (the laws of [`lease`]).
     ///
     /// The transition runs detached from the caller (the law of whole transitions): cancelling
     /// the caller abandons only the wait.
@@ -645,8 +653,15 @@ impl TransactionReplay {
         run_whole(async move { replay.commit_reservation(key, count).await }).await
     }
 
-    /// The reservation transition: lock, load, reserve, persist the stream's record, then update
-    /// the table.
+    /// The reservation transition: lock, load, allocate, persist the extended lease if the
+    /// allocation outruns the stream's lease, then update the table.
+    ///
+    /// ```text
+    /// allocate(table[key], count) ── ⊥ ──▶ Err(TransactionSequenceExhausted)
+    ///      │ extend = None ─────────────────────────────▶ table[key] := next ──▶ range
+    ///      │ extend = Some(L) ──▶ persist D := L ── Err ─▶ Err (table unchanged)
+    ///                                │ Ok ─────────────▶ table[key] := next ──▶ range
+    /// ```
     async fn commit_reservation(
         &self,
         key: StreamKey,
@@ -661,18 +676,13 @@ impl TransactionReplay {
                 capacity: TRANSACTION_REPLAY_STREAM_CAPACITY,
             });
         }
-        let first = match previous {
-            Some(last) => last
-                .checked_add(1)
-                .ok_or(Error::TransactionSequenceExhausted { key })?,
-            None => 0,
-        };
-        let last = first
-            .checked_add(count.get().saturating_sub(1))
-            .ok_or(Error::TransactionSequenceExhausted { key })?;
-        self.persist(sender_record(&key, last)?).await?;
-        store.tables.sender.insert(key, last);
-        Ok(first..=last)
+        let allocation =
+            allocate(previous, count).ok_or(Error::TransactionSequenceExhausted { key })?;
+        if let Some(leased) = allocation.extend {
+            self.persist(sender_record(&key, leased)?).await?;
+        }
+        store.tables.sender.insert(key, allocation.next);
+        Ok(allocation.range)
     }
 
     /// Atomically commit replay classification and origin-quota admission before dispatch.
@@ -853,6 +863,8 @@ mod test_browser_store;
 mod test_custody;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_durable_throughput;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_lease;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_load_failures;
 #[cfg(all(test, not(target_family = "wasm")))]

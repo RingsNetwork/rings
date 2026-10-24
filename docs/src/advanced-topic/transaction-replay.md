@@ -97,9 +97,15 @@ logical lane admission.
 
 ## Persistence and bounds
 
-The sender reserves and persists the next sequence before exposing a signature. A crash may leave
-a gap but cannot reuse a successfully reserved sequence. A reservation that would wrap `u64`
-fails closed.
+The sender never exposes a signature over a sequence its durable record does not cover. It
+persists a lease, not each sequence (#1043): a reservation that outruns the stream's lease writes
+a new one covering at least the next `TRANSACTION_SEQUENCE_LEASE` (64) sequences, and the
+reservations inside it are handed out from memory without a write. A stream reserving one sequence
+per transaction therefore writes once per 64 transactions. A restart resumes past the durable
+lease, so a crash may leave a gap, of at most 64 sequences for single reservations, but never
+reuses a sequence. The receiver takes the gap as one `Advance`: no transaction carries a skipped
+sequence, since none was signed. The laws, with their proof sketch over every crash point, are
+in `crates/core/src/message/replay/lease.rs`. A reservation that would wrap `u64` fails closed.
 
 One runtime serializes all writers to its allocator. Multiple devices or processes using the same
 account and destination must delegate signing to that one allocator; merely pointing independent
@@ -115,7 +121,7 @@ execution because replay storage and application handlers do not share a transac
 Sender and receiver state are stored as one record per stream:
 
 ```text
-rings-core:transaction-replay:stream:sender:<hex key>    ->  (key, last reserved sequence)
+rings-core:transaction-replay:stream:sender:<hex key>    ->  (key, last leased sequence)
 rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot window, relay custody)
 ```
 
@@ -165,8 +171,9 @@ flush latency. `test_durable_throughput_of_replay_admissions` (ignored by defaul
 The benchmark admits through the production path (`admit_with_quota`), so each figure includes
 the detached task every transition runs on.
 
-Sender reservations pay the same cost. The ceiling is far below the outbound lane rate, and group
-commit is tracked in #916.
+Sender reservations pay the same cost once per lease of 64 sequences, so a node's replay writes
+are about one per admission. The ceiling is far below the outbound lane rate, and group commit is
+tracked in #916.
 
 Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class
 stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each receiver stream
