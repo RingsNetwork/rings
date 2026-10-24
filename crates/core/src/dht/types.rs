@@ -128,6 +128,11 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 ///   owner a later lookup reaches.
 /// - Residency: evicting a key at capacity, or retiring it under the retention law,
 ///   un-observes it, and its next read starts again from the replies it gets.
+/// - Linearization (#922): a read is pure. It projects the value it loaded at its own clock,
+///   and it writes or removes nothing. Every state change is one transition under the cache
+///   transition: a put, an observation, or the eviction the count bound makes inside a put. A
+///   transition takes effect at its store put and a read at its store get, so a read that
+///   loaded a value before a concurrent put completed cannot drop that put.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageCache<Action>: Chord<Action> {

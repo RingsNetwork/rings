@@ -39,6 +39,7 @@ use crate::tests::volatile_relay_storage;
 use crate::utils::get_epoch_ms;
 
 mod test_cache_join;
+mod test_cache_linearization;
 mod test_handoff;
 mod test_horizon;
 mod test_own_write;
