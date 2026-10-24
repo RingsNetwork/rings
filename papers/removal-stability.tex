@@ -278,15 +278,26 @@ until stable and answers no lookup.
 changes it, and after Section~\ref{sec:heartbeat} neither does a heartbeat.
 
 \textbf{Budget.}  The removal store refuses and never evicts (Law~8 of~\cite{DurableRecords}).
-Its byte budget is at least the per-carrier bound $W_\Rm$ of Section~\ref{sec:bound}, so any
-one carrier fits.  An operation refused for room returns $\Exhausted$ to its writer.  A
-refused sync join is never acknowledged, so the sender keeps its copy and retries.
+Its budget $B_\Rm$ is shared by every topic at the owner, so it is partitioned by origin
+(Law~\ref{law:share} of Section~\ref{sec:bound}).  An operation refused for room returns
+$\Exhausted$ to its writer.  A refused sync join is never acknowledged, so the sender keeps its
+copy and retries.
 
-\textbf{No durable store.}  A node that can open no durable store (a browser whose IndexedDB
-fails to open) keeps the remove side in memory, refusing at its budget: $(\Volatile,
-\Retained)$, logged at \texttt{warn}.  Each restart of such a node is the total loss of
-Proposition~2 of~\cite{DurableRecords}: the node comes back as a fresh replica.
-Theorem~\ref{theorem:noresurrect} then fails at that node alone, and by
+\textbf{Browsers.}  A browser's crash class is claimed, $\Durable^\circ$, and a store that
+holds state for others is admissible at $(\Durable^\circ,\Retained)$ when $r\ge2$ holders keep
+it and every repair period restores $r$ copies (Law~12 of~\cite{DurableRecords}, as amended by
+\issue{1056}).  A remove side is held by every owner of its topic, $r=\mathtt{DATA\_REDUNDANT}=6$
+by default, and repair restores the replica set.  So a browser opens the removal store in
+IndexedDB at $(\Durable^\circ,\Retained)$, with strict commit and refusal.  By Proposition~9
+of~\cite{DurableRecords}, a remove is lost only if every holder is lost within one repair
+period.  A deployment configured with $r=1$ makes the browser removal store an inadmissible
+point, as Law~12 makes any single-holder browser custody; native owners at
+$(\Durable,\Retained)$ need no redundancy.
+
+\textbf{IndexedDB that fails to open.}  Only then does a browser keep the remove side in
+memory, refusing at its budget: $(\Volatile,\Retained)$, logged at \texttt{warn}.  Each restart
+is the total loss of Proposition~2 of~\cite{DurableRecords}: the node comes back as a fresh
+replica.  Theorem~\ref{theorem:noresurrect} then fails at that node alone, and by
 Lemma~\ref{lem:replication} the remove survives at every other holder.
 
 \textbf{Mirror.}  The fetch cache is $(\Volatile,\Rebuild)$.  Its count bound evicts whole
@@ -336,8 +347,15 @@ each field is at most its supremum.
 \end{proof}
 
 The margin is wide: removes cost $145$\,KB at the cap, against $26$\,MB of headroom.  We pick
-$\Tmax=\Dmax$ for the size of a lookup reply, not for the message bound.  The honest remove
-rate this admits per topic is $\Tmax/(H+\sigma)\approx10$ per minute.
+$\Tmax=\Dmax$ for the size of a lookup reply, not for the message bound.
+
+\textbf{Honest rate.}  The cap admits $\Tmax/(H+\sigma)\approx10$ removes per minute per topic,
+sustained.  A topic that removes faster, such as a chat log that deletes each message, is
+refused past the cap: its writer gets $\Exhausted$, and nothing is silently dropped.  Raising
+$\Tmax$ would cost every lookup reply of a busy topic $w_T$ per remove, and every owner that
+much of its removal budget.  An application that needs a higher rate shards the topic: $k$
+topics $t_i$, with each element written to $t_{\dg(v)\bmod k}$, admit $k$ times the rate, and
+since their keys differ they place at different owners.
 
 \begin{lemma}[A sync delta simulates a writer]\label{lem:simulate}
 Let $\delta$ be admissible at clock $c$.  Some writer, using at most
@@ -358,14 +376,59 @@ nothing held.  Admission bounds every $\tau(r)\le c+\sigma$.
 A syncer cannot exceed $W$ (Law~\ref{law:admit}).  It covers an add only as a writer's
 $\mathrm{Tombstone}$ would, with a dot up to $\sigma$ later.  It can fill one carrier's
 removes, which refuses further removes on that carrier at that owner until
-$c+\sigma+H+\sigma$, or fill the removal store, which refuses removes at that owner.  By
-Lemma~\ref{lem:simulate}, any writer can do the same with $O(\Tmax)$ operations.
+$c+\sigma+H+\sigma$.  By Lemma~\ref{lem:simulate}, any writer can do the same with
+$O(\Tmax)$ operations.
 \end{proposition}
 
-So the defect of \issue{921} closes.  A remote peer can still exhaust the remove capacity of
-a topic, but every writer could already do that, since a data topic has no write authority
-and its element cap already lets a writer displace the topic's elements.  The capacity
-exhaustion that remains is the availability residual stated in \texttt{SECURITY.md}.
+So the defect of \issue{921} closes for one carrier.  A remote peer can still exhaust the
+remove capacity of a topic, but every writer could already do that, since a data topic has no
+write authority and its element cap already lets a writer displace the topic's elements.
+
+\textbf{Isolation across topics.}  The removal store is one budget for every topic at an
+owner, and it refuses instead of evicting, so junk held there stays until it is stable.  By
+Lemma~\ref{lem:simulate}, one writer can place $\mathrm{Extend}(v_e),\mathrm{Tombstone}(v_e)$
+pairs on fresh topics at an owner and, without a further bound, refuse every honest remove on
+every topic there for $H+\sigma$.  A per-topic share does not prevent this: the junk topics
+are fresh topics, each under its own cap.  The share must follow the sender.
+
+\begin{definition}[Charge]\label{def:charge}
+Owner $p$ charges each unstable remove $(t,e)$ it holds to an origin $o_p(t,e)$: the
+authenticated sender of the transition that last raised $D_t(e)$ at $p$.  That is the
+operation's writer, as the shell verified its signature, or the signer of the sync message.
+A sync from a node that $p$'s own view names as an owner of $t$'s placement (the predecessor
+handing off its range, or a replica peer) is charged to the \emph{holder class} $\star$
+instead.  $o_p$ is local to $p$: it is stored beside each remove in the removal store, never
+sent, and recounted at open.  Let $c_p(o)=|\{(t,e):o_p(t,e)=o\}|$ over unstable removes.
+\end{definition}
+
+\begin{law}[Origin share]\label{law:share}
+A transition from sender $o\ne\star$ that would raise $c_p(o)$ above
+$S=\Tmax$ is refused with $\Err(\Exhausted)$, and the slot is unchanged.  The store refuses
+any transition past its total $B_\Rm=64\,\Tmax$ removes ($\approx9.3$\,MB at $w_T$).  A
+transition that raises no $D_t(e)$ is never charged, and a charge is released when its remove
+is retired at stability.
+\end{law}
+
+\begin{proposition}[Isolation]\label{prop:isolation}
+Let an honest writer $w$ remove an element of topic $t$ at owner $p$.  The remove is refused
+only if (i) $t$ holds $\Tmax$ unstable removes, (ii) $w$'s own share is exhausted,
+$c_p(w)=S$, or (iii) the total is reached, which requires removes charged to at least
+$\lceil(B_\Rm-c_p(\star))/S\rceil-1$ origins other than $w$, or removes charged to $\star$.
+\end{proposition}
+\begin{proof}
+Laws~\ref{law:admit} and \ref{law:share} refuse for exactly three reasons: the topic cap, the
+sender's share, and the total.  The total is
+$c_p(\star)+\sum_{o\ne\star}c_p(o)$ with each $c_p(o)\le S$, so reaching it with
+$c_p(w)<S$ needs the stated number of other origins.  An origin is the authenticated sender,
+so no peer can charge $w$: a forged sync is charged to its own signer.
+\end{proof}
+
+Case (iii) needs either $63$ distinct identities or a node that $p$'s view makes an owner of
+the topic.  The first is a Sybil attack and the second is a Byzantine storage owner, and
+\texttt{SECURITY.md} lists both as non-goals.  Capacity exhaustion by one writer is thus
+confined to its own share and to topics it fills to $\Tmax$; this is the availability residual
+stated in \texttt{SECURITY.md}.  An honest writer may hold $S$ unstable removes per owner,
+about $10$ per minute per owner, sustained.
 
 \begin{proposition}[Refusal is safe]\label{prop:diverge}
 Suppose owners $p$ and $q$ refuse each other's deltas because $|D_p\cup D_q|>\Tmax$.  Then
@@ -496,7 +559,8 @@ PR & Issue & Law\\
 (\texttt{rings-node})\\
 3 & \issue{921} & Def.~\ref{def:cap}, Law~\ref{law:admit}; the assertion of
 Prop.~\ref{prop:message}\\
-4 & \issue{920} & Laws~\ref{law:evict}--\ref{law:order}; the removal store\\
+4 & \issue{920} & Laws~\ref{law:evict}--\ref{law:order}, \ref{law:share}; the removal
+store\\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -527,6 +591,7 @@ what may drop it & $\ret_t$, a move, a loss event (Law~\ref{law:survival})\\
 what eviction drops & the element side (Law~\ref{law:evict})\\
 where removes live & removal store, $(\Durable,\Retained)$ (Law~\ref{law:authority})\\
 how many & $\le\Tmax$, refused past it (Law~\ref{law:admit})\\
+store isolation & per-origin share (Prop.~\ref{prop:isolation})\\
 how large & $W\le$ one message (Prop.~\ref{prop:message})\\
 forged by sync & simulates a writer (Lemma~\ref{lem:simulate})\\
 cache order & pure reads, locked transitions (Law~\ref{law:pure})\\
