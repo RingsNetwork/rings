@@ -30,7 +30,8 @@ pub mod prime_order;
 /// Signature schemes used by DID identity and provider login.
 pub mod signers;
 mod types;
-use elliptic_curve::point::DecompressPoint;
+use elliptic_curve::sec1::FromSec1Point;
+use elliptic_curve::sec1::Sec1Point;
 use elliptic_curve::sec1::ToSec1Point;
 use elliptic_curve::FieldBytes;
 pub use group::*;
@@ -112,32 +113,19 @@ impl TryFrom<PublicKey<33>> for ed25519_dalek::VerifyingKey {
 }
 
 impl PublicKey<33> {
-    /// The x-coordinate bytes of the compressed encoding `prefix ‖ x`.
+    /// Decode the SEC1 §2.3.3 compressed encoding `t ‖ x` into a secp256r1 affine point.
     ///
-    /// A compressed key is an encoding, not an affine point: it carries `x` and one parity bit
-    /// but no `y`, so it exposes exactly those two projections rather than `AffineCoordinates`.
-    fn compressed_x(&self) -> FieldBytes<NistP256> {
-        let [_, x @ ..] = self.0;
-        FieldBytes::<NistP256>::from(x)
-    }
-
-    /// The y-parity bit carried by the prefix byte of the compressed encoding.
-    fn compressed_y_is_odd(&self) -> Choice {
-        let [prefix, ..] = self.0;
-        match prefix {
-            2u8 => Choice::from(1),
-            3u8 => Choice::from(0),
-            _ => Choice::from(0),
-        }
-    }
-
-    /// Map a PublicKey into secp256r1 affine point,
-    /// This function is an constant-time cryptographic implementations
+    /// `None` unless `t ∈ {0x02, 0x03}` and `x` is the x-coordinate of a curve point; `0x02`
+    /// selects the even `y`, `0x03` the odd one. The decoding is the library's
+    /// (`FromSec1Point`), as for secp256k1, so both curves share one tag convention. Only the
+    /// curve arithmetic is constant-time: the tag of a public key is public.
     pub fn ct_into_secp256r1_affine(self) -> CtOption<primeorder::AffinePoint<NistP256>> {
-        primeorder::AffinePoint::<NistP256>::decompress(
-            &self.compressed_x(),
-            self.compressed_y_is_odd(),
-        )
+        match Sec1Point::<NistP256>::from_bytes(self.0) {
+            Ok(encoded) if encoded.is_compressed() => {
+                primeorder::AffinePoint::<NistP256>::from_sec1_point(&encoded).into()
+            }
+            Ok(_) | Err(_) => CtOption::new(primeorder::AffinePoint::IDENTITY, Choice::from(0)),
+        }
     }
 
     /// Map a PublicKey into secp256r1 public key,
@@ -360,6 +348,8 @@ pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey
 
 #[cfg(test)]
 mod test_known_answers;
+#[cfg(test)]
+mod test_sec1;
 
 #[cfg(test)]
 pub(crate) mod tests {
