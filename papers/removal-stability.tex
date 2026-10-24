@@ -425,7 +425,10 @@ so no peer can charge $w$: a forged sync is charged to its own signer.
 
 Case (iii) needs either $63$ distinct identities or a node that $p$'s view makes an owner of
 the topic.  The first is a Sybil attack and the second is a Byzantine storage owner, and
-\texttt{SECURITY.md} lists both as non-goals.  Capacity exhaustion by one writer is thus
+\texttt{SECURITY.md} lists both as non-goals.  The Sybil residual is the one of
+\issue{907}, where free origins exhaust the replay table, and it closes there: when
+\issue{907} prices or bounds origins, this share uses the same mechanism, not a second one.
+Capacity exhaustion by one writer is thus
 confined to its own share and to topics it fills to $\Tmax$; this is the availability residual
 stated in \texttt{SECURITY.md}.  An honest writer may hold $S$ unstable removes per owner,
 about $10$ per minute per owner, sustained.
