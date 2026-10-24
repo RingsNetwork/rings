@@ -89,9 +89,10 @@ pub struct OnlineNodeDescriptorBody {
     pub endpoint_hint: Option<String>,
     /// Process start timestamp in milliseconds since Unix epoch.
     pub started_at_ms: u128,
-    /// Heartbeat timestamp in milliseconds since Unix epoch.
-    pub heartbeat_at_ms: u128,
-    /// Expiry timestamp in milliseconds since Unix epoch.
+    /// Freshness window `T` in milliseconds: a reader holds the descriptor live only while it
+    /// heard it within `T` (see the lease law of `descriptor`).
+    pub fresh_for_ms: u64,
+    /// Lease end `ℓ` in milliseconds since Unix epoch.
     pub expires_at_ms: u128,
     /// Node software version.
     pub version: String,
@@ -110,7 +111,7 @@ impl OnlineNodeDescriptorBody {
             capabilities: self.capabilities,
             endpoint_hint: &self.endpoint_hint,
             started_at_ms: self.started_at_ms,
-            heartbeat_at_ms: self.heartbeat_at_ms,
+            fresh_for_ms: self.fresh_for_ms,
             expires_at_ms: self.expires_at_ms,
             version: self.version.as_str(),
         }
@@ -154,7 +155,8 @@ impl SignedDescriptorBody for OnlineNodeDescriptorBody {
             capabilities: self.capabilities,
             endpoint_hint: self.endpoint_hint,
             started_at_ms: self.started_at_ms,
-            heartbeat_at_ms: self.heartbeat_at_ms,
+            heartbeat_at_ms: 0,
+            fresh_for_ms: self.fresh_for_ms,
             expires_at_ms: self.expires_at_ms,
             version: self.version,
             signature,
@@ -174,7 +176,7 @@ struct OnlineNodeDescriptorBodyRef<'a> {
     capabilities: OnlineNodeCapabilities,
     endpoint_hint: &'a Option<String>,
     started_at_ms: u128,
-    heartbeat_at_ms: u128,
+    fresh_for_ms: u64,
     expires_at_ms: u128,
     version: &'a str,
 }
@@ -208,13 +210,18 @@ pub struct OnlineNodeDescriptor {
     pub endpoint_hint: Option<String>,
     /// Process start timestamp in milliseconds since Unix epoch.
     pub started_at_ms: u128,
-    /// Heartbeat timestamp in milliseconds since Unix epoch.
+    /// When the reader last heard this descriptor, in milliseconds since Unix epoch: the dot of
+    /// its element in the fetched registry carrier. Not signed and not encoded (see the lease
+    /// law of `descriptor`); `0` until heard.
+    #[serde(skip)]
     pub heartbeat_at_ms: u128,
-    /// Expiry timestamp in milliseconds since Unix epoch.
+    /// Freshness window `T` in milliseconds.
+    pub fresh_for_ms: u64,
+    /// Lease end `ℓ` in milliseconds since Unix epoch.
     pub expires_at_ms: u128,
     /// Node software version.
     pub version: String,
-    /// Signature covering every descriptor field above.
+    /// Signature covering every descriptor field above except `heartbeat_at_ms`.
     pub signature: MessageVerification,
 }
 
@@ -243,7 +250,8 @@ impl OnlineNodeDescriptor {
             capabilities,
             endpoint_hint,
             started_at_ms,
-            heartbeat_at_ms,
+            heartbeat_at_ms: _,
+            fresh_for_ms,
             expires_at_ms,
             version,
             signature: _,
@@ -260,7 +268,7 @@ impl OnlineNodeDescriptor {
             capabilities: *capabilities,
             endpoint_hint,
             started_at_ms: *started_at_ms,
-            heartbeat_at_ms: *heartbeat_at_ms,
+            fresh_for_ms: *fresh_for_ms,
             expires_at_ms: *expires_at_ms,
             version: version.as_str(),
         }
@@ -288,20 +296,22 @@ impl OnlineNodeDescriptor {
     /// DID/public-key binding.
     ///
     /// This does not apply the embedded [`MessageVerification`] timestamp/TTL
-    /// as a liveness rule. Online-node liveness is defined solely by the
-    /// signed `expires_at_ms` descriptor field; use [`Self::is_live_at`] when
-    /// expiry should be enforced.
+    /// as a liveness rule. Online-node liveness is defined by the lease law of
+    /// `descriptor`: the signed lease end and freshness window, and the time the
+    /// descriptor was heard; use [`Self::is_live_at`] when it should be enforced.
     pub fn verify_signature(&self, network_id: u32) -> bool {
         self.descriptor_verify_signature(network_id)
     }
 
-    /// Returns whether this descriptor is expired at `now_ms`.
+    /// Returns whether this descriptor is expired at `now_ms`: its lease ended, or it was not
+    /// heard within its freshness window.
     pub fn is_expired_at(&self, now_ms: u128) -> bool {
         self.descriptor_is_expired_at(now_ms)
     }
 
-    /// Returns whether this descriptor verifies under the overlay `network_id` and is not
-    /// expired.
+    /// Returns whether a reader lists this descriptor: it verifies under the overlay
+    /// `network_id`, its lease terms are admissible, and it is not expired (the lease law of
+    /// `descriptor`).
     pub fn is_live_at(&self, now_ms: u128, network_id: u32) -> bool {
         self.descriptor_is_live_at(now_ms, network_id)
     }
@@ -344,8 +354,19 @@ impl SignedDescriptor for OnlineNodeDescriptor {
         self.expires_at_ms
     }
 
+    fn descriptor_fresh_for_ms(&self) -> u64 {
+        self.fresh_for_ms
+    }
+
     fn descriptor_signing_data(&self) -> Result<Vec<u8>> {
         self.signing_data()
+    }
+
+    fn heard_at(self, heartbeat_at_ms: u128) -> Self {
+        Self {
+            heartbeat_at_ms,
+            ..self
+        }
     }
 }
 
@@ -353,23 +374,34 @@ impl RegistryElement for OnlineNodeDescriptor {}
 
 #[cfg(test)]
 mod tests {
+    use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
     use rings_core::delegation::DelegateeKey;
     use rings_core::ecc::SecretKey;
 
     use super::*;
-    use crate::descriptor::prunes_registry_element;
     use crate::tests::TEST_NETWORK_ID;
 
-    fn descriptor_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnlineNodeDescriptor> {
+    /// A descriptor of a fresh account, fresh for `fresh_for_ms` until the lease end
+    /// `expires_at_ms`, heard at `heartbeat_at_ms`.
+    fn descriptor_at(
+        heartbeat_at_ms: u128,
+        fresh_for_ms: u64,
+        expires_at_ms: u128,
+    ) -> Result<OnlineNodeDescriptor> {
         let key = SecretKey::random();
         let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-        descriptor_of(&delegatee_key, heartbeat_at_ms, expires_at_ms)
+        Ok(
+            descriptor_of(&delegatee_key, "test", fresh_for_ms, expires_at_ms)?
+                .heard_at(heartbeat_at_ms),
+        )
     }
 
-    /// A descriptor of `delegatee_key`'s node with the given heartbeat and expiry.
+    /// A descriptor of `delegatee_key`'s node at `version`, fresh for `fresh_for_ms` until the
+    /// lease end `expires_at_ms`, not yet heard.
     fn descriptor_of(
         delegatee_key: &DelegateeKey,
-        heartbeat_at_ms: u128,
+        version: &str,
+        fresh_for_ms: u64,
         expires_at_ms: u128,
     ) -> Result<OnlineNodeDescriptor> {
         let did = delegatee_key.delegator_did();
@@ -385,64 +417,121 @@ mod tests {
                 capabilities: OnlineNodeCapabilities::default(),
                 endpoint_hint: None,
                 started_at_ms: 10,
-                heartbeat_at_ms,
+                fresh_for_ms,
                 expires_at_ms,
-                version: "test".to_string(),
+                version: version.to_string(),
             },
             MessageSigner::new(delegatee_key, TEST_NETWORK_ID),
         )
     }
 
-    /// Totality (#864): of two distinct descriptors of one DID at an equal heartbeat, the same
-    /// one is selected whatever order they are read in: at a different expiry, and at an equal
-    /// expiry from two delegatee keys of one account (two processes publishing in the same
-    /// millisecond).
+    /// Totality (#864): of two distinct descriptors of one DID at an equal lease and heartbeat,
+    /// the same one is selected whatever order they are read in: two delegatee keys of one
+    /// account (two processes publishing in the same millisecond).
     #[test]
-    fn test_latest_valid_by_did_breaks_an_equal_heartbeat_by_content() -> Result<()> {
+    fn test_latest_valid_by_did_breaks_an_equal_lease_by_content() -> Result<()> {
         let account = SecretKey::random();
         let delegatee_key = DelegateeKey::new_with_seckey(&account)?;
         let other_delegatee_key = DelegateeKey::new_with_seckey(&account)?;
-        let shorter = descriptor_of(&delegatee_key, 20, 100)?;
-        let longer = descriptor_of(&delegatee_key, 20, 200)?;
-        let other_process = descriptor_of(&other_delegatee_key, 20, 100)?;
-        assert_eq!(other_process.did, shorter.did);
-        assert_ne!(other_process, shorter);
+        let one = descriptor_of(&delegatee_key, "test", 100, 200)?.heard_at(20);
+        let other_process = descriptor_of(&other_delegatee_key, "test", 100, 200)?.heard_at(20);
+        assert_eq!(other_process.did, one.did);
+        assert_ne!(other_process, one);
 
-        for (first, second) in [(&shorter, &longer), (&shorter, &other_process)] {
-            let forward = OnlineNodeDescriptor::latest_valid_by_did(
-                [first.clone(), second.clone()],
-                50,
-                TEST_NETWORK_ID,
-                false,
-            );
-            let reverse = OnlineNodeDescriptor::latest_valid_by_did(
-                [second.clone(), first.clone()],
-                50,
-                TEST_NETWORK_ID,
-                false,
-            );
-            assert_eq!(forward, reverse);
-            assert_eq!(forward.len(), 1);
-        }
+        let forward = OnlineNodeDescriptor::latest_valid_by_did(
+            [one.clone(), other_process.clone()],
+            50,
+            TEST_NETWORK_ID,
+            false,
+        );
+        let reverse = OnlineNodeDescriptor::latest_valid_by_did(
+            [other_process, one],
+            50,
+            TEST_NETWORK_ID,
+            false,
+        );
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
         Ok(())
     }
 
     #[test]
     fn test_descriptor_signature_covers_mutable_fields() -> Result<()> {
-        let mut descriptor = descriptor_at(20, 30)?;
+        let mut descriptor = descriptor_at(20, 10, 30)?;
         assert!(descriptor.verify_signature(TEST_NETWORK_ID));
 
         descriptor.node_type = OnlineNodeType::Browser;
         assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
-        descriptor = descriptor_at(20, 30)?;
+        descriptor = descriptor_at(20, 10, 30)?;
         descriptor.storage_redundancy = 7;
         assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
+        descriptor = descriptor_at(20, 10, 30)?;
+        descriptor.expires_at_ms = 31;
+        assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
+        descriptor = descriptor_at(20, 10, 30)?;
+        descriptor.fresh_for_ms = 11;
+        assert!(!descriptor.verify_signature(TEST_NETWORK_ID));
+        Ok(())
+    }
+
+    /// The heard time is neither signed nor encoded: a descriptor heard at any time verifies,
+    /// and its element is the same bytes, which decode unheard.
+    #[test]
+    fn test_heard_time_is_neither_signed_nor_encoded() -> Result<()> {
+        let unheard = descriptor_at(0, 10, 30)?;
+        let heard = unheard.clone().heard_at(25);
+        assert!(heard.verify_signature(TEST_NETWORK_ID));
+        let element = heard.to_element()?;
+        assert_eq!(element, unheard.to_element()?);
+        assert_eq!(OnlineNodeDescriptor::from_element(&element)?, unheard);
+        Ok(())
+    }
+
+    /// Lease law (#918): live iff `t ≤ ℓ` and `t ≤ τ* + T + σ`; a descriptor re-appended after
+    /// its registrant stopped is listed at most until its signed lease end.
+    #[test]
+    fn test_a_descriptor_is_live_within_its_lease_and_freshness() -> Result<()> {
+        let skew = TS_OFFSET_TOLERANCE_MS;
+        let fresh = descriptor_at(1_000, 90, 10_000)?;
+        assert!(fresh.is_live_at(1_000 + 90 + skew, TEST_NETWORK_ID));
+        assert!(!fresh.is_live_at(1_000 + 90 + skew + 1, TEST_NETWORK_ID));
+
+        let replayed = descriptor_at(10_000, 90, 10_000)?;
+        assert!(replayed.is_live_at(10_000, TEST_NETWORK_ID));
+        let replayed_late = descriptor_at(10_001, 90, 10_000)?;
+        assert!(
+            !replayed_late.is_live_at(10_001, TEST_NETWORK_ID),
+            "a fresh dot never extends a lease past its signed end"
+        );
+        Ok(())
+    }
+
+    /// The reader bounds the signed terms (Law 9): a lease ending more than `Λ + σ` from now, or
+    /// a freshness window longer than `Λ`, is never live, so a one-shot write cannot list its
+    /// signer for longer than a lease; at the bounds it is live.
+    #[test]
+    fn test_a_descriptor_with_terms_past_the_lease_is_never_live() -> Result<()> {
+        let lease = crate::descriptor::registry_lease().as_millis();
+        let lease_u64 = u64::try_from(lease).unwrap_or(u64::MAX);
+        let skew = TS_OFFSET_TOLERANCE_MS;
+        let now = 1_000_000;
+
+        let at_bound = descriptor_at(now, lease_u64, now + lease + skew)?;
+        assert!(at_bound.is_live_at(now, TEST_NETWORK_ID));
+        let long_lease = descriptor_at(now, 90_000, now + lease + skew + 1)?;
+        assert!(!long_lease.is_live_at(now, TEST_NETWORK_ID));
+        let long_window = descriptor_at(now, lease_u64 + 1, now + 90_000)?;
+        assert!(!long_window.is_live_at(now, TEST_NETWORK_ID));
+        assert!(
+            long_lease.is_live_at(now + skew + 1, TEST_NETWORK_ID),
+            "a lease within reach of the reader's clock is live again"
+        );
         Ok(())
     }
 
     #[test]
     fn test_descriptor_round_trips_through_dht_encoding() -> Result<()> {
-        let descriptor = descriptor_at(20, 30)?;
+        let descriptor = descriptor_at(0, 10, 30)?;
         let element = descriptor.to_element()?;
         let decoded = OnlineNodeDescriptor::from_element(&element)?;
 
@@ -451,51 +540,16 @@ mod tests {
         Ok(())
     }
 
+    /// The newest lease of a DID wins even when an older lease was heard later, as a replayed
+    /// older lease is; expired descriptors are kept only on request.
     #[test]
-    fn test_latest_valid_by_did_filters_expired_and_keeps_newest() -> Result<()> {
+    fn test_latest_valid_by_did_filters_expired_and_keeps_the_newest_lease() -> Result<()> {
         let key = SecretKey::random();
         let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-        let did = delegatee_key.delegator_did();
-        let public_key = delegatee_key.delegation().delegator_verification_pubkey()?;
-
-        let older = OnlineNodeDescriptor::new_signed(
-            OnlineNodeDescriptorBody {
-                did,
-                public_key: public_key.clone(),
-                delegatee_public_key: delegatee_key.delegatee_public_key(),
-                node_type: OnlineNodeType::Native,
-                network_id: 1,
-                storage_redundancy: 6,
-                dht_virtual_nodes: 0,
-                capabilities: OnlineNodeCapabilities::default(),
-                endpoint_hint: None,
-                started_at_ms: 1,
-                heartbeat_at_ms: 10,
-                expires_at_ms: 100,
-                version: "old".to_string(),
-            },
-            MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
-        )?;
-        let newer = OnlineNodeDescriptor::new_signed(
-            OnlineNodeDescriptorBody {
-                did,
-                public_key,
-                delegatee_public_key: delegatee_key.delegatee_public_key(),
-                node_type: OnlineNodeType::Native,
-                network_id: 1,
-                storage_redundancy: 6,
-                dht_virtual_nodes: 0,
-                capabilities: OnlineNodeCapabilities::default(),
-                endpoint_hint: None,
-                started_at_ms: 1,
-                heartbeat_at_ms: 20,
-                expires_at_ms: 100,
-                version: "new".to_string(),
-            },
-            MessageSigner::new(&delegatee_key, TEST_NETWORK_ID),
-        )?;
-        let other_live = descriptor_at(25, 100)?;
-        let expired = descriptor_at(30, 40)?;
+        let older = descriptor_of(&delegatee_key, "old", 100, 90)?.heard_at(45);
+        let newer = descriptor_of(&delegatee_key, "new", 100, 100)?.heard_at(40);
+        let other_live = descriptor_at(25, 100, 100)?;
+        let expired = descriptor_at(30, 100, 40)?;
 
         let descriptors = OnlineNodeDescriptor::latest_valid_by_did(
             vec![
@@ -522,40 +576,6 @@ mod tests {
             true,
         );
         assert_eq!(with_expired.len(), 3);
-        Ok(())
-    }
-
-    /// A publisher prunes its own descriptors and every one that does not decode, does not
-    /// verify, or expired more than the skew tolerance ago; a descriptor of another registrant
-    /// expired within the tolerance is kept.
-    #[test]
-    fn test_a_publisher_keeps_only_live_descriptors_of_other_registrants() -> Result<()> {
-        let skew = rings_core::consts::TS_OFFSET_TOLERANCE_MS;
-        let now_ms = 40 + skew + 1;
-        let own = descriptor_at(20, 10 * now_ms)?;
-        let other_live = descriptor_at(25, 10 * now_ms)?;
-        let expired = descriptor_at(30, 40)?;
-        let expired_within_skew = descriptor_at(35, 41)?;
-        let mut forged = descriptor_at(35, 10 * now_ms)?;
-        forged.version = "forged".to_string();
-        let prunes = |element: &[u8]| {
-            prunes_registry_element::<OnlineNodeDescriptor>(
-                element,
-                own.did,
-                now_ms,
-                TEST_NETWORK_ID,
-            )
-        };
-
-        assert!(prunes(&own.to_element()?));
-        assert!(!prunes(&other_live.to_element()?));
-        assert!(prunes(&expired.to_element()?));
-        assert!(
-            !prunes(&expired_within_skew.to_element()?),
-            "a clock up to σ behind still holds it live"
-        );
-        assert!(prunes(&forged.to_element()?));
-        assert!(prunes(b"not a descriptor"));
         Ok(())
     }
 }

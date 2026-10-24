@@ -345,7 +345,9 @@ fn test_descriptor_naming_a_service_outside_the_signature_is_rejected_at_decode(
         .copy_from_slice(b"\x03web");
 
     assert_eq!(
-        rings_codec::deserialize::<OnionExitDescriptor>(encoded.as_slice()).ok(),
+        rings_codec::deserialize::<OnionExitDescriptor>(encoded.as_slice())
+            .ok()
+            .map(|decoded| decoded.heard_at(descriptor.heartbeat_at_ms)),
         Some(descriptor)
     );
     assert!(rings_codec::deserialize::<OnionExitDescriptor>(outside.as_slice()).is_err());

@@ -7,6 +7,7 @@
 use rings_core::delegation::DelegateeKey;
 use rings_core::message::MessageSigner;
 
+use crate::descriptor::SignedDescriptor;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitDescriptor;
@@ -42,9 +43,9 @@ pub(crate) struct ExitDescriptorFixture<'k> {
     pub(crate) policy: OnionExitPolicy,
     /// The registration's start, in epoch milliseconds.
     pub(crate) started_at_ms: u128,
-    /// The registration's latest heartbeat, in epoch milliseconds.
+    /// When a reader heard the registration, in epoch milliseconds (its element's dot).
     pub(crate) heartbeat_at_ms: u128,
-    /// The registration's expiry, in epoch milliseconds.
+    /// The registration's lease end, in epoch milliseconds; it is also fresh until then.
     pub(crate) expires_at_ms: u128,
     /// The build version the exit advertises.
     pub(crate) version: String,
@@ -103,8 +104,12 @@ impl<'k> ExitDescriptorFixture<'k> {
         }
     }
 
-    /// The descriptor of this registration, signed by its key on its network.
+    /// The descriptor of this registration, signed by its key on its network, fresh from its
+    /// heartbeat until its lease end and heard at its heartbeat.
     pub(crate) fn sign(self) -> Result<OnionExitDescriptor> {
+        let heartbeat_at_ms = self.heartbeat_at_ms;
+        let fresh_for_ms =
+            u64::try_from(self.expires_at_ms.saturating_sub(heartbeat_at_ms)).unwrap_or(u64::MAX);
         OnionExitDescriptor::new_signed(
             OnionExitDescriptorBody {
                 did: self.key.delegator_did(),
@@ -120,12 +125,13 @@ impl<'k> ExitDescriptorFixture<'k> {
                 service: self.service,
                 policy: self.policy,
                 started_at_ms: self.started_at_ms,
-                heartbeat_at_ms: self.heartbeat_at_ms,
+                fresh_for_ms,
                 expires_at_ms: self.expires_at_ms,
                 version: self.version,
             },
             MessageSigner::new(self.key, self.network_id),
         )
+        .map(|descriptor| descriptor.heard_at(heartbeat_at_ms))
         .map_err(Error::CoreError)
     }
 }

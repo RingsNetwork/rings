@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+- Registry heartbeats re-append a signed lease (#918; removal-stability paper, Laws 8 and 9).
+  An online-node, onion-exit or DNS-relay service descriptor no longer signs a heartbeat time:
+  it signs a lease end (`expires_at_ms`, 10 minutes after it is issued) and a freshness window
+  (`fresh_for_ms`, the configured TTL), so its bytes stay fixed for the lease and every heartbeat
+  appends the same element, which raises its dot and writes no tombstone. A heartbeat no longer
+  reads the registry or removes anything. A reader takes `heartbeat_at_ms` from the element's
+  dot, unsigned, and lists a descriptor while the time is at most the lease end and at most
+  `heartbeat_at_ms + fresh_for_ms + σ`, and never lists a lease ending more than 10 minutes
+  and 3 s ahead or a freshness window over 10 minutes, whatever the signer chose; of two leases
+  of one registrant the later one wins. A
+  registrant renews its lease once fewer than two heartbeats remain in it, or when a signed
+  field changes. A heartbeat interval must now be below 300 seconds (half the lease), down from
+  595, and below the TTL, and a TTL must be at most 600 seconds (the lease). The
+  `lookupOnlineNodes` and `lookupOnionExits` results gain `fresh_for_ms`.
+  - **Upgrade consequence.** The descriptor encoding changes, so a node reads no descriptor an
+    earlier build published, and an earlier build reads none of this one's: registries list
+    only nodes on the same build (no protocol versioning before 1.0). A descriptor someone
+    re-appends after its registrant stopped stays listed until its lease ends, at most 10
+    minutes, where before it expired with its TTL.
+  - **Operator step.** None; earlier descriptors are ignored and expire within the element
+    horizon. A configuration with a heartbeat interval of 300 seconds or more, or a TTL over 600
+    seconds, is refused at start and must be lowered.
+
 ## 0.36.0
 
 - A relay carrier no longer strands at its old holder when two relay-capable nodes join one

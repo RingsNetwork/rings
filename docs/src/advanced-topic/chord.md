@@ -97,8 +97,10 @@ another node's read shows that an owner holds the write.
   topic requested (a plain write, such as `publishMessageToTopic` or `registerService`,
   requests 10 minutes). Writing the value again issues a fresh dot and a fresh bound and is what
   keeps it: a sole writer rewrites each value within 10 minutes, and every writer within `H`,
-  even while other writes keep the topic alive. The online-node and onion-exit registries
-  refresh their descriptors every heartbeat (30 s by default). Once the topic's bound has
+  even while other writes keep the topic alive. The online-node, onion-exit and DNS-relay
+  registries re-append their descriptor every heartbeat (30 s by default): a signed 10-minute
+  lease whose bytes stay fixed, so a heartbeat raises its dot and writes no tombstone (#918).
+  Once the topic's bound has
   elapsed, it serves no element; it is kept only while it holds a tombstone or overwrite that
   is not yet collected, and it answers lookups as absent, from a replica and from a reader's
   fetch cache alike, so a reader asks the next replica. Its tombstones still spread by
@@ -119,10 +121,11 @@ another node's read shows that an owner holds the write.
   operation: a reset stamped by one owner would erase every concurrent write that owner had
   not yet received.
 - **Bounds.** A topic holds at most 1024 elements (the oldest are dropped when the cap binds) and
-  one tombstone per value removed within the last `H + σ`, so a registry holds about
-  `(H + σ) / heartbeat` tombstones per registrant, about 25 KB per registrant at the default
-  30 s heartbeat (a tombstone encodes in 125 bytes). This is a rate bound, not a count cap: a
-  capped tombstone could be dropped while a write it covers is still live somewhere.
+  one tombstone per value removed within the last `H + σ`. This is a rate bound, not a count
+  cap: a capped tombstone could be dropped while a write it covers is still live somewhere.
+  Registry heartbeats remove nothing, so a registrant leaves at most 13 descriptors (one per
+  lease) within the horizon and no tombstone; the cap drops superseded leases first, since no
+  heartbeat refreshes their dots.
 
 An overwrite (the browser provider's `storage_store`, or `storage_store` on a node) still
 replaces a topic: it drops every element and tombstone older than itself, and its own elements
