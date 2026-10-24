@@ -1,17 +1,19 @@
-use std::time::Duration;
-
 use rand::distributions::Distribution;
 
+use super::ARRIVAL_TURNS;
 use super::CONTROLLED_RNG_STATE;
-use super::DUMMY_DELAY_MAX;
-use super::DUMMY_DELAY_MIN;
 
-pub(super) async fn random_delay() {
-    tokio::time::sleep(Duration::from_millis(random(
-        DUMMY_DELAY_MIN,
-        DUMMY_DELAY_MAX,
-    )))
-    .await;
+/// Let the other ready tasks run before a frame arrives: a number of scheduler turns drawn
+/// uniformly from `0..ARRIVAL_TURNS` by [`random`], so a seeded test replays the same draws.
+///
+/// Law: no clock elapses. Per link, frames arrive in send order, since one listener handles a
+/// connection's events in turn; across links, a frame may be overtaken by up to
+/// `ARRIVAL_TURNS - 1` turns of every other ready task, so links race as they do over a
+/// network, while no wait's length depends on host load.
+pub(super) async fn yield_before_arrival() {
+    for _ in 0..random(0, ARRIVAL_TURNS) {
+        tokio::task::yield_now().await;
+    }
 }
 
 pub(super) fn random(low: u64, high: u64) -> u64 {

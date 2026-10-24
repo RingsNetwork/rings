@@ -38,6 +38,7 @@ pub struct SwarmBuilder {
     dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
     dht_storage: EntryStorage,
+    relay_storage: Option<EntryStorage>,
     replay_storage: ReplayStorage,
     origin_quota: OriginQuotaConfig,
     delegatee_key: DelegateeKey,
@@ -66,6 +67,7 @@ impl SwarmBuilder {
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             reassembly_limits: default_reassembly_limits(),
             dht_storage,
+            relay_storage: None,
             replay_storage: Box::new(crate::storage::MemStorage::<ReplayRecord>::new()),
             origin_quota: OriginQuotaConfig::default(),
             delegatee_key,
@@ -149,6 +151,15 @@ impl SwarmBuilder {
         self
     }
 
+    /// Set the storage of the relay-inbox namespace: the only copy of the mail this node holds
+    /// or owns, so it is a `RecordAuthority::Retained` store (#1021). Without one, the node takes
+    /// custody of no relay carrier: it refuses to hold mail and to take its own inbox's
+    /// hand-off (`Error::RelayStorageUnavailable`), so the mail stays with its holder.
+    pub fn relay_storage(mut self, storage: EntryStorage) -> Self {
+        self.relay_storage = Some(storage);
+        self
+    }
+
     /// Set the durable sender-sequence and receiver replay-window storage.
     pub fn replay_storage(mut self, storage: ReplayStorage) -> Self {
         self.replay_storage = storage;
@@ -167,15 +178,17 @@ impl SwarmBuilder {
         let storage_virtual_node_config =
             VirtualNodeConfig::new(self.network_id, self.dht_virtual_nodes);
 
-        let dht = Arc::new(
-            PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
-                dht_did,
-                self.dht_succ_max,
-                self.dht_storage,
-                self.dht_finger_table_size,
-                storage_virtual_node_config,
-            ),
+        let ring = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+            dht_did,
+            self.dht_succ_max,
+            self.dht_storage,
+            self.dht_finger_table_size,
+            storage_virtual_node_config,
         );
+        let dht = Arc::new(match self.relay_storage {
+            Some(storage) => ring.with_relay_storage(storage),
+            None => ring,
+        });
 
         let observer = self.observer.unwrap_or_else(|| Arc::new(NoopSwarmObserver));
         let transport = Arc::new(SwarmTransport::new(SwarmTransportParts {

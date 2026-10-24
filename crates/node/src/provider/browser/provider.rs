@@ -124,6 +124,35 @@ async fn open_browser_entry_storage_or_memory(storage_name: &str) -> Option<Entr
     }
 }
 
+/// Row capacity of the browser relay-inbox store: the carriers this node holds or owns. A hold
+/// beyond it is refused, never evicting held mail (the budget law of a retained store).
+const RELAY_STORAGE_ROWS: u32 = 1024;
+
+/// Open the browser relay-inbox store as a retained store (#1021): its writes commit with
+/// strict durability and it evicts nothing, since a relay carrier is the only copy of the mail
+/// it holds. An IndexedDB that cannot open leaves the provider with no relay store, never an
+/// in-memory one: the node then takes custody of no relay carrier, so it holds no mail and its
+/// own mail stays with its holder.
+async fn open_browser_relay_storage(storage_name: &str) -> Option<EntryStorage> {
+    let opened = IdbStorage::new_with_cap_name_and_authority(
+        RELAY_STORAGE_ROWS,
+        storage_name,
+        RecordAuthority::Retained,
+    )
+    .await;
+    match opened {
+        Ok(storage) => Some(Box::new(storage) as EntryStorage),
+        Err(source) => {
+            tracing::warn!(
+                storage_name = %storage_name,
+                error = %source,
+                "browser relay-inbox IndexedDB unavailable; this node will hold no relay mail"
+            );
+            None
+        }
+    }
+}
+
 async fn open_browser_measure_storage(storage_name: &str) -> Option<MeasureStorage> {
     match IdbStorage::new_with_cap_and_name(50000, storage_name).await {
         Ok(storage) => Some(Box::new(storage) as MeasureStorage),
@@ -148,8 +177,17 @@ async fn open_browser_evidence_storage(storage_name: &str) -> NodeResult<Evidenc
         })
 }
 
+/// Open the browser entry-guard store as a durable cache (#911): its writes commit with strict
+/// durability, and a guard record that does not decode is retired, logged, and re-selected. An
+/// IndexedDB that cannot open falls back to in-memory guards, re-selected on every start.
 async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEntryGuardStorage> {
-    match IdbStorage::new_with_cap_and_name(1024, storage_name).await {
+    let opened = IdbStorage::new_with_cap_name_and_authority(
+        1024,
+        storage_name,
+        RecordAuthority::DurableCache,
+    )
+    .await;
+    match opened {
         Ok(storage) => Some(Box::new(storage) as OnionEntryGuardStorage),
         Err(source) => {
             tracing::warn!(
@@ -163,10 +201,10 @@ async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEnt
 }
 
 /// Open the browser replay store under a row capacity of every record of a full store
-/// ([`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]). IndexedDB evicts its least recently
-/// used row beyond the capacity, and an evicted replay record would reopen replay for its
-/// stream, so the capacity must never be reached. The store is authoritative: a record it cannot
-/// decode is reported and kept, never retired.
+/// ([`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]). The store is authoritative: it evicts nothing, so
+/// a new record beyond the capacity fails its transition closed (`StorageBudgetExhausted`)
+/// instead of reopening replay for an evicted stream (#923), and a record it cannot decode is
+/// reported and kept, never retired.
 async fn open_browser_replay_storage(storage_name: &str) -> NodeResult<ReplayStorage> {
     let open_error = |source| Error::BrowserStorageOpen {
         name: storage_name.to_string(),
@@ -192,6 +230,8 @@ impl Provider {
     ) -> NodeResult<Self> {
         config.validate_onion_role()?;
         let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
+        let relay_storage =
+            open_browser_relay_storage(&format!("{storage_name}/relay-inbox")).await;
         let measure_storage =
             open_browser_measure_storage(&format!("{storage_name}/measure")).await;
         let evidence_storage = Some(
@@ -205,6 +245,7 @@ impl Provider {
         let provider = Self::new_provider_with_storage_internal(
             config,
             entry_storage,
+            relay_storage,
             measure_storage,
             evidence_storage,
             onion_entry_guard_storage,
@@ -250,6 +291,7 @@ impl Provider {
             let signer = wrapped_signer(signer);
 
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
+            let relay_storage = open_browser_relay_storage("rings-node/relay-inbox").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
             let evidence_storage =
                 Some(open_browser_evidence_storage("rings-node/provisional-evidence").await?);
@@ -266,6 +308,7 @@ impl Provider {
                 account_type,
                 Signer::Async(Box::new(signer)),
                 entry_storage,
+                relay_storage,
                 measure_storage,
                 evidence_storage,
                 onion_entry_guard_storage,
@@ -299,6 +342,7 @@ impl Provider {
                 OnionExitOffer::new(https_onion_exit_services(), policy).map_err(JsError::from)?;
 
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
+            let relay_storage = open_browser_relay_storage("rings-node/relay-inbox").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
             let evidence_storage =
                 Some(open_browser_evidence_storage("rings-node/provisional-evidence").await?);
@@ -315,6 +359,7 @@ impl Provider {
                 account_type,
                 Signer::Async(Box::new(signer)),
                 entry_storage,
+                relay_storage,
                 measure_storage,
                 evidence_storage,
                 onion_entry_guard_storage,

@@ -129,9 +129,15 @@ async fn send_by_hop(sender: &Node, relay: &Node, destination: &Node, data: &[u8
 
 /// Connect `left` and `right` and return once each has admitted the other: the join traffic has
 /// been consumed and each end lists the other as a successor.
-async fn establish_admitted_link(left: &Node, right: &Node) -> Result<()> {
+///
+/// `network` is every node of the test. The join traffic reaches past the pair: a node already
+/// linked to either end relays its connect messages and opens links of its own. Quiescence
+/// balances frames sent against frames arrived over the nodes it samples only, so the wait
+/// samples the whole network; over the pair alone, one unanswered frame to or from a third node
+/// keeps the counts apart for good.
+async fn establish_admitted_link(left: &Node, right: &Node, network: &[&Node]) -> Result<()> {
     manually_establish_connection(&left.swarm, &right.swarm).await;
-    wait_for_msgs([left, right]).await;
+    wait_for_msgs(network.iter().copied()).await;
     wait_for_successor(left, right.did()).await?;
     wait_for_successor(right, left.did()).await
 }
@@ -160,7 +166,7 @@ async fn test_link_reaches_references_without_a_miss() -> Result<()> {
     let left = prepare_node(SecretKey::random()).await;
     let right = prepare_node(SecretKey::random()).await;
     let dispatched_before = dispatched_link_control_for_test().len();
-    establish_admitted_link(&left, &right).await?;
+    establish_admitted_link(&left, &right, &[&left, &right]).await?;
     let link = (left.did(), right.did());
     let referenced_before = referenced_on(link);
 
@@ -191,8 +197,9 @@ async fn test_relayed_origin_session_never_misses() -> Result<()> {
     let origin = prepare_node(SecretKey::random()).await;
     let relay = prepare_node(SecretKey::random()).await;
     let destination = prepare_node(SecretKey::random()).await;
-    establish_admitted_link(&origin, &relay).await?;
-    establish_admitted_link(&relay, &destination).await?;
+    let network = [&origin, &relay, &destination];
+    establish_admitted_link(&origin, &relay, &network).await?;
+    establish_admitted_link(&relay, &destination, &network).await?;
     let dispatched_before = dispatched_link_control_for_test().len();
     let last_hop = (relay.did(), destination.did());
     let first = relay_custom(&origin, &relay, &destination, b"relayed").await?;
@@ -230,8 +237,9 @@ async fn test_a_backlog_across_a_session_switch_loses_no_frame() -> Result<()> {
     let origin = prepare_node(SecretKey::random()).await;
     let relay = prepare_node(SecretKey::random()).await;
     let destination = prepare_node(SecretKey::random()).await;
-    establish_admitted_link(&origin, &relay).await?;
-    establish_admitted_link(&relay, &destination).await?;
+    let network = [&origin, &relay, &destination];
+    establish_admitted_link(&origin, &relay, &network).await?;
+    establish_admitted_link(&relay, &destination, &network).await?;
     let dispatched_before = dispatched_link_control_for_test().len();
     let _waits_for_credit = hold_first_frame_deadlines_for_test();
 

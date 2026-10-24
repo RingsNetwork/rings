@@ -1872,7 +1872,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2502,7 +2502,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2969,7 +2969,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3006,7 +3006,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -3209,21 +3209,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rexie"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fef172ff9cdf146cdc934e28cdeb137517bf954fb75e6ee8987dd44b58f351b1"
-dependencies = [
- "console_error_panic_hook",
- "js-sys",
- "num-traits",
- "thiserror 1.0.69",
- "tokio",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3249,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "rings-aez"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "aes",
  "subtle",
@@ -3260,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "postcard",
  "serde",
@@ -3268,7 +3253,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -3306,7 +3291,6 @@ dependencies = [
  "rand 0.8.6",
  "rand_core 0.6.4",
  "rand_hc",
- "rexie",
  "rings-codec",
  "rings-derive",
  "rings-measure",
@@ -3333,12 +3317,13 @@ dependencies = [
  "wasm-bindgen-test",
  "web-sys",
  "web-time",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
 [[package]]
 name = "rings-derive"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3348,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "rings-gateway"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -3367,11 +3352,11 @@ dependencies = [
 
 [[package]]
 name = "rings-logo"
-version = "0.34.2"
+version = "0.35.0"
 
 [[package]]
 name = "rings-measure"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3381,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "rings-native-example"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3396,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -3404,7 +3389,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -3476,7 +3461,7 @@ dependencies = [
 
 [[package]]
 name = "rings-relay-example"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "rings-core",
  "rings-node",
@@ -3485,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3509,7 +3494,7 @@ dependencies = [
 
 [[package]]
 name = "rings-runtime"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "futures",
  "futures-timer",
@@ -3524,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "rings-test-support"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "futures",
  "rings-core",
@@ -3533,7 +3518,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3565,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "rings-webview"
-version = "0.34.2"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4063,7 +4048,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4362,9 +4347,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
@@ -5462,7 +5447,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

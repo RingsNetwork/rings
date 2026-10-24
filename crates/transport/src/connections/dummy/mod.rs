@@ -44,7 +44,7 @@ mod retirement;
 mod state;
 
 use self::delay::random;
-use self::delay::random_delay;
+use self::delay::yield_before_arrival;
 use self::event::Event;
 use self::retirement::DummyRetirementFence;
 use self::state::set_parked;
@@ -74,12 +74,9 @@ use self::state::SENT_COUNT;
 use self::state::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
 use self::state::WITHHELD_CREDIT;
 
-/// Max delay in ms on sending message
-const DUMMY_DELAY_MAX: u64 = 100;
-/// Min delay in ms on sending message
-const DUMMY_DELAY_MIN: u64 = 10;
-/// Config random delay when send message
-const SEND_MESSAGE_DELAY: bool = true;
+/// Exclusive bound on the scheduler turns a frame waits before it arrives
+/// (see [`yield_before_arrival`]).
+const ARRIVAL_TURNS: u64 = 16;
 
 lazy_static! {
     static ref CONNS: DashMap<String, Arc<DummyConnection>> = DashMap::new();
@@ -327,9 +324,7 @@ impl DummyConnection {
                         .await;
                     return;
                 }
-                if SEND_MESSAGE_DELAY {
-                    random_delay().await;
-                }
+                yield_before_arrival().await;
                 // Arrival never waits on the protocol: the frame joins its lane's FIFO, as a
                 // native or browser channel's frames do (see `InnerTransportCallback`).
                 self.callback.dispatch_admitted_frame(frame, lane);

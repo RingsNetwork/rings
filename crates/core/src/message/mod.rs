@@ -54,6 +54,8 @@ pub use types::MessageCategory;
 
 mod replay;
 pub use replay::observe;
+pub(crate) use replay::RelayAdmission;
+pub(crate) use replay::RelayDelivery;
 pub use replay::ReplayCounters;
 pub use replay::ReplayRecord;
 pub use replay::ReplayStorage;

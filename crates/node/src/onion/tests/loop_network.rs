@@ -43,6 +43,7 @@ use crate::online::OnlineNodeType;
 use crate::processor::Processor;
 use crate::provider::Provider;
 use crate::tests::exit_descriptor::ExitDescriptorFixture;
+#[cfg(not(feature = "dummy"))]
 use crate::tests::native::network_test_guard;
 use crate::tests::native::prepare_processor_with_onion_role;
 use crate::tests::native::signal_edge;
@@ -119,7 +120,9 @@ pub(super) struct LoopNetwork {
     pub(super) client: LoopNode,
     /// `[g, r₀₂, h, r₁₁]`.
     hops: [LoopNode; 4],
-    /// The native WebRTC test lock, held while the network lives.
+    /// The native WebRTC test lock, held while the network lives. A `dummy` network shares
+    /// nothing with another test's network and holds none.
+    #[cfg(not(feature = "dummy"))]
     _serial: tokio::sync::MutexGuard<'static, ()>,
 }
 
@@ -128,6 +131,7 @@ impl LoopNetwork {
     pub(super) async fn new(
         algebra: impl FnOnce(&OnionExitAccounting, &OnionLinkSender) -> OnionAlgebra,
     ) -> Result<Self> {
+        #[cfg(not(feature = "dummy"))]
         let serial = network_test_guard().await;
         let relay = || LoopNode::new(OnionRole::Relay, |_, _| OnionAlgebra::default());
         let client = LoopNode::new(OnionRole::Client, |_, _| OnionAlgebra::default()).await?;
@@ -146,6 +150,7 @@ impl LoopNetwork {
         Ok(Self {
             client,
             hops,
+            #[cfg(not(feature = "dummy"))]
             _serial: serial,
         })
     }

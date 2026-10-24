@@ -461,8 +461,10 @@ impl SwarmTransport {
         );
     }
 
+    /// Test builds: a tracked send whose deadline is the delivery bound, the least deadline the
+    /// production profile allows (`tracked_payload ≥ delivery`), followed by the cleanup grace.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn send_payload_tracked_with_matching_delivery_deadline_for_test(
+    pub(crate) async fn send_payload_tracked_with_delivery_bound_deadline_for_test(
         &self,
         payload: MessagePayload,
     ) -> Result<SendCompletionOutcome> {

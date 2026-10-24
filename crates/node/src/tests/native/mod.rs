@@ -1,3 +1,4 @@
+#[cfg(not(feature = "dummy"))]
 use std::sync::OnceLock;
 
 use rings_core::ecc::SecretKey;
@@ -15,10 +16,13 @@ mod test_duplicate_namespace;
 
 /// Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive connection
 /// callbacks; they run serially under this lock, so one test's candidates or callbacks cannot
-/// add pressure to another test's handshake.
+/// add pressure to another test's handshake. A `dummy` build has no WebRTC: each test's
+/// in-memory network shares nothing with another's, so it has no lock.
+#[cfg(not(feature = "dummy"))]
 static NETWORK_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 /// Hold the native WebRTC test lock for the rest of a test.
+#[cfg(not(feature = "dummy"))]
 pub(crate) async fn network_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
     NETWORK_TEST_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))

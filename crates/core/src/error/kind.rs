@@ -301,6 +301,12 @@ pub enum Error {
     #[error("Relay inbox removal was not issued by the inbox's recipient")]
     RelayInboxWriterNotRecipient,
 
+    /// This node keeps no retained relay store, so it takes custody of no relay carrier: it
+    /// neither holds mail nor accepts a carrier's hand-off, and the mail stays with its holder
+    /// (durable-records, Law 1: a relay carrier is admissible only at a durable store)
+    #[error("This node keeps no retained relay store and takes custody of no relay carrier")]
+    RelayStorageUnavailable,
+
     /// A storage count or record length does not fit its interface width
     #[error("A storage count or record length does not fit its interface width")]
     StorageCountOverflow,
@@ -713,9 +719,9 @@ pub enum Error {
     },
 
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
-    /// IndexedDB error, {0}
+    /// An IndexedDB open, request or commit failed; the engine's error, as text
     #[error("IndexedDB error, {0}")]
-    IDBError(rexie::Error),
+    IDBError(String),
 
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// IndexedDB access clock record is missing from an opened store
@@ -743,14 +749,17 @@ pub enum Error {
     },
 
     /// An authoritative storage is full: it evicts nothing, so a write that does not fit, or an
-    /// open over a lowered budget, fails and changes nothing.
-    #[error("Authoritative storage holds {used} of {capacity} bytes; {required} more do not fit")]
+    /// open over a lowered budget, fails and changes nothing. The three counts are in the unit
+    /// of the storage's budget: bytes for `FileStorage`, rows for `IdbStorage`.
+    #[error(
+        "Authoritative storage holds {used} of {capacity} budget units; {required} more do not fit"
+    )]
     StorageBudgetExhausted {
-        /// Bytes the stored records occupy.
+        /// Budget units the stored records occupy.
         used: u64,
-        /// Bytes the write needs (zero at open).
+        /// Budget units the write needs (zero at open).
         required: u64,
-        /// Total byte budget of the storage.
+        /// Total budget of the storage.
         capacity: u64,
     },
 
@@ -764,9 +773,22 @@ pub enum Error {
     #[error("Transaction replay transition did not run: {0}")]
     TransactionReplayUnscheduled(rings_runtime::DetachedError),
 
+    /// The receiver holds as many relay deliveries in custody as a relay inbox holds elements:
+    /// a new relay delivery waits for a later pass until one is taken or leaves the inbox.
+    #[error("Relay custody holds its capacity of {capacity} deliveries")]
+    RelayCustodyFull {
+        /// The most relay deliveries in custody.
+        capacity: usize,
+    },
+
     /// A storage holds a record it cannot read or decode; the record is kept, never deleted.
     #[error("Storage cannot decode {0}")]
     StorageRecordUndecodable(crate::storage::UndecodableRecord),
+
+    /// An authoritative storage witnessed a record as written, and no longer holds it: it was
+    /// removed or renamed outside the store, or lost by the file system. Its marker is kept.
+    #[error("Storage is missing {0}")]
+    StorageRecordMissing(crate::storage::UndecodableRecord),
 
     /// Message invalid: {0}
     #[error("Message invalid: {0}")]

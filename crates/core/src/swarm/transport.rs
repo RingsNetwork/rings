@@ -58,6 +58,8 @@ use crate::swarm::observer::SharedSwarmObserver;
 use crate::utils::get_epoch_ms_i64;
 
 mod connection;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+mod deadline_hold;
 mod delivery;
 pub(crate) mod egress;
 #[cfg(test)]
@@ -86,6 +88,8 @@ mod timeouts;
 pub(crate) use self::connection::AdmittedConnection;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::delivery::delivery_stall_deadline_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::delivery::hold_frame_deadlines_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::delivery::SendCompletionOutcome;
 #[cfg(test)]
