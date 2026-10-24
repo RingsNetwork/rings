@@ -72,7 +72,6 @@ async fn test_same_class_chunked_transfers_are_contiguous_on_the_wire() -> Resul
     let peer = node2.did();
     let _max_size = MaxMessageSizeGuard::new(8192);
     let _paused_delivery = PausedDeliveryGuard::new();
-    dummy_controlled::reset_sent_count();
 
     node1
         .swarm
