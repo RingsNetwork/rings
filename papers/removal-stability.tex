@@ -1,0 +1,542 @@
+\documentclass[journal]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{url}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\newtheorem{law}{Law}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+
+\newcommand{\Volatile}{\mathsf{Vol}}
+\newcommand{\Cached}{\mathsf{Cch}}
+\newcommand{\Durable}{\mathsf{Dur}}
+\newcommand{\Rebuild}{\mathsf{Reb}}
+\newcommand{\Retained}{\mathsf{Ret}}
+\newcommand{\Ok}{\mathsf{Ok}}
+\newcommand{\Err}{\mathsf{Err}}
+\newcommand{\Exhausted}{\mathsf{Exhausted}}
+\newcommand{\El}{\mathsf{E}}
+\newcommand{\Rm}{\mathsf{R}}
+\newcommand{\dg}{h}
+\newcommand{\ret}{\operatorname{retire}}
+\newcommand{\live}{\operatorname{live}}
+\newcommand{\stab}{\operatorname{stab}}
+\newcommand{\enc}{\operatorname{enc}}
+\newcommand{\Tmax}{T_{\max}}
+\newcommand{\Dmax}{D_{\max}}
+\newcommand{\Pmax}{P_{\max}}
+\newcommand{\issue}[1]{\#{#1}}
+
+\author{Ryan~J.~Kung%
+\thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
+Manuscript created October 24, 2026.  This document specifies when a removal of a data-topic
+element of Rings is stable, what may drop it, how large it may grow, how the fetch cache is
+linearized, and what a registry heartbeat writes, before 1.0 (\texttt{rings-core}, modules
+\texttt{dht::entry}, \texttt{dht::chord::storage} and \texttt{storage}; \texttt{rings-node},
+module \texttt{registration}).  It is the law for issues \issue{918}, \issue{920},
+\issue{921} and \issue{922} of \texttt{RingsNetwork/rings}, and extends the durable-records
+law~\cite{DurableRecords}.}}
+\title{\huge Removal Stability:\\
+Eviction, Tombstone Bounds and Heartbeats\\
+for the Data Topics of Rings}
+\date{}
+
+\IEEEaftertitletext{%
+\vspace{0.5\baselineskip}%
+\noindent\hfill
+\parbox{0.90\textwidth}{%
+{\centering\bfseries Abstract\par}%
+\vspace{0.4\baselineskip}%
+\noindent
+A Rings data topic is a replicated last-writer-wins element set whose removes are collected
+at a clock horizon (\issue{872}, \issue{913}).  Four open defects share one cause: nothing
+states which actions may drop a remove before it is stable, nor how many removes a carrier
+may hold.  Storage eviction drops removes and resurrects removed elements (\issue{920}); a
+sync peer can grow a carrier's removes past one transport message (\issue{921}); the fetch
+cache was specified without a linearization (\issue{922}); and registry heartbeats emit one
+remove each, about 25\,KB per registrant (\issue{918}).  We define stability, state one
+survival law for removes, and prove no resurrection under it.  We factor a carrier into an
+element side and a remove side, give each its point of the durable-records authority
+lattice, and so confine eviction to elements.  We bound the remove side by a count enforced
+by refusal, prove the carrier fits one message, and show that a forged sync delta simulates
+a writer.  We give the cache's linearization, and replace the heartbeat by the re-append of
+a signed lease, which removes nothing and reads nothing.
+}\hfill\null\par
+\vspace{0.5\baselineskip}}
+
+\begin{document}
+\maketitle
+\emergencystretch=1.5em
+
+\section{Problem}\label{sec:problem}
+
+\begin{description}[leftmargin=1.2em,style=nextline]
+\item[\issue{920}] The byte budget of the data store evicts the least recently written
+carrier, whatever it holds.  An evicted remove lets a stale replica's sync re-add the element
+it covered.
+\item[\issue{921}] A data carrier's removes have no count or byte bound, and a sync delta
+may carry any number of them.  The assertion that a full carrier fits one transport message
+counts elements only.
+\item[\issue{922}] A cache read that retires an entry can overwrite or delete a value that a
+concurrent cache put just stored.
+\item[\issue{918}] A registry descriptor's bytes change on every heartbeat, so every
+heartbeat removes the previous descriptor.  Removes are retained for $H+\sigma$, which leaves
+about $200$ removes per registrant, and every registrant reads all of them on every heartbeat.
+\end{description}
+\issue{920} and \issue{921} concern the survival and the size of a remove.  \issue{918} is
+the dominant producer of removes.  \issue{922} is the one store that holds carriers and is
+not replicated.  Section~\ref{sec:model} fixes the model, Section~\ref{sec:stable} the
+survival law, and Sections~\ref{sec:evict}--\ref{sec:heartbeat} one law per issue.
+Section~\ref{sec:plan} orders the implementation.
+
+\section{Model}\label{sec:model}
+
+\begin{definition}[Carrier]\label{def:carrier}
+A data carrier is $x=(V,D,\rho,\beta)$: adds $V:\mathrm{Bytes}\rightharpoonup\mathrm{Dot}$,
+removes $D:\mathrm{Digest}\rightharpoonup\mathrm{Dot}$, a register
+$\rho\in\mathrm{Ver}_\bot$ (the overwrite floor) and a bound $\beta\in\mathbb{N}_\bot$.  A dot
+leads with its hybrid time $\tau(d)$.  The remove $(e,r)\in D$ \emph{covers} the add
+$(v,d)\in V$ iff $\dg(v)=e\wedge d\le r$, with $\dg$ Keccak-256.  $x$ is \emph{normalized}
+iff no add is covered or below $\rho$ and no remove is below $\rho$.  The join $\sqcup$ is
+the pointwise $\max$ followed by normalization (\texttt{crdt.rs}).  It is a semilattice on
+normalized carriers~\cite{Shapiro2011}.
+\end{definition}
+
+\begin{definition}[Horizon, retirement, liveness]\label{def:retire}
+With $H$ the element horizon ($6\cdot10^6$\,ms) and $\sigma$ the skew tolerance
+($3000$\,ms), as in \issue{913}:
+\begin{align*}
+\ret_t(x)&=x\setminus\{(v,d):t\ge\tau(d)+H\}\\
+&\phantom{{}=x}\setminus\{(e,r):t\ge\tau(r)+H+\sigma\}\\
+&\phantom{{}=x}\setminus\{\rho:t\ge\tau(\rho)+H+\sigma\},\\
+s(x)&=\max\{\tau(r):r\in\operatorname{ran}D\cup\{\rho\}\}+H+\sigma,\\
+\live_t(x)&\iff\beta\ne\bot\wedge(t<\beta\vee t<s(x)).
+\end{align*}
+$\ret_t$ is a join homomorphism and $\ret_t\circ\ret_s=\ret_{\max(s,t)}$.
+\end{definition}
+
+\begin{assumption}[Clocks]\label{as:clock}
+Any two node clocks differ by at most $\sigma$.  Admission at clock $c$ refuses a delta that
+carries a version with $\tau>c+\sigma$.
+\end{assumption}
+
+\textbf{Actors.}  A \emph{writer} is any node: a data topic has no write authority, so any
+node may $\mathrm{Extend}$, $\mathrm{Tombstone}$ or $\mathrm{Overwrite}$ any topic.  A
+\emph{syncer} is any node that sends a delta (a hand-off, a repair, a lookup reply), which
+the receiver admits by the admission law alone.  An \emph{owner} holds a replica of a
+placement in its data store.  The fetch cache is a \emph{mirror}: it is not a replica, it
+never acknowledges, and it spreads only by read-repair.
+
+\textbf{Program actions and loss events.}  A program action is a transition of the store
+that the program performs: a join, an operation, a retirement, an ack-gated deletion,
+eviction, a cap, or a refusal.  A loss event is what the platform or the operator does
+(Definition~4 of~\cite{DurableRecords}).  The distinction matters because a writer controls
+program actions through the writes it sends, but it cannot cause a loss event.
+
+\section{Stability}\label{sec:stable}
+
+\begin{definition}[Stable]\label{def:stable}
+A remove $(e,r)$ is \emph{stable} at clock $t$ iff $t\ge\tau(r)+H+\sigma$, and likewise the
+register $\rho$ iff $t\ge\tau(\rho)+H+\sigma$.  A carrier's remove side is stable at $t$ iff
+$t\ge s(x)$.
+\end{definition}
+
+\begin{lemma}[A stable remove covers only retired adds]\label{lem:covers}
+If $(e,r)$ is stable at the clock $t_p$ of some node, then every add $(v,d)$ it covers is
+retired at the clock $t_q$ of every node at the same instant.
+\end{lemma}
+\begin{proof}
+$t_q\ge t_p-\sigma\ge\tau(r)+H\ge\tau(d)+H$, since $d\le r\Rightarrow\tau(d)\le\tau(r)$.
+The register case is the same, with the adds below $\rho$.
+\end{proof}
+
+\begin{definition}[Holder]\label{def:holder}
+Owner $p$ \emph{holds} $(e,r)$ at time $t$ iff its replica has $D(e)\ge r$.  The mirror is
+never a holder.
+\end{definition}
+
+\begin{law}[Remove survival]\label{law:survival}
+An unstable remove or register leaves a holder's replica only by
+(i) $\ret_t$ at its stability,
+(ii) an ack-gated move whose receiver holds it, or
+(iii) a loss event.
+No other program action drops it.  In particular, no eviction, cap or truncation does.
+\end{law}
+
+\begin{theorem}[No resurrection]\label{theorem:noresurrect}
+Under Law~\ref{law:survival}, let $p$ hold $(e,r)$ at $t_0$, and let no loss event strike
+$p$ before $\tau(r)+H+\sigma$.  Then no read at $p$ after $t_0$ serves an add covered by
+$(e,r)$.
+\end{theorem}
+\begin{proof}
+Before stability, $D_p(e)\ge r$ by Law~\ref{law:survival}, because no admissible transition
+lowers it: a join takes the pointwise $\max$, and a move keeps it at the receiver.
+Normalization then drops every covered add from each value $p$ stores or reads.  From
+stability on, Lemma~\ref{lem:covers} retires every covered add, and every read applies
+$\ret_t$.
+\end{proof}
+
+\begin{lemma}[Replication answers loss events, not eviction]\label{lem:replication}
+A remove held by $k$ holders leaves the system before it is stable only if all $k$ drop it.
+Under Law~\ref{law:survival}, that takes a loss event at each of them.  If eviction may drop
+removes, one writer drops it from all $k$ with no loss event.
+\end{lemma}
+\begin{proof}
+A writer may write to every placement of any topic, so it can fill the byte budget of each
+of the $k$ owners.  Eviction is a function of the writes received.
+\end{proof}
+
+So \issue{920} breaks Law~\ref{law:survival} through a program action that a writer can
+drive, and it breaks it at every replica at once.  The remaining sections discharge the law
+and bound what it retains.
+
+\section{Eviction and the factored carrier}\label{sec:evict}
+
+\begin{definition}[Sides]\label{def:sides}
+$\El(x)=(V,\emptyset,\bot,\beta)$ and $\Rm(x)=(\emptyset,D,\rho,0)$.
+\end{definition}
+
+The remove side carries the least stamped bound, $0$.  So a remove side read alone is live
+only through $s(x)$, and it answers a lookup as a miss
+(\texttt{bound\_live\_at} is false).  It never shadows a replica that holds elements.
+
+\begin{lemma}[Factorization]\label{lem:factor}
+For normalized $x$, $x=\El(x)\sqcup\Rm(x)$.  For every $E'$ whose adds are a subset of those
+of some carrier the replica held and every $R'\sqsupseteq\Rm(x)$, $E'\sqcup R'$ contains no
+add that $x$'s removes or register drop.
+\end{lemma}
+\begin{proof}
+No add of $x$ is covered or below $\rho$, so normalization of the union drops nothing, and
+$\max(\beta,0)=\beta$.  For the second claim, normalization of $E'\sqcup R'$ drops every add
+that $R'$ covers or floors, and $R'$ covers or floors at least what $\Rm(x)$ does.
+\end{proof}
+
+\begin{law}[Eviction acts on elements]\label{law:evict}
+Eviction maps $x\mapsto\Rm(x)$.  It may drop the element side of any carrier, and the whole
+carrier iff $\Rm(\ret_t(x))=\bot$.
+\end{law}
+
+\begin{proposition}[What eviction may drop]\label{prop:maydrop}
+Law~\ref{law:evict} satisfies Law~\ref{law:survival}, and it is the largest eviction that
+does: dropping any unstable remove or register violates it.
+\end{proposition}
+\begin{proof}
+$x\mapsto\Rm(x)$ keeps $D$ and $\rho$.  A remove that $\ret_t$ already dropped is stable.
+Dropping an unstable $(e,r)$ is a program action outside (i)--(iii).
+\end{proof}
+
+\begin{law}[Authority per side]\label{law:authority}
+A data carrier is stored as two records under one key.  $\El$ goes to the data store at
+$(\Cached,\Rebuild)$, which is unchanged (Table~1 of~\cite{DurableRecords}).  $\Rm$ goes to a
+\emph{removal store} at $(\Durable,\Retained)$, \texttt{RecordAuthority::Retained}.
+\end{law}
+
+\begin{proof}[Justification]
+An absent remove side means ``never removed here, or retired at stability''.  That is the
+meaning $\Retained$, whose obligations are N (no eviction) and D.  N is
+Law~\ref{law:evict}.  D follows from Admissibility (Law~1 of~\cite{DurableRecords}).  D also
+turns (ii) into a move under crashes: the receiver acknowledges a hand-off only after its
+flush.  The element side keeps $\Rebuild$, because a lost add is an availability loss that
+replication repairs.
+\end{proof}
+
+\begin{law}[Write order]\label{law:order}
+$\mathrm{get}(k)=\El_k\sqcup\Rm_k$.  $\mathrm{put}(k,x)$ first writes $\Rm(x)$, or removes
+the record if $\Rm(x)=\bot$, and does so only if it differs from the stored $\Rm_k$.  It then
+writes $\El(x)$.  It returns $\Ok$ only after both, and an $\Err(\Exhausted)$ from the
+removal store leaves both records unchanged.  $\mathrm{rm}(k)$ removes $\El_k$ and then
+$\Rm_k$.
+\end{law}
+
+\begin{proposition}[Every crash state is safe]\label{prop:crash}
+After any crash, $\mathrm{get}(k)$ serves no add that a remove or register the replica made
+durable covers or floors, until that remove or register is stable.
+\end{proposition}
+\begin{proof}
+D gives $\Rm_k\in\{\Rm(x_m),\Rm(x_{m+1})\}$ for the last two removal-store writes.  Under
+$\Cached$, $\El_k$ is the element side of some earlier write, or $\bot$.  A remove side
+changes only by joins, which grow it, and by $\ret_t$, which drops stable parts; so the
+durable $\Rm_k$ covers or floors every unstable remove of every earlier carrier.  The claim
+then follows from Lemma~\ref{lem:factor}, and Lemma~\ref{lem:covers} covers the stable parts.
+A crash between the two removals of $\mathrm{rm}$ leaves a remove side alone, which is live
+until stable and answers no lookup.
+\end{proof}
+
+\textbf{Cost.}  One flush per write that changes the remove side.  An $\mathrm{Extend}$ never
+changes it, and after Section~\ref{sec:heartbeat} neither does a heartbeat.
+
+\textbf{Budget.}  The removal store refuses and never evicts (Law~8 of~\cite{DurableRecords}).
+Its byte budget is at least the per-carrier bound $W_\Rm$ of Section~\ref{sec:bound}, so any
+one carrier fits.  An operation refused for room returns $\Exhausted$ to its writer.  A
+refused sync join is never acknowledged, so the sender keeps its copy and retries.
+
+\textbf{No durable store.}  A node that can open no durable store (a browser whose IndexedDB
+fails to open) keeps the remove side in memory, refusing at its budget: $(\Volatile,
+\Retained)$, logged at \texttt{warn}.  Each restart of such a node is the total loss of
+Proposition~2 of~\cite{DurableRecords}: the node comes back as a fresh replica.
+Theorem~\ref{theorem:noresurrect} then fails at that node alone, and by
+Lemma~\ref{lem:replication} the remove survives at every other holder.
+
+\textbf{Mirror.}  The fetch cache is $(\Volatile,\Rebuild)$.  Its count bound evicts whole
+carriers, which ends a residency (Section~\ref{sec:cache}).  It drops no holder's remove, and
+its read-repair delivers to a holder only values that the holder's removes still cover.
+
+\section{The tombstone bound}\label{sec:bound}
+
+\begin{definition}[Cap]\label{def:cap}
+$\Tmax=\Dmax=\mathtt{ENTRY\_DATA\_MAX\_LEN}=1024$ removes per data carrier.
+\end{definition}
+
+\begin{law}[Remove admission]\label{law:admit}
+(a) A peer-supplied delta $\delta$ with $|D_\delta|>\Tmax$ is not admissible.  Like the clock
+bound, this is a predicate on the delta.
+(b) A join or an operation whose result $y=\ret_t(x\sqcup\delta)$ has $|D_y|>\Tmax$ is refused
+with $\Err(\Exhausted)$, and the slot is unchanged.
+A data carrier's removes are never truncated.
+\end{law}
+
+\begin{proposition}[Refuse, not truncate]\label{prop:refuse}
+Truncating a data carrier's removes violates Law~\ref{law:survival}.  A relay inbox may
+truncate (\issue{913}), because it has one holder and one ack-gated relocation at a time.
+\end{proposition}
+\begin{proof}
+Truncation drops an unstable remove by a program action, and Lemma~\ref{lem:replication}
+applies, since a writer controls which removes exceed the cap.  A relay inbox has no second
+replica that could keep a stale add.
+\end{proof}
+
+\begin{proposition}[One message]\label{prop:message}
+Let $w_T$, $w_D$ and $w_\rho$ be the postcard suprema of one remove, one dot and one register
+($142$, $110$ and $106$\,B: a dot is a varint $u128$, two $42$-character DIDs and a varint
+$u32$; a digest is $32$\,B).  Let $\lambda=3$ be the length prefix of a $32$\,KiB element and
+$w_0$ the carrier's fixed fields.  Every admitted data carrier encodes in at most
+\[
+W=w_0+\Dmax(\Pmax+\lambda+w_D)+\Tmax w_T+w_\rho\approx33.82\,\text{MB},
+\]
+with $W_\Rm=w_0+\Tmax w_T+w_\rho$ for its remove side.  The carrier law is
+$W+\mathtt{MAX\_PAYLOAD\_ENVELOPE\_OVERHEAD}\le\mathtt{TRANSPORT\_MAX\_SIZE}$
+($60$\,MB), asserted at compile time.  Each $w$ is a constant witnessed with equality by a
+test, as the envelope reserves are.
+\end{proposition}
+\begin{proof}
+The cap $\Dmax$, the per-element bound $\Pmax$ and Law~\ref{law:admit} bound the counts, and
+each field is at most its supremum.
+\end{proof}
+
+The margin is wide: removes cost $145$\,KB at the cap, against $26$\,MB of headroom.  We pick
+$\Tmax=\Dmax$ for the size of a lookup reply, not for the message bound.  The honest remove
+rate this admits per topic is $\Tmax/(H+\sigma)\approx10$ per minute.
+
+\begin{lemma}[A sync delta simulates a writer]\label{lem:simulate}
+Let $\delta$ be admissible at clock $c$.  Some writer, using at most
+$2|D_\delta|+|V_\delta|+1$ operations stamped at clocks $\le c$, produces at an owner a
+carrier that has the same coverage and remove count as $x\sqcup\delta$, up to dots in
+$(c,c+\sigma]$.
+\end{lemma}
+\begin{proof}
+Write each add with $\mathrm{Extend}$ and the register with $\mathrm{Overwrite}$.  Take a
+remove $(e,r)$.  If $e=\dg(v)$ for an element $v$ that some carrier holds, then
+$\mathrm{Tombstone}(v)$ covers what $(e,r)$ covers at dots up to $c$.  Otherwise no
+held add has digest $e$ (collision resistance), so $(e,r)$ covers nothing, and the pair
+$\mathrm{Extend}(v_e),\mathrm{Tombstone}(v_e)$ for a fresh $v_e$ adds one remove that covers
+nothing held.  Admission bounds every $\tau(r)\le c+\sigma$.
+\end{proof}
+
+\begin{proposition}[Forgery through sync adds no power]\label{prop:forge}
+A syncer cannot exceed $W$ (Law~\ref{law:admit}).  It covers an add only as a writer's
+$\mathrm{Tombstone}$ would, with a dot up to $\sigma$ later.  It can fill one carrier's
+removes, which refuses further removes on that carrier at that owner until
+$c+\sigma+H+\sigma$, or fill the removal store, which refuses removes at that owner.  By
+Lemma~\ref{lem:simulate}, any writer can do the same with $O(\Tmax)$ operations.
+\end{proposition}
+
+So the defect of \issue{921} closes.  A remote peer can still exhaust the remove capacity of
+a topic, but every writer could already do that, since a data topic has no write authority
+and its element cap already lets a writer displace the topic's elements.  The capacity
+exhaustion that remains is the availability residual stated in \texttt{SECURITY.md}.
+
+\begin{proposition}[Refusal is safe]\label{prop:diverge}
+Suppose owners $p$ and $q$ refuse each other's deltas because $|D_p\cup D_q|>\Tmax$.  Then
+neither violates Theorem~\ref{theorem:noresurrect}.  They converge once the union fits, which
+happens by $\max\tau(r)+H+\sigma$ over the removes present if no new remove arrives.
+\end{proposition}
+\begin{proof}
+A refusal changes no slot, so no holder drops a remove.  An add that $p$ serves and $q$ has
+removed is a remove $p$ never held.  That is a stale replica, not a resurrection.
+\end{proof}
+
+\section{The fetch cache}\label{sec:cache}
+
+\begin{definition}[Cache machine]\label{def:cache}
+The cache maps $c:K\rightharpoonup X$.  Its transitions run under one lock (the cache
+transition), each at its own clock $t$:
+\begin{align*}
+\mathrm{put}(v)&:\ c[k]\leftarrow\ret_t\big(\live_t(c[k])\sqcup v\big),\\
+\mathrm{obs}(o)&:\ c[k]\leftarrow\big(\live_t(c[k])\text{ or }\bot\big).o,\\
+\mathrm{evict}(k')&:\ c[k']\leftarrow\bot,
+\end{align*}
+the last inside a put of a new key at the count bound.
+A read at $t$ returns $\ret_t(c[k])$ when it is live and its bound has not elapsed, and it
+changes nothing.
+\end{definition}
+
+\begin{law}[Pure reads]\label{law:pure}
+A cache read is a function of one state and the reader's clock, and it never writes or
+removes.  Every state change is one transition under the cache transition.  The store
+orders single gets and puts atomically.
+\end{law}
+
+\begin{proposition}[Linearizable; no lost put]\label{prop:linear}
+Each transition linearizes~\cite{HerlihyWing1990} at its store put, and each read at its store get.  After
+$\mathrm{put}(v)$ at $k$, $c[k]\sqsupseteq\ret_t(v)$ holds until the next transition at $k$.
+That transition is a put or obs, which keeps $c[k]$ ascending in $\sqsubseteq$ up to
+retirement (\issue{982}), or the eviction of $k$, which ends the residency.
+\end{proposition}
+\begin{proof}
+Transitions are totally ordered by the lock, and reads have no write effect.  So the history
+is the lock-order sequence of transitions, with every read placed at its get.  The trace of
+\issue{922} needs a read that stores, and no read stores.  The clocks need not be monotone in
+lock order: by composition a state stored at an earlier clock is a less retired version of
+the one at the later clock, and every read projects at its own clock.
+\end{proof}
+
+This is the state since \issue{913} made the cache read return its projection only.  A dead
+cached value stays until a put replaces it or the count bound evicts it.  It costs one of
+$\mathtt{LOCAL\_CACHE\_CAPACITY}$ slots and is served as absent.  Read-your-writes
+(\issue{982}) holds per residency.  \issue{922} needs a test that witnesses
+Proposition~\ref{prop:linear}, not a code change.
+
+\section{Heartbeats}\label{sec:heartbeat}
+
+Today a descriptor signs $\mathit{heartbeat\_at}$ and $\mathit{expires\_at}$, so its bytes
+change at every heartbeat.  Each heartbeat therefore reads the registry, appends the new
+descriptor and removes the old one.  With interval $I=30$\,s that leaves
+$(H+\sigma)/I\approx200$ removes, about $25$\,KB, per registrant, and $N$ registrants read
+about $N^2\cdot25$\,KB per interval.
+
+\textbf{The issue's direction, stress-tested.}  \issue{918} proposes to drop the timestamps
+and derive liveness from the element's dot.  A dot is stamped by whoever writes, and it is
+unsigned: by Lemma~\ref{lem:simulate} a syncer can forge one too.  Any node that re-appends a
+dead registrant's observed bytes would then refresh its dot, and so keep it listed forever.
+Freshness that a peer cannot forge needs a signed bound.  The lease below keeps the bytes
+stable and keeps that bound signed.
+
+\begin{definition}[Lease descriptor]\label{def:lease}
+A lease descriptor $d$ signs the registrant's identity fields, its process epoch, its
+capabilities and a lease end $\ell$, and nothing that changes between heartbeats.  Its bytes
+are fixed for the lease.  The lease length is $\Lambda=L=\mathtt{DEFAULT\_TTL\_MS}$ (10 min).
+\end{definition}
+
+\begin{law}[Heartbeat]\label{law:heartbeat}
+At each heartbeat at clock $t$, a registrant writes exactly $\mathrm{Extend}([d])$ for its
+current lease descriptor $d$.  It writes no remove and reads nothing.  If $t+2I\ge\ell$, or
+if a signed field changed (restart, capabilities), it first signs $d'$ with $\ell'=t+\Lambda$
+and appends $d'$ in place of $d$.  It never removes $d$.  A remove is written only on
+withdrawal (advertising turned off), at most once per lease.
+\end{law}
+
+\begin{law}[Reader liveness]\label{law:reader}
+Let $\tau^*(d)$ be the dot of $d$ in the fetched carrier.  A reader at clock $t$ lists, for
+each DID, the descriptor with the greatest $\ell$ among those that verify and satisfy
+$t<\ell$ and $t<\tau^*(d)+T+\sigma$, where $T$ is the registry TTL ($90$\,s).
+\end{law}
+
+\begin{proposition}[Cost]\label{prop:hbcost}
+Heartbeats write no removes.  A registrant writes at most one remove per withdrawal within
+$H+\sigma$, so registries stay far below $\Tmax$.  A registrant leaves at most
+$\lceil H/(\Lambda-2I)\rceil+1=13$ descriptors within the horizon.  The cap keeps the $\Dmax$
+newest dots, and a heartbeat refreshes the current descriptor's dot, so superseded leases
+are dropped first.  A heartbeat performs no registry read, which removes the $N^2$ read
+traffic.
+\end{proposition}
+\begin{proof}
+Law~\ref{law:heartbeat} writes $\mathrm{Extend}$ only, and an $\mathrm{Extend}$ of bytes
+already held raises their dot (pointwise $\max$) without a remove.  A new lease is signed at
+most once per $\Lambda-2I$.
+\end{proof}
+
+\begin{proposition}[Ghost bound]\label{prop:ghost}
+Let a registrant stop at $t_s$.  If no node re-appends its bytes, it is listed until at most
+$t_s+T+\sigma$.  Against any writer or syncer, it is listed until at most
+$\ell\le t_s+\Lambda$.
+\end{proposition}
+\begin{proof}
+Its last honest dot has $\tau^*\le t_s$, which gives the first bound.  A re-append or a
+forged dot can raise $\tau^*$, but not the signed $\ell$, which gives the second.
+\end{proof}
+
+The cost is the trade-off of this law.  A replayed registrant can stay listed for up to
+$\Lambda=10$\,min, where today it stays at most $T$.  In exchange, heartbeats produce no
+removes, and the per-heartbeat registry read and its $N^2$ traffic disappear.  A larger
+$\Lambda$ retains fewer descriptors and lengthens the ghost window.  The bound applies to
+both registries (online nodes and onion exits).
+
+\section{Implementation order}\label{sec:plan}
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}llp{0.6\columnwidth}@{}}
+\toprule
+PR & Issue & Law\\
+\midrule
+1 & \issue{922} & Law~\ref{law:pure}; a test witnessing Prop.~\ref{prop:linear}\\
+2 & \issue{918} & Def.~\ref{def:lease}, Laws~\ref{law:heartbeat}, \ref{law:reader}
+(\texttt{rings-node})\\
+3 & \issue{921} & Def.~\ref{def:cap}, Law~\ref{law:admit}; the assertion of
+Prop.~\ref{prop:message}\\
+4 & \issue{920} & Laws~\ref{law:evict}--\ref{law:order}; the removal store\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+PR~2 precedes PR~3.  Once PR~3 lands, today's heartbeats would hit $\Tmax$ with about five
+registrants per topic, and their removes would be refused.  PR~4 needs PR~3, because the
+removal store's budget is sized by $W_\Rm$.  PR~1 is independent.
+
+\textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}.  PR~2 changes the
+descriptor encoding, so old descriptors no longer decode.  Readers skip them, and they
+retire within $H$; this needs no step.  PR~4 adds the removal store (native directory and
+browser database \texttt{dht-removals} beside the data store) and needs no step either.  A
+carrier written before PR~4 keeps its removes in the data store until it is next written,
+and the read join (Law~\ref{law:order}) still applies them.  An operator who wants
+Law~\ref{law:evict} to hold from the first eviction removes the data store while the node is
+stopped; replication rebuilds it.
+
+\section{Summary of laws}
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Question & Answer\\
+\midrule
+when stable & $t\ge\tau(r)+H+\sigma$ (Def.~\ref{def:stable})\\
+what may drop it & $\ret_t$, a move, a loss event (Law~\ref{law:survival})\\
+what eviction drops & the element side (Law~\ref{law:evict})\\
+where removes live & removal store, $(\Durable,\Retained)$ (Law~\ref{law:authority})\\
+how many & $\le\Tmax$, refused past it (Law~\ref{law:admit})\\
+how large & $W\le$ one message (Prop.~\ref{prop:message})\\
+forged by sync & simulates a writer (Lemma~\ref{lem:simulate})\\
+cache order & pure reads, locked transitions (Law~\ref{law:pure})\\
+heartbeat writes & $\mathrm{Extend}$ of a signed lease (Law~\ref{law:heartbeat})\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\sloppy
+\bibliographystyle{IEEEtran}
+\bibliography{removal-stability}
+
+\end{document}
