@@ -28,6 +28,23 @@
     rebuilds it, and an undecodable stored carrier is otherwise retired on its next read. Relay
     carriers held under an earlier build do not decode either and are retired (and logged), so
     mail held across the upgrade is lost; drain held mail before upgrading.
+
+- Replay writes are group-committed (#916; durable-records, Law Group commit). A replay
+  transition still runs whole under the one replay lock, but the lock no longer covers the record
+  write: the transition applies its effect to the in-memory tables and stages its record, then
+  waits for its batch. The transitions that run while one batch is written gather into the next
+  batch. A native authoritative store writes a batch with one `F_FULLFSYNC` barrier on Apple
+  targets and one directory flush. IndexedDB writes it as one strict transaction. No result is
+  returned before its batch is durable, refusals included. A failed batch fails and undoes every
+  pending transition. One run on an M1 Max measured 922 admissions/s with 64 in flight, against
+  49–57 before. A lone admission still pays one batch write. The onion WebView test runs on the
+  authoritative IndexedDB replay store again.
+  - **Breaking (library API).** `KvStorageScan` gains the required method `put_batch`, so an
+    implementor of that trait must add it. `Error::TransactionReplayPersistence::source` is an
+    `Arc<Error>`, shared by the transitions of a failed batch.
+  - **Upgrade consequence.** None: the record format is unchanged.
+  - **Operator step.** None.
+
 - Registry heartbeats re-append a signed lease (#918; removal-stability paper, Laws 8 and 9).
   An online-node, onion-exit or DNS-relay service descriptor no longer signs a heartbeat time:
   it signs a lease end (`expires_at_ms`, 10 minutes after it is issued) and a freshness window

@@ -3686,6 +3686,7 @@ dependencies = [
  "js-sys",
  "k256",
  "lazy_static",
+ "libc",
  "num-bigint",
  "p256",
  "pretty_assertions",

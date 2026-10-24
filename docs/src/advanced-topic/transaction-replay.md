@@ -147,33 +147,51 @@ commit. `"strict"` is each engine's strongest commit; whether it also flushes a 
 is the engine's choice. An IndexedDB transaction is atomic, so a crash leaves every record whole at
 its previous or its new value.
 
-One lock serializes all replay transitions and is held across each record write, so the store's
-write latency bounds the node-wide transition rate. Each transition runs detached from its caller
-on the runtime: lock, persist the stream's record, update the table, unlock. Cancelling a caller
-abandons only its wait, so a record write is never left in flight while the next transition of its
-stream runs, and a stale write can never land after a newer one. A cancelled caller's transition
-therefore commits, exactly as if the caller had dropped the verdict: an admission enters the window
-and is charged its quota though nobody dispatches it (a retransmission is then a `Replay`, and the
-message is lost, as for any drop after admission), and a reservation consumes its sequences (a gap
-the receiver accepts). A cancelled attempt is not shed from the queue: it still pays its flushed
-write.
+One lock serializes all replay transitions, but no record write runs under it: replay commits by
+group commit (#916). A transition locks, applies its effect to the in-memory tables, stages its
+stream's record into the open batch, unlocks, and waits until that batch is durable. One writer at a
+time writes the batches, in order, outside the lock. The transitions that run while one batch is
+written gather into the next, and one store batch writes all of them:
 
-With the flushed native store that bound is the
-flush latency. `test_durable_throughput_of_replay_admissions` (ignored by default; run it with
-`--ignored --nocapture`) measures it. On an Apple M1 Max SSD (APFS) it measured:
+- On the native store, every record goes to its own temporary file, and each file is `fsync`ed. One
+  `F_FULLFSYNC` barrier on Apple targets then makes them all durable together. After that come the
+  renames, and one directory flush covers all of them.
+- On IndexedDB, the batch is one strict read-write transaction.
+
+The laws, stated in `crates/core/src/message/replay/commit.rs` and in the Group commit section of
+`papers/durable-records.tex`:
+
+- **Release.** No result is returned before its batch is durable. That holds for a refusal too,
+  and for a reservation inside its lease that writes nothing.
+- **Atomicity.** Each record is whole at its previous or its new value after any crash.
+- **Order.** Each stream's durable values follow lock order.
+- **Fail closed.** A failed batch fails, and undoes, every pending transition: its own, and those of
+  the batch gathering on top of it. It is counted once as a persistence failure.
+- **Latency.** A transition waits for at most two batch writes: the one in flight, then its own.
+
+Each transition runs detached from its caller on the runtime, so cancelling a caller abandons only
+its wait, never a staged effect. A cancelled caller's transition therefore commits, exactly as if
+the caller had dropped the verdict: an admission enters the window and is charged its quota though
+nobody dispatches it (a retransmission is then a `Replay`, and the message is lost, as for any drop
+after admission), and a reservation consumes its sequences (a gap the receiver accepts). A crash
+after some records of a batch landed and before the batch was released is the same case.
+
+`test_durable_throughput_of_replay_admissions` (ignored by default; run it with
+`--release --ignored --nocapture`) measures both latency and throughput. One admission at a time
+pays a whole batch write. Admissions that run concurrently share batches, so the rate grows with
+the transitions in flight. One run on an Apple M1 Max SSD (APFS) measured:
 
 | Store | Admissions/s | p50 | p99 |
 |---|---|---|---|
-| authoritative file | 49–57 | ~17–18 ms | ~30–47 ms |
-| disposable file | ~4,500 | ~0.2 ms | ~0.4 ms |
-| memory | ~97,000 | ~10 µs | ~17 µs |
+| authoritative file, one at a time | 39 | ~24 ms | ~46 ms |
+| authoritative file, 64 in flight | 922 | | |
+| disposable file, one at a time | ~4,000 | ~0.2 ms | ~0.5 ms |
+| memory, one at a time | ~67,000 | ~11 µs | ~41 µs |
 
-The benchmark admits through the production path (`admit_with_quota`), so each figure includes
-the detached task every transition runs on.
-
-Sender reservations pay the same cost once per lease of 64 sequences, so a node's replay writes
-are about one per admission. The ceiling is far below the outbound lane rate, and group commit is
-tracked in #916.
+Before group commit the authoritative store sustained 49–57 admissions/s whatever the concurrency.
+The benchmark admits through the production path (`admit_with_quota`), so each figure includes the
+detached task every transition runs on. Sender reservations write once per lease of 64 sequences,
+so a node's replay writes are about one per admission, and they share the same batches.
 
 Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class
 stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each receiver stream

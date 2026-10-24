@@ -264,7 +264,6 @@ route.
 
 ## Known Limitations
 
-- #916: durable replay writes cap a node near 50 transitions per second on macOS.
 - #918: a registry descriptor that another node re-appends after its registrant stopped stays
   listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
   registrant leaves the listing within its TTL.

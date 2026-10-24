@@ -2722,6 +2722,7 @@ dependencies = [
  "itertools 0.10.5",
  "js-sys",
  "k256",
+ "libc",
  "num-bigint",
  "p256",
  "primeorder",
