@@ -749,8 +749,13 @@ strictly behind $n$ with $\mathrm{holds}$.
 
 \begin{definition}[Members]\label{def:members}
 $\Mem_r(k)$ is the first $r$ nodes $n$ of $\own(k),\nxt(\own(k)),\nxt^2(\own(k)),\dots$
-with $\mathrm{holds}(n)$; its first, $h_0(k)$, is the holder of \issue{1037}.  The default is
-$r=3$.
+with $\mathrm{holds}(n)$; its first, $h_0(k)$, is the holder of \issue{1037}.  The
+\emph{rank} of a member is $\mathrm{rank}_k(n)=|\{m\in\Mem_r(k): m\text{ before }n\}|$, and its
+\emph{next member} $\mathrm{next}_k(n)$ is the member of rank $\mathrm{rank}_k(n)+1$.  $r$ is
+configurable; the default $r=8$ keeps a held message's loss below $10^{-3}$ over its 24\,h
+retention with 90\% browser holders whose median session is 15\,s, given the repair delay of
+Law~\ref{law:eventrepair} (\issue{777}); it is to be recalibrated on \issue{773}'s churn
+simulator.
 \end{definition}
 
 \begin{lemma}[Member range]\label{lem:range}
@@ -775,41 +780,83 @@ By the induction of \issue{1037} along each storage-less run, every holder learn
 $p_1(n),\dots,p_r(n)$ with their successor heads, so Lemma~\ref{lem:range} is decided on
 local state.
 
-\begin{law}[Replicated hold]\label{law:fanout}
+A member decides its rank on local state too: its list names $p_1,\dots,p_r$, so it counts
+the holders in $[\own(k),n)$.  It finds $\mathrm{next}_k(n)$ in its successor list, or, when no
+node of that list holds relay mail, by the owner query of \issue{1045} for the key just past
+its list's last node, whose owner answers the first holder at or after it; an owner whose view
+names none answers the last node it places, and the query is asked again past it.  So a member
+reaches the next member however long the run between them, and the successor list stays at its
+capacity of 3: with browsers holding relay mail (\issue{1036}) storage-less runs are short, and
+the query covers the rest.
+
+\begin{law}[Chain replication]\label{law:fanout}
 A hold goes to $h_0$, under the writer authority of \issue{1037}.  $h_0$ joins the element and
-sends a copy to every other member its view names; a member acknowledges a copy to its
-sender.  $h_0$ acknowledges the writer once $q(k)=\min(r,|\Mem_r(k)\cap\mathrm{view}(h_0)|)$
-members hold the element, itself included.  The writer keeps and resends the hold until
-acknowledged, as before.
+forwards the hold to $\mathrm{next}_k(h_0)$.  A member of rank $j$ that admits it
+(Law~\ref{law:admitcopy}) forwards it to its next member while $j<q(k)-1$, and the member of
+rank $q(k)-1$ acknowledges it to the member it came from; every member acknowledges the
+member it came from once its own next member acknowledged.  $h_0$ acknowledges the writer once
+its next member did, at once when $q(k)=1$.  Here $q(k)=r$, or the number of holders when a
+member's list came round the ring (Law~\ref{law:previous}) and names fewer.  The writer keeps
+and resends the hold until acknowledged, as before.
 \end{law}
+
+So an acknowledgement means that every one of the $q(k)$ members holds the element: a chain
+acknowledges only from its end, and no member acknowledges for another.
 
 \begin{law}[Replica admission]\label{law:admitcopy}
 $m$ admits a copy of the carrier at $k$ from $s$ iff $m\in\Mem_r(k)$
-(Lemma~\ref{lem:range}), $\mathrm{holds}(s)$, and $s$ is a member in $m$'s view: one of
-$p_1(m),\dots,p_{r-1}(m)$ inside the range, or a node of $m$'s successor list.  Admitted
-elements pass the witness of the carrier as before; a copy is a join (S3).
+(Lemma~\ref{lem:range}), $\mathrm{holds}(s)$, and $s$ is $m$'s previous member, $p_1(m)$ inside
+the range, or its next member.  Admitted elements pass the witness of the carrier as before; a
+copy is a join (S3).
 \end{law}
 
-\begin{law}[Member repair]\label{law:memberrepair}
-Each repair pass every member keeping a carrier offers its join to every other member its
-view names.  A keeper that is no member offers the carrier to the members and deletes its
-copy only after a delete-capable acknowledgement from a member holding $\sqsupseteq$ its
+\begin{law}[Chain repair]\label{law:memberrepair}
+Each repair pass every member keeping a carrier offers its join to its previous and its next
+member, and a member whose carrier an admitted copy changed offers it on to its other neighbour
+at once.  A keeper that is no member offers the carrier to the member it can name and deletes
+its copy only after a delete-capable acknowledgement from a member holding $\sqsupseteq$ its
 state (S1$''$, S2$'$ with member for holder).
 \end{law}
 
+\begin{law}[Event-driven repair]\label{law:eventrepair}
+A member that loses a node of its view, by a closed connection or a failed liveness check, runs
+Law~\ref{law:memberrepair} at once, on its new view, for every carrier it keeps of a key whose
+previous or next member that node was.  The periodic pass of period $T$ remains the backstop.
+\end{law}
+
+\begin{proposition}[Repair delay]\label{prop:delay}
+After the loss of one member of $k$, every member of $k$ holds a copy again within
+$D\le T_d+r\,\delta$, where $T_d$ bounds the loss's detection (a connection close at once, a
+liveness failure within its check) and $\delta$ one chain hop (a send and a join, and the owner
+queries when the next member lies past the successor list); within $T$ when the event is
+missed.
+\end{proposition}
+\begin{proof}
+The loss is detected by the lost member's chain neighbours within $T_d$, and each runs
+Law~\ref{law:memberrepair} at once.  A copy that changes a member's carrier is offered on at
+once, so the hole closes along the chain in at most $r$ hops.  A missed event leaves the
+periodic pass.
+\end{proof}
+
 \begin{proposition}[Acknowledged copies survive]\label{prop:copies}
-In a window where the views agree on $\Mem_r$ (S4), an acknowledged element has at least
-$q(k)$ copies, and is lost only if every member holding it is lost within one repair period.
+In a window where the views agree on $\Mem_r$ (S4), an acknowledged element has $q(k)$ copies,
+and is lost only if every member holding it is lost within $D$.
 \end{proposition}
 \begin{proof}
 Law~\ref{law:fanout} gives $q(k)$ copies at the acknowledgement.  Copies decrease only by a
 member's loss or by a deletion of Law~\ref{law:memberrepair}, made by a non-member after a
-member holds its state, which leaves the members' copies as they were.  A pass of
-Law~\ref{law:memberrepair} restores a copy at every member from any surviving copy, which is
-the premise of Proposition~\ref{prop:redundant}.  Before the views agree, a copy offered to a
-node that is no member by its own view is refused by Law~\ref{law:admitcopy} and stays with
-its sender: disagreement delays replication and loses no copy.
+member holds its state, which leaves the members' copies as they were.  By
+Proposition~\ref{prop:delay} a loss is repaired from any surviving copy within $D$, which is
+Proposition~\ref{prop:redundant} with $D$ for the repair period.
 \end{proof}
+
+\textbf{Outside S4.}  An acknowledgement taken while views disagree still means $q(k)$ nodes
+hold the element, each of which admitted it as a member of $k$ by its own view; it does not
+mean they are the members the views will agree on.  No copy is deleted without a member's
+acknowledgement (S1$''$), so their number does not fall but by node loss, and once the views
+agree Law~\ref{law:memberrepair} moves the copies to the members.  Until then the bound of
+Proposition~\ref{prop:copies} holds with $D$ extended by the convergence of
+Proposition~\ref{prop:converge}.
 
 \begin{proposition}[Convergence]\label{prop:converge}
 After one membership change the lists of Law~\ref{law:previous} settle within $r(L+1)$
@@ -827,17 +874,24 @@ tombstones spread by Law~\ref{law:memberrepair}.  Tombstones stay capped at
 fell off the cap; its redelivery is refused by the recipient's window ($\mathsf{Replay}$, or
 $\mathsf{Stale}$ below it) and retired, case (ii) of Proposition~\ref{prop:atleastonce}, except
 after a replay reset (Law~\ref{law:ownclaim}), where its retention bounds it.  A recipient
-without a relay store fetches from $h_0$ and then the next member; an element is the same
+without a relay store fetches from $h_0$ and then down the chain; an element is the same
 holder-signed bytes at every member, so the drain's handed-over set and $\K_s$ deduplicate
-copies, and Law~\ref{law:custody} is unchanged.  The owner of $k$ places it, so its answer to
-the owner query (\issue{1045}) names the members within its successor list, and each takes a
-copy only by Law~\ref{law:admitcopy}.
+copies, and Law~\ref{law:custody} is unchanged.  Only $h_0$'s report restricts custody: a
+lagging member's copy may miss an element that still exists (\issue{1059}).
 
-\textbf{Costs.}  A node keeps about $r$ times the carriers; a full store refuses a copy, which
-then stays with its sender (N).  A hold costs $r-1$ copies and their acknowledgements; a pass
-offers each carrier's digest to $r-1$ members and copies only on a difference.  Full placement
-needs a successor list of at least $r+L$ nodes.  A best-effort leave on departure (\issue{1057})
-shortens the loss window and is never needed for this section's laws.
+\textbf{Store capacity.}  A node keeps about $r$ times the carriers it kept as a sole holder,
+so the relay store's budget scales with $r$: a browser's from 1024 rows to $1024\,r$, a native
+node's from 64\,MiB to $64\,r$\,MiB, a cap on a store that evicts nothing, not space it takes.
+A member whose store is full still refuses a copy (N): it does not acknowledge, so the chain
+acknowledges no writer, which resends until the sender proof expires and then drops the hold
+with a warning, as a full store's refusal did before.  So exhaustion never lowers $q(k)$; it
+refuses new mail.
+
+\textbf{Costs.}  A hold costs $r-1$ forwarded copies, $r-1$ acknowledgements, and a
+round trip of $r$ hops before the writer's acknowledgement.  A pass offers each carrier's
+digest to two chain neighbours and copies only on a difference.  A list of
+Law~\ref{law:previous} carries $r$ pairs.  A best-effort leave on departure (\issue{1057})
+shortens $T_d$ and is never needed for this section's laws.
 
 \section{Implementation order}\label{sec:plan}
 
@@ -887,7 +941,7 @@ survival, Windows & write-through rename (Law~\ref{law:writethrough})\\
 survival, browser & strict commit (Law~\ref{law:strict})\\
 presence of custody & $\K_s$ in the receiver record (Law~\ref{law:custody})\\
 own state, ephemeral & reset per session (Law~\ref{law:ownclaim})\\
-custody, browser & $r\ge2$ holders (Laws~\ref{law:redundant}--\ref{law:memberrepair})\\
+custody, browser & $r$-member chain (Laws~\ref{law:redundant}--\ref{law:eventrepair})\\
 \bottomrule
 \end{tabular}
 \end{center}
