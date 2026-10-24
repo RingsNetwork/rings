@@ -35,7 +35,7 @@ fn quota_config_with_capacity(message_burst: u64, max_records: usize) -> OriginQ
 
 fn runtime(message_burst: u64) -> TransactionReplay {
     TransactionReplay::new_with_quota(
-        Box::new(MemStorage::<ReplayRecord>::new()),
+        Some(Box::new(MemStorage::<ReplayRecord>::new())),
         quota_config(message_burst),
     )
 }
@@ -137,7 +137,7 @@ async fn quota_rejection_does_not_advance_replay_and_retry_can_commit() -> Resul
 #[tokio::test]
 async fn capacity_rejection_preserves_replay_until_an_idle_slot_is_safe() -> Result<()> {
     let runtime = TransactionReplay::new_with_quota(
-        Box::new(MemStorage::<ReplayRecord>::new()),
+        Some(Box::new(MemStorage::<ReplayRecord>::new())),
         quota_config_with_capacity(1, 1),
     );
     let first = stream(1);
@@ -208,7 +208,7 @@ impl StorageHooks for FailFirstPut {
 #[tokio::test]
 async fn replay_persistence_failure_rolls_back_provisional_quota() -> Result<()> {
     let runtime = TransactionReplay::new_with_quota(
-        Box::new(Hooked::new(FailFirstPut(AtomicBool::new(true)))),
+        Some(Box::new(Hooked::new(FailFirstPut(AtomicBool::new(true))))),
         quota_config(1),
     );
     let key = stream(1);

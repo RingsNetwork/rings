@@ -59,13 +59,26 @@ void rings_node_string_free(char *value);
 void rings_node_provider_destroy(struct ProviderHandle *provider_ptr);
 
 /**
- * Craft a new Provider with signer.
+ * Craft a new Provider with signer, keeping its stores under `storage_path`.
+ *
+ * `storage_path` is a directory the provider owns: it opens the node's stores
+ * under it as the native daemon does (the DHT data store, the authoritative
+ * transaction replay store, the retained relay inbox, the onion entry guards
+ * and the measurement stores). Reusing the path across runs keeps the replay
+ * windows, held mail and entry guards; a fresh path is a fresh node state.
+ *
+ * Precondition: the provider owns `storage_path` exclusively while it lives.
+ * At most one live provider uses a given root, and it is never a native
+ * daemon's storage directory: every store assumes it is its directory's only
+ * writer, and two writers would interleave writes to one authoritative replay
+ * store. Nothing enforces this yet (#1039).
  *
  * # Safety
  *
- * String pointers must be valid null-terminated UTF-8 strings. The signer must
- * write exactly 65 signature bytes into the provided output buffer. Returns NULL
- * when provider creation fails. The returned handle must be released exactly
+ * String pointers, `storage_path` included, must be valid null-terminated
+ * UTF-8 strings. The signer must write exactly 65 signature bytes into the
+ * provided output buffer. Returns NULL when provider creation fails, a store
+ * that cannot be opened included. The returned handle must be released exactly
  * once with `rings_node_provider_destroy`.
  */
 struct ProviderHandle *rings_node_new_provider_with_callback(uint32_t network_id,
@@ -73,6 +86,7 @@ struct ProviderHandle *rings_node_new_provider_with_callback(uint32_t network_id
                                                              uint64_t stabilize_interval,
                                                              const char *account,
                                                              const char *account_type,
+                                                             const char *storage_path,
                                                              void (*signer)(const char *, char *));
 
 #endif

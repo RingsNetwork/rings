@@ -4,13 +4,17 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
+/** A fresh storage directory for one fixture provider. */
+private fun fixtureStorage(): String =
+    java.nio.file.Files.createTempDirectory("rings-ffi-kotlin").toString()
+
 class RingsTest {
     @Test
     fun providerCreationSurfacesSignerFailure() {
         val library = requireNotNull(System.getProperty("rings.fake.library"))
         val runtime = RingsRuntime.load(library)
         val failure = assertFailsWith<RingsFfiException> {
-            runtime.createProvider("fixture-create-failure", RingsSigner {
+            runtime.createProvider("fixture-create-failure", fixtureStorage(), RingsSigner {
                 error("fixture signer failure")
             })
         }
@@ -36,10 +40,15 @@ class RingsTest {
         val library = requireNotNull(System.getProperty("rings.fake.library"))
         val runtime = RingsRuntime.load(library)
         runtime.initializeLogging()
-        runtime.createProvider("fixture-one", RingsSigner { ByteArray(RINGS_SIGNATURE_LENGTH) { 1 } })
+        runtime.createProvider(
+            "fixture-one",
+            fixtureStorage(),
+            RingsSigner { ByteArray(RINGS_SIGNATURE_LENGTH) { 1 } },
+        )
             .use { first ->
                 runtime.createProvider(
                     "fixture-two",
+                    fixtureStorage(),
                     RingsSigner { ByteArray(RINGS_SIGNATURE_LENGTH) { 2 } },
                 ).use { second ->
                     first.listen()
