@@ -31,7 +31,9 @@
 //! Law (Owner places) the owner of a key places it, as the key lies in its own arc, so its view
 //!                 names the key's holder or none and never finds the owner `Unknown`; a keeper
 //!                 whose view does not place a carrier's key asks the owner (`FindRelayHolder`)
-//!                 and offers the carrier to the holder it names (`owner_answer`)
+//!                 and offers the carrier to the holder it names (`owner_answer`); it asks at
+//!                 most one query per kept key whose owner its view does not place, per repair
+//!                 pass, and takes only the first answer to a query it asked (`Law (Asked)`)
 //! ```
 //!
 //! Law (Owner places) is what makes the convergence law hold for overlapping changes too: a

@@ -335,11 +335,13 @@ impl Stabilizer {
     /// Ask the owner of every relay key kept here whose owner this view does not place for the
     /// key's holder (`FindRelayHolder`, `Law (Owner places)`); its answer names the holder the
     /// next pass offers the carrier to. A query that is not queued is asked again next pass.
+    /// Bound: at most one query per kept key whose owner this view does not place, per pass.
     async fn ask_owners_of_unplaced_relay_keys(&self) -> Result<()> {
         for key in self.dht.unplaced_relay_keys(get_epoch_ms()).await? {
             let PeerRingAction::RemoteAction(next, _) = self.dht.find_successor(key)? else {
                 continue;
             };
+            self.dht.ask_relay_holder(key)?;
             let query = Message::FindRelayHolder(FindRelayHolder { key });
             if let Err(error) = self
                 .transport

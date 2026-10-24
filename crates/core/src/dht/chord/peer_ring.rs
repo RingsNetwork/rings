@@ -80,6 +80,7 @@ use crate::utils::Instant;
 
 mod relay_custody;
 use relay_custody::KeptRelayHold;
+use relay_custody::RelayHolderHints;
 mod views;
 
 /// Storage accepted by [`PeerRing::new_with_storage`].
@@ -148,9 +149,9 @@ pub struct PeerRing {
     relay_neighborhood: Mutex<RelayNeighborhood>,
     /// The relay holds this node wrote and no holder acknowledged yet (see `relay_custody`).
     unacknowledged_relay_holds: Mutex<BTreeMap<RelayHoldDigest, KeptRelayHold>>,
-    /// The holder each key's owner named for a relay carrier kept here that this view does not
-    /// place (see `relay_custody`).
-    relay_holder_hints: Mutex<BTreeMap<Did, Did>>,
+    /// The queries asked of, and the holders named by, the owners of the relay keys kept here
+    /// that this view does not place (see `relay_custody`).
+    relay_holder_hints: Mutex<RelayHolderHints>,
 }
 
 /// Construction.
@@ -210,7 +211,7 @@ impl PeerRing {
             topology_epoch: Epoch::default(),
             relay_neighborhood: Mutex::new(RelayNeighborhood::default()),
             unacknowledged_relay_holds: Mutex::new(BTreeMap::new()),
-            relay_holder_hints: Mutex::new(BTreeMap::new()),
+            relay_holder_hints: Mutex::new(RelayHolderHints::default()),
             did,
         }
     }

@@ -12,6 +12,7 @@
 //! unacknowledged holds and of the holder hints, which no other lock is held across.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::MutexGuard;
 
 use super::PeerRing;
@@ -37,6 +38,21 @@ pub(crate) struct KeptRelayHold {
     /// The node it was last sent to, the only one whose acknowledgement or refusal names it;
     /// `None` while no view names a holder.
     target: Option<Did>,
+}
+
+/// What this node asked of, and was told by, the owners of the relay keys it keeps and does not
+/// place (`Law (Owner places)`).
+///
+/// Law (Asked): an answer is taken only for a key with a query outstanding, and taking it ends
+/// the query, so each query is answered at most once, by the first answer to arrive, and a peer
+/// can neither name a holder unasked nor overwrite a hint between queries. Both maps keep only
+/// the keys still unplaced, so they are bounded by the carriers kept here.
+#[derive(Debug, Default)]
+pub(crate) struct RelayHolderHints {
+    /// The keys whose owner was asked and has not answered yet.
+    asked: BTreeSet<Did>,
+    /// The holder each owner named, by key.
+    named: BTreeMap<Did, Did>,
 }
 
 impl PeerRing {
@@ -217,7 +233,7 @@ impl PeerRing {
     }
 
     /// Lock the holder hints, a leaf of `Law (Lock order)`.
-    fn lock_relay_holder_hints(&self) -> Result<MutexGuard<'_, BTreeMap<Did, Did>>> {
+    fn lock_relay_holder_hints(&self) -> Result<MutexGuard<'_, RelayHolderHints>> {
         self.relay_holder_hints
             .lock()
             .map_err(|_| Error::LockPoisoned)
@@ -236,25 +252,43 @@ impl PeerRing {
             .map(|(key, _)| key.placement())
             .filter(|key| relay_holder(&segment, *key) == RelayHolder::Unknown)
             .collect::<Vec<_>>();
-        self.lock_relay_holder_hints()?
-            .retain(|key, _| unplaced.contains(key));
+        let mut hints = self.lock_relay_holder_hints()?;
+        hints.asked.retain(|key| unplaced.contains(key));
+        hints.named.retain(|key, _| unplaced.contains(key));
         Ok(unplaced)
     }
 
-    /// Record `holder`, which the owner of `key` named, for the carrier of `key` this view does
-    /// not place, iff `holder` is another node that holds relay mail as far as this node knows.
-    /// The result says whether it was recorded.
-    pub(crate) fn name_relay_holder(&self, key: Did, holder: Did) -> Result<bool> {
-        if holder == self.did || !self.lock_relay_neighborhood()?.holds(holder) {
+    /// Record that the owner of `key` is asked for its holder (`Law (Asked)`).
+    pub(crate) fn ask_relay_holder(&self, key: Did) -> Result<()> {
+        self.lock_relay_holder_hints()?.asked.insert(key);
+        Ok(())
+    }
+
+    /// Take `holder`, the answer to the outstanding query for `key` (`Law (Asked)`): end the
+    /// query, and record `holder` iff it is another node that holds relay mail as far as this
+    /// node knows. The result says whether the hint changed, so only a new holder costs a pass.
+    pub(crate) fn name_relay_holder(&self, key: Did, holder: Option<Did>) -> Result<bool> {
+        let holds = |holder: Did| -> Result<bool> {
+            Ok(holder != self.did && self.lock_relay_neighborhood()?.holds(holder))
+        };
+        let holder = match holder {
+            Some(holder) if holds(holder)? => Some(holder),
+            _ => None,
+        };
+        let mut hints = self.lock_relay_holder_hints()?;
+        if !hints.asked.remove(&key) {
             return Ok(false);
         }
-        self.lock_relay_holder_hints()?.insert(key, holder);
-        Ok(true)
+        let changed = match holder {
+            Some(holder) => hints.named.insert(key, holder) != Some(holder),
+            None => hints.named.remove(&key).is_some(),
+        };
+        Ok(changed)
     }
 
     /// The holders the keys' owners named, by key.
     pub(crate) fn relay_holder_hints(&self) -> Result<BTreeMap<Did, Did>> {
-        Ok(self.lock_relay_holder_hints()?.clone())
+        Ok(self.lock_relay_holder_hints()?.named.clone())
     }
 
     /// Whether this node takes a relay carrier relocated by `sender` (`relocates_from`).

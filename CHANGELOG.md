@@ -7,7 +7,8 @@
   of a relay key always places it, as the key lies in its own arc, so an old holder whose view
   cannot place a carrier's key asks the key's owner for its holder (the new `FindRelayHolder` and
   `RelayHolderFound` messages, routed as a lookup) on each repair pass, and offers the carrier
-  there too. The holder still takes only a key its own view makes it hold, so a wrong answer
+  there too, taking only the first answer to a query it asked, at most one query per such key
+  and pass. The holder still takes only a key its own view makes it hold, so a wrong answer
   moves nothing. No operator step beyond upgrading the overlay together: the message set grows
   with no version.
 

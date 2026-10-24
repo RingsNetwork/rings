@@ -6,7 +6,6 @@
 use async_trait::async_trait;
 
 use crate::dht::entry::inbox::inbox_key;
-use crate::dht::entry::EntryKind;
 use crate::dht::relay_holder::owner_answer;
 use crate::dht::relay_holder::PreviousHolder;
 use crate::dht::relay_holder::RelayHolder;
@@ -182,28 +181,17 @@ impl HandleMsg<FindRelayHolder> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<RelayHolderFound> for MessageHandler {
-    /// Record the holder the owner named for a carrier this node keeps and does not place, and
-    /// ask for a repair pass, which offers the carrier there. An answer for a key this node keeps
-    /// no carrier of, or naming no holder, changes nothing; a wrong answer only costs an offer
-    /// the named node refuses.
+    /// Take the answer to this node's outstanding query for `msg.key` (`Law (Asked)`): record
+    /// the holder the owner named, and ask for a repair pass, which offers the carrier there,
+    /// only when that hint changed. An answer nobody asked for, a second answer, or a wrong one
+    /// costs no pass and moves nothing.
     async fn handle(&self, ctx: &MessagePayload, msg: &RelayHolderFound) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
                 .await;
         }
-        let Some(holder) = msg.holder else {
-            return Ok(());
-        };
-        let kept = self
-            .dht
-            .live_storage_entry(
-                StorageKey::new(EntryKind::RelayMessage, msg.key),
-                get_epoch_ms(),
-            )
-            .await?
-            .is_some();
-        if kept && self.dht.name_relay_holder(msg.key, holder)? {
+        if self.dht.name_relay_holder(msg.key, msg.holder)? {
             self.run_effects([CoreEffect::request_storage_repair()])
                 .await?;
         }
