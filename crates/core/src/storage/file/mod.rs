@@ -32,7 +32,8 @@
 //! open (stale `.tmp` files from an interrupted write are removed then), every write and every
 //! retirement updates it under the same lock only after the file system operation succeeded
 //! (so a file the file system refused to remove stays indexed and stays counted against the
-//! budget), and the directory is owned exclusively by this instance while it is open. A record
+//! budget), and the directory is owned exclusively by this instance while it is open, which the
+//! open enforces with a lock on the directory (`lock`, #1039). A record
 //! file whose metadata cannot be read fails a disposable open; an authoritative open indexes it
 //! at zero bytes so that a scan reports it rather than hiding it. A directory listing that fails
 //! part-way skips the unlisted entries of a disposable store, and fails an authoritative open as
@@ -93,6 +94,7 @@ use serde::Serialize;
 use sha1::Digest;
 use sha1::Sha1;
 
+mod lock;
 mod presence;
 
 use std::collections::BTreeSet;
@@ -224,6 +226,8 @@ struct FileStore {
     capacity: u64,
     authority: RecordAuthority,
     index: RwLock<FileIndex>,
+    /// The exclusive lock of `root`, held while the store lives (the ownership law, `lock`).
+    lock: lock::DirectoryLock,
 }
 
 /// One record file as a read found it: its bytes, or the error that kept them from the reader.
@@ -343,11 +347,13 @@ impl FileStore {
     /// authoritative open over it fails.
     fn open(byte_capacity: u32, root: PathBuf, authority: RecordAuthority) -> Result<Self> {
         create_directory(&root, authority.flushes())?;
+        let lock = lock::lock_directory(&root)?;
         let store = Self {
             root,
             capacity: u64::from(byte_capacity),
             authority,
             index: RwLock::new(FileIndex::default()),
+            lock,
         };
         let mut index = store.write_index()?;
         *index = store.scan_directory()?;
@@ -908,6 +914,7 @@ impl std::fmt::Debug for FileStorage {
             .field("capacity", &self.store.capacity)
             .field("authority", &self.store.authority)
             .field("root", &self.store.root)
+            .field("lock", &self.store.lock)
             .finish()
     }
 }
@@ -916,6 +923,8 @@ impl std::fmt::Debug for FileStorage {
 mod test_durability;
 #[cfg(test)]
 mod test_file;
+#[cfg(test)]
+mod test_lock;
 #[cfg(test)]
 mod test_presence;
 #[cfg(test)]

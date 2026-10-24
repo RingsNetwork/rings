@@ -2,6 +2,7 @@
 
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
+use rings_core::dht::RelayCustody;
 use rings_core::domain_tag;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::VerificationPublicKey;
@@ -43,17 +44,24 @@ pub enum OnlineNodeType {
 /// `onion_relay = Some(e_n)` registers the identity symbol `relay` of the onion signature at the
 /// process epoch `e_n` (#834 D2). The epoch is part of the capability, so a relay registration
 /// without an epoch is unrepresentable.
+///
+/// `relay_custody` is the declaration the node also makes in every connection handshake: a node
+/// without a retained relay store holds no relay mail, and relay custody moves past it to the
+/// next node along the successor path that holds relay mail (`rings_core::dht::relay_holder`).
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnlineNodeCapabilities {
     /// Process epoch at which this node registers the onion `relay` symbol, if it does.
     pub onion_relay: Option<OnionProcessEpoch>,
+    /// Whether this node holds relay mail.
+    pub relay_custody: RelayCustody,
 }
 
 impl OnlineNodeCapabilities {
-    /// Register the onion `relay` symbol at process epoch `epoch`.
+    /// Register the onion `relay` symbol at process epoch `epoch`, holding relay mail.
     pub const fn onion_relay(epoch: OnionProcessEpoch) -> Self {
         Self {
             onion_relay: Some(epoch),
+            relay_custody: RelayCustody::Holds,
         }
     }
 }

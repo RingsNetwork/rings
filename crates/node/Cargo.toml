@@ -41,6 +41,7 @@ node = [
     "lazy_static",
     "dep:axum",
     "rings-core/default",
+    "dep:rings-dns-relay",
     "dep:rings-gateway",
     "rings-rpc/std",
     "rings-derive/default",
@@ -144,6 +145,7 @@ web-sys = { version = "0.3.64", optional = true, features = [
 ] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+rings-dns-relay = { workspace = true, optional = true }
 rings-gateway = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -159,7 +161,9 @@ tower = "0.5"
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+ppp = "2.3.0"
 rings-gateway = { workspace = true, features = ["test-support"] }
+tempfile = "3"
 tokio = { version = "1.50.0", features = ["test-util"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

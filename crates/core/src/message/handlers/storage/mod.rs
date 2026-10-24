@@ -12,6 +12,7 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::SyncedEntryAck;
+use crate::dht::relay_holder::is_unplaced_hold;
 use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
@@ -29,6 +30,9 @@ use crate::message::effects::yield_core_actor_step;
 use crate::message::effects::CoreEffect;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
+use crate::message::types::RelayCarrierHeld;
+use crate::message::types::RelayCarrierRefused;
+use crate::message::types::RelayHoldDigest;
 use crate::message::types::SearchEntry;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
@@ -234,7 +238,43 @@ pub(super) async fn handle_storage_store_act(
     Ok(())
 }
 
+/// Apply or route `msg`. A relay hold from another node is answered to its writer: the holder
+/// acknowledges one it took (`RelayCarrierHeld`), and a target refuses one it does not take
+/// (`is_unplaced_hold`, `RelayCarrierRefused`). The writer keeps the hold until acknowledged,
+/// so an answer that is lost costs a resend, not the hold.
 async fn handle_placed_entry_operation(
+    handler: &MessageHandler,
+    ctx: &MessagePayload,
+    msg: &PlacedEntryOperation,
+) -> Result<()> {
+    let result = place_entry_operation(handler, ctx, msg).await;
+    let is_hold = matches!(&msg.op, EntryOperation::Extend(entry) if entry.kind.is_relay_inbox());
+    if is_hold && ctx.transaction.origin() != handler.dht.did {
+        let hold = RelayHoldDigest::of(&msg.op)?;
+        let answer = match &result {
+            Ok(()) => Some(Message::RelayCarrierHeld(RelayCarrierHeld { hold })),
+            Err(error) if is_unplaced_hold(error) => {
+                Some(Message::RelayCarrierRefused(RelayCarrierRefused { hold }))
+            }
+            Err(_) => None,
+        };
+        if let Some(answer) = answer {
+            if let Err(error) = handler
+                .run_effects([CoreEffect::send_report_message(ctx, answer)])
+                .await
+            {
+                tracing::debug!(
+                    ?error,
+                    "relay hold answer not sent; the writer sends it again"
+                );
+            }
+        }
+    }
+    result
+}
+
+/// Apply `msg` here when this node accepts its placement, or route it on.
+async fn place_entry_operation(
     handler: &MessageHandler,
     ctx: &MessagePayload,
     msg: &PlacedEntryOperation,
@@ -248,6 +288,11 @@ async fn handle_placed_entry_operation(
             let op = msg.op.clone().stamped(now_ms, dht.did)?;
             dht.operate_storage_entry(now_ms, msg.placement, op, ctx.transaction.origin())
                 .await
+        }
+        // A relay carrier is sent to the holder its writer's view names, never routed toward
+        // one: a holder that disagrees refuses it rather than pass it on (`dht::relay_holder`).
+        OperateRoute::Remote(_) if msg.op.kind().is_relay_inbox() => {
+            Err(Error::RelayCarrierNotHeldHere)
         }
         OperateRoute::Remote(next) => reset_storage_relay_destination(handler, ctx, next).await,
     }

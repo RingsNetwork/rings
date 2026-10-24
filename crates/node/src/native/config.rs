@@ -8,6 +8,8 @@ use rings_gateway::GatewayPlan;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::dns_relay::DnsRelayConfig;
+use crate::dns_relay::ServicesConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitPolicy;
@@ -275,6 +277,13 @@ pub struct Config {
     /// Managed bootstrap targets `rings run` keeps reachable for the life of the process.
     #[serde(default)]
     pub bootstrap: BootstrapConfig,
+    /// The services this node serves at `<did>.<zone>` through DNS relays (#1049); absent, it
+    /// announces nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<ServicesConfig>,
+    /// The DNS relay this node runs for its zones (#1049), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_relay: Option<DnsRelayConfig>,
     /// Virtual DHT positions per storage owner.
     #[serde(default = "default_storage_virtual_positions_per_owner")]
     pub dht_virtual_nodes: u16,
@@ -375,6 +384,8 @@ impl Config {
                 crate::onion::proxy::http::default_max_connect_connections(),
             gateway: Some(NativeGatewayConfig::disabled_default()),
             bootstrap: BootstrapConfig::default(),
+            services: None,
+            dns_relay: None,
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             origin_quota: OriginQuotaConfig::default(),
             external_ip: None,

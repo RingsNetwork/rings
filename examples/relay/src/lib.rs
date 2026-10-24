@@ -16,9 +16,9 @@ use std::time::Duration;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
-use rings_core::storage::MemStorage;
 use rings_core::swarm::OfferReply;
 use rings_node::extension::protocols::relay::RelayHandle;
+use rings_node::native::stores::NodeStores;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
@@ -46,10 +46,16 @@ pub async fn spawn_node() -> (Arc<Processor>, Arc<Provider>, RelayHandle) {
         delegatee_key,
         3,
     );
+    // Each node keeps its stores in a directory of its own (#1022).
+    let root = std::env::temp_dir().join(format!("rings-relay-example-{}", key.address()));
+    let stores = NodeStores::open_under(&root).await.expect("node stores");
     let processor = Arc::new(
         ProcessorBuilder::from_config(&config)
             .expect("processor builder")
-            .storage(Box::new(MemStorage::new()))
+            .storage(stores.data)
+            .relay_storage(stores.relay)
+            .replay_storage(stores.replay)
+            .onion_entry_guard_storage(stores.guards)
             .build()
             .expect("build processor"),
     );

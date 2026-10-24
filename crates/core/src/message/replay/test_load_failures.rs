@@ -94,3 +94,25 @@ impl StorageHooks for WritesRefused {
         )))
     }
 }
+
+/// A runtime given no replay store refuses every reservation and admission (#1022): it never
+/// keeps a window in memory, so no restart can reopen a stream, and nothing is counted as a
+/// persistence failure, since there is no store to fail.
+#[tokio::test]
+async fn test_a_runtime_without_a_store_refuses_every_transition() {
+    let runtime = std::sync::Arc::new(TransactionReplay::new_with_quota(
+        None,
+        crate::message::OriginQuotaConfig::default(),
+    ));
+    let key = stream(SecretKey::random().address().into());
+
+    assert!(matches!(
+        runtime.admit(key, 0, digest(1)).await,
+        Err(Error::TransactionReplayStorageUnavailable)
+    ));
+    assert!(matches!(
+        runtime.reserve(key, std::num::NonZeroU64::MIN).await,
+        Err(Error::TransactionReplayStorageUnavailable)
+    ));
+    assert_eq!(runtime.counters().persistence_failure, 0);
+}

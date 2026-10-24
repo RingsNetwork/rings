@@ -1,6 +1,5 @@
 use super::inbox::inbox_destination;
 use super::inbox::inbox_key;
-use super::inbox::relocates_from_predecessor;
 use super::inbox::HeldMessage;
 use super::inbox::InboxElement;
 use super::Entry;
@@ -333,14 +332,12 @@ fn test_hold_law_admits_only_the_responsible_holder_of_a_live_message() -> Resul
         now_ms,
     )?);
 
-    hold.validate_inbox_write(responsible, Some(responsible), now_ms, TEST_NETWORK_ID)?;
-    for (writer, node) in [
-        (stranger, Some(responsible)),
-        (responsible, Some(stranger)),
-        (responsible, None),
-    ] {
+    hold.validate_inbox_write(responsible, true, now_ms, TEST_NETWORK_ID)?;
+    // A writer the holder's view does not admit, and an admitted writer that is not the holder
+    // of the elements, are both refused.
+    for (writer, admitted) in [(responsible, false), (stranger, true)] {
         assert!(matches!(
-            hold.validate_inbox_write(writer, node, now_ms, TEST_NETWORK_ID),
+            hold.validate_inbox_write(writer, admitted, now_ms, TEST_NETWORK_ID),
             Err(Error::RelayMessageHolderNotResponsible)
         ));
     }
@@ -351,7 +348,7 @@ fn test_hold_law_admits_only_the_responsible_holder_of_a_live_message() -> Resul
         now_ms,
     )?);
     assert!(matches!(
-        relayed.validate_inbox_write(responsible, Some(responsible), now_ms, TEST_NETWORK_ID),
+        relayed.validate_inbox_write(responsible, true, now_ms, TEST_NETWORK_ID),
         Err(Error::RelayMessageHolderNotResponsible)
     ));
 
@@ -364,7 +361,7 @@ fn test_hold_law_admits_only_the_responsible_holder_of_a_live_message() -> Resul
     )?);
     stale.validate_admissible_at(stale_now, TEST_NETWORK_ID)?;
     assert!(matches!(
-        stale.validate_inbox_write(responsible, Some(responsible), stale_now, TEST_NETWORK_ID),
+        stale.validate_inbox_write(responsible, true, stale_now, TEST_NETWORK_ID),
         Err(Error::RelayMessageHoldStale)
     ));
     Ok(())
@@ -379,14 +376,14 @@ fn test_removal_authority_is_the_recipient_alone_and_nothing_else_is_allowed() -
 
     EntryOperation::Tombstone(carrier.clone()).validate_inbox_write(
         destination,
-        Some(responsible),
+        false,
         now_ms,
         TEST_NETWORK_ID,
     )?;
     assert!(matches!(
         EntryOperation::Tombstone(carrier.clone()).validate_inbox_write(
             responsible,
-            Some(responsible),
+            true,
             now_ms,
             TEST_NETWORK_ID
         ),
@@ -395,24 +392,13 @@ fn test_removal_authority_is_the_recipient_alone_and_nothing_else_is_allowed() -
     assert!(matches!(
         EntryOperation::Overwrite(carrier.clone()).validate_inbox_write(
             destination,
-            Some(responsible),
+            true,
             now_ms,
             TEST_NETWORK_ID
         ),
         Err(Error::RelayInboxOperationNotAllowed)
     ));
     Ok(())
-}
-
-#[test]
-fn test_relocation_is_accepted_from_the_predecessor_alone() {
-    let predecessor = Did::from(3u32);
-    assert!(relocates_from_predecessor(predecessor, Some(predecessor)));
-    assert!(!relocates_from_predecessor(
-        Did::from(4u32),
-        Some(predecessor)
-    ));
-    assert!(!relocates_from_predecessor(predecessor, None));
 }
 
 #[test]

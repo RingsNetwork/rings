@@ -2,6 +2,10 @@ use super::config::validate_dht_virtual_nodes;
 use super::config::validate_onion_role_config;
 use super::*;
 use crate::consts::DATA_REDUNDANT;
+#[cfg(rings_native)]
+use crate::dns_relay::ServiceOffer;
+#[cfg(rings_native)]
+use crate::dns_relay::ServiceRegistration;
 
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {
@@ -31,6 +35,9 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
     /// An observer chained after the processor's own `Observability`.
     pub(in crate::processor) observer: Option<rings_core::swarm::observer::SharedSwarmObserver>,
+    /// The heartbeat announcing this node's services through DNS relays (#1049), if any.
+    #[cfg(rings_native)]
+    pub(in crate::processor) service_registration: Option<Arc<dyn RegistrationTask>>,
 }
 
 impl ProcessorBuilder {
@@ -68,7 +75,18 @@ impl ProcessorBuilder {
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
             observer: None,
+            #[cfg(rings_native)]
+            service_registration: None,
         })
+    }
+
+    /// Announce `offer` through DNS relays: the processor publishes this node's service
+    /// descriptor on every heartbeat of the offer (#1049).
+    #[cfg(rings_native)]
+    pub fn announce_services(mut self, offer: ServiceOffer) -> Self {
+        let did = self.delegatee_key.delegator_did();
+        self.service_registration = Some(Arc::new(ServiceRegistration::new(did, offer)));
+        self
     }
 
     /// Chain `observer` after the processor's own `Observability`, an open hook for embedders
@@ -106,7 +124,9 @@ impl ProcessorBuilder {
         self
     }
 
-    /// Set durable destination-scoped transaction replay storage.
+    /// Set durable destination-scoped transaction replay storage: an authoritative store.
+    /// Without one, the processor refuses every replay transition, so it neither sends nor
+    /// accepts a transaction (`SwarmBuilder::replay_storage`, #1022).
     pub fn replay_storage(mut self, storage: ReplayStorage) -> Self {
         self.replay_storage = Some(storage);
         self
@@ -188,9 +208,6 @@ impl ProcessorBuilder {
             .map_err(|e| Error::VerifyError(e.to_string()))?;
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
-        let replay_storage = self
-            .replay_storage
-            .unwrap_or_else(|| Box::new(MemStorage::new()));
         let onion_entry_guard_storage = self
             .onion_entry_guard_storage
             .unwrap_or_else(|| Box::new(MemStorage::new()));
@@ -220,6 +237,8 @@ impl ProcessorBuilder {
             );
             registration_tasks.push(Arc::new(onion_exit_registration));
         }
+        #[cfg(rings_native)]
+        registration_tasks.extend(self.service_registration);
 
         // One recorder is shared between core protocol hooks and node-level snapshot assembly.
         let observability = Arc::new(crate::observability::Observability::new());
@@ -233,7 +252,9 @@ impl ProcessorBuilder {
         swarm_builder = swarm_builder.dht_finger_table_size(self.dht_finger_table_size);
         swarm_builder = swarm_builder.dht_virtual_nodes(self.dht_virtual_nodes);
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
-        swarm_builder = swarm_builder.replay_storage(replay_storage);
+        if let Some(replay_storage) = self.replay_storage {
+            swarm_builder = swarm_builder.replay_storage(replay_storage);
+        }
         if let Some(relay_storage) = self.relay_storage {
             swarm_builder = swarm_builder.relay_storage(relay_storage);
         }

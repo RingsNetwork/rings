@@ -307,6 +307,24 @@ pub enum Error {
     #[error("This node keeps no retained relay store and takes custody of no relay carrier")]
     RelayStorageUnavailable,
 
+    /// No node from the relay inbox key's owner to the end of this node's successor list holds
+    /// relay mail, so the carrier has no holder this view can name, and the hold is refused to
+    /// its sender (`dht::relay_holder`, Law (Bound))
+    #[error("No node from the relay inbox key's owner on this successor list holds relay mail")]
+    RelayHolderUnavailable,
+
+    /// A relay carrier operation reached a node that does not hold the carrier under its own
+    /// view; it is refused there rather than routed on, so two views that disagree cannot pass
+    /// it back and forth
+    #[error("This node does not hold the relay carrier the operation was sent to")]
+    RelayCarrierNotHeldHere,
+
+    /// This node keeps as many unacknowledged relay holds as it may
+    /// (`UNACKNOWLEDGED_RELAY_HOLDS_MAX`), so it refuses another to its local sender rather than
+    /// forget an earlier one
+    #[error("This node keeps as many unacknowledged relay holds as it may")]
+    RelayHoldsUnacknowledgedFull,
+
     /// A storage count or record length does not fit its interface width
     #[error("A storage count or record length does not fit its interface width")]
     StorageCountOverflow,
@@ -781,6 +799,11 @@ pub enum Error {
         capacity: usize,
     },
 
+    /// This node was given no transaction replay store, so it refuses every reservation and
+    /// admission: a volatile replay store would reopen every stream at each restart (#1022)
+    #[error("This node keeps no transaction replay store and refuses every replay transition")]
+    TransactionReplayStorageUnavailable,
+
     /// A storage holds a record it cannot read or decode; the record is kept, never deleted.
     #[error("Storage cannot decode {0}")]
     StorageRecordUndecodable(crate::storage::UndecodableRecord),
@@ -789,6 +812,11 @@ pub enum Error {
     /// removed or renamed outside the store, or lost by the file system. Its marker is kept.
     #[error("Storage is missing {0}")]
     StorageRecordMissing(crate::storage::UndecodableRecord),
+
+    /// Another open store holds this store directory's exclusive lock (#1039): one store
+    /// directory has one writer, so this open refuses instead of interleaving with it.
+    #[error("Storage directory {} is held by another open store", .0.display())]
+    StorageDirectoryLocked(std::path::PathBuf),
 
     /// Message invalid: {0}
     #[error("Message invalid: {0}")]

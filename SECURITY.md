@@ -179,15 +179,27 @@ route.
   size; versions too far ahead of the receiver's clock are rejected. Each data-topic element
   expires at its own horizon, and a removal is collected only once every write it covers has
   expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
-  while the carrier is retained. A relay inbox is verified by its owner, readable only by
+  while the carrier is retained. A relay inbox is verified by its holder, readable only by
   its recipient, and removable only by its recipient or, in an ownership hand-off, by the
-  previous owner once the next one acknowledged holding exactly that value; it is capped at
+  previous holder once the next one acknowledged holding exactly that value; it is capped at
   64 messages. Relay carriers live in a store of their own (#1021), retained: a completed hold
   survives a crash, and the data store's budget never evicts held mail; a full relay store
-  refuses a new hold instead. A node without a retained relay store (a browser whose
-  IndexedDB cannot open, a library node built without one) takes custody of no relay carrier:
-  it refuses to hold mail, and its own mail stays with its holder. Values are stored in the clear.
-  [Details](docs/src/advanced-topic/chord.md#data-topic-storage).
+  refuses a new hold instead. A node without a retained relay store (a browser whose IndexedDB
+  cannot open, a library node built without one) declares in its handshake that it holds no relay
+  mail, and relay custody moves past it: an inbox is held by the first node at or after its key's
+  owner that holds relay mail, which every relay path names by one function (#1037). A hold no node
+  within the writer's successor list can take is refused to the writer, never dropped. The holder of
+  a key behind its predecessor admits a hold only from a storage-less node of the run at or after
+  the destination, and the previous holder it learns is passed from predecessor to successor, so a
+  dishonest node of a run can at most make the holder after it refuse or misplace mail whose key
+  lies on that run. A writer keeps every hold until the holder it sent it to acknowledges it, and
+  sends it again on later repair passes until a holder takes it or its sender proof expires, so a
+  lost acknowledgement or refusal costs a resend, never the mail; only the node a hold was sent to
+  can acknowledge or refuse it, and at most 64 holds are kept, another being refused to its local
+  sender. A holder takes a relocated carrier only for a key its own view makes it hold, from a node
+  that holds relay mail, and only elements that pass the witness. Values are stored in the clear.
+  [Details](docs/src/advanced-topic/chord.md#data-topic-storage),
+  [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
   refuses no honest frame, refuses and reports a frame beyond its credit, and pushes overload
   back to the sender. One peer's backpressure never holds another's control lane (lane 0, which
@@ -209,6 +221,26 @@ route.
   tests in its crate.
 - **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures
   nothing until the operator lists a prefix, and never grants itself host capabilities.
+- **DNS relay.** A relay serves only what an owner signed: an owner's name answers from its
+  newest descriptor that verifies under the owner's DID, so no node can publish records or
+  services for another (#1049). The ingress carries a connection only to an address its DNS
+  handed out and a port the owner announced, and the owner's node dials only the
+  `dns-relay/<port>` services its own configuration registered, so a relay is no open proxy
+  into a node. The address map is keyed by the relay's secret, so no one can grind a DID onto
+  another's address; a colliding second owner gets no address. Admission bounds the
+  connections carried at once, in total and per owner. The relay sees what it carries: the
+  bytes cross the overlay in the TCP relay, readable by the relay and by every hop, so a service
+  that needs confidentiality ends TLS on the node (a certificate for `<did>.<zone>` by ACME
+  DNS-01 through the owner's own TXT records). The relay keeps answering for a vanished owner
+  for its grace period, from the last descriptor it verified; an owner withdraws at once by
+  announcing nothing. A served port is a service of the node's TCP relay, so any overlay peer
+  that opens `dns-relay/<port>` reaches its target, not only relays: map only what may face the
+  internet. The PROXY protocol header of a `proxy_protocol: v2` port is unauthenticated, as the
+  relay or any such peer writes the first bytes; a service may log, rate or filter by the client
+  it names, never authorize by it. The relay bounds what strangers make it do: an `ANY` query
+  gets one record set (RFC 8482), at most `max_lookups` DHT lookups run at once (the rest are
+  answered from memory or refused), at most `max_owners` owners are kept, and the ingress takes
+  a connection's slot before routing it and IPv4 connections never reach it.
 
 ## Non-Goals
 
@@ -229,3 +261,7 @@ route.
 - #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal
   received by sync can hold a topic live for up to the horizon past the receiver's clock.
 - #932: a reassembled message whose full-size mailbox charge does not fit is dropped.
+- #1055: one origin runs one browser node at a time. A native store locks its directory, so a
+  second daemon or FFI provider over it fails to open (#1039), but two browser tabs of one origin
+  open the same IndexedDB stores and would interleave their writes to the replay and relay
+  stores; nothing refuses the second tab yet.

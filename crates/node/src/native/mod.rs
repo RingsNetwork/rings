@@ -11,3 +11,5 @@ pub mod config;
 pub mod endpoint;
 /// Foreground native TUN gateway supervision.
 pub mod gateway;
+// Documented by its own module docs, whose intra-doc links resolve in its scope.
+pub mod stores;

@@ -286,6 +286,9 @@ pub struct OnlineNodeCapabilitiesInfo {
     /// Process epoch at which the node registers the onion `relay` symbol, encoded with the node
     /// serde shape; absent when it registers no `relay`.
     pub onion_relay: Option<Value>,
+    /// Whether the node holds relay mail (it keeps a retained relay store); relay custody moves
+    /// past a node that does not.
+    pub holds_relay_mail: bool,
 }
 
 /// Public descriptor for a node currently known by the online-node directory.

@@ -14,6 +14,10 @@ extend-ignore-re = ["[wW]s", "WS"]
 Brin = "Brin"
 Pease = "Pease"
 Tung = "Tung"
+# SMTP's HELO command (RFC 5321 §4.1.1.1), and the names that spell it.
+HELO = "HELO"
+Helo = "Helo"
+helo = "helo"
 
 # JSON-RPC method name as documented in docs/src/jsonrpc.md.
 [default.extend-identifiers]

@@ -15,6 +15,7 @@ use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
+use crate::dht::RelayCustody;
 use crate::dht::StorageKey;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
@@ -111,16 +112,19 @@ fn inbox_slot(inbox: &Entry) -> StorageKey {
     StorageKey::new(EntryKind::RelayMessage, inbox.did)
 }
 
-/// Relocation law: a relay carrier is accepted from the receiver's predecessor and skipped
-/// without an acknowledgement from anyone else, while the data entries sharing its batch are
-/// accepted either way; the carrier is not invalid, only not this receiver's to take yet.
+/// Relocation law: a relay carrier is accepted from a node that holds relay mail and skipped
+/// without an acknowledgement from one that declared it holds none, while the data entries
+/// sharing its batch are accepted either way; the carrier is not invalid, only not this
+/// receiver's to take from that sender.
 #[tokio::test]
-async fn test_persist_synced_entries_relocates_a_relay_carrier_from_the_predecessor_alone(
-) -> Result<()> {
+async fn test_persist_synced_entries_relocates_a_relay_carrier_from_a_holder_alone() -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
     let predecessor: Did = SecretKey::random().address().into();
     let stranger: Did = SecretKey::random().address().into();
     *receiver.dht().lock_predecessor()? = Some(predecessor);
+    receiver
+        .dht()
+        .observe_relay_custody(stranger, RelayCustody::HoldsNone)?;
     let topic = live_entry(
         Did::from(10u32),
         vec![Bytes::from("acked")],

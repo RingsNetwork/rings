@@ -249,16 +249,11 @@ fn fixture_origin_quota() -> Result<OriginQuotaConfig> {
     Ok(OriginQuotaConfig::new(lane, lane, lane, lane))
 }
 
-/// Builds a node with explicit ICE servers and optional measurement recording.
-fn prepare_node_with_ice_servers_and_measure(
-    key: SecretKey,
-    ice_servers: &str,
-    measure: Option<MeasureImpl>,
-) -> Result<Node> {
+/// The builder of a fixture node with explicit ICE servers and no relay store.
+fn fixture_builder(key: &SecretKey, ice_servers: &str) -> Result<SwarmBuilder> {
     let storage = Box::new(MemStorage::new());
-
-    let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-    let builder = SwarmBuilder::new(
+    let delegatee_key = DelegateeKey::new_with_seckey(key)?;
+    Ok(SwarmBuilder::new(
         crate::tests::TEST_NETWORK_ID,
         ice_servers,
         storage,
@@ -266,8 +261,24 @@ fn prepare_node_with_ice_servers_and_measure(
     )
     .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
     .dht_virtual_nodes(0)
-    .relay_storage(crate::tests::volatile_relay_storage())
-    .origin_quota(fixture_origin_quota()?);
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(fixture_origin_quota()?))
+}
+
+/// A fixture node with no relay store: it declares that it holds no relay mail.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub fn prepare_node_without_relay_storage(key: SecretKey) -> Result<Node> {
+    Ok(Node::build(fixture_builder(&key, TEST_ICE_SERVERS)?))
+}
+
+/// Builds a node with explicit ICE servers and optional measurement recording.
+fn prepare_node_with_ice_servers_and_measure(
+    key: SecretKey,
+    ice_servers: &str,
+    measure: Option<MeasureImpl>,
+) -> Result<Node> {
+    let builder =
+        fixture_builder(&key, ice_servers)?.relay_storage(crate::tests::volatile_relay_storage());
     let builder = match measure {
         Some(measure) => builder.measure(measure),
         None => builder,

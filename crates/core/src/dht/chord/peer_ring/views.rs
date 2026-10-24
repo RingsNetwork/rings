@@ -20,7 +20,6 @@ use crate::dht::delivery::Origination;
 use crate::dht::delivery::RouteStage;
 use crate::dht::successor::SuccessorSeq;
 use crate::dht::topology;
-use crate::dht::topology::FindSuccessorStep;
 use crate::dht::topology::TopologyState;
 use crate::dht::virtual_node::VirtualNodeConfig;
 use crate::dht::Did;
@@ -89,15 +88,6 @@ impl PeerRing {
     /// unreachable `did` in this interval has reached the node that must hold it.
     pub(crate) fn is_responsible_for(&self, did: Did) -> Result<bool> {
         self.with_topology_state(|state| topology::is_responsible_for(state, did))
-    }
-
-    /// The node this owner routes the position `destination` to, when its own view answers:
-    /// the only node whose holds for `destination` this owner admits (see the `inbox` module).
-    pub(crate) fn inbox_hold_authority(&self, destination: Did) -> Result<Option<Did>> {
-        self.with_topology_state(|state| match topology::find_successor(state, destination) {
-            FindSuccessorStep::Local(responsible) => Some(responsible),
-            FindSuccessorStep::Remote { .. } => None,
-        })
     }
 
     /// The delivery decision for a payload addressed to the node `destination` whose carrier

@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.36.0
+
+- DNS relay (#1049): every node is named `<did>.<zone>` in each zone a relay serves, and the
+  services it announces are reachable there from the internet. The new crate `rings-dns-relay`
+  is the relay: an authoritative DNS server (`hickory-server`) for the zones delegated to it, an
+  address map giving every DID its own IPv6 address in the relay's prefix (keyed by a secret,
+  its inverse kept across restarts), a memory of announcements that answers without a lookup
+  for a freshness window and keeps a vanished owner named for a grace period, and an ingress,
+  IPv6 only, that relays a TCP connection to `(address, port)` to the owner's announced port.
+  The book and the memory are append-only journals in the state directory, bounded by
+  `max_owners`; at most `max_lookups` DHT lookups run at once, and an `ANY` query gets one
+  record set (RFC 8482). On the node, the `services` section of `config.yaml` maps ports to
+  local addresses, each optionally preceded by a PROXY protocol v2 header naming the client
+  (`proxy_protocol: v2`): the node registers each as the TCP relay service `dns-relay/<port>`
+  and publishes a signed service descriptor (`ServiceDescriptor`, domain tag
+  `rings-node:service-descriptor`) on the DHT topic `dns_relay:<did>` every heartbeat
+  (`ProcessorBuilder::announce_services`). The `dns_relay` section runs a relay
+  (`rings_node::dns_relay::{DhtDirectory, RelayForward}`); a relay node's own served ports are
+  dialed directly, since the overlay has no hop to itself. Both sections are absent by default.
+  The new `RelayHandle::carry_tcp_stream` relays an accepted stream like `relay_tcp_stream`, a
+  given preamble first, and returns only once the relay is done with it, so a caller bounding
+  its live connections (the ingress's per-owner admission) holds its slot for the connection's
+  life. The new `examples/mailbox` is `me@<did>.<zone>` as a program: SMTP receiver (reading the
+  PROXY header with `--receiver-proxy-protocol`), mailbox store, IMAP4rev1 server and SMTP
+  submission with an outbound queue and its own SMTP client.
+  - **Upgrade consequence.** None: the descriptor is a new registry, and a node without the new
+    sections publishes and runs nothing new.
+  - **Operator step.** None, unless running a relay: see the DNS Relay chapter.
+
+- RUSTSEC-2026-0387 (`crypto-bigint`: secret-dependent branches in constant-time operations) is
+  ignored in `deny.toml` for now (#1051). The fix exists only in `crypto-bigint` 0.7.6, while
+  0.5.5 reaches us through `elliptic-curve` 0.13 (`k256` in rings-core, `p256` via webrtc's
+  `dtls`), which no 0.5.x release fixes; #1051 tracks the `elliptic-curve` 0.14 upgrade.
+
+- A node given no transaction replay store refuses every replay transition (#1022): a
+  reservation or an admission fails with the new `Error::TransactionReplayStorageUnavailable`,
+  so it neither sends nor accepts a transaction, instead of keeping its replay windows in memory
+  and reopening every stream at each restart. `SwarmBuilder`, `ProcessorBuilder` and `Provider`
+  no longer default the replay store to `MemStorage`; the native daemon and the browser provider
+  open an authoritative one, as before. Breaking for `rings-core` and `rings-node` library
+  callers that relied on the in-memory default: pass `replay_storage(...)`. A relay-inbox drain
+  on such a node defers its mail.
+- **Breaking (C ABI):** `rings_node_new_provider_with_callback` takes a new `storage_path`
+  argument, before `signer` (#1022). The FFI provider used to keep every store in memory, its
+  replay windows included; it now opens the native node's stores under that directory, each at
+  its authority, through the new `rings_node::native::stores::NodeStores`, which the daemon uses
+  too: `data`, `transaction-replay` (authoritative), `relay-inbox` (retained),
+  `onion-entry-guards` (durable cache), `measure` and `provisional-evidence`. Pass the same path
+  on every run of one node. `rings.h`, `docs/src/ffi.md` and the Python, Kotlin and Swift
+  wrappers take the path too (`create_provider(runtime, acc, storage_path)`,
+  `createProvider(account, storagePath, signer)`, `RingsProvider(runtime:account:storagePath:)`).
+
+- Relay custody moves past nodes without a relay store (#1037). Every node declares whether it holds
+  relay mail: in its connection handshake (the new `relay_custody` field of `ConnectNodeSend` and
+  `ConnectNodeReport`, `rings_core::dht::RelayCustody`) and in its online-node descriptor
+  (`OnlineNodeCapabilities::relay_custody`; `holds_relay_mail` in the JSON-RPC
+  `OnlineNodeCapabilitiesInfo`). The holder of a relay inbox key is the first node at or after the
+  key's owner along the successor path that holds relay mail, and one function (`dht::relay_holder`)
+  names it on every relay path, so mail for an inbox whose owner keeps no relay store is held by the
+  next node that does, instead of being refused and lost. A recipient without a relay store fetches
+  its inbox from its holder (the new `FetchRelayInbox` and `RelayInboxReport` messages) and removes
+  what it delivered there. Each repair pass, every node passes the previous holder it knows to its
+  successor head (the new `AnnounceRelayHolder` message), so a holder places the keys owned on the
+  storage-less run behind it. A hold with no holder within the writer's successor list is refused to
+  the writer with the new `Error::RelayHolderUnavailable`; a relay operation sent to a node whose
+  view does not make it the holder is refused there with the new `Error::RelayCarrierNotHeldHere`. A
+  writer keeps every hold it sends until the holder acknowledges it (the new `RelayCarrierHeld`
+  message) and sends every kept hold again on each repair pass until a holder takes it or its sender
+  proof expires; a target's refusal (the new `RelayCarrierRefused` message) only lets it send
+  sooner. At most `UNACKNOWLEDGED_RELAY_HOLDS_MAX` (64) holds are kept; another is refused to its
+  local sender with the new `Error::RelayHoldsUnacknowledgedFull`. A holder takes a relocated
+  carrier from any node that holds relay mail, for a key its own view makes it hold. Online
+  messaging and data-topic ownership are unchanged.
+  - **Upgrade consequence.** The handshake and the message set change with no version: a node of
+    this version and one of an earlier version cannot connect, so every node of an overlay
+    upgrades together.
+  - **Operator step.** Upgrade every node of the overlay at once. No store needs clearing: relay
+    carriers keep their keys, and a carrier whose holder moved is handed to it by the first
+    repair passes.
+
+- Each file store locks its own directory at open (#1039): `FileStorage` takes an exclusive lock
+  on a `.lock` file in the store's directory (`flock` on unix, `LockFileEx` on Windows) and holds
+  it while the store lives, so a second open of a store that is open, in the same process or
+  another, fails with the new `Error::StorageDirectoryLocked` instead of interleaving writes with
+  it. This covers the native daemon and the FFI provider alike: a second daemon or provider given
+  an open node's stores now fails to start. The lock is per store, so stores under one root open
+  together. A file system that offers no such lock fails the open. A lock is released when its
+  process exits, so a crashed node leaves nothing to clean up; the `.lock` file may stay in place.
+
 ## 0.35.0
 
 - `tokio` is bumped to 1.53.3 for RUSTSEC-2026-0386 (`AsyncFd::new` and related constructors

@@ -40,13 +40,21 @@ pub(crate) fn test_processor_config(key: &SecretKey, network_id: u32) -> Process
     )
 }
 
-/// The builder of a test processor over `config`: memory storage,
+/// An in-memory replay store: the named choice of a fixture whose replay windows need not
+/// survive its process. Production never builds one (#1022): a processor without an
+/// authoritative replay store refuses every replay transition instead.
+pub(crate) fn volatile_replay_storage() -> rings_core::message::ReplayStorage {
+    Box::new(MemStorage::<rings_core::message::ReplayRecord>::new())
+}
+
+/// The builder of a test processor over `config`: memory storage and replay store,
 /// [`TEST_DHT_FINGER_TABLE_SIZE`] finger slots and the [`activity::activity_observer`]. Each
 /// fixture chains its one difference; a later `storage` replaces the memory one.
 pub(crate) fn test_processor_builder(config: &ProcessorConfig) -> ProcessorBuilder {
     ProcessorBuilder::from_config(config)
         .expect("test processor config")
         .storage(Box::new(MemStorage::new()))
+        .replay_storage(volatile_replay_storage())
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .observer(activity::activity_observer())
 }

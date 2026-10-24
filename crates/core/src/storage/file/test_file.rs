@@ -529,6 +529,7 @@ async fn test_a_record_of_another_key_is_undecodable_for_its_name() {
         None
     );
     assert!(!root.join(&name).exists());
+    drop(disposable);
 
     // A disposable `get_all` retires such a record too, and returns neither key.
     plant_record(&root, "stream", &copied);
