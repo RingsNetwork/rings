@@ -179,21 +179,22 @@ where the run starts however long it is.
   view places every neighbour with its declaration. The previous-holder records settle within
   `L + 1` repair passes after a membership change, `L` the longest storage-less run. Until
   then a hold lands where repair moves it on, or is refused and sent again, so no mail is lost
-  in the window. Two relay-capable nodes joining one run longer than a successor list within
-  one window are the exception (#1045).
+  in the window, including when several relay-capable nodes join one long run within it
+  (#1045).
 - **Who may hold.** The holder admits a hold only from the node responsible for the
   destination as its view places it: its successor head for a destination it owns, itself for a
   destination in `(predecessor, self]`, and otherwise a storage-less node of the run at or after
   the destination.
-- **Membership changes.** The holder moves only when the first relay-capable node after the
-  owner changes. A storage-less node joining or leaving between the key and the holder moves
-  nothing. A storage-less node joining as the key's owner moves custody forward to the next
-  holder; a relay-capable node joining inside a run takes custody back from the holder after
-  it. Each move is an ownership hand-off acknowledged by the new holder before the old one
-  deletes. A carrier whose owner the old holder cannot place is offered to both ends of its
-  view, and the new holder takes a carrier only for a key its own view makes it hold, from a
-  node that holds relay mail: custody can jump between holders that do not know each other,
-  as when a holder gives back the keys of a run a relay-capable node joined.
+- **Membership changes.** The holder moves only when the first relay-capable node after the owner
+  changes. A storage-less node joining or leaving between the key and the holder moves nothing. A
+  storage-less node joining as the key's owner moves custody forward to the next holder; a
+  relay-capable node joining inside a run takes custody back from the holder after it. Each move is
+  an ownership hand-off acknowledged by the new holder before the old one deletes. A carrier whose
+  owner the old holder cannot place is offered to both ends of its view and to the holder the key's
+  owner names: the owner always places its own keys, so the old holder asks it (`FindRelayHolder`,
+  #1045). The new holder takes a carrier only for a key its own view makes it hold, from a node
+  that holds relay mail: custody can jump between holders that do not know each other, as when a
+  holder gives back the keys of a run a relay-capable node joined.
 
 ## Finger-table convergence
 

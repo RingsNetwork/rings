@@ -1,6 +1,7 @@
 use super::Stabilizer;
 use super::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
 use crate::dht::topology;
+use crate::dht::types::Chord;
 use crate::dht::types::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
@@ -9,6 +10,7 @@ use crate::dht::StorageSyncDelivery;
 use crate::error::Result;
 use crate::message::handlers::inbox::send_relay_hold;
 use crate::message::AnnounceRelayHolder;
+use crate::message::FindRelayHolder;
 use crate::message::Message;
 use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
@@ -278,6 +280,7 @@ impl Stabilizer {
         }
         self.dht.forget_stale_relay_custody(&stale)?;
         self.resend_unacknowledged_relay_holds().await?;
+        self.ask_owners_of_unplaced_relay_keys().await?;
         let Some((head, previous)) = self.dht.previous_relay_holder_to_pass()? else {
             return Ok(());
         };
@@ -323,6 +326,33 @@ impl Stabilizer {
                     local = %self.dht.did,
                     error = ?error,
                     "STABILIZATION relay hold not placed on this pass"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Ask the owner of every relay key kept here whose owner this view does not place for the
+    /// key's holder (`FindRelayHolder`, `Law (Owner places)`); its answer names the holder the
+    /// next pass offers the carrier to. A query that is not queued is asked again next pass.
+    async fn ask_owners_of_unplaced_relay_keys(&self) -> Result<()> {
+        for key in self.dht.unplaced_relay_keys(get_epoch_ms()).await? {
+            let PeerRingAction::RemoteAction(next, _) = self.dht.find_successor(key)? else {
+                continue;
+            };
+            let query = Message::FindRelayHolder(FindRelayHolder { key });
+            if let Err(error) = self
+                .transport
+                .protocol_egress()
+                .send_message(query, next)
+                .await
+            {
+                tracing::debug!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    %key,
+                    error = ?error,
+                    "STABILIZATION relay holder query not queued; asked again next pass"
                 );
             }
         }

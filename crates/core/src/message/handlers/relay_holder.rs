@@ -1,12 +1,17 @@
 //! Handlers of relay custody (see `dht::relay_holder`): the previous holder a predecessor passes,
-//! a recipient's fetch of its inbox, the holder's report back, and a holder's acknowledgement or
-//! a target's refusal of a hold, back to its writer.
+//! a recipient's fetch of its inbox, the holder's report back, a holder's acknowledgement or a
+//! target's refusal of a hold, back to its writer, and a keeper's query of a key's owner for its
+//! holder, with the answer.
 
 use async_trait::async_trait;
 
 use crate::dht::entry::inbox::inbox_key;
+use crate::dht::entry::EntryKind;
+use crate::dht::relay_holder::owner_answer;
 use crate::dht::relay_holder::PreviousHolder;
 use crate::dht::relay_holder::RelayHolder;
+use crate::dht::Chord;
+use crate::dht::PeerRingAction;
 use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -14,9 +19,11 @@ use crate::message::effects::CoreEffect;
 use crate::message::handlers::inbox::send_relay_hold;
 use crate::message::types::AnnounceRelayHolder;
 use crate::message::types::FetchRelayInbox;
+use crate::message::types::FindRelayHolder;
 use crate::message::types::Message;
 use crate::message::types::RelayCarrierHeld;
 use crate::message::types::RelayCarrierRefused;
+use crate::message::types::RelayHolderFound;
 use crate::message::types::RelayInboxReport;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
@@ -137,5 +144,69 @@ impl HandleMsg<RelayCarrierRefused> for MessageHandler {
             }
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl HandleMsg<FindRelayHolder> for MessageHandler {
+    /// Answer with the holder of `msg.key` as this node's view names it, when this node owns the
+    /// key (`Law (Owner places)`); otherwise route the query on toward the owner, as a lookup is.
+    async fn handle(&self, ctx: &MessagePayload, msg: &FindRelayHolder) -> Result<()> {
+        if ctx.should_forward_from(self.dht.did) {
+            return self
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .await;
+        }
+        match self.dht.find_successor(msg.key)? {
+            PeerRingAction::Some(_) => {
+                let holder = owner_answer(&self.dht.relay_segment()?, self.dht.did, msg.key);
+                self.run_effects([CoreEffect::send_report_message(
+                    ctx,
+                    Message::RelayHolderFound(RelayHolderFound {
+                        key: msg.key,
+                        holder,
+                    }),
+                )])
+                .await
+            }
+            PeerRingAction::RemoteAction(next, _) => {
+                self.run_effects([CoreEffect::reset_destination(ctx, next)])
+                    .await
+            }
+            action => Err(Error::unexpected_peer_ring_action(action)),
+        }
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl HandleMsg<RelayHolderFound> for MessageHandler {
+    /// Record the holder the owner named for a carrier this node keeps and does not place, and
+    /// ask for a repair pass, which offers the carrier there. An answer for a key this node keeps
+    /// no carrier of, or naming no holder, changes nothing; a wrong answer only costs an offer
+    /// the named node refuses.
+    async fn handle(&self, ctx: &MessagePayload, msg: &RelayHolderFound) -> Result<()> {
+        if ctx.should_forward_from(self.dht.did) {
+            return self
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .await;
+        }
+        let Some(holder) = msg.holder else {
+            return Ok(());
+        };
+        let kept = self
+            .dht
+            .live_storage_entry(
+                StorageKey::new(EntryKind::RelayMessage, msg.key),
+                get_epoch_ms(),
+            )
+            .await?
+            .is_some();
+        if kept && self.dht.name_relay_holder(msg.key, holder)? {
+            self.run_effects([CoreEffect::request_storage_repair()])
+                .await?;
+        }
+        Ok(())
     }
 }

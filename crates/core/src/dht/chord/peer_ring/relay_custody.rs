@@ -9,7 +9,7 @@
 //! ```
 //!
 //! The neighbourhood lock is a leaf: nothing is acquired while it is held. So is the lock of the
-//! unacknowledged holds, which no other lock is held across.
+//! unacknowledged holds and of the holder hints, which no other lock is held across.
 
 use std::collections::BTreeMap;
 use std::sync::MutexGuard;
@@ -214,6 +214,47 @@ impl PeerRing {
             .iter()
             .map(|(digest, known)| (*digest, known.hold.clone()))
             .collect())
+    }
+
+    /// Lock the holder hints, a leaf of `Law (Lock order)`.
+    fn lock_relay_holder_hints(&self) -> Result<MutexGuard<'_, BTreeMap<Did, Did>>> {
+        self.relay_holder_hints
+            .lock()
+            .map_err(|_| Error::LockPoisoned)
+    }
+
+    /// The keys of the live relay carriers kept here whose owner this view does not place: the
+    /// carriers to ask their key's owner about (`FindRelayHolder`, `Law (Owner places)`). The
+    /// holder hints keep only these keys, so they are bounded by the relay store.
+    pub(crate) async fn unplaced_relay_keys(&self, now_ms: u128) -> Result<Vec<Did>> {
+        let segment = self.relay_segment()?;
+        let unplaced = self
+            .live_storage_entries(now_ms)
+            .await?
+            .into_iter()
+            .filter(|(key, _)| key.kind().is_relay_inbox())
+            .map(|(key, _)| key.placement())
+            .filter(|key| relay_holder(&segment, *key) == RelayHolder::Unknown)
+            .collect::<Vec<_>>();
+        self.lock_relay_holder_hints()?
+            .retain(|key, _| unplaced.contains(key));
+        Ok(unplaced)
+    }
+
+    /// Record `holder`, which the owner of `key` named, for the carrier of `key` this view does
+    /// not place, iff `holder` is another node that holds relay mail as far as this node knows.
+    /// The result says whether it was recorded.
+    pub(crate) fn name_relay_holder(&self, key: Did, holder: Did) -> Result<bool> {
+        if holder == self.did || !self.lock_relay_neighborhood()?.holds(holder) {
+            return Ok(false);
+        }
+        self.lock_relay_holder_hints()?.insert(key, holder);
+        Ok(true)
+    }
+
+    /// The holders the keys' owners named, by key.
+    pub(crate) fn relay_holder_hints(&self) -> Result<BTreeMap<Did, Did>> {
+        Ok(self.lock_relay_holder_hints()?.clone())
     }
 
     /// Whether this node takes a relay carrier relocated by `sender` (`relocates_from`).

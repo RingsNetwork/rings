@@ -197,18 +197,21 @@ impl PeerRing {
     }
 
     /// Offer every relay carrier of `items` this node does not hold under its own view to the
-    /// nodes `relay_handoff_targets` names, as an ownership hand-off (`Law (Holder)`): onward to a
-    /// new head or past a storage-less run, or back to a previous holder that joined behind this
-    /// node. A carrier with no target stays here and is offered again on a later pass.
+    /// nodes `relay_handoff_targets` names, as an ownership hand-off (`Law (Holder)`): onward to
+    /// a new head or past a storage-less run, back to a previous holder that joined behind this
+    /// node, or to the holder the key's owner named (`Law (Owner places)`). A carrier with no
+    /// target stays here and is offered again on a later pass.
     ///
     /// Post S1/S2(copy): as [`Self::hand_off_beyond`]: nothing is removed here, and every
     /// emitted `PlacedEntry` keeps its exact local placement key.
     fn hand_off_relay_carriers(&self, items: Vec<(StorageKey, Entry)>) -> Result<PeerRingAction> {
         let segment = self.relay_segment()?;
+        let hints = self.relay_holder_hints()?;
         Ok(items
             .into_iter()
             .flat_map(|(key, entry)| {
-                relay_handoff_targets(&segment, key.placement(), self.did)
+                let named = hints.get(&key.placement()).copied();
+                relay_handoff_targets(&segment, key.placement(), self.did, named)
                     .into_iter()
                     .map(move |holder| {
                         PeerRingAction::sync_entries_for_handoff(

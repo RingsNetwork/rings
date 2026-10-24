@@ -1,6 +1,7 @@
 //! Messages of relay custody (see `dht::relay_holder`): a node passing the previous holder it
-//! knows to its successor head, a recipient fetching its inbox from its holder, and a holder's
-//! acknowledgement or a target's refusal of a hold, back to its writer.
+//! knows to its successor head, a recipient fetching its inbox from its holder, a holder's
+//! acknowledgement or a target's refusal of a hold, back to its writer, and a keeper asking a
+//! key's owner for its holder.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -65,4 +66,24 @@ pub struct RelayCarrierHeld {
 pub struct RelayCarrierRefused {
     /// The digest of the hold refused.
     pub hold: RelayHoldDigest,
+}
+
+/// A keeper whose view does not place the owner of the relay key `key` asks that owner for the
+/// key's holder. The query is routed toward the owner as a lookup is, and the owner answers
+/// (`RelayHolderFound`): it places every key of its own arc (`Law (Owner places)`).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FindRelayHolder {
+    /// The relay key.
+    pub key: Did,
+}
+
+/// The owner's answer to [`FindRelayHolder`]: the holder its view names for `key`, `None` for a
+/// key without one. The keeper offers its carrier there; the holder takes it only if its own view
+/// names it, so a wrong answer moves nothing.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RelayHolderFound {
+    /// The relay key.
+    pub key: Did,
+    /// The holder the owner names.
+    pub holder: Option<Did>,
 }

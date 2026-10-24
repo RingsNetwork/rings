@@ -9,6 +9,7 @@
 //! holder offers each carrier to the new one, which takes it.
 
 use super::in_arc;
+use super::owner_answer;
 use super::relay_handoff_targets;
 use super::relay_holder;
 use super::HoldAuthority;
@@ -121,24 +122,49 @@ fn test_a_closing_segment_owns_the_rest_of_the_ring_and_wraps_its_search() {
 #[test]
 fn test_hand_off_targets_are_the_holder_or_the_holding_ends_of_the_view() {
     let segment = RelaySegment::new(vec![node(10, true), node(20, false), node(30, true)]);
-    assert_eq!(relay_handoff_targets(&segment, did(15), did(30)), vec![
-        did(10)
-    ]);
-    assert_eq!(relay_handoff_targets(&segment, did(25), did(10)), vec![
-        did(30)
-    ]);
+    assert_eq!(
+        relay_handoff_targets(&segment, did(15), did(30), None),
+        vec![did(10)]
+    );
+    assert_eq!(
+        relay_handoff_targets(&segment, did(25), did(10), None),
+        vec![did(30)]
+    );
     // This node holds it: nothing to offer.
-    assert!(relay_handoff_targets(&segment, did(15), did(10)).is_empty());
+    assert!(relay_handoff_targets(&segment, did(15), did(10), None).is_empty());
     // Outside the view: offered to both ends that hold relay mail, this node excepted.
-    assert_eq!(relay_handoff_targets(&segment, did(35), did(20)), vec![
-        did(30),
-        did(10)
-    ]);
-    assert_eq!(relay_handoff_targets(&segment, did(35), did(10)), vec![
-        did(30)
-    ]);
+    assert_eq!(
+        relay_handoff_targets(&segment, did(35), did(20), None),
+        vec![did(30), did(10)]
+    );
+    assert_eq!(
+        relay_handoff_targets(&segment, did(35), did(10), None),
+        vec![did(30)]
+    );
     let ending_without_store = RelaySegment::new(vec![node(10, false), node(20, false)]);
-    assert!(relay_handoff_targets(&ending_without_store, did(25), did(10)).is_empty());
+    assert!(relay_handoff_targets(&ending_without_store, did(25), did(10), None).is_empty());
+    // The owner's answer comes first, and only for a key the view does not place.
+    assert_eq!(
+        relay_handoff_targets(&segment, did(35), did(20), Some(did(90))),
+        vec![did(90), did(30), did(10)]
+    );
+    assert_eq!(
+        relay_handoff_targets(&segment, did(15), did(30), Some(did(90))),
+        vec![did(10)]
+    );
+    assert!(
+        relay_handoff_targets(&ending_without_store, did(25), did(20), Some(did(20))).is_empty()
+    );
+}
+
+#[test]
+fn test_the_owner_answers_with_the_holder_of_its_own_arc_alone() {
+    let owner = RelaySegment::new(vec![node(10, false), node(20, false), node(30, true)]);
+    assert_eq!(owner_answer(&owner, did(20), did(25)), Some(did(30)));
+    // A key of another node's arc is not this node's to answer for.
+    assert_eq!(owner_answer(&owner, did(20), did(15)), None);
+    let without_holder = RelaySegment::new(vec![node(10, false), node(20, false)]);
+    assert_eq!(owner_answer(&without_holder, did(10), did(15)), None);
 }
 
 #[test]
@@ -296,6 +322,16 @@ impl Ring {
         neighborhoods
     }
 
+    /// The holder the owner of `key` names to a keeper that asks it, under `neighborhoods`.
+    fn owner_named(&self, neighborhoods: &[RelayNeighborhood], key: Did) -> Option<Did> {
+        let owner = self.owner(key);
+        owner_answer(
+            &self.segment(neighborhoods, owner),
+            self.nodes[owner].did,
+            key,
+        )
+    }
+
     /// Whether `node` is on the ring.
     fn has(&self, node: Did) -> bool {
         self.nodes.iter().any(|known| known.did == node)
@@ -385,7 +421,8 @@ fn assert_carriers_follow_the_holder(before: &Ring, after: &Ring) {
         let Some(o) = after.nodes.iter().position(|node| node.did == old) else {
             continue;
         };
-        let offered = relay_handoff_targets(&after.segment(&neighborhoods, o), key, old);
+        let named = after.owner_named(&neighborhoods, key);
+        let offered = relay_handoff_targets(&after.segment(&neighborhoods, o), key, old, named);
         if old == new {
             assert!(
                 offered.is_empty(),
@@ -544,15 +581,17 @@ fn assert_reaches_the_holder(
             .iter()
             .flat_map(|keeper| {
                 let k = ring.index(*keeper);
-                let takers = relay_handoff_targets(&ring.segment(neighborhoods, k), key, *keeper)
-                    .into_iter()
-                    .filter(|target| {
-                        let t = ring.index(*target);
-                        relay_holder(&ring.segment(neighborhoods, t), key)
-                            == RelayHolder::Holder(*target)
-                            && neighborhoods[t].relocates_from(*keeper)
-                    })
-                    .collect::<Vec<_>>();
+                let named = ring.owner_named(neighborhoods, key);
+                let takers =
+                    relay_handoff_targets(&ring.segment(neighborhoods, k), key, *keeper, named)
+                        .into_iter()
+                        .filter(|target| {
+                            let t = ring.index(*target);
+                            relay_holder(&ring.segment(neighborhoods, t), key)
+                                == RelayHolder::Holder(*target)
+                                && neighborhoods[t].relocates_from(*keeper)
+                        })
+                        .collect::<Vec<_>>();
                 assert!(
                     !takers.is_empty(),
                     "{keeper} keeps {key}, held by {truth:?}"
@@ -588,7 +627,8 @@ fn assert_window_loses_nothing(before: &Ring, after: &Ring) {
                 continue;
             };
             let o = after.index(old);
-            for target in relay_handoff_targets(&after.segment(&window, o), key, old) {
+            let named = after.owner_named(&window, key);
+            for target in relay_handoff_targets(&after.segment(&window, o), key, old, named) {
                 let t = after.index(target);
                 let takes = relay_holder(&after.segment(&window, t), key)
                     == RelayHolder::Holder(target)
@@ -634,4 +674,19 @@ fn test_model_mail_survives_the_convergence_window() {
     for (before, after) in transitions {
         assert_window_loses_nothing(&before, &after);
     }
+}
+
+/// Two relay-capable nodes, 150 and 350, join one storage-less run longer than the successor
+/// list, both behind the old holder 500, within one window (#1045). The key 101 is now held by
+/// 150, which neither end of 500's view places: 500 asks the key's owner, whose view always
+/// places it (`Law (Owner places)`), and offers the carrier to the holder it names.
+#[test]
+fn test_model_two_holders_joining_one_long_run_strand_no_carrier() {
+    let before = ring(&[100, 200, 300, 400, 500, 600], &[100, 200, 300, 400], 2);
+    let after = before.joined(node(150, true)).joined(node(350, true));
+    assert_eq!(before.holder(did(101)), Some(did(500)));
+    assert_eq!(after.holder(did(101)), Some(did(150)));
+    assert_views_agree_with_the_truth(&after);
+    assert_carriers_follow_the_holder(&before, &after);
+    assert_window_loses_nothing(&before, &after);
 }

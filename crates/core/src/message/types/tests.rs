@@ -172,6 +172,13 @@ sample_message_body!(RelayCarrierRefused, |fixture| RelayCarrierRefused {
 sample_message_body!(RelayCarrierHeld, |fixture| RelayCarrierHeld {
     hold: RelayHoldDigest::of(&EntryOperation::Extend(fixture.entry.clone()))?,
 });
+sample_message_body!(FindRelayHolder, |fixture| FindRelayHolder {
+    key: fixture.did
+});
+sample_message_body!(RelayHolderFound, |fixture| RelayHolderFound {
+    key: fixture.did,
+    holder: Some(fixture.did),
+});
 sample_message_body!(Chunk, |fixture| Chunk {
     chunk: [0, 1],
     data: Bytes::from(fixture.did.to_string()),

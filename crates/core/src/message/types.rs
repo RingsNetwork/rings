@@ -32,9 +32,11 @@ mod relay_holder;
 
 pub use relay_holder::AnnounceRelayHolder;
 pub use relay_holder::FetchRelayInbox;
+pub use relay_holder::FindRelayHolder;
 pub use relay_holder::RelayCarrierHeld;
 pub use relay_holder::RelayCarrierRefused;
 pub use relay_holder::RelayHoldDigest;
+pub use relay_holder::RelayHolderFound;
 pub use relay_holder::RelayInboxReport;
 
 /// DHT protocol mode that must match before two peers join the same DHT.
@@ -408,6 +410,10 @@ macro_rules! with_message_variants {
             23 => RelayCarrierRefused(RelayCarrierRefused): Storage, NoStorageRoute,
             /// A relay hold taken by its holder, acknowledged to its writer.
             24 => RelayCarrierHeld(RelayCarrierHeld): Storage, NoStorageRoute,
+            /// A keeper asking a relay key's owner for its holder.
+            25 => FindRelayHolder(FindRelayHolder): Storage, NoStorageRoute,
+            /// The owner's answer to FindRelayHolder.
+            26 => RelayHolderFound(RelayHolderFound): Storage, NoStorageRoute,
         }
     };
 }

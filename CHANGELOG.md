@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A relay carrier no longer strands at its old holder when two relay-capable nodes join one
+  storage-less run longer than a successor list within one convergence window (#1045). The owner
+  of a relay key always places it, as the key lies in its own arc, so an old holder whose view
+  cannot place a carrier's key asks the key's owner for its holder (the new `FindRelayHolder` and
+  `RelayHolderFound` messages, routed as a lookup) on each repair pass, and offers the carrier
+  there too. The holder still takes only a key its own view makes it hold, so a wrong answer
+  moves nothing. No operator step beyond upgrading the overlay together: the message set grows
+  with no version.
+
 - DNS relay (#1049): every node is named `<did>.<zone>` in each zone a relay serves, and the
   services it announces are reachable there from the internet. The new crate `rings-dns-relay`
   is the relay: an authoritative DNS server (`hickory-server`) for the zones delegated to it, an
