@@ -390,11 +390,26 @@ impl EntryOperation {
     /// Post: every carried entry has `expires_at_ms = Some(_)`; an absent bound becomes
     /// `now_ms + kind.default_lifetime_ms()`.
     pub fn stamped(self, now_ms: u128, actor: Did) -> Result<Self> {
+        self.stamped_after(now_ms, actor, None)
+    }
+
+    /// [`Self::stamped`], issuing any version it stamps strictly after `floor`: the issue law of
+    /// a node that stamps its operations in order (#1075), `logical_time = max(now, floor + 1)`
+    /// when `now` alone would not exceed `floor` (`EntryVersion::after`).
+    ///
+    /// Post: a version this call issues is greater than `floor`; an operation that already
+    /// carries its witnesses is returned with them unchanged.
+    pub fn stamped_after(
+        self,
+        now_ms: u128,
+        actor: Did,
+        floor: Option<EntryVersion>,
+    ) -> Result<Self> {
         let stamp = self.stamp_kind();
         self.try_map_entry(|entry| {
             let entry = entry.ensure_lifetime_from(now_ms);
             match stamp {
-                Some(kind) => entry.ensure_stamp_after(now_ms, actor, None, kind),
+                Some(kind) => entry.ensure_stamp_after(now_ms, actor, floor, kind),
                 None => Ok(entry),
             }
         })
@@ -508,7 +523,7 @@ impl Entry {
         actor: Did,
         floor: Option<EntryVersion>,
     ) -> Result<EntryVersion> {
-        Ok(EntryVersion::new(now_ms, actor, self.operation_digest()?).after(floor))
+        EntryVersion::new(now_ms, actor, self.operation_digest()?).after(floor)
     }
 
     fn ensure_stamp_after(
@@ -542,7 +557,8 @@ impl Entry {
             .chain(self.crdt.register)
     }
 
-    fn max_observed_version(&self) -> Option<EntryVersion> {
+    /// The greatest version this carrier holds: of a dot, a remove, or the register.
+    pub(crate) fn max_observed_version(&self) -> Option<EntryVersion> {
         self.versions().max()
     }
 

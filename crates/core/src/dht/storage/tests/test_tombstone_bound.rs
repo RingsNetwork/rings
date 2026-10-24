@@ -35,7 +35,10 @@ use crate::utils::get_epoch_ms;
 
 /// The widest version: every field at its widest encoding.
 fn widest_version() -> EntryVersion {
-    EntryVersion::new(u128::MAX, Did::from(u32::MAX), Did::from(u32::MAX))
+    EntryVersion {
+        counter: u32::MAX,
+        ..EntryVersion::new(u128::MAX, Did::from(u32::MAX), Did::from(u32::MAX))
+    }
 }
 
 /// The widest dot.

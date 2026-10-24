@@ -50,12 +50,14 @@ use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
 
-/// Hybrid logical version for LWW entry registers and element dots.
+/// Hybrid logical version for LWW entry registers and element dots: the HLC pair
+/// `(logical_time_ms, counter)` followed by the issuer, ordered lexicographically in field order.
 ///
-/// `logical_time_ms` starts from the wall-clock millisecond observed at the
-/// storage-operation boundary, then advances beyond any local floor that would
-/// otherwise dominate it. `actor` and `operation` make concurrent writes from
-/// the same millisecond totally ordered without claiming wall-clock recency.
+/// `logical_time_ms` starts from the wall-clock millisecond observed at the storage-operation
+/// boundary; a version issued after a floor that dominates it keeps the floor's millisecond and
+/// raises `counter` instead (`EntryVersion::after`), so strict ascent never moves the millisecond
+/// ahead of the clock (#1075). `actor` and `operation` make concurrent writes of different
+/// issuers at one `(logical_time_ms, counter)` totally ordered without claiming recency.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -63,6 +65,9 @@ pub struct EntryVersion {
     /// Hybrid logical time in milliseconds.
     #[serde(alias = "epoch_ms")]
     pub logical_time_ms: u128,
+    /// Logical counter within `logical_time_ms`: raised, instead of the millisecond, when a
+    /// version is issued after a floor at the same or a later millisecond.
+    pub counter: u32,
     /// Storage node that first stamped the operation.
     pub actor: Did,
     /// Deterministic digest of the stamped operation payload.
@@ -75,23 +80,41 @@ impl EntryVersion {
     pub fn new(logical_time_ms: u128, actor: Did, operation: Did) -> Self {
         Self {
             logical_time_ms,
+            counter: 0,
             actor,
             operation,
         }
     }
 
-    pub(super) fn after(self, floor: Option<Self>) -> Self {
+    /// The HLC issue step: `max(self, (l_f, c_f + 1, actor, operation))`. When `self`, the
+    /// version at the issuer's clock `(now, 0, …)`, already exceeds `floor`, it is returned, so
+    /// the millisecond follows the clock and the counter restarts at 0; only when `now ≤ l_f`
+    /// does the counter step at `floor`'s millisecond.
+    ///
+    /// Laws: `v.after(f) > f`; `v.after(f).logical_time_ms = max(v.logical_time_ms, l_f)`, so
+    /// strict ascent never advances the millisecond past the greater of the two; and
+    /// `counter < 2³²` per millisecond, totally: at `c_f = u32::MAX` the step is refused with
+    /// `EntryVersionAheadOfClock`, since the only way past it would advance the millisecond
+    /// beyond the floor, which the caller's cap forbids; the writer is refused, never made to
+    /// wait. The bound needs `2³²` versions issued after floors at one millisecond, more than
+    /// `4·10¹²` writes a second, so no writer reaches it.
+    pub(super) fn after(self, floor: Option<Self>) -> Result<Self> {
         let Some(floor) = floor else {
-            return self;
+            return Ok(self);
         };
         if self > floor {
-            return self;
+            return Ok(self);
         }
-        Self {
-            logical_time_ms: floor.logical_time_ms.saturating_add(1),
+        let counter = floor
+            .counter
+            .checked_add(1)
+            .ok_or(Error::EntryVersionAheadOfClock)?;
+        Ok(Self {
+            logical_time_ms: floor.logical_time_ms,
+            counter,
             actor: self.actor,
             operation: self.operation,
-        }
+        })
     }
 }
 
