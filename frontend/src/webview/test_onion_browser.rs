@@ -94,12 +94,21 @@ async fn test_webview_node_fetches_page_resources_through_browser_onion_exit() {
     );
 }
 
+/// Run the flow over a fresh loop, then shut the loop down whatever the flow's outcome, so its
+/// nodes stop before the next test of this page runs.
 async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
+    let onion_loop = browser_onion_loop().await?;
+    let flow = browser_onion_webview_flow(Rc::clone(&onion_loop.client)).await;
+    let shutdown = onion_loop.shutdown().await;
+    flow.and(shutdown)
+}
+
+/// The WebView flow through the loop whose client is `client`.
+async fn browser_onion_webview_flow(client: Rc<Provider>) -> WebviewResult<()> {
     let fixture_index = fixture_url("/index.html");
     let fixture_css = fixture_url("/site.css");
     let fixture_api = fixture_url("/api/data");
     let fixture_submit = fixture_url("/forms/submit");
-    let (client, _listeners) = browser_onion_loop().await?;
     let node = WebviewNode::new(client, controlled_origin()?, web_shell_bootstrap)?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
     let index = gateway_navigation(&node, &index_target).await?;
@@ -174,9 +183,9 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
 ///                  └─ relay₁ ─┘
 /// ```
 ///
-/// The listeners are returned with the client, and the caller holds them for as long as it
-/// routes through the loop.
-async fn browser_onion_loop() -> WebviewResult<(Rc<Provider>, Vec<ProviderListener>)> {
+/// The loop is returned whole: the caller routes through its client and then shuts it down
+/// ([`BrowserOnionLoop::shutdown`]).
+async fn browser_onion_loop() -> WebviewResult<BrowserOnionLoop> {
     let storage_suffix = uuid::Uuid::new_v4().to_simple().to_string();
     let fixture_authority = fixture_authority();
     let client = browser_provider(
@@ -230,13 +239,60 @@ async fn browser_onion_loop() -> WebviewResult<(Rc<Provider>, Vec<ProviderListen
         .chain(publishers)
         .map(|node| node.provider.listen())
         .collect::<Vec<_>>();
+    let onion_loop = BrowserOnionLoop {
+        client: Rc::clone(&client.provider),
+        edges: edges
+            .iter()
+            .map(|(offerer, answerer)| {
+                (
+                    Rc::clone(&offerer.provider),
+                    answerer.provider.address(),
+                )
+            })
+            .collect(),
+        listeners,
+    };
     poll_until(
         "the client directory to register the loop",
         registry_hang_guard(heartbeat),
         || loop_directory_ready(&client.provider, FIXTURE_MIDDLE_RELAYS + 2),
     )
     .await?;
-    Ok((client.provider, listeners))
+    Ok(onion_loop)
+}
+
+/// A running browser onion loop: its client, the edges that link its nodes, and their
+/// listeners.
+struct BrowserOnionLoop {
+    /// The loop's client.
+    client: Rc<Provider>,
+    /// Every edge, as its offerer and the answerer's address.
+    edges: Vec<(Rc<Provider>, String)>,
+    /// The listener of every node.
+    listeners: Vec<ProviderListener>,
+}
+
+impl BrowserOnionLoop {
+    /// Stop every listener and close every edge, then wait for each listener to settle. A node
+    /// whose links stay open keeps emitting its constant-rate cover traffic (#880), each cell a
+    /// strict commit to its authoritative replay store (#916), into the tests that run after
+    /// this one in the same page.
+    async fn shutdown(self) -> WebviewResult<()> {
+        for listener in &self.listeners {
+            listener.stop();
+        }
+        for (offerer, answerer) in &self.edges {
+            JsFuture::from(offerer.disconnect(answerer.clone(), None))
+                .await
+                .map_err(|error| WebviewError::transport(format!("close edge: {error:?}")))?;
+        }
+        for listener in &self.listeners {
+            JsFuture::from(listener.task())
+                .await
+                .map_err(|error| WebviewError::transport(format!("settle listener: {error:?}")))?;
+        }
+        Ok(())
+    }
 }
 
 /// One fixture node: its provider and the peers its backend has admitted.
