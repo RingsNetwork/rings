@@ -98,7 +98,8 @@ async fn test_an_owners_stamp_follows_the_replica_it_holds() -> Result<()> {
         Did::from(9u32),
     )?;
     let held = ahead.max_observed_version();
-    node.join_storage_entry(now_ms, topic, ahead).await?;
+    node.join_storage_entry(now_ms, topic, ahead, Did::from(9u32))
+        .await?;
 
     let op = node
         .stamp_operation(

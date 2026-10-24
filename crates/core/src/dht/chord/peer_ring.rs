@@ -44,6 +44,10 @@ use std::sync::OnceLock;
 
 use futures::lock::Mutex as FuturesMutex;
 
+use super::carrier_store::CarrierStore;
+use super::carrier_store::RemovalCharge;
+use super::carrier_store::RemovalIndex;
+use super::carrier_store::RemovalStorage;
 use super::PeerRingAction;
 use super::RemoteAction;
 use crate::consts::LOCAL_CACHE_CAPACITY;
@@ -97,9 +101,17 @@ pub struct PeerRing {
     successor_seq: SuccessorSeq,
     /// Current predecessor learned through Chord notifications.
     predecessor: Arc<Mutex<Option<Did>>>,
-    /// Persistent replicated-entry storage of the data namespace: a cache of the overlay's
-    /// replicated topics, rebuildable from their replicas.
+    /// Persistent replicated-entry storage of the data namespace: the element sides of the
+    /// overlay's replicated topics, rebuildable from their replicas, which its budget may evict
+    /// (see `chord::carrier_store`).
     pub(crate) storage: EntryStorage,
+    /// The remove sides of the data namespace (#920): a `RecordAuthority::Retained` store, which
+    /// refuses and never evicts, given by [`Self::with_removal_storage`]; an in-memory one until
+    /// then, whose loss at a restart makes this node a fresh replica (removal-stability paper,
+    /// Section IV).
+    pub(crate) removal_storage: RemovalStorage,
+    /// The charge index of [`Self::removal_storage`](PeerRing#structfield.removal_storage).
+    removal_index: RemovalIndex,
     /// Storage of the relay-inbox namespace: the only copy of the mail this node holds (a relay
     /// carrier is never cached or replicated, and fetched by its recipient alone), so it must be
     /// a `RecordAuthority::Retained` store (#1021). `None` until [`Self::with_relay_storage`]
@@ -203,6 +215,8 @@ impl PeerRing {
             predecessor: Arc::new(Mutex::new(None)),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
+            removal_storage: Box::new(MemStorage::new()),
+            removal_index: RemovalIndex::default(),
             relay_storage: None,
             cache: Box::new(MemStorage::bounded(LOCAL_CACHE_CAPACITY)),
             storage_virtual_node_config: virtual_nodes,
@@ -230,22 +244,48 @@ impl PeerRing {
         self
     }
 
+    /// This ring with `storage` as the store of the data namespace's remove sides (see
+    /// [`Self::removal_storage`](PeerRing#structfield.removal_storage)): a retained store, which
+    /// refuses and never evicts (#920).
+    pub fn with_removal_storage(mut self, storage: RemovalStorage) -> Self {
+        self.removal_storage = storage;
+        self
+    }
+
     /// The store of the carriers of `kind`, if this node keeps one: data topics and relay
     /// inboxes live in separate stores of their own authority, as they live in separate
-    /// namespaces, and a node with no relay store keeps no relay carrier.
-    pub(crate) fn carrier_storage(&self, kind: EntryKind) -> Option<&EntryStorage> {
+    /// namespaces, and a node with no relay store keeps no relay carrier. The data store is
+    /// factored into element and remove sides.
+    pub(crate) fn carrier_storage(&self, kind: EntryKind) -> Option<CarrierStore<'_>> {
         match kind {
-            EntryKind::Data => Some(&self.storage),
-            EntryKind::RelayMessage => self.relay_storage.as_ref(),
+            EntryKind::Data => Some(CarrierStore::Factored {
+                elements: &self.storage,
+                removals: &self.removal_storage,
+                index: &self.removal_index,
+            }),
+            EntryKind::RelayMessage => self.relay_storage.as_ref().map(CarrierStore::Whole),
         }
     }
 
     /// The store a write of a carrier of `kind` goes to (the custody law of #1021).
     ///
     /// Post: `Err(RelayStorageUnavailable)` for a relay carrier on a node with no relay store.
-    pub(crate) fn carrier_store_for_write(&self, kind: EntryKind) -> Result<&EntryStorage> {
+    pub(crate) fn carrier_store_for_write(&self, kind: EntryKind) -> Result<CarrierStore<'_>> {
         self.carrier_storage(kind)
             .ok_or(Error::RelayStorageUnavailable)
+    }
+
+    /// Whom a write sent by `sender` is charged to in the removal store (removal-stability
+    /// paper, Def. 7): the holder class for this node and for a node its view names as an owner
+    /// of the placements it holds (its predecessor or a successor), else `sender` itself.
+    pub(crate) fn removal_charge_of(&self, sender: Did) -> Result<RemovalCharge> {
+        let holder = sender == self.did
+            || *self.lock_predecessor_state()? == Some(sender)
+            || self.successor_seq.contains(&sender)?;
+        Ok(match holder {
+            true => RemovalCharge::Holder,
+            false => RemovalCharge::Origin(sender),
+        })
     }
 }
 

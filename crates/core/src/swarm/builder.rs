@@ -10,6 +10,7 @@ use crate::chunk::ReassemblyLimits;
 use crate::delegation::DelegateeKey;
 use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
+use crate::dht::RemovalStorage;
 use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
@@ -38,6 +39,7 @@ pub struct SwarmBuilder {
     reassembly_limits: ReassemblyLimits,
     dht_storage: EntryStorage,
     relay_storage: Option<EntryStorage>,
+    removal_storage: Option<RemovalStorage>,
     replay_storage: Option<ReplayStorage>,
     origin_quota: OriginQuotaConfig,
     delegatee_key: DelegateeKey,
@@ -67,6 +69,7 @@ impl SwarmBuilder {
             reassembly_limits: default_reassembly_limits(),
             dht_storage,
             relay_storage: None,
+            removal_storage: None,
             replay_storage: None,
             origin_quota: OriginQuotaConfig::default(),
             delegatee_key,
@@ -160,6 +163,15 @@ impl SwarmBuilder {
         self
     }
 
+    /// Set the storage of the data namespace's remove sides (#920): a
+    /// `RecordAuthority::Retained` store, so a remove survives a crash and is never evicted
+    /// before it is stable. Without one, the remove sides are kept in memory, and each restart
+    /// makes this node a fresh replica.
+    pub fn removal_storage(mut self, storage: RemovalStorage) -> Self {
+        self.removal_storage = Some(storage);
+        self
+    }
+
     /// Set the durable sender-sequence and receiver replay-window storage: an authoritative
     /// store. Without one, the swarm refuses every reservation and admission
     /// (`Error::TransactionReplayStorageUnavailable`, #1022), so it neither sends nor accepts a
@@ -188,6 +200,10 @@ impl SwarmBuilder {
             self.dht_finger_table_size,
             storage_virtual_node_config,
         );
+        let ring = match self.removal_storage {
+            Some(storage) => ring.with_removal_storage(storage),
+            None => ring,
+        };
         let dht = Arc::new(match self.relay_storage {
             Some(storage) => ring.with_relay_storage(storage),
             None => ring,

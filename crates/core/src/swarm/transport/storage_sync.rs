@@ -308,7 +308,7 @@ impl<'data> StorageSyncBatch<'data> {
 
         match transport
             .dht
-            .join_admitted_storage_entry(self.now_ms, key, admitted)
+            .join_admitted_storage_entry(self.now_ms, key, admitted, self.sender)
             .await
         {
             Ok(_) => {
@@ -316,15 +316,18 @@ impl<'data> StorageSyncBatch<'data> {
                 crate::simulation::record_storage_persisted(transport.dht.did);
                 self.persist_index += 1;
             }
-            // The join would hold more removes than the bound (#921): it changed nothing and is
-            // not acknowledged, so the sender keeps the entry and offers it again once removes
-            // here are collected; the rest of the batch persists.
-            Err(Error::EntryTombstonesExceedMax { count, bound }) => {
+            // The join would hold more removes than the carrier's bound (#921), or than the
+            // sender's share or the removal store's total (#920): it changed nothing and is not
+            // acknowledged, so the sender keeps the entry and offers it again once removes here
+            // are collected; the rest of the batch persists.
+            Err(
+                error @ (Error::EntryTombstonesExceedMax { .. }
+                | Error::RemovalCapacityExhausted { .. }),
+            ) => {
                 tracing::debug!(
                     %key,
-                    count,
-                    bound,
-                    "refusing a synced entry past its tombstone bound; its owner keeps it"
+                    %error,
+                    "refusing a synced entry past a removal bound; its owner keeps it"
                 );
                 self.accepted.remove(self.persist_index);
             }

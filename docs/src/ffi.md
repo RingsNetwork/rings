@@ -38,7 +38,8 @@ never sees the private key.
 `storage_path` is a directory the provider owns. Under it the provider opens the same stores a
 native node opens beside its data store, each at its authority: `data` (the DHT data store),
 `transaction-replay` (the replay windows, authoritative), `relay-inbox` (held mail, retained),
-`onion-entry-guards` (a durable cache), and `measure` with `provisional-evidence`. Pass the same
+`dht-removals` (the data topics' uncollected removals, retained), `onion-entry-guards` (a durable
+cache), and `measure` with `provisional-evidence`. Pass the same
 path on every run of the same node: the replay windows must survive a restart, or the node
 would accept replayed transactions and re-sign used sequences (#1022). A fresh path is a fresh
 node state.

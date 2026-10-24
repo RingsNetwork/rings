@@ -44,6 +44,24 @@
   - **Operator step.** None; earlier descriptors are ignored and expire within the element
     horizon. A configuration with a heartbeat interval of 300 seconds or more, or a TTL over 600
     seconds, is refused at start and must be lowered.
+- Data-topic removals are never evicted (#920; removal-stability paper, Laws 2–4 and 6). A
+  data carrier is stored as two records: its values in the data store, which its byte budget
+  may evict, and its tombstones and overwrite floor in a new retained store, `dht-removals`
+  beside the data store (browser: `<storage name>/dht-removals`, strict IndexedDB), which
+  flushes and never evicts. A write stores the remove side first and the values after; reads
+  glue the two without hashing, and the first operation after a node opens normalizes any
+  value a crash rolled back. Each uncollected remove is charged to the authenticated sender of
+  the write that raised it (a predecessor, a successor, or the node itself is the holder
+  class): a write that would pass 1024 for its sender (`REMOVAL_ORIGIN_SHARE`), or 65536 in
+  all (`REMOVAL_STORE_MAX_REMOVES`), fails with `RemovalCapacityExhausted` and changes nothing,
+  and a sync batch leaves such an entry unacknowledged. `SwarmBuilder::removal_storage`,
+  `ProcessorBuilder::removal_storage` and `PeerRing::with_removal_storage` set the store;
+  without one the removes are kept in memory. `ChordStorageRepair::read_repair_entry` takes
+  the node that supplied the entry.
+  - **Upgrade consequence.** A topic stored before this release keeps its tombstones in the
+    data store until it is next written, and is read as before meanwhile.
+  - **Operator step.** None required. An operator who wants the eviction law to hold from the
+    first eviction removes the data store while the node is stopped; replication rebuilds it.
 - Data-topic tombstones are bounded (#921; removal-stability paper, Law 5 and Prop. 4). A data
   carrier holds at most `DATA_TOMBSTONE_MAX_LEN` (1024) uncollected removes. A delta carrying
   more is not admitted, and a join, operation or repair whose result would hold more fails with

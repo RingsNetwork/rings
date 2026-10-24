@@ -7,7 +7,6 @@ use super::data_entry_with_payload_len;
 use crate::consts::UNACKNOWLEDGED_RELAY_HOLDS_MAX;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::inbox::inbox_key;
-use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::Did;
 use crate::dht::RelayCustody;
@@ -89,7 +88,9 @@ async fn test_a_full_relay_store_refuses_the_hold() -> Result<()> {
     let first = Did::from(50u32);
     hold(&node, &holder, first).await?;
     assert_eq!(
-        node.carrier_store_for_write(EntryKind::RelayMessage)?
+        node.relay_storage
+            .as_ref()
+            .ok_or(Error::RelayStorageUnavailable)?
             .count()
             .await?,
         1

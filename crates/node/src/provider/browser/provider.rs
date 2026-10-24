@@ -8,9 +8,11 @@ use std::sync::Arc;
 
 use js_sys;
 use js_sys::Uint8Array;
+use rings_core::consts::REMOVAL_STORE_MAX_REMOVES;
 use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
+use rings_core::dht::RemovalStorage;
 use rings_core::ecc::PublicKey;
 use rings_core::message::ReplayStorage;
 use rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
@@ -38,6 +40,7 @@ use crate::onion::OnionRole;
 use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
 use crate::provider::Provider;
+use crate::provider::ProviderStores;
 use crate::provider::Signer;
 
 /// Browser listener lifecycle handle and serialized `listen` entrypoint.
@@ -153,6 +156,30 @@ async fn open_browser_relay_storage(storage_name: &str) -> Option<EntryStorage> 
     }
 }
 
+/// Open the browser store of the data namespace's remove sides as a retained store (#920): its
+/// writes commit with strict durability and it evicts nothing, at `(Dur°, Ret)`, admissible
+/// because every data topic is held by its replica set (durable-records, Law 12). Its row
+/// capacity is the charge index's total, one remove per row at worst. An IndexedDB that cannot
+/// open leaves the remove sides in memory, logged here: each restart then makes this node a
+/// fresh replica.
+async fn open_browser_removal_storage(storage_name: &str) -> Option<RemovalStorage> {
+    let rows = u32::try_from(REMOVAL_STORE_MAX_REMOVES).unwrap_or(u32::MAX);
+    let opened =
+        IdbStorage::new_with_cap_name_and_authority(rows, storage_name, RecordAuthority::Retained)
+            .await;
+    match opened {
+        Ok(storage) => Some(Box::new(storage) as RemovalStorage),
+        Err(source) => {
+            tracing::warn!(
+                storage_name = %storage_name,
+                error = %source,
+                "browser removal IndexedDB unavailable; data-topic removes are kept in memory"
+            );
+            None
+        }
+    }
+}
+
 async fn open_browser_measure_storage(storage_name: &str) -> Option<MeasureStorage> {
     match IdbStorage::new_with_cap_and_name(50000, storage_name).await {
         Ok(storage) => Some(Box::new(storage) as MeasureStorage),
@@ -232,6 +259,8 @@ impl Provider {
         let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
         let relay_storage =
             open_browser_relay_storage(&format!("{storage_name}/relay-inbox")).await;
+        let removal_storage =
+            open_browser_removal_storage(&format!("{storage_name}/dht-removals")).await;
         let measure_storage =
             open_browser_measure_storage(&format!("{storage_name}/measure")).await;
         let evidence_storage = Some(
@@ -242,15 +271,15 @@ impl Provider {
         let replay_storage =
             open_browser_replay_storage(&format!("{storage_name}/transaction-replay")).await?;
 
-        let provider = Self::new_provider_with_storage_internal(
-            config,
-            entry_storage,
-            relay_storage,
-            measure_storage,
-            evidence_storage,
-            onion_entry_guard_storage,
-            Some(replay_storage),
-        )
+        let provider = Self::new_provider_with_storage_internal(config, ProviderStores {
+            entry: entry_storage,
+            relay: relay_storage,
+            removals: removal_storage,
+            measure: measure_storage,
+            evidence: evidence_storage,
+            guards: onion_entry_guard_storage,
+            replay: Some(replay_storage),
+        })
         .await?;
         provider.install_relay_onion_runtime()?;
         provider.set_backend()?;
@@ -292,6 +321,7 @@ impl Provider {
 
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let relay_storage = open_browser_relay_storage("rings-node/relay-inbox").await;
+            let removal_storage = open_browser_removal_storage("rings-node/dht-removals").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
             let evidence_storage =
                 Some(open_browser_evidence_storage("rings-node/provisional-evidence").await?);
@@ -307,12 +337,15 @@ impl Provider {
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
-                entry_storage,
-                relay_storage,
-                measure_storage,
-                evidence_storage,
-                onion_entry_guard_storage,
-                Some(replay_storage),
+                ProviderStores {
+                    entry: entry_storage,
+                    relay: relay_storage,
+                    removals: removal_storage,
+                    measure: measure_storage,
+                    evidence: evidence_storage,
+                    guards: onion_entry_guard_storage,
+                    replay: Some(replay_storage),
+                },
             )
             .await?;
 
@@ -343,6 +376,7 @@ impl Provider {
 
             let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
             let relay_storage = open_browser_relay_storage("rings-node/relay-inbox").await;
+            let removal_storage = open_browser_removal_storage("rings-node/dht-removals").await;
             let measure_storage = open_browser_measure_storage("rings-node/measure").await;
             let evidence_storage =
                 Some(open_browser_evidence_storage("rings-node/provisional-evidence").await?);
@@ -358,12 +392,15 @@ impl Provider {
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
-                entry_storage,
-                relay_storage,
-                measure_storage,
-                evidence_storage,
-                onion_entry_guard_storage,
-                Some(replay_storage),
+                ProviderStores {
+                    entry: entry_storage,
+                    relay: relay_storage,
+                    removals: removal_storage,
+                    measure: measure_storage,
+                    evidence: evidence_storage,
+                    guards: onion_entry_guard_storage,
+                    replay: Some(replay_storage),
+                },
                 move |config| config.onion_role(OnionRole::Exit(offer)),
             )
             .await?;

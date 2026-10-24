@@ -89,10 +89,12 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
     ///
     /// Post: `misses.is_empty()` is a no-op. Non-empty repair emits copy-only
     /// actions for exactly the observed misses and performs no additional
-    /// placement probing.
+    /// placement probing. A local repair charges the removes it raises to `source`, the node
+    /// that supplied `entry` (this node for its own storage; #920).
     async fn read_repair_entry(
         &self,
         entry: Entry,
+        source: Did,
         misses: &[PlacementMiss],
         redundancy: u16,
     ) -> Result<Action>;

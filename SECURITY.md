@@ -268,8 +268,10 @@ route.
 - #918: a registry descriptor that another node re-appends after its registrant stopped stays
   listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
   registrant leaves the listing within its TTL.
-- #920: storage byte-budget eviction can drop a removal before it is collected, resurrecting
-  the values it covered.
+- #920: a node's store of uncollected removals refuses past 1024 per sender and 65536 in all;
+  filling the total takes 64 senders' identities (the Sybil residual of #907) or a node its view
+  makes an owner of the topic. A node whose browser cannot open IndexedDB keeps removals in
+  memory, so each restart makes it a fresh replica.
 - #921: a data topic holds at most 1024 uncollected tombstones and refuses past them, so any
   writer, or a sync peer, can fill one topic's removal capacity at an owner and refuse further
   removals of that topic there until those tombstones are collected, at most 100 minutes and
