@@ -28,6 +28,17 @@
   - **Upgrade consequence.** None: the descriptor is a new registry, and a node without the new
     sections publishes and runs nothing new.
   - **Operator step.** None, unless running a relay: see the DNS Relay chapter.
+- Sender sequences are reserved in leases (part of #1043). A reservation writes its stream's
+  replay record only when it outruns the stream's durable lease, which then covers at least the
+  next 64 sequences (`TRANSACTION_SEQUENCE_LEASE`). Reservations inside the lease are handed out
+  from memory. A stream sending one transaction at a time writes once per 64 transactions
+  instead of once per transaction. That removes about half the replay writes of a browser onion
+  request: about 1,030 instead of about 2,040. A restart resumes past the lease, so it may skip
+  up to 64 sequences, which the receiver takes as one `Advance`, and it never reuses a sequence.
+  - **Upgrade consequence.** None: the record bytes are unchanged. The sender record's value now
+    reads as the last leased sequence, and a record written by an earlier release holds the
+    last reserved sequence, which is a valid lease.
+  - **Operator step.** None.
 
 - RUSTSEC-2026-0387 (`crypto-bigint`: secret-dependent branches in constant-time operations) is
   ignored in `deny.toml` for now (#1051). The fix exists only in `crypto-bigint` 0.7.6, while
