@@ -23,7 +23,9 @@ use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
+use rings_node::prelude::rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
+use rings_node::prelude::rings_core::storage::RecordAuthority;
 use rings_node::prelude::rings_core::swarm::observer::SharedSwarmObserver;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
@@ -93,9 +95,20 @@ async fn build_node_with(
             .await
             .expect("idb storage"),
     );
+    // Replay needs an authoritative store (#1022), as the browser provider opens it.
+    let replay_storage = Box::new(
+        IdbStorage::new_with_cap_name_and_authority(
+            u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS).expect("replay row capacity"),
+            &format!("{storage_name}/transaction-replay"),
+            RecordAuthority::Authoritative,
+        )
+        .await
+        .expect("replay idb storage"),
+    );
     let builder = ProcessorBuilder::from_config(&config)
         .expect("processor builder")
-        .storage(storage);
+        .storage(storage)
+        .replay_storage(replay_storage);
     let builder = match observer {
         Some(observer) => builder.observer(observer),
         None => builder,

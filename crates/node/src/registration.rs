@@ -25,6 +25,7 @@ use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::entry;
 use rings_core::dht::Did;
+use rings_core::dht::RelayCustody;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::lifecycle::StopToken;
 use rings_core::message::ChordStorageInterface;
@@ -117,18 +118,50 @@ pub(crate) fn validate_registration_timing(
     if !advertised {
         return Ok(());
     }
+    let keys = TimingKeys {
+        heartbeat_interval: &format!("{registry}_heartbeat_interval"),
+        ttl: &format!("{registry}_ttl"),
+        enabled_by: Some(advertise_setting),
+    };
+    validate_schedule(&keys, heartbeat_interval, ttl)
+}
+
+/// The settings that schedule one registry, as its timing errors name them.
+pub(crate) struct TimingKeys<'a> {
+    /// The setting of the heartbeat interval.
+    pub(crate) heartbeat_interval: &'a str,
+    /// The setting of the descriptor time-to-live.
+    pub(crate) ttl: &'a str,
+    /// The switch that enables the registry, if one does.
+    pub(crate) enabled_by: Option<&'a str>,
+}
+
+/// Validate a registry's scheduling: the heartbeat interval is below the descriptor TTL and
+/// below [`registry_refresh_bound`]; an error names the settings in `keys`.
+pub(crate) fn validate_schedule(
+    keys: &TimingKeys<'_>,
+    heartbeat_interval: Duration,
+    ttl: Duration,
+) -> Result<()> {
+    let TimingKeys {
+        heartbeat_interval: heartbeat_key,
+        ttl: ttl_key,
+        enabled_by,
+    } = keys;
     if heartbeat_interval >= ttl {
+        let condition = enabled_by
+            .map(|switch| format!(" when {switch} is enabled"))
+            .unwrap_or_default();
         return Err(Error::InvalidConfig(format!(
-            "{registry}_heartbeat_interval ({heartbeat_interval:?}) must be less than \
-             {registry}_ttl ({ttl:?}) when {advertise_setting} is enabled"
+            "{heartbeat_key} ({heartbeat_interval:?}) must be less than {ttl_key} \
+             ({ttl:?}){condition}"
         )));
     }
     let bound = registry_refresh_bound();
     if heartbeat_interval >= bound {
         return Err(Error::InvalidConfig(format!(
-            "{registry}_heartbeat_interval ({heartbeat_interval:?}) must be less than {bound:?}, \
-             the lifetime of a registry write less the clock-skew tolerance and the fetch-poll \
-             budget"
+            "{heartbeat_key} ({heartbeat_interval:?}) must be less than {bound:?}, the lifetime \
+             of a registry write less the clock-skew tolerance and the fetch-poll budget"
         )));
     }
     Ok(())
@@ -182,6 +215,11 @@ impl<'a> RegistrationContext<'a> {
     /// Return storage virtual-node positions for the local DHT protocol mode.
     pub(crate) fn dht_virtual_nodes(&self) -> u16 {
         self.processor.swarm.dht_virtual_nodes()
+    }
+
+    /// Return the relay custody the local node declares: whether it holds relay mail.
+    pub(crate) fn relay_custody(&self) -> RelayCustody {
+        self.processor.swarm.dht().relay_custody()
     }
 
     /// Return the account verification public key.
@@ -417,6 +455,7 @@ impl OnlineNodeRegistration {
                 dht_virtual_nodes: context.dht_virtual_nodes(),
                 capabilities: OnlineNodeCapabilities {
                     onion_relay: self.onion_relay.as_ref().map(OnionProcessEpochCell::get),
+                    relay_custody: context.relay_custody(),
                 },
                 endpoint_hint: self.endpoint_hint.clone(),
                 started_at_ms: self.started_at_ms,

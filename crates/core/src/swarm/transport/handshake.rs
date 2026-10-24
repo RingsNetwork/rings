@@ -279,6 +279,7 @@ impl SwarmTransport {
         Ok(ConnectNodeSend {
             sdp: self.negotiate_sdp(pending, "offer", offer).await?,
             dht_protocol_mode: self.dht_protocol_mode(),
+            relay_custody: self.dht.relay_custody(),
         })
     }
 
@@ -292,6 +293,7 @@ impl SwarmTransport {
         Ok(ConnectNodeReport {
             sdp: self.negotiate_sdp(pending, "answer", answer).await?,
             dht_protocol_mode: self.dht_protocol_mode(),
+            relay_custody: self.dht.relay_custody(),
         })
     }
 
@@ -392,6 +394,7 @@ impl SwarmTransport {
                         offer: ConnectNodeSend {
                             sdp,
                             dht_protocol_mode: self.dht_protocol_mode(),
+                            relay_custody: self.dht.relay_custody(),
                         },
                         tx_id,
                     }));
@@ -459,6 +462,8 @@ impl SwarmTransport {
             ));
         }
         let offer: String = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
+        self.dht
+            .observe_relay_custody(peer, offer_msg.relay_custody)?;
         let pending = match self.reconcile_incoming_offer_peer(peer, carrier).await? {
             IncomingOfferSlot::CounterOffer(counter_offer) => {
                 tracing::debug!(
@@ -533,6 +538,8 @@ impl SwarmTransport {
         }
 
         let answer: String = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
+        self.dht
+            .observe_relay_custody(peer, answer_msg.relay_custody)?;
 
         let (attempt, conn) = match (expected, self.answer_slot(peer)?) {
             (Some(expected), AnswerSlot::Pending(owner, _) | AnswerSlot::Owned(owner))

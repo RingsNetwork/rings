@@ -89,6 +89,11 @@ pub const MIN_CHUNK_DATA: usize = 1024;
 pub const ENTRY_DATA_MAX_LEN: usize = 1024;
 /// Maximum number of held messages kept in a relay inbox.
 pub const RELAY_INBOX_MAX_LEN: usize = 64;
+/// The relay holds a writer keeps unacknowledged at once: one inbox's worth. A writer keeps
+/// every hold it sends until a holder acknowledges it or its sender proof expires, and refuses
+/// a hold beyond this bound to its local sender (`Error::RelayHoldsUnacknowledgedFull`) rather
+/// than forget an earlier one.
+pub const UNACKNOWLEDGED_RELAY_HOLDS_MAX: usize = RELAY_INBOX_MAX_LEN;
 /// Maximum bytes of one element in a DHT storage entry.
 ///
 /// The bound is per element so that filtering by it is a lattice morphism; with

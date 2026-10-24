@@ -1,9 +1,12 @@
 //! The swarm's interpretation of the storage maintenance intent to deliver this node's inbox.
 //!
-//! The inbox carrier `d + 1` lies in `d`'s own storage interval once `d` is online, so the
-//! predecessor's storage repair pass hands the held messages to `d`. Every storage maintenance
-//! pass the DHT emits [`InboxDelivery::deliver_inbox`]; this interpreter decodes the elements of
-//! the inbox from local storage and offers each it has not handed over yet through the inbound
+//! The inbox carrier `d + 1` lies in `d`'s own storage interval once `d` is online, so the old
+//! holder's storage repair pass hands the held messages to `d` when `d` holds relay mail, and to
+//! the next node along `d`'s successor list that does otherwise (`dht::relay_holder`). Every
+//! storage maintenance pass the DHT emits [`InboxDelivery::deliver_inbox`]; this interpreter
+//! reads the inbox from local storage when `d` holds its own inbox key, or fetches it from the
+//! holder its view names, decodes the elements, and offers each it has not handed over yet
+//! through the inbound
 //! pipeline (handler dispatch, then the application inbox), verifying its witness first (an
 //! element held ahead of this clock waits for a later pass, as
 //! [`InboxElement::is_deliverable_at`] states). An element is retired by its add dot once core
@@ -49,16 +52,21 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::channel::oneshot;
 
+use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::inbox::InboxElement;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryDot;
 use crate::dht::entry::EntryOperation;
+use crate::dht::relay_holder::RelayHolder;
 use crate::dht::Did;
 use crate::dht::InboxDelivery;
 use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::handlers::storage::operate_entry;
+use crate::message::FetchRelayInbox;
+use crate::message::Message;
+use crate::message::PayloadSender;
 use crate::swarm::application::RelayConsumption;
 use crate::swarm::callback::LocalDelivered;
 use crate::swarm::callback::LocalDelivery;
@@ -82,13 +90,15 @@ enum Offered {
     EndPass,
 }
 
-/// Whether `error` defers the payload rather than refusing it: a failure of this node's own
-/// replay store, or a full relay custody. Nothing was committed, so the element waits for a
+/// Whether `error` defers the payload rather than refusing it: a failure or the absence of this
+/// node's own replay store, or a full relay custody. Nothing was committed, so the element waits for a
 /// later pass instead of being retired as one the live path would drop.
 fn defers(error: &Error) -> bool {
     matches!(
         error,
-        Error::TransactionReplayPersistence { .. } | Error::RelayCustodyFull { .. }
+        Error::TransactionReplayPersistence { .. }
+            | Error::RelayCustodyFull { .. }
+            | Error::TransactionReplayStorageUnavailable
     )
 }
 
@@ -187,22 +197,64 @@ impl SwarmInboxDelivery {
     }
 }
 
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl InboxDelivery for SwarmInboxDelivery {
-    /// Post: the elements of the locally stored inbox were taken in order, as the module laws
-    /// say, until one found no room, no reader or a local failure; every element core is done
-    /// with was tombstoned at its owner by one removal.
+impl SwarmInboxDelivery {
+    /// Ask `holder`, the holder of this node's inbox key, for the inbox: its report is drained by
+    /// [`Self::deliver_fetched`].
+    async fn fetch(&self, holder: Did) -> Result<()> {
+        self.transport
+            .protocol_egress()
+            .send_message(Message::FetchRelayInbox(FetchRelayInbox), holder)
+            .await
+            .map(drop)
+    }
+
+    /// Drain the inbox `holder` reported, iff `holder` holds this node's inbox key under this
+    /// node's own view (`Law (Agreement)` of `dht::relay_holder`), and the carrier is this
+    /// node's inbox and passes admission, as a hand-off's would.
+    ///
+    /// Post: a report from any other node, or of any other carrier, is refused and drains
+    /// nothing; custody is left as it is until a pass sees the carrier.
+    pub(crate) async fn deliver_fetched(&self, holder: Did, inbox: Option<Entry>) -> Result<()> {
+        let local = self.transport.dht.did;
+        let key = inbox_key(local);
+        if holder == local || self.transport.dht.relay_holder(key)? != RelayHolder::Holder(holder) {
+            return Err(Error::InvalidMessage(format!(
+                "relay inbox report from {holder}, which does not hold this inbox"
+            )));
+        }
+        let inbox = match inbox {
+            Some(entry) if entry.kind.is_relay_inbox() && entry.did == key => Some(
+                entry
+                    .validate_admissible_at(get_epoch_ms(), self.transport.network_id)?
+                    .into_entry(),
+            ),
+            Some(_) => {
+                return Err(Error::InvalidMessage(format!(
+                    "relay inbox report from {holder} carries another carrier"
+                )));
+            }
+            None => None,
+        };
+        self.drain(inbox).await
+    }
+
+    /// One pass over the inbox `inbox`, read from local storage or fetched from its holder, as
+    /// the module laws say. A pass that finds another running leaves the elements to the next.
+    ///
+    /// Post: the elements were taken in order until one found no room, no reader or a local
+    /// failure; every element core is done with was tombstoned at the holder by one removal.
     ///
     /// A removal refused before acceptance (`SingleAttemptRefused`, a detached `Cancelled`
-    /// included) ends the drain with that error: the element stays at its owner and is taken
+    /// included) ends the drain with that error: the element stays at its holder and is taken
     /// again on the next drain. No element is lost, and none is tombstoned twice.
-    async fn deliver_inbox(&self) -> Result<()> {
+    async fn drain(&self, inbox: Option<Entry>) -> Result<()> {
+        let Some(_pass) = self.transport.application().relay_drain.try_lock() else {
+            return Ok(());
+        };
         let now_ms = get_epoch_ms();
-        let key = StorageKey::inbox_of(self.transport.dht.did);
-        let Some(inbox) = self.transport.dht.live_storage_entry(key, now_ms).await? else {
-            // No carrier (expired, never held, or no relay store to keep one): nothing is
-            // stored, so custody restricts to nothing (the custody law's first step).
+        let Some(inbox) = inbox else {
+            // No carrier (expired, never held, or no holder to keep one): nothing is stored, so
+            // custody restricts to nothing (the custody law's first step).
             return self.transport.restrict_relay_custody([]).await;
         };
         let stored = inbox.stored_inbox_elements();
@@ -236,5 +288,31 @@ impl InboxDelivery for SwarmInboxDelivery {
             return Ok(());
         }
         self.retire(inbox.removal_of(retired)).await
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl InboxDelivery for SwarmInboxDelivery {
+    /// Post: the inbox was drained from local storage when this node holds its own inbox key,
+    /// fetched from the holder its view names otherwise (`dht::relay_holder`), and drained as
+    /// nothing when its view names the key's owner and no holder, so custody follows a carrier
+    /// that cannot exist. A view that cannot place the key leaves custody as it is.
+    async fn deliver_inbox(&self) -> Result<()> {
+        let local = self.transport.dht.did;
+        match self.transport.dht.relay_holder(inbox_key(local))? {
+            RelayHolder::Holder(holder) if holder == local => {
+                let key = StorageKey::inbox_of(local);
+                let inbox = self
+                    .transport
+                    .dht
+                    .live_storage_entry(key, get_epoch_ms())
+                    .await?;
+                self.drain(inbox).await
+            }
+            RelayHolder::Holder(holder) => self.fetch(holder).await,
+            RelayHolder::Unheld => self.drain(None).await,
+            RelayHolder::Unknown => Ok(()),
+        }
     }
 }

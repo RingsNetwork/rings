@@ -253,7 +253,8 @@ The signed descriptors of the online-node registry.
 * Params: `include_expired` (optional, default `false`).
 * Result: `nodes`, a list of descriptors with `did`, `public_key`, `delegatee_public_key`,
   `node_type` (`Native`, `Browser` or `Ffi`), `network_id`, `storage_redundancy`,
-  `dht_virtual_nodes`, `capabilities` (`{onion_relay}`, the relay's process epoch or `null`),
+  `dht_virtual_nodes`, `capabilities` (`{onion_relay, holds_relay_mail}`: the relay's process
+  epoch or `null`, and whether the node keeps a relay store and so holds relay mail),
   `endpoint_hint`, `started_at_ms`, `heartbeat_at_ms`, `expires_at_ms`, `version` and
   `signature`.
 

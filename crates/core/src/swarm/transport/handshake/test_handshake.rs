@@ -38,6 +38,7 @@ fn ring_node(key: SecretKey) -> Result<Node> {
             Box::new(crate::storage::MemStorage::new()),
             session,
         )
+        .replay_storage(crate::tests::volatile_replay_storage())
         .dht_succ_max(1)
         .dht_finger_table_size(0)
         .dht_virtual_nodes(0),
@@ -355,6 +356,7 @@ async fn test_answered_and_answering_generations_refuse_a_delayed_offer() -> Res
                         _ => Err(Error::InvalidMessage("not an offer".to_string())),
                     })?,
                 dht_protocol_mode: first.swarm.dht_protocol_mode(),
+                relay_custody: first.swarm.transport.dht.relay_custody(),
             }),
             second.did(),
             Some(second.did()),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::dht::RelayCustody;
 use crate::message::DhtProtocolMode;
 #[cfg(feature = "dummy")]
 use crate::swarm::application::SwarmEvent;
@@ -134,6 +135,7 @@ fn test_connection_offer_protocol_mode_includes_storage_redundancy() -> Result<(
     let matching = ConnectNodeSend {
         sdp: String::new(),
         dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
+        relay_custody: RelayCustody::Holds,
     };
     let mismatched_redundancy = ConnectNodeSend {
         dht_protocol_mode: DhtProtocolMode::new(0, 2, 0),
@@ -151,6 +153,7 @@ fn test_connection_answer_protocol_mode_includes_storage_redundancy() -> Result<
     let matching = ConnectNodeReport {
         sdp: String::new(),
         dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
+        relay_custody: RelayCustody::Holds,
     };
     let mismatched_redundancy = ConnectNodeReport {
         dht_protocol_mode: DhtProtocolMode::new(0, 2, 0),

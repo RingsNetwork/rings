@@ -29,6 +29,8 @@ pub mod custom;
 pub mod e2e;
 /// Relay inbox: holding messages for offline peers and draining one's own inbox.
 pub(crate) mod inbox;
+/// Handlers of relay custody: holder announcements and inbox fetches.
+mod relay_holder;
 mod service_receipt;
 /// Operator and handler for DHT stabilization
 pub mod stabilization;

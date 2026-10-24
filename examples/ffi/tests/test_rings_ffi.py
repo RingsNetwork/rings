@@ -151,6 +151,7 @@ def test_create_provider_reports_null_provider_ptr_as_runtime_error():
             stabilize_interval,
             account,
             account_type,
+            storage_path,
             signer,
         ):
             return ffi.NULL
@@ -163,7 +164,7 @@ def test_create_provider_reports_null_provider_ptr_as_runtime_error():
     account = Web3().eth.account.create()
 
     with pytest.raises(RuntimeError, match="rings provider creation failed"):
-        module.create_provider(runtime, account)
+        module.create_provider(runtime, account, "unused")
     assert rings.log_levels == [rings.Error]
 
 
@@ -174,10 +175,10 @@ def ffi_runtime():
     return module, module.load_runtime(library_path=library_path)
 
 
-def test_provider_node_info_round_trip(ffi_runtime):
+def test_provider_node_info_round_trip(ffi_runtime, tmp_path):
     module, runtime = ffi_runtime
     account = Web3().eth.account.create()
-    provider = module.create_provider(runtime, account)
+    provider = module.create_provider(runtime, account, str(tmp_path))
 
     try:
         result = module.request_json(runtime, provider, "nodeInfo", {})
@@ -188,10 +189,10 @@ def test_provider_node_info_round_trip(ffi_runtime):
     assert result
 
 
-def test_create_offer_exercises_ffi_request_path(ffi_runtime):
+def test_create_offer_exercises_ffi_request_path(ffi_runtime, tmp_path):
     module, runtime = ffi_runtime
     account = Web3().eth.account.create()
-    provider = module.create_provider(runtime, account)
+    provider = module.create_provider(runtime, account, str(tmp_path))
 
     try:
         result = module.request_json(
@@ -208,10 +209,14 @@ def test_create_offer_exercises_ffi_request_path(ffi_runtime):
     assert result["offer"]
 
 
-def test_two_ffi_providers_connect_with_offer_answer(ffi_runtime):
+def test_two_ffi_providers_connect_with_offer_answer(ffi_runtime, tmp_path):
     module, runtime = ffi_runtime
-    provider_a = module.create_provider(runtime, Web3().eth.account.create())
-    provider_b = module.create_provider(runtime, Web3().eth.account.create())
+    provider_a = module.create_provider(
+        runtime, Web3().eth.account.create(), str(tmp_path / "a")
+    )
+    provider_b = module.create_provider(
+        runtime, Web3().eth.account.create(), str(tmp_path / "b")
+    )
     try:
         did_a = module.node_did(runtime, provider_a)
         did_b = module.node_did(runtime, provider_b)
@@ -225,10 +230,14 @@ def test_two_ffi_providers_connect_with_offer_answer(ffi_runtime):
         module.destroy_provider(runtime, provider_b)
 
 
-def test_two_ffi_providers_exchange_e2e_handshake_and_stream_frames(ffi_runtime):
+def test_two_ffi_providers_exchange_e2e_handshake_and_stream_frames(ffi_runtime, tmp_path):
     module, runtime = ffi_runtime
-    provider_a = module.create_provider(runtime, Web3().eth.account.create())
-    provider_b = module.create_provider(runtime, Web3().eth.account.create())
+    provider_a = module.create_provider(
+        runtime, Web3().eth.account.create(), str(tmp_path / "a")
+    )
+    provider_b = module.create_provider(
+        runtime, Web3().eth.account.create(), str(tmp_path / "b")
+    )
     try:
         did_a = module.node_did(runtime, provider_a)
         did_b = module.node_did(runtime, provider_b)

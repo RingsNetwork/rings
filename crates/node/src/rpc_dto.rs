@@ -6,6 +6,8 @@ use std::str::FromStr;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 use rings_core::dht::Did;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
+use rings_core::dht::RelayCustody;
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use rings_core::ecc::PublicKey;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 use rings_core::ecc::VerificationPublicKey;
@@ -92,6 +94,7 @@ pub(crate) fn online_node_descriptor_info(
                 .onion_relay
                 .map(json_value)
                 .transpose()?,
+            holds_relay_mail: descriptor.capabilities.relay_custody.holds(),
         },
         endpoint_hint: descriptor.endpoint_hint,
         started_at_ms: descriptor_timestamp_ms(descriptor.started_at_ms)?,
@@ -193,6 +196,7 @@ pub(crate) fn online_node_descriptor_from_info(
                 .onion_relay
                 .map(from_json_value::<crate::onion::OnionProcessEpoch>)
                 .transpose()?,
+            relay_custody: RelayCustody::of(descriptor.capabilities.holds_relay_mail),
         },
         endpoint_hint: descriptor.endpoint_hint,
         started_at_ms: u128::from(descriptor.started_at_ms),

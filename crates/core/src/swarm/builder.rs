@@ -15,7 +15,6 @@ use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::measure::MeasureImpl;
 use crate::message::OriginQuotaConfig;
-use crate::message::ReplayRecord;
 use crate::message::ReplayStorage;
 use crate::message::TransactionReplay;
 use crate::swarm::observer::NoopSwarmObserver;
@@ -39,7 +38,7 @@ pub struct SwarmBuilder {
     reassembly_limits: ReassemblyLimits,
     dht_storage: EntryStorage,
     relay_storage: Option<EntryStorage>,
-    replay_storage: ReplayStorage,
+    replay_storage: Option<ReplayStorage>,
     origin_quota: OriginQuotaConfig,
     delegatee_key: DelegateeKey,
     session_ttl: Option<usize>,
@@ -68,7 +67,7 @@ impl SwarmBuilder {
             reassembly_limits: default_reassembly_limits(),
             dht_storage,
             relay_storage: None,
-            replay_storage: Box::new(crate::storage::MemStorage::<ReplayRecord>::new()),
+            replay_storage: None,
             origin_quota: OriginQuotaConfig::default(),
             delegatee_key,
             session_ttl: None,
@@ -153,16 +152,20 @@ impl SwarmBuilder {
 
     /// Set the storage of the relay-inbox namespace: the only copy of the mail this node holds
     /// or owns, so it is a `RecordAuthority::Retained` store (#1021). Without one, the node takes
-    /// custody of no relay carrier: it refuses to hold mail and to take its own inbox's
-    /// hand-off (`Error::RelayStorageUnavailable`), so the mail stays with its holder.
+    /// custody of no relay carrier and declares in its handshake that it holds no relay mail, so
+    /// relay custody moves past it to the next node that does (`dht::relay_holder`), and it
+    /// fetches its own inbox from that holder.
     pub fn relay_storage(mut self, storage: EntryStorage) -> Self {
         self.relay_storage = Some(storage);
         self
     }
 
-    /// Set the durable sender-sequence and receiver replay-window storage.
+    /// Set the durable sender-sequence and receiver replay-window storage: an authoritative
+    /// store. Without one, the swarm refuses every reservation and admission
+    /// (`Error::TransactionReplayStorageUnavailable`, #1022), so it neither sends nor accepts a
+    /// transaction: an in-memory store would lose every stream's window at each restart.
     pub fn replay_storage(mut self, storage: ReplayStorage) -> Self {
-        self.replay_storage = storage;
+        self.replay_storage = Some(storage);
         self
     }
 

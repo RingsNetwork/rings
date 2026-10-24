@@ -7,7 +7,7 @@ mod builder;
 /// The transport callback of a connection: its inbound pipeline and lifecycle handling.
 pub(crate) mod callback;
 mod detached;
-mod inbox;
+pub(crate) mod inbox;
 /// Non-blocking observation hooks for operator telemetry.
 pub mod observer;
 pub(crate) mod session_link;
