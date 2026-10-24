@@ -28,11 +28,17 @@
 //!                 was last sent to acknowledges it, or its sender proof expires; it keeps at most
 //!                 `UNACKNOWLEDGED_RELAY_HOLDS_MAX` and refuses another to its local sender
 //!                 (`message::handlers::inbox::send_relay_hold`)
+//! Law (Owner places) the owner of a key places it, as the key lies in its own arc, so its view
+//!                 names the key's holder or none and never finds the owner `Unknown`; a keeper
+//!                 whose view does not place a carrier's key asks the owner (`FindRelayHolder`)
+//!                 and offers the carrier to the holder it names (`owner_answer`); it asks at
+//!                 most one query per kept key whose owner its view does not place, per repair
+//!                 pass, and takes only the first answer to a query it asked (`Law (Asked)`)
 //! ```
 //!
-//! The convergence law covers every single membership change and overlapping changes whose run
-//! fits a successor list; two relay-capable nodes joining one longer run within one window can
-//! strand a carrier at the old holder (#1045).
+//! Law (Owner places) is what makes the convergence law hold for overlapping changes too: a
+//! carrier whose holder lies behind several holders that joined within one window, out of reach
+//! of both ends of the old holder's view, still reaches the holder its owner names (#1045).
 //!
 //! A view covers a clockwise `RelaySegment`: the nodes behind this one that it can place, this
 //! node, and its successor list; a node with no successor owns the rest of the ring, as the
@@ -218,28 +224,61 @@ pub(crate) fn relay_holder(segment: &RelaySegment, key: Did) -> RelayHolder {
 }
 
 /// The nodes a keeper of the carrier of `key` offers it to, other than `local` itself: the
-/// holder `segment` names; or, when the view does not place the key's owner, both ends of the
-/// view that hold relay mail. The key then lies past the last node, toward which a holder's
-/// interval moves when nodes join ahead, or behind the first, the previous holder, which takes
-/// back the keys of a run a relay-capable node joined. Each end is the nearest node the view
-/// knows on its side, and takes the carrier only if its own view names it the holder, so an
-/// offer to the wrong side moves nothing. Empty: keep the carrier.
+/// holder `segment` names; or, when the view does not place the key's owner, the holder the
+/// owner named (`owner_named`, `Law (Owner places)`) and both ends of the view that hold relay
+/// mail. The key then lies past the last node, toward which a holder's interval moves when
+/// nodes join ahead, or behind the first, the previous holder, which takes back the keys of a
+/// run a relay-capable node joined. The owner's answer reaches a holder neither end knows, such
+/// as one behind several holders that joined within one window (#1045). Every target takes the
+/// carrier only if its own view names it the holder, so an offer to a node that does not hold
+/// it moves nothing. Empty: keep the carrier.
 ///
-/// Post: every target is not `local` and holds relay mail, and there are at most two.
-pub(crate) fn relay_handoff_targets(segment: &RelaySegment, key: Did, local: Did) -> Vec<Did> {
-    let mut targets = match relay_holder(segment, key) {
+/// Post: every target is not `local` and appears once; there are at most three, and every one
+/// but `owner_named` holds relay mail as the view knows it.
+pub(crate) fn relay_handoff_targets(
+    segment: &RelaySegment,
+    key: Did,
+    local: Did,
+    owner_named: Option<Did>,
+) -> Vec<Did> {
+    let candidates = match relay_holder(segment, key) {
         RelayHolder::Holder(holder) => vec![holder],
-        RelayHolder::Unknown => [segment.nodes.last(), segment.nodes.first()]
+        RelayHolder::Unknown => owner_named
             .into_iter()
-            .flatten()
-            .filter(|end| end.holds)
-            .map(|end| end.did)
+            .chain(
+                [segment.nodes.last(), segment.nodes.first()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|end| end.holds)
+                    .map(|end| end.did),
+            )
             .collect(),
         RelayHolder::Unheld => Vec::new(),
     };
-    targets.dedup();
-    targets.retain(|target| *target != local);
+    let mut targets = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if candidate != local && !targets.contains(&candidate) {
+            targets.push(candidate);
+        }
+    }
     targets
+}
+
+/// The holder the owner of `key` names to a keeper that asks (`FindRelayHolder`): the holder its
+/// own `segment` names. The owner places every key of its own arc, so its answer is a holder or
+/// `None` for a key without one, and `None` too when this node does not own `key`.
+///
+/// Law (Owner places): a node that owns `key` (`key ∈ (n, succ(n)]`, its segment's own arc)
+/// never finds its owner `Unknown`: `owner_answer` is the holder the owner's view names.
+pub(crate) fn owner_answer(segment: &RelaySegment, owner: Did, key: Did) -> Option<Did> {
+    let owns = segment
+        .owner_index(key)
+        .and_then(|index| segment.nodes.get(index))
+        .is_some_and(|node| node.did == owner);
+    match relay_holder(segment, key) {
+        RelayHolder::Holder(holder) if owns => Some(holder),
+        _ => None,
+    }
 }
 
 /// The nearest node behind this one that holds relay mail, and the head of its successor list:

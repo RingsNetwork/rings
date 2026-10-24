@@ -197,7 +197,9 @@ route.
   lost acknowledgement or refusal costs a resend, never the mail; only the node a hold was sent to
   can acknowledge or refuse it, and at most 64 holds are kept, another being refused to its local
   sender. A holder takes a relocated carrier only for a key its own view makes it hold, from a node
-  that holds relay mail, and only elements that pass the witness. Values are stored in the clear.
+  that holds relay mail, and only elements that pass the witness; a keeper that cannot place a
+  carrier's key asks the key's owner for its holder, and a wrong answer moves nothing, as the
+  named node takes only a key its own view makes it hold. Values are stored in the clear.
   [Details](docs/src/advanced-topic/chord.md#data-topic-storage),
   [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
