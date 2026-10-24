@@ -143,7 +143,11 @@ route.
   at most once while the store is retained; a damaged record disables only its stream.
   A completed replay write survives a process or system crash: the native store flushes the
   file and its directory (on unix), and the browser store commits each IndexedDB transaction
-  with `durability: "strict"` (#912). Exactly-once effects are not claimed.
+  with `durability: "strict"` (#912). Exactly-once effects are not claimed. In a browser the
+  replay guarantee lasts as long as the browser keeps the origin's storage: a private window
+  or ephemeral partitioned storage discards it when the session ends, which resets every
+  stream as an operator's removal of the replay store does, and a page cannot detect such a
+  context (#1036).
   [Details](docs/src/advanced-topic/transaction-replay.md).
 - **Rate limits.** After verification, the destination charges per-origin message and byte
   buckets keyed by the account DID, committed together with replay and before the application
@@ -200,6 +204,11 @@ route.
   that holds relay mail, and only elements that pass the witness; a keeper that cannot place a
   carrier's key asks the key's owner for its holder, and a wrong answer moves nothing, as the
   named node takes only a key its own view makes it hold. Values are stored in the clear.
+  Browser nodes hold relay mail too, but a browser can only claim that its storage outlives the
+  session, and a closed tab strands what it holds, so held mail is protected by redundancy
+  instead of by one holder's durability: once carriers are replicated to their first r ≥ 2
+  holders (#777), mail survives unless all r holders are lost within one repair period
+  (#1036).
   [Details](docs/src/advanced-topic/chord.md#data-topic-storage),
   [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
@@ -263,6 +272,11 @@ route.
 - #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal
   received by sync can hold a topic live for up to the horizon past the receiver's clock.
 - #932: a reassembled message whose full-size mailbox charge does not fit is dropped.
+- #777: a relay carrier has one holder. A browser holder whose ephemeral session ends, or
+  whose tab closes, loses or strands the mail it holds until carriers are replicated (#1036).
+- #1036: in a browser context with ephemeral storage, the replay windows reset at every
+  session end, undetectably: a receiver may admit an unexpired transaction once more per
+  session, and a sender's streams restart at sequence 0.
 - #1055: one origin runs one browser node at a time. A native store locks its directory, so a
   second daemon or FFI provider over it fails to open (#1039), but two browser tabs of one origin
   open the same IndexedDB stores and would interleave their writes to the replay and relay

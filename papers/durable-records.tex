@@ -86,7 +86,11 @@ detects total loss.  We state the crash obligation per platform, verified agains
 Chromium, Gecko and WebKit sources (only \jsq{strict} durability flushes in all three),
 forbid eviction for authoritative records, and give a custody law that makes relay mail
 survive a restart between admission and consumption, with the impossibility result that
-bounds what any receiver can do for mail that has fallen behind live traffic.
+bounds what any receiver can do for mail that has fallen behind live traffic.  A browser
+can only claim durability, since an ephemeral context is indistinguishable from a persistent
+one; we admit a node's own state on the claim, with each ephemeral session end as the
+documented reset, and admit custody of other nodes' mail on a claim only across $r\ge2$
+holders.
 }\hfill\null\par
 \vspace{0.5\baselineskip}}
 
@@ -114,7 +118,12 @@ before a restart, is refused as a replay on redelivery and lost.
 \issue{936} is a presence defect of a fact that lives in no store at all (that the queued mail
 was never consumed).  Section~\ref{sec:model} fixes the model, Section~\ref{sec:lattice} the
 authority lattice, Sections~\ref{sec:witness}--\ref{sec:custody} the five laws, and
-Section~\ref{sec:plan} the order of implementation.
+Section~\ref{sec:plan} the order of implementation.  One defect was found after the batch:
+\begin{description}[leftmargin=1.2em,style=nextline]
+\item[\issue{1036}] A browser context whose IndexedDB opens but is ephemeral (a private
+window, ephemeral partitioned storage) claims $\Durable$, and nothing the page observes
+tells it apart; Section~\ref{sec:claimed} rules on it.
+\end{description}
 
 \section{Model}\label{sec:model}
 
@@ -216,6 +225,9 @@ opened at $(c,m)$ only if $c\sqsupseteq\req(m)$.
 Under $c\sqsubset\Durable$ a crash may lose a completed write, so $\bot$ after recovery can
 be a loss; a meaning above $\Rebuild$ asserts that $\bot$ is not a loss.
 \end{proof}
+Law~\ref{law:admissible} reads $c$ as the crash class the platform establishes.  A browser
+can only claim it (Assumption~\ref{as:claimed}); Section~\ref{sec:claimed} states when a
+claimed class is admissible.
 
 The existing \texttt{RecordAuthority} is the two-point chain
 $\mathsf{Disposable}=(\Cached,\Rebuild)\sqsubset\mathsf{Authoritative}=(\Durable,\Auth)$
@@ -239,17 +251,26 @@ Entry guards & $(\Cached,\Rebuild)$ & $(\Durable,\Rebuild)$ \issue{911}\\
 Replay (native) & $(\Durable,\Auth)^{\ast}$ & $(\Durable,\Auth)$ \issue{915}\\
 Replay (browser) & $(\Cached,\Rebuild)^{\dagger}$ & $(\Durable,\Auth)$ \issue{912},\issue{923}\\
 Replay (no store given) & $(\Volatile,\Auth)$ & refused \issue{1022}\\
+\midrule
+\multicolumn{3}{@{}l}{Browser, where $\Durable$ is claimed ($\Durable^{\circ}$):}\\
+\quad relay carriers & $(\Durable,\Retained)$ & same, $r\ge2$ \issue{777}\\
+\quad replay & $(\Durable,\Auth)$ & same \issue{1036}\\
+\quad entry guards & $(\Durable,\Rebuild)$ & same\\
 \bottomrule
 \end{tabular}
 \\[2pt]
 {\footnotesize $^{\ast}$W missing; D only on unix.  $^{\dagger}$Decodes as $\Auth$ (F) but
-neither D (relaxed commit) nor N (row-cap eviction) holds.}
+neither D (relaxed commit) nor N (row-cap eviction) holds.\\
+$^{\circ}$Claimed (Assumption~\ref{as:claimed}).  $r$: the holders of a carrier
+(Law~\ref{law:redundant}), one today.}
 \end{table}
 
 Table~\ref{tab:stores} is the whole classification.  The two rows marked with new issues are
 inadmissible points the law exposes outside the five issues: relay carriers are the only
 copy of held mail (\issue{1021}), and a provider given no replay store runs replay at
-$(\Volatile,\Auth)$ (\issue{1022}).
+$(\Volatile,\Auth)$ (\issue{1022}).  The browser rows below the rule rest on a claimed crash
+class (Section~\ref{sec:claimed}); the carrier row is inadmissible at $r=1$, which
+\issue{777} closes.
 
 \section{Presence witness}\label{sec:witness}
 
@@ -392,6 +413,21 @@ N the program removes no row it was not told to.  By Assumption~\ref{as:idbloss}
 platform loses no proper subset of a database's rows, so no $\lambda_{\mathrm{part}}$ is
 reachable and W holds vacuously; total loss is Proposition~\ref{prop:total}.
 \end{proof}
+
+\begin{assumption}[A browser's crash class is claimed]\label{as:claimed}
+A page cannot observe whether its IndexedDB outlives the browsing session.  An ephemeral
+context (a private window, ephemeral partitioned third-party storage) opens, commits and
+fires \jsq{complete} as a persistent one does, and \jsq{navigator.storage.persisted()}
+reports exemption from eviction under storage pressure, not
+ephemerality~\cite{MDNEviction}.  We write $\Durable^{\circ}$ for a claimed $\Durable$:
+$\Durable$ in a persistent context, and $\Volatile$ with a $\lambda_{\mathrm{tot}}$ at
+session end in an ephemeral one.
+\end{assumption}
+
+Assumption~\ref{as:idbloss} holds in an ephemeral context too: its session end loses the
+whole partition, a total loss, so Proposition~\ref{prop:idbwitness} is unchanged.  By
+Proposition~\ref{prop:total} no witness in the domain detects that loss, so no observation at
+open separates $\Durable^{\circ}$ from $\Durable$.
 
 
 
@@ -646,6 +682,56 @@ So below the window the drain refuses as the live path does, which is the criter
 payload arriving live).  Delivering such mail needs the sender to put it on a stream that
 live traffic does not advance, a protocol change outside this law.
 
+\section{Claimed durability}\label{sec:claimed}
+
+A store at $(\Durable^{\circ},m)$ satisfies Law~\ref{law:admissible} read with the claim,
+and violates it read with the ephemeral case.  Which reading applies is fixed by whose state
+the store holds: refusing a node's own state refuses the node, while refusing state it holds
+for other nodes moves that state to another holder.
+
+\begin{law}[Own state on a claim]\label{law:ownclaim}
+A store of the node's own state (replay, entry guards) may be opened at
+$(\Durable^{\circ},m)$ for every $m$.  In an ephemeral context each session end is
+$\lambda_{\mathrm{tot}}$ of the store, the documented reset of Proposition~\ref{prop:total}.
+\end{law}
+
+For replay at $(\Durable^{\circ},\Auth)$ the reset is per ephemeral session: a receiver may
+admit an unexpired transaction once more, which its expiry bounds, and a sender restarts its
+streams at sequence $0$, which destinations see as $\mathsf{Stale}$ or $\mathsf{Fork}$ until
+it passes their retained high watermark.  For entry guards it is one re-selection of the
+first hop.
+
+Relay carriers are the other case.  Most nodes are expected to be browsers
+(\issue{1036}), so carriers must rest on browser holders: moving custody past every
+browser (\issue{1037}) would concentrate it on the few native nodes.  One
+$\Durable^{\circ}$ holder loses its carriers at an ephemeral session end, and a persistent
+but closed tab holds them unreachably until it returns.  Both are holder losses, so
+redundancy across holders replaces durability at one holder.
+
+\begin{law}[Redundant custody]\label{law:redundant}
+A carrier is admissible at $(\Durable^{\circ},\Retained)$ iff it is held by $r\ge2$ holders,
+the first $r$ relay-capable nodes from its key's owner under the holder law of
+\issue{1037}, and every repair period $T$ restores $r$ copies from any copy that survives.
+A carrier at an established $(\Durable,\Retained)$ is admissible at $r=1$.
+\end{law}
+
+\begin{proposition}[Survival across holders]\label{prop:redundant}
+Under Law~\ref{law:redundant} a held element is lost only if every holder that held it is
+lost (it left, or its storage was lost) within one repair period.
+\end{proposition}
+\begin{proof}
+A repair pass that runs while one copy of an element survives restores $r$ copies.  Between
+two passes the copies decrease only by holder loss, so the element is lost only if all of
+its copies, at least $r$ after the last pass, are lost before the next.
+\end{proof}
+
+Proposition~\ref{prop:atleastonce} then holds with its premise, a carrier that survives, read
+as the condition of Proposition~\ref{prop:redundant}.  Today $r=1$ for every carrier, so a
+browser carrier is an inadmissible point, as relay carriers in the data store were before
+\issue{1021}; \issue{777} implements the law: placement on the first $r$ relay-capable
+nodes, acknowledgements (\issue{1037}) that count holders, and its composition with the
+custody set $\K_s$.
+
 \section{Implementation order}\label{sec:plan}
 
 \begin{center}
@@ -668,7 +754,7 @@ The dependencies: 2 and 4 on the browser need the strict-commit seam of 2; 4 on 
 needs the write-through rename of 3; 5 needs nothing from 1--4, but its
 Proposition~\ref{prop:atleastonce} holds in full only with \issue{1021}.  PR~1 comes first because
 it is the only one that closes a safety gap reachable without a crash.  \issue{1021} and
-\issue{1022} follow the batch.
+\issue{1022} follow the batch; \issue{777} implements Law~\ref{law:redundant}.
 
 \textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}: PR~5 changes the
 receiver record, so an old record does not decode and fails its stream closed; the operator
@@ -692,6 +778,8 @@ survival, unix & fsync, rename, directory fsync\\
 survival, Windows & write-through rename (Law~\ref{law:writethrough})\\
 survival, browser & strict commit (Law~\ref{law:strict})\\
 presence of custody & $\K_s$ in the receiver record (Law~\ref{law:custody})\\
+own state, ephemeral & reset per session (Law~\ref{law:ownclaim})\\
+custody, browser & $r\ge2$ holders (Law~\ref{law:redundant})\\
 \bottomrule
 \end{tabular}
 \end{center}
