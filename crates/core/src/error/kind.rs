@@ -799,6 +799,11 @@ pub enum Error {
         capacity: usize,
     },
 
+    /// This node was given no transaction replay store, so it refuses every reservation and
+    /// admission: a volatile replay store would reopen every stream at each restart (#1022)
+    #[error("This node keeps no transaction replay store and refuses every replay transition")]
+    TransactionReplayStorageUnavailable,
+
     /// A storage holds a record it cannot read or decode; the record is kept, never deleted.
     #[error("Storage cannot decode {0}")]
     StorageRecordUndecodable(crate::storage::UndecodableRecord),

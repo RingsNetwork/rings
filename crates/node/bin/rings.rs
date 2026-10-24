@@ -41,13 +41,11 @@ use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api_with_gateway;
 use rings_node::native::gateway::NativeGatewayRunner;
+use rings_node::native::stores::NodeStores;
 use rings_node::onion::proxy::http::run_onion_http_proxy;
 use rings_node::onion::proxy::http::OnionHttpProxyOptions;
-use rings_node::onion::OnionEntryGuardStorage;
 use rings_node::onion::OnionExitTarget;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
-use rings_node::prelude::rings_core::storage::file::FileStorage;
-use rings_node::prelude::rings_core::storage::RecordAuthority;
 use rings_node::prelude::StopSource;
 use rings_node::prelude::StopToken;
 use rings_node::processor::Processor;
@@ -63,39 +61,6 @@ use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 
 const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
-const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
-/// Byte budget of the native replay store: at least every record of a full store
-/// (`rings_core::message::TRANSACTION_REPLAY_STORE_MAX_BYTES`, about 27 MiB). The store is
-/// authoritative and evicts nothing: a write beyond the budget fails, which
-/// fails that transition closed, so the budget must never be reached.
-const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 40 * 1024 * 1024;
-
-/// Byte budget of the native relay-inbox store: the carriers this node holds or owns, each at
-/// most `RELAY_INBOX_MAX_LEN` held messages. The store is retained and evicts nothing (#1021): a
-/// hold beyond the budget is refused, so the sender's message is not held, instead of evicting
-/// mail already held.
-const RELAY_INBOX_STORAGE_CAPACITY: u32 = 64 * 1024 * 1024;
-/// Directory of the onion entry-guard store, beside the data store.
-const ONION_ENTRY_GUARD_STORAGE_DIR: &str = "onion-entry-guards";
-/// Directory of the transaction replay store, beside the data store.
-const TRANSACTION_REPLAY_STORAGE_DIR: &str = "transaction-replay";
-/// Directory of the relay-inbox store, beside the data store.
-const RELAY_INBOX_STORAGE_DIR: &str = "relay-inbox";
-/// Directory of the provisional-evidence store, beside the measure store.
-const PROVISIONAL_EVIDENCE_STORAGE_DIR: &str = "provisional-evidence";
-
-/// The path of the store directory `dir` beside the store at `storage_path`: in its parent, or
-/// in the working directory when it has none (pure).
-fn sibling_storage_path(storage_path: &str, dir: &str) -> String {
-    Path::new(storage_path)
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .join(dir)
-        .to_string_lossy()
-        .to_string()
-}
-
 /// The command line: the top-level parser, its subcommands and their arguments.
 mod cli;
 
@@ -326,67 +291,18 @@ async fn build_processor(
     reassembly_limits: ReassemblyLimits,
     service_offer: Option<ServiceOffer>,
 ) -> anyhow::Result<Arc<Processor>> {
-    let per_data_storage = Box::new(
-        FileStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path.clone())
-            .await?,
-    );
-    let per_measure_storage = Box::new(
-        FileStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path.clone())
-            .await?,
-    );
-    let provisional_evidence_path =
-        sibling_storage_path(&measure_storage.path, PROVISIONAL_EVIDENCE_STORAGE_DIR);
-    let per_evidence_storage = Box::new(
-        FileStorage::new_with_cap_and_path(measure_storage.capacity, provisional_evidence_path)
-            .await?,
-    );
-    let onion_entry_guard_path =
-        sibling_storage_path(&data_storage.path, ONION_ENTRY_GUARD_STORAGE_DIR);
-    // The entry guards are a durable cache (#911): a completed guard write survives a crash, and
-    // a guard record that is absent or does not decode is re-selected, logged, never fatal.
-    let per_onion_entry_guard_storage: OnionEntryGuardStorage = Box::new(
-        FileStorage::new_with_cap_path_and_authority(
-            ONION_ENTRY_GUARD_STORAGE_CAPACITY,
-            onion_entry_guard_path,
-            RecordAuthority::DurableCache,
-        )
-        .await?,
-    );
-    // The replay store is the only copy of its streams' state: its writes are flushed and an
-    // undecodable record is reported and kept, so replay fails closed on it (#909).
-    let per_transaction_replay_storage = Box::new(
-        FileStorage::new_with_cap_path_and_authority(
-            TRANSACTION_REPLAY_STORAGE_CAPACITY,
-            sibling_storage_path(&data_storage.path, TRANSACTION_REPLAY_STORAGE_DIR),
-            RecordAuthority::Authoritative,
-        )
-        .await?,
-    );
-    // Relay carriers are the only copy of the mail they hold: their store is retained, so a
-    // completed hold survives a crash and none is evicted by the data store's budget (#1021).
-    let per_relay_inbox_storage = Box::new(
-        FileStorage::new_with_cap_path_and_authority(
-            RELAY_INBOX_STORAGE_CAPACITY,
-            sibling_storage_path(&data_storage.path, RELAY_INBOX_STORAGE_DIR),
-            RecordAuthority::Retained,
-        )
-        .await?,
-    );
-
+    let stores = NodeStores::open(&data_storage, &measure_storage).await?;
     let collector =
         EvidenceCollectorIdentity::new(pc.network_id(), pc.delegatee_key().delegator_did());
-    let measure = PeriodicMeasure::new_with_evidence_storage(
-        per_measure_storage,
-        per_evidence_storage,
-        collector,
-    )
-    .await?;
+    let measure =
+        PeriodicMeasure::new_with_evidence_storage(stores.measure, stores.evidence, collector)
+            .await?;
 
     let builder = ProcessorBuilder::from_config(pc)?
-        .storage(per_data_storage)
-        .relay_storage(per_relay_inbox_storage)
-        .onion_entry_guard_storage(per_onion_entry_guard_storage)
-        .replay_storage(per_transaction_replay_storage)
+        .storage(stores.data)
+        .relay_storage(stores.relay)
+        .onion_entry_guard_storage(stores.guards)
+        .replay_storage(stores.replay)
         .measure(measure)
         .reassembly_limits(reassembly_limits);
     let builder = match service_offer {
@@ -823,17 +739,10 @@ mod tests {
     use clap::CommandFactory;
     use clap::FromArgMatches;
     use rings_node::logging::LogLevel;
-    use rings_node::prelude::rings_core::message::TRANSACTION_REPLAY_STORE_MAX_BYTES;
 
     use super::await_gateway_startup;
     use super::await_task_cleanup;
-    use super::sibling_storage_path;
     use super::Cli;
-    use super::ONION_ENTRY_GUARD_STORAGE_DIR;
-    use super::PROVISIONAL_EVIDENCE_STORAGE_DIR;
-    use super::RELAY_INBOX_STORAGE_DIR;
-    use super::TRANSACTION_REPLAY_STORAGE_CAPACITY;
-    use super::TRANSACTION_REPLAY_STORAGE_DIR;
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
         let matches = Cli::command()
@@ -874,38 +783,6 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    /// Every store beside the data or the measure store is a sibling directory of it, in the
-    /// working directory when the store path has no parent.
-    #[test]
-    fn test_sibling_stores_sit_beside_their_store() {
-        for dir in [
-            ONION_ENTRY_GUARD_STORAGE_DIR,
-            TRANSACTION_REPLAY_STORAGE_DIR,
-            RELAY_INBOX_STORAGE_DIR,
-            PROVISIONAL_EVIDENCE_STORAGE_DIR,
-        ] {
-            assert_eq!(
-                sibling_storage_path(".rings/data", dir),
-                format!(".rings/{dir}")
-            );
-            assert_eq!(
-                sibling_storage_path("/tmp/rings/data", dir),
-                format!("/tmp/rings/{dir}")
-            );
-            assert_eq!(sibling_storage_path("data", dir), format!("./{dir}"));
-        }
-    }
-
-    /// A full replay store always fits the native replay store's budget, so the stream-count bound,
-    /// not the store's budget, is what fails closed.
-    #[test]
-    fn test_transaction_replay_storage_holds_a_full_store() -> Result<(), std::num::TryFromIntError>
-    {
-        let capacity = usize::try_from(TRANSACTION_REPLAY_STORAGE_CAPACITY)?;
-        assert!(TRANSACTION_REPLAY_STORE_MAX_BYTES <= capacity);
-        Ok(())
     }
 
     #[tokio::test]

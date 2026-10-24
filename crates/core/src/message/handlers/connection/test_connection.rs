@@ -35,6 +35,7 @@ fn prepare_ring_node(key: SecretKey) -> Result<Node> {
             Box::new(crate::storage::MemStorage::new()),
             session,
         )
+        .replay_storage(crate::tests::volatile_replay_storage())
         .dht_succ_max(1)
         .dht_finger_table_size(0)
         .dht_virtual_nodes(0),

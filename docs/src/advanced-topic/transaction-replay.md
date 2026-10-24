@@ -180,9 +180,11 @@ providers keep them in a dedicated authoritative IndexedDB store with a row capa
 `TRANSACTION_REPLAY_STORE_MAX_RECORDS`, which evicts nothing either: a new record beyond it fails
 with `StorageBudgetExhausted`, and so does an open under a lowered capacity (#923). Both are sized
 never to reach their limits, so the refusal is a bound, not an expected path. A custom
-`SwarmBuilder` or `ProcessorBuilder` must supply durable `ReplayStorage` to retain the restart
-guarantee; their in-memory default guarantees replay rejection only for the lifetime of that
-runtime.
+`SwarmBuilder` or `ProcessorBuilder` must supply an authoritative `ReplayStorage`. Without one,
+the node refuses every reservation and admission with `TransactionReplayStorageUnavailable`, so
+it neither sends nor accepts a transaction (#1022): an in-memory store would lose every stream's
+window at each restart, reopening replay on the receiver and re-signing used sequences on the
+sender.
 
 Deleting or replacing the replay store deletes the guarantee for its streams. There is no safe
 incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail

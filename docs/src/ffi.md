@@ -22,7 +22,7 @@ The library lands in `target/debug/` as `librings_node.dylib` (macOS), `librings
 | Function | Role |
 |---|---|
 | `rings_node_init_logging(level)` | Installs the logger once; `level` is `Debug`, `Info`, `Warn`, `Error`, or `Trace`. |
-| `rings_node_new_provider_with_callback(network_id, ice_server, stabilize_interval, account, account_type, signer)` | Creates a provider and returns its handle, or `NULL` when creation fails. |
+| `rings_node_new_provider_with_callback(network_id, ice_server, stabilize_interval, account, account_type, storage_path, signer)` | Creates a provider keeping its stores under `storage_path`, and returns its handle, or `NULL` when creation fails. |
 | `rings_node_listen(provider)` | Starts message listening and Chord stabilization. |
 | `rings_node_request(provider, method, params)` | Calls one method of the [JSON-RPC API](jsonrpc.md) with a JSON `params` string; returns the reply as a string, or `NULL` when validation or execution fails. |
 | `rings_node_string_free(value)` | Releases a string returned by `rings_node_request`. |
@@ -35,13 +35,26 @@ seconds, the account as a hex string, and its `account_type` (`eip191`, `ed25519
 exactly 65 signature bytes over `proof` into `out`; the node calls it to sign its session and
 never sees the private key.
 
+`storage_path` is a directory the provider owns. Under it the provider opens the same stores a
+native node opens beside its data store, each at its authority: `data` (the DHT data store),
+`transaction-replay` (the replay windows, authoritative), `relay-inbox` (held mail, retained),
+`onion-entry-guards` (a durable cache), and `measure` with `provisional-evidence`. Pass the same
+path on every run of the same node: the replay windows must survive a restart, or the node
+would accept replayed transactions and re-sign used sequences (#1022). A fresh path is a fresh
+node state.
+
+The provider owns `storage_path` exclusively while it lives: at most one live provider uses a
+given root, and it is never a native daemon's storage directory. Every store assumes it is its
+directory's only writer, so two writers would interleave their writes to one authoritative
+replay store. Nothing enforces this yet (#1039); keep one root per node.
+
 ## Lifecycle
 
 ```c
 rings_node_init_logging(Info);
 
 struct ProviderHandle *provider = rings_node_new_provider_with_callback(
-    1, "stun://stun.l.google.com:19302", 15, account, "eip191", signer);
+    1, "stun://stun.l.google.com:19302", 15, account, "eip191", "/var/lib/myapp/rings", signer);
 rings_node_listen(provider);
 
 char *reply = rings_node_request(provider, "connectPeerViaHttp",

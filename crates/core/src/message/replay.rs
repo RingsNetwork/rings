@@ -383,6 +383,12 @@ fn quota_clock(started_at: Instant) -> impl FnOnce() -> OriginQuotaInstant {
     }
 }
 
+/// `storage`'s record naming, under which it files each record and reports the records it cannot
+/// decode.
+fn record_naming(storage: &ReplayStorage) -> impl Fn(&str) -> String + '_ {
+    |storage_key| storage.record_name(storage_key)
+}
+
 /// Storage accepted by the transaction replay runtime.
 pub type ReplayStorage = Box<rings_runtime::maybe_send_sync!(dyn KvStorageScan<ReplayRecord>)>;
 
@@ -458,7 +464,10 @@ impl ReplayCounterState {
 ///   └──────────▶ only the wait is abandoned
 /// ```
 pub(crate) struct TransactionReplay {
-    storage: ReplayStorage,
+    /// The replay store; `None` when the node was given none, so that every transition is
+    /// refused (`Error::TransactionReplayStorageUnavailable`, #1022): durable-records admits no
+    /// volatile replay store, whose loss at every restart would reopen every stream.
+    storage: Option<ReplayStorage>,
     state: Mutex<TransactionAdmissionState>,
     started_at: Instant,
     counters: ReplayCounterState,
@@ -491,11 +500,18 @@ impl TransactionReplay {
     /// lazily on its first operation.
     #[cfg(test)]
     pub(crate) fn new_shared(storage: ReplayStorage) -> Arc<Self> {
-        Arc::new(Self::new_with_quota(storage, OriginQuotaConfig::default()))
+        Arc::new(Self::new_with_quota(
+            Some(storage),
+            OriginQuotaConfig::default(),
+        ))
     }
 
-    /// Construct a replay runtime with explicit runtime-local origin quotas.
-    pub(crate) fn new_with_quota(storage: ReplayStorage, quota_config: OriginQuotaConfig) -> Self {
+    /// Construct a replay runtime over `storage` with explicit runtime-local origin quotas; with
+    /// no storage, every reservation and admission is refused (the field's law).
+    pub(crate) fn new_with_quota(
+        storage: Option<ReplayStorage>,
+        quota_config: OriginQuotaConfig,
+    ) -> Self {
         Self {
             storage,
             state: Mutex::new(TransactionAdmissionState {
@@ -528,6 +544,7 @@ impl TransactionReplay {
     /// ```text
     /// slot cached? ── yes ──────────────────────────────────────────────▶ slot
     ///      │ no
+    /// no storage ──────────▶ Err(TransactionReplayStorageUnavailable)
     /// scan storage ── Err ──▶ count persistence failure ──▶ Err(load) (slot stays empty)
     ///      │ Ok(records)
     /// restore (pure, total) ──▶ count + log unrestorable ──▶ slot := store ──▶ slot
@@ -537,24 +554,26 @@ impl TransactionReplay {
         slot: &'a mut Option<ReplayStore>,
     ) -> Result<&'a mut ReplayStore> {
         if slot.is_none() {
-            let records = self.storage.scan().await.map_err(|source| {
+            let storage = self.storage()?;
+            let records = storage.scan().await.map_err(|source| {
                 self.count_persistence_failure();
                 Error::TransactionReplayPersistence {
                     operation: "load",
                     source: Box::new(source),
                 }
             })?;
-            let restored = restore(records, self.record_naming());
+            let restored = restore(records, record_naming(storage));
             self.report_unrestorable(&restored.unrestorable);
             *slot = Some(restored);
         }
         slot.as_mut().ok_or(Error::TransactionReplayStateInvalid)
     }
 
-    /// The storage's record naming, under which it files each record and reports the records it
-    /// cannot decode.
-    fn record_naming(&self) -> impl Fn(&str) -> String + '_ {
-        |storage_key| self.storage.record_name(storage_key)
+    /// The replay store, or the refusal of a node given none (the law of `storage`).
+    fn storage(&self) -> Result<&ReplayStorage> {
+        self.storage
+            .as_ref()
+            .ok_or(Error::TransactionReplayStorageUnavailable)
     }
 
     /// Count and log the `unrestorable` records of a fresh load; each fails its stream closed
@@ -581,7 +600,7 @@ impl TransactionReplay {
         table: ReplayTable,
         key: StreamKey,
     ) -> Result<()> {
-        match store.unavailable_record(table, &key, self.record_naming())? {
+        match store.unavailable_record(table, &key, record_naming(self.storage()?))? {
             None => Ok(()),
             Some(record) => {
                 self.counters
@@ -601,7 +620,7 @@ impl TransactionReplay {
 
     /// Store one stream's `record` under `storage_key`; a failure is counted and returned.
     async fn persist(&self, (storage_key, record): (String, ReplayRecord)) -> Result<()> {
-        self.storage
+        self.storage()?
             .put(storage_key.as_str(), &record)
             .await
             .map_err(|source| {

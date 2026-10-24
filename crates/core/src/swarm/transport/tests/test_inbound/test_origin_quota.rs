@@ -11,6 +11,7 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
     let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
+        .replay_storage(crate::tests::volatile_replay_storage())
         .origin_quota(quota)
         .build();
     let transport = Arc::clone(&swarm.transport);
@@ -89,6 +90,7 @@ async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() ->
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
     let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
+        .replay_storage(crate::tests::volatile_replay_storage())
         .origin_quota(quota)
         .build();
     let transport = Arc::clone(&swarm.transport);

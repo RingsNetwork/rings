@@ -421,6 +421,7 @@ mod tests {
                 Box::new(MemStorage::new()),
                 session,
             )
+            .replay_storage(crate::tests::volatile_replay_storage())
             .build(),
         );
 
@@ -450,6 +451,7 @@ mod tests {
                 Box::new(MemStorage::new()),
                 session,
             )
+            .replay_storage(crate::tests::volatile_replay_storage())
             .build(),
         );
         let stabilizer = swarm.stabilizer();

@@ -124,7 +124,9 @@ impl ProcessorBuilder {
         self
     }
 
-    /// Set durable destination-scoped transaction replay storage.
+    /// Set durable destination-scoped transaction replay storage: an authoritative store.
+    /// Without one, the processor refuses every replay transition, so it neither sends nor
+    /// accepts a transaction (`SwarmBuilder::replay_storage`, #1022).
     pub fn replay_storage(mut self, storage: ReplayStorage) -> Self {
         self.replay_storage = Some(storage);
         self
@@ -206,9 +208,6 @@ impl ProcessorBuilder {
             .map_err(|e| Error::VerifyError(e.to_string()))?;
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
-        let replay_storage = self
-            .replay_storage
-            .unwrap_or_else(|| Box::new(MemStorage::new()));
         let onion_entry_guard_storage = self
             .onion_entry_guard_storage
             .unwrap_or_else(|| Box::new(MemStorage::new()));
@@ -253,7 +252,9 @@ impl ProcessorBuilder {
         swarm_builder = swarm_builder.dht_finger_table_size(self.dht_finger_table_size);
         swarm_builder = swarm_builder.dht_virtual_nodes(self.dht_virtual_nodes);
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
-        swarm_builder = swarm_builder.replay_storage(replay_storage);
+        if let Some(replay_storage) = self.replay_storage {
+            swarm_builder = swarm_builder.replay_storage(replay_storage);
+        }
         if let Some(relay_storage) = self.relay_storage {
             swarm_builder = swarm_builder.relay_storage(relay_storage);
         }

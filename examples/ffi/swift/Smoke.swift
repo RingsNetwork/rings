@@ -1,5 +1,10 @@
 import Foundation
 
+/// A fresh storage directory for one fixture provider.
+private func fixtureStorage() -> String {
+    NSTemporaryDirectory() + "rings-ffi-swift-" + UUID().uuidString
+}
+
 @main
 struct Smoke {
     static func main() throws {
@@ -19,16 +24,25 @@ struct Smoke {
         do {
             _ = try RingsProvider(
                 runtime: runtime,
-                account: "fixture-create-failure"
+                account: "fixture-create-failure",
+                storagePath: fixtureStorage()
             ) { _ in Data([1]) }
             throw RingsFfiError.invalidResponse("provider creation unexpectedly succeeded")
         } catch RingsFfiError.signerLength(let length) where length == 1 {
             // The wrapper must surface the signer cause recorded during native construction.
         }
-        let first = try RingsProvider(runtime: runtime, account: "fixture-one") { message in
+        let first = try RingsProvider(
+            runtime: runtime,
+            account: "fixture-one",
+            storagePath: fixtureStorage()
+        ) { message in
             Data(repeating: UInt8(message.count), count: ringsSignatureLength)
         }
-        let second = try RingsProvider(runtime: runtime, account: "fixture-two") { _ in
+        let second = try RingsProvider(
+            runtime: runtime,
+            account: "fixture-two",
+            storagePath: fixtureStorage()
+        ) { _ in
             Data(repeating: 7, count: ringsSignatureLength)
         }
         first.listen()
