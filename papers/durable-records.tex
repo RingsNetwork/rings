@@ -51,6 +51,9 @@
 \newcommand{\W}{\mathcal{W}}
 \newcommand{\issue}[1]{\#{#1}}
 \newcommand{\jsq}[1]{\texttt{#1}}
+\newcommand{\nxt}{\operatorname{succ}}
+\newcommand{\own}{\operatorname{owner}}
+\newcommand{\Mem}{\mathcal{M}}
 
 \author{Ryan~J.~Kung%
 \thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
@@ -732,6 +735,230 @@ browser carrier is an inadmissible point, as relay carriers in the data store we
 nodes, acknowledgements (\issue{1037}) that count holders, and its composition with the
 custody set $\K_s$.
 
+\section{Replicated custody}\label{sec:replicated}
+
+Law~\ref{law:redundant} fixes what must hold; this section fixes how, composed with the
+holder law of \issue{1037}, the owner query of \issue{1045}, the acknowledgements of
+\issue{1037}, and the custody set of Law~\ref{law:custody}.  Holders are lost to churn and
+to ephemeral sessions; availability against Byzantine holders is not claimed, so a member's
+copy is trusted as \issue{1037} trusts a relocating holder's.
+
+Write $\mathrm{holds}(n)$ for $n$'s declaration, $\nxt(n)$ for its successor head,
+$\own(k)$ for the $n$ with $k\in(n,\nxt(n)]$, and $p_j(n)$ for the $j$-th nearest node
+strictly behind $n$ with $\mathrm{holds}$.
+
+\begin{definition}[Members]\label{def:members}
+$\Mem_r(k)$ is the first $r$ nodes $n$ of $\own(k),\nxt(\own(k)),\nxt^2(\own(k)),\dots$
+with $\mathrm{holds}(n)$; its first, $h_0(k)$, is the holder of \issue{1037}.  The
+\emph{rank} of a member is $\mathrm{rank}_k(n)=|\{m\in\Mem_r(k): m\text{ before }n\}|$, and its
+\emph{next member} $\mathrm{next}_k(n)$ is the member of rank $\mathrm{rank}_k(n)+1$.  $r$ is
+configurable, default $r=8$, aimed at a held message's loss below $10^{-3}$ over its 24\,h
+retention with 90\% browser holders (\issue{777}); which session models it covers is stated
+with the departure classes below, and it is to be recalibrated on \issue{773}'s churn
+simulator.
+\end{definition}
+
+\begin{lemma}[Member range]\label{lem:range}
+For $n$ with $\mathrm{holds}(n)$: $n\in\Mem_r(k)\iff k\in(\nxt(p_r(n)),\nxt(n)]$, and
+$n=h_0(k)\iff k\in(\nxt(p_1(n)),\nxt(n)]$.
+\end{lemma}
+\begin{proof}
+$n\in\Mem_r(k)$ iff fewer than $r$ holders lie in $[\own(k),n)$, iff
+$\own(k)\in(p_r(n),n]$.  The arcs owned by the nodes from $\nxt(p_r(n))$ to $n$ are
+$(\nxt(p_r(n)),\nxt(n)]$.  At $r=1$ this is the holder's range of \issue{1037}.
+\end{proof}
+
+\begin{law}[Previous holders]\label{law:previous}
+Each repair pass every node $n$ passes to $\nxt(n)$ the list
+$\pi(n)=[(n,\nxt(n))]\mathbin{+\!\!+}\rho(n)[..r-1]$ if $\mathrm{holds}(n)$, and $\rho(n)$
+otherwise, where $\rho(n)$ is the list its predecessor last passed it; a node takes a list
+from its predecessor alone.  A list that comes round the ring to $n$ names every holder, and
+$n$'s search for members then continues round the ring.
+\end{law}
+
+By the induction of \issue{1037} along each storage-less run, every holder learns
+$p_1(n),\dots,p_r(n)$ with their successor heads, so Lemma~\ref{lem:range} is decided on
+local state.
+
+A member decides its rank on local state too: its list names $p_1,\dots,p_r$, so it counts
+the holders in $[\own(k),n)$.  It finds $\mathrm{next}_k(n)$ in its successor list, or, when no
+node of that list holds relay mail, by the owner query of \issue{1045} for the key just past
+its list's last node, whose owner answers the first holder at or after it; an owner whose view
+names none answers the last node it places, and the query is asked again past it.  So a member
+reaches the next member however long the run between them, and the successor list stays at its
+capacity of 3: with browsers holding relay mail (\issue{1036}) storage-less runs are short, and
+the query covers the rest.
+
+\begin{law}[Age gate]\label{law:agegate}
+A node declares that it holds relay mail only once it has been online for $A$, at least four
+stabilization periods (default 2\,min); until then it routes, and fetches its own mail from its
+holder (\issue{1037}), but is no member and takes no copy.
+\end{law}
+
+Replica maintenance costs each node about $r\,B/(N\bar L)$ bytes per unit time, $B$ the held
+bytes of the overlay, $N$ its nodes and $\bar L$ the mean member session~\cite{BlakeRodrigues}: at $r=8$, $10^5$ nodes
+and a fifth of them receiving a full carrier of 4\,KiB elements, about 27\,KiB/s per node at
+$\bar L=15$\,s against 0.7\,KiB/s at 10\,min, and a node that leaves within its first session
+pays its join copy before it is of use.  The gate excludes such nodes, and it makes members
+length-biased, which is the session model the default $r$ assumes.
+
+A member caches $\mathrm{next}_k(n)$ for the range of keys whose next member it is, until its
+view changes: every key of the range has the same next member, so one owner query serves them
+all, and a member asks at most one per view change.  The successor capacity is revisited only if
+measured runs routinely exceed it: raising it from 3 to 8 costs five more keep-alives a node,
+less than routed queries per hold.
+
+\begin{law}[Chain replication]\label{law:fanout}
+A hold goes to $h_0$, under the writer authority of \issue{1037}.  $h_0$ joins the element and
+forwards the hold to $\mathrm{next}_k(h_0)$, digest first: the bytes follow only when the next
+member lacks the element.  A member of rank $j$ that admits it
+(Law~\ref{law:admitcopy}) forwards it to its next member while $j<q(k)-1$, and the member of
+rank $q(k)-1$ acknowledges it to the member it came from; every member acknowledges the
+member it came from once its own next member acknowledged.  $h_0$ acknowledges the writer once
+its next member did, at once when $q(k)=1$.  Here $q(k)=r$, or the number of holders when a
+member's list came round the ring (Law~\ref{law:previous}) and names fewer.  The writer keeps
+and resends the hold until acknowledged, as before.
+\end{law}
+
+So an acknowledgement means that every one of the $q(k)$ members holds the element: a chain
+acknowledges only from its end, and no member acknowledges for another.
+
+\begin{law}[Replica admission]\label{law:admitcopy}
+$m$ admits a copy of the carrier at $k$ from $s$ iff $m\in\Mem_r(k)$
+(Lemma~\ref{lem:range}), $\mathrm{holds}(s)$, and $s$ is $m$'s previous member, $p_1(m)$ inside
+the range, or its next member.  Admitted elements pass the witness of the carrier as before; a
+copy is a join (S3).
+\end{law}
+
+\begin{law}[Chain repair]\label{law:memberrepair}
+Chain order is ring order over the holders, so every carrier a member $m$ keeps has the same
+chain neighbours, its previous holder $p_1(m)$ and its next holder $n_1(m)$, but at the ends of
+its range (rank 0 has no previous member, rank $r-1$ no next).  A repair pass, periodic or
+event-driven, sends at most one message to each of the two: the digest set of every carrier $m$
+keeps whose chain includes that neighbour, the bytes following only for the carriers it lacks.
+A member whose carriers an admitted copy changed offers them on to its other neighbour at once,
+in the same bundled form.  A keeper that is no member offers the carrier to the member it can
+name and deletes its copy only after a delete-capable acknowledgement from a member holding
+$\sqsupseteq$ its state (S1$''$, S2$'$ with member for holder).
+\end{law}
+
+\begin{law}[Event-driven repair]\label{law:eventrepair}
+A member that loses a node of its view, by a closed connection or a failed liveness check, runs
+Law~\ref{law:memberrepair} at once, on its new view, when that node was $p_1(m)$ or $n_1(m)$: one
+bundled exchange with each replacement neighbour, whatever the number of carriers.  The
+periodic pass of period $T$ remains the backstop.
+\end{law}
+
+\begin{proposition}[Repair delay]\label{prop:delay}
+After the loss of one member of $k$, every member of $k$ holds a copy again within
+$D\le T_d+r\,\delta$, where $T_d$ bounds the loss's detection (a connection close at once, a
+liveness failure within its check) and $\delta$ one chain hop (a send and a join, and the owner
+queries when the next member lies past the successor list); within $T$ when the event is
+missed.
+\end{proposition}
+\begin{proof}
+The loss is detected by the lost member's chain neighbours within $T_d$, and each runs
+Law~\ref{law:memberrepair} at once.  A copy that changes a member's carrier is offered on at
+once, so the hole closes along the chain in at most $r$ hops.  A missed event leaves the
+periodic pass.
+\end{proof}
+
+\textbf{Departure classes.}  $T_d$ depends on how a member leaves.  A \emph{graceful} departure
+closes its connections, so its neighbours detect it at once: $T_d\approx0$, and
+$D_g=r\,\delta$, seconds.  A \emph{silent} one (a crash, a dropped network, a suspended tab)
+is detected only when its liveness check fails, after \texttt{PEER\_LIVENESS\_TIMEOUT\_MS} of
+45\,s: $D_s\approx45\,\mathrm{s}+r\,\delta$, about a minute.  With $\sigma$ the fraction of
+departures that are silent and $\varepsilon_r(D)$ the probability that all $r$ members of a key
+are lost within one window $D$, a held message's loss over its retention is bounded, to first
+order, by the mixture
+\[
+\varepsilon\;\le\;(1-\sigma)\,\varepsilon_r(D_g)+\sigma\,\varepsilon_r(D_s),
+\]
+since an element's window opens with the loss of its first member, whose class sets $D$ (a
+later member's class only shortens or lengthens the same window's repair).  By
+the table of \issue{777}, $r=8$ meets $10^{-3}$ for Weibull ($k=0.5$) sessions of median
+1\,min at $D=60$\,s, so for any $\sigma$; for a median of 15\,s it meets it only at $D=10$\,s,
+that is with $\sigma\approx0$, and a silent fraction at that median needs $r\approx14$.  Two
+levers move $\sigma$ and $D_s$ instead of $r$: a leave on \jsq{pagehide} (\issue{1057}) makes a
+closing tab's departure graceful, and a shorter liveness timeout between chain neighbours
+(\issue{1070}), which are only $p_1(m)$ and $n_1(m)$, bounds $D_s$; with them $r=8$ covers the
+15\,s median.  The laws hold for every $r$; these figures
+only choose its default.
+
+\begin{proposition}[Acknowledged copies survive]\label{prop:copies}
+In a window where the views agree on $\Mem_r$ (S4), an acknowledged element has $q(k)$ copies,
+and is lost only if every member holding it is lost within $D$.
+\end{proposition}
+\begin{proof}
+Law~\ref{law:fanout} gives $q(k)$ copies at the acknowledgement.  Copies decrease only by a
+member's loss or by a deletion of Law~\ref{law:memberrepair}, made by a non-member after a
+member holds its state, which leaves the members' copies as they were.  By
+Proposition~\ref{prop:delay} a loss is repaired from any surviving copy within $D$, which is
+Proposition~\ref{prop:redundant} with $D$ for the repair period.
+\end{proof}
+
+\textbf{Outside S4.}  An acknowledgement taken while views disagree still means $q(k)$ nodes
+hold the element, each of which admitted it as a member of $k$ by its own view; it does not
+mean they are the members the views will agree on.  No copy is deleted without a member's
+acknowledgement (S1$''$), so their number does not fall but by node loss, and once the views
+agree Law~\ref{law:memberrepair} moves the copies to the members.  Until then the bound of
+Proposition~\ref{prop:copies} holds with $D$ extended by the convergence of
+Proposition~\ref{prop:converge}.
+
+\begin{proposition}[Convergence]\label{prop:converge}
+After one membership change the lists of Law~\ref{law:previous} settle within $r(L+1)$
+passes, $L$ the longest storage-less run.
+\end{proposition}
+\begin{proof}
+A list moves one hop per pass, and a change reaches the $r$-th holder after it through at
+most $r$ holders and the runs before each, $r(L+1)$ hops; at $r=1$ this is the bound of
+\issue{1037}.
+\end{proof}
+
+\textbf{Removal, fetch, owner.}  The recipient removes at the member it fetched from, and
+tombstones spread by Law~\ref{law:memberrepair}.  Tombstones stay capped at
+\texttt{RELAY\_INBOX\_MAX\_LEN}, so a lagging member can resurrect an element whose tombstone
+fell off the cap; its redelivery is refused by the recipient's window ($\mathsf{Replay}$, or
+$\mathsf{Stale}$ below it) and retired, case (ii) of Proposition~\ref{prop:atleastonce}, except
+after a replay reset (Law~\ref{law:ownclaim}), where its retention bounds it.  A recipient
+without a relay store fetches from $h_0$ and then down the chain; an element is the same
+holder-signed bytes at every member, so the drain's handed-over set and $\K_s$ deduplicate
+copies, and Law~\ref{law:custody} is unchanged.  Only $h_0$'s report restricts custody: a
+lagging member's copy may miss an element that still exists (\issue{1059}).
+
+\textbf{Store capacity.}  A node keeps about $r$ times the carriers it kept as a sole holder,
+so the relay store's budget scales with $r$: a browser's from 1024 rows to $1024\,r$, a native
+node's from 64\,MiB to $64\,r$\,MiB, a cap on a store that evicts nothing, not space it takes.
+A member whose store is full still refuses a copy (N): it does not acknowledge, so the chain
+acknowledges no writer, which resends until the sender proof expires and then drops the hold
+with a warning, as a full store's refusal did before.  So exhaustion never lowers $q(k)$; it
+refuses new mail.  Its blast radius is the keys whose chain contains the full member, those
+whose owner lies in $(p_r(m),m]$ (Lemma~\ref{lem:range}): about $r$ holders' arcs refuse new
+mail while it is full, and every other key is unaffected.  Isolating one origin's load from
+another's within a store is the per-origin share of \issue{907} and \issue{1060}, not this
+law's.
+
+\begin{proposition}[Message budget]\label{prop:budget}
+Per node and per repair pass: one list of Law~\ref{law:previous} and at most two bundled repair
+messages, so at most three, whatever the carriers it keeps; plus $2r$ for each hold it relays,
+and one bundled exchange per change of $p_1$ or $n_1$.
+\end{proposition}
+\begin{proof}
+Laws~\ref{law:previous}, \ref{law:memberrepair} and~\ref{law:eventrepair} as stated; a hold is
+one send to $h_0$, $r-1$ forwards, $r-1$ chain acknowledgements and one to the writer, and the
+owner queries of its hops are served by the cached next members.
+\end{proof}
+
+\textbf{Costs.}  A hold costs $r-1$ forwarded copies and $r-1$ acknowledgements, and the
+writer's acknowledgement waits for the chain's round trip, about $2(q-1)\,\delta\le2r\,\delta$.
+A member that leaves mid-chain stalls the acknowledgement until its loss is detected and the
+chain repaired, within $D+2r\,\delta$ of its departure ($D$ by its class); the writer keeps and
+resends the hold meanwhile, so the stall delays the acknowledgement and loses nothing.  A pass offers each carrier's
+digest set to two chain neighbours in one message each and copies only on a difference.  A
+list of
+Law~\ref{law:previous} carries $r$ pairs.  A best-effort leave on departure (\issue{1057})
+shortens $T_d$ and is never needed for this section's laws.
+
 \section{Implementation order}\label{sec:plan}
 
 \begin{center}
@@ -754,7 +981,8 @@ The dependencies: 2 and 4 on the browser need the strict-commit seam of 2; 4 on 
 needs the write-through rename of 3; 5 needs nothing from 1--4, but its
 Proposition~\ref{prop:atleastonce} holds in full only with \issue{1021}.  PR~1 comes first because
 it is the only one that closes a safety gap reachable without a crash.  \issue{1021} and
-\issue{1022} follow the batch; \issue{777} implements Law~\ref{law:redundant}.
+\issue{1022} follow the batch; \issue{777} implements Law~\ref{law:redundant} by
+Section~\ref{sec:replicated}.
 
 \textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}: PR~5 changes the
 receiver record, so an old record does not decode and fails its stream closed; the operator
@@ -779,7 +1007,7 @@ survival, Windows & write-through rename (Law~\ref{law:writethrough})\\
 survival, browser & strict commit (Law~\ref{law:strict})\\
 presence of custody & $\K_s$ in the receiver record (Law~\ref{law:custody})\\
 own state, ephemeral & reset per session (Law~\ref{law:ownclaim})\\
-custody, browser & $r\ge2$ holders (Law~\ref{law:redundant})\\
+custody, browser & $r$-member chain (Laws~\ref{law:redundant}--\ref{law:eventrepair})\\
 \bottomrule
 \end{tabular}
 \end{center}
