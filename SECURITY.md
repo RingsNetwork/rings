@@ -270,8 +270,12 @@ route.
   registrant leaves the listing within its TTL.
 - #920: storage byte-budget eviction can drop a removal before it is collected, resurrecting
   the values it covered.
-- #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal
-  received by sync can hold a topic live for up to the horizon past the receiver's clock.
+- #921: a data topic holds at most 1024 uncollected tombstones and refuses past them, so any
+  writer, or a sync peer, can fill one topic's removal capacity at an owner and refuse further
+  removals of that topic there until those tombstones are collected, at most 100 minutes and
+  twice the clock-skew tolerance later; a data topic has no write authority, and a forged
+  removal received by sync can likewise hold a topic live for up to the horizon past the
+  receiver's clock.
 - #932: a reassembled message whose full-size mailbox charge does not fit is dropped.
 - #777: a relay carrier has one holder. A browser holder whose ephemeral session ends, or
   whose tab closes, loses or strands the mail it holds until carriers are replicated (#1036).

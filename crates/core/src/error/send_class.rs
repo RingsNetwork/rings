@@ -237,7 +237,8 @@ impl Error {
             | Self::EntryKindNotEqual | Self::EntryDidNotEqual | Self::EntryNotOverwritable
             | Self::EntryDotIndexOutOfBounds { .. } | Self::EntryNotLive
             | Self::EntryLifetimeExceedsMax | Self::EntryVersionAheadOfClock
-            | Self::EntryPayloadExceedsMax | Self::RelayMessageNotAddressedToInbox
+            | Self::EntryPayloadExceedsMax | Self::EntryTombstonesExceedMax { .. }
+            | Self::RelayMessageNotAddressedToInbox
             | Self::RelayMessageNotCustom | Self::RelayMessageUnverifiable
             | Self::RelayMessageHeldAheadOfClock | Self::RelayMessageHeldOutsideSenderProof
             | Self::RelayMessageHoldStale | Self::RelayInboxDeltaExceedsCapacity

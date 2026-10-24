@@ -11,9 +11,8 @@
   dot, unsigned, and lists a descriptor while the time is at most the lease end and at most
   `heartbeat_at_ms + fresh_for_ms + σ`, and never lists a lease ending more than 10 minutes
   and 3 s ahead or a freshness window over 10 minutes, whatever the signer chose; of two leases
-  of one registrant the later one wins. A
-  registrant renews its lease once fewer than two heartbeats remain in it, or when a signed
-  field changes. A heartbeat interval must now be below 300 seconds (half the lease), down from
+  of one registrant the later one wins. A registrant renews its lease once fewer than two
+  heartbeats remain in it, or when a signed field changes. A heartbeat interval must now be below 300 seconds (half the lease), down from
   595, and below the TTL, and a TTL must be at most 600 seconds (the lease). The
   `lookupOnlineNodes` and `lookupOnionExits` results gain `fresh_for_ms`.
   - **Upgrade consequence.** The descriptor encoding changes, so a node reads no descriptor an
@@ -24,6 +23,20 @@
   - **Operator step.** None; earlier descriptors are ignored and expire within the element
     horizon. A configuration with a heartbeat interval of 300 seconds or more, or a TTL over 600
     seconds, is refused at start and must be lowered.
+- Data-topic tombstones are bounded (#921; removal-stability paper, Law 5 and Prop. 4). A data
+  carrier holds at most `DATA_TOMBSTONE_MAX_LEN` (1024) uncollected removes. A delta carrying
+  more is not admitted, and a join, operation or repair whose result would hold more fails with
+  `EntryTombstonesExceedMax` and changes nothing; removes are never truncated, since a dropped
+  remove could resurrect a value it still covers elsewhere. A storage sync batch refuses such an
+  entry without acknowledging it and persists the rest, so its owner keeps it. The carrier law
+  now counts every field: a carrier at every bound encodes in exactly `DATA_CARRIER_WIRE_MAX`
+  (33 815 728) bytes, asserted to fit one transport message, with each encoding supremum
+  witnessed by a test. `EntryKind::max_tombstones` is replaced by `EntryKind::tombstone_bound`,
+  which says whether a kind refuses (data topics) or truncates (relay inboxes).
+  - **Upgrade consequence.** A topic that removes more than about 10 values a minute,
+    sustained, has its further removals refused until earlier ones are collected; shard such a
+    topic. Registries must run a build with #918, whose heartbeats remove nothing.
+  - **Operator step.** None.
 
 ## 0.36.0
 

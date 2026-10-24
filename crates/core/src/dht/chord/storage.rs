@@ -212,7 +212,9 @@ async fn retire_unless_live(
 /// Pre: the caller holds the transition of `store`.
 /// Post: the stored value is `(live ⊔ admitted).retired_at(now_ms)` when a live value exists,
 /// otherwise `admitted.retired_at(now_ms)`, normalized for storage either way (the join
-/// normalizes the union, the admission normalized `admitted`); it is returned.
+/// normalizes the union, the admission normalized `admitted`); it is returned. A result past
+/// its tombstone bound is refused with `EntryTombstonesExceedMax` and the slot is unchanged
+/// (#921).
 async fn join_live_entry(
     store: &EntryStorage,
     key: &str,
@@ -225,6 +227,7 @@ async fn join_live_entry(
         None => admitted,
     }
     .retired_at(now_ms);
+    joined.check_tombstone_bound()?;
     store.put(key, &joined).await?;
     Ok(joined)
 }
@@ -235,7 +238,8 @@ async fn join_live_entry(
 ///
 /// Pre: the caller holds the transition of `store`, and `op` passed the admission law.
 /// Post: the slot holds `(live or ⊥).operate(op)` when that is live at `now_ms`, and is clear
-/// otherwise, since a stored value is always live when written.
+/// otherwise, since a stored value is always live when written; a result past its tombstone
+/// bound is refused with `EntryTombstonesExceedMax` and the slot is unchanged (#921).
 async fn operate_live_entry(
     store: &EntryStorage,
     key: &str,
@@ -248,7 +252,10 @@ async fn operate_live_entry(
         None => op.gen_default_entry()?,
     };
     match local.operate(now_ms, op, actor)?.live_at(now_ms) {
-        Some(value) => store.put(key, &value).await,
+        Some(value) => {
+            value.check_tombstone_bound()?;
+            store.put(key, &value).await
+        }
         None => store.remove(key).await,
     }
 }
@@ -365,7 +372,9 @@ impl PeerRing {
     /// Post: the stored value is the least upper bound of the previous live local
     /// value and `incoming` when a previous value exists; otherwise it is
     /// `incoming` normalized for storage. Either is projected to its element horizon at
-    /// `now_ms`, which commutes with the join.
+    /// `now_ms`, which commutes with the join. A result past its tombstone bound is refused with
+    /// `EntryTombstonesExceedMax` and the slot is unchanged (#921), so an unacknowledged hand-off
+    /// stays with its sender.
     pub(crate) async fn join_storage_entry(
         &self,
         now_ms: u128,
@@ -385,6 +394,7 @@ impl PeerRing {
             None => incoming.try_into_storage_entry()?,
         }
         .retired_at(now_ms);
+        stored.check_tombstone_bound()?;
         store.put(&key, &stored).await?;
         Ok(stored)
     }

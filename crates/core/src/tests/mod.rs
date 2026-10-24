@@ -150,6 +150,31 @@ pub(crate) fn stamped_delta(
         .clone())
 }
 
+/// A removes-only data carrier of `count` removes of distinct values tagged `salt`, issued at
+/// `issued_at_ms`, live for an hour from now.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn removes_only_carrier(
+    did: Did,
+    count: usize,
+    issued_at_ms: u128,
+    salt: &str,
+) -> Result<Entry> {
+    let version = EntryVersion::new(issued_at_ms, Did::from(1u32), Did::from(2u32));
+    let mut entry = live_entry(did, Vec::new(), EntryKind::Data);
+    entry.crdt.tombstones = (0..count)
+        .map(|index| {
+            let index =
+                u32::try_from(index).map_err(|_| crate::error::Error::MessageSizeOverflow)?;
+            let value = Bytes::from(format!("{salt}-{index}"));
+            Ok(crate::dht::entry::EntryTombstone::of(&value, EntryDot {
+                version,
+                index,
+            }))
+        })
+        .collect::<Result<_>>()?;
+    Ok(entry)
+}
+
 /// A placement outside the affine replica set of `entry_key` under `redundancy`.
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(crate) fn non_affine_placement(entry_key: Did, redundancy: u16) -> Result<Did> {

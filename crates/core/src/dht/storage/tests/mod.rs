@@ -46,6 +46,7 @@ mod test_own_write;
 #[cfg(not(target_family = "wasm"))]
 mod test_relay_storage;
 mod test_repair;
+mod test_tombstone_bound;
 
 fn data_entry(did: Did) -> Entry {
     live_entry(did, vec![], EntryKind::Data)

@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::algebra::JoinSemilattice;
+use crate::consts::DATA_TOMBSTONE_MAX_LEN;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::consts::RELAY_INBOX_MAX_LEN;
 use crate::dht::Did;
@@ -65,17 +66,40 @@ impl EntryKind {
         }
     }
 
-    /// The greatest number of tombstones a carrier of this kind keeps. A data topic has no
-    /// count cap: a capped tombstone could be dropped while its add is still inside its element
-    /// horizon somewhere, and a stale replica would resurrect it; its tombstones are bounded by
-    /// rate instead, since each one retires `max_lifetime_ms + TS_OFFSET_TOLERANCE_MS` after its
-    /// dot (see the `retention` module). A relay inbox has one owner and one ack-gated
-    /// relocation at a time, so a stale copy can only be transient and the newest
-    /// [`RELAY_INBOX_MAX_LEN`] removals suffice to shadow it.
-    pub const fn max_tombstones(self) -> Option<usize> {
+    /// How a carrier of this kind bounds its removes (removal-stability paper, Law 5 and
+    /// Prop. 3).
+    ///
+    /// A data topic refuses past [`DATA_TOMBSTONE_MAX_LEN`] and never truncates: a dropped
+    /// tombstone could be one whose add is still inside its element horizon at another replica,
+    /// which would then resurrect it; a refused write drops nothing. A relay inbox has one owner
+    /// and one ack-gated relocation at a time, so a stale copy can only be transient and the
+    /// newest [`RELAY_INBOX_MAX_LEN`] removals suffice to shadow it.
+    pub const fn tombstone_bound(self) -> TombstoneBound {
         match self {
-            EntryKind::Data => None,
-            EntryKind::RelayMessage => Some(RELAY_INBOX_MAX_LEN),
+            EntryKind::Data => TombstoneBound::Refuse(DATA_TOMBSTONE_MAX_LEN),
+            EntryKind::RelayMessage => TombstoneBound::Truncate(RELAY_INBOX_MAX_LEN),
+        }
+    }
+}
+
+/// How a carrier bounds its removes: by refusing a write past the bound, or by keeping the newest
+/// removes up to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TombstoneBound {
+    /// A write whose result would hold more removes is refused, changing nothing.
+    Refuse(usize),
+    /// Only the newest removes, by dot, up to the bound are kept.
+    Truncate(usize),
+}
+
+impl TombstoneBound {
+    /// How many of `count` removes, oldest first, materialization drops: the excess over a
+    /// truncating bound, and none under a refusing one, which [`Entry::check_tombstone_bound`]
+    /// enforces instead.
+    const fn truncated(self, count: usize) -> usize {
+        match self {
+            Self::Refuse(_) => 0,
+            Self::Truncate(cap) => count.saturating_sub(cap),
         }
     }
 }
@@ -564,7 +588,7 @@ impl Entry {
     }
 
     /// Materialize a normalized buffer as an entry: elements in dot order under the count cap,
-    /// removes in dot order under the kind's tombstone cap.
+    /// removes in dot order, truncated only under a truncating tombstone bound.
     ///
     /// Pre: `buffer` is normalized, so no element is below the register or covered by a remove,
     /// and no digest is computed here.
@@ -597,9 +621,7 @@ impl Entry {
                 .cmp(&right.dot)
                 .then_with(|| left.element.cmp(&right.element))
         });
-        let tombstone_skip = kind
-            .max_tombstones()
-            .map_or(0, |cap| tombstones.len().saturating_sub(cap));
+        let tombstone_skip = kind.tombstone_bound().truncated(tombstones.len());
 
         Self {
             did: self.did,
