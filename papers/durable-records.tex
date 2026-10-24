@@ -767,7 +767,8 @@ $(\nxt(p_r(n)),\nxt(n)]$.  At $r=1$ this is the holder's range of \issue{1037}.
 Each repair pass every node $n$ passes to $\nxt(n)$ the list
 $\pi(n)=[(n,\nxt(n))]\mathbin{+\!\!+}\rho(n)[..r-1]$ if $\mathrm{holds}(n)$, and $\rho(n)$
 otherwise, where $\rho(n)$ is the list its predecessor last passed it; a node takes a list
-from its predecessor alone.
+from its predecessor alone.  A list that comes round the ring to $n$ names every holder, and
+$n$'s search for members then continues round the ring.
 \end{law}
 
 By the induction of \issue{1037} along each storage-less run, every holder learns
