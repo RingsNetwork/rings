@@ -5,19 +5,15 @@ pub mod eip191;
 pub mod secp256k1;
 pub mod secp256r1;
 
-use elliptic_curve::generic_array::ArrayLength;
+use ecdsa::EcdsaCurve;
 use elliptic_curve::scalar::IsHigh;
 use elliptic_curve::CurveArithmetic;
-use elliptic_curve::PrimeCurve;
 
 use crate::error::Error;
 use crate::error::Result;
 
 pub(crate) fn ecdsa_signature_s_is_high<C>(signature: &ecdsa::Signature<C>) -> bool
-where
-    C: PrimeCurve + CurveArithmetic,
-    ecdsa::SignatureSize<C>: ArrayLength<u8>,
-{
+where C: EcdsaCurve + CurveArithmetic {
     bool::from(signature.s().is_high())
 }
 

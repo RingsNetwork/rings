@@ -5,10 +5,11 @@ all-features = true
 git-fetch-with-cli = false
 ignore = [
     # crypto-bigint 0.5.5 has secret-dependent branches in operations meant to be constant-time.
-    # The only fix is 0.7.6, and no 0.5.x release fixes it. 0.5.5 reaches us only through
-    # elliptic-curve 0.13 (k256 0.13 in rings-core; p256 0.13 via webrtc's dtls), so leaving it
-    # needs elliptic-curve 0.14 there and upstream. Tracked, and removed once fixed, in #1051.
-    { id = "RUSTSEC-2026-0387", reason = "no crypto-bigint 0.5.x fix; elliptic-curve 0.14 upgrade tracked in #1051" },
+    # The only fix is 0.7.6, and no 0.5.x release fixes it. rings-core is on elliptic-curve 0.14
+    # (crypto-bigint 0.7); 0.5.5 now reaches only the workspace lock, through webrtc 0.17's dtls
+    # (p256/p384 0.13); the #1051 audit found no affected 0.5.5 operation reachable from a secret
+    # there. Removed once dtls leaves elliptic-curve 0.13; tracked in #1051.
+    { id = "RUSTSEC-2026-0387", reason = "no 0.5.x fix; only webrtc 0.17 dtls still pulls it; #1051" },
 ]
 
 [licenses]

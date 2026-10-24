@@ -61,20 +61,13 @@ use crate::error::Result;
 pub fn sign(sec: &SecretKey, hash: &[u8; 32]) -> Result<[u8; 64]> {
     let sk_bytes: FieldBytes<p256::NistP256> = sec.into();
     let sk = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
-    let (sig, _rid) = sk.sign_prehash_recoverable(hash)?;
+    let (sig, _rid) = sk.sign_prehash_recoverable(hash);
     normalize_signature(sig.to_bytes())
 }
 
 /// Return the low-S canonical form of a raw 64-byte secp256r1 ECDSA signature.
 pub fn normalize_signature(sig: impl AsRef<[u8]>) -> Result<[u8; 64]> {
-    let signature = ecdsa::Signature::<p256::NistP256>::from_slice(sig.as_ref())?;
-    let signature = if super::ecdsa_signature_s_is_high(&signature) {
-        signature
-            .normalize_s()
-            .ok_or(Error::NonCanonicalSignature)?
-    } else {
-        signature
-    };
+    let signature = ecdsa::Signature::<p256::NistP256>::from_slice(sig.as_ref())?.normalize_s();
     let bytes = signature.to_bytes();
     let mut sig_bytes = [0u8; 64];
     sig_bytes.copy_from_slice(bytes.as_slice());

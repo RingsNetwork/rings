@@ -16,3 +16,13 @@ version = "0.103.16"
 [[allow.exact]]
 crate = "webpki-roots"
 version = "1.0.10"
+
+# RUSTSEC-2026-0387: the only constant-time fix for crypto-bigint (#1051).
+[[allow.exact]]
+crate = "crypto-bigint"
+version = "0.7.6"
+
+# RUSTSEC-2026-0387: the hardened constant-time primitives crypto-bigint 0.7.6 requires (#1051).
+[[allow.exact]]
+crate = "ctutils"
+version = "0.4.5"
