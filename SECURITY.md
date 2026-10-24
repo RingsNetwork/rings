@@ -256,8 +256,9 @@ route.
 ## Known Limitations
 
 - #916: durable replay writes cap a node near 50 transitions per second on macOS.
-- #918: registry tombstones are bounded by the heartbeat rate per registrant, not by count
-  ([bounds](docs/src/advanced-topic/chord.md#data-topic-storage)).
+- #918: a registry descriptor that another node re-appends after its registrant stopped stays
+  listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
+  registrant leaves the listing within its TTL.
 - #920: storage byte-budget eviction can drop a removal before it is collected, resurrecting
   the values it covered.
 - #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal

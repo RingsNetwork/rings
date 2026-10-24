@@ -107,19 +107,12 @@ pub(crate) use handshake::HandshakePeer;
 
 /// The pause between two reads of the fetch cache while a DHT fetch waits for its reply.
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-/// The number of fetch-cache reads a DHT fetch makes before it gives up on a reply; with
-/// [`DHT_LOOKUP_CACHE_POLL_INTERVAL`] it fixes [`dht_lookup_poll_budget`], the `P` term of the
-/// registry refresh bound.
+/// The number of fetch-cache reads a DHT fetch makes before it gives up on a reply.
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: u32 = 40;
 
 /// Whether the fetch-cache read numbered `attempt` (from 0) is a DHT fetch's last one.
 const fn is_final_lookup_poll(attempt: u32) -> bool {
     attempt.saturating_add(1) >= DHT_LOOKUP_CACHE_POLL_ATTEMPTS
-}
-
-/// The longest a DHT fetch polls the cache for its reply: its attempts times their interval.
-pub(crate) const fn dht_lookup_poll_budget() -> Duration {
-    DHT_LOOKUP_CACHE_POLL_INTERVAL.saturating_mul(DHT_LOOKUP_CACHE_POLL_ATTEMPTS)
 }
 
 async fn sleep_registration_interval_with_stop(
@@ -220,10 +213,17 @@ impl Processor {
         RegistrationContext::new(self)
     }
 
+    /// This node's online descriptor under a lease issued at `now_ms` that is fresh for 90 s
+    /// and ends with it, not yet heard.
     #[cfg(all(test, feature = "node"))]
     fn online_node_descriptor_at(&self, now_ms: u128) -> Result<OnlineNodeDescriptor> {
-        self.online_node_registration
-            .descriptor_at(&self.registration_context(), now_ms)
+        self.online_node_registration.descriptor_at(
+            &self.registration_context(),
+            crate::registration::LeaseTerms {
+                fresh_for_ms: 90_000,
+                expires_at_ms: now_ms + 90_000,
+            },
+        )
     }
 
     /// The registry entry under `topic` whose elements are `descriptors`.

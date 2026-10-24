@@ -1,10 +1,11 @@
 //! The heartbeat that keeps a node's service descriptor in the DHT.
 //!
-//! A descriptor is a registry element on the node's own [`service_topic`]: each heartbeat signs
-//! a fresh one and replaces the last ([`DhtRegistrationPublisher::publish_replacing`]), so the
-//! topic holds one live descriptor per node and expires it within the data lifetime once the
-//! node stops. A node that stops serving publishes an offer with no port and no record, which a
-//! relay reads as a withdrawal.
+//! A descriptor is a registry element on the node's own [`service_topic`]: a signed lease whose
+//! bytes each heartbeat re-appends ([`DhtRegistrationPublisher::publish_lease`], #918), so the
+//! topic holds one live descriptor per node, written without a remove, and a reader stops
+//! listing it within its freshness window once the node stops. A node that stops serving
+//! publishes an offer with no port and no record, a new lease, which a relay reads as a
+//! withdrawal.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -25,6 +26,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::dht::Did;
 use crate::registration::DhtRegistrationPublisher;
+use crate::registration::LeaseTerms;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
 
@@ -80,13 +82,13 @@ impl ServiceOffer {
     }
 
     /// The unsigned descriptor body of this offer for `did`, with key `public_key` in overlay
-    /// `network_id`, heartbeat at `now_ms`.
+    /// `network_id`, under the lease `terms`.
     fn body(
         &self,
         did: Did,
         public_key: VerificationPublicKey,
         network_id: u32,
-        now_ms: u128,
+        terms: LeaseTerms,
     ) -> ServiceDescriptorBody {
         ServiceDescriptorBody {
             did,
@@ -94,8 +96,8 @@ impl ServiceOffer {
             network_id,
             ports: self.served_ports().collect(),
             txt: self.txt.clone(),
-            heartbeat_at_ms: now_ms,
-            expires_at_ms: now_ms.saturating_add(self.ttl.as_millis()),
+            fresh_for_ms: terms.fresh_for_ms,
+            expires_at_ms: terms.expires_at_ms,
         }
     }
 }
@@ -104,29 +106,33 @@ impl ServiceOffer {
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceRegistration {
     offer: ServiceOffer,
-    publisher: DhtRegistrationPublisher,
+    publisher: DhtRegistrationPublisher<[ServiceDescriptor; 1]>,
 }
 
 impl ServiceRegistration {
     /// The registration of `offer` for the node `did`.
     pub(crate) fn new(did: Did, offer: ServiceOffer) -> Self {
         Self {
+            publisher: DhtRegistrationPublisher::new(
+                service_topic(did),
+                offer.heartbeat_interval,
+                offer.ttl,
+            ),
             offer,
-            publisher: DhtRegistrationPublisher::new(service_topic(did)),
         }
     }
 
-    /// This node's signed descriptor at `now_ms`.
+    /// This node's signed descriptor under the lease `terms`.
     pub(crate) fn descriptor_at(
         &self,
         context: &RegistrationContext<'_>,
-        now_ms: u128,
+        terms: LeaseTerms,
     ) -> Result<ServiceDescriptor> {
         let body = self.offer.body(
             context.did(),
             context.delegator_verification_pubkey()?,
             context.network_id(),
-            now_ms,
+            terms,
         );
         ServiceDescriptor::new_signed(body, context.message_signer()).map_err(Error::CoreError)
     }
@@ -144,10 +150,12 @@ impl RegistrationTask for ServiceRegistration {
     }
 
     async fn register_once(&self, context: &RegistrationContext<'_>) -> Result<()> {
-        let now_ms = get_epoch_ms();
-        let descriptor = self.descriptor_at(context, now_ms)?;
         self.publisher
-            .publish_replacing(context, now_ms, std::slice::from_ref(&descriptor))
+            .publish_lease(context, get_epoch_ms(), |terms| {
+                self.descriptor_at(context, terms)
+                    .map(|descriptor| [descriptor])
+            })
             .await
+            .map(drop)
     }
 }

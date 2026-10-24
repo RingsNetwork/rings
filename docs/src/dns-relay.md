@@ -110,8 +110,11 @@ services:
 * `txt`: TXT records under the node's name; `name` is relative to it, and empty for the name
   itself. An ACME DNS-01 challenge is published this way, so the node can hold a certificate for
   `<did>.<zone>` and end TLS itself.
-* `heartbeat_interval_secs` (default 30) and `ttl_secs` (default 90): how often the node signs and
-  publishes its descriptor, and how long each one is live.
+* `heartbeat_interval_secs` (default 30) and `ttl_secs` (default 90): how often the node
+  publishes its descriptor, and how long after its last heartbeat a relay still reads it. The
+  descriptor is a signed 10-minute lease that each heartbeat re-appends unchanged (#918); a
+  change of ports or records signs a new one. The interval must be below the TTL and below
+  300 seconds, and the TTL at most 600 seconds.
 
 The node is then `<did>.<zone>` in every zone a relay serves, with the DID that `rings run`
 prints. With port 22 mapped to the node's SSH server, `ssh user@<did>.<zone>` reaches it.

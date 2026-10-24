@@ -1,29 +1,30 @@
 //! Node-layer DHT registration tasks.
 //!
 //! A registration task is a built-in periodic node-side publisher. The shared publisher owns
-//! DHT touch/tombstone mechanics for the online-node and onion-exit registries.
+//! the heartbeat of the online-node, onion-exit and DNS-relay service registries.
 //!
-//! Boundedness: a registry carrier is a data topic, so each descriptor expires individually at
-//! its dot's issue time plus the data element horizon `H = EntryKind::Data.max_lifetime_ms()`
-//! unless it is written again, and the heartbeat is what writes it again. Each heartbeat adds
-//! one descriptor and removes the one it replaces, and a remove retires `H + σ` after the dot
-//! it covers, so a registry holds at most one live descriptor per registrant and service plus
-//! the removes of the last `H + σ`: about `(H + σ) / heartbeat` per registrant, 200 removes of
-//! 125 encoded bytes each at the default 30 s heartbeat. No publisher
-//! compacts; a reset floor stamped by one owner would erase every concurrent descriptor that
-//! owner never received (#867).
+//! Boundedness (#918): a registry carrier is a data topic, so each descriptor expires
+//! individually at its dot's issue time plus the data element horizon
+//! `H = EntryKind::Data.max_lifetime_ms()` unless it is written again. A descriptor is a signed
+//! lease of length `Λ` (`registry_lease`) whose bytes are fixed, so a heartbeat re-appends
+//! the same bytes, which raises their dot and writes no remove, and reads nothing. A registrant
+//! therefore writes no remove at all, and leaves at most `⌈H / (Λ − 2I)⌉ + 1` descriptors within
+//! the horizon (13 at the defaults); the element cap keeps the newest dots, so superseded leases,
+//! which no heartbeat refreshes, are the first it drops. No publisher compacts; a reset floor
+//! stamped by one owner would erase every concurrent descriptor that owner never received
+//! (#867).
+//!
+//! Ghost bound (removal-stability paper, Prop. 10): a registrant that stops at `t_s` is listed
+//! until at most `t_s + T + σ` while nobody re-appends its bytes, and until at most its signed
+//! lease end `ℓ ≤ t_s + Λ` against any writer or syncer.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::lock::Mutex as AsyncMutex;
-use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
 use rings_core::delegation::DelegateeKey;
-use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::dht::RelayCustody;
 use rings_core::ecc::VerificationPublicKey;
@@ -34,7 +35,8 @@ use rings_core::message::ScopedStorage;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
 
-use crate::descriptor::prunes_registry_element;
+use crate::descriptor::heard_descriptors;
+use crate::descriptor::registry_lease;
 use crate::descriptor::RegistryElement;
 use crate::descriptor::SignedDescriptor;
 use crate::error::Error;
@@ -45,7 +47,6 @@ use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
-use crate::processor::dht_lookup_poll_budget;
 use crate::processor::stoppable_storage_error;
 use crate::processor::Processor;
 
@@ -86,22 +87,16 @@ pub(crate) const fn default_advertise_presence() -> bool {
     true
 }
 
-/// The heartbeat interval below which a registry descriptor stays stored between heartbeats.
+/// The heartbeat interval `I` below which a registry stays fresh: half the lease, `Λ / 2`.
 ///
-/// A descriptor write requests the data default lifetime `L` (which bounds the registry of a
-/// sole registrant, and is below the element horizon), stamped on the publisher's clock; an
-/// owner whose clock runs up to `σ = TS_OFFSET_TOLERANCE_MS` ahead retires it at `L − σ` of the
-/// publisher's time. Each heartbeat first fetches the registry, polling for up to the fetch-poll
-/// budget `P`, before it appends, so the interval is below `L − σ − P`; the append's own
-/// network latency must fit in what the interval leaves of it. The bound holds between
-/// successful heartbeats: one that fails leaves a gap of two intervals, which a sole
-/// registrant's descriptor outlives only if `2I < L − σ − P`.
+/// Below it a lease spans more than two heartbeats, so the publisher renews it at most once per
+/// `Λ − 2I` and a registrant leaves a bounded number of descriptors (the boundedness law). Each
+/// append requests the data default lifetime `L = Λ` for the carrier, stamped on the publisher's
+/// clock, which an owner whose clock runs up to `σ = TS_OFFSET_TOLERANCE_MS` ahead retires at
+/// `L − σ`; `Λ / 2 < L − σ`, so the carrier also outlives every gap between heartbeats, a failed
+/// one included (`2I < Λ`).
 pub(crate) fn registry_refresh_bound() -> Duration {
-    let lifetime = Duration::from_millis(entry::EntryKind::Data.default_lifetime_ms());
-    let skew = Duration::from_millis(u64::try_from(TS_OFFSET_TOLERANCE_MS).unwrap_or(u64::MAX));
-    lifetime
-        .saturating_sub(skew)
-        .saturating_sub(dht_lookup_poll_budget())
+    registry_lease() / 2
 }
 
 /// Validate a registry's scheduling when the switch `advertise_setting` enables it: the
@@ -137,7 +132,14 @@ pub(crate) struct TimingKeys<'a> {
 }
 
 /// Validate a registry's scheduling: the heartbeat interval is below the descriptor TTL and
-/// below [`registry_refresh_bound`]; an error names the settings in `keys`.
+/// below [`registry_refresh_bound`], and the TTL is at most the registry lease; an error names
+/// the settings in `keys`.
+///
+/// `I < T` keeps a registrant listed between heartbeats: a reader whose clock `t_r` runs at most
+/// `σ` ahead of the publisher's `t_w` lists it while `t_r ≤ τ* + T + σ`, which holds whenever
+/// `t_w − τ* ≤ T`, and `τ*` is stamped on the publisher's clock when the heartbeat is sent; the
+/// heartbeat's propagation to the owners must fit in `T − I`. `T ≤ Λ` because a reader refuses
+/// a longer window as not a registry's (the lease law of `descriptor`).
 pub(crate) fn validate_schedule(
     keys: &TimingKeys<'_>,
     heartbeat_interval: Duration,
@@ -157,11 +159,17 @@ pub(crate) fn validate_schedule(
              ({ttl:?}){condition}"
         )));
     }
+    let lease = registry_lease();
+    if ttl > lease {
+        return Err(Error::InvalidConfig(format!(
+            "{ttl_key} ({ttl:?}) must be at most {lease:?}, the registry lease"
+        )));
+    }
     let bound = registry_refresh_bound();
     if heartbeat_interval >= bound {
         return Err(Error::InvalidConfig(format!(
-            "{heartbeat_key} ({heartbeat_interval:?}) must be less than {bound:?}, the lifetime \
-             of a registry write less the clock-skew tolerance and the fetch-poll budget"
+            "{heartbeat_key} ({heartbeat_interval:?}) must be less than {bound:?}, half the \
+             registry lease"
         )));
     }
     Ok(())
@@ -252,142 +260,177 @@ impl<'a> RegistrationContext<'a> {
             .await
             .map_err(stoppable_storage_error)
     }
+}
 
-    /// Tombstone `data` in `topic`, stopping cooperatively with the registration.
-    pub(crate) async fn tombstone_data(&self, topic: &str, data: Bytes) -> Result<()> {
-        self.storage()
-            .storage_tombstone_data(topic, data)
-            .await
-            .map_err(stoppable_storage_error)
+/// The terms of a registry lease: the signed lease end `ℓ` and freshness window `T` every
+/// descriptor of the lease carries (see the lease law of `descriptor`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LeaseTerms {
+    /// Freshness window `T` in milliseconds.
+    pub(crate) fresh_for_ms: u64,
+    /// Lease end `ℓ` in milliseconds since Unix epoch.
+    pub(crate) expires_at_ms: u128,
+}
+
+/// The descriptors one registration publishes under a lease: one (`[D; 1]`) or one per service
+/// (`Vec<D>`), so a caller gets back exactly the shape it built.
+///
+/// Law: `heard_at(t)` maps [`SignedDescriptor::heard_at`] over the descriptors and keeps their
+/// number and order.
+pub(crate) trait LeaseDescriptors: Clone {
+    /// The descriptor type.
+    type Descriptor: SignedDescriptor + RegistryElement;
+
+    /// The descriptors, in publication order.
+    fn as_slice(&self) -> &[Self::Descriptor];
+
+    /// The descriptors as heard at `heartbeat_at_ms`.
+    fn heard_at(self, heartbeat_at_ms: u128) -> Self;
+}
+
+impl<D> LeaseDescriptors for [D; 1]
+where D: SignedDescriptor + RegistryElement + Clone
+{
+    type Descriptor = D;
+
+    fn as_slice(&self) -> &[D] {
+        self
     }
 
-    pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
-        self.processor
-            .fetch_storage_entry_with_stop(entry_key, &self.stop)
-            .await
+    fn heard_at(self, heartbeat_at_ms: u128) -> Self {
+        self.map(|descriptor| descriptor.heard_at(heartbeat_at_ms))
     }
 }
 
-/// Common publisher for DHT-backed registries.
+impl<D> LeaseDescriptors for Vec<D>
+where D: SignedDescriptor + RegistryElement + Clone
+{
+    type Descriptor = D;
+
+    fn as_slice(&self) -> &[D] {
+        self
+    }
+
+    fn heard_at(self, heartbeat_at_ms: u128) -> Self {
+        self.into_iter()
+            .map(|descriptor| descriptor.heard_at(heartbeat_at_ms))
+            .collect()
+    }
+}
+
+/// The lease a publisher holds: its terms, the signed bodies it was issued over, its descriptors,
+/// and the elements every heartbeat of the lease re-appends.
 #[derive(Clone, Debug)]
-pub(crate) struct DhtRegistrationPublisher {
-    topic: String,
-    publish_gate: Arc<AsyncMutex<()>>,
-    published_values: Arc<Mutex<BTreeSet<Bytes>>>,
+struct HeldLease<S> {
+    terms: LeaseTerms,
+    bodies: Vec<Vec<u8>>,
+    descriptors: S,
+    elements: Vec<Bytes>,
 }
 
-impl DhtRegistrationPublisher {
-    /// Create a publisher for `topic`.
-    pub(crate) fn new(topic: impl Into<String>) -> Self {
+/// Common publisher for DHT-backed registries: the heartbeat of a signed lease (#918;
+/// removal-stability paper, Law 8).
+///
+/// Law (heartbeat): a heartbeat at `t` appends exactly the current lease's elements, the same
+/// bytes every time, so it raises their dots and writes no remove; it reads nothing. It issues a
+/// new lease, `ℓ' = t + Λ`, only when `t + 2I ≥ ℓ` or when a signed field changed, and appends
+/// the new lease's elements instead; it never removes the old ones, which readers outrank by
+/// their lease and the element horizon retires.
+///
+/// ```text
+///   heartbeat(t):
+///     held ∧ t + 2I < ℓ ∧ bodies(ℓ) = held.bodies ─▶ Extend(held.elements)
+///     otherwise ─▶ held ← sign(bodies(t + Λ)); Extend(held.elements)
+/// ```
+#[derive(Clone, Debug)]
+pub(crate) struct DhtRegistrationPublisher<S> {
+    topic: String,
+    /// The renewal margin `2I`: a lease is renewed once fewer than two heartbeats remain in it.
+    renewal_margin_ms: u128,
+    /// The freshness window `T` this registration signs.
+    fresh_for_ms: u64,
+    /// The lease held, if any; its lock also serializes the heartbeats.
+    held: Arc<AsyncMutex<Option<HeldLease<S>>>>,
+}
+
+impl<S: LeaseDescriptors> DhtRegistrationPublisher<S> {
+    /// A publisher for `topic` whose heartbeat runs every `heartbeat_interval` and whose
+    /// descriptors are fresh for `fresh_for`.
+    pub(crate) fn new(
+        topic: impl Into<String>,
+        heartbeat_interval: Duration,
+        fresh_for: Duration,
+    ) -> Self {
         Self {
             topic: topic.into(),
-            publish_gate: Arc::new(AsyncMutex::new(())),
-            published_values: Arc::new(Mutex::new(BTreeSet::new())),
+            renewal_margin_ms: heartbeat_interval.as_millis().saturating_mul(2),
+            fresh_for_ms: u64::try_from(fresh_for.as_millis()).unwrap_or(u64::MAX),
+            held: Arc::new(AsyncMutex::new(None)),
         }
     }
 
-    /// Publish `descriptors`, signed at `now_ms`, as the current value set, tombstoning every
-    /// observed value [`prunes_registry_element`] selects: this registrant's older values, and
-    /// values that no longer decode, verify or are live.
+    /// Publish one heartbeat at `now_ms` of the lease whose descriptors `descriptors_for` signs
+    /// under given terms (the heartbeat law), returning them as heard now.
     ///
-    /// Invariant: registry topics are keyed presence sets, not append-only heartbeat logs.
-    /// Preservation: every observed value replaced by the current publish is tombstoned after the
-    /// replacement value has been touched, while unrelated publisher keys stay joinable.
-    ///
-    /// Each append and tombstone is rerouted as `Processor::storage_fetch` documents, and its
-    /// rerouting wait ends at the registration's stop.
-    pub(crate) async fn publish_replacing<D>(
+    /// Each append is rerouted as `Processor::storage_fetch` documents, and its rerouting wait
+    /// ends at the registration's stop.
+    pub(crate) async fn publish_lease(
         &self,
         context: &RegistrationContext<'_>,
         now_ms: u128,
-        descriptors: &[D],
-    ) -> Result<()>
-    where
-        D: SignedDescriptor + RegistryElement,
-    {
-        let current_values = descriptors
-            .iter()
-            .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
-            .collect::<Result<BTreeSet<_>>>()?;
-        let prunes_observed_value = |observed: &Bytes| {
-            prunes_registry_element::<D>(observed, context.did(), now_ms, context.network_id())
-        };
-        let _publish_turn = self.publish_gate.lock().await;
+        descriptors_for: impl Fn(LeaseTerms) -> Result<S>,
+    ) -> Result<S> {
+        let mut held = self.held.lock().await;
         context.ensure_running()?;
-        let observed_values = self.observed_registry_values(context).await?;
-        let stale_values = {
-            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
-            begin_registration_publish(
-                &mut published_values,
-                &current_values,
-                observed_values,
-                prunes_observed_value,
-            )
+        let kept = match held.as_ref() {
+            Some(lease)
+                if now_ms.saturating_add(self.renewal_margin_ms) < lease.terms.expires_at_ms =>
+            {
+                let bodies = signing_data(descriptors_for(lease.terms)?.as_slice())?;
+                (bodies == lease.bodies).then(|| lease.clone())
+            }
+            _ => None,
         };
-
-        for value in &current_values {
+        let lease = match kept {
+            Some(lease) => lease,
+            None => {
+                let terms = LeaseTerms {
+                    fresh_for_ms: self.fresh_for_ms,
+                    expires_at_ms: now_ms.saturating_add(registry_lease().as_millis()),
+                };
+                let descriptors = descriptors_for(terms)?;
+                let lease = HeldLease {
+                    terms,
+                    bodies: signing_data(descriptors.as_slice())?,
+                    elements: descriptors
+                        .as_slice()
+                        .iter()
+                        .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
+                        .collect::<Result<_>>()?,
+                    descriptors,
+                };
+                *held = Some(lease.clone());
+                lease
+            }
+        };
+        for element in &lease.elements {
             context.ensure_running()?;
-            context.append_data(&self.topic, value.clone()).await?;
+            context.append_data(&self.topic, element.clone()).await?;
         }
-        for stale_value in stale_values {
-            context.ensure_running()?;
-            context
-                .tombstone_data(&self.topic, stale_value.clone())
-                .await?;
-            self.published_values
-                .lock()
-                .map_err(|_| Error::Lock)?
-                .remove(&stale_value);
-        }
-        {
-            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
-            finish_registration_publish(&mut published_values, current_values);
-        }
-        Ok(())
-    }
-
-    async fn observed_registry_values(
-        &self,
-        context: &RegistrationContext<'_>,
-    ) -> Result<Vec<Bytes>> {
-        let entry_key = entry::Entry::gen_did(&self.topic)?;
-        Ok(context
-            .fetch_storage_entry(entry_key)
-            .await?
-            .map(|entry| entry.data)
-            .unwrap_or_default())
+        Ok(lease.descriptors.heard_at(now_ms))
     }
 }
 
-fn begin_registration_publish(
-    published_values: &mut BTreeSet<Bytes>,
-    current_values: &BTreeSet<Bytes>,
-    observed_values: Vec<Bytes>,
-    prunes_observed_value: impl Fn(&Bytes) -> bool,
-) -> Vec<Bytes> {
-    let mut stale_values = published_values
+/// The signed bodies of `descriptors`, which decide whether a lease still describes them.
+fn signing_data<D: SignedDescriptor>(descriptors: &[D]) -> Result<Vec<Vec<u8>>> {
+    descriptors
         .iter()
-        .filter(|published| !current_values.contains(*published))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    stale_values.extend(
-        observed_values
-            .into_iter()
-            .filter(|observed| !current_values.contains(observed))
-            .filter(prunes_observed_value),
-    );
-    // Invariant: every value whose touch may have reached storage is remembered
-    // before the first await. If the publish future is later cancelled by an
-    // attempt timeout, the next attempt can still tombstone the value.
-    published_values.extend(current_values.iter().cloned());
-    stale_values.into_iter().collect()
-}
-
-fn finish_registration_publish(
-    published_values: &mut BTreeSet<Bytes>,
-    current_values: BTreeSet<Bytes>,
-) {
-    *published_values = current_values;
+        .map(|descriptor| {
+            descriptor
+                .descriptor_signing_data()
+                .map_err(Error::CoreError)
+        })
+        .collect()
 }
 
 /// Periodic node-layer registration.
@@ -408,14 +451,13 @@ pub(crate) trait RegistrationTask: MaybeSendSync {
 #[derive(Clone, Debug)]
 pub struct OnlineNodeRegistration {
     heartbeat_interval: Duration,
-    ttl: Duration,
     node_type: OnlineNodeType,
     started_at_ms: u128,
     endpoint_hint: Option<String>,
     /// The process epoch this node registers `relay` at, if it relays (#834 D2): read at every
     /// heartbeat, so a renewed epoch is published by the next one.
     onion_relay: Option<OnionProcessEpochCell>,
-    publisher: DhtRegistrationPublisher,
+    publisher: DhtRegistrationPublisher<[OnlineNodeDescriptor; 1]>,
 }
 
 impl OnlineNodeRegistration {
@@ -429,20 +471,19 @@ impl OnlineNodeRegistration {
     ) -> Self {
         Self {
             heartbeat_interval,
-            ttl,
             node_type,
             started_at_ms: get_epoch_ms(),
             endpoint_hint,
             onion_relay,
-            publisher: DhtRegistrationPublisher::new(ONLINE_NODES_TOPIC),
+            publisher: DhtRegistrationPublisher::new(ONLINE_NODES_TOPIC, heartbeat_interval, ttl),
         }
     }
 
-    /// Build this node's signed descriptor at `now_ms`.
+    /// Build this node's signed descriptor under the lease `terms`.
     pub(crate) fn descriptor_at(
         &self,
         context: &RegistrationContext<'_>,
-        now_ms: u128,
+        terms: LeaseTerms,
     ) -> Result<OnlineNodeDescriptor> {
         OnlineNodeDescriptor::new_signed(
             OnlineNodeDescriptorBody {
@@ -459,8 +500,8 @@ impl OnlineNodeRegistration {
                 },
                 endpoint_hint: self.endpoint_hint.clone(),
                 started_at_ms: self.started_at_ms,
-                heartbeat_at_ms: now_ms,
-                expires_at_ms: now_ms + self.ttl.as_millis(),
+                fresh_for_ms: terms.fresh_for_ms,
+                expires_at_ms: terms.expires_at_ms,
                 version: crate::util::build_version(),
             },
             context.message_signer(),
@@ -468,28 +509,27 @@ impl OnlineNodeRegistration {
         .map_err(Error::CoreError)
     }
 
-    /// Publish this node's signed online descriptor.
+    /// Publish one heartbeat of this node's signed online descriptor, returning it as heard
+    /// now.
     pub(crate) async fn publish_descriptor(
         &self,
         context: &RegistrationContext<'_>,
     ) -> Result<OnlineNodeDescriptor> {
-        let now_ms = get_epoch_ms();
-        let descriptor = self.descriptor_at(context, now_ms)?;
-        self.publisher
-            .publish_replacing(context, now_ms, std::slice::from_ref(&descriptor))
+        let [descriptor] = self
+            .publisher
+            .publish_lease(context, get_epoch_ms(), |terms| {
+                self.descriptor_at(context, terms)
+                    .map(|descriptor| [descriptor])
+            })
             .await?;
         Ok(descriptor)
     }
 
-    /// Decode online-node descriptors from a DHT entry.
+    /// Decode online-node descriptors from a DHT entry, each heard at its element's dot.
     pub fn descriptors_from_entry(
         entry: &rings_core::dht::entry::Entry,
     ) -> Vec<OnlineNodeDescriptor> {
-        entry
-            .data
-            .iter()
-            .filter_map(|value| OnlineNodeDescriptor::from_element(value).ok())
-            .collect()
+        heard_descriptors(entry)
     }
 }
 
@@ -506,118 +546,5 @@ impl RegistrationTask for OnlineNodeRegistration {
 
     async fn register_once(&self, context: &RegistrationContext<'_>) -> Result<()> {
         self.publish_descriptor(context).await.map(|_| ())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use super::*;
-
-    /// The registry element holding the bytes of `value`.
-    fn element(value: &'static str) -> Bytes {
-        Bytes::from_static(value.as_bytes())
-    }
-
-    /// The subset of the elements `a`, `b`, `c` that `mask` selects bit by bit.
-    fn element_subset(mask: u8) -> BTreeSet<Bytes> {
-        ["a", "b", "c"]
-            .into_iter()
-            .enumerate()
-            .filter(|(bit, _value)| mask & (1 << bit) != 0)
-            .map(|(_bit, value)| element(value))
-            .collect()
-    }
-
-    #[test]
-    fn test_registration_publish_remembers_attempted_values_before_effects() {
-        let old = element("old");
-        let attempted = element("attempted");
-        let current = BTreeSet::from([attempted.clone()]);
-        let mut known = BTreeSet::from([old.clone()]);
-
-        let stale = begin_registration_publish(&mut known, &current, vec![], |_| false);
-
-        assert_eq!(stale, vec![old.clone()]);
-        assert_eq!(known, BTreeSet::from([old, attempted]));
-    }
-
-    #[test]
-    fn test_registration_publish_retry_tombstones_values_from_cancelled_attempts() {
-        let old = element("old");
-        let cancelled = element("cancelled");
-        let replacement = element("replacement");
-        let mut known = BTreeSet::from([old.clone()]);
-
-        let cancelled_current = BTreeSet::from([cancelled.clone()]);
-        let _ = begin_registration_publish(&mut known, &cancelled_current, vec![], |_| false);
-        let replacement_current = BTreeSet::from([replacement.clone()]);
-        let stale = begin_registration_publish(&mut known, &replacement_current, vec![], |_| false);
-
-        assert_eq!(
-            stale.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from([old, cancelled])
-        );
-        assert!(known.contains(&replacement));
-        finish_registration_publish(&mut known, replacement_current.clone());
-        assert_eq!(known, replacement_current);
-    }
-
-    #[test]
-    fn test_registration_publish_begin_finish_preserve_known_set_law() {
-        for old_mask in 0..8 {
-            for current_mask in 0..8 {
-                for replacement_mask in 0..8 {
-                    let old = element_subset(old_mask);
-                    let current = element_subset(current_mask);
-                    let replacement = element_subset(replacement_mask);
-                    let mut known = old.clone();
-
-                    let _ = begin_registration_publish(&mut known, &current, vec![], |_| false);
-                    let attempted = old.union(&current).cloned().collect::<BTreeSet<_>>();
-                    assert_eq!(known, attempted);
-
-                    let stale =
-                        begin_registration_publish(&mut known, &replacement, vec![], |_| false)
-                            .into_iter()
-                            .collect::<BTreeSet<_>>();
-                    let expected_stale = attempted
-                        .difference(&replacement)
-                        .cloned()
-                        .collect::<BTreeSet<_>>();
-                    assert_eq!(stale, expected_stale);
-
-                    finish_registration_publish(&mut known, replacement.clone());
-                    assert_eq!(known, replacement);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_registration_publish_tombstones_unpreserved_observed_values() {
-        let current = BTreeSet::from([element("self-new")]);
-        let observed_self_old = element("self-old");
-        let observed_live = element("other-live");
-        let observed_invalid = element("invalid");
-        let mut known = BTreeSet::new();
-
-        let stale = begin_registration_publish(
-            &mut known,
-            &current,
-            vec![
-                observed_self_old.clone(),
-                observed_live,
-                observed_invalid.clone(),
-            ],
-            |observed| observed == &observed_self_old || observed == &observed_invalid,
-        );
-
-        assert_eq!(
-            stale.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from([observed_invalid, observed_self_old])
-        );
-        assert_eq!(known, current);
     }
 }

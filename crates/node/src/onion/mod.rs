@@ -30,6 +30,7 @@ use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::descriptor::heard_elements;
 use crate::descriptor::latest_valid_by_key;
 use crate::descriptor::sign_descriptor_body;
 use crate::descriptor::RegistryElement;
@@ -39,6 +40,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeType;
 use crate::registration::DhtRegistrationPublisher;
+use crate::registration::LeaseTerms;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
 
@@ -386,9 +388,10 @@ pub struct OnionExitDescriptorBody {
     pub policy: OnionExitPolicy,
     /// Process start timestamp in milliseconds since Unix epoch.
     pub started_at_ms: u128,
-    /// Heartbeat timestamp in milliseconds since Unix epoch.
-    pub heartbeat_at_ms: u128,
-    /// Expiry timestamp in milliseconds since Unix epoch.
+    /// Freshness window `T` in milliseconds: a reader holds the descriptor live only while it
+    /// heard it within `T` (see the lease law of `descriptor`).
+    pub fresh_for_ms: u64,
+    /// Lease end `ℓ` in milliseconds since Unix epoch.
     pub expires_at_ms: u128,
     /// Node software version.
     pub version: String,
@@ -406,7 +409,7 @@ impl OnionExitDescriptorBody {
             service: &self.service,
             policy: &self.policy,
             started_at_ms: self.started_at_ms,
-            heartbeat_at_ms: self.heartbeat_at_ms,
+            fresh_for_ms: self.fresh_for_ms,
             expires_at_ms: self.expires_at_ms,
             version: self.version.as_str(),
         }
@@ -449,7 +452,8 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
             service: self.service,
             policy: self.policy,
             started_at_ms: self.started_at_ms,
-            heartbeat_at_ms: self.heartbeat_at_ms,
+            heartbeat_at_ms: 0,
+            fresh_for_ms: self.fresh_for_ms,
             expires_at_ms: self.expires_at_ms,
             version: self.version,
             signature,
@@ -468,7 +472,7 @@ struct OnionExitDescriptorBodyRef<'a> {
     service: &'a OnionServiceName,
     policy: &'a OnionExitPolicy,
     started_at_ms: u128,
-    heartbeat_at_ms: u128,
+    fresh_for_ms: u64,
     expires_at_ms: u128,
     version: &'a str,
 }
@@ -500,13 +504,18 @@ pub struct OnionExitDescriptor {
     pub policy: OnionExitPolicy,
     /// Process start timestamp in milliseconds since Unix epoch.
     pub started_at_ms: u128,
-    /// Heartbeat timestamp in milliseconds since Unix epoch.
+    /// When the reader last heard this descriptor, in milliseconds since Unix epoch: the dot of
+    /// its element in the fetched registry carrier. Not signed and not encoded (see the lease
+    /// law of `descriptor`); `0` until heard.
+    #[serde(skip)]
     pub heartbeat_at_ms: u128,
-    /// Expiry timestamp in milliseconds since Unix epoch.
+    /// Freshness window `T` in milliseconds.
+    pub fresh_for_ms: u64,
+    /// Lease end `ℓ` in milliseconds since Unix epoch.
     pub expires_at_ms: u128,
     /// Node software version.
     pub version: String,
-    /// Signature covering every descriptor field above.
+    /// Signature covering every descriptor field above except `heartbeat_at_ms`.
     pub signature: MessageVerification,
 }
 
@@ -534,7 +543,8 @@ impl OnionExitDescriptor {
             service,
             policy,
             started_at_ms,
-            heartbeat_at_ms,
+            heartbeat_at_ms: _,
+            fresh_for_ms,
             expires_at_ms,
             version,
             signature: _,
@@ -550,7 +560,7 @@ impl OnionExitDescriptor {
             service,
             policy,
             started_at_ms: *started_at_ms,
-            heartbeat_at_ms: *heartbeat_at_ms,
+            fresh_for_ms: *fresh_for_ms,
             expires_at_ms: *expires_at_ms,
             version: version.as_str(),
         }
@@ -572,14 +582,16 @@ impl OnionExitDescriptor {
         self.descriptor_verify_signature(network_id)
     }
 
-    /// Returns whether this descriptor is expired at `now_ms`.
+    /// Returns whether this descriptor is expired at `now_ms`: its lease ended, or it was not
+    /// heard within its freshness window.
     pub fn is_expired_at(&self, now_ms: u128) -> bool {
         self.descriptor_is_expired_at(now_ms)
     }
 
-    /// Returns whether this descriptor has a valid signature and is not expired.
+    /// Returns whether a reader lists this descriptor: it has a valid signature, admissible
+    /// lease terms, and is not expired (the lease law of `descriptor`).
     pub fn is_live_at(&self, now_ms: u128, network_id: u32) -> bool {
-        self.verify_signature(network_id) && !self.is_expired_at(now_ms)
+        self.descriptor_is_live_at(now_ms, network_id)
     }
 
     /// Select the newest valid onion-exit descriptor per `(DID, service)`.
@@ -637,8 +649,19 @@ impl SignedDescriptor for OnionExitDescriptor {
         self.expires_at_ms
     }
 
+    fn descriptor_fresh_for_ms(&self) -> u64 {
+        self.fresh_for_ms
+    }
+
     fn descriptor_signing_data(&self) -> CoreResult<Vec<u8>> {
         self.signing_data()
+    }
+
+    fn heard_at(self, heartbeat_at_ms: u128) -> Self {
+        Self {
+            heartbeat_at_ms,
+            ..self
+        }
     }
 }
 
@@ -664,12 +687,11 @@ impl OnionExitDescriptorDecodeReport {
 #[derive(Clone, Debug)]
 pub(crate) struct OnionExitRegistration {
     heartbeat_interval: Duration,
-    ttl: Duration,
     node_type: OnlineNodeType,
     process_epoch: OnionProcessEpochCell,
     started_at_ms: u128,
     offer: OnionExitOffer,
-    publisher: DhtRegistrationPublisher,
+    publisher: DhtRegistrationPublisher<Vec<OnionExitDescriptor>>,
 }
 
 impl OnionExitRegistration {
@@ -682,33 +704,32 @@ impl OnionExitRegistration {
     ) -> Self {
         Self {
             heartbeat_interval,
-            ttl,
             node_type,
             process_epoch,
             started_at_ms: get_epoch_ms(),
             offer,
-            publisher: DhtRegistrationPublisher::new(ONION_EXITS_TOPIC),
+            publisher: DhtRegistrationPublisher::new(ONION_EXITS_TOPIC, heartbeat_interval, ttl),
         }
     }
 
-    /// Build this node's signed onion-exit descriptors at `now_ms`.
+    /// Build this node's signed onion-exit descriptors under the lease `terms`.
     pub fn descriptors_at(
         &self,
         context: &RegistrationContext<'_>,
-        now_ms: u128,
+        terms: LeaseTerms,
     ) -> Result<Vec<OnionExitDescriptor>> {
         self.offer
             .services()
             .iter()
             .cloned()
-            .map(|service| self.descriptor_for_service(context, now_ms, service))
+            .map(|service| self.descriptor_for_service(context, terms, service))
             .collect()
     }
 
     fn descriptor_for_service(
         &self,
         context: &RegistrationContext<'_>,
-        now_ms: u128,
+        terms: LeaseTerms,
         service: OnionServiceName,
     ) -> Result<OnionExitDescriptor> {
         OnionExitDescriptor::new_signed(
@@ -722,8 +743,8 @@ impl OnionExitRegistration {
                 service,
                 policy: self.offer.policy().clone(),
                 started_at_ms: self.started_at_ms,
-                heartbeat_at_ms: now_ms,
-                expires_at_ms: now_ms + self.ttl.as_millis(),
+                fresh_for_ms: terms.fresh_for_ms,
+                expires_at_ms: terms.expires_at_ms,
                 version: crate::util::build_version(),
             },
             context.message_signer(),
@@ -731,27 +752,27 @@ impl OnionExitRegistration {
         .map_err(Error::CoreError)
     }
 
-    /// Publish this node's signed onion-exit descriptors.
+    /// Publish one heartbeat of this node's signed onion-exit descriptors, returning them as
+    /// heard now.
     pub async fn publish_descriptors(
         &self,
         context: &RegistrationContext<'_>,
     ) -> Result<Vec<OnionExitDescriptor>> {
-        let now_ms = get_epoch_ms();
-        let descriptors = self.descriptors_at(context, now_ms)?;
         self.publisher
-            .publish_replacing(context, now_ms, &descriptors)
-            .await?;
-        Ok(descriptors)
+            .publish_lease(context, get_epoch_ms(), |terms| {
+                self.descriptors_at(context, terms)
+            })
+            .await
     }
 
-    /// Decode onion-exit descriptors from a DHT entry.
+    /// Decode onion-exit descriptors from a DHT entry, each heard at its element's dot.
     pub fn decode_descriptors_from_entry(
         entry: &rings_core::dht::entry::Entry,
     ) -> OnionExitDescriptorDecodeReport {
         let mut report = OnionExitDescriptorDecodeReport::default();
-        for value in &entry.data {
+        for (value, heard_at_ms) in heard_elements(entry) {
             match OnionExitDescriptor::from_element(value) {
-                Ok(descriptor) => report.descriptors.push(descriptor),
+                Ok(descriptor) => report.descriptors.push(descriptor.heard_at(heard_at_ms)),
                 Err(error) => {
                     report.rejected_values = report.rejected_values.saturating_add(1);
                     tracing::debug!(

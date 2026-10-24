@@ -11,6 +11,7 @@ use rings_core::message::MessageSigner;
 
 use super::super::*;
 use crate::consts::DATA_REDUNDANT;
+use crate::descriptor::SignedDescriptor;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitDescriptor;
@@ -103,12 +104,14 @@ fn online_descriptor(
             capabilities,
             endpoint_hint: None,
             started_at_ms: 1,
-            heartbeat_at_ms: HEARTBEAT_MS,
+            fresh_for_ms: u64::try_from(expires_at_ms.saturating_sub(HEARTBEAT_MS))
+                .unwrap_or(u64::MAX),
             expires_at_ms,
             version: "test".to_string(),
         },
         MessageSigner::new(key, network_id),
     )
+    .map(|descriptor| descriptor.heard_at(HEARTBEAT_MS))
     .map_err(Error::CoreError)
 }
 
