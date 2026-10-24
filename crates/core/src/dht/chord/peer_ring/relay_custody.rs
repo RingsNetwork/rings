@@ -63,19 +63,32 @@ impl PeerRing {
         self.relay_storage.is_some() && self.now_ms() >= self.relay_replication.age_gate_ms
     }
 
-    /// Whether this node's age gate opened since it last answered: once, the first time it holds
-    /// relay mail, so that it declares it to the peers it is already connected to.
-    pub(crate) fn relay_custody_opened(&self) -> bool {
-        self.holds_relay_mail()
-            && !self
-                .relay_custody_declared
-                .swap(true, std::sync::atomic::Ordering::AcqRel)
+    /// The peers of `connected` this node has not declared to yet that it holds relay mail;
+    /// empty while its age gate is closed (`Law (Age gate)`). A peer is declared to once: each
+    /// is recorded when its declaration is queued ([`Self::record_relay_custody_declared`]), and
+    /// a peer it lost is forgotten with it, so the set is bounded by the peers it knows.
+    pub(crate) fn undeclared_relay_custody_peers(&self, connected: Vec<Did>) -> Result<Vec<Did>> {
+        if !self.holds_relay_mail() {
+            return Ok(Vec::new());
+        }
+        let declared = self.lock_relay_custody_declared()?;
+        Ok(connected
+            .into_iter()
+            .filter(|peer| !declared.contains(peer))
+            .collect())
     }
 
-    /// Let [`Self::relay_custody_opened`] answer once more, a declaration having been lost.
-    pub(crate) fn declare_relay_custody_again(&self) {
+    /// Record that this node's declaration to `peer` was queued.
+    pub(crate) fn record_relay_custody_declared(&self, peer: Did) -> Result<()> {
+        self.lock_relay_custody_declared()?.insert(peer);
+        Ok(())
+    }
+
+    /// Lock the declared-to set, a leaf of `Law (Lock order)`.
+    fn lock_relay_custody_declared(&self) -> Result<MutexGuard<'_, BTreeSet<Did>>> {
         self.relay_custody_declared
-            .store(false, std::sync::atomic::Ordering::Release);
+            .lock()
+            .map_err(|_| Error::LockPoisoned)
     }
 
     /// The members `r` a carrier is replicated to (#777).
@@ -115,6 +128,7 @@ impl PeerRing {
     /// Forget what is known of `peer`'s relay custody, once it left this node's topology.
     pub(crate) fn forget_relay_custody(&self, peer: Did) -> Result<()> {
         self.lock_relay_neighborhood()?.forget(peer);
+        self.lock_relay_custody_declared()?.remove(&peer);
         self.forget_next_relay_holder(Some(peer))
     }
 

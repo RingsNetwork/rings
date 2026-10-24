@@ -289,7 +289,7 @@ impl Stabilizer {
             }
         }
         self.dht.forget_stale_relay_custody(&stale)?;
-        self.declare_opened_relay_custody().await;
+        self.declare_opened_relay_custody().await?;
         self.dht.prune_relay_replications(get_epoch_ms())?;
         self.resend_unacknowledged_relay_holds().await?;
         self.repair_relay_chain().await?;
@@ -331,6 +331,12 @@ impl Stabilizer {
     ///
     /// `Law (Wake)`: the listener is registered before the due flag is checked, so no loss is
     /// missed; `stop` is observed between waits of at most `STABILIZATION_STOP_POLL_INTERVAL`.
+    ///
+    /// Bound: exchanges per second ≤ chain-neighbour losses per second. Each exchange is run by
+    /// taking the due flag, which only a loss sets, and losses that arrive before it is taken
+    /// share one exchange. It cannot amplify itself: an exchange sends digest offers, copies and
+    /// forwards and removes no peer, while a loss is a topology removal on a closed connection
+    /// or a failed liveness check, which no exchange causes.
     pub(crate) async fn repair_relay_chain_on_loss(&self, stop: &StopToken) {
         loop {
             if stop.should_stop() {
@@ -362,16 +368,14 @@ impl Stabilizer {
         offer_relay_repair(&self.transport).await
     }
 
-    /// Declare to every connected peer that this node holds relay mail, once its age gate opened
-    /// (`Law (Age gate)`, #777): those peers read its handshake while it held none. When a
-    /// declaration is not queued, the next pass declares to every peer again.
-    async fn declare_opened_relay_custody(&self) {
-        if !self.dht.relay_custody_opened() {
-            return;
-        }
+    /// Declare to every connected peer not declared to yet that this node holds relay mail, once
+    /// its age gate opened (`Law (Age gate)`, #777): those peers may have read its handshake while
+    /// it held none. A peer is recorded once its declaration is queued, so a declaration that is
+    /// not queued is sent again on the next pass to that peer alone.
+    async fn declare_opened_relay_custody(&self) -> Result<()> {
         let custody = self.dht.relay_custody();
-        let mut undeclared = false;
-        for peer in self.transport.get_connection_ids() {
+        let connected = self.transport.get_connection_ids();
+        for peer in self.dht.undeclared_relay_custody_peers(connected)? {
             let declaration = Message::DeclareRelayCustody(DeclareRelayCustody { custody });
             if let Err(error) = self
                 .transport
@@ -384,14 +388,13 @@ impl Stabilizer {
                     local = %self.dht.did,
                     %peer,
                     error = ?error,
-                    "STABILIZATION relay custody declaration not queued"
+                    "STABILIZATION relay custody declaration not queued; sent again next pass"
                 );
-                undeclared = true;
+                continue;
             }
+            self.dht.record_relay_custody_declared(peer)?;
         }
-        if undeclared {
-            self.dht.declare_relay_custody_again();
-        }
+        Ok(())
     }
 
     /// Send again every hold this node keeps unacknowledged, to the holder its view now names

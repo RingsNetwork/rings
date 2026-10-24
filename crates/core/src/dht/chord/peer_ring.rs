@@ -37,6 +37,7 @@
 //! rounds, successor-list synchronization, and test hooks.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -185,8 +186,8 @@ pub struct PeerRing {
     relay_replications: Mutex<RelayReplications>,
     /// How relay custody is replicated: `r` and the age gate (see `relay_replicas`).
     relay_replication: RelayReplication,
-    /// Whether this node told its peers that it holds relay mail, once its age gate opened.
-    relay_custody_declared: AtomicBool,
+    /// The peers this node declared to that it holds relay mail, once its age gate opened.
+    relay_custody_declared: Mutex<BTreeSet<Did>>,
     /// The first holder after this node past its successor list (see `relay_replicas`).
     relay_next_holder: Mutex<NextHolder>,
     /// Whether a chain neighbour was lost and the chain exchange has not run since (`Law
@@ -259,7 +260,7 @@ impl PeerRing {
             relay_holder_hints: Mutex::new(RelayHolderHints::default()),
             relay_replications: Mutex::new(BTreeMap::new()),
             relay_replication: RelayReplication::default(),
-            relay_custody_declared: AtomicBool::new(false),
+            relay_custody_declared: Mutex::new(BTreeSet::new()),
             relay_next_holder: Mutex::new(NextHolder::default()),
             relay_chain_repair_due: AtomicBool::new(false),
             relay_chain_losses: Epoch::default(),

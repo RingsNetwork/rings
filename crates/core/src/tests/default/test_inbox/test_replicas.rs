@@ -175,10 +175,15 @@ async fn test_mail_survives_the_loss_of_its_holder() -> Result<()> {
 }
 
 /// The age gate (`Law (Age gate)`): a node with a relay store declares that it holds relay mail
-/// only once it has been online for the gate, and it declares the opening to its peers once.
+/// only once it has been online for the gate, and then to each connected peer once: a peer it
+/// declared to is not declared to again, and a peer it lost is declared to again on return.
 #[test]
-fn test_the_age_gate_closes_custody_and_opens_it_once() {
+fn test_the_age_gate_closes_custody_and_declares_it_once_per_peer() -> Result<()> {
     let did: Did = SecretKey::random().address().into();
+    let [first, second]: [Did; 2] = [
+        SecretKey::random().address().into(),
+        SecretKey::random().address().into(),
+    ];
     let gated = gen_pure_dht(did)
         .with_relay_replication(RelayReplication {
             age_gate_ms: u64::MAX,
@@ -187,19 +192,26 @@ fn test_the_age_gate_closes_custody_and_opens_it_once() {
         .with_relay_storage(crate::tests::volatile_relay_storage());
     assert!(!gated.holds_relay_mail());
     assert_eq!(gated.relay_custody(), RelayCustody::HoldsNone);
-    assert!(!gated.relay_custody_opened());
+    assert!(gated
+        .undeclared_relay_custody_peers(vec![first, second])?
+        .is_empty());
 
     let open = gen_pure_dht(did)
         .with_relay_replication(crate::tests::ungated_relay_replication())
         .with_relay_storage(crate::tests::volatile_relay_storage());
     assert_eq!(open.relay_custody(), RelayCustody::Holds);
-    assert!(open.relay_custody_opened());
-    assert!(!open.relay_custody_opened(), "the opening is declared once");
-    open.declare_relay_custody_again();
-    assert!(
-        open.relay_custody_opened(),
-        "a lost declaration is declared again"
-    );
+    assert_eq!(open.undeclared_relay_custody_peers(vec![first, second])?, [
+        first, second
+    ]);
+    // Only the declaration to `first` was queued: `second` alone is declared to again.
+    open.record_relay_custody_declared(first)?;
+    assert_eq!(open.undeclared_relay_custody_peers(vec![first, second])?, [
+        second
+    ]);
+    // A peer that was lost is declared to again when it returns.
+    open.forget_relay_custody(first)?;
+    assert_eq!(open.undeclared_relay_custody_peers(vec![first])?, [first]);
+    Ok(())
 }
 
 /// Chain repair is coalesced per neighbour (`Law (Chain repair)`, Prop. 13 of durable-records):
