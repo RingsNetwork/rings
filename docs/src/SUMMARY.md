@@ -9,6 +9,7 @@
 - [Operate a Node from the CLI](cli.md)
 - [Operator Observability](operator-observability.md)
 - [Native Gateway](native-gateway.md)
+- [DNS Relay](dns-relay.md)
 
 # Wasm Node (WebAssembly for Browsers)
 

@@ -31,6 +31,9 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
     /// An observer chained after the processor's own `Observability`.
     pub(in crate::processor) observer: Option<rings_core::swarm::observer::SharedSwarmObserver>,
+    /// The services this node announces through DNS relays (#1049), if any.
+    #[cfg(rings_native)]
+    pub(in crate::processor) service_offer: Option<crate::dns_relay::ServiceOffer>,
 }
 
 impl ProcessorBuilder {
@@ -68,7 +71,17 @@ impl ProcessorBuilder {
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
             observer: None,
+            #[cfg(rings_native)]
+            service_offer: None,
         })
+    }
+
+    /// Announce `offer` through DNS relays: the processor publishes this node's service
+    /// descriptor on every heartbeat of the offer (#1049).
+    #[cfg(rings_native)]
+    pub fn announce_services(mut self, offer: crate::dns_relay::ServiceOffer) -> Self {
+        self.service_offer = Some(offer);
+        self
     }
 
     /// Chain `observer` after the processor's own `Observability`, an open hook for embedders
@@ -219,6 +232,13 @@ impl ProcessorBuilder {
                 onion_process_epoch.clone(),
             );
             registration_tasks.push(Arc::new(onion_exit_registration));
+        }
+        #[cfg(rings_native)]
+        if let Some(offer) = self.service_offer {
+            registration_tasks.push(Arc::new(crate::dns_relay::ServiceRegistration::new(
+                delegatee_key.delegator_did(),
+                offer,
+            )));
         }
 
         // One recorder is shared between core protocol hooks and node-level snapshot assembly.
