@@ -15,6 +15,7 @@ use crate::consts::ENTRY_ELEMENT_PREFIX_WIRE_MAX;
 use crate::consts::ENTRY_PAYLOAD_MAX_BYTES;
 use crate::consts::ENTRY_REGISTER_WIRE_MAX;
 use crate::consts::ENTRY_TOMBSTONE_WIRE_MAX;
+use crate::consts::REMOVAL_STORED_ITEM_WIRE_MAX;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::entry::ElementDigest;
 use crate::dht::entry::Entry;
@@ -24,7 +25,10 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::EntryTombstone;
 use crate::dht::entry::EntryVersion;
+use crate::dht::ChargedRegister;
+use crate::dht::ChargedRemove;
 use crate::dht::Did;
+use crate::dht::RemovalRecord;
 use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -100,6 +104,32 @@ fn test_carrier_wire_suprema_are_the_widest_encodings() -> Result<()> {
     // its own.
     assert_eq!(wire_size(&header)?, ENTRY_CARRIER_HEADER_WIRE_MAX - 3 + 1);
     assert_eq!(wire_size(&full)?, DATA_CARRIER_WIRE_MAX);
+
+    // A removal record of one remove at its widest, filed with its storage key as a key-value
+    // store files a pair: the widest per item of the removal store.
+    let did = Did::from(u32::MAX);
+    let one_remove = RemovalRecord {
+        did,
+        register: None,
+        removes: vec![ChargedRemove {
+            tombstone,
+            charge: Principal::Slot(u16::MAX),
+        }],
+    };
+    let key = StorageKey::new(EntryKind::Data, did).to_string();
+    assert_eq!(
+        wire_size(&(&key, &one_remove))?,
+        REMOVAL_STORED_ITEM_WIRE_MAX
+    );
+    let one_register = RemovalRecord {
+        removes: Vec::new(),
+        register: Some(ChargedRegister {
+            version: widest_version(),
+            charge: Principal::Slot(u16::MAX),
+        }),
+        ..one_remove
+    };
+    assert!(wire_size(&(&key, &one_register))? < REMOVAL_STORED_ITEM_WIRE_MAX);
     Ok(())
 }
 

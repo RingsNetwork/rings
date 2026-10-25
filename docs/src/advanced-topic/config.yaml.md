@@ -275,7 +275,7 @@ The daemon keeps four more stores in directories beside the data store, with fix
 `transaction-replay` (the replay windows, authoritative), `relay-inbox` (the relay carriers this
 node holds or owns, retained: flushed and never evicted, 64 MiB, #1021), `dht-removals` (the
 removals of the data topics this node stores, retained: flushed and never evicted until they
-are collected, 16 MiB, #920) and `onion-entry-guards` (a durable cache). Back them up and remove
+are collected, 24 MiB, #920, #907) and `onion-entry-guards` (a durable cache). Back them up and remove
 them together with the data store; removing `relay-inbox` drops the mail held there, and
 removing `dht-removals` makes this node a fresh replica of every topic it stores.
 

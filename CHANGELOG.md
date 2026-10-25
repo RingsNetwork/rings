@@ -48,9 +48,10 @@
   share of its principal. An item stays charged to its slot after its connection leaves, so a
   table never holds more than `R(s)·f + P + L + S` items however many connections rotate; a
   connection admitted into a slot inherits what the slot still holds. The replay receiver
-  table has `f = 32`, `P = 4096`, `L = 1024`, inbox `768` (16384 streams at three successors,
-  its hard capacity); the removal store `f = 128`, `P = 16384`, `L = 7168`, custody `16384`
-  (81920, about 12 MB, within the native store's 16 MiB). A replay stream is retired once it is spent:
+  table has `f = 32`, `P = 3328`, `L = 1024`, inbox `768` (15616 streams at three successors,
+  within its hard capacity of 16384 up to 15 successors); the removal store `f = 128`,
+  `P = 16384`, `L = 7168`, custody `16384` (81920, filed in at most about 19.6 MB, so the native
+  `dht-removals` budget rises from 16 MiB to 24 MiB). A replay stream is retired once it is spent:
   `σ` after its last proof expires, and for application streams another relay-inbox retention
   plus `σ` later; a refusal therefore lasts until a stream of the refused slot is spent, never
   for good. Handlers receive a `HandlerContext`, which carries the payload and the principal

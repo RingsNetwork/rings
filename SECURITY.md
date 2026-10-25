@@ -293,7 +293,7 @@ route.
   the range's previous owner past a custody share of 16384, which a Byzantine predecessor or
   successor can fill (a non-goal). A node whose browser cannot
   open IndexedDB keeps removals in memory, so each restart makes it a fresh replica.
-- #907: a new replay stream is refused past its slot's floor of 32 and fair claim of 4096, past
+- #907: a new replay stream is refused past its slot's floor of 32 and fair claim of a pool of 3328, past
   the inbox share of 768 for mail out of the relay inbox, or past this node's share of 1024 for
   its own signaling, until a stream of that principal is spent: about 10 minutes after its last
   default-lifetime transaction, and 7 days for application streams, whose mail a relay inbox may

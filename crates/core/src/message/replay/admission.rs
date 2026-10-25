@@ -13,23 +13,32 @@ use crate::message::OriginQuotaInstant;
 use crate::utils::Instant;
 
 /// The shares of the receiver table (load-bounds paper, Law 2): `f = 32` new streams per slot,
-/// a pool of 4096, a local share of 1024 for this node's own signaling and an inbox share of
-/// 768 for deliveries out of its relay inbox, so `B(s) = R(s)·32 + 5888`: 16 384 at `s = 3`,
-/// the table's hard bound
-/// ([`TRANSACTION_REPLAY_STREAM_CAPACITY`](super::TRANSACTION_REPLAY_STREAM_CAPACITY)), which
-/// binds first past `s = 3`.
+/// a pool of 3328, a local share of 1024 for this node's own signaling and an inbox share of
+/// 768 for deliveries out of its relay inbox, so `B(s) = R(s)·32 + 5120`: 15 616 at `s = 3`.
+///
+/// Law: `B(s)` stays within the table's hard bound
+/// ([`TRANSACTION_REPLAY_STREAM_CAPACITY`](super::TRANSACTION_REPLAY_STREAM_CAPACITY), 16 384)
+/// iff `s ≤ 15`, so up to 15 successors the floors bind before the hard bound does (Theorem
+/// 1(1)); past it, the hard bound refuses first.
 pub(crate) const RECEIVER_STREAM_SHARES: Shares = Shares {
     floor: 32,
-    pool: 4096,
+    pool: 3328,
     local: 1024,
     inbox: 768,
     custody: 0,
 };
 
+/// The most successors under which the receiver table's bound stays within its hard bound.
+const RECEIVER_STREAM_SUCCESSORS_MAX: usize = 15;
 const _: () = assert!(
     RECEIVER_STREAM_SHARES.bound(crate::dht::topology::edge_slots(
-        crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY
-    )) == super::TRANSACTION_REPLAY_STREAM_CAPACITY
+        RECEIVER_STREAM_SUCCESSORS_MAX
+    )) <= super::TRANSACTION_REPLAY_STREAM_CAPACITY
+);
+const _: () = assert!(
+    RECEIVER_STREAM_SHARES.bound(crate::dht::topology::edge_slots(
+        RECEIVER_STREAM_SUCCESSORS_MAX + 1
+    )) > super::TRANSACTION_REPLAY_STREAM_CAPACITY
 );
 
 /// `ι(class)`: how long after its proof expires a transaction of `class` may still be delivered.

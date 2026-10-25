@@ -120,13 +120,23 @@ pub const ENTRY_PAYLOAD_MAX_BYTES: usize = 32 * 1024;
 /// topic.
 pub const DATA_TOMBSTONE_MAX_LEN: usize = ENTRY_DATA_MAX_LEN;
 /// The unstable removes an owner's removal store holds in all at the default successor capacity,
-/// `B(3) = 328·128 + 16 384 + 7 168 + 16 384` (#920, #907; load-bounds paper, Sec. V), about
-/// 12 MB at [`ENTRY_TOMBSTONE_WIRE_MAX`]: each connection slot's floor of 128, a pool shared in
-/// fair claims, this node's own share, and the custody share of an ownership hand-off. A ring with `s` successors holds `256(s − 3)` more, and its removal
+/// `B(3) = 328·128 + 16 384 + 7 168 + 16 384` (#920, #907; load-bounds paper, Sec. V), at most
+/// about 19.6 MB stored ([`REMOVAL_STORED_ITEM_WIRE_MAX`] each): each connection slot's floor of
+/// 128, a pool shared in fair claims, this node's own share, and the custody share of an
+/// ownership hand-off. A ring with `s` successors holds `256(s − 3)` more, and its removal
 /// store must be sized for them.
 pub const REMOVAL_STORE_MAX_REMOVES: usize = crate::dht::REMOVAL_SHARES.bound(
     crate::dht::topology::edge_slots(crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY),
 );
+/// Encoded bytes a key-value store files per unstable item of the removal store, at most: the
+/// pair of a storage key (a DID string, 43) and a record that holds that one item (its DID, 43;
+/// an absent register, 1; the removes' length prefix, 1; one remove, [`ENTRY_TOMBSTONE_WIRE_MAX`];
+/// and its charge, a principal's tag and a slot varint, 4). A record of one remove is the widest
+/// per item: a register alone is narrower, and further removes share the key and the DID.
+/// So a removal store holds [`REMOVAL_STORE_MAX_REMOVES`] items in at most
+/// `REMOVAL_STORE_MAX_REMOVES · REMOVAL_STORED_ITEM_WIRE_MAX` bytes, about 19.6 MB; witnessed
+/// with equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const REMOVAL_STORED_ITEM_WIRE_MAX: usize = 43 + 43 + 1 + 1 + ENTRY_TOMBSTONE_WIRE_MAX + 4;
 /// Encoded bytes of one element's length prefix, at most: the varint of
 /// [`ENTRY_PAYLOAD_MAX_BYTES`].
 ///
