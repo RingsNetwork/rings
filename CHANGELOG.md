@@ -24,7 +24,9 @@
   - **Library API.** `WIRE_VERSION`, `PeerWireVersion`, `WireVersionMismatch`,
     `Error::IncompatibleWireVersion` (core and node), `INCOMPATIBLE_WIRE_VERSION_CODE` and
     `NodeDidResponse::wire_version` are new. `Error::UnmarkedFrame` now also covers a header of
-    this version with an unknown kind.
+    this version with an unknown kind. The header is 9 bytes against the old 14-byte marker,
+    so `MAX_CHUNK_ENVELOPE_OVERHEAD` drops from 912 to 907 and `MAX_PAYLOAD_ENVELOPE_OVERHEAD`
+    from 3697 to 3692, both still witnessed with equality.
   - **Upgrade consequence.** Breaking on the wire: a node of this release and a node before it
     cannot connect. The earlier one fails with its old codec error; this one names the earlier
     one as a node before wire versioning. Seeds, browsers and embedders move together.

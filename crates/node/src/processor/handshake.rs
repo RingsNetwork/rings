@@ -54,8 +54,7 @@ impl RemoteHandshake for rings_rpc::jsonrpc::Client {
         .await
         .map_err(Error::from)?
         .answer;
-        MessagePayload::from_encoded(&Encoded::from(reply))
-            .map_err(|error| Error::from_core_or(error, |_| Error::DecodeError))
+        decode_handshake_payload(&Encoded::from(reply))
     }
 
     async fn accept_answer(&self, answer: &MessagePayload) -> Result<()> {
@@ -67,6 +66,14 @@ impl RemoteHandshake for rings_rpc::jsonrpc::Client {
         .map_err(Error::from)?;
         Ok(())
     }
+}
+
+/// Decode an offer or an answer from its HTTP handshake string. A frame of another wire version
+/// is refused as [`Error::IncompatibleWireVersion`] (#1104); any other failure is
+/// [`Error::DecodeError`].
+pub(crate) fn decode_handshake_payload(encoded: &Encoded) -> Result<MessagePayload> {
+    MessagePayload::from_encoded(encoded)
+        .map_err(|error| Error::from_core_or(error, |_| Error::DecodeError))
 }
 
 /// Admit the wire version an endpoint's `nodeDid` reported before any offer is created

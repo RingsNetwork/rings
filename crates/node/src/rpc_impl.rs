@@ -14,16 +14,15 @@ use jsonrpc_core::Result;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::message::e2e;
-use rings_core::message::Decoder;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
-use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
 use rings_core::message::WIRE_VERSION;
 use rings_rpc::protos::rings_node::*;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 
 use crate::error::Error as ServerError;
+use crate::processor::handshake::decode_handshake_payload;
 use crate::processor::HandshakeFailure;
 use crate::processor::HandshakePeer;
 use crate::processor::Processor;
@@ -144,8 +143,7 @@ impl HandleRpc<AnswerOfferRequest, AnswerOfferResponse> for Processor {
         }
         let encoded: Encoded = <Encoded as From<String>>::from(req.offer);
 
-        let offer_payload = MessagePayload::from_encoded(&encoded)
-            .map_err(|error| ServerError::from_core_or(error, |_| ServerError::DecodeError))?;
+        let offer_payload = decode_handshake_payload(&encoded)?;
 
         // The reply is the answer: the caller's offer, carried out of band, prevails over this
         // node's own sent overlay offer to the caller (`Law (Tie-break)`), so a caller without
@@ -178,8 +176,7 @@ impl HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse> for Processor {
         }
         let encoded = Encoded::from(req.answer);
 
-        let answer_payload = MessagePayload::from_encoded(&encoded)
-            .map_err(|error| ServerError::from_core_or(error, |_| ServerError::DecodeError))?;
+        let answer_payload = decode_handshake_payload(&encoded)?;
         answer_payload.transaction.signer();
 
         self.swarm
