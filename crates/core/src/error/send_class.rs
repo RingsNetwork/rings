@@ -228,7 +228,8 @@ impl Error {
             | Self::TransactionReplayUnscheduled(_)
             // accounting and delegation
             | Self::OriginQuota(_) | Self::ServiceReceipt(_) | Self::ProvisionalEvidence(_)
-            | Self::UnmarkedFrame | Self::DelegationReferenceUnresolved(_)
+            | Self::UnmarkedFrame | Self::IncompatibleWireVersion(_)
+            | Self::DelegationReferenceUnresolved(_)
             | Self::DelegationExpired | Self::DelegationExpiresWithinMargin
             // link control
             | Self::LinkControlOutsideLink | Self::LinkControlInFlightCapacity(_)
