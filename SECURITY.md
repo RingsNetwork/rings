@@ -206,9 +206,13 @@ route.
   named node takes only a key its own view makes it hold. Values are stored in the clear.
   Browser nodes hold relay mail too, but a browser can only claim that its storage outlives the
   session, and a closed tab strands what it holds, so held mail is protected by redundancy
-  instead of by one holder's durability: once carriers are replicated to their first r ≥ 2
-  holders (#777), mail survives unless all r holders are lost within one repair period
-  (#1036).
+  instead of by one holder's durability (#1036): every carrier is replicated down a chain to
+  the first r nodes after its key's owner that hold relay mail, 8 by default, and the writer is
+  acknowledged only once all of them hold it (#777). Held mail is lost only if every member
+  holding it is lost within one repair delay: seconds after a departure the members see, and up
+  to the 45 s liveness timeout after a silent one. A node takes custody only after 2 minutes
+  online, so members are the nodes that stay. Members trust each other's copies as holders do;
+  this replication guards against churn, not against a dishonest member.
   [Details](docs/src/advanced-topic/chord.md#data-topic-storage),
   [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
@@ -279,8 +283,10 @@ route.
   removal received by sync can likewise hold a topic live for up to the horizon past the
   receiver's clock.
 - #932: a reassembled message whose full-size mailbox charge does not fit is dropped.
-- #777: a relay carrier has one holder. A browser holder whose ephemeral session ends, or
-  whose tab closes, loses or strands the mail it holds until carriers are replicated (#1036).
+- #1057, #1070: a departure the members do not see (a crash, a dropped network, a suspended or
+  closed tab) is repaired only after the 45 s liveness timeout, so r = 8 meets its loss target
+  for browser sessions of a minute's median, not of 15 s, until a closing tab leaves gracefully
+  (#1057) and chain neighbours probe each other on a shorter timeout (#1070).
 - #1036: in a browser context with ephemeral storage, the replay windows reset at every
   session end, undetectably: a receiver may admit an unexpired transaction once more per
   session, and a sender's streams restart at sequence 0.

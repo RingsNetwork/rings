@@ -15,6 +15,8 @@ pub use carrier_store::RemovalRecord;
 pub use carrier_store::RemovalStorage;
 pub use peer_ring::EntryStorage;
 pub use peer_ring::PeerRing;
+pub(crate) use peer_ring::ReplicaAcknowledgement;
+pub(crate) use peer_ring::ReplicationStep;
 pub(crate) use storage::LookupSettlement;
 pub(crate) use storage::OperateRoute;
 pub(crate) use storage::PlacementLookup;

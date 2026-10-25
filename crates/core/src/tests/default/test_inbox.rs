@@ -8,6 +8,7 @@
 //! direct connection from the peer.
 
 mod test_rejoin;
+mod test_replicas;
 mod test_storage_less;
 
 use std::time::Instant;

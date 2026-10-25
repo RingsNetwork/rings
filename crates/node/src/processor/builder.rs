@@ -8,6 +8,7 @@ use crate::consts::DATA_REDUNDANT;
 use crate::dns_relay::ServiceOffer;
 #[cfg(rings_native)]
 use crate::dns_relay::ServiceRegistration;
+use crate::prelude::rings_core::dht::RelayReplication;
 
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {
@@ -20,6 +21,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) storage: Option<EntryStorage>,
     pub(in crate::processor) relay_storage: Option<EntryStorage>,
     pub(in crate::processor) removal_storage: Option<RemovalStorage>,
+    pub(in crate::processor) relay_replication: Option<RelayReplication>,
     pub(in crate::processor) replay_storage: Option<ReplayStorage>,
     pub(in crate::processor) origin_quota: OriginQuotaConfig,
     pub(in crate::processor) onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
@@ -62,6 +64,7 @@ impl ProcessorBuilder {
             storage: None,
             relay_storage: None,
             removal_storage: None,
+            relay_replication: None,
             replay_storage: None,
             origin_quota: config.origin_quota,
             onion_entry_guard_storage: None,
@@ -133,6 +136,15 @@ impl ProcessorBuilder {
     /// before it is stable (#920). Without one, the remove sides are kept in memory.
     pub fn removal_storage(mut self, storage: RemovalStorage) -> Self {
         self.removal_storage = Some(storage);
+        self
+    }
+
+    /// Set how relay custody is replicated (#777): the members `r` each carrier is replicated
+    /// to, and how long the node is online before it holds relay mail. By default `r` is 8 and
+    /// the age gate is 2 minutes, raised to four stabilization periods when those are longer
+    /// (`Law (Age gate)` of durable-records); a value set here is taken as given.
+    pub fn relay_replication(mut self, replication: RelayReplication) -> Self {
+        self.relay_replication = Some(replication);
         self
     }
 
@@ -273,6 +285,17 @@ impl ProcessorBuilder {
         if let Some(removal_storage) = self.removal_storage {
             swarm_builder = swarm_builder.removal_storage(removal_storage);
         }
+        let stabilization_periods_ms =
+            u64::try_from(self.stabilize_interval.saturating_mul(4).as_millis())
+                .unwrap_or(u64::MAX);
+        let relay_replication = self.relay_replication.unwrap_or_else(|| {
+            let default = RelayReplication::default();
+            RelayReplication {
+                age_gate_ms: default.age_gate_ms.max(stabilization_periods_ms),
+                ..default
+            }
+        });
+        swarm_builder = swarm_builder.relay_replication(relay_replication);
         swarm_builder = swarm_builder.origin_quota(self.origin_quota);
         let observer: rings_core::swarm::observer::SharedSwarmObserver = match self.observer {
             Some(extra) => Arc::new(ChainedObserver {

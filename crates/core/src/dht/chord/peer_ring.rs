@@ -37,6 +37,8 @@
 //! rounds, successor-list synchronization, and test hooks.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -60,6 +62,7 @@ use crate::dht::finger::FingerDeferOutcome;
 use crate::dht::finger::FingerRetireOutcome;
 use crate::dht::finger::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::relay_holder::RelayNeighborhood;
+use crate::dht::relay_holder::RelayReplication;
 use crate::dht::successor::SuccessorSeq;
 use crate::dht::topology;
 use crate::dht::topology::FindSuccessorStep;
@@ -86,6 +89,15 @@ use crate::utils::Instant;
 mod relay_custody;
 use relay_custody::KeptRelayHold;
 use relay_custody::RelayHolderHints;
+mod relay_repair;
+mod relay_replicas;
+use relay_replicas::NextHolder;
+use relay_replicas::PendingReplication;
+pub(crate) use relay_replicas::ReplicaAcknowledgement;
+pub(crate) use relay_replicas::ReplicationStep;
+
+/// The holds a holder replicates to the other members of their keys (see `relay_replicas`).
+type RelayReplications = BTreeMap<RelayHoldDigest, PendingReplication>;
 mod views;
 
 /// Storage accepted by [`PeerRing::new_with_storage`].
@@ -112,9 +124,10 @@ pub struct PeerRing {
     pub(crate) removal_storage: RemovalStorage,
     /// The charge index of [`Self::removal_storage`](PeerRing#structfield.removal_storage).
     removal_index: RemovalIndex,
-    /// Storage of the relay-inbox namespace: the only copy of the mail this node holds (a relay
-    /// carrier is never cached or replicated, and fetched by its recipient alone), so it must be
-    /// a `RecordAuthority::Retained` store (#1021). `None` until [`Self::with_relay_storage`]
+    /// Storage of the relay-inbox namespace: this node's copy of the mail it holds as a member of
+    /// a carrier's key (a relay carrier is replicated to the members alone, #777, never cached,
+    /// and fetched by its recipient alone), so it must be a `RecordAuthority::Retained` store
+    /// (#1021). `None` until [`Self::with_relay_storage`]
     /// gives it one; without it the node takes custody of no relay carrier (Law 1 admits no
     /// volatile relay store): it declares that it holds no relay mail, so the holder law
     /// (`dht::relay_holder`) never names it, every relay write that reaches it anyway is refused
@@ -169,6 +182,19 @@ pub struct PeerRing {
     /// The queries asked of, and the holders named by, the owners of the relay keys kept here
     /// that this view does not place (see `relay_custody`).
     relay_holder_hints: Mutex<RelayHolderHints>,
+    /// The holds this node took as their key's holder and replicates (see `relay_replicas`).
+    relay_replications: Mutex<RelayReplications>,
+    /// How relay custody is replicated: `r` and the age gate (see `relay_replicas`).
+    relay_replication: RelayReplication,
+    /// The peers this node declared to that it holds relay mail, once its age gate opened.
+    relay_custody_declared: Mutex<BTreeSet<Did>>,
+    /// The first holder after this node past its successor list (see `relay_replicas`).
+    relay_next_holder: Mutex<NextHolder>,
+    /// Whether a chain neighbour was lost and the chain exchange has not run since (`Law
+    /// (Event-driven repair)`); the predicate the chain repair task guards on.
+    relay_chain_repair_due: AtomicBool,
+    /// Count of chain-neighbour losses, which wakes the chain repair task (`Law (Wake)`).
+    relay_chain_losses: Epoch,
 }
 
 /// Construction.
@@ -232,6 +258,12 @@ impl PeerRing {
             unacknowledged_relay_holds: Mutex::new(BTreeMap::new()),
             last_stamped: Mutex::new(None),
             relay_holder_hints: Mutex::new(RelayHolderHints::default()),
+            relay_replications: Mutex::new(BTreeMap::new()),
+            relay_replication: RelayReplication::default(),
+            relay_custody_declared: Mutex::new(BTreeSet::new()),
+            relay_next_holder: Mutex::new(NextHolder::default()),
+            relay_chain_repair_due: AtomicBool::new(false),
+            relay_chain_losses: Epoch::default(),
             did,
         }
     }
@@ -249,6 +281,18 @@ impl PeerRing {
     /// refuses and never evicts (#920).
     pub fn with_removal_storage(mut self, storage: RemovalStorage) -> Self {
         self.removal_storage = storage;
+        self
+    }
+
+    /// This ring replicating relay custody as `replication` says (#777).
+    pub fn with_relay_replication(mut self, replication: RelayReplication) -> Self {
+        let replication = RelayReplication {
+            replicas: replication.replicas.max(1),
+            ..replication
+        };
+        self.relay_replication = replication;
+        self.relay_neighborhood =
+            Mutex::new(RelayNeighborhood::with_replicas(replication.replicas));
         self
     }
 
@@ -389,6 +433,7 @@ impl PeerRing {
         if next.state.successors != current.successors {
             self.lock_pending_successor_sync()?
                 .retain_current(&next.state.successors);
+            self.forget_next_relay_holder(None)?;
         }
         if !next.state.routes_equal(&current) {
             self.topology_epoch.advance();
@@ -516,6 +561,11 @@ impl PeerRing {
         did: Did,
         successor: SuccessorRemoval,
     ) -> Result<TopologyRemoval> {
+        // A chain neighbour vacates a slot of relay custody even when the topology does not
+        // reference it, so its loss makes the repair round due at once (`Law (Event-driven
+        // repair)`, #777).
+        let (previous, next) = self.relay_chain_neighbours()?;
+        let chain_neighbour = previous == Some(did) || next == Some(did);
         let (_, removal) = self.transition(|state, _| {
             let removal = TopologyRemoval::of(state, did);
             let event = TopologyEvent::Remove {
@@ -525,7 +575,16 @@ impl PeerRing {
             (self.step(state, event), removal)
         })?;
         self.forget_relay_custody(did)?;
-        Ok(removal)
+        if chain_neighbour {
+            self.relay_chain_repair_due
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.relay_chain_losses.advance();
+        }
+        Ok(if chain_neighbour {
+            TopologyRemoval::Referenced
+        } else {
+            removal
+        })
     }
 }
 

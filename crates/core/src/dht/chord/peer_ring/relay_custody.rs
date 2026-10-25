@@ -56,9 +56,44 @@ pub(crate) struct RelayHolderHints {
 }
 
 impl PeerRing {
-    /// Whether this node holds relay mail: it keeps a retained relay store.
+    /// Whether this node holds relay mail: it keeps a retained relay store and has been online
+    /// for the age gate (`Law (Age gate)`, #777), so a node that leaves within its first minutes
+    /// never pays a member's copies.
     pub fn holds_relay_mail(&self) -> bool {
-        self.relay_storage.is_some()
+        self.relay_storage.is_some() && self.now_ms() >= self.relay_replication.age_gate_ms
+    }
+
+    /// The peers of `connected` this node has not declared to yet that it holds relay mail;
+    /// empty while its age gate is closed (`Law (Age gate)`). A peer is declared to once: each
+    /// is recorded when its declaration is queued ([`Self::record_relay_custody_declared`]), and
+    /// a peer it lost is forgotten with it, so the set is bounded by the peers it knows.
+    pub(crate) fn undeclared_relay_custody_peers(&self, connected: Vec<Did>) -> Result<Vec<Did>> {
+        if !self.holds_relay_mail() {
+            return Ok(Vec::new());
+        }
+        let declared = self.lock_relay_custody_declared()?;
+        Ok(connected
+            .into_iter()
+            .filter(|peer| !declared.contains(peer))
+            .collect())
+    }
+
+    /// Record that this node's declaration to `peer` was queued.
+    pub(crate) fn record_relay_custody_declared(&self, peer: Did) -> Result<()> {
+        self.lock_relay_custody_declared()?.insert(peer);
+        Ok(())
+    }
+
+    /// Lock the declared-to set, a leaf of `Law (Lock order)`.
+    fn lock_relay_custody_declared(&self) -> Result<MutexGuard<'_, BTreeSet<Did>>> {
+        self.relay_custody_declared
+            .lock()
+            .map_err(|_| Error::LockPoisoned)
+    }
+
+    /// The members `r` a carrier is replicated to (#777).
+    pub(crate) fn relay_replicas(&self) -> usize {
+        self.relay_replication.replicas
     }
 
     /// The relay custody this node declares when it connects.
@@ -67,14 +102,14 @@ impl PeerRing {
     }
 
     /// Lock the neighbourhood, a leaf of `Law (Lock order)`.
-    fn lock_relay_neighborhood(&self) -> Result<MutexGuard<'_, RelayNeighborhood>> {
+    pub(super) fn lock_relay_neighborhood(&self) -> Result<MutexGuard<'_, RelayNeighborhood>> {
         self.relay_neighborhood
             .lock()
             .map_err(|_| Error::LockPoisoned)
     }
 
     /// Run `observe` on one topology snapshot and the neighbourhood together.
-    fn with_relay_view<T>(
+    pub(super) fn with_relay_view<T>(
         &self,
         observe: impl FnOnce(&TopologyState, &mut RelayNeighborhood) -> T,
     ) -> Result<T> {
@@ -93,7 +128,8 @@ impl PeerRing {
     /// Forget what is known of `peer`'s relay custody, once it left this node's topology.
     pub(crate) fn forget_relay_custody(&self, peer: Did) -> Result<()> {
         self.lock_relay_neighborhood()?.forget(peer);
-        Ok(())
+        self.lock_relay_custody_declared()?.remove(&peer);
+        self.forget_next_relay_holder(Some(peer))
     }
 
     /// The peers that declared they hold no relay mail.
@@ -120,23 +156,20 @@ impl PeerRing {
         Ok(relay_holder(&self.relay_segment()?, key))
     }
 
-    /// Whether this node holds the relay key `key` under its own view.
-    pub(crate) fn holds_relay_key(&self, key: Did) -> Result<bool> {
-        Ok(self.relay_holder(key)? == RelayHolder::Holder(self.did))
-    }
-
-    /// Take the previous holder `previous` that `from` passed, iff `from` is this node's
-    /// predecessor; the result says whether it was taken.
+    /// Take the previous holders `previous`, nearest first, that `from` passed, iff `from` is
+    /// this node's predecessor; the result says whether they were taken.
     pub(crate) fn accept_previous_relay_holder(
         &self,
         from: Did,
-        previous: PreviousHolder,
+        previous: Vec<PreviousHolder>,
     ) -> Result<bool> {
         self.with_relay_view(|state, neighborhood| neighborhood.pass(state, from, previous))
     }
 
-    /// The previous holder this node passes to its successor head, with that head.
-    pub(crate) fn previous_relay_holder_to_pass(&self) -> Result<Option<(Did, PreviousHolder)>> {
+    /// The previous holders this node passes to its successor head, with that head.
+    pub(crate) fn previous_relay_holder_to_pass(
+        &self,
+    ) -> Result<Option<(Did, Vec<PreviousHolder>)>> {
         let holds = self.holds_relay_mail();
         self.with_relay_view(|state, neighborhood| neighborhood.record_to_pass(state, holds))
     }

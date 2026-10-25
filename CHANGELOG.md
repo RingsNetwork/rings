@@ -82,6 +82,34 @@
     topic. Registries must run a build with #918, whose heartbeats remove nothing.
   - **Operator step.** None.
 
+- Relay carriers are replicated to the first `r` nodes from their key's owner that hold relay
+  mail, down a chain (#777, durable-records Section X): `r` is configurable
+  (`RelayReplication`, `SwarmBuilder::relay_replication`, `ProcessorBuilder::relay_replication`)
+  and 8 by default, so held mail survives its holder's tab closing or private session ending as
+  long as another member survives the repair delay.
+  - The holder forwards a hold to its next member (the new `ReplicateRelayHold` message), each
+    member forwards it on, and acknowledgements return from the chain's end: the writer is
+    acknowledged (`RelayCarrierHeld`) only once every member holds the hold.
+  - A member's next member past its successor list is found by the owner query of #1045, whose
+    answer (`RelayHolderFound`) now also names the owner's last placed node (`horizon`) when it
+    names no holder, and is cached until the successor list changes.
+  - Each repair pass a member sends one digest set to each of its two chain neighbours (the new
+    `RelayCarrierDigests` and `RelayCarriersWanted` messages) and copies only the carriers that
+    differ; losing a chain neighbour runs that exchange at once, outside the repair schedule.
+  - A node declares that it holds relay mail only after 2 minutes online (at least four
+    stabilization periods), and then tells its connected peers (the new `DeclareRelayCustody`
+    message).
+  - `AnnounceRelayHolder` carries the sender's `r` nearest previous holders (`previous`), from
+    which every node decides whether, and at which rank, it is a member of a key.
+  - A recipient fetches its inbox from the holder and then down the chain, and removes what it
+    delivered at the member it read it from; only the holder's report restricts relay custody.
+  - A node keeps up to `r` times the relay carriers it kept before.
+  - **Upgrade consequence.** `AnnounceRelayHolder`, `RelayHolderFound` and `ReplicateRelayHold`
+    change shape and messages are added, with no version: nodes of this version and of an
+    earlier one cannot exchange relay custody, so every node of an overlay upgrades together.
+  - **Operator step.** Upgrade every node of the overlay at once. No store needs clearing: the
+    first repair passes copy every carrier down its chain.
+
 ## 0.36.0
 
 - A relay carrier no longer strands at its old holder when two relay-capable nodes join one

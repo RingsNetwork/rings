@@ -94,6 +94,16 @@ pub const RELAY_INBOX_MAX_LEN: usize = 64;
 /// a hold beyond this bound to its local sender (`Error::RelayHoldsUnacknowledgedFull`) rather
 /// than forget an earlier one.
 pub const UNACKNOWLEDGED_RELAY_HOLDS_MAX: usize = RELAY_INBOX_MAX_LEN;
+/// The default number of members a relay carrier is replicated to (#777, durable-records
+/// Section X): the first `r` nodes that hold relay mail from the carrier's key owner on. A held
+/// element is lost only if every one of them is lost within one repair delay; `r = 8` is aimed
+/// at a loss below `10⁻³` over the 24 h retention with 90 % browser members (durable-records,
+/// departure classes).
+pub const DEFAULT_RELAY_INBOX_REPLICAS: usize = 8;
+/// The default time a node is online before it declares that it holds relay mail (#777,
+/// durable-records `Law (Age gate)`): until then it routes and fetches its own mail, but takes
+/// no relay copy, so members are the nodes that stay.
+pub const DEFAULT_RELAY_AGE_GATE_MS: u64 = 2 * 60 * 1000;
 /// Maximum bytes of one element in a DHT storage entry.
 ///
 /// The bound is per element so that filtering by it is a lattice morphism; with

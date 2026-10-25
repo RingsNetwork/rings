@@ -57,8 +57,9 @@ impl EntryKind {
         matches!(self, EntryKind::RelayMessage)
     }
 
-    /// The replication a carrier of this kind actually gets when `requested` is configured: a
-    /// relay inbox has one owner and is never replicated.
+    /// The affine placements a carrier of this kind gets when `requested` is configured: a relay
+    /// inbox has one placement, its key, and is replicated to the members of that key instead
+    /// (`dht::relay_holder`, #777), never to affine rotations.
     pub const fn replication(self, requested: u16) -> u16 {
         match self {
             EntryKind::Data => requested,
@@ -71,9 +72,11 @@ impl EntryKind {
     ///
     /// A data topic refuses past [`DATA_TOMBSTONE_MAX_LEN`] and never truncates: a dropped
     /// tombstone could be one whose add is still inside its element horizon at another replica,
-    /// which would then resurrect it; a refused write drops nothing. A relay inbox has one owner
-    /// and one ack-gated relocation at a time, so a stale copy can only be transient and the
-    /// newest [`RELAY_INBOX_MAX_LEN`] removals suffice to shadow it.
+    /// which would then resurrect it; a refused write drops nothing. A relay inbox keeps the
+    /// newest [`RELAY_INBOX_MAX_LEN`] removals: a lagging member (#777) may still resurrect an
+    /// element whose removal fell off the cap, and its redelivery is refused by the recipient's
+    /// receiver window and retired again, so the cap costs a redelivery, never a duplicate
+    /// dispatch.
     pub const fn tombstone_bound(self) -> TombstoneBound {
         match self {
             EntryKind::Data => TombstoneBound::Refuse(DATA_TOMBSTONE_MAX_LEN),

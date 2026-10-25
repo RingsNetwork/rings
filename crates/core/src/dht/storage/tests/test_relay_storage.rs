@@ -30,6 +30,7 @@ async fn retained(root: &TempRoot, capacity: u32) -> Result<FileStorage> {
 /// `data` and `relay` as its two stores.
 fn ring(holder: &DelegateeKey, data: FileStorage, relay: FileStorage) -> PeerRing {
     PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(data))
+        .with_relay_replication(crate::tests::ungated_relay_replication())
         .with_relay_storage(Box::new(relay))
 }
 

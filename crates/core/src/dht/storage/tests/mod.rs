@@ -619,6 +619,7 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
     let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     // Standing alone, the node routes every position to itself and is the hold authority.
     let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()))
+        .with_relay_replication(crate::tests::ungated_relay_replication())
         .with_relay_storage(volatile_relay_storage());
     let destination = Did::from(50u32);
     let position = inbox_key(destination);
@@ -703,6 +704,7 @@ async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result
     let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     // The slot is a relay carrier, so the yielding store is the relay store.
     let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()))
+        .with_relay_replication(crate::tests::ungated_relay_replication())
         .with_relay_storage(Box::new(YieldingStorage(MemStorage::new())));
     let destination = Did::from(50u32);
     let position = inbox_key(destination);
@@ -757,6 +759,7 @@ async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result
 async fn test_removal_against_nothing_held_stores_nothing() -> Result<()> {
     let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()))
+        .with_relay_replication(crate::tests::ungated_relay_replication())
         .with_relay_storage(volatile_relay_storage());
     let now_ms = get_epoch_ms();
 
