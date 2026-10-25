@@ -289,9 +289,11 @@ charges.
 \end{itemize}
 Parameters:
 \begin{itemize}[leftmargin=1.2em]
-\item $f=32$ new streams per slot, $\Pool=4096$, $L=1024$ and $M=S_\mu=768$, so
-$B(3)=328\cdot32+4096+1024+768=16\,384$, the table's hard capacity, and $B(s)=B(3)+64(s-3)$:
-past $s=3$ the hard capacity binds first;
+\item $f=32$ new streams per slot, $\Pool=3328$, $L=1024$ and $M=S_\mu=768$, so
+$B(3)=328\cdot32+3328+1024+768=15\,616$ and $B(s)=B(3)+64(s-3)$;
+\item $B(s)\le C=16\,384$, the table's hard capacity, iff $s\le15$: up to 15 successors
+Theorem~\ref{theorem:isolation}(1) holds and the floors bind first, and past it the hard capacity
+refuses before a floor does;
 \item the per-origin quota is unchanged.
 \end{itemize}
 A new stream past its bound is refused with \texttt{TransactionReplayStreamCapacityExceeded}, as
@@ -322,7 +324,7 @@ hold horizon passes first.  A slot would not do better: a node's inbox mail all 
 its own store or one member's fetch reply, so charging the delivering slot isolates nothing.
 
 A relay or seed that forwards many distinct origins can fill its own floor legitimately; its
-overflow then holds a fair claim of the pool, $\lceil\Pool/n\rceil\ge13$ at worst and $4096$
+overflow then holds a fair claim of the pool, $\lceil\Pool/n\rceil\ge11$ at worst and $3328$
 alone, and past it the honest cost is a refusal on that edge until its streams are spent.  The sender table holds this node's own streams, so it is local.
 
 \section{The removal store, re-keyed}\label{sec:removal}
@@ -339,7 +341,9 @@ principal $\chi$; every other sync from a predecessor or successor is charged to
 any edge's.
 \end{itemize}
 Parameters: $f=128$ removes per slot, $\Pool=16\,384$, $L=7\,168$ and $K=S_\chi=16\,384$, so
-$B(3)=328\cdot128+16\,384+7\,168+16\,384=81\,920$, about 12\,MB, and $B(s)=B(3)+256(s-3)$.
+$B(3)=328\cdot128+16\,384+7\,168+16\,384=81\,920$ and $B(s)=B(3)+256(s-3)$.  A store files
+each item in at most 239 bytes, the widest when every record holds one remove (its key, its
+DID, one remove and its charge), so $B(3)$ items take at most about 19.6\,MB.
 Theorem~\ref{theorem:isolation} then closes the Sybil residual that \issue{907} was to close: one
 mechanism serves both tables.
 
