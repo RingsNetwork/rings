@@ -112,7 +112,9 @@ where noted.
   that originated it, the `application` message limit is skipped, while the `application` byte
   limits and record bound still apply, each such message is charged at least 16 KiB
   (`DELEGATED_MIN_CHARGE`), and it shares the byte bucket with that neighbour's other
-  application traffic. Delegation is not configured here.
+  application traffic. A protocol may also declare delegated replay (#1081): its traffic from
+  that same neighbour is then admitted in a volatile replay window of the connection, and the
+  protocol guards its own replay. Delegation is not configured here.
 * `external_ip`, `webrtc_udp_port_min`, `webrtc_udp_port_max`: optional reachability hints, an
   externally visible address and a UDP port range for ICE. The two port bounds must be given
   together.

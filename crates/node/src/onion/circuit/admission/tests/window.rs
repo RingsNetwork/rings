@@ -171,6 +171,11 @@ fn test_clock_rollback_after_a_jump_never_admits_a_replay() {
 
 /// Law (D2): a restarted process rejects every layer sealed for the previous epoch. Each such
 /// cell is still charged, and none enters the replay store.
+///
+/// This is the onion half of durable-records, Prop. What a peer can replay into a restarted
+/// node (#1081): core admits a link-local cell replayed after a restart on the new link's empty
+/// window (`test_a_new_link_generation_opens_an_empty_window` in rings-core), and the epoch
+/// refuses it here.
 #[test]
 fn test_new_epoch_rejects_every_layer_of_the_old_one() {
     let mut rng = StdRng::seed_from_u64(0x0841_0004);

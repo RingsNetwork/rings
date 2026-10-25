@@ -262,3 +262,40 @@ async fn test_a_failed_batch_fails_and_undoes_every_pending_transition() -> Resu
     assert_eq!(replay.quota_record_count_for_test().await, 1);
     Ok(())
 }
+
+/// A link-local admission (#1081) is released at once while a batch is in flight: it writes
+/// nothing and rests on no durable state. Its quota charge is logged into the pending batch, so
+/// a failed batch rewinds the quota table last first across both; the link's window keeps the
+/// admission.
+#[tokio::test]
+async fn test_a_link_admission_is_released_at_once_and_its_charge_rewinds_with_a_failed_batch(
+) -> Result<()> {
+    let (storage, replay) = gated();
+    storage.hooks.fail_first.store(true, Ordering::SeqCst);
+    let durable = admit(&replay, stream(1), 0, 1);
+    storage.hooks.entered.notified().await;
+
+    let mut window = None;
+    let verdict = replay
+        .admit_on_link(
+            &mut window,
+            stream(1),
+            7,
+            digest(7),
+            MessageCategory::Application.into(),
+            0,
+        )
+        .await?;
+    assert_eq!(verdict, SequenceVerdict::First);
+    assert!(!durable.is_finished());
+
+    storage.hooks.release.notify_one();
+    assert!(matches!(
+        outcome(durable).await,
+        Err(Error::TransactionReplayPersistence { .. })
+    ));
+    assert_eq!(replay.quota_record_count_for_test().await, 0);
+    assert!(window.is_some_and(|window| window.high() == 7));
+    assert_eq!(sizes(&storage)?, [1]);
+    Ok(())
+}

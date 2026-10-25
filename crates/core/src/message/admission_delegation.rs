@@ -48,6 +48,24 @@
 //! the authority of the operator who configures the quota; core matches it without calling the
 //! application (#935). A namespace that declares it must enforce its own per-neighbour
 //! admission.
+//!
+//! # Delegated replay (#1081)
+//!
+//! The replay counterpart, by the same eligibility and the same registration as data: a
+//! namespace may declare *delegated replay*, and its direct-edge traffic is then admitted in a
+//! volatile replay window of the link it arrived on instead of the durable one
+//! (durable-records, Law Window by classification):
+//!
+//! ```text
+//! window(m, edge, delegated) ≜ Link      if class(m) = Application ∧ edge = Neighbour ∧ delegated
+//!                              Durable   otherwise
+//! ```
+//!
+//! A declaring namespace owes Obligation R of durable-records: it acts on each of its payloads
+//! at most once, by its own replay key, across connections, generations, envelopes and restarts
+//! of the receiver. Only the origin itself can present a link-local transaction again
+//! (Prop. What the durable window gave a link-local transaction), so the durable window
+//! protected nothing that R does not.
 
 use crate::dht::Did;
 use crate::message::types::MessageCategory;
@@ -118,6 +136,34 @@ impl OriginQuotaCharge {
     }
 }
 
+/// The replay window a final-destination transaction is admitted in (#1081).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplayWindow {
+    /// The durable window of its stream, written to the replay store.
+    Durable,
+    /// The volatile window of its stream on the link it arrived on, never written and released
+    /// with the link: the declaring namespace guards its own replay (Obligation R).
+    Link,
+}
+
+impl ReplayWindow {
+    /// Select the window: see the module documentation for the law. `delegated` asks whether
+    /// the message's namespace declared delegated replay; it is consulted only for
+    /// Application traffic from the authenticated neighbour that originated it.
+    pub(crate) fn select(
+        lane: MessageCategory,
+        edge: EdgeRelation,
+        delegated: impl FnOnce() -> bool,
+    ) -> Self {
+        let eligible = lane == MessageCategory::Application && edge == EdgeRelation::Neighbour;
+        if eligible && delegated() {
+            Self::Link
+        } else {
+            Self::Durable
+        }
+    }
+}
+
 impl From<MessageCategory> for OriginQuotaCharge {
     fn from(lane: MessageCategory) -> Self {
         Self {
@@ -134,6 +180,7 @@ mod tests {
     use super::EdgeRelation;
     use super::MessageLimit;
     use super::OriginQuotaCharge;
+    use super::ReplayWindow;
     use crate::dht::Did;
     use crate::message::types::MessageCategory;
 
@@ -165,6 +212,41 @@ mod tests {
                         MessageLimit::Enforced
                     };
                     assert_eq!(charge.message_limit, expected);
+                }
+            }
+        }
+    }
+
+    /// The replay window law over every class and edge relation, with and without a
+    /// declaration: only Application traffic of a declaring namespace from the authenticated
+    /// neighbour that originated it meets a link window, so a relayed copy, and all DHT,
+    /// storage and E2E traffic, keep the durable window; the classifier is consulted only where
+    /// the law can delegate.
+    #[test]
+    fn test_only_neighbour_application_traffic_may_meet_a_link_window() {
+        let classes = [
+            MessageCategory::DhtControl,
+            MessageCategory::Storage,
+            MessageCategory::E2e,
+            MessageCategory::Application,
+        ];
+        for lane in classes {
+            for edge in [EdgeRelation::Neighbour, EdgeRelation::Remote] {
+                for declared in [false, true] {
+                    let consulted = Cell::new(false);
+                    let window = ReplayWindow::select(lane, edge, || {
+                        consulted.set(true);
+                        declared
+                    });
+                    let eligible =
+                        lane == MessageCategory::Application && edge == EdgeRelation::Neighbour;
+                    assert_eq!(consulted.get(), eligible);
+                    let expected = if eligible && declared {
+                        ReplayWindow::Link
+                    } else {
+                        ReplayWindow::Durable
+                    };
+                    assert_eq!(window, expected);
                 }
             }
         }

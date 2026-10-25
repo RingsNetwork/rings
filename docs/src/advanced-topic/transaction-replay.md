@@ -118,6 +118,21 @@ crash after persistence but before dispatch may lose the event. This is the deli
 persistence-before-dispatch boundary: it prevents duplicate dispatch but is not exactly-once
 execution because replay storage and application handlers do not share a transaction.
 
+Link-local transactions are the exception (#1081). A transaction is link-local when all three
+hold: it is Application traffic, it arrived on the authenticated connection of its own origin,
+and its namespace was registered in advance as delegating its replay (a protocol's
+`delegates_replay`, published with `Swarm::set_replay_delegation`). Core decides this from the
+envelope and the connection; it never calls the application. Such a transaction is admitted in a
+volatile window of its stream on that connection. The window is never written, and it is released
+with the connection, so it spans one link generation. Every other transaction, a relayed copy
+included, keeps the durable window. A namespace that declares delegated replay must act on each
+of its payloads at most once by its own replay key, across connections, generations, envelopes
+and restarts. The onion data plane does, with its replay store and process epoch, and it is the
+one namespace that declares it. Only the origin can present a link-local transaction again: its
+link is authenticated and encrypted, and the transaction names this node as its destination. So
+the durable window protected nothing there that the declaring namespace does not. The law is the
+*Link-local transactions* section of `papers/durable-records.tex`.
+
 Sender and receiver state are stored as one record per stream:
 
 ```text

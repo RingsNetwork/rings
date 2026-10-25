@@ -27,7 +27,10 @@
 //! An admission writes its stream's record every time; a reservation writes it only when it
 //! outruns the stream's durable lease of sender sequences, which then covers the next
 //! `TRANSACTION_SEQUENCE_LEASE` sequences (#1043). A restart resumes past the lease: it may
-//! skip sequences, never reuse one (the laws of [`lease`]). The records of the transitions that
+//! skip sequences, never reuse one (the laws of [`lease`]). A link-local transaction (#1081) meets
+//! none of this: it is admitted by [`TransactionReplay::admit_on_link`] in a volatile window of
+//! the link it arrived on, which its connection holds ([`LinkWindows`]), and writes nothing
+//! (durable-records, Law Window by classification). The records of the transitions that
 //! run while one batch is written share the next batch, one flush for all of them, and each
 //! transition is released only once its batch is durable (the group-commit law of [`commit`],
 //! #916).
@@ -402,6 +405,12 @@ fn record_naming(storage: &ReplayStorage) -> impl Fn(&str) -> String + '_ {
     |storage_key| storage.record_name(storage_key)
 }
 
+/// The volatile replay windows of one link (#1081): the window of each stream whose
+/// link-local transactions arrived on it. Held by the link's inbound stage, never written, and
+/// released with the link, so a window lives exactly one link generation (durable-records, Law
+/// Window by classification).
+pub(crate) type LinkWindows = BTreeMap<StreamKey, SequenceState>;
+
 /// Storage accepted by the transaction replay runtime.
 pub type ReplayStorage = Box<rings_runtime::maybe_send_sync!(dyn KvStorageScan<ReplayRecord>)>;
 
@@ -758,29 +767,7 @@ impl TransactionReplay {
             });
         }
         let (next, verdict) = observe(previous.cloned(), sequence, digest);
-        match verdict {
-            SequenceVerdict::First | SequenceVerdict::Advance | SequenceVerdict::Late => {}
-            SequenceVerdict::Replay => {
-                self.counters.replay.fetch_add(1, Ordering::Relaxed);
-                return Err(Error::TransactionReplay { key, sequence });
-            }
-            SequenceVerdict::Fork { accepted, incoming } => {
-                self.counters.fork.fetch_add(1, Ordering::Relaxed);
-                return Err(Error::TransactionSequenceFork {
-                    key,
-                    sequence,
-                    evidence: Box::new(TransactionForkEvidence { accepted, incoming }),
-                });
-            }
-            SequenceVerdict::Stale { retained_min } => {
-                self.counters.stale.fetch_add(1, Ordering::Relaxed);
-                return Err(Error::TransactionSequenceStale {
-                    key,
-                    sequence,
-                    retained_min,
-                });
-            }
-        }
+        self.refuse_rejected(key, sequence, verdict)?;
 
         let mut custody = ledger
             .store
@@ -813,6 +800,79 @@ impl TransactionReplay {
         if entered {
             ledger.set_custody(key, custody);
         }
+        Ok(verdict)
+    }
+
+    /// Refuse, and count, a verdict that does not permit dispatch: `Replay`, `Fork` (with its
+    /// evidence) or `Stale`, whichever window observed it.
+    fn refuse_rejected(
+        &self,
+        key: StreamKey,
+        sequence: u64,
+        verdict: SequenceVerdict,
+    ) -> Result<()> {
+        match verdict {
+            SequenceVerdict::First | SequenceVerdict::Advance | SequenceVerdict::Late => Ok(()),
+            SequenceVerdict::Replay => {
+                self.counters.replay.fetch_add(1, Ordering::Relaxed);
+                Err(Error::TransactionReplay { key, sequence })
+            }
+            SequenceVerdict::Fork { accepted, incoming } => {
+                self.counters.fork.fetch_add(1, Ordering::Relaxed);
+                Err(Error::TransactionSequenceFork {
+                    key,
+                    sequence,
+                    evidence: Box::new(TransactionForkEvidence { accepted, incoming }),
+                })
+            }
+            SequenceVerdict::Stale { retained_min } => {
+                self.counters.stale.fetch_add(1, Ordering::Relaxed);
+                Err(Error::TransactionSequenceStale {
+                    key,
+                    sequence,
+                    retained_min,
+                })
+            }
+        }
+    }
+
+    /// Admit a link-local transaction of stream `key` in `window`, the volatile window of that
+    /// stream on the link it arrived on (#1081; durable-records, Law Window by classification):
+    /// observe, read the quota clock and reserve quota under the lock, then advance the window.
+    ///
+    /// Nothing is written, and the verdict is returned at once: it rests on the link's volatile
+    /// window and the runtime-local quotas, never on a durable state. The quota reservation is
+    /// logged into the pending batch, if any, so a failed batch still rewinds the quota table
+    /// last first (the fail-closed law of [`commit`]); the admission itself stands. A refusal
+    /// leaves `window` and the quotas unchanged.
+    pub(crate) async fn admit_on_link(
+        &self,
+        window: &mut Option<SequenceState>,
+        key: StreamKey,
+        sequence: u64,
+        digest: TransactionDigest,
+        charge: OriginQuotaCharge,
+        byte_cost: usize,
+    ) -> Result<SequenceVerdict> {
+        let clock = quota_clock(self.started_at);
+        let mut state = self.state.lock().await;
+        let TransactionAdmissionState { quota, journal, .. } = &mut *state;
+        let (next, verdict) = observe(window.clone(), sequence, digest);
+        self.refuse_rejected(key, sequence, verdict)?;
+        let quota_key = OriginQuotaKey::new(
+            key.network_id,
+            key.origin_account,
+            key.destination,
+            charge.lane,
+        );
+        let reservation = quota
+            .reserve(quota_key, charge.message_limit, byte_cost, clock())
+            .map_err(|error| {
+                self.quota_counters.record(charge.lane, &error);
+                quota_admission_error(quota_key, byte_cost, error)
+            })?;
+        journal.log_released_charge(reservation);
+        *window = Some(next);
         Ok(verdict)
     }
 

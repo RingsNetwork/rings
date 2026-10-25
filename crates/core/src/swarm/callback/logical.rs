@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use futures::lock::Mutex as FuturesMutex;
+
 use super::InboundLane;
 use super::LocalDelivery;
 use super::LogicalInbound;
@@ -9,6 +11,7 @@ use crate::message::with_message_variants;
 use crate::message::CustomMessage;
 use crate::message::EdgeRelation;
 use crate::message::HandleMsg;
+use crate::message::LinkWindows;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::MessageHandler;
@@ -311,6 +314,45 @@ impl LogicalInbound {
                 .delegates(application_payload.as_slice()),
             _ => false,
         }
+    }
+
+    /// Whether the namespace of an application message delegated its replay (#1081), as the
+    /// application registered it in advance; no application code runs here.
+    pub(super) fn delegates_replay(&self, message: &Message) -> bool {
+        match message {
+            Message::CustomMessage(CustomMessage(application_payload)) => self
+                .transport
+                .application()
+                .replay_delegations
+                .delegates(application_payload.as_slice()),
+            _ => false,
+        }
+    }
+
+    /// Commit the replay and origin-quota admission of a link-local transaction addressed to
+    /// this node in `windows`, the volatile windows of the connection it arrived on (#1081;
+    /// durable-records, Law Window by classification). Charged as
+    /// [`Self::admit_final_transaction`] charges it; transactions for other destinations are not
+    /// admitted here.
+    pub(super) async fn admit_link_transaction(
+        &self,
+        windows: &FuturesMutex<LinkWindows>,
+        payload: &MessagePayload,
+        message: &Message,
+        lane: crate::swarm::callback::InboundLane,
+        edge: EdgeRelation,
+    ) -> crate::error::Result<()> {
+        if !self.is_local_destination(payload) {
+            return Ok(());
+        }
+        let class = lane
+            .class()
+            .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
+        let charge = OriginQuotaCharge::select(class, edge, || self.delegates_admission(message));
+        let mut windows = windows.lock().await;
+        self.transport
+            .admit_link_transaction(&mut windows, &payload.transaction, charge)
+            .await
     }
 
     /// The application message `payload` carries for this node: `None` when it is addressed

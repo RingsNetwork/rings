@@ -55,6 +55,15 @@ impl Protocol for OnionCircuitProtocol {
         true
     }
 
+    /// The onion data plane guards its own replay (#1081; durable-records, Obligation R): a
+    /// layer is admitted at most once per `(x, ν)` by the replay store every link shares, no
+    /// layer outlives its filter, and every restart draws a fresh process epoch under which
+    /// every earlier layer is refused (#834 L9, D2). Core admits its cells from the
+    /// authenticated neighbour in a volatile window of their link, and writes nothing.
+    fn delegates_replay(&self) -> bool {
+        true
+    }
+
     /// Every fact about a link reaches the data plane, in its queue's order: an admission makes
     /// the link live, a retirement ends it, and both a retirement and a drop end the sessions
     /// this node holds on it (`Law (Circuit fate)`, #963, #966, #969; see `circuit::shell`).

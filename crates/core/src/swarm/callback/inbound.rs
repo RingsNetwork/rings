@@ -284,7 +284,6 @@ impl InboundMailbox {
             }
             let edge = edge_relation(peer, authentication, &prepared.payload);
             processor
-                .logical
                 .admit_final_transaction(&prepared.payload, &prepared.message, lane, edge)
                 .await?;
         }

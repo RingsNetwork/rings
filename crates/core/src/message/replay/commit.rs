@@ -243,6 +243,17 @@ impl Journal {
         (release, start)
     }
 
+    /// Log the quota `reservation` of a transition released at once (a link-local admission,
+    /// #1081): into the open batch while a batch is pending, so that a failed batch rewinds the
+    /// quota table last first across both; dropped otherwise, since no pending batch lies
+    /// beneath it. The released transition is not failed with the batch: its verdict rests on
+    /// no durable state, and only its charge is refunded.
+    pub(super) fn log_released_charge(&mut self, reservation: OriginQuotaReservation) {
+        if self.in_flight.is_some() || !self.open.waiters.is_empty() {
+            self.open.undo.push(Undo::Quota(reservation));
+        }
+    }
+
     /// The transitions waiting in the open batch.
     #[cfg(all(test, not(target_family = "wasm")))]
     pub(super) fn open_members(&self) -> usize {
@@ -253,6 +264,8 @@ impl Journal {
     /// `None`, ending the flusher, when no transition joined it.
     fn take(&mut self) -> Option<(BTreeMap<String, ReplayRecord>, Batch)> {
         if self.open.waiters.is_empty() {
+            // Only released charges can be logged here, and no batch lies beneath them now.
+            self.open.undo.clear();
             self.in_flight = None;
             return None;
         }

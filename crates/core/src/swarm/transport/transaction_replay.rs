@@ -6,6 +6,7 @@ use std::ops::RangeInclusive;
 use super::SwarmTransport;
 use crate::dht::Did;
 use crate::error::Result;
+use crate::message::LinkWindows;
 use crate::message::MessageCategory;
 use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaCounters;
@@ -78,6 +79,36 @@ impl SwarmTransport {
             )
             .await
             .map(|_| ())
+    }
+
+    /// Admit a link-local transaction in `windows`, the volatile replay windows of the link it
+    /// arrived on, with its origin-quota charge (#1081; see
+    /// [`TransactionReplay::admit_on_link`]): nothing is written, and a refusal leaves its
+    /// stream's window as it was.
+    pub(crate) async fn admit_link_transaction(
+        &self,
+        windows: &mut LinkWindows,
+        transaction: &Transaction,
+        charge: OriginQuotaCharge,
+    ) -> Result<()> {
+        let key = transaction.stream_key(self.network_id)?;
+        let digest = transaction.digest()?;
+        let mut window = windows.remove(&key);
+        let admitted = self
+            .transaction_replay
+            .admit_on_link(
+                &mut window,
+                key,
+                transaction.sequence,
+                digest,
+                charge,
+                logical_message_byte_cost(transaction),
+            )
+            .await;
+        if let Some(window) = window {
+            windows.insert(key, window);
+        }
+        admitted.map(|_| ())
     }
 
     /// Atomically commit final-destination replay, relay custody and origin-quota admission of
