@@ -61,7 +61,8 @@ Manuscript created October 23, 2026.  This document specifies the durability mod
 local stores of Rings before 1.0 (\texttt{rings-core}, modules \texttt{storage},
 \texttt{message::replay} and \texttt{swarm::inbox}; \texttt{rings-node}, module
 \texttt{onion::entry\_guard}).  It is the law for issues \issue{911}, \issue{912},
-\issue{915}, \issue{916}, \issue{923} and \issue{936} of \texttt{RingsNetwork/rings}.}}
+\issue{915}, \issue{916}, \issue{923}, \issue{936} and \issue{1081} of
+\texttt{RingsNetwork/rings}.}}
 \title{\huge Durable Records:\\
 One Presence and Survival Law\\
 for the Local Stores of a Rings Node}
@@ -782,6 +783,134 @@ still cannot separate an admission from its custody entry, nor a release from it
 Law~\ref{law:custody} holds unchanged.
 \end{corollary}
 
+\section{Link-local transactions}\label{sec:linklocal}
+
+Every onion cell, cover included, crosses each hop as a core transaction addressed to the
+next hop, and each such transaction is admitted in the receiver's durable replay window
+$\W_s$, one durable write per cell per hop (\issue{1043}).  Group commit
+(Law~\ref{law:group}) amortizes the flush, not the write: on the native durable store the
+onion loop of \issue{843} sustains $100$\,KB/s, against $575$\,KB/s with an in-memory
+replay store.  The onion layer already admits each cell at most once against its own replay
+store $R_i$~\cite{OnionPipeline}, so the durable window repeats that defence on the hot
+path.  This section states which transactions are admitted without $\W_s$, what replaces it, and why
+nothing is lost (\issue{1081}).
+
+\subsection{Classification}
+
+\begin{definition}[Link-local]\label{def:linklocal}
+Let $t$ be a transaction addressed to this node and delivered on connection $c$ of
+generation $g$.  Then
+\begin{align*}
+\mathrm{ll}(t,c)\ \Leftrightarrow\ {}&\mathrm{class}(t)=\mathsf{Application}\\
+\wedge\ {}&\mathrm{edge}(c,t)=\mathsf{Neighbour}\ \wedge\ \mathrm{ns}(t)\in D_r,
+\end{align*}
+where $\mathrm{edge}(c,t)=\mathsf{Neighbour}$ iff $c$'s handshake authenticated
+$\mathrm{origin}(t)$ and $g$ is live (\issue{888}), $\mathrm{ns}(t)$ is the namespace prefix of
+$t$'s application payload, and $D_r$ is the set of namespaces registered in advance, as
+data, as \emph{delegating replay}.
+\end{definition}
+
+The predicate reads the envelope (class and payload prefix) and the connection, and matches
+registered data: core never calls the application, exactly as for delegated admission
+(\issue{935}), of which $\mathrm{ll}$ is the replay counterpart.  The relay carrier is not
+signed, so ``direct'' is not read from the payload; the authenticated connection is the only
+unforgeable witness, and a relayed copy of $t$ is never link-local.
+
+\begin{obligation}[Delegated replay, R]\label{ob:delegated}
+A namespace in $D_r$ acts on each of its payloads at most once, by its own replay key,
+across connections, generations, envelopes and restarts of the receiver.
+\end{obligation}
+
+The onion namespace discharges R: $R_i[x]$ admits $(x,\nu)$ at most once while $x$ is live,
+$\nu$ is bound to the cell and $R_i$ is shared by every link (Prop.~Replay bounds (i)--(ii)
+of~\cite{OnionPipeline}); no layer outlives its filter, since $x\le\mathit{arr}+V$; and every
+restart draws a fresh process epoch, under which every layer sealed for an earlier epoch is
+rejected (D2, and Prop.~Replay bounds (vi)).
+
+\subsection{Replay authority}
+
+\begin{law}[Window by classification]\label{law:linklocal}
+\[
+\mathrm{window}(t,c)=
+\begin{cases}
+\W_{s,g}, & \mathrm{ll}(t,c),\\
+\W_s, & \text{otherwise,}
+\end{cases}
+\]
+where $\W_{s,g}$ is the replay window of stream $s$ on generation $g$, held in memory only,
+never written, and dropped when $g$ retires; $\W_s$ is the durable window.  Both observe by
+the same transition $\obs$, and the origin quota is charged as before (it is runtime-local).
+The sender is unchanged: its sequences come from its leased allocator, one stream per
+class, whichever window each transaction meets.
+\end{law}
+
+Classification is a function of $(t,c)$, so a given delivery meets exactly one window, and
+each window takes the sequences the other admitted as gaps, which $\obs$ admits as
+$\mathsf{Advance}$; a transaction delivered both directly and relayed meets both, which
+Prop.~\ref{prop:llloss} bounds.  A link-local transaction is never
+relayed, so it never enters relay custody, and Law~\ref{law:custody} is unchanged.
+
+\begin{proposition}[What the durable window gave a link-local transaction]
+\label{prop:llloss}
+Let $\mathrm{ll}(t,c)$.  Every delivery $t'$ with $\mathrm{digest}(t')=\mathrm{digest}(t)$
+that $\W_s$ would refuse and Law~\ref{law:linklocal} admits is sent by $\mathrm{origin}(t)$.
+\end{proposition}
+\begin{proof}
+Such a $t'$ either meets $\W_{s,g'}$ with $g'\ne g$ (a later generation, or after a receiver
+restart), or is a relayed copy meeting $\W_s$, which never saw $t$.  In the first case
+$\mathrm{edge}(c',t')=\mathsf{Neighbour}$, so $c'$ authenticated $\mathrm{origin}(t)$ as its
+sender.  In the second, the relay holds $t$, which crossed only $c$: each link's transport is
+authenticated and encrypted per connection, so $t$ is held only by its two ends, and
+$\mathrm{dest}(t)$ binds it to this node; this node delivering $t$ to itself is no replay.
+\end{proof}
+
+Hence, against the four threats of \issue{1081}:
+\begin{enumerate}[leftmargin=1.5em]
+\item \emph{Across a restart.} Only the origin can present $t$ again, and an origin can always
+sign a fresh transaction with the same payload: no window ever protected a receiver from its
+origin's resends.  Payload duplicates are R's, which the onion layer discharges by the
+epoch.
+\item \emph{From a different neighbour.} A neighbour $d\neq\mathrm{origin}(t)$ cannot present
+$t$ as $\mathsf{Neighbour}$, and $\W_s$, keyed by origin, never related two neighbours'
+traffic; a cell replayed across links is refused by $R_i$, which every link shares.
+\item \emph{The envelope rather than the cell.} The same envelope on the same generation is
+refused by $\W_{s,g}$; on another generation, or under a new envelope around the same cell,
+it is refused by R.
+\item \emph{What remains.} Nothing that R does not cover, so no further key rotation is
+needed: the process epoch is the rotation.
+\end{enumerate}
+
+\begin{proposition}[Why a volatile window, not none]\label{prop:llvolatile}
+$\W_{s,g}$ is not needed for R-soundness, but it keeps three properties at negligible cost:
+(i) core's dispatch law, at most once per window, holds for every transaction within a
+generation, so a namespace in $D_r$ never sees an envelope duplicate on one connection;
+(ii) $\mathsf{Stale}$ and $\mathsf{Fork}$ of a misbehaving neighbour stay classified and
+counted; (iii) it costs one in-memory $\obs$ (about $10\,\mu$s) and at most one window per
+live generation and class, $\le\mathcal R$ windows, bounded by the connection registry and
+released with each generation.
+\end{proposition}
+
+\subsection{Restart}
+
+\begin{proposition}[What a peer can replay into a restarted node]\label{prop:llrestart}
+After a restart of the receiver, every $\W_{s,g}$ is gone and every generation has ended;
+$\W_s$ persists.  A peer can deliver, as link-local, only transactions it signed itself, over
+a new generation $g'$; $\W_{s,g'}$ admits them, and the onion layer refuses every cell among
+them, since each was sealed for the receiver's previous process epoch (D2).  Within the new
+epoch, a cell is admitted at most once per $(x,\nu)$, and no cell older than $V$ is admitted.
+The replayable set is therefore empty for onion cells, and bounded by R for any namespace in
+$D_r$.  A restart of the sender ends its generation the same way, and its leased allocator
+never reuses a sequence; a link that flaps without a restart opens $g'$ with an empty window,
+and a frame of $g$ cannot arrive on $g'$.
+\end{proposition}
+
+\textbf{The rate this buys.}  Under Law~\ref{law:linklocal} an onion cell costs no durable write at any receiver; a
+sender still writes one lease per $64$ sequences (\issue{1043}).  The durable configuration
+then pays what the in-memory configuration pays for onion traffic, whose measured rate is
+$575$\,KB/s, still below the $1$\,MB/s of \issue{843}.  The law removes the durable cost; the
+remaining gap is not attributed here and must be found and closed for the acceptance of
+\issue{1081} to hold.
+
 \section{Claimed durability}\label{sec:claimed}
 
 A store at $(\Durable^{\circ},m)$ satisfies Law~\ref{law:admissible} read with the claim,
@@ -1104,6 +1233,7 @@ survival, Windows & write-through rename (Law~\ref{law:writethrough})\\
 survival, browser & strict commit (Law~\ref{law:strict})\\
 presence of custody & $\K_s$ in the receiver record (Law~\ref{law:custody})\\
 own state, ephemeral & reset per session (Law~\ref{law:ownclaim})\\
+replay, link-local & volatile window, R (Law~\ref{law:linklocal})\\
 custody, browser & $r$-member chain (Laws~\ref{law:redundant}--\ref{law:eventrepair})\\
 throughput, durable & group commit (Law~\ref{law:group})\\
 \bottomrule
