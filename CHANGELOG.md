@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- aarch64 builds use the ARMv8 AES and POLYVAL instructions (#848). `aes` 0.8
+  and `polyval` 0.6 take them only under `--cfg aes_armv8` and `--cfg polyval_armv8`, so until
+  now every aarch64 build (Apple silicon, ARM servers) ran AEZ and DTLS on the software fixslice
+  backend, which cost 13.8% of the #843 loop's CPU (#1087). `.cargo/config.toml` now sets both
+  cfgs for every aarch64 target. The crates still detect the extension at runtime (Linux,
+  Android and every Apple target, iOS included) and fall back to software where it is missing or
+  undetectable. x86_64 already detected AES-NI at runtime and is unchanged. CI
+  runs the `rings-aez` known answers on both backends, and the cluster image copies
+  `.cargo/`.
+  - **Operator step.** A build that sets `RUSTFLAGS` in the environment replaces the cargo
+    config's flags. To keep the hardware path, add `--cfg aes_armv8 --cfg polyval_armv8` to
+    such a `RUSTFLAGS` on aarch64.
+
 ## 0.37.0
 
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
