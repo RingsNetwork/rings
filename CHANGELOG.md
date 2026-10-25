@@ -142,6 +142,32 @@
   - **Operator step.** Upgrade every node of the overlay at once. No store needs clearing: the
     first repair passes copy every carrier down its chain.
 
+- **Breaking:** 33-byte public keys follow SEC1 §2.3.3 (#1072): the tag `0x02` marks an even
+  y-coordinate and `0x03` an odd one. Rings had both inverted, in `PublicKey::<33>::from_u8`
+  (compressing a 64-byte `x ‖ y`) and in the P-256 decoder `ct_into_secp256r1_affine`, so it
+  round-tripped only with itself; any standard SEC1 producer or consumer, such as Web Crypto,
+  WebAuthn or a wallet, got the negated point `(x, −y)`. P-256 keys are now decoded by the
+  library's SEC1 decoder, as secp256k1 keys already were, and a tag other than `0x02` or `0x03`
+  is refused. The prefix `0x00` keeps one meaning, the Ed25519 embedding `0x00 ‖ k` of a
+  32-byte key; it is not a point of unknown parity.
+  - **Upgrade consequence.** Keys secp256k1 derives itself (node, delegatee, E2E, ElGamal and
+    onion keys, and their DIDs) were already SEC1 and do not change. What changes is every
+    secp256r1 account key, whose 33 bytes, and so its DID, are new; every delegation signed by a
+    secp256r1 account, which no longer verifies; and every key given as 64 bytes `x ‖ y` (a
+    secp256r1 or secp256k1 account entity, an RPC `recipient_public_key`), which now denotes
+    `(x, y)` instead of `(x, −y)`. There is no compatibility path: an old encoding is dropped,
+    not converted, and nodes upgrade together.
+  - **Operator step.** While the node is stopped:
+    - native: delete the data and measure stores and every store beside them: the `data`,
+      `relay-inbox`, `dht-removals`, `transaction-replay`, `onion-entry-guards`, `measure` and
+      `provisional-evidence` directories (under `storage_path` for an FFI provider);
+    - browser: delete the site's IndexedDB databases `rings-node`, `rings-node/relay-inbox`,
+      `rings-node/dht-removals`, `rings-node/transaction-replay`,
+      `rings-node/onion-entry-guards`, `rings-node/measure` and
+      `rings-node/provisional-evidence`;
+    - a delegatee key file whose delegator is a secp256r1 account: issue a new one, since its
+      delegation no longer verifies. A key file `rings init` wrote needs no step.
+
 ## 0.36.0
 
 - A relay carrier no longer strands at its old holder when two relay-capable nodes join one

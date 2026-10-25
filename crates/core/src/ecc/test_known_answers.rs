@@ -3,7 +3,8 @@
 //!
 //! Law: every byte string the curve stack puts on the wire or derives from fixed inputs is
 //! identical across the swap. Each vector was produced by the 0.13 build from the same public
-//! API calls these tests make.
+//! API calls these tests make, except the P-256 decompression vectors, which follow SEC1 since
+//! #1072 corrected the y-parity tags.
 
 use elliptic_curve::ff::PrimeField;
 
@@ -48,18 +49,18 @@ const WIDE_ONES_POINT: &str = "02bf7d0e090ec4e6e0e2c371dcd74439f2d75231821274486
 /// The x-coordinate of the P-256 generator.
 const P256_GENERATOR_X: &str = "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296";
 
-/// Uncompressed points that the 0.13 build decompressed from `0x02 ‖ x` and `0x03 ‖ x`.
-/// Rings' prefix maps `0x02` to odd `y`, the reverse of SEC1; these vectors pin that mapping.
+/// Uncompressed points of `0x02 ‖ x` and `0x03 ‖ x`: SEC1 maps `0x02` to the even `y` and `0x03`
+/// to the odd one, here the SEC 2 generator. The 0.13 build decoded the reverse (#1072).
 const P256_DECOMPRESSED: [(u8, &str); 2] = [
     (
         2,
         "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296\
-         4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+         b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a",
     ),
     (
         3,
         "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296\
-         b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a",
+         4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
     ),
 ];
 
@@ -115,7 +116,7 @@ fn test_wide_reduction_matches_elliptic_curve_0_13_vectors() {
 }
 
 #[test]
-fn test_secp256r1_decompression_matches_elliptic_curve_0_13_vectors() {
+fn test_secp256r1_decompression_matches_sec1_vectors() {
     let x = hex::decode(P256_GENERATOR_X).unwrap();
     for (prefix, expected) in P256_DECOMPRESSED {
         let mut compressed = [prefix; 33];
