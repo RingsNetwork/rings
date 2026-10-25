@@ -1,11 +1,14 @@
 use std::future::Future;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::join_all;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
 use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::TransportInterface;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use rings_transport::core::transport::WebrtcConnectionState;
 
@@ -445,6 +448,45 @@ impl SwarmTransport {
             self.close_if_current(&connection).await?;
         }
         Ok(())
+    }
+
+    /// Close this transport: it opens no connection from now on, and every peer it holds a
+    /// lifecycle record or a raw connection of is disconnected, each physical close awaited as
+    /// a disconnect awaits it.
+    ///
+    /// ```text
+    ///   close = let P = registry.close() ∪ dom pool
+    ///           in ∀ p ∈ P, concurrently: await p's creation in flight ; disconnect(p)
+    /// ```
+    ///
+    /// Close law (#1098): once `close` returns, no connection of this transport is open, and
+    /// none will be. A reservation either committed before the registry closed, and its peer is
+    /// in `P`, or is refused with [`Error::SwarmClosed`]. A creation in flight for a peer of `P`
+    /// holds that peer's creation lease, so the disconnect waits for it: either the creation
+    /// installed its transport, which the disconnect then closes, or the disconnect retired its
+    /// generation first, and the creation finds it superseded and installs nothing.
+    ///
+    /// Every peer is disconnected even if another's disconnect fails; the first failure is
+    /// returned.
+    pub(crate) async fn close(&self) -> Result<()> {
+        let mut peers = self.with_connection_lifecycle(|| Ok(self.peer_lifecycles()?.close()))?;
+        peers.extend(
+            self.transport
+                .connection_ids()
+                .into_iter()
+                .filter_map(|cid| Did::from_str(&cid).ok()),
+        );
+        join_all(peers.into_iter().map(|peer| self.close_peer(peer)))
+            .await
+            .into_iter()
+            .collect()
+    }
+
+    /// Disconnect `peer` for [`Self::close`], once a creation in flight for it has ended.
+    async fn close_peer(&self, peer: Did) -> Result<()> {
+        let creation = self.connection_creation.lease(peer);
+        let _creation = creation.acquire().await;
+        self.disconnect(peer).await
     }
 
     /// Disconnect an active peer while promoting a validated successor.

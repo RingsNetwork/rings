@@ -250,9 +250,9 @@ impl ProviderHandle {
                 tracing::warn!("FFI provider listener thread panicked during shutdown");
             }
         }
-        flush_provider_before_runtime_shutdown(&provider, &runtime);
+        close_provider_before_runtime_shutdown(&provider, &runtime);
         drop(provider);
-        // Invariant: joined listeners, the completed flush thread, and the dropped provider have
+        // Invariant: joined listeners, the completed close thread, and the dropped provider have
         // released every intentional runtime clone. If an unexpected in-flight owner remains,
         // leaking the final Arc avoids dropping a Tokio runtime from an asynchronous/C-ABI path.
         match Arc::try_unwrap(runtime) {
@@ -267,24 +267,27 @@ impl ProviderHandle {
     }
 }
 
-fn flush_provider_before_runtime_shutdown(provider: &Arc<Provider>, runtime: &Arc<Runtime>) {
+/// Close `provider`'s network on `runtime` from a thread of its own, before the runtime shuts
+/// down: every connection is closed and the measurements are flushed ([`Provider::close`]), so
+/// a provider created again in this process finds none of this one's sockets bound (#1098).
+fn close_provider_before_runtime_shutdown(provider: &Arc<Provider>, runtime: &Arc<Runtime>) {
     let provider = provider.clone();
     let runtime = runtime.clone();
-    let flush_thread = std::thread::Builder::new()
-        .name("rings-ffi-measurement-flush".to_owned())
-        .spawn(move || runtime.block_on(provider.flush_measurements()));
-    match flush_thread {
-        Ok(flush_thread) => match flush_thread.join() {
+    let close_thread = std::thread::Builder::new()
+        .name("rings-ffi-provider-close".to_owned())
+        .spawn(move || runtime.block_on(provider.close()));
+    match close_thread {
+        Ok(close_thread) => match close_thread.join() {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                tracing::warn!(%error, "failed to flush FFI provider measurements during shutdown");
+                tracing::warn!(%error, "failed to close the FFI provider during shutdown");
             }
             Err(_) => {
-                tracing::warn!("FFI measurement flush thread panicked during shutdown");
+                tracing::warn!("FFI provider close thread panicked during shutdown");
             }
         },
         Err(error) => {
-            tracing::warn!(%error, "failed to start FFI measurement flush thread during shutdown");
+            tracing::warn!(%error, "failed to start the FFI provider close thread during shutdown");
         }
     }
 }
@@ -385,8 +388,9 @@ pub unsafe extern "C" fn rings_node_string_free(value: *mut c_char) {
 ///
 /// Passing null is a no-op. The function requests cooperative listener
 /// shutdown, joins listener threads started through [`rings_node_listen`],
-/// explicitly flushes measurement state even when listening never started, and
-/// then releases the handle. The pointer is invalid after this call.
+/// closes every connection of the node and flushes its measurement state, even
+/// when listening never started ([`Provider::close`]), and then releases the
+/// handle. The pointer is invalid after this call.
 ///
 /// # Safety
 ///

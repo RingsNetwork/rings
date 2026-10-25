@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- A node can be closed before it is dropped (#1098). `Swarm::close`, `Processor::close` and
+  `Provider::close` disconnect every peer, admitted or still handshaking, awaiting each physical
+  close, and refuse every later connection with the new `Error::SwarmClosed`.
+  `rings_node_provider_destroy` closes its provider this way before the runtime shuts down. A
+  dropped node is freed (#1093), but a peer connection that was never closed kept its ICE
+  sockets bound for the life of the process, so an embedder that stops and starts nodes in one
+  process leaked them on every restart. An embedder should call `close` before dropping a node
+  it stops. Each peer then sees the connection close at once, as on `disconnect`, instead of
+  waiting for an ICE timeout. Awaiting the release of the stores and the end of the node's
+  background tasks is #1085.
+  - **Library API.** `Swarm::close`, `Processor::close`, `Provider::close` and
+    `Error::SwarmClosed` are new, all additive.
+  - **Upgrade consequence.** None: the wire format is unchanged.
+  - **Operator step.** None.
+
 - A node that had a peer is freed when its owner drops it (#1093): at once if its runtime is
   dropped with it, and otherwise once the work it has in flight ends (awaiting that end is
   #1085). Each connection's callback held the swarm transport that holds the connection, and the
@@ -11,7 +26,7 @@
   failed with `Error::StorageDirectoryLocked`. The callback and its actor now hold the transport
   weakly and bind it for each event; an event that arrives after the transport is gone is
   dropped, and an actor that finds it gone stops. Nothing changes on the wire. A peer connection
-  that was never closed still keeps its ICE sockets bound (#1098).
+  that was never closed keeps its ICE sockets bound; close the node first (#1098).
 - aarch64 builds use the ARMv8 AES and POLYVAL instructions (#848). `aes` 0.8
   and `polyval` 0.6 take them only under `--cfg aes_armv8` and `--cfg polyval_armv8`, so until
   now every aarch64 build (Apple silicon, ARM servers) ran AEZ and DTLS on the software fixslice
