@@ -202,14 +202,14 @@ impl LogicalInbound {
 
     /// Dispatch application data `payload` carries to its handler, by reference, and record the
     /// observation: the data stays where the caller keeps it (the inbox room that hands it to
-    /// the application). The payload is delivered out of this node's own relay inbox, so it is
-    /// local.
+    /// the application). The payload is delivered out of this node's own relay inbox, so its
+    /// introducer is the inbox principal `μ`.
     async fn handle_application(
         &self,
         payload: &MessagePayload,
         data: &ApplicationData,
     ) -> crate::error::Result<()> {
-        let context = HandlerContext::new(payload, Principal::Local);
+        let context = HandlerContext::new(payload, Principal::Inbox);
         let (kind, result) = match data {
             ApplicationData::Custom(message) => (
                 MessageKind::CustomMessage,

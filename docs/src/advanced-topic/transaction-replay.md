@@ -244,12 +244,14 @@ connection takes the least free slot and frees it when it is retired. A new stre
 its introducer:
 
 - the slot of the handshake-authenticated connection that delivered its first transaction;
-- this node itself, for mail out of its own relay inbox and for out-of-band connection signaling.
+- the inbox, for mail out of this node's own relay inbox;
+- this node itself, for out-of-band connection signaling.
 
 Each slot has a floor of 32 new streams. Slots past their floors share a pool of 4096, each up to
-its fair claim `⌈4096 / n⌉`, where `n` counts the over-floor slots. This node has a share of 1024.
-At the default three successors the table holds at most `328 x 32 + 4096 + 1024 = 15,616`
-streams, and 64 more per extra successor. A new stream past its introducer's share fails with
+its fair claim `⌈4096 / n⌉`, where `n` counts the over-floor slots. The inbox has a share of 768
+and this node a share of 1024, so a flood of mail never refuses the node's own signaling. At the
+default three successors the table holds at most `328 x 32 + 4096 + 1024 + 768 = 16,384`
+streams, its hard capacity, which binds first with more successors. A new stream past its introducer's share fails with
 `TransactionReplayStreamCapacityExceeded`, naming the introducer and the bound. A party with many
 origins and `k` slots can be refused only on those `k` slots.
 

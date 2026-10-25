@@ -2,26 +2,31 @@
 //!
 //! Every item of a table that remote input can grow is charged to the principal that
 //! introduced it: the connection slot of the handshake-authenticated edge that delivered it
-//! (`fair_admission::slot_roster`), or the node itself. An origin is never a principal: it is
-//! free, while a node has `R` connection slots.
+//! (`fair_admission::slot_roster`), the node itself for its own operations, or one of the
+//! node's dedicated duties (its relay inbox, the custody of a range it owns). An origin is never
+//! a principal: it is free, while a node has `R` connection slots.
 //!
-//! Let `f` be the floor per slot, `P` the pool and `L` the local share; `u(π)` the items of `π`,
-//! and for a slot `κ`
+//! Let `f` be the floor per slot, `P` the pool, `L` the local share and `S_d` the share of a
+//! dedicated principal `d`; `u(π)` the items of `π`, and for a slot `κ`
 //!
 //! ```text
 //! o(κ) = max(0, u(κ) − f)                    (its pool items)
 //! o(υ) = u(υ)                                (a delivery on no slot: pool items alone)
 //! Σo   = Σ_κ o(κ) + o(υ)
-//! n    = |{π ≠ λ : o(π) > 0}| + [the claimant is not yet counted]
+//! n    = |{π : o(π) > 0}| + [the claimant is not yet counted]
 //! ```
 //!
 //! **Law (admission).** An item introduced by `π` is admitted iff
 //!
 //! ```text
 //! π = κ,  u(κ) < f                         (the slot's floor)
-//! π ≠ λ,  Σo < P,  o(π) < ⌈P / n⌉          (the pool, within the fair claim)
+//! π = κ or υ,  Σo < P,  o(π) < ⌈P / n⌉     (the pool, within the fair claim)
 //! π = λ,  u(λ) < L                         (the local share)
+//! π = d,  u(d) < S_d                       (a dedicated share: μ, the inbox; χ, custody)
 //! ```
+//!
+//! A transition adding several items is admitted iff each is, in order, and refused whole
+//! otherwise; so the floor guarantee is per item.
 //!
 //! and nothing is ever dropped to make room: an item leaves only by
 //! [`SlotAccounting::advance`] past its instant or by [`SlotAccounting::discharge`]. An item
@@ -29,7 +34,7 @@
 //! pool, and
 //!
 //! ```text
-//! |T| ≤ R·f + P + L       (every transition preserves it)
+//! |T| ≤ R·f + P + L + S_μ + S_χ       (every transition preserves it)
 //! ```
 //!
 //! Every transition costs `O(log |T|)`: the aggregates `Σo` and the count of claimants are kept
@@ -45,15 +50,21 @@ use serde::Serialize;
 pub enum Principal {
     /// The connection slot of the handshake-authenticated edge that delivered the item.
     Slot(u16),
-    /// The node itself: its own operations and deliveries out of its own stores.
+    /// The node itself: its own operations alone.
     Local,
+    /// `μ`: deliveries out of this node's own relay inbox (the replay table's inbox share).
+    Inbox,
+    /// `χ`: the hand-off of a range this node owns, from the node its view names as the
+    /// range's previous owner (the removal store's custody share).
+    Custody,
     /// A delivery on no slot: on no authenticated edge, or on one retired meanwhile. Every
     /// production connection is bound to its handshake and holds a slot while admitted, so only
     /// a delivery racing its edge's retirement is one; it has no floor, only its fair claim.
     Unbound,
 }
 
-/// The shares of one table: the floor per slot, the pool and the local share.
+/// The shares of one table: the floor per slot, the pool, the local share and the dedicated
+/// shares (zero for a duty the table does not serve).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Shares {
     /// `f`: items any slot may hold whatever the others do.
@@ -62,15 +73,32 @@ pub(crate) struct Shares {
     pub(crate) pool: usize,
     /// `L`: items of the local principal.
     pub(crate) local: usize,
+    /// `S_μ`: items of the inbox principal.
+    pub(crate) inbox: usize,
+    /// `S_χ`: items of the custody principal.
+    pub(crate) custody: usize,
 }
 
 impl Shares {
-    /// `B(R) = R·f + P + L`, the bound of a table over `slots` connection slots.
+    /// `B(R) = R·f + P + L + S_μ + S_χ`, the bound of a table over `slots` connection slots.
     pub(crate) const fn bound(self, slots: usize) -> usize {
         slots
             .saturating_mul(self.floor)
             .saturating_add(self.pool)
             .saturating_add(self.local)
+            .saturating_add(self.inbox)
+            .saturating_add(self.custody)
+    }
+
+    /// The share of a principal that holds one apart from the floors and the pool: `L`, `S_μ`
+    /// or `S_χ`; `None` for a slot or an unbound delivery.
+    const fn reserved(self, principal: Principal) -> Option<usize> {
+        match principal {
+            Principal::Local => Some(self.local),
+            Principal::Inbox => Some(self.inbox),
+            Principal::Custody => Some(self.custody),
+            Principal::Slot(_) | Principal::Unbound => None,
+        }
     }
 }
 
@@ -93,13 +121,13 @@ pub enum ShareRefusal {
         /// `⌈P / n⌉`.
         claim: usize,
     },
-    /// The local principal holds its share.
-    #[error("the local principal holds {held} of {local} items")]
-    LocalShare {
-        /// `u(λ)`.
+    /// A principal with a share of its own (this node, its inbox, its custody) holds it.
+    #[error("the principal holds {held} of its share of {share} items")]
+    ReservedShare {
+        /// `u(π)`.
         held: usize,
-        /// `L`.
-        local: usize,
+        /// `L`, `S_μ` or `S_χ`.
+        share: usize,
     },
     /// The table holds its hard bound, which items no principal is charged for (records that do
     /// not restore) also take.
@@ -123,7 +151,7 @@ pub(crate) struct SlotAccounting {
     expiry: BTreeMap<(u128, Principal), usize>,
     /// `Σo`.
     pool_held: usize,
-    /// `|{π ≠ λ : o(π) > 0}|`.
+    /// `|{π : o(π) > 0}|`.
     claimants: usize,
 }
 
@@ -150,13 +178,14 @@ impl SlotAccounting {
         self.held.get(&principal).copied().unwrap_or_default()
     }
 
-    /// `o(π)`, the pool items of `principal` (pure); none for the local principal.
+    /// `o(π)`, the pool items of `principal` (pure); none for a principal with a share of its
+    /// own.
     fn pool_items(&self, principal: Principal) -> usize {
         let held = self.held(principal);
         match principal {
             Principal::Slot(_) => held.saturating_sub(self.shares.floor),
             Principal::Unbound => held,
-            Principal::Local => 0,
+            Principal::Local | Principal::Inbox | Principal::Custody => 0,
         }
     }
 
@@ -174,18 +203,14 @@ impl SlotAccounting {
     /// Whether one more item introduced by `principal` is admitted (the admission law; pure).
     pub(crate) fn admit(&self, principal: Principal) -> Result<(), ShareRefusal> {
         let held = self.held(principal);
-        match principal {
-            Principal::Local => {
-                return match held < self.shares.local {
-                    true => Ok(()),
-                    false => Err(ShareRefusal::LocalShare {
-                        held,
-                        local: self.shares.local,
-                    }),
-                };
-            }
-            Principal::Slot(_) if held < self.shares.floor => return Ok(()),
-            Principal::Slot(_) | Principal::Unbound => {}
+        if let Some(share) = self.shares.reserved(principal) {
+            return match held < share {
+                true => Ok(()),
+                false => Err(ShareRefusal::ReservedShare { held, share }),
+            };
+        }
+        if matches!(principal, Principal::Slot(_)) && held < self.shares.floor {
+            return Ok(());
         }
         if self.pool_held >= self.shares.pool {
             return Err(ShareRefusal::PoolFull {

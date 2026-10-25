@@ -15,6 +15,8 @@ const SMALL: Shares = Shares {
     floor: 1,
     pool: 2,
     local: 1,
+    inbox: 0,
+    custody: 0,
 };
 /// `R` of the small table.
 const SMALL_SLOTS: u16 = 2;
@@ -135,6 +137,8 @@ const REPLAY: Shares = Shares {
     floor: 32,
     pool: 4096,
     local: 1024,
+    inbox: 0,
+    custody: 0,
 };
 
 /// Fill `slot`'s floor with items leaving at `until_ms`.
@@ -177,6 +181,8 @@ fn test_a_lone_claimant_takes_the_pool_and_a_second_splits_what_frees() {
         floor: 1,
         pool: 4,
         local: 0,
+        inbox: 0,
+        custody: 0,
     };
     let mut accounting = SlotAccounting::new(shares);
     let (relay, other) = (Principal::Slot(0), Principal::Slot(1));
@@ -224,4 +230,28 @@ fn test_an_item_leaves_at_its_instant() {
     assert_eq!(accounting.held(slot), 1);
     accounting.advance(20);
     assert_eq!(accounting.held(slot), 0);
+}
+
+/// The reserved shares: this node, its inbox and its custody each hold a share of their own,
+/// apart from the floors and the pool and from each other, so filling one refuses no other.
+#[test]
+fn test_the_reserved_shares_are_apart() {
+    let shares = Shares {
+        floor: 0,
+        pool: 1,
+        local: 1,
+        inbox: 1,
+        custody: 1,
+    };
+    let mut accounting = SlotAccounting::new(shares);
+    for principal in [Principal::Local, Principal::Inbox, Principal::Custody] {
+        assert_eq!(accounting.admit(principal), Ok(()));
+        accounting.charge(principal, 9);
+        assert_eq!(
+            accounting.admit(principal),
+            Err(ShareRefusal::ReservedShare { held: 1, share: 1 })
+        );
+    }
+    assert_eq!(accounting.admit(Principal::Slot(0)), Ok(()));
+    assert_eq!(accounting.len(), shares.bound(0) - 1);
 }

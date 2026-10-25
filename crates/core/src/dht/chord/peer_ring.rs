@@ -293,6 +293,13 @@ impl PeerRing {
         self
     }
 
+    /// Whether this node's view names `node` as a previous owner of the placements it now owns:
+    /// its predecessor or one of its successors (load-bounds paper, Sec. V, the custody
+    /// principal `χ`).
+    pub(crate) fn names_previous_owner(&self, node: Did) -> Result<bool> {
+        Ok(*self.lock_predecessor_state()? == Some(node) || self.successor_seq.contains(&node)?)
+    }
+
     /// The connection slots of this node (see [`Self::edges`](PeerRing#structfield.edges)).
     pub(crate) fn edges(&self) -> &SlotRoster {
         &self.edges

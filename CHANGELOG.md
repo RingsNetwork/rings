@@ -41,13 +41,16 @@
   refuse every new origin for good. A node has `R(s) = 2(160 + s + 1)` connection slots; an
   admitted connection takes the least free one and frees it when it is retired. Each item of
   either table is now charged to the slot of the handshake-authenticated connection that
-  delivered it, or to this node for its own writes, repairs, relay inbox and connection
-  signaling, and admitted within that slot's floor, its fair claim `⌈P / n⌉` of a shared pool,
-  or this node's share. An item stays charged to its slot after its connection leaves, so a
-  table never holds more than `R(s)·f + P + L` items however many connections rotate; a
+  delivered it, to this node for its own writes, repairs and connection signaling, or to a
+  dedicated share: the relay inbox for mail delivered out of it, and custody for an ownership
+  hand-off of the range a node owns from the node its view names as the range's previous owner.
+  It is admitted within that slot's floor, its fair claim `⌈P / n⌉` of a shared pool, or the
+  share of its principal. An item stays charged to its slot after its connection leaves, so a
+  table never holds more than `R(s)·f + P + L + S` items however many connections rotate; a
   connection admitted into a slot inherits what the slot still holds. The replay receiver
-  table has `f = 32`, `P = 4096`, `L = 1024` (15616 streams at three successors); the removal
-  store `f = 128`, `P = 16384`, `L = 7168` (65536). A replay stream is retired once it is spent:
+  table has `f = 32`, `P = 4096`, `L = 1024`, inbox `768` (16384 streams at three successors,
+  its hard capacity); the removal store `f = 128`, `P = 16384`, `L = 7168`, custody `16384`
+  (81920, about 12 MB, within the native store's 16 MiB). A replay stream is retired once it is spent:
   `σ` after its last proof expires, and for application streams another relay-inbox retention
   plus `σ` later; a refusal therefore lasts until a stream of the refused slot is spent, never
   for good. Handlers receive a `HandlerContext`, which carries the payload and the principal

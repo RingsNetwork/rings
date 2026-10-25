@@ -125,8 +125,10 @@ another node's read shows that an owner holds the write.
   (#920): the data store's byte budget drops the values of a topic, never its tombstones, and
   each tombstone is charged to the connection slot of the connection that delivered it, or to
   the node for its own writes and repairs (#907): each slot has a floor of 128 uncollected, the
-  rest share a pool of 16384 in fair claims, and the node keeps 7168 of its own, so no number
-  of writers or connections crowds out a slot below its floor. There is no compaction
+  rest share a pool of 16384 in fair claims, and the node keeps 7168 of its own. A hand-off of
+  the range a node now owns, from the node its view names as the range's previous owner, draws
+  on a custody share of 16384 instead, so a busy range is never capped by one neighbour's slot.
+  No number of writers or connections crowds out a slot below its floor. There is no compaction
   operation: a reset stamped by one owner would erase every concurrent write that owner had
   not yet received.
 - **Bounds.** A topic holds at most 1024 elements (the oldest are dropped when the cap binds) and

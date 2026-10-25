@@ -23,14 +23,15 @@
 //!   whose element side still holds removes, is joined in full.
 //! - Shares (load-bounds paper, Sec. V, re-keying Law 6 of the removal-stability paper): each
 //!   unstable remove, and the register, is an item charged to the principal that delivered the
-//!   transition raising it: the connection slot of the edge an operation or a sync arrived on, or
-//!   this node for its own writes and repairs. The items are accounted under slot accounting with
-//!   [`REMOVAL_SHARES`], so the store holds at most `R(s)·128 + 16 384 + 7 168` unstable items,
+//!   transition raising it: the connection slot of the edge an operation or a sync arrived on,
+//!   this node for its own writes and repairs, or the custody principal for an ownership
+//!   hand-off from the range's previous owner. The items are accounted under slot accounting
+//!   with [`REMOVAL_SHARES`], so the store holds at most `R(s)·128 + 39 936` unstable items,
 //!   [`REMOVAL_STORE_MAX_REMOVES`] at the default `s = 3`. A transition that raises an item the
 //!   accounting refuses is refused whole; one that raises none is never refused for room. An
-//!   honest remove is therefore refused only by its topic's cap, or by its slot's floor and fair
-//!   claim, whatever other parties hold (Theorem 1); a slot's removes outlive its edge until they
-//!   are stable (Prop. 1).
+//!   honest remove is therefore refused only by its topic's cap, or by its principal's floor,
+//!   fair claim or share, whatever other parties hold (Theorem 1, per item); a slot's removes
+//!   outlive its edge until they are stable (Prop. 1).
 //! - Locks: a read takes no lock once the store is recovered, so it never waits on a write's
 //!   I/O. The write lock is taken only by the recovery pass, once, and by a write whose remove
 //!   side changed, across its admission and its remove-side write; a write that raises and drops
@@ -70,12 +71,15 @@ pub type RemovalStorage =
     Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<RemovalRecord>)>;
 
 /// The shares of the removal store (load-bounds paper, Sec. V): `f = 128` items per slot, a
-/// pool of 16 384 and a local share of 7 168, so `B(s) = R(s)·128 + 23 552`, 65 536 at `s = 3`
-/// and 256 more per successor.
+/// pool of 16 384, a local share of 7 168 and a custody share of 16 384 for the hand-off of a
+/// range this node owns, so `B(s) = R(s)·128 + 39 936`, 81 920 at `s = 3` and 256 more per
+/// successor.
 pub(crate) const REMOVAL_SHARES: Shares = Shares {
     floor: 128,
     pool: 16_384,
     local: 7_168,
+    inbox: 0,
+    custody: 16_384,
 };
 
 /// One remove of a remove side, with its charge.

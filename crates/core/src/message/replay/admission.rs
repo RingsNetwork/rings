@@ -13,14 +13,24 @@ use crate::message::OriginQuotaInstant;
 use crate::utils::Instant;
 
 /// The shares of the receiver table (load-bounds paper, Law 2): `f = 32` new streams per slot,
-/// a pool of 4096 and a local share of 1024, so `B(s) = R(s)·32 + 5120`, 15 616 at `s = 3` and
-/// `64` more per successor. The table's hard bound, [`TRANSACTION_REPLAY_STREAM_CAPACITY`](super::TRANSACTION_REPLAY_STREAM_CAPACITY), binds
-/// first only past `s = 15`.
+/// a pool of 4096, a local share of 1024 for this node's own signaling and an inbox share of
+/// 768 for deliveries out of its relay inbox, so `B(s) = R(s)·32 + 5888`: 16 384 at `s = 3`,
+/// the table's hard bound
+/// ([`TRANSACTION_REPLAY_STREAM_CAPACITY`](super::TRANSACTION_REPLAY_STREAM_CAPACITY)), which
+/// binds first past `s = 3`.
 pub(crate) const RECEIVER_STREAM_SHARES: Shares = Shares {
     floor: 32,
     pool: 4096,
     local: 1024,
+    inbox: 768,
+    custody: 0,
 };
+
+const _: () = assert!(
+    RECEIVER_STREAM_SHARES.bound(crate::dht::topology::edge_slots(
+        crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY
+    )) == super::TRANSACTION_REPLAY_STREAM_CAPACITY
+);
 
 /// `ι(class)`: how long after its proof expires a transaction of `class` may still be delivered.
 /// Application mail may be held in a relay inbox and delivered as of its hold instant, at most

@@ -37,6 +37,8 @@ use crate::tests::default::Node;
 use crate::tests::held_inbox_for;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
+use crate::tests::removes_only_carrier;
+use crate::utils::get_epoch_ms;
 
 #[tokio::test]
 async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
@@ -174,6 +176,68 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_a_holder_alo
         .get(&inbox_slot(&inbox).to_string())
         .await?
         .is_some());
+    Ok(())
+}
+
+/// The removes a synced data entry raised, as the removal store charged them.
+async fn charges_of(node: &Node, topic: Did) -> Result<Vec<Principal>> {
+    let key = StorageKey::new(EntryKind::Data, topic).to_string();
+    Ok(node
+        .dht()
+        .removal_storage
+        .get(&key)
+        .await?
+        .map(|record| record.removes.iter().map(|remove| remove.charge).collect())
+        .unwrap_or_default())
+}
+
+/// Custody (load-bounds paper, Sec. V): an ownership hand-off from the node this node's view
+/// names as the previous owner is charged to the custody principal, while the same hand-off from
+/// any other node, and an additive repair from the previous owner, is charged to the principal
+/// that delivered it.
+#[tokio::test]
+async fn test_a_hand_off_from_the_previous_owner_is_charged_to_custody() -> Result<()> {
+    let receiver = prepare_node(SecretKey::random()).await;
+    let predecessor: Did = SecretKey::random().address().into();
+    let stranger: Did = SecretKey::random().address().into();
+    *receiver.dht().lock_predecessor()? = Some(predecessor);
+    let now_ms = get_epoch_ms();
+    let cases = [
+        (
+            StorageSyncPurpose::OwnershipHandoff,
+            predecessor,
+            Principal::Custody,
+        ),
+        (
+            StorageSyncPurpose::OwnershipHandoff,
+            stranger,
+            Principal::Unbound,
+        ),
+        (
+            StorageSyncPurpose::AdditiveRepair,
+            predecessor,
+            Principal::Unbound,
+        ),
+    ];
+    for (index, (purpose, sender, charged)) in cases.into_iter().enumerate() {
+        let topic = Did::from(20u32 + u32::try_from(index).unwrap_or_default());
+        let carrier = removes_only_carrier(topic, 2, now_ms, "hand-off")?;
+        let sync_msg = SyncEntriesWithSuccessor {
+            purpose,
+            destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
+            data: vec![PlacedEntry::new(topic, carrier)],
+        };
+        receiver
+            .swarm
+            .transport
+            .persist_storage_sync_entries(&sync_msg, sender, Principal::Unbound)
+            .await?;
+        assert_eq!(
+            charges_of(&receiver, topic).await?,
+            vec![charged; 2],
+            "{purpose:?}"
+        );
+    }
     Ok(())
 }
 

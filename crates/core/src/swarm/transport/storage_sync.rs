@@ -428,6 +428,11 @@ fn evict_storage_sync_acks(pending: &mut StorageSyncAckMap) {
 impl SwarmTransport {
     /// Validate a complete local storage-sync batch before persisting any entry.
     ///
+    /// The removes the batch raises are charged to `introducer`, except for an ownership
+    /// hand-off from a node this node's view names as the previous owner, which is charged to
+    /// the custody principal `χ` (load-bounds paper, Sec. V): such a hand-off carries the range
+    /// this node now owns, every entry of which the batch persists only if this node owns it.
+    ///
     /// Pre: `sender` is the authenticated origin of the message carrying `msg`, and
     /// `introducer` the principal that delivered it.
     pub(crate) async fn persist_storage_sync_entries(
@@ -436,6 +441,12 @@ impl SwarmTransport {
         sender: Did,
         introducer: Principal,
     ) -> Result<Vec<SyncedEntryAck>> {
+        let custody =
+            msg.purpose.permits_source_cleanup() && self.dht.names_previous_owner(sender)?;
+        let introducer = match custody {
+            true => Principal::Custody,
+            false => introducer,
+        };
         StorageSyncBatch::new(msg, sender, introducer, get_epoch_ms())
             .run(self)
             .await

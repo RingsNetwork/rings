@@ -24,11 +24,13 @@ use crate::message::OriginQuotaInstant;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 
-/// One floor item per slot, one pool item and one local item.
+/// One floor item per slot, one pool item, one local item and one inbox item.
 const SMALL: Shares = Shares {
     floor: 1,
     pool: 1,
     local: 1,
+    inbox: 1,
+    custody: 0,
 };
 
 /// The instant every stream of these tests is spent at.
@@ -132,6 +134,36 @@ async fn test_the_charges_survive_a_restart() -> Result<()> {
     Ok(())
 }
 
+/// Inbox mail draws on the inbox share alone: once it is full, mail from a new origin is
+/// refused, while this node's own signaling still opens a stream on its local share.
+#[tokio::test]
+async fn test_inbox_mail_never_draws_on_the_local_share() -> Result<()> {
+    let storage = Arc::new(MemStorage::new());
+    let replay = runtime(&storage);
+    let class = MessageCategory::Application;
+    let relayed = |origin| {
+        let key = stream(origin, class);
+        Admission {
+            introducer: Principal::Inbox,
+            ..Admission::for_test(key, 0, TransactionDigest::new([1; 32]), 0)
+        }
+    };
+    replay.admit_relayed(relayed(10)).await?;
+    assert!(matches!(
+        replay.admit_relayed(relayed(11)).await,
+        Err(Error::TransactionReplayStreamCapacityExceeded {
+            refusal: ShareRefusal::ReservedShare { .. },
+            ..
+        })
+    ));
+    let signaling = stream(12, MessageCategory::DhtControl);
+    assert_eq!(
+        open(&replay, signaling, Principal::Local, 0).await?,
+        SequenceVerdict::First
+    );
+    Ok(())
+}
+
 /// A stream held in relay custody is never retired, spent or not: its delivery is still to be
 /// taken, and its custody lives in its record.
 #[tokio::test]
@@ -140,6 +172,7 @@ async fn test_a_stream_in_custody_is_not_retired() -> Result<()> {
     let replay = runtime(&storage);
     let key = stream(10, MessageCategory::Application);
     let admission = Admission {
+        introducer: Principal::Inbox,
         spent_at_ms: SPENT_AT_MS,
         ..Admission::for_test(key, 0, TransactionDigest::new([1; 32]), 0)
     };

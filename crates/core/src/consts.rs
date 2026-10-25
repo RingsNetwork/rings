@@ -120,9 +120,9 @@ pub const ENTRY_PAYLOAD_MAX_BYTES: usize = 32 * 1024;
 /// topic.
 pub const DATA_TOMBSTONE_MAX_LEN: usize = ENTRY_DATA_MAX_LEN;
 /// The unstable removes an owner's removal store holds in all at the default successor capacity,
-/// `B(3) = 328·128 + 16 384 + 7 168` (#920, #907; load-bounds paper, Sec. V), about 9.6 MB at
-/// [`ENTRY_TOMBSTONE_WIRE_MAX`]: each connection slot's floor of 128, a pool shared in fair claims, and
-/// this node's own share. A ring with `s` successors holds `256(s − 3)` more, and its removal
+/// `B(3) = 328·128 + 16 384 + 7 168 + 16 384` (#920, #907; load-bounds paper, Sec. V), about
+/// 12 MB at [`ENTRY_TOMBSTONE_WIRE_MAX`]: each connection slot's floor of 128, a pool shared in
+/// fair claims, this node's own share, and the custody share of an ownership hand-off. A ring with `s` successors holds `256(s − 3)` more, and its removal
 /// store must be sized for them.
 pub const REMOVAL_STORE_MAX_REMOVES: usize = crate::dht::REMOVAL_SHARES.bound(
     crate::dht::topology::edge_slots(crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY),

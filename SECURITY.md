@@ -289,12 +289,16 @@ route.
   streams within 7 days. A connection that keeps its slot is never affected. Only a cost on
   admission removes this (#1094, #780).
 - #920, #907: a node's store of uncollected removals refuses a connection slot past its floor of
-  128 and its fair claim of a pool of 16384, and this node past 7168. A node whose browser cannot
+  128 and its fair claim of a pool of 16384, this node past 7168, and an ownership hand-off from
+  the range's previous owner past a custody share of 16384, which a Byzantine predecessor or
+  successor can fill (a non-goal). A node whose browser cannot
   open IndexedDB keeps removals in memory, so each restart makes it a fresh replica.
-- #907: a new replay stream is refused past its slot's floor of 32 and fair claim of 4096, or
-  this node's share of 1024, until a stream of that edge is spent: about 10 minutes after its
-  last default-lifetime transaction, and 7 days for application streams, whose mail a relay
-  inbox may still deliver.
+- #907: a new replay stream is refused past its slot's floor of 32 and fair claim of 4096, past
+  the inbox share of 768 for mail out of the relay inbox, or past this node's share of 1024 for
+  its own signaling, until a stream of that principal is spent: about 10 minutes after its last
+  default-lifetime transaction, and 7 days for application streams, whose mail a relay inbox may
+  still deliver. A flood of mail from fresh origins therefore delays mail from new
+  correspondents for up to that long; the mail stays held.
 - #921: a data topic holds at most 1024 uncollected tombstones and refuses past them, so any
   writer, or a sync peer, can fill one topic's removal capacity at an owner and refuse further
   removals of that topic there until those tombstones are collected, at most 100 minutes and

@@ -133,13 +133,14 @@ impl SwarmTransport {
     /// a transaction a relay inbox delivered (the custody law of `message::replay`): either it
     /// enters the window and custody in one record write, or it is already in custody and is
     /// queued again with nothing admitted. The delivery is out of this node's own relay inbox,
-    /// so a new stream is local.
+    /// so a new stream is charged to the inbox principal `μ`, never to this node's own share
+    /// (load-bounds paper, Law 2).
     pub(crate) async fn admit_relayed_transaction(
         &self,
         transaction: &Transaction,
         charge: OriginQuotaCharge,
     ) -> Result<RelayAdmission> {
-        let admission = self.admission(transaction, charge, Principal::Local)?;
+        let admission = self.admission(transaction, charge, Principal::Inbox)?;
         self.transaction_replay.admit_relayed(admission).await
     }
 
