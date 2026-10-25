@@ -35,6 +35,52 @@
   0.21 (#1071). CI runs the crate's tests, including a new TSN-order test, on Linux and macOS.
   No operator step.
 
+- The replay receiver table and the removal store are shared by connection slot, not by
+  origin (#907; load-bounds paper, Laws 1 and 2, Sec. V). An origin is a free key pair, so
+  anyone could fill the receiver table with one transaction from each of 16384 fresh origins and
+  refuse every new origin for good. A node has `R(s) = 2(160 + s + 1)` connection slots; an
+  admitted connection takes the least free one and frees it when it is retired. Each item of
+  either table is now charged to the slot of the handshake-authenticated connection that
+  delivered it, to this node for its own writes, repairs and connection signaling, or to a
+  dedicated share: the relay inbox for mail delivered out of it, and custody for an ownership
+  hand-off of the range a node owns from the node its view names as the range's previous owner.
+  It is admitted within that slot's floor, its fair claim `⌈P / n⌉` of a shared pool, or the
+  share of its principal. An item stays charged to its slot after its connection leaves, so a
+  table never holds more than `R(s)·f + P + L + S` items however many connections rotate; a
+  connection admitted into a slot inherits what the slot still holds. The replay receiver
+  table has `f = 32`, `P = 3328`, `L = 1024`, inbox `768` (15616 streams at three successors,
+  within its hard capacity of 16384 up to 15 successors); the removal store `f = 128`,
+  `P = 16384`, `L = 7168`, custody `16384` (81920, filed in at most about 19.6 MB, so the native
+  `dht-removals` budget rises from 16 MiB to 24 MiB). A replay stream is retired once it is spent:
+  `σ` after its last proof expires, and for application streams another relay-inbox retention
+  plus `σ` later; a refusal therefore lasts until a stream of the refused slot is spent, never
+  for good. Handlers receive a `HandlerContext`, which carries the payload and the principal
+  that delivered it.
+  - **Breaking (library API).** `HandleMsg::handle` takes a `&HandlerContext`; its
+    `payload()` is the `MessagePayload`. `RemovalCharge` and `REMOVAL_ORIGIN_SHARE` are gone: a remove's charge
+    is a `Principal`. `Error::TransactionReplayStreamCapacityExceeded` and
+    `Error::RemovalCapacityExhausted` carry the introducer and the `ShareRefusal`.
+    `ChordStorageRepair::read_repair_entry` takes the principal that delivered the entry.
+    `KvStorageScan` gains the required method `remove_batch`, which removes records with one
+    flush, as `put_batch` writes them; the replay store retires spent streams in the batch
+    their admission joins.
+  - **Upgrade consequence.** A receiver replay record and a removal record each gain their
+    charge, so records of an earlier build do not restore (no protocol versioning before 1.0).
+  - **Operator step.** Stop the node and remove the `transaction-replay` store, the documented
+    reset of the replay guarantee, and the `dht-removals` store (browser: the IndexedDB stores
+    `<storage name>/transaction-replay` and `<storage name>/dht-removals`), then start it.
+    Replication rebuilds the removals a node holds.
+
+- Held relay mail expires 7 days after its hold (#907; load-bounds paper, Def. 3). A held
+  message retires `MAX_RELAY_INBOX_TTL_MS` after the instant its holder signed: every read, join
+  and sync of its inbox drops it, and a recipient never delivers it. Before, a held message
+  lived as long as its inbox, which every newer hold extended, so mail could linger without
+  bound and a member could deliver an old message after the recipient's replay window had
+  forgotten its stream. The rule reads the signed hold instant, not the element's dot, so every
+  replica drops the same messages and rewriting an old hold gains nothing.
+  - **Upgrade consequence.** Mail held more than 7 days ago is dropped at the first read of its
+    inbox.
+
 ## 0.37.0
 
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
@@ -57,6 +103,7 @@
   poll, so a store directory reopened in the same process right after a drop could still be held
   (`Error::StorageDirectoryLocked`, #1039). `close` resolves once the worker has persisted any
   pending snapshot and dropped both stores.
+
 - A node stamps its own writes in issue order (#1075, #1033; folds in #1076). Every operation a
   node stamps is issued strictly after every version it stamped or passed through before and
   every version it read for the key (its cached carrier, and the replica an owner holds), with
@@ -116,6 +163,7 @@
   - **Operator step.** None; earlier descriptors are ignored and expire within the element
     horizon. A configuration with a heartbeat interval of 300 seconds or more, or a TTL over 600
     seconds, is refused at start and must be lowered.
+
 - Data-topic removals are never evicted (#920; removal-stability paper, Laws 2–4 and 6). A
   data carrier is stored as two records: its values in the data store, which its byte budget
   may evict, and its tombstones and overwrite floor in a new retained store, `dht-removals`
@@ -134,6 +182,7 @@
     data store until it is next written, and is read as before meanwhile.
   - **Operator step.** None required. An operator who wants the eviction law to hold from the
     first eviction removes the data store while the node is stopped; replication rebuilds it.
+
 - Data-topic tombstones are bounded (#921; removal-stability paper, Law 5 and Prop. 4). A data
   carrier holds at most `DATA_TOMBSTONE_MAX_LEN` (1024) uncollected removes. A delta carrying
   more is not admitted, and a join, operation or repair whose result would hold more fails with

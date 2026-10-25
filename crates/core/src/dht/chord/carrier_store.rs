@@ -21,18 +21,23 @@
 //!   that; the first operation on the store after it is opened normalizes every element side that
 //!   has a remove side (the recovery pass), and a whole carrier written before the factoring,
 //!   whose element side still holds removes, is joined in full.
-//! - Shares (Law 6): each unstable remove is charged to the authenticated sender of the
-//!   transition that raised it, or to the holder class for a node this owner's view names as an
-//!   owner. A transition that raises a remove is refused when its sender's charges would pass
-//!   [`REMOVAL_ORIGIN_SHARE`] or the store's would pass [`REMOVAL_STORE_MAX_REMOVES`]; a
-//!   transition that raises none is never refused for room. An honest remove is therefore refused
-//!   only by its topic's cap, its writer's own share, or a total that takes 63 other identities
-//!   or a Byzantine owner (Prop. 6).
+//! - Shares (load-bounds paper, Sec. V, re-keying Law 6 of the removal-stability paper): each
+//!   unstable remove, and the register, is an item charged to the principal that delivered the
+//!   transition raising it: the connection slot of the edge an operation or a sync arrived on,
+//!   this node for its own writes and repairs, or the custody principal for an ownership
+//!   hand-off from the range's previous owner. The items are accounted under slot accounting
+//!   with [`REMOVAL_SHARES`], so the store holds at most `R(s)·128 + 39 936` unstable items,
+//!   [`REMOVAL_STORE_MAX_REMOVES`] at the default `s = 3`. A transition that raises an item the
+//!   accounting refuses is refused whole; one that raises none is never refused for room. An
+//!   honest remove is therefore refused only by its topic's cap, or by its principal's floor,
+//!   fair claim or share, whatever other parties hold (Theorem 1, per item); a slot's removes
+//!   outlive its edge until they are stable (Prop. 1).
 //! - Locks: a read takes no lock once the store is recovered, so it never waits on a write's
-//!   I/O. The charge index is locked only by the recovery pass, once, and by a write whose
-//!   remove side changed, across its admission and its remove-side write; a write that raises
-//!   and drops nothing (an `Extend`, a heartbeat) never takes it. Writes to one key are ordered
-//!   by the storage transition their callers hold, which is what keeps `R` before `E` per key.
+//!   I/O. The write lock is taken only by the recovery pass, once, and by a write whose remove
+//!   side changed, across its admission and its remove-side write; a write that raises and drops
+//!   nothing (an `Extend`, a heartbeat) never takes it. The accounting is locked for one pure
+//!   step at a time beneath it. Writes to one key are ordered by the storage transition their
+//!   callers hold, which is what keeps `R` before `E` per key.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
@@ -43,7 +48,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::EntryStorage;
-use crate::consts::REMOVAL_ORIGIN_SHARE;
+#[cfg(doc)]
 use crate::consts::REMOVAL_STORE_MAX_REMOVES;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::entry::Entry;
@@ -54,6 +59,10 @@ use crate::dht::entry::EntryVersion;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::Principal;
+use crate::fair_admission::Shares;
+use crate::fair_admission::SlotAccounting;
+use crate::fair_admission::TableAccounting;
 use crate::storage::KvStorageInterface;
 
 /// The store of remove sides (#920): a `RecordAuthority::Retained` store in production, which
@@ -61,24 +70,25 @@ use crate::storage::KvStorageInterface;
 pub type RemovalStorage =
     Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<RemovalRecord>)>;
 
-/// Whom an owner charges a remove it holds (removal-stability paper, Def. 7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum RemovalCharge {
-    /// The authenticated sender of the transition that raised it: an operation's writer, or the
-    /// signer of a sync message or lookup reply.
-    Origin(Did),
-    /// A node this owner's view names as an owner of the placement (itself, its predecessor, or
-    /// a successor), which no share bounds: a Byzantine owner is a non-goal.
-    Holder,
-}
+/// The shares of the removal store (load-bounds paper, Sec. V): `f = 128` items per slot, a
+/// pool of 16 384, a local share of 7 168 and a custody share of 16 384 for the hand-off of a
+/// range this node owns, so `B(s) = R(s)·128 + 39 936`, 81 920 at `s = 3` and 256 more per
+/// successor.
+pub(crate) const REMOVAL_SHARES: Shares = Shares {
+    floor: 128,
+    pool: 16_384,
+    local: 7_168,
+    inbox: 0,
+    custody: 16_384,
+};
 
 /// One remove of a remove side, with its charge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChargedRemove {
     /// The remove.
     pub tombstone: EntryTombstone,
-    /// Whom it is charged to.
-    pub charge: RemovalCharge,
+    /// The principal that delivered the transition raising it.
+    pub charge: Principal,
 }
 
 /// The register of a remove side, with its charge.
@@ -86,8 +96,8 @@ pub struct ChargedRemove {
 pub struct ChargedRegister {
     /// The register.
     pub version: EntryVersion,
-    /// Whom it is charged to.
-    pub charge: RemovalCharge,
+    /// The principal that delivered the transition raising it.
+    pub charge: Principal,
 }
 
 /// The remove side `R(x)` of one data carrier as the removal store keeps it: its removes and
@@ -116,9 +126,8 @@ fn stable_at(version: &EntryVersion) -> u128 {
 impl RemovalRecord {
     /// The remove side of the normalized carrier `value`, charging `charge` with what it raised
     /// over `previous` and keeping the earlier charge of the rest; `None` when `value` holds no
-    /// remove and no register. The second component says whether anything was raised.
-    fn of(value: &Entry, previous: Option<&Self>, charge: RemovalCharge) -> (Option<Self>, bool) {
-        let mut raised = false;
+    /// remove and no register.
+    fn of(value: &Entry, previous: Option<&Self>, charge: Principal) -> Option<Self> {
         let held = |tombstone: &EntryTombstone| {
             previous.and_then(|previous| {
                 previous
@@ -134,10 +143,7 @@ impl RemovalRecord {
             .iter()
             .map(|tombstone| ChargedRemove {
                 tombstone: *tombstone,
-                charge: held(tombstone).unwrap_or_else(|| {
-                    raised = true;
-                    charge
-                }),
+                charge: held(tombstone).unwrap_or(charge),
             })
             .collect::<Vec<_>>();
         let register = value.crdt.register.map(|version| ChargedRegister {
@@ -146,20 +152,17 @@ impl RemovalRecord {
                 .and_then(|previous| previous.register)
                 .filter(|held| held.version == version)
                 .map(|held| held.charge)
-                .unwrap_or_else(|| {
-                    raised = true;
-                    charge
-                }),
+                .unwrap_or(charge),
         });
         if removes.is_empty() && register.is_none() {
-            return (None, false);
+            return None;
         }
         let record = Self {
             did: value.did,
             register,
             removes,
         };
-        (Some(record), raised)
+        Some(record)
     }
 
     /// `R(x)`: the remove side as a carrier, with no element and the least stamped bound.
@@ -177,8 +180,8 @@ impl RemovalRecord {
         }
     }
 
-    /// Every charge of this record with the instant its item is stable.
-    fn charges(&self) -> impl Iterator<Item = (RemovalCharge, u128)> + '_ {
+    /// Every item of this record: its principal and the instant it is stable.
+    fn items(&self) -> impl Iterator<Item = (Principal, u128)> + '_ {
         self.removes
             .iter()
             .map(|remove| (remove.charge, stable_at(&remove.tombstone.dot.version)))
@@ -187,14 +190,6 @@ impl RemovalRecord {
                     .iter()
                     .map(|register| (register.charge, stable_at(&register.version))),
             )
-    }
-
-    /// The items of this record still unstable at `now_ms`, charged to `charge` (any charge when
-    /// `None`).
-    fn unstable(&self, charge: Option<RemovalCharge>, now_ms: u128) -> usize {
-        self.charges()
-            .filter(|(held, at)| charge.is_none_or(|charge| *held == charge) && *at > now_ms)
-            .count()
     }
 }
 
@@ -234,100 +229,111 @@ fn glue(elements: Option<Entry>, removals: Option<&RemovalRecord>) -> Result<Opt
     }))
 }
 
-/// The unstable items of the removal store per charge, by the instant each is stable.
-///
-/// Law: `held(c, t)` counts the items charged to `c` whose stable instant is after `t`; an item
-/// that became stable is forgotten, whether or not its record has been rewritten yet.
-#[derive(Debug, Default)]
-struct ChargeIndex {
-    by_charge: BTreeMap<RemovalCharge, BTreeMap<u128, usize>>,
+/// The items one transition of a remove side changes: those that left and those it raised.
+struct ItemChanges {
+    /// The items `previous` held and `next` does not, unstable at the transition's instant.
+    left: Vec<(Principal, u128)>,
+    /// The items `next` holds and `previous` did not, unstable at that instant.
+    raised: Vec<(Principal, u128)>,
 }
 
-impl ChargeIndex {
-    /// Count `record`'s items.
-    fn add(&mut self, record: &RemovalRecord) {
-        for (charge, at) in record.charges() {
-            *self
-                .by_charge
-                .entry(charge)
-                .or_default()
-                .entry(at)
-                .or_default() += 1;
-        }
-    }
-
-    /// Forget `record`'s items.
-    fn subtract(&mut self, record: &RemovalRecord) {
-        for (charge, at) in record.charges() {
-            let Some(instants) = self.by_charge.get_mut(&charge) else {
-                continue;
-            };
-            if let Some(count) = instants.get_mut(&at) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    instants.remove(&at);
-                }
-            }
-        }
-        self.by_charge.retain(|_, instants| !instants.is_empty());
-    }
-
-    /// The unstable items at `now_ms` charged to `charge`, or to anyone when `None`.
-    fn held(&self, charge: Option<RemovalCharge>, now_ms: u128) -> usize {
-        self.by_charge
-            .iter()
-            .filter(|(held, _)| charge.is_none_or(|charge| **held == charge))
-            .flat_map(|(_, instants)| instants.range(now_ms.saturating_add(1)..))
-            .map(|(_, count)| *count)
-            .sum()
-    }
-
-    /// Refuse the transition `previous ↦ next` that raised items charged to `charge` if it passes
-    /// the sender's share or the store's total (Law 6).
-    fn admit(
-        &self,
-        previous: Option<&RemovalRecord>,
-        next: Option<&RemovalRecord>,
-        charge: RemovalCharge,
-        now_ms: u128,
-    ) -> Result<()> {
-        let after = |of: Option<RemovalCharge>| {
-            let before = previous.map_or(0, |record| record.unstable(of, now_ms));
-            let after = next.map_or(0, |record| record.unstable(of, now_ms));
-            self.held(of, now_ms)
-                .saturating_sub(before)
-                .saturating_add(after)
+impl ItemChanges {
+    /// The multiset differences of the items of `previous` and `next` unstable at `now_ms`
+    /// (pure).
+    fn of(previous: Option<&RemovalRecord>, next: Option<&RemovalRecord>, now_ms: u128) -> Self {
+        let mut counts = BTreeMap::<(Principal, u128), isize>::new();
+        let unstable = |record: Option<&RemovalRecord>| {
+            record
+                .into_iter()
+                .flat_map(RemovalRecord::items)
+                .filter(|(_, at)| *at > now_ms)
+                .collect::<Vec<_>>()
         };
-        if let RemovalCharge::Origin(origin) = charge {
-            let held = after(Some(charge));
-            if held > REMOVAL_ORIGIN_SHARE {
+        for item in unstable(previous) {
+            *counts.entry(item).or_default() -= 1;
+        }
+        for item in unstable(next) {
+            *counts.entry(item).or_default() += 1;
+        }
+        let mut changes = Self {
+            left: Vec::new(),
+            raised: Vec::new(),
+        };
+        for (item, count) in counts {
+            let into = match count < 0 {
+                true => &mut changes.left,
+                false => &mut changes.raised,
+            };
+            into.extend(std::iter::repeat_n(item, count.unsigned_abs()));
+        }
+        changes
+    }
+
+    /// Apply the changes to `accounting` at `now_ms`: forget the items that left, then admit
+    /// and charge each item raised, all or none.
+    ///
+    /// Post: on `Err(RemovalCapacityExhausted)` the accounting is as it was, but for the items
+    /// that became stable by `now_ms`, which it forgets either way.
+    fn apply(&self, accounting: &mut SlotAccounting, now_ms: u128) -> Result<()> {
+        accounting.advance(now_ms);
+        for (principal, at) in self.left.iter() {
+            accounting.discharge(*principal, *at);
+        }
+        for (index, (principal, at)) in self.raised.iter().enumerate() {
+            if let Err(refusal) = accounting.admit(*principal) {
+                Self::undo(&self.left, self.raised.iter().take(index), accounting);
                 return Err(Error::RemovalCapacityExhausted {
-                    origin: Some(origin),
-                    held,
-                    bound: REMOVAL_ORIGIN_SHARE,
+                    introducer: *principal,
+                    refusal,
                 });
             }
-        }
-        let held = after(None);
-        if held > REMOVAL_STORE_MAX_REMOVES {
-            return Err(Error::RemovalCapacityExhausted {
-                origin: None,
-                held,
-                bound: REMOVAL_STORE_MAX_REMOVES,
-            });
+            accounting.charge(*principal, *at);
         }
         Ok(())
     }
+
+    /// Revert the changes applied to `accounting`: forget the raised items and charge the left
+    /// ones again, with no admission, since they held their places before.
+    fn revert(&self, accounting: &mut SlotAccounting) {
+        Self::undo(&self.left, self.raised.iter(), accounting);
+    }
+
+    /// Forget the `raised` items and charge the `left` ones again.
+    fn undo<'a>(
+        left: &[(Principal, u128)],
+        raised: impl Iterator<Item = &'a (Principal, u128)>,
+        accounting: &mut SlotAccounting,
+    ) {
+        for (principal, at) in raised {
+            accounting.discharge(*principal, *at);
+        }
+        for (principal, at) in left {
+            accounting.charge(*principal, *at);
+        }
+    }
 }
 
-/// The charge index of a removal store, built by the recovery pass on first use (the lock law
-/// of the module documentation).
-#[derive(Debug, Default)]
+/// The accounting of a removal store, filled by the recovery pass on first use (the lock law of
+/// the module documentation).
+#[derive(Debug)]
 pub(crate) struct RemovalIndex {
     /// Whether the recovery pass has run: read without the lock once set.
     recovered: AtomicBool,
-    /// The charges; locked by the recovery pass and by a write that changes a remove side.
-    charges: FuturesMutex<ChargeIndex>,
+    /// The write lock: taken by the recovery pass and by a write that changes a remove side.
+    writes: FuturesMutex<()>,
+    /// The items, under edge accounting with [`REMOVAL_SHARES`].
+    accounting: TableAccounting,
+}
+
+impl RemovalIndex {
+    /// An index not yet recovered, accounting in `accounting`.
+    pub(crate) fn new(accounting: TableAccounting) -> Self {
+        Self {
+            recovered: AtomicBool::new(false),
+            writes: FuturesMutex::new(()),
+            accounting,
+        }
+    }
 }
 
 /// The store of one carrier kind: a whole store (relay inboxes, the fetch cache), or the data
@@ -357,13 +363,17 @@ impl CarrierStore<'_> {
         if index.recovered.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut charges = index.charges.lock().await;
+        let _writes = index.writes.lock().await;
         if index.recovered.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut counted = ChargeIndex::default();
         for (key, record) in removals.get_all().await? {
-            counted.add(&record);
+            {
+                let mut accounting = index.accounting.lock();
+                for (principal, at) in record.items() {
+                    accounting.charge(principal, at);
+                }
+            }
             let Some(held) = elements.get(&key).await? else {
                 continue;
             };
@@ -373,7 +383,6 @@ impl CarrierStore<'_> {
                 elements.put(&key, &element_side(&normalized)).await?;
             }
         }
-        *charges = counted;
         index.recovered.store(true, Ordering::Release);
         Ok(())
     }
@@ -394,8 +403,9 @@ impl CarrierStore<'_> {
         }
     }
 
-    /// Store `value`, normalized, at `key` at `now_ms`, charging what it raises to `charge`
-    /// (the write order, shares and lock law of the module documentation).
+    /// Store `value`, normalized, at `key` at `now_ms`, charging what it raises to `introducer`,
+    /// the principal that delivered it (the write order, shares and lock law of the module
+    /// documentation).
     ///
     /// Pre: the caller holds the storage transition, which orders the writes to one key.
     /// Post: on `Err(RemovalCapacityExhausted)` nothing changed.
@@ -403,7 +413,7 @@ impl CarrierStore<'_> {
         &self,
         key: &str,
         value: &Entry,
-        charge: RemovalCharge,
+        introducer: Principal,
         now_ms: u128,
     ) -> Result<()> {
         let (elements, removals, index) = match self {
@@ -416,22 +426,21 @@ impl CarrierStore<'_> {
         };
         Self::ensure_recovered(elements, removals, index).await?;
         let previous = removals.get(key).await?;
-        let (next, raised) = RemovalRecord::of(value, previous.as_ref(), charge);
+        let next = RemovalRecord::of(value, previous.as_ref(), introducer);
         if next != previous {
-            let mut charges = index.charges.lock().await;
-            if raised {
-                charges.admit(previous.as_ref(), next.as_ref(), charge, now_ms)?;
+            let _writes = index.writes.lock().await;
+            let changes = ItemChanges::of(previous.as_ref(), next.as_ref(), now_ms);
+            changes.apply(&mut index.accounting.lock(), now_ms)?;
+            let written = match &next {
+                Some(record) => removals.put(key, record).await,
+                None => removals.remove(key).await,
+            };
+            if written.is_err() {
+                // The store still holds `previous`, or a value the next start's recovery pass
+                // counts afresh.
+                changes.revert(&mut index.accounting.lock());
             }
-            match &next {
-                Some(record) => removals.put(key, record).await?,
-                None => removals.remove(key).await?,
-            }
-            if let Some(record) = &previous {
-                charges.subtract(record);
-            }
-            if let Some(record) = &next {
-                charges.add(record);
-            }
+            written?;
         }
         elements.put(key, &element_side(value)).await
     }
@@ -450,9 +459,12 @@ impl CarrierStore<'_> {
                 Self::ensure_recovered(elements, removals, index).await?;
                 elements.remove(key).await?;
                 if let Some(record) = removals.get(key).await? {
-                    let mut charges = index.charges.lock().await;
+                    let _writes = index.writes.lock().await;
                     removals.remove(key).await?;
-                    charges.subtract(&record);
+                    let mut accounting = index.accounting.lock();
+                    for (principal, at) in record.items() {
+                        accounting.discharge(principal, at);
+                    }
                 }
                 Ok(())
             }

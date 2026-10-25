@@ -22,6 +22,7 @@ use crate::message::handlers::relay_replica::ask_owner;
 use crate::message::handlers::relay_replica::forward;
 use crate::message::handlers::relay_replica::replicate_taken_hold;
 use crate::message::handlers::relay_replica::resume_relay_replications;
+use crate::message::handlers::HandlerContext;
 use crate::message::types::AnnounceRelayHolder;
 use crate::message::types::DeclareRelayCustody;
 use crate::message::types::FetchRelayInbox;
@@ -34,7 +35,6 @@ use crate::message::types::RelayInboxReport;
 use crate::message::types::ReplicateRelayHold;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
-use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::RelayHoldDigest;
 use crate::swarm::inbox::SwarmInboxDelivery;
@@ -46,7 +46,8 @@ impl HandleMsg<AnnounceRelayHolder> for MessageHandler {
     /// Take the previous holders the authenticated origin passed, iff it is this node's
     /// predecessor. A record this node does not take is ignored: the predecessor passes it again
     /// on its next repair pass.
-    async fn handle(&self, ctx: &MessagePayload, msg: &AnnounceRelayHolder) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &AnnounceRelayHolder) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
@@ -79,7 +80,8 @@ impl HandleMsg<FetchRelayInbox> for MessageHandler {
     /// Report the live inbox of the authenticated origin to it, iff this node is a member of its
     /// inbox key under its own view (#777); otherwise the fetch is refused with
     /// `RelayCarrierNotHeldHere`.
-    async fn handle(&self, ctx: &MessagePayload, _: &FetchRelayInbox) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, _: &FetchRelayInbox) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
@@ -106,7 +108,8 @@ impl HandleMsg<FetchRelayInbox> for MessageHandler {
 impl HandleMsg<RelayInboxReport> for MessageHandler {
     /// Drain the inbox the authenticated origin reported, iff it is a member of this node's inbox
     /// key under this node's own view (see `SwarmInboxDelivery::deliver_fetched`).
-    async fn handle(&self, ctx: &MessagePayload, msg: &RelayInboxReport) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &RelayInboxReport) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
@@ -125,7 +128,8 @@ impl HandleMsg<RelayCarrierHeld> for MessageHandler {
     /// node the hold came from (`Law (Chain replication)`); otherwise stop keeping a hold this
     /// node wrote, iff the node it was last sent to acknowledges it. An acknowledgement from any
     /// other node, or of a hold this node neither forwards nor keeps, changes nothing.
-    async fn handle(&self, ctx: &MessagePayload, msg: &RelayCarrierHeld) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &RelayCarrierHeld) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
@@ -159,7 +163,8 @@ impl HandleMsg<ReplicateRelayHold> for MessageHandler {
     /// names a hold this node forwards already; for any other, the origin is asked for the bytes
     /// (`RelayCarrierRefused`). The hold is judged as a relocated carrier is, as of its hold
     /// instant, since the holder judged its freshness when it took it.
-    async fn handle(&self, ctx: &MessagePayload, msg: &ReplicateRelayHold) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &ReplicateRelayHold) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
@@ -200,7 +205,7 @@ impl HandleMsg<ReplicateRelayHold> for MessageHandler {
                 .clone()
                 .validate_admissible_at(now_ms, self.transport.network_id)?;
             self.dht
-                .join_admitted_storage_entry(now_ms, entry.did, admitted, sender)
+                .join_admitted_storage_entry(now_ms, entry.did, admitted, context.introducer())
                 .await?;
         }
         if replicate_taken_hold(&self.transport, &hold, sender).await? {
@@ -222,7 +227,8 @@ impl HandleMsg<RelayCarrierRefused> for MessageHandler {
     /// node it was last sent to refuses, iff this node's view now names another holder; the next
     /// repair pass sends it again besides. A refusal of a hold this node neither forwards nor
     /// keeps, or from another node, changes nothing.
-    async fn handle(&self, ctx: &MessagePayload, msg: &RelayCarrierRefused) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &RelayCarrierRefused) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
@@ -250,7 +256,8 @@ impl HandleMsg<RelayCarrierRefused> for MessageHandler {
 impl HandleMsg<FindRelayHolder> for MessageHandler {
     /// Answer with the holder of `msg.key` as this node's view names it, when this node owns the
     /// key (`Law (Owner places)`); otherwise route the query on toward the owner, as a lookup is.
-    async fn handle(&self, ctx: &MessagePayload, msg: &FindRelayHolder) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &FindRelayHolder) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
@@ -295,7 +302,8 @@ impl HandleMsg<RelayHolderFound> for MessageHandler {
     /// keeper's hint, and ask for a repair pass, which offers the carrier there, only when that
     /// hint changed. An answer nobody asked for, a second answer, or a wrong one costs no pass and
     /// moves nothing.
-    async fn handle(&self, ctx: &MessagePayload, msg: &RelayHolderFound) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &RelayHolderFound) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
@@ -323,7 +331,8 @@ impl HandleMsg<RelayHolderFound> for MessageHandler {
 impl HandleMsg<DeclareRelayCustody> for MessageHandler {
     /// Record the declaration the authenticated origin made after its handshake (`Law (Age
     /// gate)`), as its handshake's declaration is recorded.
-    async fn handle(&self, ctx: &MessagePayload, msg: &DeclareRelayCustody) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &DeclareRelayCustody) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])

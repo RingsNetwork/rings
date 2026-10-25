@@ -6,8 +6,10 @@ use super::test_storage::Hooked;
 use super::test_storage::StorageHooks;
 use super::*;
 use crate::message::MessageCategory;
+use crate::message::OriginQuotaInstant;
 use crate::message::OriginQuotaLaneConfig;
 use crate::storage::MemStorage;
+use crate::utils::get_epoch_ms;
 
 const ONE_SECOND: u128 = 1_000_000_000;
 
@@ -35,10 +37,18 @@ fn quota_config_with_capacity(message_burst: u64, max_records: usize) -> OriginQ
 }
 
 fn runtime(message_burst: u64) -> Arc<TransactionReplay> {
-    Arc::new(TransactionReplay::new_with_quota(
+    Arc::new(TransactionReplay::with_quota_for_test(
         Some(Box::new(MemStorage::<ReplayRecord>::new())),
         quota_config(message_burst),
     ))
+}
+
+/// An application admission of `key` at `sequence` costing one byte, introduced by this node.
+fn costing_one(key: StreamKey, sequence: u64, digest: TransactionDigest) -> Admission {
+    Admission {
+        byte_cost: 1,
+        ..Admission::for_test(key, sequence, digest, get_epoch_ms())
+    }
 }
 
 async fn admit_at(
@@ -49,14 +59,9 @@ async fn admit_at(
     now: u128,
 ) -> Result<SequenceVerdict> {
     runtime
-        .admit_at(
-            key,
-            sequence,
-            digest,
-            MessageCategory::Application.into(),
-            1,
-            move || OriginQuotaInstant::from_nanos(now),
-        )
+        .admit_at(costing_one(key, sequence, digest), move || {
+            ReplayInstant::quota_at(OriginQuotaInstant::from_nanos(now))
+        })
         .await
 }
 
@@ -137,7 +142,7 @@ async fn quota_rejection_does_not_advance_replay_and_retry_can_commit() -> Resul
 
 #[tokio::test]
 async fn capacity_rejection_preserves_replay_until_an_idle_slot_is_safe() -> Result<()> {
-    let runtime = Arc::new(TransactionReplay::new_with_quota(
+    let runtime = Arc::new(TransactionReplay::with_quota_for_test(
         Some(Box::new(MemStorage::<ReplayRecord>::new())),
         quota_config_with_capacity(1, 1),
     ));
@@ -208,7 +213,7 @@ impl StorageHooks for FailFirstPut {
 
 #[tokio::test]
 async fn replay_persistence_failure_rolls_back_provisional_quota() -> Result<()> {
-    let runtime = Arc::new(TransactionReplay::new_with_quota(
+    let runtime = Arc::new(TransactionReplay::with_quota_for_test(
         Some(Box::new(Hooked::new(FailFirstPut(AtomicBool::new(true))))),
         quota_config(1),
     ));
@@ -244,14 +249,13 @@ async fn test_quota_clock_is_read_under_the_admission_lock() -> Result<()> {
             let mut readings = readings.lock().expect("test clock lock");
             let tick = readings.len() as u128;
             readings.push(label);
-            OriginQuotaInstant::from_nanos(tick * ONE_SECOND)
+            ReplayInstant::quota_at(OriginQuotaInstant::from_nanos(tick * ONE_SECOND))
         }
     };
-    let charge = || MessageCategory::Application.into();
 
     let held = runtime.state.lock().await;
-    let mut first = std::pin::pin!(runtime.admit_at(key, 0, digest(1), charge(), 1, clock("A")));
-    let mut second = std::pin::pin!(runtime.admit_at(key, 1, digest(2), charge(), 1, clock("B")));
+    let mut first = std::pin::pin!(runtime.admit_at(costing_one(key, 0, digest(1)), clock("A")));
+    let mut second = std::pin::pin!(runtime.admit_at(costing_one(key, 1, digest(2)), clock("B")));
     assert!(futures::poll!(first.as_mut()).is_pending());
     assert!(futures::poll!(second.as_mut()).is_pending());
     assert!(readings.lock().expect("test clock lock").is_empty());

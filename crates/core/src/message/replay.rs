@@ -44,7 +44,7 @@
 //! ∀ transition t of s.   t = Err(TransactionReplayStreamUnavailable { s, record })
 //!                        until the record is cleared and the node restarts
 //! ∀ s′ ≠ s restored.     state(s′) and the verdicts of s′ are those of a store without s
-//! ∀ s′ new.              s′ opens iff its table's streams + |U| < capacity
+//! ∀ s′ new.              s′ opens only if its table's streams + |U| < capacity
 //! cost(restore) = O(|store|), once;  cost(call) = 0 store reads + at most 1 record in a batch
 //! ```
 //!
@@ -74,13 +74,30 @@
 //! [`TransactionForkEvidence`] against this node, inside it; the messages they carry are lost.
 //! No other stream is touched.
 //!
-//! Sender and receiver tables each have a hard stream-count bound and never evict: once the
-//! bound is reached, a new stream fails closed. Existing stream records remain durable until an
-//! operator explicitly removes the replay store, which must therefore hold
-//! [`TRANSACTION_REPLAY_STORE_MAX_BYTES`] and [`TRANSACTION_REPLAY_STORE_MAX_RECORDS`] without
-//! evicting any. Deleting that store deletes the corresponding replay guarantee. Runtime-local
-//! origin quota state shares the serialized receiver commit boundary but is not part of the
-//! store.
+//! **Law (stream admission, #907; load-bounds paper, Law 2).** The receiver table is a table
+//! under slot accounting (`fair_admission::slot_accounting`): a new stream is charged to the
+//! connection slot of the edge that delivered its first transaction, or to this node for its own
+//! relay inbox and
+//! signaling, and admitted only within that principal's floor, fair claim of the pool, or local
+//! share ([`admission::RECEIVER_STREAM_SHARES`]); an origin, which costs nothing to mint, is never
+//! a principal. A stream is spent once its every transaction can no longer be delivered
+//! ([`spent_at`]):
+//!
+//! ```text
+//! spent(s, t) ⟺ t ≥ max_{x ∈ s} (ts(x) + ttl(x)) + ι(class(s)) + σ
+//! ```
+//!
+//! and only a spent stream that holds no relay custody leaves the table, retired by the next
+//! admission that reads the clock past it; forgetting it reopens no replay (Lemma 2), so a
+//! refusal lasts until a stream of the refused principal is spent, never for good. Each
+//! receiver record carries its stream's charge, so a restart recovers the accounting.
+//!
+//! The sender table holds this node's own streams: it never evicts, and a new stream fails
+//! closed at [`TRANSACTION_REPLAY_STREAM_CAPACITY`], which also bounds the receiver table. The
+//! store must therefore hold [`TRANSACTION_REPLAY_STORE_MAX_BYTES`] and
+//! [`TRANSACTION_REPLAY_STORE_MAX_RECORDS`] without evicting any. Deleting that store deletes
+//! the corresponding replay guarantee. Runtime-local origin quota state shares the serialized
+//! receiver commit boundary but is not part of the store.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -98,6 +115,8 @@ use serde::Serialize;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::Principal;
+use crate::fair_admission::TableAccounting;
 use crate::message::quota::quota_admission_error;
 use crate::message::quota::OriginQuotaCounterState;
 use crate::message::quota::OriginQuotaTable;
@@ -105,29 +124,34 @@ use crate::message::types::MessageCategory;
 use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaConfig;
 use crate::message::OriginQuotaCounters;
-use crate::message::OriginQuotaInstant;
 use crate::message::OriginQuotaKey;
 use crate::storage::KvStorageScan;
 use crate::swarm::transport::DELIVERY_BOUND;
 use crate::utils::Instant;
 
+mod admission;
 mod commit;
 mod custody;
 mod lease;
 mod store;
 
+use self::admission::replay_clock;
+pub(crate) use self::admission::spent_at;
+pub(crate) use self::admission::Admission;
+use self::admission::ReplayInstant;
+pub(crate) use self::admission::RECEIVER_STREAM_SHARES;
 use self::commit::Journal;
 use self::commit::Ledger;
 pub(crate) use self::custody::RelayAdmission;
 pub(crate) use self::custody::RelayDelivery;
 use self::lease::allocate;
-use self::store::receiver_record;
 use self::store::restore;
 use self::store::sender_record;
 pub use self::store::ReplayRecord;
 use self::store::ReplayStore;
 use self::store::ReplayTable;
 use self::store::RestoreFailure;
+use self::store::StreamCharge;
 pub use self::store::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
 pub use self::store::TRANSACTION_REPLAY_STORE_MAX_BYTES;
 pub use self::store::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
@@ -388,17 +412,6 @@ where
         .map_err(Error::TransactionReplayUnscheduled)?
 }
 
-/// The runtime-local quota clock: monotonic time elapsed since `started_at`, read when called.
-fn quota_clock(started_at: Instant) -> impl FnOnce() -> OriginQuotaInstant {
-    move || {
-        OriginQuotaInstant::from_nanos(
-            Instant::now()
-                .saturating_duration_since(started_at)
-                .as_nanos(),
-        )
-    }
-}
-
 /// `storage`'s record naming, under which it files each record and reports the records it cannot
 /// decode.
 fn record_naming(storage: &ReplayStorage) -> impl Fn(&str) -> String + '_ {
@@ -490,24 +503,12 @@ pub(crate) struct TransactionReplay {
     /// refused (`Error::TransactionReplayStorageUnavailable`, #1022): durable-records admits no
     /// volatile replay store, whose loss at every restart would reopen every stream.
     storage: Option<ReplayStorage>,
+    /// The receiver table's slot accounting (load-bounds paper, Law 2).
+    accounting: TableAccounting,
     state: Mutex<TransactionAdmissionState>,
     started_at: Instant,
     counters: ReplayCounterState,
     quota_counters: OriginQuotaCounterState,
-}
-
-/// One transaction presented for admission at its destination.
-struct Admission {
-    /// Its stream.
-    key: StreamKey,
-    /// Its sequence in the stream.
-    sequence: u64,
-    /// Its digest.
-    digest: TransactionDigest,
-    /// The quota charge of its class.
-    charge: OriginQuotaCharge,
-    /// Its byte cost against the origin's quota.
-    byte_cost: usize,
 }
 
 struct TransactionAdmissionState {
@@ -525,20 +526,34 @@ impl TransactionReplay {
     /// lazily on its first operation.
     #[cfg(test)]
     pub(crate) fn new_shared(storage: ReplayStorage) -> Arc<Self> {
-        Arc::new(Self::new_with_quota(
+        Arc::new(Self::with_quota_for_test(
             Some(storage),
             OriginQuotaConfig::default(),
         ))
     }
 
-    /// Construct a replay runtime over `storage` with explicit runtime-local origin quotas; with
-    /// no storage, every reservation and admission is refused (the field's law).
-    pub(crate) fn new_with_quota(
+    /// Test builds: a replay runtime over `storage` with `quota_config` and the production
+    /// shares.
+    #[cfg(test)]
+    pub(crate) fn with_quota_for_test(
         storage: Option<ReplayStorage>,
         quota_config: OriginQuotaConfig,
     ) -> Self {
+        let accounting = TableAccounting::new(RECEIVER_STREAM_SHARES);
+        Self::new_with_quota(storage, quota_config, accounting)
+    }
+
+    /// Construct a replay runtime over `storage` with explicit runtime-local origin quotas,
+    /// whose receiver table is accounted in `accounting`; with no storage, every reservation and
+    /// admission is refused (the field's law).
+    pub(crate) fn new_with_quota(
+        storage: Option<ReplayStorage>,
+        quota_config: OriginQuotaConfig,
+        accounting: TableAccounting,
+    ) -> Self {
         Self {
             storage,
+            accounting,
             state: Mutex::new(TransactionAdmissionState {
                 store: None,
                 quota: OriginQuotaTable::new(quota_config),
@@ -573,7 +588,7 @@ impl TransactionReplay {
     /// no storage ──────────▶ Err(TransactionReplayStorageUnavailable)
     /// scan storage ── Err ──▶ count persistence failure ──▶ Err(load) (slot stays empty)
     ///      │ Ok(records)
-    /// restore (pure, total) ──▶ count + log unrestorable ──▶ slot := store ──▶ slot
+    /// restore (pure, total) ──▶ count + log unrestorable ──▶ charge streams ──▶ slot := store
     /// ```
     async fn load_store<'a>(
         &self,
@@ -590,6 +605,7 @@ impl TransactionReplay {
             })?;
             let restored = restore(records, record_naming(storage));
             self.report_unrestorable(&restored.unrestorable);
+            restored.tables.charge_all(&mut self.accounting.lock());
             *slot = Some(restored);
         }
         slot.as_mut().ok_or(Error::TransactionReplayStateInvalid)
@@ -675,10 +691,14 @@ impl TransactionReplay {
     ) -> Result<RangeInclusive<u64>> {
         self.refuse_unavailable(ledger.store, ReplayTable::Sender, key)?;
         let previous = ledger.store.tables.sender.get(&key).copied();
-        if previous.is_none() && !ledger.store.admits_new_stream(ReplayTable::Sender) {
-            return Err(Error::TransactionReplayStreamCapacityExceeded {
-                capacity: TRANSACTION_REPLAY_STREAM_CAPACITY,
-            });
+        if previous.is_none() {
+            ledger
+                .store
+                .admits_new_stream(ReplayTable::Sender)
+                .map_err(|refusal| Error::TransactionReplayStreamCapacityExceeded {
+                    introducer: Principal::Local,
+                    refusal,
+                })?;
         }
         let allocation =
             allocate(previous, count).ok_or(Error::TransactionSequenceExhausted { key })?;
@@ -695,19 +715,15 @@ impl TransactionReplay {
     /// the caller abandons only the wait.
     pub(crate) async fn admit_with_quota(
         self: &Arc<Self>,
-        key: StreamKey,
-        sequence: u64,
-        digest: TransactionDigest,
-        charge: OriginQuotaCharge,
-        byte_cost: usize,
+        admission: Admission,
     ) -> Result<SequenceVerdict> {
-        let clock = quota_clock(self.started_at);
-        self.admit_at(key, sequence, digest, charge, byte_cost, clock)
-            .await
+        let clock = replay_clock(self.started_at);
+        self.admit_at(admission, clock).await
     }
 
-    /// The admission transition: classify, read the quota clock, reserve quota, stage the
-    /// stream's record, then update the table, as one transition (the group-commit law).
+    /// The admission transition: read the clock, retire the spent streams, classify, reserve
+    /// quota, update the table and stage the stream's record, as one transition (the
+    /// group-commit law).
     ///
     /// Law (Clock under the lock): `clock` is read only inside the critical section of
     /// `state`, so the instants the quota table receives follow the order in which
@@ -717,31 +733,29 @@ impl TransactionReplay {
     /// first (#953).
     async fn admit_at<C>(
         self: &Arc<Self>,
-        key: StreamKey,
-        sequence: u64,
-        digest: TransactionDigest,
-        charge: OriginQuotaCharge,
-        byte_cost: usize,
+        admission: Admission,
         clock: C,
     ) -> Result<SequenceVerdict>
     where
-        C: FnOnce() -> OriginQuotaInstant + rings_runtime::MaybeSend + 'static,
+        C: FnOnce() -> ReplayInstant + rings_runtime::MaybeSend + 'static,
     {
-        let admission = Admission {
-            key,
-            sequence,
-            digest,
-            charge,
-            byte_cost,
-        };
         self.commit(move |replay, ledger| replay.admit_in(ledger, admission, clock, None))
             .await
     }
 
-    /// The admission transition on the speculative state: classify, read the quota clock,
-    /// reserve quota, stage the stream's record, then update the table. A `relayed` delivery
-    /// enters the stream's custody in the same record (the custody law of `custody`); a live one
-    /// leaves the custody as it is.
+    /// The admission transition on the speculative state (load-bounds paper, Law 2). A
+    /// `relayed` delivery enters the stream's custody in the same record (the custody law of
+    /// `custody`); a live one leaves the custody as it is.
+    ///
+    /// ```text
+    /// now := clock();  retire every stream spent at now.wall
+    /// s ∉ table ── table full ─────────────────────▶ Err(StreamCapacityExceeded { λ/π, TableFull })
+    ///          └── accounting refuses π ───────────▶ Err(StreamCapacityExceeded { π, refusal })
+    /// observe(window(s)) ── Replay/Fork/Stale ─────▶ Err(…)
+    /// quota(origin) ── refused ────────────────────▶ Err(quota)
+    /// window(s) := next;  custody(s) += relayed;  charge(s) := (π(s), max(spent_at))
+    /// stage record(s) ──▶ Ok(verdict)
+    /// ```
     fn admit_in<C>(
         &self,
         ledger: &mut Ledger<'_>,
@@ -750,7 +764,7 @@ impl TransactionReplay {
         relayed: Option<RelayDelivery>,
     ) -> Result<SequenceVerdict>
     where
-        C: FnOnce() -> OriginQuotaInstant,
+        C: FnOnce() -> ReplayInstant,
     {
         let Admission {
             key,
@@ -758,36 +772,36 @@ impl TransactionReplay {
             digest,
             charge,
             byte_cost,
+            introducer,
+            spent_at_ms,
         } = admission;
+        let now = clock();
+        ledger.retire_spent(now.wall_ms)?;
         self.refuse_unavailable(ledger.store, ReplayTable::Receiver, key)?;
         let previous = ledger.store.tables.receiver.get(&key);
-        if previous.is_none() && !ledger.store.admits_new_stream(ReplayTable::Receiver) {
-            return Err(Error::TransactionReplayStreamCapacityExceeded {
-                capacity: TRANSACTION_REPLAY_STREAM_CAPACITY,
-            });
+        if previous.is_none() {
+            ledger
+                .store
+                .admits_new_stream(ReplayTable::Receiver)
+                .and_then(|()| ledger.accounting.lock().admit(introducer))
+                .map_err(|refusal| Error::TransactionReplayStreamCapacityExceeded {
+                    introducer,
+                    refusal,
+                })?;
         }
         let (next, verdict) = observe(previous.cloned(), sequence, digest);
         self.refuse_rejected(key, sequence, verdict)?;
 
-        let mut custody = ledger
-            .store
-            .tables
-            .custody
-            .get(&key)
-            .cloned()
-            .unwrap_or_default();
-        let entered = relayed.is_some();
-        custody.extend(relayed);
-        let record = receiver_record(&key, &next, &custody)?;
         let quota_key = OriginQuotaKey::new(
             key.network_id,
             key.origin_account,
             key.destination,
             charge.lane,
         );
-        let reservation = ledger
-            .quota
-            .reserve(quota_key, charge.message_limit, byte_cost, clock());
+        let reservation =
+            ledger
+                .quota
+                .reserve(quota_key, charge.message_limit, byte_cost, now.quota);
         match reservation {
             Ok(reservation) => ledger.charged(reservation),
             Err(error) => {
@@ -795,11 +809,27 @@ impl TransactionReplay {
                 return Err(quota_admission_error(quota_key, byte_cost, error));
             }
         }
-        ledger.write(record);
         ledger.set_receiver(key, next);
-        if entered {
+        if relayed.is_some() {
+            let mut custody = ledger
+                .store
+                .tables
+                .custody
+                .get(&key)
+                .cloned()
+                .unwrap_or_default();
+            custody.extend(relayed);
             ledger.set_custody(key, custody);
         }
+        let held = ledger.store.tables.charge(&key);
+        let stream_charge = StreamCharge {
+            introducer: held.map_or(introducer, |held| held.introducer),
+            spent_at_ms: held.map_or(spent_at_ms, |held| held.spent_at_ms.max(spent_at_ms)),
+        };
+        if held != Some(stream_charge) {
+            ledger.set_charge(key, stream_charge);
+        }
+        ledger.write(ledger.store.tables.receiver_record(&key)?);
         Ok(verdict)
     }
 
@@ -854,7 +884,7 @@ impl TransactionReplay {
         charge: OriginQuotaCharge,
         byte_cost: usize,
     ) -> Result<SequenceVerdict> {
-        let clock = quota_clock(self.started_at);
+        let clock = replay_clock(self.started_at);
         let mut state = self.state.lock().await;
         let TransactionAdmissionState { quota, journal, .. } = &mut *state;
         let (next, verdict) = observe(window.clone(), sequence, digest);
@@ -866,7 +896,7 @@ impl TransactionReplay {
             charge.lane,
         );
         let reservation = quota
-            .reserve(quota_key, charge.message_limit, byte_cost, clock())
+            .reserve(quota_key, charge.message_limit, byte_cost, clock().quota)
             .map_err(|error| {
                 self.quota_counters.record(charge.lane, &error);
                 quota_admission_error(quota_key, byte_cost, error)
@@ -876,6 +906,8 @@ impl TransactionReplay {
         Ok(verdict)
     }
 
+    /// Test builds: admit `sequence` and `digest` of stream `key`, introduced by this node,
+    /// at quota instant zero and at the wall clock now.
     #[cfg(test)]
     async fn admit(
         self: &Arc<Self>,
@@ -883,14 +915,12 @@ impl TransactionReplay {
         sequence: u64,
         digest: TransactionDigest,
     ) -> Result<SequenceVerdict> {
-        self.admit_at(
-            key,
-            sequence,
-            digest,
-            crate::message::MessageCategory::Application.into(),
-            0,
-            || OriginQuotaInstant::ZERO,
-        )
+        let now_ms = crate::utils::get_epoch_ms();
+        let admission = Admission::for_test(key, sequence, digest, now_ms);
+        self.admit_at(admission, move || ReplayInstant {
+            quota: crate::message::OriginQuotaInstant::ZERO,
+            wall_ms: now_ms,
+        })
         .await
     }
 
@@ -923,6 +953,8 @@ mod test_group_commit;
 mod test_lease;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_load_failures;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_slot_accounting;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_storage;
 #[cfg(all(test, not(target_family = "wasm")))]

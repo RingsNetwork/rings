@@ -28,7 +28,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use rings_transport::core::pool::ChannelLane;
 
-use super::logical::edge_relation;
+use super::logical::Arrival;
 use super::InboundFrameLease;
 use super::InboundProcessor;
 use super::LogicalInbound;
@@ -38,6 +38,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::measure::Authentication;
 use crate::message::MessagePayload;
+use crate::message::Principal;
 use crate::swarm::application::Delivered;
 use crate::swarm::detached::spawn_detached;
 use crate::utils::try_sleep;
@@ -282,9 +283,12 @@ impl InboundMailbox {
                 finish_completion(completion, Ok(()));
                 return Ok(());
             }
-            let edge = edge_relation(peer, authentication, &prepared.payload);
+            let arrival = Arrival {
+                peer,
+                authentication,
+            };
             processor
-                .admit_final_transaction(&prepared.payload, &prepared.message, lane, edge)
+                .admit_final_transaction(&prepared.payload, &prepared.message, lane, arrival)
                 .await?;
         }
         // Capacity before the ticket: an arrival waiting for capacity holds no sequence, so
@@ -786,8 +790,18 @@ async fn process_event(
     }
 
     processor.logical.pass_tapped_lane(lane).await;
-    let result =
-        process_logical_message(&processor.logical, &event.payload, event.prepared_message).await;
+    let introducer = Arrival {
+        peer: event.peer,
+        authentication: event.authentication,
+    }
+    .introducer(processor.logical.transport.dht.edges());
+    let result = process_logical_message(
+        &processor.logical,
+        &event.payload,
+        introducer,
+        event.prepared_message,
+    )
+    .await;
     finish_completion(event.completion, result);
     InboundTaskCompletion {
         lane,
@@ -796,16 +810,20 @@ async fn process_event(
     }
 }
 
-/// Dispatch `payload`, then hand its application data, if any, to the application inbox:
+/// Dispatch `payload`, delivered by `introducer`, then hand its application data, if any, to the
+/// application inbox:
 /// queued or, when full, dropped, counted and logged by the inbox, and told as
 /// [`SwarmEvent::MessageDropped`](crate::swarm::application::SwarmEvent::MessageDropped) when it
 /// came from an admitted peer (#969). Never waits on the application.
 async fn process_logical_message(
     pipeline: &LogicalInbound,
     payload: &MessagePayload,
+    introducer: Principal,
     prepared_message: Option<crate::message::Message>,
 ) -> Result<()> {
-    let message = pipeline.handle_payload(payload, prepared_message).await?;
+    let message = pipeline
+        .handle_payload(payload, introducer, prepared_message)
+        .await?;
     if let Some(application) = pipeline.application_message(payload, message) {
         let from = application.from;
         if pipeline.transport.application().outlet.deliver(application) == Delivered::Dropped {

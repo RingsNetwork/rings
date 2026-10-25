@@ -61,13 +61,17 @@ use futures::channel::oneshot;
 
 use super::custody::RelayCustody;
 use super::lease::SenderLease;
+use super::store::record_key;
 use super::store::ReplayStore;
+use super::store::ReplayTable;
+use super::store::StreamCharge;
 use super::ReplayRecord;
 use super::SequenceState;
 use super::StreamKey;
 use super::TransactionReplay;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::TableAccounting;
 use crate::message::quota::OriginQuotaReservation;
 use crate::message::quota::OriginQuotaTable;
 
@@ -80,13 +84,30 @@ enum Undo {
     Receiver(StreamKey, Option<Box<SequenceState>>),
     /// Restore a receiver stream's custody (`None`: it held none).
     Custody(StreamKey, Option<RelayCustody>),
+    /// Restore a receiver stream's charge (`None`: it had none), with its accounting.
+    Charge(StreamKey, Option<StreamCharge>),
     /// Roll back an origin-quota reservation.
     Quota(OriginQuotaReservation),
 }
 
+/// The state an undo acts on: the speculative tables, the quotas and the receiver accounting.
+struct Speculative<'a> {
+    /// The speculative tables.
+    store: &'a mut ReplayStore,
+    /// The runtime-local origin quotas.
+    quota: &'a mut OriginQuotaTable,
+    /// The receiver table's edge accounting.
+    accounting: &'a TableAccounting,
+}
+
 impl Undo {
-    /// Undo the effect on `store` and `quota`.
-    fn apply(self, store: &mut ReplayStore, quota: &mut OriginQuotaTable) {
+    /// Undo the effect on `state`.
+    fn apply(self, state: &mut Speculative<'_>) {
+        let Speculative {
+            store,
+            quota,
+            accounting,
+        } = state;
         match self {
             Self::Sender(key, previous) => restore(&mut store.tables.sender, key, previous),
             Self::Receiver(key, previous) => restore(
@@ -95,6 +116,11 @@ impl Undo {
                 previous.map(|window| *window),
             ),
             Self::Custody(key, previous) => restore(&mut store.tables.custody, key, previous),
+            Self::Charge(key, previous) => {
+                store
+                    .tables
+                    .set_charge(key, previous, &mut accounting.lock());
+            }
             Self::Quota(reservation) => reservation.rollback(quota),
         }
     }
@@ -112,10 +138,10 @@ fn restore<V>(table: &mut BTreeMap<StreamKey, V>, key: StreamKey, previous: Opti
     }
 }
 
-/// Undo `log` on `store` and `quota`, last entry first.
-fn rewind(log: Vec<Undo>, store: &mut ReplayStore, quota: &mut OriginQuotaTable) {
+/// Undo `log` on `state`, last entry first.
+fn rewind(log: Vec<Undo>, state: &mut Speculative<'_>) {
     for undo in log.into_iter().rev() {
-        undo.apply(store, quota);
+        undo.apply(state);
     }
 }
 
@@ -126,18 +152,27 @@ pub(super) struct Ledger<'a> {
     pub(super) store: &'a mut ReplayStore,
     /// The runtime-local origin quotas.
     pub(super) quota: &'a mut OriginQuotaTable,
+    /// The receiver table's edge accounting.
+    pub(super) accounting: &'a TableAccounting,
     /// The inverses of the changes made, in order.
     undo: Vec<Undo>,
-    /// The records to write, by storage key; a later record of one key supersedes an earlier.
-    records: BTreeMap<String, ReplayRecord>,
+    /// The records to write (`Some`) or remove (`None`), by storage key; a later change of one
+    /// key supersedes an earlier.
+    records: BTreeMap<String, Option<ReplayRecord>>,
 }
 
 impl<'a> Ledger<'a> {
-    /// A ledger over the speculative `store` and `quota` with nothing applied yet.
-    pub(super) fn new(store: &'a mut ReplayStore, quota: &'a mut OriginQuotaTable) -> Self {
+    /// A ledger over the speculative `store`, `quota` and `accounting` with nothing applied
+    /// yet.
+    pub(super) fn new(
+        store: &'a mut ReplayStore,
+        quota: &'a mut OriginQuotaTable,
+        accounting: &'a TableAccounting,
+    ) -> Self {
         Self {
             store,
             quota,
+            accounting,
             undo: Vec::new(),
             records: BTreeMap::new(),
         }
@@ -164,6 +199,32 @@ impl<'a> Ledger<'a> {
         self.undo.push(Undo::Custody(key, previous));
     }
 
+    /// Set receiver stream `key`'s charge to `charge`, with its accounting.
+    pub(super) fn set_charge(&mut self, key: StreamKey, charge: StreamCharge) {
+        let previous = self
+            .store
+            .tables
+            .set_charge(key, Some(charge), &mut self.accounting.lock());
+        self.undo.push(Undo::Charge(key, previous));
+    }
+
+    /// Retire every receiver stream spent at `now_ms` that holds no custody (Lemma 2): forget
+    /// its window and its charge, and stage the removal of its record.
+    pub(super) fn retire_spent(&mut self, now_ms: u128) -> Result<()> {
+        for key in self.store.tables.spent_streams(now_ms) {
+            let window = self.store.tables.receiver.remove(&key);
+            self.undo.push(Undo::Receiver(key, window.map(Box::new)));
+            let previous = self
+                .store
+                .tables
+                .set_charge(key, None, &mut self.accounting.lock());
+            self.undo.push(Undo::Charge(key, previous));
+            self.records
+                .insert(record_key(ReplayTable::Receiver, &key)?, None);
+        }
+        Ok(())
+    }
+
     /// Log the quota `reservation` already applied to `quota`.
     pub(super) fn charged(&mut self, reservation: OriginQuotaReservation) {
         self.undo.push(Undo::Quota(reservation));
@@ -171,13 +232,18 @@ impl<'a> Ledger<'a> {
 
     /// Stage the write of `record` under `storage_key`.
     pub(super) fn write(&mut self, (storage_key, record): (String, ReplayRecord)) {
-        self.records.insert(storage_key, record);
+        self.records.insert(storage_key, Some(record));
     }
 
     /// Undo every change made so far, last first, and drop the staged records: the effect of
     /// a body that refused.
     fn abandon(&mut self) {
-        rewind(std::mem::take(&mut self.undo), self.store, self.quota);
+        let mut state = Speculative {
+            store: self.store,
+            quota: self.quota,
+            accounting: self.accounting,
+        };
+        rewind(std::mem::take(&mut self.undo), &mut state);
         self.records.clear();
     }
 }
@@ -192,8 +258,8 @@ type Release = oneshot::Receiver<Result<()>>;
 struct Batch {
     /// The undo entries of every member, in lock order.
     undo: Vec<Undo>,
-    /// The records, by storage key, each the last its stream staged.
-    records: BTreeMap<String, ReplayRecord>,
+    /// The records to write or remove, by storage key, each the last its stream staged.
+    records: BTreeMap<String, Option<ReplayRecord>>,
     /// One waiter per member.
     waiters: Vec<oneshot::Sender<Result<()>>>,
 }
@@ -262,7 +328,7 @@ impl Journal {
 
     /// Take the open batch for writing: its records and waiters, its undo log kept in flight;
     /// `None`, ending the flusher, when no transition joined it.
-    fn take(&mut self) -> Option<(BTreeMap<String, ReplayRecord>, Batch)> {
+    fn take(&mut self) -> Option<(BTreeMap<String, Option<ReplayRecord>>, Batch)> {
         if self.open.waiters.is_empty() {
             // Only released charges can be logged here, and no batch lies beneath them now.
             self.open.undo.clear();
@@ -277,19 +343,14 @@ impl Journal {
     /// Settle the batch in flight: drop its undo log once durable; on a failure, undo the open
     /// batch and then the batch in flight (the fail-closed law) and return the open batch, whose
     /// members fail with it.
-    fn settle(
-        &mut self,
-        durable: bool,
-        store: &mut ReplayStore,
-        quota: &mut OriginQuotaTable,
-    ) -> Option<Batch> {
+    fn settle(&mut self, durable: bool, state: &mut Speculative<'_>) -> Option<Batch> {
         let in_flight = self.in_flight.replace(Vec::new()).unwrap_or_default();
         if durable {
             return None;
         }
         let mut open = std::mem::take(&mut self.open);
-        rewind(std::mem::take(&mut open.undo), store, quota);
-        rewind(in_flight, store, quota);
+        rewind(std::mem::take(&mut open.undo), state);
+        rewind(in_flight, state);
         Some(open)
     }
 }
@@ -313,7 +374,7 @@ impl TransactionReplay {
                 let mut state = replay.state.lock().await;
                 let state = &mut *state;
                 let store = replay.load_store(&mut state.store).await?;
-                let mut ledger = Ledger::new(store, &mut state.quota);
+                let mut ledger = Ledger::new(store, &mut state.quota, &replay.accounting);
                 let outcome = body(&replay, &mut ledger);
                 if outcome.is_err() {
                     ledger.abandon();
@@ -354,9 +415,14 @@ impl TransactionReplay {
                 let mut state = self.state.lock().await;
                 let state = &mut *state;
                 match state.store.as_mut() {
-                    Some(store) => state
-                        .journal
-                        .settle(written.is_ok(), store, &mut state.quota),
+                    Some(store) => {
+                        let mut speculative = Speculative {
+                            store,
+                            quota: &mut state.quota,
+                            accounting: &self.accounting,
+                        };
+                        state.journal.settle(written.is_ok(), &mut speculative)
+                    }
                     None => None,
                 }
             };
@@ -368,12 +434,26 @@ impl TransactionReplay {
         }
     }
 
-    /// Write `records` by one batch of the store; a failure is counted once.
-    async fn write_batch(&self, records: BTreeMap<String, ReplayRecord>) -> Result<()> {
-        let records = records.into_iter().collect::<Vec<_>>();
-        self.storage()?
-            .put_batch(&records)
-            .await
-            .inspect_err(|_| self.count_persistence_failure())
+    /// Remove the retired records, then write the others by one batch of the store; a failure
+    /// is counted once.
+    ///
+    /// A removal lands before the writes of its batch, so no crash leaves a new stream's record
+    /// beside a retired one it replaced, past the table's bound; a removal that lands while the
+    /// batch fails forgets a spent stream that memory still holds, which admits exactly what
+    /// the spent stream admits (Lemma 2).
+    async fn write_batch(&self, records: BTreeMap<String, Option<ReplayRecord>>) -> Result<()> {
+        let storage = self.storage()?;
+        let (mut writes, mut removals) = (Vec::new(), Vec::new());
+        for (key, record) in records {
+            match record {
+                Some(record) => writes.push((key, record)),
+                None => removals.push(key),
+            }
+        }
+        let written = match storage.remove_batch(&removals).await {
+            Ok(()) => storage.put_batch(&writes).await,
+            Err(error) => Err(error),
+        };
+        written.inspect_err(|_| self.count_persistence_failure())
     }
 }

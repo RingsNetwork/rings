@@ -518,3 +518,48 @@ fn test_an_element_held_ahead_of_a_stepped_back_clock_is_kept_for_a_later_pass()
     assert!(element.is_deliverable_at(now_ms, TEST_NETWORK_ID));
     Ok(())
 }
+
+/// The relay hold horizon (load-bounds paper, Def. 3): a held message retires
+/// `MAX_RELAY_INBOX_TTL_MS` after its hold instant. Every read projects it out of its carrier,
+/// which stays admissible, the other elements stay, and the recipient never delivers it.
+#[test]
+fn test_a_hold_past_the_relay_horizon_is_projected_out_and_never_delivered() -> Result<()> {
+    let holder = session()?;
+    let destination: Did = SecretKey::random().address().into();
+    let now_ms = get_epoch_ms();
+    let old = hold_at(
+        &holder,
+        custom_to(destination, TEST_NETWORK_ID)?,
+        TEST_NETWORK_ID,
+        now_ms,
+    )?;
+    let horizon_ms = now_ms + u128::from(MAX_RELAY_INBOX_TTL_MS);
+    assert!(!old.is_retired_at(horizon_ms - 1));
+    assert!(old.is_retired_at(horizon_ms));
+
+    let mut carrier = Entry::inbox_delta(&old)?.try_into_storage_entry()?;
+    let young = hold_at(
+        &holder,
+        custom_to(destination, TEST_NETWORK_ID)?,
+        TEST_NETWORK_ID,
+        now_ms + 1,
+    )?;
+    carrier = carrier.join(Entry::inbox_delta(&young)?)?;
+    assert_eq!(carrier.data.len(), 2);
+
+    let projected = carrier.clone().retired_at(horizon_ms);
+    assert_eq!(projected.data, vec![young.to_element()?]);
+    assert_eq!(projected.crdt.dots.len(), 1);
+    // The projection is identity before the horizon.
+    assert_eq!(carrier.clone().retired_at(horizon_ms - 1), carrier);
+
+    // Read whole, as a carrier fetched before the projection: only the young hold is delivered.
+    let deliverable = carrier
+        .stored_inbox_elements()
+        .into_iter()
+        .filter(|element| element.is_deliverable_at(horizon_ms, TEST_NETWORK_ID))
+        .map(|element| element.held)
+        .collect::<Vec<_>>();
+    assert_eq!(deliverable, vec![young]);
+    Ok(())
+}

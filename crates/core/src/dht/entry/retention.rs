@@ -100,8 +100,10 @@
 //!   `Tombstone` could cover, with a dot at most `σ` later, or covers nothing and costs what an
 //!   `Extend` and `Tombstone` of a fresh value cost (removal-stability paper, Lemma 4).
 //!
-//! A relay inbox has no horizon: it has no reset floor, its tombstones are capped, and a held
-//! message lives as long as its carrier (see the `inbox` module).
+//! A relay inbox has no dot horizon: it has no reset floor and its tombstones are capped. Its
+//! elements retire by the hold horizon instead: a held message retires `MAX_RELAY_INBOX_TTL_MS`
+//! after its signed hold instant, however long newer holds keep its carrier (#907; see the
+//! `inbox` module).
 //!
 //! Size: the payload predicate is element-intrinsic, so filtering by it commutes with union
 //! and the carrier stays a lattice; together with the count cap `kind.max_data_len()` and the
@@ -145,12 +147,13 @@ impl EntryKind {
         }
     }
 
-    /// The element horizon `H`: how long after its dot's issue time an add of this kind may be
-    /// held anywhere, or `None` for a kind whose removals are bounded otherwise.
+    /// The dot horizon `H`: how long after its dot's issue time an add of this kind may be held
+    /// anywhere, or `None` for a kind whose elements retire otherwise.
     ///
     /// A data element lives at most the longest retention one write may request, so writing a
-    /// value again (which issues a fresh dot) is what keeps it; a relay inbox has none (see the
-    /// module documentation).
+    /// value again (which issues a fresh dot) is what keeps it. A relay element has no dot
+    /// horizon: it retires by its signed hold instant instead, the hold horizon
+    /// `inbox::RELAY_HOLD_HORIZON_MS`, which a rewrite under a fresh dot cannot extend.
     pub const fn element_horizon_ms(self) -> Option<u64> {
         match self {
             EntryKind::Data => Some(self.max_lifetime_ms()),
@@ -231,12 +234,17 @@ impl Entry {
     ///
     /// Pre: `self` is normalized ([`Self::try_into_storage_entry`]), as every stored value, join
     /// result and operation result is; the projection is then a pure filter.
-    /// Post: identity for a kind without a horizon; for a kind with one, normalized, and
+    /// Post: for a relay carrier, every element past the hold horizon dropped
+    /// (`holds_retired_at`) and nothing else; for a data carrier, normalized, and
     /// identity, without copying or hashing, when nothing has crossed a threshold. The retention
     /// bound is unchanged.
     pub fn retired_at(self, now_ms: u128) -> Self {
         let retention = ElementRetention::of(self.kind);
-        self.retired_under(retention, now_ms)
+        let entry = self.retired_under(retention, now_ms);
+        match entry.kind {
+            EntryKind::Data => entry,
+            EntryKind::RelayMessage => entry.holds_retired_at(now_ms),
+        }
     }
 
     /// What a read serves at `now_ms`: the projection [`Self::retired_at`] when it is live

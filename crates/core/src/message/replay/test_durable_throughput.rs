@@ -16,6 +16,7 @@ use std::time::Instant;
 use futures::StreamExt;
 use futures::TryStreamExt;
 
+use super::Admission;
 use super::ReplayStorage;
 use super::StreamKey;
 use super::TransactionDigest;
@@ -27,6 +28,7 @@ use crate::storage::file::test_root::TempRoot;
 use crate::storage::file::FileStorage;
 use crate::storage::MemStorage;
 use crate::storage::RecordAuthority;
+use crate::utils::get_epoch_ms;
 
 /// Admissions measured per store.
 const ADMISSIONS: u32 = 512;
@@ -58,13 +60,12 @@ async fn admission_latencies(storage: ReplayStorage) -> Result<Vec<Duration>> {
     for origin in 0..ADMISSIONS {
         let started = Instant::now();
         replay
-            .admit_with_quota(
+            .admit_with_quota(Admission::for_test(
                 stream(origin),
                 0,
                 digest(origin),
-                MessageCategory::Application.into(),
-                0,
-            )
+                get_epoch_ms(),
+            ))
             .await?;
         latencies.push(started.elapsed());
     }
@@ -82,13 +83,12 @@ async fn concurrent_rate(storage: ReplayStorage) -> Result<f64> {
             let replay = std::sync::Arc::clone(&replay);
             async move {
                 replay
-                    .admit_with_quota(
+                    .admit_with_quota(Admission::for_test(
                         stream(origin),
                         0,
                         digest(origin),
-                        MessageCategory::Application.into(),
-                        0,
-                    )
+                        get_epoch_ms(),
+                    ))
                     .await
             }
         })

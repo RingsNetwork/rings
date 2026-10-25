@@ -6,11 +6,13 @@ use super::InboundLane;
 use super::LocalDelivery;
 use super::LogicalInbound;
 use crate::dht::Did;
+use crate::fair_admission::SlotRoster;
 use crate::measure::Authentication;
 use crate::message::with_message_variants;
 use crate::message::CustomMessage;
 use crate::message::EdgeRelation;
 use crate::message::HandleMsg;
+use crate::message::HandlerContext;
 use crate::message::LinkWindows;
 use crate::message::Message;
 use crate::message::MessageCategory;
@@ -18,6 +20,7 @@ use crate::message::MessageHandler;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::OriginQuotaCharge;
+use crate::message::Principal;
 use crate::message::RelayAdmission;
 use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationMessage;
@@ -65,7 +68,9 @@ impl LocalDelivery {
             // drain never comes here; the body is decoded again for its handler.
             pipeline.tap_inbound(payload);
             pipeline.admit_local_transaction(payload, lane).await?;
-            pipeline.handle_payload(payload, None).await?;
+            pipeline
+                .handle_payload(payload, Principal::Local, None)
+                .await?;
             return Ok(LocalDelivered::Handled);
         };
         let outlet = &pipeline.transport.application().outlet;
@@ -94,17 +99,37 @@ pub(crate) enum LocalDelivered {
     Deferred,
 }
 
-/// Relate the connection that delivered `payload` to its origin account.
-///
-/// Only a handshake-authenticated connection names a neighbour; an unauthenticated or unknown
-/// peer is never [`EdgeRelation::Neighbour`], whatever DID it claims.
-pub(super) fn edge_relation(
-    peer: Option<Did>,
-    authentication: Authentication,
-    payload: &MessagePayload,
-) -> EdgeRelation {
-    let authenticated = matches!(authentication, Authentication::Authenticated);
-    EdgeRelation::of(peer.filter(|_| authenticated), payload.transaction.origin())
+/// The connection a frame arrived on: its peer, and whether its handshake authenticated it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Arrival {
+    /// The connection's peer, if its name parses.
+    pub(super) peer: Option<Did>,
+    /// Whether the connection's handshake authenticated that peer.
+    pub(super) authentication: Authentication,
+}
+
+impl Arrival {
+    /// The peer iff the connection's handshake authenticated it (pure).
+    fn authenticated_peer(self) -> Option<Did> {
+        self.peer
+            .filter(|_| matches!(self.authentication, Authentication::Authenticated))
+    }
+
+    /// Relate the connection to `payload`'s origin account: only a handshake-authenticated
+    /// connection names a neighbour; an unauthenticated or unknown peer is never
+    /// [`EdgeRelation::Neighbour`], whatever DID it claims.
+    pub(super) fn edge_relation(self, payload: &MessagePayload) -> EdgeRelation {
+        EdgeRelation::of(self.authenticated_peer(), payload.transaction.origin())
+    }
+
+    /// The principal that delivered the frame (load-bounds paper, Law 1): the slot of its edge
+    /// in `slots` iff the connection's handshake authenticated it, else [`Principal::Unbound`],
+    /// which no slot's floor covers. Every production connection is bound to its handshake and
+    /// holds a slot while admitted, so a frame that reaches admission names its slot unless its
+    /// edge was retired meanwhile.
+    pub(super) fn introducer(self, slots: &SlotRoster) -> Principal {
+        slots.principal_of(self.authenticated_peer())
+    }
 }
 
 impl LogicalInbound {
@@ -117,12 +142,15 @@ impl LogicalInbound {
         }
     }
 
-    /// Dispatch `payload` to its handler and record the observation; returns the decoded body.
+    /// Dispatch `payload`, delivered by `introducer`, to its handler and record the
+    /// observation; returns the decoded body.
     pub(super) async fn handle_payload(
         &self,
         payload: &MessagePayload,
+        introducer: Principal,
         prepared_message: Option<Message>,
     ) -> crate::error::Result<Message> {
+        let context = HandlerContext::new(payload, introducer);
         let message = match prepared_message {
             Some(message) => message,
             None => payload.transaction.data()?,
@@ -145,13 +173,13 @@ impl LogicalInbound {
                 Err(crate::error::Error::InboundActorInvariantViolation)
             }};
             (ProbeOffer, $msg:expr) => {
-                self.message_handler.handle(payload, $msg.as_ref()).await
+                self.message_handler.handle(&context, $msg.as_ref()).await
             };
             (ProbeAcknowledgement, $msg:expr) => {
-                self.message_handler.handle(payload, $msg.as_ref()).await
+                self.message_handler.handle(&context, $msg.as_ref()).await
             };
             ($variant:ident, $msg:expr) => {
-                self.message_handler.handle(payload, $msg).await
+                self.message_handler.handle(&context, $msg).await
             };
         }
         macro_rules! dispatch_message {
@@ -174,28 +202,30 @@ impl LogicalInbound {
 
     /// Dispatch application data `payload` carries to its handler, by reference, and record the
     /// observation: the data stays where the caller keeps it (the inbox room that hands it to
-    /// the application).
+    /// the application). The payload is delivered out of this node's own relay inbox, so its
+    /// introducer is the inbox principal `μ`.
     async fn handle_application(
         &self,
         payload: &MessagePayload,
         data: &ApplicationData,
     ) -> crate::error::Result<()> {
+        let context = HandlerContext::new(payload, Principal::Inbox);
         let (kind, result) = match data {
             ApplicationData::Custom(message) => (
                 MessageKind::CustomMessage,
-                self.message_handler.handle(payload, message).await,
+                self.message_handler.handle(&context, message).await,
             ),
             ApplicationData::E2eHandshakeRequest(request) => (
                 MessageKind::E2eHandshakeRequest,
-                self.message_handler.handle(payload, request).await,
+                self.message_handler.handle(&context, request).await,
             ),
             ApplicationData::E2eHandshakeResponse(response) => (
                 MessageKind::E2eHandshakeResponse,
-                self.message_handler.handle(payload, response).await,
+                self.message_handler.handle(&context, response).await,
             ),
             ApplicationData::E2eStreamFrame(frame) => (
                 MessageKind::E2eStreamFrame,
-                self.message_handler.handle(payload, frame).await,
+                self.message_handler.handle(&context, frame).await,
             ),
         };
         self.record_handling(payload, kind, None, result)
@@ -242,15 +272,18 @@ impl LogicalInbound {
     ///
     /// The charge is the message's class record, with its message limit skipped only when
     /// `edge` is [`EdgeRelation::Neighbour`] and the namespace delegated its admission (see
-    /// [`OriginQuotaCharge::select`]). Transactions for other destinations are not admitted here.
+    /// [`OriginQuotaCharge::select`]); a new stream is introduced by the edge `arrival` names.
+    /// Transactions for other destinations are not admitted here.
     pub(super) async fn admit_final_transaction(
         &self,
         payload: &MessagePayload,
         message: &Message,
         lane: crate::swarm::callback::InboundLane,
-        edge: EdgeRelation,
+        arrival: Arrival,
     ) -> crate::error::Result<()> {
-        self.admit_charged(payload, lane, |class| {
+        let edge = arrival.edge_relation(payload);
+        let introducer = arrival.introducer(self.transport.dht.edges());
+        self.admit_charged(payload, lane, introducer, |class| {
             OriginQuotaCharge::select(class, edge, || self.delegates_admission(message))
         })
         .await
@@ -258,13 +291,13 @@ impl LogicalInbound {
 
     /// [`Self::admit_final_transaction`] for a locally sourced payload: it crossed no
     /// connection, so no neighbour can have its admission delegated and its class record's
-    /// message limit is enforced, as for any remote origin.
+    /// message limit is enforced, as for any remote origin; a new stream is local.
     async fn admit_local_transaction(
         &self,
         payload: &MessagePayload,
         lane: crate::swarm::callback::InboundLane,
     ) -> crate::error::Result<()> {
-        self.admit_charged(payload, lane, OriginQuotaCharge::from)
+        self.admit_charged(payload, lane, Principal::Local, OriginQuotaCharge::from)
             .await
     }
 
@@ -284,12 +317,13 @@ impl LogicalInbound {
             .await
     }
 
-    /// Commit admission of `payload` under the charge `charge` selects for its class, if it is
-    /// addressed to this node.
+    /// Commit admission of `payload`, delivered by `introducer`, under the charge `charge`
+    /// selects for its class, if it is addressed to this node.
     async fn admit_charged(
         &self,
         payload: &MessagePayload,
         lane: crate::swarm::callback::InboundLane,
+        introducer: Principal,
         charge: impl FnOnce(MessageCategory) -> OriginQuotaCharge,
     ) -> crate::error::Result<()> {
         if self.is_local_destination(payload) {
@@ -297,7 +331,7 @@ impl LogicalInbound {
                 .class()
                 .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
             self.transport
-                .admit_final_transaction(&payload.transaction, charge(class))
+                .admit_final_transaction(&payload.transaction, charge(class), introducer)
                 .await?;
         }
         Ok(())
@@ -627,7 +661,10 @@ mod tests {
                     &payload,
                     &message,
                     crate::swarm::callback::InboundLane::Application,
-                    EdgeRelation::Remote,
+                    Arrival {
+                        peer: None,
+                        authentication: Authentication::Unauthenticated,
+                    },
                 )
                 .await
                 .expect(pass);

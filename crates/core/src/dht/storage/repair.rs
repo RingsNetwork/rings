@@ -83,6 +83,7 @@ use crate::dht::entry::PlacementMiss;
 use crate::dht::ChordStorageRepair;
 use crate::dht::Did;
 use crate::error::Result;
+use crate::fair_admission::Principal;
 use crate::utils::get_epoch_ms;
 
 fn push_action(actions: &mut Vec<PeerRingAction>, action: PeerRingAction) {
@@ -123,7 +124,7 @@ impl PeerRing {
                     now_ms,
                     placement_key,
                     AdmittedEntry::stored(entry.clone()),
-                    self.did,
+                    Principal::Local,
                 )
                 .await?;
                 Ok(PeerRingAction::None)
@@ -141,7 +142,7 @@ impl PeerRing {
         now_ms: u128,
         miss: PlacementMiss,
         entry: &Entry,
-        source: Did,
+        introducer: Principal,
         redundancy: u16,
     ) -> Result<PeerRingAction> {
         // Pre: miss was produced by entry_lookup/SearchEntry and is still
@@ -158,7 +159,7 @@ impl PeerRing {
         let placed = PlacedEntry::new(miss.key, entry.clone());
         placed.validate_placement(redundancy)?;
         if miss.owner == self.did {
-            self.join_storage_entry(now_ms, placed.key, placed.entry, source)
+            self.join_storage_entry(now_ms, placed.key, placed.entry, introducer)
                 .await?;
             Ok(PeerRingAction::None)
         } else {
@@ -219,7 +220,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
     async fn read_repair_entry(
         &self,
         entry: Entry,
-        source: Did,
+        introducer: Principal,
         misses: &[PlacementMiss],
         redundancy: u16,
     ) -> Result<PeerRingAction> {
@@ -239,7 +240,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         let mut actions = Vec::new();
         for miss in misses.iter().copied() {
             let action = self
-                .copy_entry_to_observed_miss(now_ms, miss, &entry, source, redundancy)
+                .copy_entry_to_observed_miss(now_ms, miss, &entry, introducer, redundancy)
                 .await?;
             push_action(&mut actions, action);
         }

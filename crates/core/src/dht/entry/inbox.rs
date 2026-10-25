@@ -59,6 +59,7 @@ use super::Entry;
 use super::EntryDot;
 use super::EntryKind;
 use super::EntryOperation;
+use crate::consts::MAX_RELAY_INBOX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::delegation::DelegateeKey;
 use crate::dht::Did;
@@ -74,6 +75,10 @@ use crate::message::MessageVerificationExt;
 /// The message family of a holder's signature over a held payload.
 pub(crate) const HELD_MESSAGE_DOMAIN_TAG: DomainTag =
     crate::domain_tag!("rings-core:relay-inbox:held-message");
+
+/// `H_I`, the relay hold horizon (load-bounds paper, Def. 3): a held message retires
+/// `MAX_RELAY_INBOX_TTL_MS` after its hold instant, the longest any carrier is kept.
+pub(crate) const RELAY_HOLD_HORIZON_MS: u128 = MAX_RELAY_INBOX_TTL_MS as u128;
 
 /// The relay-inbox carrier of `destination`: the ring position just after it.
 pub(crate) fn inbox_key(destination: Did) -> Did {
@@ -134,6 +139,16 @@ impl HeldMessage {
             holder: holder.sign_at(HELD_MESSAGE_DOMAIN_TAG, &data, held_at_ms)?,
             payload,
         })
+    }
+
+    /// Whether this hold is past the relay hold horizon at `now_ms`, `t ≥ h + H_I` (pure).
+    ///
+    /// Law: the witness bounds the hold instant by the sender's proof, `h ≤ ts + ttl`, so a
+    /// transaction is delivered out of an inbox only while `t < ts + ttl + H_I`, however its
+    /// hold was written; the receiver's replay horizon `ι(Application)` covers that
+    /// (`message::replay::admission`).
+    pub(crate) fn is_retired_at(&self, now_ms: u128) -> bool {
+        now_ms >= self.held_at_ms().saturating_add(RELAY_HOLD_HORIZON_MS)
     }
 
     /// The node that held the payload.
@@ -291,6 +306,36 @@ impl Entry {
             .collect()
     }
 
+    /// The relay hold horizon projection at `now_ms` (load-bounds paper, Def. 3): every
+    /// element whose hold is past `h + H_I` is dropped with its dot.
+    ///
+    /// Law: the predicate reads the element alone (its signed hold instant, never its dot), so
+    /// the projection commutes with join and the carrier stays a lattice; an element is
+    /// projected out, never refused, so a carrier holding an old element stays admissible. An
+    /// element that does not decode is kept, as every other path keeps it.
+    ///
+    /// Pre: `self` is a materialized relay carrier, so `data` and `crdt.dots` align.
+    /// Post: identity, without copying, when no element is past the horizon.
+    pub(crate) fn holds_retired_at(self, now_ms: u128) -> Self {
+        let retired = |element: &Bytes| {
+            HeldMessage::from_element(element).is_ok_and(|held| held.is_retired_at(now_ms))
+        };
+        if !self.data.iter().any(retired) {
+            return self;
+        }
+        let (data, dots) = self
+            .data
+            .into_iter()
+            .zip(self.crdt.dots)
+            .filter(|(element, _)| !retired(element))
+            .unzip();
+        Self {
+            data,
+            crdt: super::EntryCrdt { dots, ..self.crdt },
+            ..self
+        }
+    }
+
     /// The removal delta of this carrier naming `dots`.
     pub(crate) fn removal_of(&self, dots: impl IntoIterator<Item = EntryDot>) -> Entry {
         let mut removal = Self::new(self.did, Vec::new(), EntryKind::RelayMessage);
@@ -317,7 +362,8 @@ impl InboxElement {
         self.held.payload.transaction.tx_id
     }
 
-    /// Whether the recipient may deliver this element at `now_ms`.
+    /// Whether the recipient may deliver this element at `now_ms`: never past the relay element
+    /// horizon, which every read projects out anyway ([`Entry::holds_retired_at`]).
     ///
     /// Law: every stored element passed the witness when it was admitted (the hold write law or
     /// a hand-off's admission), and the witness is judged as of the hold instant, so it holds
@@ -326,6 +372,9 @@ impl InboxElement {
     /// later pass. Any other failure is lasting ([`is_lasting_witness_failure`]): it is logged
     /// at `warn` and the element stays, never retired or repaired.
     pub(crate) fn is_deliverable_at(&self, now_ms: u128, network_id: u32) -> bool {
+        if self.held.is_retired_at(now_ms) {
+            return false;
+        }
         match self
             .held
             .validate_witness(self.destination, now_ms, network_id)

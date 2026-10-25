@@ -108,11 +108,14 @@ pub enum Error {
         retained_min: u64,
     },
 
-    /// A new replay stream would exceed the fail-closed stream table bound.
-    #[error("Transaction replay stream capacity {capacity} exceeded")]
+    /// A new replay stream would pass a bound of its table (load-bounds paper, Law 2): the
+    /// share of the edge that introduced it, the pool, or the local share; nothing changed.
+    #[error("Transaction replay stream of {introducer:?} refused: {refusal}")]
     TransactionReplayStreamCapacityExceeded {
-        /// Maximum sender streams or receiver streams retained by one runtime.
-        capacity: usize,
+        /// The principal that introduced the stream.
+        introducer: crate::message::Principal,
+        /// The bound it met.
+        refusal: crate::message::ShareRefusal,
     },
 
     /// A replay stream whose stored record does not restore refuses every transition until an
@@ -269,16 +272,14 @@ pub enum Error {
         bound: usize,
     },
 
-    /// An owner's removal store would hold more unstable removes than a bound (#920): the
-    /// origin's share when `origin` is set, else the store's total. The write changes nothing.
-    #[error("Removal store would hold {held} removes, past its bound of {bound}")]
+    /// An owner's removal store would pass a bound for an unstable remove (#920, #907): the
+    /// share of the edge that delivered it, the pool, or the local share. Nothing changed.
+    #[error("Removal store refused a remove of {introducer:?}: {refusal}")]
     RemovalCapacityExhausted {
-        /// The origin whose share binds, or `None` for the store's total.
-        origin: Option<crate::dht::Did>,
-        /// Removes the store, or the origin, would hold.
-        held: usize,
-        /// The bound that binds.
-        bound: usize,
+        /// The principal that delivered the transition raising it.
+        introducer: crate::message::Principal,
+        /// The bound it met.
+        refusal: crate::message::ShareRefusal,
     },
 
     /// Relay inbox element is not addressed to the peer the inbox is kept for

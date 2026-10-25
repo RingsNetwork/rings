@@ -16,7 +16,6 @@ use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
-use crate::message::MessagePayload;
 
 /// Correlated topology-report admission and bounded candidate processing.
 ///
@@ -27,6 +26,8 @@ use crate::message::MessagePayload;
 mod topology_view;
 
 use topology_view::connect_successor_hint;
+
+use crate::message::handlers::HandlerContext;
 
 /// `result` with the expected drop of a connect-signaling reply whose recorded path names a hop
 /// this node lost the link to (#947) logged at debug and absorbed: the initiator's pending
@@ -45,7 +46,8 @@ fn drop_unlinked_return(result: Result<()>, context: &'static str) -> Result<()>
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &QueryForTopoInfoSend) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &QueryForTopoInfoSend) -> Result<()> {
+        let ctx = context.payload();
         let info: TopoInfo = TopoInfo::try_from(self.dht.as_ref())?;
         if msg.targets(self.dht.did) {
             self.run_effects([CoreEffect::send_report_message(
@@ -61,7 +63,8 @@ impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<ConnectNodeSend> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeSend) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &ConnectNodeSend) -> Result<()> {
+        let ctx = context.payload();
         if !self.transport.accepts_connection_offer(msg) {
             tracing::warn!(
                 local = %self.dht.did,
@@ -135,7 +138,8 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<ConnectNodeReport> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeReport) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &ConnectNodeReport) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             tracing::trace!(
                 local = %self.dht.did,
@@ -204,7 +208,8 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<FindSuccessorSend> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &FindSuccessorSend) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &FindSuccessorSend) -> Result<()> {
+        let ctx = context.payload();
         match self.dht.find_successor(msg.did)? {
             PeerRingAction::Some(did) => {
                 if msg.accepts_local_successor(self.dht.did) {
@@ -245,7 +250,8 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<FindSuccessorReport> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &FindSuccessorReport) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &FindSuccessorReport) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])

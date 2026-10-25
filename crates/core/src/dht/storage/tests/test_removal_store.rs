@@ -1,6 +1,6 @@
-//! The factored data store (#920; removal-stability paper, Laws 2–4 and 6): eviction drops
-//! element sides and never a remove, the removal store is shared by origin, and the recovery
-//! pass normalizes an element side a crash rolled back.
+//! The factored data store (#920; removal-stability paper, Laws 2–4): eviction drops element
+//! sides and never a remove, the removal store is shared by slot (#907; load-bounds paper,
+//! Sec. V), and the recovery pass normalizes an element side a crash rolled back.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -13,18 +13,19 @@ use rings_test_support::with_hang_guard;
 
 use super::super::super::chord::PeerRing;
 use crate::consts::DATA_TOMBSTONE_MAX_LEN;
-use crate::consts::REMOVAL_ORIGIN_SHARE;
-use crate::consts::REMOVAL_STORE_MAX_REMOVES;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::ChargedRemove;
 use crate::dht::Did;
-use crate::dht::RemovalCharge;
 use crate::dht::RemovalRecord;
 use crate::dht::StorageKey;
+use crate::dht::REMOVAL_SHARES;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Principal;
+use crate::message::ShareRefusal;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::tests::removes_only_carrier;
@@ -53,7 +54,7 @@ async fn test_eviction_keeps_the_remove_a_stale_sync_would_undo() -> Result<()> 
     let writer = Did::from(7u32);
     let added = stamped_delta(EntryOperation::Extend, topic, &["a"], now_ms, writer)?;
     let removed = added.tombstone(added.clone())?;
-    node.join_storage_entry(now_ms, topic, removed, writer)
+    node.join_storage_entry(now_ms, topic, removed, Principal::Unbound)
         .await?;
 
     let filler = stamped_delta(
@@ -63,11 +64,11 @@ async fn test_eviction_keeps_the_remove_a_stale_sync_would_undo() -> Result<()> 
         now_ms,
         writer,
     )?;
-    node.join_storage_entry(now_ms, Did::from(11u32), filler, writer)
+    node.join_storage_entry(now_ms, Did::from(11u32), filler, Principal::Unbound)
         .await?;
     assert_eq!(node.storage.get(&topic.to_string()).await?, None, "evicted");
 
-    node.join_storage_entry(now_ms, topic, added, Did::from(8u32))
+    node.join_storage_entry(now_ms, topic, added, Principal::Unbound)
         .await?;
     let read = stored(&node, topic, now_ms).await?;
     assert_eq!(read.as_ref().map(|entry| entry.data.len()), Some(0));
@@ -75,43 +76,66 @@ async fn test_eviction_keeps_the_remove_a_stale_sync_would_undo() -> Result<()> 
     Ok(())
 }
 
-/// Shares (Law 6, Prop. 6): an origin that holds its share is refused a further remove on any
-/// topic, which changes nothing, while another origin and the holder class still remove.
+/// Fill `slot`'s floor and as much of the pool as one claimant may take: `f + P` removes, in
+/// carriers of at most `DATA_TOMBSTONE_MAX_LEN`, on topics from `first_topic` on.
+async fn fill_floor_and_pool(
+    node: &PeerRing,
+    slot: Principal,
+    first_topic: u32,
+    now_ms: u128,
+) -> Result<()> {
+    let mut left = REMOVAL_SHARES.floor + REMOVAL_SHARES.pool;
+    let mut topic = first_topic;
+    while left > 0 {
+        let removes = left.min(DATA_TOMBSTONE_MAX_LEN);
+        let carrier = removes_only_carrier(Did::from(topic), removes, now_ms, "fill")?;
+        node.join_storage_entry(now_ms, Did::from(topic), carrier, slot)
+            .await?;
+        left -= removes;
+        topic += 1;
+    }
+    Ok(())
+}
+
+/// Isolation (load-bounds paper, Theorem 1): a slot that holds its floor and the whole pool, as
+/// a lone claimant may, is refused a further remove, which changes nothing, and so is a delivery
+/// on no slot; another slot below its floor and this node still remove, and each remove is
+/// charged to the slot of the edge that delivered it.
 #[tokio::test]
-async fn test_an_origin_past_its_share_is_refused_and_others_are_not() -> Result<()> {
+async fn test_a_slot_past_its_claim_is_refused_and_another_floor_is_not() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let now_ms = get_epoch_ms();
-    let flooder = Did::from(70u32);
-    assert_eq!(REMOVAL_ORIGIN_SHARE, DATA_TOMBSTONE_MAX_LEN);
-    node.join_storage_entry(
-        now_ms,
-        Did::from(10u32),
-        removes_only_carrier(Did::from(10u32), REMOVAL_ORIGIN_SHARE, now_ms, "share")?,
-        flooder,
-    )
-    .await?;
+    let (flooder, honest) = (Did::from(70u32), Did::from(71u32));
+    node.edges().arrive(flooder);
+    node.edges().arrive(honest);
+    let flooder = node.edges().principal_of(Some(flooder));
+    let honest = node.edges().principal_of(Some(honest));
+    assert_eq!((flooder, honest), (Principal::Slot(0), Principal::Slot(1)));
+    fill_floor_and_pool(&node, flooder, 1_000, now_ms).await?;
 
-    let other_topic = Did::from(11u32);
-    let one_more = removes_only_carrier(other_topic, 1, now_ms, "more")?;
-    assert!(matches!(
-        node.join_storage_entry(now_ms, other_topic, one_more.clone(), flooder)
-            .await,
-        Err(Error::RemovalCapacityExhausted { origin: Some(origin), .. }) if origin == flooder
-    ));
-    assert_eq!(stored(&node, other_topic, now_ms).await?, None);
+    let topic = Did::from(11u32);
+    let one_more = removes_only_carrier(topic, 1, now_ms, "more")?;
+    for refused in [flooder, Principal::Unbound] {
+        assert!(matches!(
+            node.join_storage_entry(now_ms, topic, one_more.clone(), refused)
+                .await,
+            Err(Error::RemovalCapacityExhausted {
+                refusal: ShareRefusal::PoolFull { .. },
+                ..
+            })
+        ));
+    }
+    assert_eq!(stored(&node, topic, now_ms).await?, None);
 
-    node.join_storage_entry(now_ms, other_topic, one_more, Did::from(71u32))
+    node.join_storage_entry(now_ms, topic, one_more, honest)
         .await?;
-    node.join_storage_entry(
-        now_ms,
-        Did::from(12u32),
-        removes_only_carrier(Did::from(12u32), 1, now_ms, "holder")?,
-        node.did,
-    )
-    .await?;
+    let local_topic = Did::from(12u32);
+    let local = removes_only_carrier(local_topic, 1, now_ms, "local")?;
+    node.join_storage_entry(now_ms, local_topic, local, Principal::Local)
+        .await?;
     let charges = node
         .removal_storage
-        .get(&other_topic.to_string())
+        .get(&topic.to_string())
         .await?
         .map(|record| {
             record
@@ -120,41 +144,36 @@ async fn test_an_origin_past_its_share_is_refused_and_others_are_not() -> Result
                 .map(|remove| remove.charge)
                 .collect::<Vec<_>>()
         });
-    assert_eq!(charges, Some(vec![RemovalCharge::Origin(Did::from(71u32))]));
+    assert_eq!(charges, Some(vec![honest]));
     Ok(())
 }
 
-/// The store's total binds only once `B_R / S` origins each hold their share: the next origin's
-/// remove is refused for the total, not for its own share.
+/// Rotation residual (Prop. 1): a slot's removes outlive the edge that delivered them, so an edge
+/// later given that slot inherits them; once they are stable, the slot removes again.
 #[tokio::test]
-async fn test_the_removal_store_refuses_past_its_total() -> Result<()> {
+async fn test_a_slot_keeps_its_removes_until_they_are_stable() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let now_ms = get_epoch_ms();
-    let origins = u32::try_from(REMOVAL_STORE_MAX_REMOVES / REMOVAL_ORIGIN_SHARE)
-        .map_err(|_| Error::MessageSizeOverflow)?;
-    for origin in 0..origins {
-        let topic = Did::from(1_000 + origin);
-        node.join_storage_entry(
-            now_ms,
-            topic,
-            removes_only_carrier(topic, REMOVAL_ORIGIN_SHARE, now_ms, "fill")?,
-            Did::from(100_000 + origin),
-        )
-        .await?;
-    }
+    let (rotated, fresh) = (Did::from(70u32), Did::from(72u32));
+    node.edges().arrive(rotated);
+    let slot = node.edges().principal_of(Some(rotated));
+    fill_floor_and_pool(&node, slot, 1_000, now_ms).await?;
+    node.edges().depart(rotated);
+    node.edges().arrive(fresh);
+    assert_eq!(node.edges().principal_of(Some(fresh)), slot);
 
     let topic = Did::from(9u32);
-    assert!(matches!(
-        node.join_storage_entry(
-            now_ms,
-            topic,
-            removes_only_carrier(topic, 1, now_ms, "late")?,
-            Did::from(99u32),
-        )
-        .await,
-        Err(Error::RemovalCapacityExhausted { origin: None, bound, .. })
-            if bound == REMOVAL_STORE_MAX_REMOVES
-    ));
+    let late = removes_only_carrier(topic, 1, now_ms, "inherited")?;
+    assert!(node
+        .join_storage_entry(now_ms, topic, late, slot)
+        .await
+        .is_err());
+
+    let horizon_ms = u128::from(EntryKind::Data.max_lifetime_ms()) + TS_OFFSET_TOLERANCE_MS;
+    let stable_ms = now_ms + horizon_ms;
+    let late = removes_only_carrier(topic, 1, stable_ms, "late")?;
+    node.join_storage_entry(stable_ms, topic, late, slot)
+        .await?;
     Ok(())
 }
 
@@ -178,7 +197,7 @@ async fn test_recovery_normalizes_a_rolled_back_element_side() -> Result<()> {
             .iter()
             .map(|tombstone| ChargedRemove {
                 tombstone: *tombstone,
-                charge: RemovalCharge::Origin(writer),
+                charge: Principal::Unbound,
             })
             .collect(),
     };
@@ -255,7 +274,7 @@ async fn test_a_read_proceeds_while_a_remove_side_write_is_parked() -> Result<()
     let writer = Did::from(7u32);
     let read_topic = Did::from(11u32);
     let added = stamped_delta(EntryOperation::Extend, read_topic, &["b"], now_ms, writer)?;
-    node.join_storage_entry(now_ms, read_topic, added, writer)
+    node.join_storage_entry(now_ms, read_topic, added, Principal::Unbound)
         .await?;
 
     let (parked, parked_signal) = oneshot::channel();
@@ -266,7 +285,7 @@ async fn test_a_read_proceeds_while_a_remove_side_write_is_parked() -> Result<()
         .ok_or(Error::RelayStorageUnavailable)?;
     let removed = removes_only_carrier(Did::from(10u32), 1, now_ms, "parked")?;
     let write_key = Did::from(10u32).to_string();
-    let write = store.put(&write_key, &removed, RemovalCharge::Holder, now_ms);
+    let write = store.put(&write_key, &removed, Principal::Local, now_ms);
     let read = async {
         assert!(parked_signal.await.is_ok(), "the remove-side write parks");
         let read = store.get(&read_topic.to_string()).await;

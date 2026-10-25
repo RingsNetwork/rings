@@ -12,6 +12,7 @@ use tokio::sync::Notify;
 use super::lease::TRANSACTION_SEQUENCE_LEASE;
 use super::test_storage::Hooked;
 use super::test_storage::StorageHooks;
+use super::Admission;
 use super::SequenceVerdict;
 use super::StreamKey;
 use super::TransactionDigest;
@@ -20,6 +21,7 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::MessageCategory;
+use crate::utils::get_epoch_ms;
 
 /// The digest of the transaction a test admits, one per `value`.
 fn digest(value: u8) -> TransactionDigest {
@@ -77,13 +79,12 @@ async fn admit(
     value: u8,
 ) -> Result<SequenceVerdict> {
     replay
-        .admit_with_quota(
+        .admit_with_quota(Admission::for_test(
             stream(),
             sequence,
             digest(value),
-            MessageCategory::Application.into(),
-            0,
-        )
+            get_epoch_ms(),
+        ))
         .await
 }
 

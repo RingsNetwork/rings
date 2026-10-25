@@ -5,6 +5,7 @@ use futures::lock::Mutex as FuturesMutex;
 
 use super::inbound;
 use super::inbound::ReassemblyClock;
+use super::logical::Arrival;
 use super::pre_admission::PreAdmissionHold;
 use super::HeldInboundFrame;
 use super::InboundGate;
@@ -16,7 +17,6 @@ use crate::chunk::MessageReassembler;
 use crate::delegation::DelegatorAuthorization;
 use crate::dht::Did;
 use crate::measure::Authentication;
-use crate::message::EdgeRelation;
 use crate::message::LinkWindows;
 use crate::message::Message;
 use crate::message::MessageKind;
@@ -71,21 +71,24 @@ impl InboundProcessor {
     /// the window its classification selects (#1081; durable-records, Law Window by
     /// classification): this connection's volatile window for a link-local transaction
     /// (Application traffic of a namespace that delegated its replay, from the authenticated
-    /// neighbour that originated it), the durable window for every other transaction.
+    /// neighbour that originated it), the durable window for every other transaction, whose new
+    /// streams are charged to the connection slot `arrival` names (#907). A link window is
+    /// volatile and spans one link generation, so it holds nothing to account.
     pub(super) async fn admit_final_transaction(
         &self,
         payload: &MessagePayload,
         message: &Message,
         lane: InboundLane,
-        edge: EdgeRelation,
+        arrival: Arrival,
     ) -> crate::error::Result<()> {
         let class = lane
             .class()
             .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
+        let edge = arrival.edge_relation(payload);
         match ReplayWindow::select(class, edge, || self.logical.delegates_replay(message)) {
             ReplayWindow::Durable => {
                 self.logical
-                    .admit_final_transaction(payload, message, lane, edge)
+                    .admit_final_transaction(payload, message, lane, arrival)
                     .await
             }
             ReplayWindow::Link => {

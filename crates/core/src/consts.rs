@@ -119,17 +119,24 @@ pub const ENTRY_PAYLOAD_MAX_BYTES: usize = 32 * 1024;
 /// about 10 removes a minute per topic, sustained; an application that needs more shards the
 /// topic.
 pub const DATA_TOMBSTONE_MAX_LEN: usize = ENTRY_DATA_MAX_LEN;
-/// The unstable removes one origin may have charged to it in an owner's removal store, `S`
-/// (#920; removal-stability paper, Law 6): one carrier's worth. An origin is the authenticated
-/// sender of the transition that raised a remove; a node this owner's view names as an owner of
-/// the placement is charged to the holder class instead, which no share bounds.
-pub const REMOVAL_ORIGIN_SHARE: usize = DATA_TOMBSTONE_MAX_LEN;
-/// The unstable removes an owner's removal store holds in all, `B_R = 64 S` (#920;
-/// removal-stability paper, Law 6), about 9.6 MB at [`ENTRY_TOMBSTONE_WIRE_MAX`]: filling it
-/// past one origin's share takes 63 other identities or a node the owner's view makes an owner
-/// of the placement, a Sybil attack or a Byzantine owner, both non-goals; #907 closes the first
-/// for the replay table and this store alike.
-pub const REMOVAL_STORE_MAX_REMOVES: usize = 64 * REMOVAL_ORIGIN_SHARE;
+/// The unstable removes an owner's removal store holds in all at the default successor capacity,
+/// `B(3) = 328·128 + 16 384 + 7 168 + 16 384` (#920, #907; load-bounds paper, Sec. V), at most
+/// about 19.6 MB stored ([`REMOVAL_STORED_ITEM_WIRE_MAX`] each): each connection slot's floor of
+/// 128, a pool shared in fair claims, this node's own share, and the custody share of an
+/// ownership hand-off. A ring with `s` successors holds `256(s − 3)` more, and its removal
+/// store must be sized for them.
+pub const REMOVAL_STORE_MAX_REMOVES: usize = crate::dht::REMOVAL_SHARES.bound(
+    crate::dht::topology::edge_slots(crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY),
+);
+/// Encoded bytes a key-value store files per unstable item of the removal store, at most: the
+/// pair of a storage key (a DID string, 43) and a record that holds that one item (its DID, 43;
+/// an absent register, 1; the removes' length prefix, 1; one remove, [`ENTRY_TOMBSTONE_WIRE_MAX`];
+/// and its charge, a principal's tag and a slot varint, 4). A record of one remove is the widest
+/// per item: a register alone is narrower, and further removes share the key and the DID.
+/// So a removal store holds [`REMOVAL_STORE_MAX_REMOVES`] items in at most
+/// `REMOVAL_STORE_MAX_REMOVES · REMOVAL_STORED_ITEM_WIRE_MAX` bytes, about 19.6 MB; witnessed
+/// with equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const REMOVAL_STORED_ITEM_WIRE_MAX: usize = 43 + 43 + 1 + 1 + ENTRY_TOMBSTONE_WIRE_MAX + 4;
 /// Encoded bytes of one element's length prefix, at most: the varint of
 /// [`ENTRY_PAYLOAD_MAX_BYTES`].
 ///

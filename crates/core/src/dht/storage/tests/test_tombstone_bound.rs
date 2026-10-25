@@ -15,6 +15,7 @@ use crate::consts::ENTRY_ELEMENT_PREFIX_WIRE_MAX;
 use crate::consts::ENTRY_PAYLOAD_MAX_BYTES;
 use crate::consts::ENTRY_REGISTER_WIRE_MAX;
 use crate::consts::ENTRY_TOMBSTONE_WIRE_MAX;
+use crate::consts::REMOVAL_STORED_ITEM_WIRE_MAX;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::entry::ElementDigest;
 use crate::dht::entry::Entry;
@@ -24,10 +25,14 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::EntryTombstone;
 use crate::dht::entry::EntryVersion;
+use crate::dht::ChargedRegister;
+use crate::dht::ChargedRemove;
 use crate::dht::Did;
+use crate::dht::RemovalRecord;
 use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Principal;
 use crate::storage::MemStorage;
 use crate::tests::removes_only_carrier;
 use crate::tests::stamped_operation;
@@ -99,6 +104,32 @@ fn test_carrier_wire_suprema_are_the_widest_encodings() -> Result<()> {
     // its own.
     assert_eq!(wire_size(&header)?, ENTRY_CARRIER_HEADER_WIRE_MAX - 3 + 1);
     assert_eq!(wire_size(&full)?, DATA_CARRIER_WIRE_MAX);
+
+    // A removal record of one remove at its widest, filed with its storage key as a key-value
+    // store files a pair: the widest per item of the removal store.
+    let did = Did::from(u32::MAX);
+    let one_remove = RemovalRecord {
+        did,
+        register: None,
+        removes: vec![ChargedRemove {
+            tombstone,
+            charge: Principal::Slot(u16::MAX),
+        }],
+    };
+    let key = StorageKey::new(EntryKind::Data, did).to_string();
+    assert_eq!(
+        wire_size(&(&key, &one_remove))?,
+        REMOVAL_STORED_ITEM_WIRE_MAX
+    );
+    let one_register = RemovalRecord {
+        removes: Vec::new(),
+        register: Some(ChargedRegister {
+            version: widest_version(),
+            charge: Principal::Slot(u16::MAX),
+        }),
+        ..one_remove
+    };
+    assert!(wire_size(&(&key, &one_register))? < REMOVAL_STORED_ITEM_WIRE_MAX);
     Ok(())
 }
 
@@ -117,7 +148,7 @@ async fn test_a_delta_past_the_tombstone_bound_is_inadmissible() -> Result<()> {
     let forged = removes_only_carrier(did, DATA_TOMBSTONE_MAX_LEN + 1, now_ms, "forged")?;
 
     assert!(matches!(
-        node.join_storage_entry(now_ms, did, forged, node.did).await,
+        node.join_storage_entry(now_ms, did, forged, Principal::Local).await,
         Err(Error::EntryTombstonesExceedMax { count, bound })
             if count == DATA_TOMBSTONE_MAX_LEN + 1 && bound == DATA_TOMBSTONE_MAX_LEN
     ));
@@ -136,7 +167,7 @@ async fn test_a_join_past_the_tombstone_bound_is_refused_and_changes_nothing() -
         now_ms,
         did,
         removes_only_carrier(did, DATA_TOMBSTONE_MAX_LEN, now_ms, "full")?,
-        node.did,
+        Principal::Local,
     )
     .await?;
     let before = stored(&node, did, now_ms).await?;
@@ -150,7 +181,7 @@ async fn test_a_join_past_the_tombstone_bound_is_refused_and_changes_nothing() -
             now_ms,
             did,
             removes_only_carrier(did, 1, now_ms, "one-more")?,
-            node.did
+            Principal::Local
         )
         .await,
         Err(Error::EntryTombstonesExceedMax { .. })
@@ -170,28 +201,34 @@ async fn test_a_remove_past_the_bound_is_refused_until_the_held_removes_are_stab
     let added = stamped_operation(EntryOperation::Extend, did, &["a"], now_ms, writer)?;
     let horizon_ms = u128::from(EntryKind::Data.max_lifetime_ms());
     let held_at_ms = now_ms - horizon_ms;
-    node.operate_storage_entry(now_ms, did, added, writer)
+    node.operate_storage_entry(now_ms, did, added, writer, Principal::Unbound)
         .await?;
     node.join_storage_entry(
         now_ms,
         did,
         removes_only_carrier(did, DATA_TOMBSTONE_MAX_LEN, held_at_ms, "held")?,
-        node.did,
+        Principal::Local,
     )
     .await?;
     let before = stored(&node, did, now_ms).await?;
 
     let remove = |at_ms| stamped_operation(EntryOperation::Tombstone, did, &["a"], at_ms, writer);
     assert!(matches!(
-        node.operate_storage_entry(now_ms, did, remove(now_ms)?, writer)
+        node.operate_storage_entry(now_ms, did, remove(now_ms)?, writer, Principal::Unbound)
             .await,
         Err(Error::EntryTombstonesExceedMax { .. })
     ));
     assert_eq!(stored(&node, did, now_ms).await?, before);
 
     let stable_ms = held_at_ms + horizon_ms + TS_OFFSET_TOLERANCE_MS;
-    node.operate_storage_entry(stable_ms, did, remove(stable_ms)?, writer)
-        .await?;
+    node.operate_storage_entry(
+        stable_ms,
+        did,
+        remove(stable_ms)?,
+        writer,
+        Principal::Unbound,
+    )
+    .await?;
     let after = stored(&node, did, stable_ms).await?;
     assert_eq!(after.as_ref().map(|entry| entry.data.len()), Some(0));
     assert_eq!(after.map(|entry| entry.crdt.tombstones.len()), Some(1));

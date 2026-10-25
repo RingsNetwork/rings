@@ -44,11 +44,17 @@ pub const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 40 * 1024 * 1024;
 /// hold beyond the budget is refused, so the sender's message is not held, instead of evicting
 /// mail already held.
 pub const RELAY_INBOX_STORAGE_CAPACITY: u32 = 64 * 1024 * 1024;
-/// Byte budget of the store of the data namespace's remove sides (#920): at least the
-/// `REMOVAL_STORE_MAX_REMOVES` the charge index admits, each at most `ENTRY_TOMBSTONE_WIRE_MAX`
-/// bytes and a charge (about 9.6 MB and its per-record framing). The store is retained and
-/// evicts nothing: a remove beyond the budget is refused, never another one evicted.
-pub const DHT_REMOVAL_STORAGE_CAPACITY: u32 = 16 * 1024 * 1024;
+/// Byte budget of the store of the data namespace's remove sides (#920, #907): at least the
+/// `REMOVAL_STORE_MAX_REMOVES` items the accounting admits, each filed in at most
+/// `REMOVAL_STORED_ITEM_WIRE_MAX` bytes when every record holds one (about 19.6 MB). The store
+/// is retained and evicts nothing: a remove beyond the budget is refused, never another one
+/// evicted.
+pub const DHT_REMOVAL_STORAGE_CAPACITY: u32 = 24 * 1024 * 1024;
+const _: () = assert!(
+    rings_core::consts::REMOVAL_STORE_MAX_REMOVES
+        * rings_core::consts::REMOVAL_STORED_ITEM_WIRE_MAX
+        <= DHT_REMOVAL_STORAGE_CAPACITY as usize
+);
 /// Directory of the store of the data namespace's remove sides, beside the data store.
 pub const DHT_REMOVAL_STORAGE_DIR: &str = "dht-removals";
 /// Directory of the onion entry-guard store, beside the data store.

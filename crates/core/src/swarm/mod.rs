@@ -49,6 +49,7 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::OriginQuotaCounters;
 use crate::message::PayloadSender;
+use crate::message::Principal;
 use crate::message::ReplayCounters;
 use crate::message::ReplayWindow;
 use crate::swarm::application::ApplicationData;
@@ -533,7 +534,8 @@ impl Swarm {
     /// earlier reply with [`OfferReply::CounterOffer`] when their sent overlay offer prevails on
     /// the DID tie-break (#947): that offer, a `ConnectNodeSend`, which the caller hands to the
     /// peer's `answer_offer`; the peer abandons its own offer and answers this one, and that
-    /// answer goes to the replying node's `accept_answer`.
+    /// answer goes to the replying node's `accept_answer`. Crossing no edge, the offer opens a
+    /// replay stream on this node's local share.
     pub async fn answer_offer(
         &self,
         offer_payload: MessagePayload,
@@ -556,6 +558,7 @@ impl Swarm {
             .admit_final_transaction(
                 &offer_payload.transaction,
                 MessageCategory::DhtControl.into(),
+                Principal::Local,
             )
             .await?;
 
@@ -608,6 +611,7 @@ impl Swarm {
     }
 
     /// Verify the answer payload and apply it to the pending generation, or to `expected` only.
+    /// Carried out of band, the answer opens a replay stream on this node's local share.
     async fn accept_answer_with(
         &self,
         expected: Option<PendingConnectionAttempt>,
@@ -631,6 +635,7 @@ impl Swarm {
             .admit_final_transaction(
                 &answer_payload.transaction,
                 MessageCategory::DhtControl.into(),
+                Principal::Local,
             )
             .await?;
 
