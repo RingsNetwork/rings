@@ -386,21 +386,68 @@ fn test_self_contained_decoding_refuses_link_only_frames() -> Result<()> {
     Ok(())
 }
 
+/// The frame-header law (#1104).
+///
+/// - A frame opens with `RINGS\0` and this build's wire version, big-endian, at the bytes no
+///   version may move, and it round-trips.
+/// - A frame of another version is refused before its body is decoded, naming both versions,
+///   whether it travels raw (a link) or base58-check encoded (the HTTP handshake).
+/// - A frame from before wire versioning (opened by `RINGS-PAYLOAD\0`, `RINGS-LINK\0`, or, in
+///   0.27, `RINGS-TX-V2\0`) is named as such.
+/// - Bytes with no header, a header cut short, or this version's header with an unknown kind
+///   carry no frame.
 #[test]
-fn test_unprefixed_transaction_shape_is_rejected_by_hard_cutover() -> Result<()> {
-    let next_hop = SecretKey::random().address().into();
-    let payload = new_test_payload(next_hop);
-    let legacy_wire = rings_codec::serialize(&payload).map_err(Error::CodecSerialize)?;
+fn test_the_frame_header_names_the_wire_version_before_any_decoding() -> Result<()> {
+    let payload = new_test_payload(SecretKey::random().address().into());
+    let wire = payload.to_wire()?;
+    assert_eq!(&wire[..6], b"RINGS\0");
+    assert_eq!(u16::from_be_bytes([wire[6], wire[7]]), WIRE_VERSION);
+    assert_eq!(wire.len(), payload.wire_size()?);
+    assert_eq!(MessagePayload::from_wire(&wire)?, payload);
 
+    let theirs = WIRE_VERSION + 1;
+    let mut other = wire.to_vec();
+    other[6..8].copy_from_slice(&theirs.to_be_bytes());
+    let undecodable = [&other[..9], b"no body any version decodes".as_slice()].concat();
+    for frame in [other.clone(), undecodable] {
+        assert!(matches!(
+            MessagePayload::from_wire(&frame),
+            Err(Error::IncompatibleWireVersion(WireVersionMismatch {
+                ours: WIRE_VERSION,
+                theirs: PeerWireVersion::Versioned(version),
+            })) if version == theirs
+        ));
+    }
     assert!(matches!(
-        MessagePayload::from_wire(&legacy_wire),
-        Err(Error::UnmarkedFrame)
+        MessagePayload::from_encoded(&other.encode()?),
+        Err(Error::IncompatibleWireVersion(WireVersionMismatch {
+            theirs: PeerWireVersion::Versioned(version),
+            ..
+        })) if version == theirs
     ));
-    // The 0.27.x marker is no marker either: every frame of that release fails closed.
-    let previous_release_wire = [b"RINGS-TX-V2\0".as_slice(), legacy_wire.as_slice()].concat();
-    assert!(matches!(
-        MessagePayload::from_wire(&previous_release_wire),
-        Err(Error::UnmarkedFrame)
-    ));
+
+    let legacy_body = rings_codec::serialize(&payload).map_err(Error::CodecSerialize)?;
+    for marker in [
+        b"RINGS-PAYLOAD\0".as_slice(),
+        b"RINGS-LINK\0",
+        b"RINGS-TX-V2\0",
+    ] {
+        assert!(matches!(
+            MessagePayload::from_wire(&[marker, legacy_body.as_slice()].concat()),
+            Err(Error::IncompatibleWireVersion(WireVersionMismatch {
+                ours: WIRE_VERSION,
+                theirs: PeerWireVersion::BeforeVersioning,
+            }))
+        ));
+    }
+
+    let mut unknown_kind = wire.to_vec();
+    unknown_kind[8] = 2;
+    for bytes in [legacy_body.as_slice(), &wire[..7], unknown_kind.as_slice()] {
+        assert!(matches!(
+            MessagePayload::from_wire(bytes),
+            Err(Error::UnmarkedFrame)
+        ));
+    }
     Ok(())
 }

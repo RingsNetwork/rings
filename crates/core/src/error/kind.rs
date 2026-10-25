@@ -153,9 +153,15 @@ pub enum Error {
     #[error(transparent)]
     ProvisionalEvidence(#[from] rings_measure::EvidenceError),
 
-    /// The frame carries neither the payload marker nor the link-control marker.
-    #[error("Frame carries no rings marker")]
+    /// The bytes are no Rings frame: they open with no frame header, or with the header of this
+    /// wire version and a kind it does not know.
+    #[error("Bytes carry no rings frame header")]
     UnmarkedFrame,
+
+    /// A frame of another wire version, refused before its body is decoded (the frame-header
+    /// law, #1104).
+    #[error("Incompatible wire version: {0}")]
+    IncompatibleWireVersion(crate::message::WireVersionMismatch),
 
     /// A payload that travels outside any link referenced a session instead of carrying it.
     #[error(

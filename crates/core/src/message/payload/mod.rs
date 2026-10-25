@@ -39,8 +39,12 @@ use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::MessageKind;
 
+mod frame;
 mod wire;
 
+pub use self::frame::PeerWireVersion;
+pub use self::frame::WireVersionMismatch;
+pub use self::frame::WIRE_VERSION;
 pub(crate) use self::wire::DelegationRef;
 pub(crate) use self::wire::LinkControl;
 pub(crate) use self::wire::LinkFrame;

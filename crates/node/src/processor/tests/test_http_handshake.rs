@@ -1,12 +1,21 @@
-//! The HTTP handshake meeting a peer that holds its own offer to the dialing node (#947), over
-//! the dummy transport with the peer's public API stubbed in-process.
+//! The HTTP handshake meeting a peer that holds its own offer to the dialing node (#947), or a
+//! peer of another wire version (#1104), over the dummy transport with the peer's public API
+//! stubbed in-process.
 
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
+use rings_core::message::Decoder;
+use rings_core::message::Encoder;
 use rings_core::message::MessagePayload;
+use rings_core::message::PeerWireVersion;
+use rings_core::message::WireVersionMismatch;
+use rings_core::message::WIRE_VERSION;
+use rings_rpc::protos::rings_node::AnswerOfferRequest;
+use rings_rpc::protos::rings_node::NodeDidRequest;
+use rings_rpc::protos::rings_node_handler::HandleRpc;
 
 use super::common::connect_processors;
 use super::common::network_test_guard;
@@ -14,6 +23,8 @@ use super::common::prepare_processor_with_identity_key;
 use super::common::wait_processors_connected;
 use crate::error::Error;
 use crate::error::Result;
+use crate::error::INCOMPATIBLE_WIRE_VERSION_CODE;
+use crate::processor::handshake::admit_endpoint_wire_version;
 use crate::processor::handshake::RemoteHandshake;
 use crate::processor::HandshakeFailure;
 use crate::processor::Processor;
@@ -144,4 +155,117 @@ async fn test_http_join_prevails_over_the_seed_lost_overlay_offer() -> Result<()
         wait_processors_connected(&joining, &seed).await;
     }
     Ok(())
+}
+
+/// `offer` as a peer of another wire version would send it: the same frame under the header of
+/// `theirs`, or, for `None`, under the opening of a peer before wire versioning.
+fn reframed(offer: &MessagePayload, theirs: Option<u16>) -> Result<String> {
+    let frame = Vec::<u8>::from_encoded(&offer.encode().map_err(Error::CoreError)?)
+        .map_err(Error::CoreError)?;
+    let frame = match theirs {
+        Some(version) => [&frame[..6], &version.to_be_bytes(), &frame[8..]].concat(),
+        None => [b"RINGS-PAYLOAD\0".as_slice(), &frame[9..]].concat(),
+    };
+    Ok(frame.encode().map_err(Error::CoreError)?.to_string())
+}
+
+/// The answerer's half of the wire-version law (#1104): `answerOffer` refuses an offer of
+/// another wire version, and one from a peer before wire versioning, before decoding it, with
+/// the stable code and both versions as data; an offer of this version is answered.
+#[tokio::test]
+async fn test_answer_offer_refuses_an_offer_of_another_wire_version() -> Result<()> {
+    let _network_guard = network_test_guard().await;
+    let (answerer_key, dialer_key) = ordered_keys();
+    let answerer = prepare_processor_with_identity_key(answerer_key).await;
+    let dialer = prepare_processor_with_identity_key(dialer_key).await;
+    let offer = dialer
+        .swarm
+        .create_offer(answerer.did())
+        .await
+        .map_err(Error::CreateOffer)?;
+
+    for (theirs, data) in [
+        (
+            Some(WIRE_VERSION + 1),
+            serde_json::Value::from(WIRE_VERSION + 1),
+        ),
+        (None, serde_json::Value::Null),
+    ] {
+        let refused = answerer
+            .handle_rpc(AnswerOfferRequest {
+                offer: reframed(&offer, theirs)?,
+            })
+            .await;
+        let Err(refusal) = refused else {
+            panic!("an offer of wire version {theirs:?} was answered");
+        };
+        assert_eq!(
+            refusal.code,
+            jsonrpc_core::ErrorCode::ServerError(INCOMPATIBLE_WIRE_VERSION_CODE.into())
+        );
+        assert_eq!(
+            refusal.data,
+            Some(serde_json::json!({ "ours": WIRE_VERSION, "theirs": data }))
+        );
+    }
+    assert!(answerer
+        .handle_rpc(AnswerOfferRequest {
+            offer: offer.encode().map_err(Error::CoreError)?.to_string(),
+        })
+        .await
+        .is_ok());
+    Ok(())
+}
+
+/// The offerer's half of the wire-version law (#1104): `nodeDid` states this node's version,
+/// and an endpoint that states another, or none (a node before wire versioning), is refused
+/// before any offer is created.
+#[tokio::test]
+async fn test_the_offerer_refuses_an_endpoint_of_another_wire_version() -> Result<()> {
+    let _network_guard = network_test_guard().await;
+    let node = prepare_processor_with_identity_key(SecretKey::random()).await;
+    let reported = node
+        .handle_rpc(NodeDidRequest {})
+        .await
+        .map_err(Error::InternalRpcError)?
+        .wire_version;
+    assert_eq!(reported, Some(WIRE_VERSION));
+    assert!(admit_endpoint_wire_version(reported).is_ok());
+
+    for (stated, theirs) in [
+        (
+            Some(WIRE_VERSION + 1),
+            PeerWireVersion::Versioned(WIRE_VERSION + 1),
+        ),
+        (None, PeerWireVersion::BeforeVersioning),
+    ] {
+        assert!(matches!(
+            admit_endpoint_wire_version(stated),
+            Err(Error::IncompatibleWireVersion(WireVersionMismatch { ours: WIRE_VERSION, theirs: refused }))
+                if refused == theirs
+        ));
+    }
+    Ok(())
+}
+
+/// A mismatch fails on both sides at once (#1104): the refusal an answerer of version `v`
+/// returns over JSON-RPC reaches the offerer as its own mismatch, naming `v` as the peer's.
+#[test]
+fn test_a_remote_refusal_reaches_the_offerer_as_its_own_mismatch() {
+    let answerers = WIRE_VERSION + 1;
+    let answerer_refusal =
+        jsonrpc_core::Error::from(Error::IncompatibleWireVersion(WireVersionMismatch {
+            ours: answerers,
+            theirs: PeerWireVersion::Versioned(WIRE_VERSION),
+        }));
+    let offerer_error = Error::from(rings_rpc::jsonrpc::RpcError::JsonClientError(
+        answerer_refusal,
+    ));
+    assert!(matches!(
+        offerer_error,
+        Error::IncompatibleWireVersion(WireVersionMismatch {
+            ours: WIRE_VERSION,
+            theirs: PeerWireVersion::Versioned(version),
+        }) if version == answerers
+    ));
 }
