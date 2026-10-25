@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.37.0
 
 - Every frame names its wire version (#1104), so a node of another release is refused by
   name, not by a codec error. A frame now opens with `RINGS\0` and the wire version, a
@@ -135,8 +135,6 @@
   replica drops the same messages and rewriting an old hold gains nothing.
   - **Upgrade consequence.** Mail held more than 7 days ago is dropped at the first read of its
     inbox.
-
-## 0.37.0
 
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
   Window by classification). A transaction is link-local when it is Application traffic, it
