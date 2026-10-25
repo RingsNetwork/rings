@@ -1,0 +1,463 @@
+\documentclass[journal]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{url}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{lemma}{Lemma}
+\newtheorem{law}{Law}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{obligation}{Obligation}
+
+\newcommand{\Rg}{\mathcal{R}}
+\newcommand{\E}{\mathcal{E}}
+\newcommand{\Ok}{\mathsf{Ok}}
+\newcommand{\Err}{\mathsf{Err}}
+\newcommand{\Wait}{\mathsf{Wait}}
+\newcommand{\Exhausted}{\mathsf{Exhausted}}
+\newcommand{\Pool}{\mathcal{P}}
+\newcommand{\use}{\operatorname{use}}
+\newcommand{\liab}{\operatorname{liab}}
+\newcommand{\issue}[1]{\#{#1}}
+
+\author{Ryan~J.~Kung%
+\thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
+Manuscript created October 25, 2026.  This document specifies the load bounds of a Rings node
+before 1.0: what it holds node-wide, per neighbour edge and per lane, what a free identity can
+consume, and what refusal and backpressure look like at each bound (\texttt{rings-transport},
+module \texttt{callback}; \texttt{rings-core}, modules \texttt{fair\_admission},
+\texttt{swarm::callback::inbound}, \texttt{chunk}, \texttt{message::replay} and
+\texttt{dht::chord::carrier\_store}).  It is the law for issues \issue{907}, \issue{927},
+\issue{932}, \issue{934} and \issue{938} of \texttt{RingsNetwork/rings}, and closes the Sybil
+residual of the removal-stability law~\cite{RemovalStability}.}}
+\title{\huge Load Bounds:\\
+Node, Edge and Lane Accounting\\
+for a Rings Node under Free Identities}
+\date{}
+
+\IEEEaftertitletext{%
+\vspace{0.5\baselineskip}%
+\noindent\hfill
+\parbox{0.90\textwidth}{%
+{\centering\bfseries Abstract\par}%
+\vspace{0.4\baselineskip}%
+\noindent
+A Rings identity is a key digest, so anyone can mint as many as they like.  Every table a
+remote party can grow must therefore be accounted to something that is not free.  We take the
+authenticated neighbour edge: a connection the node itself admitted, of which it holds at most
+$\Rg$ at once.  One accounting law covers every such table: each current edge has a reserved
+floor, overflow and the charges of departed edges share a pool, and the node-wide bound is the
+sum.  An honest edge is then refused only past its own floor with the pool full, and a free
+identity consumes at most the share of the edge that carries it.  We apply the law to the
+receiver's replay streams (with an eviction horizon that cannot reopen replay), to the removal
+store, to received frames through a credit-reclaim protocol that makes the frame bound hard and
+independent of the connection count, and to reassembled messages, which are charged once at
+their first chunk so that no honest message is refused.  We state the complexity obligations of
+the admission hot paths, and show that the barrier's control exemption is the identity
+``a lane waits for reassembly iff it carries chunks''.
+}\hfill\null\par
+\vspace{0.5\baselineskip}}
+
+\begin{document}
+\maketitle
+\emergencystretch=1.5em
+
+\section{Problem}\label{sec:problem}
+
+\begin{description}[leftmargin=1.2em,style=nextline]
+\item[\issue{907}] The receiver's replay table never evicts, and a new stream fails closed once
+the table is full.  Streams are keyed by the origin account, which costs nothing, so 16\,384 key
+pairs and one message each lock a node out of every new origin, permanently.
+\item[\issue{1060}, residual] The removal store charges each sender a share, and senders are
+free keys, so 64 identities fill it.
+\item[\issue{934}] Credit bounds the frames held per connection, not per node: about 1.3\,GiB
+at the connection cap.  Advertised credit cannot be taken back, so no hard node-wide bound
+exists today.
+\item[\issue{932}] A reassembled message is re-charged at its full size on the inbound actor,
+where it cannot wait, and is dropped when that charge does not fit.  A chunk that finds the
+reassembly budget full is dropped too.
+\item[\issue{938}] Admission costs $O(n)$ per event and takes node-global locks per frame,
+exactly when the node is saturated.
+\item[\issue{927}] It is unclear whether the barrier's control exemption is still needed under
+per-lane credit.
+\end{description}
+
+\section{Model}\label{sec:model}
+
+\begin{definition}[Principals]\label{def:principals}
+\begin{itemize}[leftmargin=1.2em]
+\item An \emph{origin} $o$ is an account DID, recovered from a signature.  Anyone can create
+one, at no cost.
+\item An \emph{edge} $e$ is a handshake-authenticated connection the node admitted
+(\texttt{EdgeRelation::Neighbour}).  The registry holds at most
+$\Rg=2(F+s+1)$ connection records in any phase, where $F=160$ is the number of finger slots and
+$s$ the number of successors ($328$ at $s=3$).  So at most $\Rg$ edges are \emph{current} at
+any instant.  An edge identity is also a free key; what is bounded is the number of edges
+current at once.
+\item A \emph{lane} $(e,\ell)$ is one of the four credit-controlled channels of an edge.
+\item The \emph{local} principal $\lambda$ is the node itself: its own operations, and
+deliveries out of its own stores.
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Table]\label{def:table}
+A table $T$ is a node-wide set of items that remote input can grow: replay streams, removal
+records, frames held, reassembly bytes, mailbox bytes.  Every item $x\in T$ carries a principal
+$\pi(x)\in\E\cup\{\lambda\}$, the edge or local principal that \emph{introduced} it, and it
+leaves $T$ only by a transition of $T$'s own law (consumption, retirement at a horizon, or an
+acknowledged move).
+\end{definition}
+
+\begin{assumption}[What a remote peer can send]\label{as:remote}
+A remote party can:
+\begin{itemize}[leftmargin=1.2em]
+\item mint origins without bound;
+\item hold up to $\Rg$ edges at once, and replace an edge by a fresh identity whenever
+connection admission accepts one;
+\item send, on each edge, anything the edge's credit, quotas and admission laws let through.
+\end{itemize}
+It cannot authenticate as an edge it does not hold.  Sybil and eclipse resistance remain
+non-goals; this law bounds what a Sybil consumes, and does not prevent one.
+\end{assumption}
+
+\textbf{Refusal and backpressure.}  At a bound, a transition takes one of three forms:
+\begin{itemize}[leftmargin=1.2em]
+\item \emph{backpressure}: the transition waits for capacity in resource order, and nothing is
+lost;
+\item \emph{refusal}: it fails with an error that names the bound and changes nothing, and the
+sender keeps its copy;
+\item \emph{drop}: it is discarded and counted.
+\end{itemize}
+A drop is allowed only where the law names it (best-effort relay, the application inbox).  It
+is never allowed for an honest frame or message at a capacity bound.
+
+\section{The accounting law}\label{sec:accounting}
+
+\begin{law}[Edge accounting]\label{law:edge}
+Every table $T$ has a per-edge floor $f_T$, a pool $\Pool_T$ and a local share $L_T$, with
+node-wide bound
+\[
+B_T=\Rg\, f_T+\Pool_T+L_T .
+\]
+Let $\use_e$ be the number of items introduced by edge $e$.  A transition that adds an item
+introduced by $\pi$ is admitted iff:
+\begin{itemize}[leftmargin=1.2em]
+\item $\pi=e$ is current and $\use_e<f_T$ (the edge's floor); or
+\item the pool has room, $\sum_{e\ \text{current}}\max(0,\use_e-f_T)+\use_{\text{departed}}
+<\Pool_T$; or
+\item $\pi=\lambda$ and $\use_\lambda<L_T$.
+\end{itemize}
+Otherwise it is refused or, where the law says so, it waits.  When an edge departs, its items
+stay in $T$ and are counted against the pool until they leave by $T$'s own law.  No item is ever
+dropped to make room.
+\end{law}
+
+\begin{theorem}[Isolation]\label{theorem:isolation}
+Under Law~\ref{law:edge}:
+\begin{enumerate}[leftmargin=1.5em]
+\item $|T|\le B_T$ always;
+\item a transition introduced by a current edge $e$ with $\use_e<f_T$ is never refused, however
+many origins, edges or departed edges any other party controls;
+\item a party holding $k$ current edges, and any number of departed ones, occupies at most
+$k f_T+\Pool_T$ items.
+\end{enumerate}
+\end{theorem}
+\begin{proof}
+(1)~At most $\Rg$ edges are current, each holds at most $f_T$ items within its floor, the pool
+holds at most $\Pool_T$, and the local principal holds at most $L_T$.
+(2)~The floor test reads $\use_e$ alone, and only $e$'s own transitions change it.
+(3)~Items within a floor belong to a current edge, and every other item is in the pool.
+\end{proof}
+
+Accounting to the origin, as the removal store did~\cite{RemovalStability} and the replay
+table's quota does, fails part~(3).  An origin costs nothing, so a party controls unboundedly
+many, and the only bound left is the node-wide total.  The edge is the unit that is both
+authenticated and bounded in number.  The quota per origin stays: it is a rate within an edge,
+not a capacity.  Edge identities are free too, but replacing an edge moves its items to the
+pool, which Theorem~\ref{theorem:isolation} already counts.
+
+\section{Replay streams (\issue{907})}\label{sec:replay}
+
+A receiver stream $s$ admits a transaction only while its proof is live,
+$t<ts+ttl$, with $ttl\le\mathtt{MAX\_TTL\_MS}=H$ and $ts\le t_{\mathrm{admit}}+\sigma$.
+
+\begin{definition}[Horizon]\label{def:streamhorizon}
+Let $a_s$ be the receiver's clock at the last admission of $s$.  The stream is \emph{spent} at
+$t$ iff $t\ge a_s+H+\sigma$.
+\end{definition}
+
+\begin{lemma}[Eviction is sound]\label{lem:evict}
+A spent stream can be forgotten without reopening replay.  Every transaction it ever admitted is
+then expired at every honest clock, so a stream opened afresh at $\mathsf{First}$ refuses them as
+dead proofs.
+\end{lemma}
+\begin{proof}
+Every admitted transaction has $ts\le a_s+\sigma$ and $ttl\le H$, so it expired by
+$a_s+H+\sigma\le t$.  Liveness is checked before replay, so it is refused at the proof, whatever
+the window holds.
+\end{proof}
+
+\begin{law}[Stream admission]\label{law:streams}
+The receiver table is a table under Law~\ref{law:edge}:
+\begin{itemize}[leftmargin=1.2em]
+\item A \emph{new} stream is introduced by the edge that delivered its first transaction, and a
+relay-inbox delivery by $\lambda$.
+\item A stream leaves the table only when it is spent, by Lemma~\ref{lem:evict}.  A spent stream
+is retired lazily, when a new stream needs its slot.
+\item The record of a stream stores $(\pi(s), a_s)$, so a restart recovers the charges.
+\end{itemize}
+Parameters:
+\begin{itemize}[leftmargin=1.2em]
+\item $f=32$ new streams per edge, $\Pool=4096$ and $L=1024$, so
+$B=328\cdot32+4096+1024=15\,616\le16\,384$, today's capacity;
+\item the per-origin quota is unchanged.
+\end{itemize}
+A new stream past its bound is refused with \texttt{TransactionReplayStreamCapacityExceeded}, as
+today.  The refusal now lasts until a slot is spent, at most $H+\sigma$ (100\,min), and it
+reaches only the edge past its own floor.
+\end{law}
+
+\begin{proposition}[No permanent lockout]\label{prop:nolockout}
+A party with $k$ edges and any number of origins can refuse new streams only through those $k$
+edges, and only once the pool is full.  For every other current edge, a new origin is refused
+only once that edge has itself introduced $f$ unspent streams.  Every refusal ends within
+$H+\sigma$ of the last admission on the streams that fill the bound.
+\end{proposition}
+\begin{proof}
+Theorem~\ref{theorem:isolation}, and Lemma~\ref{lem:evict} for the end of a refusal.
+\end{proof}
+
+A relay or seed that forwards many distinct origins can fill its own floor legitimately.  Its
+overflow then competes in the pool; the honest cost is a refusal for at most $H+\sigma$ on that
+edge alone.  The sender table holds this node's own streams, so it is local.
+
+\section{The removal store, re-keyed}\label{sec:removal}
+
+Law~6 of~\cite{RemovalStability} charged each remove to its sender's origin.  We re-key it
+under Law~\ref{law:edge}:
+\begin{itemize}[leftmargin=1.2em]
+\item an operation or a sync is charged to the edge that delivered it, and this node's own
+writes and repairs to $\lambda$;
+\item the holder class goes away: a predecessor or successor is an edge like any other, so its
+floor is the same.
+\end{itemize}
+Parameters: $f=128$ removes per edge, $\Pool=16\,384$ and $L=7\,168$, so
+$B=328\cdot128+16\,384+7\,168=65\,536$, today's total.  Theorem~\ref{theorem:isolation} then closes
+the Sybil residual that \issue{907} was to close: one mechanism serves both tables.
+
+\section{Received frames (\issue{934})}\label{sec:frames}
+
+Let lane $(e,\ell)$ have advertised credit $A$ and released count $R$.  Its liability is
+$\liab=A-R$: the frames the receiver may still have to hold, in flight or held.  Today
+$\liab\le W=16$ per lane, but credit is cumulative and never shrinks, so $\sum\liab$ is bounded
+only by the connection count.
+
+\begin{definition}[Reclaim]\label{def:reclaim}
+Two frames are added on the priority lane, both cumulative and idempotent:
+\begin{itemize}[leftmargin=1.2em]
+\item $\mathsf{Shrink}(\ell,L',g)$, receiver to sender: ``from generation $g$, your limit on
+lane $\ell$ is $L'$''.
+\item $\mathsf{Returned}(\ell,c,g)$, sender to receiver: ``I committed $c$ frames of $\ell$, and
+from now on I commit at most $\max(c,L')$''.
+\end{itemize}
+Until the $\mathsf{Returned}$ arrives, the receiver counts the lane's liability at its old
+$A$.  After it, the liability is $\max(c,L')-R$.
+\end{definition}
+
+\begin{law}[Hard frame bound]\label{law:frames}
+Every lane has a floor $g_\ell$: $g_{\mathrm{prio}}=2$ for the priority lane (control, and the
+reclaim and demand frames), and $g_\ell=0$ for the data lanes.  A fresh generation grants only
+the floors.
+\begin{itemize}[leftmargin=1.2em]
+\item A data lane with queued frames and no credit sends a one-frame $\mathsf{Wanted}(\ell)$ on
+the priority lane.
+\item The receiver grants a lane credit beyond its floor only from the node's frame pool:
+\[
+\textstyle\sum\liab\le B_F=\Rg\, g_{\mathrm{prio}}+\Pool_F .
+\]
+\item Demands are served first come, first served.
+\item A lane that received no frame for $T_{\mathrm{idle}}$ while holding pooled credit is shrunk
+to its floor.
+\end{itemize}
+Parameters:
+\begin{itemize}[leftmargin=1.2em]
+\item $\Pool_F=256$ frames (16\,MiB, the soft limit of today);
+\item $T_{\mathrm{idle}}=$ two observed round trips;
+\item $B_F=328\cdot2+256=912$ frames, 57\,MiB.
+\end{itemize}
+This is independent of how many connections are open.
+\end{law}
+
+\begin{proposition}[Frames]\label{prop:frames}
+Under Law~\ref{law:frames}, for an honest sender:
+\begin{enumerate}[leftmargin=1.5em]
+\item $\sum\liab\le B_F$ in every interleaving, with shrink, return and demand frames reordered
+and duplicated;
+\item no honest frame is refused: a frame sent under credit is within the liability counted for
+it;
+\item a lane with queued frames is never blocked forever while the receiver keeps consuming
+(progress);
+\item an idle lane holds at most its floor after $T_{\mathrm{idle}}$ plus one round trip, so it
+starves no active lane;
+\item control traffic never waits for the pool.
+\end{enumerate}
+\end{proposition}
+\begin{proof}[Proof sketch]
+(1)~Pooled credit is granted only when the counted liability fits, and the counted liability
+never falls below the true one: a shrink takes effect only once its $\mathsf{Returned}$ confirms
+what was committed.
+(2)~A frame committed under $A$ is counted until released.
+(3)~A blocked lane has a $\mathsf{Wanted}$ queued.  The pool refills as frames are released and
+idle lanes are shrunk, and service is first come, first served.
+(4)~The shrink frees the lane's pooled credit.
+(5)~The priority floor is reserved per edge.
+These are the model-checking obligations of the implementation, over the existing credit model
+with the new frames.
+\end{proof}
+
+This is a wire change: a total cutover, with no versioning before 1.0.  Byte-denominated credit
+(\issue{937}) composes with it, by counting $\liab$ in bytes, and is not required here.
+
+\section{Reassembled messages (\issue{932})}\label{sec:reassembly}
+
+\begin{law}[One charge per message]\label{law:onecharge}
+The first chunk of a message, with header $[0,n]$ and data length $d_0$, reserves
+$m=n\cdot d_0$ (validated $\le$ \texttt{max\_message\_bytes}) once, on the inbound mailbox
+ledger: the edge's budget, the lane's share and the shared pool.  It takes that reservation as
+an \emph{arrival}, so it waits in resource order and is never refused for capacity.
+\begin{itemize}[leftmargin=1.2em]
+\item Later chunks of the message must have length $\le d_0$, and they charge nothing.
+\item The reassembly buffer and the completed message live inside that one reservation.
+\item The mailbox transition at completion is a move, not a new charge.
+\item The reservation is released when the message's processing completes, or when the
+reassembly expires.
+\end{itemize}
+The separate reassembly byte budget and its refusal ($\mathsf{Rejected}(\mathsf{Capacity})$)
+are retired.  The id and slot caps stay, as validity bounds.
+\end{law}
+
+\begin{proposition}[No honest message refused]\label{prop:noref}
+Under Law~\ref{law:onecharge}, no honest chunked message is refused or dropped for capacity, and
+no wait can deadlock.
+\end{proposition}
+\begin{proof}
+The only charge is the first chunk's, which waits as an arrival before it holds a lane ticket.
+The ordering laws of \texttt{ResourceOrderedQueue} cover it, and the capacity it waits for is
+released by events that do not wait on it.  The transition that used to re-charge, and could
+only be refused, now moves bytes already reserved.
+\end{proof}
+
+The cost is direction~1 of \issue{932}: a message holds its full size for its whole reassembly.
+This is bounded by the edge's budget and by the reassembly expiry, so a peer that announces and
+then stalls holds only its own budget.
+
+\section{Hot paths (\issue{938})}\label{sec:hot}
+
+These are performance obligations, kept apart from the security laws above.
+
+\begin{obligation}[Admission complexity]\label{ob:complexity}
+\begin{itemize}[leftmargin=1.2em]
+\item Each arrival, release and cancel in \texttt{ResourceOrderedQueue} costs
+$O(\log n)$ in the waiters: waiters are indexed by resource, and one ledger snapshot is taken
+per pass.
+\item Each received frame takes $O(1)$ lock acquisitions, and none of them on a node-global
+mutex: the node load is an atomic counter.
+\item The node load has hysteresis: advertisements are deferred above $H_{\mathrm{hi}}$ and
+resume below $H_{\mathrm{lo}}=H_{\mathrm{hi}}/2$.  Deferred links are kept in a set, so a
+release at the limit wakes no one, and crossing $H_{\mathrm{lo}}$ wakes each deferred link once.
+\item Each peer runs one admission watcher, not one task per send.
+\item Unread admissions are indexed by peer.
+\end{itemize}
+They are verified against the sync-storm matrix, before and after each change.
+\end{obligation}
+
+\section{The barrier exemption (\issue{927})}\label{sec:barrier}
+
+\begin{lemma}[One frame per lane]\label{lem:oneframe}
+If every path that hands a frame to core does so through its lane's FIFO, with at most one frame
+in hand-over per lane, then a lane that waits behind the reassembly barrier waits at most one
+reassembly frame's service, $\le2$\,s.  That is below the control deadline of 15\,s.
+\end{lemma}
+
+The predicate \texttt{lane\_waits\_for\_reassembly} is ``the lane carries logical data''.
+Chunks travel only on their message's lane (the lane-mismatch refusal), and control messages
+are never chunked, so the predicate is exactly ``the lane can carry chunks''.  In that form it
+is the barrier's definition, not an exemption.
+
+\textbf{Decision.}  Keep the predicate, renamed for what it is.  Remove the ablation toggle
+\texttt{ProtectionLayer::BarrierControlExemption} and its legacy feedback-loop witness.  This is
+a subtraction, under two obligations checked in the implementation:
+\begin{itemize}[leftmargin=1.2em]
+\item every hand-off path obeys Lemma~\ref{lem:oneframe}, the pre-admission drain and the
+detached submissions included;
+\item no control message can exceed one frame.  This is asserted at compile time from the
+widest control message.
+\end{itemize}
+
+\section{Summary of bounds}\label{sec:summary}
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}p{0.22\columnwidth}p{0.3\columnwidth}p{0.36\columnwidth}@{}}
+\toprule
+Table & Bound & At the bound\\
+\midrule
+frames held & node $B_F$; lane floor & sender waits for credit (backpressure)\\
+mailbox bytes & edge budget, lane share, pool & arrival waits (backpressure)\\
+reassembly & inside the mailbox reservation & first chunk waits (backpressure)\\
+replay streams & $\Rg f+\Pool+L$ by edge & new stream refused, $\le H+\sigma$\\
+removal store & $\Rg f+\Pool+L$ by edge & write refused, unacked\\
+origin & rate quota within its edge & refused for the rate window\\
+application inbox & 64\,MiB & dropped, counted (by design)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{What a free identity consumes.}  An origin alone consumes nothing beyond its quota on the
+edge that carries it.  An edge consumes its floors.  The pool is shared, and is the most that
+any number of free identities can take together.
+
+\section{Implementation order}\label{sec:plan}
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}llp{0.6\columnwidth}@{}}
+\toprule
+PR & Issue & Law\\
+\midrule
+1 & \issue{907} & Laws~\ref{law:edge}, \ref{law:streams}; Sec.~\ref{sec:removal}\\
+2 & \issue{932} & Law~\ref{law:onecharge}\\
+3 & \issue{934} & Law~\ref{law:frames} (wire cutover)\\
+4 & \issue{938} & Obligation~\ref{ob:complexity}, measured\\
+5 & \issue{927} & Sec.~\ref{sec:barrier} (subtraction)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+PR~1 adds the edge-accounting primitive that PR~2 reuses for the mailbox.  PR~4 rewrites the
+queue that PR~2 changes, so it follows PR~2.  PR~5 needs nothing from the others.
+
+\textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}:
+\begin{itemize}[leftmargin=1.2em]
+\item PR~1 changes the replay record, which gains its introducer and last admission.  Remove the
+\texttt{transaction-replay} store while the node is stopped; this is the documented reset of
+the durable-records law.  The removal store gains an edge charge, so remove
+\texttt{dht-removals} too.
+\item PR~3 is a wire cutover with no step.
+\end{itemize}
+
+\sloppy
+\bibliographystyle{IEEEtran}
+\bibliography{load-bounds}
+
+\end{document}
