@@ -5,6 +5,7 @@ use futures::lock::Mutex as FuturesMutex;
 use super::InboundLane;
 use super::LocalDelivery;
 use super::LogicalInbound;
+use super::WeakLogical;
 use crate::dht::Did;
 use crate::fair_admission::SlotRoster;
 use crate::measure::Authentication;
@@ -129,6 +130,25 @@ impl Arrival {
     /// edge was retired meanwhile.
     pub(super) fn introducer(self, slots: &SlotRoster) -> Principal {
         slots.principal_of(self.authenticated_peer())
+    }
+}
+
+impl WeakLogical {
+    /// The logical stage over `transport`, held weakly (the release law).
+    pub(super) fn new(transport: &Arc<SwarmTransport>) -> Self {
+        Self(Arc::downgrade(transport))
+    }
+
+    /// The logical stage for one event, while its transport lives.
+    ///
+    /// ```text
+    ///   upgrade : WeakLogical → Option LogicalInbound
+    ///   upgrade (WeakLogical::new t) = Some (LogicalInbound::new t)   while t lives;  None after
+    /// ```
+    ///
+    /// `None` is absorbing: once the transport is gone, every later upgrade is `None`.
+    pub(super) fn upgrade(&self) -> Option<LogicalInbound> {
+        self.0.upgrade().map(LogicalInbound::new)
     }
 }
 

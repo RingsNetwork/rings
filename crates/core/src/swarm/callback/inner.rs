@@ -15,6 +15,7 @@ use super::inbound::InboundSubmission;
 use super::inbound::ReassemblyClock;
 use super::pre_admission::Arrival;
 use super::processor::prepare_resolved_frame;
+use super::BoundCallback;
 use super::FrameProvenance;
 use super::HeldInboundFrame;
 use super::InboundFrameLease;
@@ -34,26 +35,31 @@ use crate::swarm::session_link::expired_within_grace;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
-impl SwarmTransportCallback {
-    pub(super) fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
-        self.processor.pending_attempt()
-    }
-
-    /// A second handle on this callback's connection, for a task that runs on its own.
-    pub(super) fn detached_handle(&self) -> Self {
-        Self {
-            processor: self.processor.clone(),
-            inbound: self.inbound.clone(),
+/// Hand one event to the callback `$callback` bound to its transport for the event, or drop it
+/// once the transport is gone (the release law of [`WeakLogical`](super::WeakLogical)).
+///
+/// ```text
+///   on_bound(c, e) = e(b)    if c.upgrade() = Some b
+///                  = Ok(())  if c.upgrade() = None
+/// ```
+macro_rules! on_bound {
+    ($callback:expr, $event:ident($($argument:expr),* $(,)?)) => {
+        match $callback.upgrade() {
+            Some(bound) => bound.$event($($argument),*).await,
+            None => Ok(()),
         }
-    }
+    };
+}
 
-    /// Create the transport callback of one connection of `transport`.
+impl SwarmTransportCallback {
+    /// Create the transport callback of one connection of `transport`, which it keeps weakly
+    /// (the release law of [`WeakLogical`](super::WeakLogical)).
     pub fn new(transport: Arc<SwarmTransport>) -> Self {
-        Self::new_with_reassembly_clock(transport, ReassemblyClock::system())
+        Self::new_with_reassembly_clock(&transport, ReassemblyClock::system())
     }
 
     fn new_with_reassembly_clock(
-        transport: Arc<SwarmTransport>,
+        transport: &Arc<SwarmTransport>,
         reassembly_clock: ReassemblyClock,
     ) -> Self {
         let inbound_capacity = transport.inbound_capacity();
@@ -69,7 +75,36 @@ impl SwarmTransportCallback {
         transport: Arc<SwarmTransport>,
         now_ms: Arc<Mutex<u128>>,
     ) -> Self {
-        Self::new_with_reassembly_clock(transport, ReassemblyClock::controlled(now_ms))
+        Self::new_with_reassembly_clock(&transport, ReassemblyClock::controlled(now_ms))
+    }
+
+    /// This callback bound to its transport for one event: `None` once the transport is gone.
+    fn upgrade(&self) -> Option<BoundCallback> {
+        Some(BoundCallback {
+            processor: self.processor.upgrade()?,
+            inbound: self.inbound.clone(),
+        })
+    }
+
+    /// Take `msg` from `cid` through the link stage as the transport hands a frame over, with
+    /// no transport credit or lane; a frame after the transport is gone is dropped.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn on_admitted_message_for_test(
+        &self,
+        cid: &str,
+        msg: &[u8],
+    ) -> Result<(), TransportCallbackError> {
+        on_bound!(
+            self,
+            submit_inbound_message(cid, Bytes::copy_from_slice(msg), None, None)
+        )
+    }
+}
+
+/// A connection's own state, which either form of its callback reads alike.
+impl<L> SwarmTransportCallback<L> {
+    pub(super) fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
+        self.processor.pending_attempt()
     }
 
     /// Bind this callback to the pending handshake that created its transport.
@@ -92,6 +127,16 @@ impl SwarmTransportCallback {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn inbound_for_test(&self) -> &InboundMailbox {
         &self.inbound
+    }
+}
+
+impl BoundCallback {
+    /// A second handle on this callback's connection, for a task that runs on its own.
+    pub(super) fn detached_handle(&self) -> Self {
+        Self {
+            processor: self.processor.clone(),
+            inbound: self.inbound.clone(),
+        }
     }
 
     /// Admit the pending connection to `did` once its data channel is open: the DHT admission,
@@ -298,7 +343,7 @@ impl SwarmTransportCallback {
     }
 }
 
-impl SwarmTransportCallback {
+impl BoundCallback {
     /// Verify one self-contained payload of `wire_len` bytes from `peer`, charging a failure
     /// to `peer`, except a frame whose only defect is an origin delegation that expired in
     /// flight, which is dropped uncharged. Post: the frame, ready for the admission gate, or
@@ -462,21 +507,45 @@ impl SwarmTransportCallback {
             }
         }
     }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn on_admitted_message_for_test(
-        &self,
-        cid: &str,
-        msg: &[u8],
-    ) -> Result<(), TransportCallbackError> {
-        self.submit_inbound_message(cid, Bytes::copy_from_slice(msg), None, None)
-            .await
-    }
 }
 
+/// The callback a connection keeps acts on each event as the callback bound to its transport
+/// for that event; an event that comes after the transport is gone has nothing to act on, and
+/// is dropped (`on_bound!`).
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl TransportCallback for SwarmTransportCallback {
+    async fn on_admitted_message(
+        &self,
+        message: AdmittedInboundMessage<'_>,
+    ) -> Result<(), TransportCallbackError> {
+        on_bound!(self, on_admitted_message(message))
+    }
+
+    async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {
+        on_bound!(self, on_invalid_inbound_frame(cid))
+    }
+
+    async fn on_peer_connection_state_change(
+        &self,
+        cid: &str,
+        s: WebrtcConnectionState,
+    ) -> Result<(), TransportCallbackError> {
+        on_bound!(self, on_peer_connection_state_change(cid, s))
+    }
+
+    async fn on_data_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
+        on_bound!(self, on_data_channel_open(cid))
+    }
+
+    async fn on_data_channel_close(&self, cid: &str) -> Result<(), TransportCallbackError> {
+        on_bound!(self, on_data_channel_close(cid))
+    }
+}
+
+/// The events the transport reports for one connection, each handled by the callback bound to
+/// its transport for the event.
+impl BoundCallback {
     async fn on_admitted_message(
         &self,
         message: AdmittedInboundMessage<'_>,

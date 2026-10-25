@@ -109,7 +109,7 @@ async fn test_malformed_unbound_transport_does_not_attribute_peer_failure() -> R
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer: Did = SecretKey::random().address().into();
-    let callback = SwarmTransportCallback::new(transport);
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
 
     callback
         .on_admitted_message_for_test(&peer.to_string(), &[0xff])
@@ -274,7 +274,7 @@ async fn test_invalid_unbound_transport_envelope_does_not_attribute_peer_failure
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer: Did = SecretKey::random().address().into();
-    let callback = SwarmTransportCallback::new(transport);
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
 
     callback
         .on_invalid_inbound_frame(&peer.to_string())

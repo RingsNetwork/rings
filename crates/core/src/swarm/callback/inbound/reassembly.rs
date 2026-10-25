@@ -40,21 +40,6 @@ impl InboundProcessor {
         self.record_expired_reassembly_failures(None, expired).await;
     }
 
-    pub(super) async fn has_pending_reassembly(&self) -> bool {
-        self.reassembler.lock().await.has_pending()
-    }
-
-    pub(super) async fn prepare_reassembly_for_close(&self) -> bool {
-        self.reassembler.lock().await.prepare_for_close()
-    }
-
-    pub(super) async fn discard_reassembly_after_close_timer_failure(&self) {
-        self.reassembler
-            .lock()
-            .await
-            .discard_after_close_timer_failure();
-    }
-
     async fn record_expired_reassembly_failures(
         &self,
         fallback_peer: Option<crate::dht::Did>,
@@ -80,6 +65,25 @@ impl InboundProcessor {
             self.record_receive_failure(Some(peer), Authentication::Authenticated)
                 .await;
         }
+    }
+}
+
+/// The reassembler's own state, which the inbound actor tends whether or not it holds the
+/// transport bound.
+impl<L> InboundProcessor<L> {
+    pub(super) async fn has_pending_reassembly(&self) -> bool {
+        self.reassembler.lock().await.has_pending()
+    }
+
+    pub(super) async fn prepare_reassembly_for_close(&self) -> bool {
+        self.reassembler.lock().await.prepare_for_close()
+    }
+
+    pub(super) async fn discard_reassembly_after_close_timer_failure(&self) {
+        self.reassembler
+            .lock()
+            .await
+            .discard_after_close_timer_failure();
     }
 }
 
