@@ -20,6 +20,7 @@ use crate::error::Result;
 use crate::message::yield_core_actor_step;
 use crate::message::Message;
 use crate::message::PayloadSender;
+use crate::message::Principal;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::SyncEntriesWithSuccessorReport;
 use crate::utils::get_epoch_ms;
@@ -140,6 +141,8 @@ pub(crate) struct StorageSyncBatch<'data> {
     /// The authenticated sender of the batch (its transaction signer), for the relocation law of
     /// relay inboxes.
     sender: Did,
+    /// The principal that delivered the batch, charged with the removes it raises (#907).
+    introducer: Principal,
     purpose: StorageSyncPurpose,
     destination: StorageSyncDestination,
     data: &'data [PlacedEntry],
@@ -151,10 +154,16 @@ pub(crate) struct StorageSyncBatch<'data> {
 }
 
 impl<'data> StorageSyncBatch<'data> {
-    pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor, sender: Did, now_ms: u128) -> Self {
+    pub(crate) fn new(
+        msg: &'data SyncEntriesWithSuccessor,
+        sender: Did,
+        introducer: Principal,
+        now_ms: u128,
+    ) -> Self {
         Self {
             now_ms,
             sender,
+            introducer,
             purpose: msg.purpose,
             destination: msg.destination,
             data: &msg.data,
@@ -309,7 +318,7 @@ impl<'data> StorageSyncBatch<'data> {
 
         match transport
             .dht
-            .join_admitted_storage_entry(self.now_ms, key, admitted, self.sender)
+            .join_admitted_storage_entry(self.now_ms, key, admitted, self.introducer)
             .await
         {
             Ok(_) => {
@@ -419,13 +428,15 @@ fn evict_storage_sync_acks(pending: &mut StorageSyncAckMap) {
 impl SwarmTransport {
     /// Validate a complete local storage-sync batch before persisting any entry.
     ///
-    /// Pre: `sender` is the authenticated origin of the message carrying `msg`.
+    /// Pre: `sender` is the authenticated origin of the message carrying `msg`, and
+    /// `introducer` the principal that delivered it.
     pub(crate) async fn persist_storage_sync_entries(
         &self,
         msg: &SyncEntriesWithSuccessor,
         sender: Did,
+        introducer: Principal,
     ) -> Result<Vec<SyncedEntryAck>> {
-        StorageSyncBatch::new(msg, sender, get_epoch_ms())
+        StorageSyncBatch::new(msg, sender, introducer, get_epoch_ms())
             .run(self)
             .await
     }
@@ -546,7 +557,7 @@ impl SwarmTransport {
             .filter(|next_hop| *next_hop != self.dht.did)
         {
             None => {
-                self.persist_storage_sync_entries(&msg, self.dht.did)
+                self.persist_storage_sync_entries(&msg, self.dht.did, Principal::Local)
                     .await?;
                 Ok(StorageSyncOutcome::PersistedLocally)
             }

@@ -23,11 +23,13 @@ use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::handlers::HandlerContext;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
+use crate::message::Principal;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
@@ -72,7 +74,9 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
         receiver.did(),
     )?;
 
-    receiver_handler.handle(&context, &sync_msg).await?;
+    receiver_handler
+        .handle(&HandlerContext::unbound_for_test(&context), &sync_msg)
+        .await?;
 
     let payload = next_payload_for_tx(&sender, context.transaction.tx_id).await?;
     match payload.transaction.data::<Message>()? {
@@ -143,7 +147,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_a_holder_alo
     let from_stranger = receiver
         .swarm
         .transport
-        .persist_storage_sync_entries(&sync_msg, stranger)
+        .persist_storage_sync_entries(&sync_msg, stranger, Principal::Unbound)
         .await?;
     assert_eq!(from_stranger, vec![SyncedEntryAck::new(
         topic.did,
@@ -161,7 +165,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_a_holder_alo
     let from_predecessor = receiver
         .swarm
         .transport
-        .persist_storage_sync_entries(&sync_msg, predecessor)
+        .persist_storage_sync_entries(&sync_msg, predecessor, Principal::Unbound)
         .await?;
     assert_eq!(from_predecessor.len(), 2);
     assert!(receiver
@@ -192,7 +196,7 @@ async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<
     let acks = receiver
         .swarm
         .transport
-        .persist_storage_sync_entries(&sync_msg, Did::from(1u32))
+        .persist_storage_sync_entries(&sync_msg, Did::from(1u32), Principal::Unbound)
         .await?;
 
     assert_eq!(acks, vec![SyncedEntryAck::new(
@@ -264,7 +268,9 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
     )?;
     let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
 
-    receiver_handler.handle(&context, &sync_msg).await?;
+    receiver_handler
+        .handle(&HandlerContext::unbound_for_test(&context), &sync_msg)
+        .await?;
 
     assert_eq!(
         receiver

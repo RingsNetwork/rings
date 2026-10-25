@@ -14,6 +14,7 @@ use crate::dht::StorageKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Principal;
 use crate::message::RelayHoldDigest;
 use crate::storage::file::test_root::TempRoot;
 use crate::storage::file::FileStorage;
@@ -39,8 +40,14 @@ async fn hold(ring: &PeerRing, holder: &DelegateeKey, destination: Did) -> Resul
     let now_ms = get_epoch_ms();
     let hold =
         EntryOperation::Extend(held_inbox_for(destination, holder)?).stamped(now_ms, ring.did)?;
-    ring.operate_storage_entry(now_ms, inbox_key(destination), hold, ring.did)
-        .await
+    ring.operate_storage_entry(
+        now_ms,
+        inbox_key(destination),
+        hold,
+        ring.did,
+        Principal::Local,
+    )
+    .await
 }
 
 /// A completed hold survives a restart of the node, and the data store's budget, however full,
@@ -59,7 +66,7 @@ async fn test_held_mail_survives_a_restart_and_the_data_budget() -> Result<()> {
             let topic = Did::from(1000 + topic);
             let park = EntryOperation::Overwrite(data_entry_with_payload_len(topic, 1024))
                 .stamped(now_ms, node.did)?;
-            node.operate_storage_entry(now_ms, topic, park, node.did)
+            node.operate_storage_entry(now_ms, topic, park, node.did, Principal::Local)
                 .await?;
         }
         assert!(

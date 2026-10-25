@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use super::Admission;
 use super::RelayAdmission;
 use super::RelayDelivery;
 use super::ReplayRecord;
@@ -17,6 +18,7 @@ use crate::error::Result;
 use crate::message::replay::custody::RELAY_CUSTODY_CAPACITY;
 use crate::message::MessageCategory;
 use crate::storage::MemStorage;
+use crate::utils::get_epoch_ms;
 
 /// The stream of origin `origin` to destination 99.
 fn stream(origin: u32) -> StreamKey {
@@ -47,9 +49,8 @@ async fn admit(
     key: StreamKey,
     delivery: RelayDelivery,
 ) -> Result<RelayAdmission> {
-    replay
-        .admit_relayed(key, delivery, MessageCategory::Application.into(), 0)
-        .await
+    let admission = Admission::for_test(key, delivery.sequence, delivery.digest, get_epoch_ms());
+    replay.admit_relayed(admission).await
 }
 
 /// A restart between the admission and the take redelivers the mail once: the delivery is still

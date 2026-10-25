@@ -158,6 +158,15 @@ where V: Clone + Send + Sync
         }
         Ok(())
     }
+
+    /// Every key removed under one write lock, so the batch is atomic as a whole.
+    async fn remove_batch(&self, keys: &[String]) -> Result<()> {
+        let mut table = self.write()?;
+        for key in keys {
+            table.slots.remove(key);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]

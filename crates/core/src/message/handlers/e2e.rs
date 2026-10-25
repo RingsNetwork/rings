@@ -5,6 +5,7 @@ use crate::message::e2e::E2eHandshakeRequest;
 use crate::message::e2e::E2eHandshakeResponse;
 use crate::message::e2e::E2eStreamFrame;
 use crate::message::effects::CoreEffect;
+use crate::message::handlers::HandlerContext;
 use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
@@ -49,7 +50,7 @@ fn e2e_handshake_response_effect<'payload>(
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<E2eHandshakeRequest> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &E2eHandshakeRequest) -> Result<()> {
+    async fn handle(&self, ctx: &HandlerContext<'_>, msg: &E2eHandshakeRequest) -> Result<()> {
         run_e2e_local_or_forward(self, ctx, || {
             let responder_public_key = self.transport.delegation().delegator_pubkey()?;
             Ok(vec![e2e_handshake_response_effect(
@@ -65,7 +66,7 @@ impl HandleMsg<E2eHandshakeRequest> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<E2eHandshakeResponse> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &E2eHandshakeResponse) -> Result<()> {
+    async fn handle(&self, ctx: &HandlerContext<'_>, msg: &E2eHandshakeResponse) -> Result<()> {
         run_e2e_local_or_forward(self, ctx, || {
             msg.verify_responder(ctx.signer())?;
             Ok(Vec::new())
@@ -77,7 +78,7 @@ impl HandleMsg<E2eHandshakeResponse> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<E2eStreamFrame> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &E2eStreamFrame) -> Result<()> {
+    async fn handle(&self, ctx: &HandlerContext<'_>, msg: &E2eStreamFrame) -> Result<()> {
         run_e2e_local_or_forward(self, ctx, || {
             msg.verify_sender(ctx.signer())?;
             Ok(Vec::new())

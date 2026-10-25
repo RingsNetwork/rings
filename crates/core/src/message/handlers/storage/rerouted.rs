@@ -28,6 +28,7 @@ use crate::dht::PlacementLookup;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SearchEntry;
+use crate::message::Principal;
 use crate::swarm::transport::Placement;
 use crate::swarm::transport::Route;
 use crate::swarm::transport::SwarmTransport;
@@ -84,7 +85,7 @@ impl Placement for LookupPlacement {
                 super::repair_observed_storage_misses(
                     transport.clone(),
                     entry,
-                    transport.dht.did,
+                    Principal::Local,
                     self.redundancy,
                 )
                 .await
@@ -123,7 +124,14 @@ impl Placement for OperatePlacement {
 
     async fn settle(&self, transport: &Arc<SwarmTransport>, (): ()) -> Result<()> {
         let dht = &transport.dht;
-        dht.operate_storage_entry(get_epoch_ms(), self.0.placement, self.0.op.clone(), dht.did)
-            .await
+        let op = self.0.op.clone();
+        dht.operate_storage_entry(
+            get_epoch_ms(),
+            self.0.placement,
+            op,
+            dht.did,
+            Principal::Local,
+        )
+        .await
     }
 }

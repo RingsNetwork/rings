@@ -107,3 +107,38 @@ async fn test_an_authoritative_batch_over_the_budget_changes_nothing() {
         .expect("a rewrite fits beside nothing it does not replace");
     assert_eq!(stored(&storage).await, records(2, "w"));
 }
+
+/// The batch removal law on an authoritative store: every record of the batch and its presence
+/// marker are gone, the others stay, a key that holds no record is skipped, and after a restart
+/// a scan reports no record missing.
+#[tokio::test]
+async fn test_a_batch_removal_removes_every_record_and_its_marker() {
+    let root = TempRoot::new("batch-removes");
+    {
+        let storage = authoritative(&root, 1 << 16).await;
+        storage
+            .put_batch(&records(4, "v"))
+            .await
+            .expect("batch stores");
+        let removed = ["k0".to_owned(), "k2".to_owned(), "absent".to_owned()];
+        <FileStorage as KvStorageScan<String>>::remove_batch(&storage, &removed)
+            .await
+            .expect("batch removes");
+        for key in ["k0", "k2"] {
+            let name = file_name_for(key);
+            assert!(!root.join(&name).exists(), "{key}");
+            assert!(!root.join(presence::marker_name(&name)).exists(), "{key}");
+        }
+    }
+    let storage = authoritative(&root, 1 << 16).await;
+    assert_eq!(stored(&storage).await, [
+        ("k1".to_owned(), "v".to_owned()),
+        ("k3".to_owned(), "v".to_owned()),
+    ]);
+    let scanned = <FileStorage as KvStorageScan<String>>::scan(&storage)
+        .await
+        .expect("store scans");
+    assert!(scanned
+        .iter()
+        .all(|record| matches!(record, ScannedRecord::Filed { .. })));
+}

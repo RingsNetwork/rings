@@ -271,6 +271,14 @@ pub trait KvStorageScan<V>: KvStorageInterface<V> {
     /// other two methods are: a default of one `put` per record would keep the law but pay one
     /// flush per record, which is what the batch exists to avoid.
     async fn put_batch(&self, records: &[(String, V)]) -> Result<()>;
+
+    /// Remove the record of every key of `keys` at once: one flush, or one commit, for the
+    /// whole batch (the batch law of [`Self::put_batch`], for removals).
+    ///
+    /// **Law (batch removal).** `Ok` means no key holds a record and, in a durable store, none
+    /// comes back after a crash; a crash, or an `Err`, leaves any subset of them removed. A key
+    /// that holds no record is skipped. Required, for the reason `put_batch` is.
+    async fn remove_batch(&self, keys: &[String]) -> Result<()>;
 }
 
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]

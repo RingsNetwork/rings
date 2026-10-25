@@ -55,6 +55,8 @@ pub use types::MessageCategory;
 
 mod replay;
 pub use replay::observe;
+pub(crate) use replay::spent_at;
+pub(crate) use replay::Admission;
 pub(crate) use replay::LinkWindows;
 pub(crate) use replay::RelayAdmission;
 pub(crate) use replay::RelayDelivery;
@@ -67,6 +69,7 @@ pub use replay::StreamKey;
 pub use replay::TransactionDigest;
 pub use replay::TransactionForkEvidence;
 pub(crate) use replay::TransactionReplay;
+pub(crate) use replay::RECEIVER_STREAM_SHARES;
 pub use replay::REORDER_DEADLINE;
 pub use replay::REORDER_WINDOW;
 pub use replay::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
@@ -74,6 +77,9 @@ pub use replay::TRANSACTION_REPLAY_STORE_MAX_BYTES;
 pub use replay::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 pub use replay::TRANSACTION_REPLAY_STREAM_CAPACITY;
 pub use replay::TRANSACTION_REPLAY_WINDOW;
+
+pub use crate::fair_admission::Principal;
+pub use crate::fair_admission::ShareRefusal;
 
 mod service_receipt;
 #[cfg(test)]
@@ -95,6 +101,7 @@ pub use types::*;
 
 pub mod handlers;
 pub use handlers::HandleMsg;
+pub use handlers::HandlerContext;
 pub use handlers::MessageHandler;
 
 pub use crate::swarm::storage_api::ChordStorageInterface;

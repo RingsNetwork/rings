@@ -137,12 +137,13 @@ Sender and receiver state are stored as one record per stream:
 
 ```text
 rings-core:transaction-replay:stream:sender:<hex key>    ->  (key, last leased sequence)
-rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot window, relay custody)
+rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot window, relay custody,
+                                                             introducer, spent instant)
 ```
 
 A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
-(3850 bytes: a 92-byte key, a 1066-byte window and a relay custody of up to 64 deliveries of 42
-bytes, with tag and length prefixes), so the cost of an admission does not grow with the number of
+(3873 bytes: a 92-byte key, a 1066-byte window, a relay custody of up to 64 deliveries of 42
+bytes and a 23-byte charge, with tag and length prefixes), so the cost of an admission does not grow with the number of
 streams retained. On load, every record must decode and
 sit under its own key, or the stream it is filed as fails closed (see [Bad records](#bad-records)).
 The native daemon opens the replay store as an authoritative file store (#909). On unix each write
@@ -211,9 +212,11 @@ so a node's replay writes are about one per admission, and they share the same b
 Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class
 stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each receiver stream
 has exactly 32 hot digest slots. A full store is at most `TRANSACTION_REPLAY_STORE_MAX_RECORDS`
-(32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,314,240 bytes, counting the relay
-custody once for the whole store, since it holds at most 64 deliveries). New streams fail
-closed at the bound; there is no LRU eviction or sender-controlled reset. The native daemon keeps
+(32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,691,072 bytes, counting the relay
+custody once for the whole store, since it holds at most 64 deliveries). The sender table holds
+this node's own streams, and a new one fails closed at the bound. The receiver table is shared by
+edge, as the next section describes. There is no LRU eviction or sender-controlled reset. The
+native daemon keeps
 the records in a dedicated 40 MiB authoritative file store, which evicts nothing: a write beyond its
 budget fails with `StorageBudgetExhausted`, and so does an open under a lowered budget. Browser
 providers keep them in a dedicated authoritative IndexedDB store with a row capacity of
@@ -230,6 +233,44 @@ Deleting or replacing the replay store deletes the guarantee for its streams. Th
 incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail
 closed on storage errors. Counters expose `Replay`, `Fork`, `Stale`, persistence failures,
 unrestorable records and the calls refused on their streams.
+
+## Receiver streams by connection slot
+
+An origin is a key pair, free to mint, so a bound per origin bounds nothing: before #907 anyone could
+fill the receiver table with one transaction from each of 16,384 fresh origins and refuse every new
+origin for good. The receiver table is now accounted by connection slot (the load-bounds paper,
+Law 2). A node has `R = 2(160 + s + 1)` slots, 328 at the default three successors; an admitted
+connection takes the least free slot and frees it when it is retired. A new stream is charged to
+its introducer:
+
+- the slot of the handshake-authenticated connection that delivered its first transaction;
+- this node itself, for mail out of its own relay inbox and for out-of-band connection signaling.
+
+Each slot has a floor of 32 new streams. Slots past their floors share a pool of 4096, each up to
+its fair claim `⌈4096 / n⌉`, where `n` counts the over-floor slots. This node has a share of 1024.
+At the default three successors the table holds at most `328 x 32 + 4096 + 1024 = 15,616`
+streams, and 64 more per extra successor. A new stream past its introducer's share fails with
+`TransactionReplayStreamCapacityExceeded`, naming the introducer and the bound. A party with many
+origins and `k` slots can be refused only on those `k` slots.
+
+A stream stays charged to its slot after its connection leaves, so rotating connections never
+grows the table past its bound. The cost is that a connection admitted into a slot inherits what
+the slot still holds: a party that rotates connections through free slots can leave a newcomer
+with only its fair claim until those streams are spent (the paper's rotation residual). A
+connection that keeps its slot is never affected.
+
+A stream leaves the table once it is spent: every transaction it admitted can no longer be
+delivered, by a clock up to `σ` behind.
+
+- A control, storage or E2E stream is spent `σ` after its last proof expires, about 10 minutes after
+  its last default-lifetime transaction.
+- An application stream is spent another `MAX_RELAY_INBOX_TTL_MS + σ` later (7 days), since its
+  mail may still arrive out of a relay inbox, judged as of its hold instant.
+
+The next admission retires every spent stream that holds no relay custody and removes its record.
+Forgetting a spent stream reopens no replay, so a refusal ends once a stream of the refused edge is
+spent. Each receiver record carries its introducer and spent instant, so a restart recovers the
+accounting.
 
 ## Bad records
 
@@ -315,7 +356,10 @@ without the current marker are rejected before deserialization. There is no dual
 negotiation, feature flag, downgrade path, or legacy fallback, and no version behind any of these
 names: the protocol is not versioned before 1.0. Mixed-version overlays are unsupported. Per-class
 streams (#898) are the next cutover: the store becomes one record per stream under
-`rings-core:transaction-replay:stream:`, and every node, seeds included, upgrades together.
+`rings-core:transaction-replay:stream:`, and every node, seeds included, upgrades together. Edge
+accounting (#907) changes the receiver record, which gains its charge: the operator removes the
+`transaction-replay` store while the node is stopped (the documented reset), since a record
+without a charge does not restore.
 
 ## Non-guarantees
 

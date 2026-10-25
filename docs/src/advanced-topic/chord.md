@@ -123,8 +123,10 @@ another node's read shows that an owner holds the write.
   on every node, so no stale replica can bring the value back, and a topic that holds either
   stays stored until it is collected. Tombstones live in a store of their own that never evicts
   (#920): the data store's byte budget drops the values of a topic, never its tombstones, and
-  each sender of tombstones is charged for them, at most 1024 uncollected per sender and 65536
-  in all per node, so one writer cannot crowd out another's. There is no compaction
+  each tombstone is charged to the connection slot of the connection that delivered it, or to
+  the node for its own writes and repairs (#907): each slot has a floor of 128 uncollected, the
+  rest share a pool of 16384 in fair claims, and the node keeps 7168 of its own, so no number
+  of writers or connections crowds out a slot below its floor. There is no compaction
   operation: a reset stamped by one owner would erase every concurrent write that owner had
   not yet received.
 - **Bounds.** A topic holds at most 1024 elements (the oldest are dropped when the cap binds) and
@@ -152,6 +154,11 @@ cannot open, a library node built without one) declares, in every connection han
 its online-node descriptor (`relay_custody`), that it holds no relay mail. Such a node still
 joins the ring, routes, sends and receives online messages, and owns ordinary DHT data; only
 relay custody moves past it (#1037).
+
+A held message expires 7 days (`MAX_RELAY_INBOX_TTL_MS`) after the instant its holder signed,
+however long newer holds keep its inbox alive (#907): every read, join and sync drops it, and a
+recipient never delivers it. The rule reads the signed hold instant alone, so every replica
+drops the same messages and a member cannot extend one by writing it again.
 
 The **holder** of an inbox key is the first node at or after the key's owner, along the
 successor path, that holds relay mail:

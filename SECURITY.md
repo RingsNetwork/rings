@@ -153,6 +153,13 @@ route.
   buckets keyed by the account DID, committed together with replay and before the application
   sees the message. Rotating keys or relays does not reset them, and a drop never disconnects
   the relay.
+- **Capacity by connection slot (#907).** An origin is a free key pair, so the replay receiver
+  table and the removal store are shared by connection slot, not by origin (load-bounds paper,
+  Law 1): an item is charged to the slot of the handshake-authenticated connection that
+  delivered it, or to this node, and admitted within that slot's floor, its fair claim of a
+  shared pool, or this node's share. However many origins or connections another party holds,
+  a slot below its floor is never refused. A replay stream leaves the table once it is spent, so
+  a refusal ends; a slot's items stay charged to it after its connection leaves.
 - **Application boundary.** Core never calls, awaits or consults application code (#935): the
   application cannot see, validate or veto a protocol message, nor send one, and no inbound
   lane waits for it. A slow application therefore costs only its own messages, never a peer's
@@ -275,10 +282,19 @@ route.
 - #918: a registry descriptor that another node re-appends after its registrant stopped stays
   listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
   registrant leaves the listing within its TTL.
-- #920: a node's store of uncollected removals refuses past 1024 per sender and 65536 in all;
-  filling the total takes 64 senders' identities (the Sybil residual of #907) or a node its view
-  makes an owner of the topic. A node whose browser cannot open IndexedDB keeps removals in
-  memory, so each restart makes it a fresh replica.
+- #907 (rotation residual, load-bounds paper, Prop. 1): a party that rotates connections
+  through free slots leaves each slot charged with up to its floor, so a connection admitted
+  later into such a slot has only its fair claim of the pool until those items leave: removes
+  and control, storage and E2E replay streams within about 100 minutes, application replay
+  streams within 7 days. A connection that keeps its slot is never affected. Only a cost on
+  admission removes this (#1094, #780).
+- #920, #907: a node's store of uncollected removals refuses a connection slot past its floor of
+  128 and its fair claim of a pool of 16384, and this node past 7168. A node whose browser cannot
+  open IndexedDB keeps removals in memory, so each restart makes it a fresh replica.
+- #907: a new replay stream is refused past its slot's floor of 32 and fair claim of 4096, or
+  this node's share of 1024, until a stream of that edge is spent: about 10 minutes after its
+  last default-lifetime transaction, and 7 days for application streams, whose mail a relay
+  inbox may still deliver.
 - #921: a data topic holds at most 1024 uncollected tombstones and refuses past them, so any
   writer, or a sync peer, can fill one topic's removal capacity at an owner and refuse further
   removals of that topic there until those tombstones are collected, at most 100 minutes and

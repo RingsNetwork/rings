@@ -119,17 +119,14 @@ pub const ENTRY_PAYLOAD_MAX_BYTES: usize = 32 * 1024;
 /// about 10 removes a minute per topic, sustained; an application that needs more shards the
 /// topic.
 pub const DATA_TOMBSTONE_MAX_LEN: usize = ENTRY_DATA_MAX_LEN;
-/// The unstable removes one origin may have charged to it in an owner's removal store, `S`
-/// (#920; removal-stability paper, Law 6): one carrier's worth. An origin is the authenticated
-/// sender of the transition that raised a remove; a node this owner's view names as an owner of
-/// the placement is charged to the holder class instead, which no share bounds.
-pub const REMOVAL_ORIGIN_SHARE: usize = DATA_TOMBSTONE_MAX_LEN;
-/// The unstable removes an owner's removal store holds in all, `B_R = 64 S` (#920;
-/// removal-stability paper, Law 6), about 9.6 MB at [`ENTRY_TOMBSTONE_WIRE_MAX`]: filling it
-/// past one origin's share takes 63 other identities or a node the owner's view makes an owner
-/// of the placement, a Sybil attack or a Byzantine owner, both non-goals; #907 closes the first
-/// for the replay table and this store alike.
-pub const REMOVAL_STORE_MAX_REMOVES: usize = 64 * REMOVAL_ORIGIN_SHARE;
+/// The unstable removes an owner's removal store holds in all at the default successor capacity,
+/// `B(3) = 328·128 + 16 384 + 7 168` (#920, #907; load-bounds paper, Sec. V), about 9.6 MB at
+/// [`ENTRY_TOMBSTONE_WIRE_MAX`]: each connection slot's floor of 128, a pool shared in fair claims, and
+/// this node's own share. A ring with `s` successors holds `256(s − 3)` more, and its removal
+/// store must be sized for them.
+pub const REMOVAL_STORE_MAX_REMOVES: usize = crate::dht::REMOVAL_SHARES.bound(
+    crate::dht::topology::edge_slots(crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY),
+);
 /// Encoded bytes of one element's length prefix, at most: the varint of
 /// [`ENTRY_PAYLOAD_MAX_BYTES`].
 ///

@@ -4,7 +4,6 @@ use std::str::FromStr;
 use async_trait::async_trait;
 
 use super::carrier_store::CarrierStore;
-use super::carrier_store::RemovalCharge;
 use super::PeerRing;
 use super::PeerRingAction;
 use super::RemoteAction;
@@ -27,6 +26,7 @@ use crate::dht::types::ChordStorageCache;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::Principal;
 use crate::utils::get_epoch_ms;
 
 /// A lookup placement settled here.
@@ -205,9 +205,7 @@ async fn retire_unless_live(
     };
     if projection.writes_back() && projection_shape(&entry) != stored_shape {
         // A retirement raises no remove, so it is charged to nobody and never refused for room.
-        store
-            .put(key, &entry, RemovalCharge::Holder, now_ms)
-            .await?;
+        store.put(key, &entry, Principal::Local, now_ms).await?;
     }
     Ok(Some(entry))
 }
@@ -220,13 +218,13 @@ async fn retire_unless_live(
 /// otherwise `admitted.retired_at(now_ms)`, normalized for storage either way (the join
 /// normalizes the union, the admission normalized `admitted`); it is returned. A result past
 /// its tombstone bound is refused with `EntryTombstonesExceedMax`, and one whose raised removes
-/// pass `charge`'s share or the removal store's total with `RemovalCapacityExhausted`; either
-/// way the slot is unchanged (#920, #921).
+/// the removal store's accounting refuses for `introducer` with `RemovalCapacityExhausted`;
+/// either way the slot is unchanged (#920, #921, #907).
 async fn join_live_entry(
     store: &CarrierStore<'_>,
     key: &str,
     admitted: AdmittedEntry,
-    charge: RemovalCharge,
+    introducer: Principal,
     now_ms: u128,
 ) -> Result<Entry> {
     let admitted = admitted.into_entry();
@@ -236,7 +234,7 @@ async fn join_live_entry(
     }
     .retired_at(now_ms);
     joined.check_tombstone_bound()?;
-    store.put(key, &joined, charge, now_ms).await?;
+    store.put(key, &joined, introducer, now_ms).await?;
     Ok(joined)
 }
 
@@ -247,14 +245,14 @@ async fn join_live_entry(
 /// Pre: the caller holds the transition of `store`, and `op` passed the admission law.
 /// Post: the slot holds `(live or ⊥).operate(op)` when that is live at `now_ms`, and is clear
 /// otherwise, since a stored value is always live when written; a result past its tombstone
-/// bound, or past `charge`'s share of the removal store, is refused and the slot is unchanged
-/// (#920, #921).
+/// bound, or raising removes the removal store's accounting refuses for `introducer`, is
+/// refused and the slot is unchanged (#920, #921, #907).
 async fn operate_live_entry(
     store: &CarrierStore<'_>,
     key: &str,
     op: EntryOperation,
     actor: Did,
-    charge: RemovalCharge,
+    introducer: Principal,
     now_ms: u128,
 ) -> Result<()> {
     let local = match live_entry(store, key, now_ms, Projection::ReturnedOnly).await? {
@@ -264,7 +262,7 @@ async fn operate_live_entry(
     match local.operate(now_ms, op, actor)?.live_at(now_ms) {
         Some(value) => {
             value.check_tombstone_bound()?;
-            store.put(key, &value, charge, now_ms).await
+            store.put(key, &value, introducer, now_ms).await
         }
         None => store.remove(key).await,
     }
@@ -383,19 +381,18 @@ impl PeerRing {
     /// value and `incoming` when a previous value exists; otherwise it is
     /// `incoming` normalized for storage. Either is projected to its element horizon at
     /// `now_ms`, which commutes with the join. A result past its tombstone bound is refused with
-    /// `EntryTombstonesExceedMax`, and one whose raised removes pass the share of `sender`'s
-    /// charge (`Self::removal_charge_of`) or the removal store's total with
-    /// `RemovalCapacityExhausted`; either way the slot is unchanged (#920, #921), so an
+    /// `EntryTombstonesExceedMax`, and one whose raised removes the removal store's accounting
+    /// refuses for `introducer`, the principal that delivered it, with
+    /// `RemovalCapacityExhausted`; either way the slot is unchanged (#920, #921, #907), so an
     /// unacknowledged hand-off stays with its sender.
     pub(crate) async fn join_storage_entry(
         &self,
         now_ms: u128,
         key: Did,
         incoming: Entry,
-        sender: Did,
+        introducer: Principal,
     ) -> Result<Entry> {
         incoming.check_admissible_at(now_ms, self.network_id())?;
-        let charge = self.removal_charge_of(sender)?;
         let store = self.carrier_store_for_write(incoming.kind)?;
         let key = StorageKey::new(incoming.kind, key).to_string();
         let _transition = self.storage_transition.lock().await;
@@ -409,7 +406,7 @@ impl PeerRing {
         }
         .retired_at(now_ms);
         stored.check_tombstone_bound()?;
-        store.put(&key, &stored, charge, now_ms).await?;
+        store.put(&key, &stored, introducer, now_ms).await?;
         Ok(stored)
     }
 
@@ -420,23 +417,24 @@ impl PeerRing {
     /// Post: the stored value is the least upper bound of the previous live local value and
     /// `admitted` when a previous value exists; otherwise it is `admitted`, normalized by its
     /// admission. Either is projected to its element horizon at `now_ms`, which commutes with
-    /// the join; the raised removes are charged to `sender` as in [`Self::join_storage_entry`].
+    /// the join; the raised removes are charged to `introducer` as in
+    /// [`Self::join_storage_entry`].
     pub(crate) async fn join_admitted_storage_entry(
         &self,
         now_ms: u128,
         key: Did,
         admitted: AdmittedEntry,
-        sender: Did,
+        introducer: Principal,
     ) -> Result<Entry> {
-        let charge = self.removal_charge_of(sender)?;
         let store = self.carrier_store_for_write(admitted.kind())?;
         let key = StorageKey::new(admitted.kind(), key).to_string();
         let _transition = self.storage_transition.lock().await;
-        join_live_entry(&store, &key, admitted, charge, now_ms).await
+        join_live_entry(&store, &key, admitted, introducer, now_ms).await
     }
 
-    /// Apply a stamped operation issued by `writer` to the value stored at `placement` at time
-    /// `now_ms`.
+    /// Apply a stamped operation issued by `writer`, delivered by `introducer`, to the value
+    /// stored at `placement` at time `now_ms`; the removes it raises are charged to
+    /// `introducer`.
     ///
     /// Pre: `op` is stamped, and `writer` is its signer as the shell verified it (this node for
     /// a local operation). Admission is checked on the delta `op` carries, never on the join
@@ -454,6 +452,7 @@ impl PeerRing {
         placement: Did,
         op: EntryOperation,
         writer: Did,
+        introducer: Principal,
     ) -> Result<()> {
         match op.entry().kind {
             EntryKind::Data => op.validate_admissible_at(now_ms, self.network_id())?,
@@ -469,11 +468,10 @@ impl PeerRing {
                 op.validate_inbox_write(writer, admitted, now_ms, self.network_id())?;
             }
         }
-        let charge = self.removal_charge_of(writer)?;
         let store = self.carrier_store_for_write(op.kind())?;
         let key = StorageKey::new(op.kind(), placement).to_string();
         let _transition = self.storage_transition.lock().await;
-        operate_live_entry(&store, &key, op, self.did, charge, now_ms).await
+        operate_live_entry(&store, &key, op, self.did, introducer, now_ms).await
     }
 
     /// The step one placement of a lookup takes under the topology and local storage at
@@ -726,7 +724,7 @@ impl PeerRing {
         let op = self.stamp_operation(op, now_ms, None).await?;
         let placement = op.did()?;
         if member == self.did {
-            self.operate_storage_entry(now_ms, placement, op, self.did)
+            self.operate_storage_entry(now_ms, placement, op, self.did, Principal::Local)
                 .await?;
             return Ok(PeerRingAction::None);
         }
@@ -752,8 +750,14 @@ impl PeerRing {
         for placement in entry_key.rotate_affine(redundancy)? {
             match self.operate_route(placement, kind)? {
                 OperateRoute::Owned => {
-                    self.operate_storage_entry(now_ms, placement, op.clone(), self.did)
-                        .await?;
+                    self.operate_storage_entry(
+                        now_ms,
+                        placement,
+                        op.clone(),
+                        self.did,
+                        Principal::Local,
+                    )
+                    .await?;
                 }
                 OperateRoute::Remote(next) => ret.push(PeerRingAction::RemoteAction(
                     next,
@@ -821,7 +825,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
             &CarrierStore::Whole(&self.cache),
             &key,
             admitted,
-            RemovalCharge::Holder,
+            Principal::Local,
             now_ms,
         )
         .await
@@ -854,7 +858,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
             &key,
             op,
             self.did,
-            RemovalCharge::Holder,
+            Principal::Local,
             now_ms,
         )
         .await

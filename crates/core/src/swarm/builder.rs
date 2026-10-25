@@ -15,10 +15,12 @@ use crate::dht::RemovalStorage;
 use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
+use crate::fair_admission::TableAccounting;
 use crate::measure::MeasureImpl;
 use crate::message::OriginQuotaConfig;
 use crate::message::ReplayStorage;
 use crate::message::TransactionReplay;
+use crate::message::RECEIVER_STREAM_SHARES;
 use crate::swarm::observer::NoopSwarmObserver;
 use crate::swarm::observer::SharedSwarmObserver;
 use crate::swarm::transport::SwarmTransport;
@@ -235,6 +237,7 @@ impl SwarmBuilder {
             transaction_replay: Arc::new(TransactionReplay::new_with_quota(
                 self.replay_storage,
                 self.origin_quota,
+                TableAccounting::new(RECEIVER_STREAM_SHARES),
             )),
             settings: SwarmTransportSettings::new(
                 self.dht_storage_redundancy,

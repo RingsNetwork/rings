@@ -60,13 +60,13 @@ pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub(crate) use chord::PlacementLookup;
 pub use chord::RemoteAction as PeerRingRemoteAction;
-pub use chord::RemovalCharge;
 pub use chord::RemovalRecord;
 pub use chord::RemovalStorage;
 pub(crate) use chord::ReplicaAcknowledgement;
 pub(crate) use chord::ReplicationStep;
 pub(crate) use chord::StorageKey;
 pub use chord::TopoInfo;
+pub(crate) use chord::REMOVAL_SHARES;
 pub use did::Did;
 /// Correlation token used by asynchronous finger lookup reports.
 pub use finger::FingerFixRequest;

@@ -21,6 +21,7 @@ use crate::dht::Did;
 use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Principal;
 use crate::storage::MemStorage;
 use crate::tests::live_entry;
 use crate::utils::get_epoch_ms;
@@ -68,11 +69,19 @@ async fn test_storage_join_and_ack_digest_each_element_at_most_once() -> Result<
     let now_ms = get_epoch_ms();
     let carrier = carrier_with_a_remove(Did::from(10u32), now_ms)?;
 
-    let into_empty =
-        digests_of(node.join_storage_entry(now_ms, placement_key, carrier.clone(), node.did));
+    let into_empty = digests_of(node.join_storage_entry(
+        now_ms,
+        placement_key,
+        carrier.clone(),
+        Principal::Local,
+    ));
     assert_eq!(into_empty.await?, DIGEST_BOUND_ELEMENTS);
-    let into_held =
-        digests_of(node.join_storage_entry(now_ms, placement_key, carrier.clone(), node.did));
+    let into_held = digests_of(node.join_storage_entry(
+        now_ms,
+        placement_key,
+        carrier.clone(),
+        Principal::Local,
+    ));
     assert_eq!(into_held.await?, DIGEST_BOUND_ELEMENTS);
 
     let ack = SyncedEntryAck::new(placement_key, carrier);

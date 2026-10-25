@@ -37,6 +37,48 @@
 
 ## 0.37.0
 
+- The replay receiver table and the removal store are shared by connection slot, not by
+  origin (#907; load-bounds paper, Laws 1 and 2, Sec. V). An origin is a free key pair, so
+  anyone could fill the receiver table with one transaction from each of 16384 fresh origins and
+  refuse every new origin for good. A node has `R(s) = 2(160 + s + 1)` connection slots; an
+  admitted connection takes the least free one and frees it when it is retired. Each item of
+  either table is now charged to the slot of the handshake-authenticated connection that
+  delivered it, or to this node for its own writes, repairs, relay inbox and connection
+  signaling, and admitted within that slot's floor, its fair claim `⌈P / n⌉` of a shared pool,
+  or this node's share. An item stays charged to its slot after its connection leaves, so a
+  table never holds more than `R(s)·f + P + L` items however many connections rotate; a
+  connection admitted into a slot inherits what the slot still holds. The replay receiver
+  table has `f = 32`, `P = 4096`, `L = 1024` (15616 streams at three successors); the removal
+  store `f = 128`, `P = 16384`, `L = 7168` (65536). A replay stream is retired once it is spent:
+  `σ` after its last proof expires, and for application streams another relay-inbox retention
+  plus `σ` later; a refusal therefore lasts until a stream of the refused slot is spent, never
+  for good. Handlers receive a `HandlerContext`, which carries the payload and the principal
+  that delivered it.
+  - **Breaking (library API).** `HandleMsg::handle` takes a `&HandlerContext`, which derefs to
+    the `MessagePayload`. `RemovalCharge` and `REMOVAL_ORIGIN_SHARE` are gone: a remove's charge
+    is a `Principal`. `Error::TransactionReplayStreamCapacityExceeded` and
+    `Error::RemovalCapacityExhausted` carry the introducer and the `ShareRefusal`.
+    `ChordStorageRepair::read_repair_entry` takes the principal that delivered the entry.
+    `KvStorageScan` gains the required method `remove_batch`, which removes records with one
+    flush, as `put_batch` writes them; the replay store retires spent streams in the batch
+    their admission joins.
+  - **Upgrade consequence.** A receiver replay record and a removal record each gain their
+    charge, so records of an earlier build do not restore (no protocol versioning before 1.0).
+  - **Operator step.** Stop the node and remove the `transaction-replay` store, the documented
+    reset of the replay guarantee, and the `dht-removals` store (browser: the IndexedDB stores
+    `<storage name>/transaction-replay` and `<storage name>/dht-removals`), then start it.
+    Replication rebuilds the removals a node holds.
+
+- Held relay mail expires 7 days after its hold (#907; load-bounds paper, Def. 3). A held
+  message retires `MAX_RELAY_INBOX_TTL_MS` after the instant its holder signed: every read, join
+  and sync of its inbox drops it, and a recipient never delivers it. Before, a held message
+  lived as long as its inbox, which every newer hold extended, so mail could linger without
+  bound and a member could deliver an old message after the recipient's replay window had
+  forgotten its stream. The rule reads the signed hold instant, not the element's dot, so every
+  replica drops the same messages and rewriting an old hold gains nothing.
+  - **Upgrade consequence.** Mail held more than 7 days ago is dropped at the first read of its
+    inbox.
+
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
   Window by classification). A transaction is link-local when it is Application traffic, it
   arrived on the authenticated connection of its own origin, and its namespace declared delegated

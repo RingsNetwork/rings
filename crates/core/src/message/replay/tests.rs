@@ -17,6 +17,8 @@ use crate::message::replay::TRANSACTION_REPLAY_PAIR_CAPACITY;
 use crate::message::types::MessageCategory;
 use crate::message::SequenceState;
 use crate::message::SequenceVerdict;
+#[cfg(not(target_family = "wasm"))]
+use crate::message::ShareRefusal;
 use crate::message::StreamKey;
 use crate::message::TransactionDigest;
 use crate::message::TransactionReplay;
@@ -355,7 +357,11 @@ async fn test_new_sender_stream_fails_closed_at_the_table_bound() -> Result<()> 
     assert!(matches!(
         runtime.reserve(new_key, NonZeroU64::MIN).await,
         Err(Error::TransactionReplayStreamCapacityExceeded {
-            capacity: TRANSACTION_REPLAY_STREAM_CAPACITY
+            refusal: ShareRefusal::TableFull {
+                bound: TRANSACTION_REPLAY_STREAM_CAPACITY,
+                ..
+            },
+            ..
         })
     ));
     Ok(())

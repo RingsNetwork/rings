@@ -28,6 +28,7 @@ use crate::dht::Did;
 use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Principal;
 use crate::storage::MemStorage;
 use crate::tests::removes_only_carrier;
 use crate::tests::stamped_operation;
@@ -117,7 +118,7 @@ async fn test_a_delta_past_the_tombstone_bound_is_inadmissible() -> Result<()> {
     let forged = removes_only_carrier(did, DATA_TOMBSTONE_MAX_LEN + 1, now_ms, "forged")?;
 
     assert!(matches!(
-        node.join_storage_entry(now_ms, did, forged, node.did).await,
+        node.join_storage_entry(now_ms, did, forged, Principal::Local).await,
         Err(Error::EntryTombstonesExceedMax { count, bound })
             if count == DATA_TOMBSTONE_MAX_LEN + 1 && bound == DATA_TOMBSTONE_MAX_LEN
     ));
@@ -136,7 +137,7 @@ async fn test_a_join_past_the_tombstone_bound_is_refused_and_changes_nothing() -
         now_ms,
         did,
         removes_only_carrier(did, DATA_TOMBSTONE_MAX_LEN, now_ms, "full")?,
-        node.did,
+        Principal::Local,
     )
     .await?;
     let before = stored(&node, did, now_ms).await?;
@@ -150,7 +151,7 @@ async fn test_a_join_past_the_tombstone_bound_is_refused_and_changes_nothing() -
             now_ms,
             did,
             removes_only_carrier(did, 1, now_ms, "one-more")?,
-            node.did
+            Principal::Local
         )
         .await,
         Err(Error::EntryTombstonesExceedMax { .. })
@@ -170,28 +171,34 @@ async fn test_a_remove_past_the_bound_is_refused_until_the_held_removes_are_stab
     let added = stamped_operation(EntryOperation::Extend, did, &["a"], now_ms, writer)?;
     let horizon_ms = u128::from(EntryKind::Data.max_lifetime_ms());
     let held_at_ms = now_ms - horizon_ms;
-    node.operate_storage_entry(now_ms, did, added, writer)
+    node.operate_storage_entry(now_ms, did, added, writer, Principal::Unbound)
         .await?;
     node.join_storage_entry(
         now_ms,
         did,
         removes_only_carrier(did, DATA_TOMBSTONE_MAX_LEN, held_at_ms, "held")?,
-        node.did,
+        Principal::Local,
     )
     .await?;
     let before = stored(&node, did, now_ms).await?;
 
     let remove = |at_ms| stamped_operation(EntryOperation::Tombstone, did, &["a"], at_ms, writer);
     assert!(matches!(
-        node.operate_storage_entry(now_ms, did, remove(now_ms)?, writer)
+        node.operate_storage_entry(now_ms, did, remove(now_ms)?, writer, Principal::Unbound)
             .await,
         Err(Error::EntryTombstonesExceedMax { .. })
     ));
     assert_eq!(stored(&node, did, now_ms).await?, before);
 
     let stable_ms = held_at_ms + horizon_ms + TS_OFFSET_TOLERANCE_MS;
-    node.operate_storage_entry(stable_ms, did, remove(stable_ms)?, writer)
-        .await?;
+    node.operate_storage_entry(
+        stable_ms,
+        did,
+        remove(stable_ms)?,
+        writer,
+        Principal::Unbound,
+    )
+    .await?;
     let after = stored(&node, did, stable_ms).await?;
     assert_eq!(after.as_ref().map(|entry| entry.data.len()), Some(0));
     assert_eq!(after.map(|entry| entry.crdt.tombstones.len()), Some(1));

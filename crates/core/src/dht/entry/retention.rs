@@ -100,8 +100,9 @@
 //!   `Tombstone` could cover, with a dot at most `σ` later, or covers nothing and costs what an
 //!   `Extend` and `Tombstone` of a fresh value cost (removal-stability paper, Lemma 4).
 //!
-//! A relay inbox has no horizon: it has no reset floor, its tombstones are capped, and a held
-//! message lives as long as its carrier (see the `inbox` module).
+//! A relay inbox has no dot horizon: it has no reset floor and its tombstones are capped. A held
+//! message retires `MAX_RELAY_INBOX_TTL_MS` after its signed hold instant, however long newer
+//! holds keep its carrier (#907; see the `inbox` module).
 //!
 //! Size: the payload predicate is element-intrinsic, so filtering by it commutes with union
 //! and the carrier stays a lattice; together with the count cap `kind.max_data_len()` and the
@@ -231,12 +232,17 @@ impl Entry {
     ///
     /// Pre: `self` is normalized ([`Self::try_into_storage_entry`]), as every stored value, join
     /// result and operation result is; the projection is then a pure filter.
-    /// Post: identity for a kind without a horizon; for a kind with one, normalized, and
+    /// Post: for a relay carrier, every element past its hold horizon dropped
+    /// (`holds_retired_at`) and nothing else; for a data carrier, normalized, and
     /// identity, without copying or hashing, when nothing has crossed a threshold. The retention
     /// bound is unchanged.
     pub fn retired_at(self, now_ms: u128) -> Self {
         let retention = ElementRetention::of(self.kind);
-        self.retired_under(retention, now_ms)
+        let entry = self.retired_under(retention, now_ms);
+        match entry.kind {
+            EntryKind::Data => entry,
+            EntryKind::RelayMessage => entry.holds_retired_at(now_ms),
+        }
     }
 
     /// What a read serves at `now_ms`: the projection [`Self::retired_at`] when it is live

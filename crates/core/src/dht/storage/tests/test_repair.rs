@@ -56,7 +56,9 @@ async fn test_read_repair_is_noop_for_single_replica_storage() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let entry = data_entry(Did::from(10u32));
 
-    let action = node.read_repair_entry(entry, node.did, &[], 1).await?;
+    let action = node
+        .read_repair_entry(entry, Principal::Local, &[], 1)
+        .await?;
 
     assert_eq!(action, PeerRingAction::None);
     assert_eq!(node.storage.count().await?, 0);
@@ -79,7 +81,12 @@ async fn test_local_hit_lookup_has_no_read_repair_targets() -> Result<()> {
         action => return Err(Error::unexpected_peer_ring_action(action)),
     };
     let repair = node
-        .read_repair_entry(evidence.entry.clone(), node.did, &evidence.misses, 2)
+        .read_repair_entry(
+            evidence.entry.clone(),
+            Principal::Local,
+            &evidence.misses,
+            2,
+        )
         .await?;
 
     assert!(evidence.misses.is_empty());
@@ -110,7 +117,12 @@ async fn test_read_repair_targets_only_observed_missing_placements() -> Result<(
         action => return Err(Error::unexpected_peer_ring_action(action)),
     };
     let repair = node
-        .read_repair_entry(evidence.entry.clone(), node.did, &evidence.misses, 3)
+        .read_repair_entry(
+            evidence.entry.clone(),
+            Principal::Local,
+            &evidence.misses,
+            3,
+        )
         .await?;
 
     assert_eq!(evidence.misses, vec![PlacementMiss::new(
@@ -143,7 +155,7 @@ async fn test_read_repair_uses_observed_remote_owner() -> Result<()> {
     let action = node
         .read_repair_entry(
             entry.clone(),
-            node.did,
+            Principal::Local,
             &[PlacementMiss::new(placement_key, owner)],
             2,
         )
@@ -169,7 +181,9 @@ async fn test_read_repair_rejects_non_affine_observed_miss() -> Result<()> {
     let entry = data_entry(Did::from(10u32));
     let miss = PlacementMiss::new(non_affine_placement(entry.did, 2)?, node.did);
 
-    let result = node.read_repair_entry(entry, node.did, &[miss], 2).await;
+    let result = node
+        .read_repair_entry(entry, Principal::Local, &[miss], 2)
+        .await;
     assert!(
         matches!(result, Err(Error::InvalidMessage(message)) if message.contains("affine replica set"))
     );

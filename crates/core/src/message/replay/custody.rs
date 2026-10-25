@@ -40,7 +40,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::commit::Ledger;
-use super::receiver_record;
+use super::Admission;
 use super::ReplayTable;
 use super::StreamKey;
 use super::TransactionDigest;
@@ -48,7 +48,6 @@ use super::TransactionReplay;
 use crate::consts::RELAY_INBOX_MAX_LEN;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::OriginQuotaCharge;
 
 /// Most relay deliveries in custody over the whole store: one per element a relay inbox holds.
 pub(crate) const RELAY_CUSTODY_CAPACITY: usize = RELAY_INBOX_MAX_LEN;
@@ -76,20 +75,22 @@ pub(crate) enum RelayAdmission {
 }
 
 impl TransactionReplay {
-    /// Admit the relay delivery `delivery` of stream `key` (the custody law): its transaction
-    /// enters the window and the delivery enters custody in one record write, unless the
-    /// delivery is already in custody.
+    /// Admit `admission` as a relay delivery (the custody law): its transaction enters the
+    /// window and the delivery enters custody in one record write, unless the delivery is
+    /// already in custody.
     ///
     /// Post: `Err(RelayCustodyFull)` at the custody bound, changing nothing; the window's
     /// refusals (`Replay`, `Fork`, `Stale`) and quota refusals as for a live admission.
     pub(crate) async fn admit_relayed(
         self: &std::sync::Arc<Self>,
-        key: StreamKey,
-        delivery: RelayDelivery,
-        charge: OriginQuotaCharge,
-        byte_cost: usize,
+        admission: Admission,
     ) -> Result<RelayAdmission> {
-        let clock = super::quota_clock(self.started_at);
+        let clock = super::replay_clock(self.started_at);
+        let key = admission.key;
+        let delivery = RelayDelivery {
+            sequence: admission.sequence,
+            digest: admission.digest,
+        };
         self.commit(move |replay, ledger| {
             replay.refuse_unavailable(ledger.store, ReplayTable::Receiver, key)?;
             let custody = &ledger.store.tables.custody;
@@ -105,13 +106,6 @@ impl TransactionReplay {
                     capacity: RELAY_CUSTODY_CAPACITY,
                 });
             }
-            let admission = super::Admission {
-                key,
-                sequence: delivery.sequence,
-                digest: delivery.digest,
-                charge,
-                byte_cost,
-            };
             replay
                 .admit_in(ledger, admission, clock, Some(delivery))
                 .map(|_| RelayAdmission::Admitted)
@@ -174,13 +168,7 @@ impl TransactionReplay {
 /// Pre: `key` is a restored receiver stream of the store (custody exists only beside a
 /// window).
 fn rewrite_custody(ledger: &mut Ledger<'_>, key: StreamKey, custody: RelayCustody) -> Result<()> {
-    let window = ledger
-        .store
-        .tables
-        .receiver
-        .get(&key)
-        .ok_or(Error::TransactionReplayStateInvalid)?;
-    ledger.write(receiver_record(&key, window, &custody)?);
     ledger.set_custody(key, custody);
+    ledger.write(ledger.store.tables.receiver_record(&key)?);
     Ok(())
 }

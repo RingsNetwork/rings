@@ -4,7 +4,8 @@
 //! ```text
 //! Hooked<H> = H ∘ MemStorage     put k ↦ H.before_put k;
 //!                                put_batch ks ↦ H.before_batch ks; ∀k ∈ ks: H.before_put k;
-//!                                get_all, scan ↦ H.before_scan; remove k ↦ H.before_remove k
+//!                                get_all, scan ↦ H.before_scan; remove k ↦ H.before_remove k;
+//!                                remove_batch ks ↦ ∀k ∈ ks: H.before_remove k
 //! ```
 //!
 //! A hook that fails fails the operation before the store is touched; every other operation,
@@ -121,5 +122,13 @@ impl<H: StorageHooks> KvStorageScan<ReplayRecord> for Hooked<H> {
             self.hooks.before_put(key).await?;
         }
         self.inner.put_batch(records).await
+    }
+
+    /// The `remove` hook of every key in order, then the memory store's `remove_batch`.
+    async fn remove_batch(&self, keys: &[String]) -> Result<()> {
+        for key in keys {
+            self.hooks.before_remove(key).await?;
+        }
+        self.inner.remove_batch(keys).await
     }
 }

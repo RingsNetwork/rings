@@ -609,6 +609,19 @@ where V: DeserializeOwned + Serialize + Sized
         }
         scope.done().await
     }
+
+    /// Every row deleted in one read-write transaction, committed with this store's durability:
+    /// all or nothing.
+    async fn remove_batch(&self, keys: &[String]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let scope = self.scope(IdbTransactionMode::Readwrite)?;
+        for key in keys {
+            scope.delete_row(key).await?;
+        }
+        scope.done().await
+    }
 }
 
 /// Decode one row of a scan as a record (pure). An undecodable row is named by its primary

@@ -12,6 +12,7 @@ use crate::dht::Did;
 use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Principal;
 use crate::storage::MemStorage;
 use crate::tests::data_carrier;
 use crate::tests::stamped_delta;
@@ -65,9 +66,9 @@ async fn test_an_append_after_an_overwrite_in_one_millisecond_survives() -> Resu
             None,
         )
         .await?;
-    node.operate_storage_entry(now_ms, topic, overwrite, node.did)
+    node.operate_storage_entry(now_ms, topic, overwrite, node.did, Principal::Local)
         .await?;
-    node.operate_storage_entry(now_ms, topic, append, node.did)
+    node.operate_storage_entry(now_ms, topic, append, node.did, Principal::Local)
         .await?;
 
     let stored = node
@@ -98,7 +99,7 @@ async fn test_an_owners_stamp_follows_the_replica_it_holds() -> Result<()> {
         Did::from(9u32),
     )?;
     let held = ahead.max_observed_version();
-    node.join_storage_entry(now_ms, topic, ahead, Did::from(9u32))
+    node.join_storage_entry(now_ms, topic, ahead, Principal::Unbound)
         .await?;
 
     let op = node

@@ -6,8 +6,11 @@
 //! ```text
 //! record_key(table, key) ≜ "rings-core:transaction-replay:stream:" ‖ table ‖ ":" ‖ hex(enc(key))
 //! record(Sender, key)    ≜ enc(Sender { key, leased })
-//! record(Receiver, key)  ≜ enc(Receiver { key, state, custody })
+//! record(Receiver, key)  ≜ enc(Receiver { key, state, custody, charge })
 //! ```
+//!
+//! A receiver record carries its stream's charge (load-bounds paper, Law 2): the principal that
+//! introduced the stream and the instant it is spent, so a restart recovers the charges.
 //!
 //! **Law (locality).** A transition of one stream writes exactly that stream's record, so a
 //! write is bounded by [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`] whatever the number of streams
@@ -59,6 +62,7 @@
 //! keys or `u64` counters.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -72,6 +76,9 @@ use super::TRANSACTION_REPLAY_STREAM_CAPACITY;
 use super::TRANSACTION_REPLAY_WINDOW;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::Principal;
+use crate::fair_admission::ShareRefusal;
+use crate::fair_admission::SlotAccounting;
 use crate::storage::ScannedRecord;
 use crate::storage::UndecodableRecord;
 
@@ -89,16 +96,27 @@ const SEQUENCE_STATE_MAX_BYTES: usize = U64_MAX_BYTES + TRANSACTION_REPLAY_WINDO
 const SENDER_STREAM_MAX_BYTES: usize = 1 + STREAM_KEY_MAX_BYTES + U64_MAX_BYTES;
 /// Largest canonical encoding of one relay delivery in custody: its sequence and its digest.
 const RELAY_DELIVERY_MAX_BYTES: usize = U64_MAX_BYTES + 32;
+/// Largest canonical encoding of a `u128` varint.
+const U128_MAX_BYTES: usize = 19;
+/// Largest canonical encoding of a `u16` varint.
+const U16_MAX_BYTES: usize = 3;
+/// Largest canonical encoding of a [`StreamCharge`]: the principal's tag and slot, then the
+/// spent instant.
+const STREAM_CHARGE_MAX_BYTES: usize = 1 + U16_MAX_BYTES + U128_MAX_BYTES;
 /// Largest encoded custody of one receiver stream: a one-byte length (at most
 /// `RELAY_CUSTODY_CAPACITY` `< 2^7` entries, asserted) and its deliveries.
 const CUSTODY_MAX_BYTES: usize = 1 + RELAY_CUSTODY_CAPACITY * RELAY_DELIVERY_MAX_BYTES;
-/// Largest encoded receiver stream whose custody is empty: the variant tag, the key, the window
-/// and the empty custody's length.
+/// Largest encoded receiver stream whose custody is empty: the variant tag, the key, the window,
+/// the empty custody's length and the charge.
 const RECEIVER_STREAM_UNHELD_MAX_BYTES: usize =
-    1 + STREAM_KEY_MAX_BYTES + SEQUENCE_STATE_MAX_BYTES + 1;
-/// Largest encoded receiver stream: the variant tag, the key, the window and a full custody.
-const RECEIVER_STREAM_MAX_BYTES: usize =
-    1 + STREAM_KEY_MAX_BYTES + SEQUENCE_STATE_MAX_BYTES + CUSTODY_MAX_BYTES;
+    1 + STREAM_KEY_MAX_BYTES + SEQUENCE_STATE_MAX_BYTES + 1 + STREAM_CHARGE_MAX_BYTES;
+/// Largest encoded receiver stream: the variant tag, the key, the window, a full custody and the
+/// charge.
+const RECEIVER_STREAM_MAX_BYTES: usize = 1
+    + STREAM_KEY_MAX_BYTES
+    + SEQUENCE_STATE_MAX_BYTES
+    + CUSTODY_MAX_BYTES
+    + STREAM_CHARGE_MAX_BYTES;
 const _: () = assert!(RELAY_CUSTODY_CAPACITY < 1 << 7);
 /// Width of the varint length prefix of a `len`-byte string: one byte below `2^7`, two below
 /// `2^14` (records and storage keys stay below `2^14`, asserted).
@@ -170,6 +188,27 @@ impl ReplayTable {
     }
 }
 
+/// The charge of one receiver stream (load-bounds paper, Law 2): the principal that introduced
+/// it, and the instant it is spent, after which forgetting it reopens no replay.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub(super) struct StreamCharge {
+    /// The edge that delivered the stream's first transaction, or this node.
+    pub(super) introducer: Principal,
+    /// `x_s + ι + σ`: the instant the stream is spent (`super::spent_at`).
+    pub(super) spent_at_ms: u128,
+}
+
+impl StreamCharge {
+    /// Test builds: a stream of this node that is never spent.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(super) const fn local_for_test() -> Self {
+        Self {
+            introducer: Principal::Local,
+            spent_at_ms: u128::MAX,
+        }
+    }
+}
+
 /// The in-memory replay tables: sender allocators and receiver windows, by stream.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct ReplayTables {
@@ -180,6 +219,75 @@ pub(super) struct ReplayTables {
     /// The relay deliveries in custody per receiver stream, only for streams that hold any
     /// (the custody law); persisted in the stream's receiver record.
     pub(super) custody: BTreeMap<StreamKey, RelayCustody>,
+    /// The charge of every receiver stream; persisted in its record.
+    charges: BTreeMap<StreamKey, StreamCharge>,
+    /// The receiver streams by the instant they are spent: `(spent_at_ms, key)` for every
+    /// charge, so the spent streams are a prefix.
+    spent: BTreeSet<(u128, StreamKey)>,
+}
+
+impl ReplayTables {
+    /// The charge of receiver stream `key`.
+    pub(super) fn charge(&self, key: &StreamKey) -> Option<StreamCharge> {
+        self.charges.get(key).copied()
+    }
+
+    /// Set receiver stream `key`'s charge to `next` (`None`: none), keeping the spent index and
+    /// `accounting` in step, and return the previous one: the one transition of a charge, which
+    /// an undo applies with the previous charge.
+    ///
+    /// Law: `accounting` holds one item `(introducer, spent_at_ms)` per charge of the table.
+    pub(super) fn set_charge(
+        &mut self,
+        key: StreamKey,
+        next: Option<StreamCharge>,
+        accounting: &mut SlotAccounting,
+    ) -> Option<StreamCharge> {
+        let previous = match next {
+            Some(charge) => self.charges.insert(key, charge),
+            None => self.charges.remove(&key),
+        };
+        if let Some(previous) = previous {
+            self.spent.remove(&(previous.spent_at_ms, key));
+            accounting.discharge(previous.introducer, previous.spent_at_ms);
+        }
+        if let Some(charge) = next {
+            self.spent.insert((charge.spent_at_ms, key));
+            accounting.charge(charge.introducer, charge.spent_at_ms);
+        }
+        previous
+    }
+
+    /// The receiver streams spent at `now_ms` that hold no relay custody (pure): forgetting one
+    /// reopens no replay (Lemma 2), while a stream in custody keeps its delivery to retire.
+    pub(super) fn spent_streams(&self, now_ms: u128) -> Vec<StreamKey> {
+        self.spent
+            .iter()
+            .take_while(|(spent_at_ms, _)| *spent_at_ms <= now_ms)
+            .map(|(_, key)| *key)
+            .filter(|key| !self.custody.contains_key(key))
+            .collect()
+    }
+
+    /// The storage key and record of receiver stream `key` as the tables hold it.
+    pub(super) fn receiver_record(&self, key: &StreamKey) -> Result<(String, ReplayRecord)> {
+        let state = self
+            .receiver
+            .get(key)
+            .ok_or(Error::TransactionReplayStateInvalid)?;
+        let charge = self
+            .charge(key)
+            .ok_or(Error::TransactionReplayStateInvalid)?;
+        let custody = self.custody.get(key).cloned().unwrap_or_default();
+        receiver_record(key, state, &custody, &charge)
+    }
+
+    /// Charge every receiver stream to `accounting`, as a restore found them.
+    pub(super) fn charge_all(&self, accounting: &mut SlotAccounting) {
+        for charge in self.charges.values() {
+            accounting.charge(charge.introducer, charge.spent_at_ms);
+        }
+    }
 }
 
 /// One stream as a record encodes it, borrowed for encoding.
@@ -187,11 +295,12 @@ pub(super) struct ReplayTables {
 enum StoredStreamRef<'a> {
     /// A sender stream and the last sequence its lease covers.
     Sender { key: &'a StreamKey, leased: u64 },
-    /// A receiver stream, its window and its relay custody.
+    /// A receiver stream, its window, its relay custody and its charge.
     Receiver {
         key: &'a StreamKey,
         state: &'a SequenceState,
         custody: &'a RelayCustody,
+        charge: &'a StreamCharge,
     },
 }
 
@@ -206,6 +315,7 @@ enum StoredStream {
         key: StreamKey,
         state: Box<SequenceState>,
         custody: RelayCustody,
+        charge: StreamCharge,
     },
 }
 
@@ -235,12 +345,13 @@ pub(super) fn sender_record(key: &StreamKey, leased: u64) -> Result<(String, Rep
     ))
 }
 
-/// The storage key and record of receiver stream `key`, whose window is `state` and whose relay
-/// deliveries in custody are `custody`.
+/// The storage key and record of receiver stream `key`, whose window is `state`, whose relay
+/// deliveries in custody are `custody` and whose charge is `charge`.
 pub(super) fn receiver_record(
     key: &StreamKey,
     state: &SequenceState,
     custody: &RelayCustody,
+    charge: &StreamCharge,
 ) -> Result<(String, ReplayRecord)> {
     Ok((
         record_key(ReplayTable::Receiver, key)?,
@@ -248,6 +359,7 @@ pub(super) fn receiver_record(
             key,
             state,
             custody,
+            charge,
         })?,
     ))
 }
@@ -308,13 +420,23 @@ impl ReplayStore {
 
     /// Whether `table` may open one more stream: its streams and the unrestorable records,
     /// each of which may hold a slot of either table, stay below the table bound (the bounded
-    /// slots law).
-    pub(super) fn admits_new_stream(&self, table: ReplayTable) -> bool {
+    /// slots law); `Err(TableFull)` otherwise.
+    pub(super) fn admits_new_stream(
+        &self,
+        table: ReplayTable,
+    ) -> std::result::Result<(), ShareRefusal> {
         let streams = match table {
             ReplayTable::Sender => self.tables.sender.len(),
             ReplayTable::Receiver => self.tables.receiver.len(),
         };
-        streams.saturating_add(self.unrestorable.len()) < TRANSACTION_REPLAY_STREAM_CAPACITY
+        let held = streams.saturating_add(self.unrestorable.len());
+        match held < TRANSACTION_REPLAY_STREAM_CAPACITY {
+            true => Ok(()),
+            false => Err(ShareRefusal::TableFull {
+                held,
+                bound: TRANSACTION_REPLAY_STREAM_CAPACITY,
+            }),
+        }
     }
 }
 
@@ -323,8 +445,8 @@ enum RestoredStream {
     /// A sender stream and the last sequence its lease covers.
     Sender(StreamKey, u64),
     /// A receiver stream, its window (still boxed as it decoded, so the sender variant stays
-    /// small) and its relay custody.
-    Receiver(StreamKey, Box<SequenceState>, RelayCustody),
+    /// small), its relay custody and its charge.
+    Receiver(StreamKey, Box<SequenceState>, RelayCustody, StreamCharge),
 }
 
 /// Restore one decoded record (pure): its stream, or what is wrong with it.
@@ -335,7 +457,8 @@ fn restore_record(bytes: &[u8]) -> std::result::Result<RestoredStream, Defect> {
             key,
             state,
             custody,
-        }) if state.is_valid() => Ok(RestoredStream::Receiver(key, state, custody)),
+            charge,
+        }) if state.is_valid() => Ok(RestoredStream::Receiver(key, state, custody, charge)),
         Ok(StoredStream::Receiver { .. }) => Err(Defect::InvalidWindow),
         Err(_) => Err(Defect::NotAStream),
     }
@@ -411,11 +534,13 @@ pub(super) fn restore(
                         .sender
                         .insert(key, SenderLease::restored(leased));
                 }
-                Contribution::Stream(RestoredStream::Receiver(key, state, custody)) => {
+                Contribution::Stream(RestoredStream::Receiver(key, state, custody, charge)) => {
                     restored.tables.receiver.insert(key, *state);
                     if !custody.is_empty() {
                         restored.tables.custody.insert(key, custody);
                     }
+                    restored.tables.charges.insert(key, charge);
+                    restored.tables.spent.insert((charge.spent_at_ms, key));
                 }
                 Contribution::Unrestorable { name, failure } => {
                     restored.unrestorable.insert(name, failure);
@@ -440,11 +565,13 @@ mod tests {
     use super::ReplayTables;
     use super::RestoreFailure;
     use super::SenderLease;
+    use super::StreamCharge;
     use super::RECEIVER_STREAM_MAX_BYTES;
     use super::RELAY_CUSTODY_CAPACITY;
     use super::RELAY_DELIVERY_MAX_BYTES;
     use super::SENDER_STREAM_MAX_BYTES;
     use super::SEQUENCE_STATE_MAX_BYTES;
+    use super::STREAM_CHARGE_MAX_BYTES;
     use super::STREAM_KEY_MAX_BYTES;
     use super::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
     use super::TRANSACTION_REPLAY_STORE_MAX_BYTES;
@@ -453,6 +580,7 @@ mod tests {
     use crate::dht::Did;
     use crate::error::Error;
     use crate::error::Result;
+    use crate::fair_admission::Principal;
     use crate::message::replay::RelayDelivery;
     use crate::message::replay::SequenceState;
     use crate::message::replay::StreamKey;
@@ -467,6 +595,14 @@ mod tests {
         rings_codec::serialize(value)
             .map(|bytes| bytes.len())
             .map_err(Error::CodecSerialize)
+    }
+
+    /// A charge whose every field encodes at its maximal length.
+    fn charge() -> StreamCharge {
+        StreamCharge {
+            introducer: Principal::Slot(u16::MAX),
+            spent_at_ms: u128::MAX,
+        }
     }
 
     /// A stream key whose every field encodes at its maximal length.
@@ -504,6 +640,7 @@ mod tests {
         assert_eq!(encoded_len(&key)?, STREAM_KEY_MAX_BYTES);
         assert_eq!(encoded_len(&u64::MAX)?, U64_MAX_BYTES);
         assert_eq!(encoded_len(&full_window())?, SEQUENCE_STATE_MAX_BYTES);
+        assert_eq!(encoded_len(&charge())?, STREAM_CHARGE_MAX_BYTES);
         let delivery = full_custody()
             .first()
             .copied()
@@ -511,7 +648,8 @@ mod tests {
         assert_eq!(encoded_len(&delivery)?, RELAY_DELIVERY_MAX_BYTES);
 
         let (sender_key, sender) = sender_record(&key, u64::MAX)?;
-        let (receiver_key, receiver) = receiver_record(&key, &full_window(), &full_custody())?;
+        let (receiver_key, receiver) =
+            receiver_record(&key, &full_window(), &full_custody(), &charge())?;
         assert_eq!(sender.0.len(), SENDER_STREAM_MAX_BYTES);
         assert_eq!(receiver.0.len(), RECEIVER_STREAM_MAX_BYTES);
         assert_eq!(encoded_len(&receiver)?, TRANSACTION_REPLAY_RECORD_MAX_BYTES);
@@ -522,7 +660,7 @@ mod tests {
         );
         // A full store of maximal pairs, one of which holds the whole custody of the store,
         // reaches the store bound exactly (the bounded custody law).
-        let (_, unheld) = receiver_record(&key, &full_window(), &RelayCustody::new())?;
+        let (_, unheld) = receiver_record(&key, &full_window(), &RelayCustody::new(), &charge())?;
         let unheld_pair = encoded_len(&(&receiver_key, unheld))?;
         let pair = encoded_len(&(&sender_key, sender))? + unheld_pair;
         let held = encoded_len(&(&receiver_key, receiver))? - unheld_pair;
@@ -531,8 +669,8 @@ mod tests {
             TRANSACTION_REPLAY_STORE_MAX_BYTES
         );
         // The figures the replay documentation states.
-        assert_eq!(TRANSACTION_REPLAY_RECORD_MAX_BYTES, 3_850);
-        assert_eq!(TRANSACTION_REPLAY_STORE_MAX_BYTES, 28_314_240);
+        assert_eq!(TRANSACTION_REPLAY_RECORD_MAX_BYTES, 3_873);
+        assert_eq!(TRANSACTION_REPLAY_STORE_MAX_BYTES, 28_691_072);
         Ok(())
     }
 
@@ -570,12 +708,14 @@ mod tests {
         let window = full_window();
         let records = decoded(vec![
             sender_record(&key, 7)?,
-            receiver_record(&key, &window, &RelayCustody::new())?,
+            receiver_record(&key, &window, &RelayCustody::new(), &charge())?,
         ]);
         let restored = restore(records, by_key);
         let mut expected = ReplayTables::default();
         expected.sender.insert(key, SenderLease::restored(7));
         expected.receiver.insert(key, window);
+        expected.charges.insert(key, charge());
+        expected.spent.insert((charge().spent_at_ms, key));
         assert_eq!(restored.tables, expected);
         assert!(restored.unrestorable.is_empty());
         Ok(())
@@ -591,7 +731,7 @@ mod tests {
         let mut invalid = full_window();
         invalid.accepted = [None; TRANSACTION_REPLAY_WINDOW];
         let (invalid_slot, invalid_record) =
-            receiver_record(&maximal_key(4), &invalid, &RelayCustody::new())?;
+            receiver_record(&maximal_key(4), &invalid, &RelayCustody::new(), &charge())?;
         let records = decoded(vec![
             sender_record(&intact, 3)?,
             (garbage.clone(), ReplayRecord(vec![0xff; 3])),
@@ -679,7 +819,9 @@ mod tests {
     fn table_record(table: ReplayTable, stream: &StreamKey) -> Result<(String, ReplayRecord)> {
         match table {
             ReplayTable::Sender => sender_record(stream, 7),
-            ReplayTable::Receiver => receiver_record(stream, &full_window(), &RelayCustody::new()),
+            ReplayTable::Receiver => {
+                receiver_record(stream, &full_window(), &RelayCustody::new(), &charge())
+            }
         }
     }
 
@@ -704,7 +846,8 @@ mod tests {
             RecordState::InvalidWindow => {
                 let mut invalid = full_window();
                 invalid.accepted = [None; TRANSACTION_REPLAY_WINDOW];
-                let (_, record) = receiver_record(stream, &invalid, &RelayCustody::new())?;
+                let (_, record) =
+                    receiver_record(stream, &invalid, &RelayCustody::new(), &charge())?;
                 (
                     filed((own.clone(), record)),
                     Some(defective(Defect::InvalidWindow)),
@@ -772,14 +915,14 @@ mod tests {
                 .sender
                 .insert(maximal_key(origin), SenderLease::restored(0));
         }
-        assert!(store.admits_new_stream(ReplayTable::Sender));
-        assert!(store.admits_new_stream(ReplayTable::Receiver));
+        assert!(store.admits_new_stream(ReplayTable::Sender).is_ok());
+        assert!(store.admits_new_stream(ReplayTable::Receiver).is_ok());
 
         store
             .unrestorable
             .insert("torn".to_owned(), RestoreFailure::Undecodable);
-        assert!(!store.admits_new_stream(ReplayTable::Sender));
-        assert!(store.admits_new_stream(ReplayTable::Receiver));
+        assert!(store.admits_new_stream(ReplayTable::Sender).is_err());
+        assert!(store.admits_new_stream(ReplayTable::Receiver).is_ok());
         Ok(())
     }
 }

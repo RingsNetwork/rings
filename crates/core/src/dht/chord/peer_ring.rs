@@ -47,9 +47,9 @@ use std::sync::OnceLock;
 use futures::lock::Mutex as FuturesMutex;
 
 use super::carrier_store::CarrierStore;
-use super::carrier_store::RemovalCharge;
 use super::carrier_store::RemovalIndex;
 use super::carrier_store::RemovalStorage;
+use super::carrier_store::REMOVAL_SHARES;
 use super::PeerRingAction;
 use super::RemoteAction;
 use crate::consts::LOCAL_CACHE_CAPACITY;
@@ -65,6 +65,7 @@ use crate::dht::relay_holder::RelayNeighborhood;
 use crate::dht::relay_holder::RelayReplication;
 use crate::dht::successor::SuccessorSeq;
 use crate::dht::topology;
+use crate::dht::topology::edge_slots;
 use crate::dht::topology::FindSuccessorStep;
 use crate::dht::topology::SuccessorRemoval;
 use crate::dht::topology::TopologyAction;
@@ -79,6 +80,8 @@ use crate::dht::FingerFixRequest;
 use crate::dht::FingerTable;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::SlotRoster;
+use crate::fair_admission::TableAccounting;
 use crate::lifecycle::epoch::Epoch;
 use crate::message::RelayHoldDigest;
 use crate::storage::KvStorageInterface;
@@ -124,6 +127,10 @@ pub struct PeerRing {
     pub(crate) removal_storage: RemovalStorage,
     /// The charge index of [`Self::removal_storage`](PeerRing#structfield.removal_storage).
     removal_index: RemovalIndex,
+    /// The connection slots of this node, which every table under slot accounting charges
+    /// (load-bounds paper, Law 1); the transport gives an edge a slot as it admits the edge and
+    /// frees it as it retires the edge.
+    edges: Arc<SlotRoster>,
     /// Storage of the relay-inbox namespace: this node's copy of the mail it holds as a member of
     /// a carrier's key (a relay carrier is replicated to the members alone, #777, never cached,
     /// and fetched by its recipient alone), so it must be a `RecordAuthority::Retained` store
@@ -236,13 +243,15 @@ impl PeerRing {
         finger_table_size: usize,
         virtual_nodes: VirtualNodeConfig,
     ) -> Self {
+        let edges = Arc::new(SlotRoster::new(edge_slots(usize::from(succ_max))));
         Self {
             successor_seq: SuccessorSeq::new(did, succ_max),
             predecessor: Arc::new(Mutex::new(None)),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
             removal_storage: Box::new(MemStorage::new()),
-            removal_index: RemovalIndex::default(),
+            removal_index: RemovalIndex::new(TableAccounting::new(REMOVAL_SHARES)),
+            edges,
             relay_storage: None,
             cache: Box::new(MemStorage::bounded(LOCAL_CACHE_CAPACITY)),
             storage_virtual_node_config: virtual_nodes,
@@ -284,6 +293,11 @@ impl PeerRing {
         self
     }
 
+    /// The connection slots of this node (see [`Self::edges`](PeerRing#structfield.edges)).
+    pub(crate) fn edges(&self) -> &SlotRoster {
+        &self.edges
+    }
+
     /// This ring replicating relay custody as `replication` says (#777).
     pub fn with_relay_replication(mut self, replication: RelayReplication) -> Self {
         let replication = RelayReplication {
@@ -317,19 +331,6 @@ impl PeerRing {
     pub(crate) fn carrier_store_for_write(&self, kind: EntryKind) -> Result<CarrierStore<'_>> {
         self.carrier_storage(kind)
             .ok_or(Error::RelayStorageUnavailable)
-    }
-
-    /// Whom a write sent by `sender` is charged to in the removal store (removal-stability
-    /// paper, Def. 7): the holder class for this node and for a node its view names as an owner
-    /// of the placements it holds (its predecessor or a successor), else `sender` itself.
-    pub(crate) fn removal_charge_of(&self, sender: Did) -> Result<RemovalCharge> {
-        let holder = sender == self.did
-            || *self.lock_predecessor_state()? == Some(sender)
-            || self.successor_seq.contains(&sender)?;
-        Ok(match holder {
-            true => RemovalCharge::Holder,
-            false => RemovalCharge::Origin(sender),
-        })
     }
 }
 

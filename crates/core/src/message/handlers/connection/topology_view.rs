@@ -53,6 +53,7 @@ use crate::dht::PeerRing;
 #[cfg(all(test, not(target_family = "wasm")))]
 use crate::dht::TopoInfo;
 use crate::error::Result;
+use crate::message::handlers::HandlerContext;
 use crate::message::types::QueryFor;
 use crate::message::types::QueryForTopoInfoReport;
 use crate::message::HandleMsg;
@@ -82,7 +83,7 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
     /// Returns an error when DHT claim state cannot be accessed, or when an
     /// authorized candidate cannot be connected or joined. The matching token
     /// is cancelled before propagating an effect failure.
-    async fn handle(&self, ctx: &MessagePayload, msg: &QueryForTopoInfoReport) -> Result<()> {
+    async fn handle(&self, ctx: &HandlerContext<'_>, msg: &QueryForTopoInfoReport) -> Result<()> {
         match msg.then {
             QueryFor::SyncSuccessor => {
                 // The transaction origin is the only peer allowed to spend the
