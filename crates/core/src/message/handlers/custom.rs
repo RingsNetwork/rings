@@ -41,7 +41,8 @@ pub(crate) fn custom_message_effects<'payload>(
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<CustomMessage> for MessageHandler {
-    async fn handle(&self, ctx: &HandlerContext<'_>, _: &CustomMessage) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, _: &CustomMessage) -> Result<()> {
+        let ctx = context.payload();
         let destination = self.destination_reachability(ctx.transaction.destination)?;
         self.run_effects(custom_message_effects(self.dht.did, ctx, destination))
             .await

@@ -76,9 +76,9 @@ use crate::message::MessageVerificationExt;
 pub(crate) const HELD_MESSAGE_DOMAIN_TAG: DomainTag =
     crate::domain_tag!("rings-core:relay-inbox:held-message");
 
-/// `H_I`, the relay element horizon (load-bounds paper, Def. 3): a held message retires
+/// `H_I`, the relay hold horizon (load-bounds paper, Def. 3): a held message retires
 /// `MAX_RELAY_INBOX_TTL_MS` after its hold instant, the longest any carrier is kept.
-pub(crate) const RELAY_ELEMENT_HORIZON_MS: u128 = MAX_RELAY_INBOX_TTL_MS as u128;
+pub(crate) const RELAY_HOLD_HORIZON_MS: u128 = MAX_RELAY_INBOX_TTL_MS as u128;
 
 /// The relay-inbox carrier of `destination`: the ring position just after it.
 pub(crate) fn inbox_key(destination: Did) -> Did {
@@ -141,14 +141,14 @@ impl HeldMessage {
         })
     }
 
-    /// Whether this hold is past the relay element horizon at `now_ms`, `t ≥ h + H_I` (pure).
+    /// Whether this hold is past the relay hold horizon at `now_ms`, `t ≥ h + H_I` (pure).
     ///
     /// Law: the witness bounds the hold instant by the sender's proof, `h ≤ ts + ttl`, so a
     /// transaction is delivered out of an inbox only while `t < ts + ttl + H_I`, however its
     /// hold was written; the receiver's replay horizon `ι(Application)` covers that
     /// (`message::replay::admission`).
     pub(crate) fn is_retired_at(&self, now_ms: u128) -> bool {
-        now_ms >= self.held_at_ms().saturating_add(RELAY_ELEMENT_HORIZON_MS)
+        now_ms >= self.held_at_ms().saturating_add(RELAY_HOLD_HORIZON_MS)
     }
 
     /// The node that held the payload.
@@ -306,7 +306,7 @@ impl Entry {
             .collect()
     }
 
-    /// The relay element horizon projection at `now_ms` (load-bounds paper, Def. 3): every
+    /// The relay hold horizon projection at `now_ms` (load-bounds paper, Def. 3): every
     /// element whose hold is past `h + H_I` is dropped with its dot.
     ///
     /// Law: the predicate reads the element alone (its signed hold instant, never its dot), so

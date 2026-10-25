@@ -54,8 +54,8 @@
   plus `σ` later; a refusal therefore lasts until a stream of the refused slot is spent, never
   for good. Handlers receive a `HandlerContext`, which carries the payload and the principal
   that delivered it.
-  - **Breaking (library API).** `HandleMsg::handle` takes a `&HandlerContext`, which derefs to
-    the `MessagePayload`. `RemovalCharge` and `REMOVAL_ORIGIN_SHARE` are gone: a remove's charge
+  - **Breaking (library API).** `HandleMsg::handle` takes a `&HandlerContext`; its
+    `payload()` is the `MessagePayload`. `RemovalCharge` and `REMOVAL_ORIGIN_SHARE` are gone: a remove's charge
     is a `Principal`. `Error::TransactionReplayStreamCapacityExceeded` and
     `Error::RemovalCapacityExhausted` carry the introducer and the `ShareRefusal`.
     `ChordStorageRepair::read_repair_entry` takes the principal that delivered the entry.

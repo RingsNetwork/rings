@@ -53,7 +53,7 @@ pub struct MessageHandler {
 
 /// One payload as the logical stage hands it to a handler: the payload, and the principal that
 /// delivered it to this node (load-bounds paper, Law 1), which every table a handler grows is
-/// charged to. It reads as the payload it carries.
+/// charged to.
 #[derive(Clone, Copy, Debug)]
 pub struct HandlerContext<'a> {
     /// The payload.
@@ -71,8 +71,9 @@ impl<'a> HandlerContext<'a> {
         }
     }
 
-    /// The principal that delivered the payload.
-    pub const fn introducer(&self) -> Principal {
+    /// The principal that delivered the payload: a node-local accounting index, meaningless
+    /// outside this node.
+    pub(crate) const fn introducer(&self) -> Principal {
         self.introducer
     }
 
@@ -88,21 +89,12 @@ impl<'a> HandlerContext<'a> {
     }
 }
 
-impl std::ops::Deref for HandlerContext<'_> {
-    type Target = MessagePayload;
-
-    /// The payload.
-    fn deref(&self) -> &MessagePayload {
-        self.payload
-    }
-}
-
 /// Generic trait for handle message ,inspired by Actor-Model.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait HandleMsg<T> {
     /// Message handler.
-    async fn handle(&self, ctx: &HandlerContext<'_>, msg: &T) -> Result<()>;
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &T) -> Result<()>;
 }
 
 impl MessageHandler {

@@ -83,7 +83,12 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
     /// Returns an error when DHT claim state cannot be accessed, or when an
     /// authorized candidate cannot be connected or joined. The matching token
     /// is cancelled before propagating an effect failure.
-    async fn handle(&self, ctx: &HandlerContext<'_>, msg: &QueryForTopoInfoReport) -> Result<()> {
+    async fn handle(
+        &self,
+        context: &HandlerContext<'_>,
+        msg: &QueryForTopoInfoReport,
+    ) -> Result<()> {
+        let ctx = context.payload();
         match msg.then {
             QueryFor::SyncSuccessor => {
                 // The transaction origin is the only peer allowed to spend the

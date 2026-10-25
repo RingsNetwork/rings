@@ -49,7 +49,8 @@ pub(crate) async fn offer_relay_repair(transport: &Arc<SwarmTransport>) -> Resul
 impl HandleMsg<RelayCarrierDigests> for MessageHandler {
     /// Ask the authenticated origin, a chain neighbour, for the offered carriers this node lacks
     /// or holds otherwise, of the keys whose chain makes the origin its neighbour.
-    async fn handle(&self, ctx: &HandlerContext<'_>, msg: &RelayCarrierDigests) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &RelayCarrierDigests) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
@@ -76,7 +77,8 @@ impl HandleMsg<RelayCarriersWanted> for MessageHandler {
     /// Copy to the authenticated origin, a chain neighbour, the carriers it asked for after this
     /// node's offer, as additive repair: the origin admits each as a copy from its neighbour, and
     /// no copy removes anything here.
-    async fn handle(&self, ctx: &HandlerContext<'_>, msg: &RelayCarriersWanted) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &RelayCarriersWanted) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])

@@ -519,7 +519,7 @@ fn test_an_element_held_ahead_of_a_stepped_back_clock_is_kept_for_a_later_pass()
     Ok(())
 }
 
-/// The relay element horizon (load-bounds paper, Def. 3): a held message retires
+/// The relay hold horizon (load-bounds paper, Def. 3): a held message retires
 /// `MAX_RELAY_INBOX_TTL_MS` after its hold instant. Every read projects it out of its carrier,
 /// which stays admissible, the other elements stay, and the recipient never delivers it.
 #[test]
