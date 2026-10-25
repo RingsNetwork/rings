@@ -15,8 +15,6 @@
     config's flags. To keep the hardware path, add `--cfg aes_armv8 --cfg polyval_armv8` to
     such a `RUSTFLAGS` on aarch64.
 
-## 0.37.0
-
 - A delegation slot that resolves by reference skips its delegator's signature (#1089). Every
   message carries two delegations, and recovering each delegator's ECDSA key cost 8.4% of the
   #843 loop's CPU (#1087). A referenced slot resolves only against the link's lessor table, whose
@@ -25,6 +23,8 @@
   `DelegatorAuthorization`, `Delegation::verify_under`). An inline slot, and every frame off a
   link, is verified in full as before. One proof costs 66 µs instead of 133 µs when its slot is
   referenced (release, M1 Max). No operator step.
+
+## 0.37.0
 
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
   Window by classification). A transaction is link-local when it is Application traffic, it

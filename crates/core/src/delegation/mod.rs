@@ -55,7 +55,7 @@ pub use account::Account;
 pub use builder::DelegationBuilder;
 pub use digest::DelegationDigest;
 pub use model::Delegation;
-pub use model::DelegatorAuthorization;
+pub(crate) use model::DelegatorAuthorization;
 pub use signing_key::DelegateeKey;
 
 #[cfg(test)]

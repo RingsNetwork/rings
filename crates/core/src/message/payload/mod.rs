@@ -36,6 +36,7 @@ use crate::domain_tag;
 use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::verify_message_under;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::MessageKind;
@@ -378,9 +379,8 @@ impl MessagePayload {
         authorization: PerSlot<DelegatorAuthorization>,
     ) -> bool {
         let now_ms = get_epoch_ms();
-        self.transaction
-            .verify_under(network_id, now_ms, authorization.origin)
-            && MessageVerificationExt::verify_under(self, network_id, now_ms, authorization.hop)
+        verify_message_under(&self.transaction, network_id, now_ms, authorization.origin)
+            && verify_message_under(self, network_id, now_ms, authorization.hop)
     }
 }
 

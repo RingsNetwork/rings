@@ -21,12 +21,13 @@ pub(super) fn pack_delegation(delegatee_did: Did, ts_ms: u128, ttl_ms: u64) -> S
 /// over the delegation, the costly part of verifying it (an ECDSA public-key recovery for a
 /// secp256k1 delegator).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DelegatorAuthorization {
+pub(crate) enum DelegatorAuthorization {
     /// Verify the delegator's signature.
     Verify,
-    /// The delegator's signature over this exact delegation was verified earlier by the caller,
-    /// as for a delegation a link resolved from its lessor table (#1089): only its expiry and
-    /// the delegatee's signature remain to check.
+    /// The delegator's signature over this exact delegation was verified earlier: a delegation a
+    /// link resolved from its lessor table (#1089). Only its expiry and the delegatee's
+    /// signature remain to check. Crate-private, so that it comes only from
+    /// `SlotEncoding::delegator_authorization`.
     Established,
 }
 
@@ -126,7 +127,7 @@ impl Delegation {
     /// Law: `verify_under(m, s, t, Established) = verify_at(m, s, t)` for every delegation whose
     /// delegator signature verifies; the expiry and the delegatee's signature are checked under
     /// both.
-    pub fn verify_under(
+    pub(crate) fn verify_under(
         &self,
         msg: &[u8],
         sig: impl AsRef<[u8]>,

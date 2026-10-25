@@ -233,7 +233,7 @@ impl MessageVerification {
 
     /// [`Self::verify_at`] with the delegation's delegator authorization treated as
     /// `authorization` says (see [`DelegatorAuthorization`]).
-    pub fn verify_under(
+    pub(crate) fn verify_under(
         &self,
         domain: SigningDomain,
         data: &[u8],
@@ -280,7 +280,7 @@ impl MessageVerification {
 
     /// [`Self::verify_live_at`] with the delegator authorization treated as `authorization`
     /// says.
-    pub fn verify_live_under(
+    pub(crate) fn verify_live_under(
         &self,
         domain: SigningDomain,
         data: &[u8],
@@ -293,6 +293,28 @@ impl MessageVerification {
         }
         self.verify_under(domain, data, at_ms, authorization)
     }
+}
+
+/// [`MessageVerificationExt::verify_at`] with the delegator authorization of `message`'s
+/// delegation treated as `authorization` says. Crate-private, as [`DelegatorAuthorization`] is:
+/// outside the crate every verification checks the delegator's signature.
+pub(crate) fn verify_message_under<M: MessageVerificationExt + ?Sized>(
+    message: &M,
+    network_id: u32,
+    at_ms: u128,
+    authorization: DelegatorAuthorization,
+) -> bool {
+    let Ok(data) = message.verification_data() else {
+        tracing::warn!("MessageVerificationExt verify get verification_data failed");
+        return false;
+    };
+
+    message.verification().verify_live_under(
+        SigningDomain::new(M::DOMAIN_TAG, network_id),
+        &data,
+        at_ms,
+        authorization,
+    )
 }
 
 /// This trait helps a struct with `MessageVerification` field to `verify` itself.
@@ -321,28 +343,7 @@ pub trait MessageVerificationExt {
     /// held message as of the instant its holder received it, so a sender's session expiring
     /// afterwards does not retroactively unverify a message that was valid when held.
     fn verify_at(&self, network_id: u32, at_ms: u128) -> bool {
-        self.verify_under(network_id, at_ms, DelegatorAuthorization::Verify)
-    }
-
-    /// [`Self::verify_at`] with the delegator authorization of the message's delegation treated
-    /// as `authorization` says (see [`DelegatorAuthorization`]).
-    fn verify_under(
-        &self,
-        network_id: u32,
-        at_ms: u128,
-        authorization: DelegatorAuthorization,
-    ) -> bool {
-        let Ok(data) = self.verification_data() else {
-            tracing::warn!("MessageVerificationExt verify get verification_data failed");
-            return false;
-        };
-
-        self.verification().verify_live_under(
-            SigningDomain::new(Self::DOMAIN_TAG, network_id),
-            &data,
-            at_ms,
-            authorization,
-        )
+        verify_message_under(self, network_id, at_ms, DelegatorAuthorization::Verify)
     }
 
     /// Verifies that the message is not expired and that the signature was issued for this
