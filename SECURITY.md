@@ -232,6 +232,13 @@ route.
   in arrival order (#908). An origin delegation that expired in flight is not charged to the
   hop that carried it, and only when the rest of the frame verifies. An unrelated party
   cannot populate a link's tables. [Details](docs/src/advanced-topic/delegation-references.md).
+- **Verified delegations.** A delegator's signature over a delegation is recovered once per exact
+  delegation and memoized under the full Keccak-256 of its encoding, so a delegation differing in
+  any byte, its signature included, is checked anew (#1089). The memo serves a delegation only
+  before its expiry minus one delivery bound, the expiry is checked on every message before the
+  memo is read, and the memo holds at most 329 delegations; eviction costs a recovery, never a
+  verdict. The delegatee's signature on each transaction is always checked. A delegation has no
+  revocation path; it ends at its expiry.
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.
 - **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures

@@ -17,6 +17,15 @@
 
 ## 0.37.0
 
+- A delegator's authorization of a delegation is verified once per exact delegation (#1089). Every
+  message carries two delegations, and recovering the delegator's ECDSA key for each cost 8.4%
+  of the #843 loop's CPU (#1087). The check now memoizes each delegation that verified, under the
+  full Keccak-256 of its encoding, and serves it only before its expiry minus one delivery bound
+  (`LEASE_MARGIN_MS`); the expiry is still checked on every call, and the delegatee's signature
+  on each transaction is unchanged. The memo holds at most 329 delegations (`R + 1` of the
+  load-bounds law, #1088) and drops the oldest. One check costs 68 µs when it recovers and under
+  1 µs when it is memoized (release, M1 Max). No operator step.
+
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
   Window by classification). A transaction is link-local when it is Application traffic, it
   arrived on the authenticated connection of its own origin, and its namespace declared delegated

@@ -50,6 +50,7 @@ mod builder;
 mod digest;
 mod model;
 mod signing_key;
+mod verified;
 
 pub use account::Account;
 pub use builder::DelegationBuilder;

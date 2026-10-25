@@ -79,9 +79,17 @@ impl Delegation {
     }
 
     /// Verify that the delegator authorized this delegation and that it was live at `at_ms`.
+    ///
+    /// The delegator's signature is recovered once per exact delegation and memoized until its
+    /// expiry minus `Δ` (see the `verified` module for the laws); the expiry is checked on every
+    /// call, before the memo is read.
     pub fn verify_delegator_authorization_at(&self, at_ms: u128) -> Result<()> {
         if self.is_expired_at(at_ms) {
             return Err(Error::DelegationExpired);
+        }
+        let (memoized, key) = self.memoized_at(at_ms)?;
+        if memoized {
+            return Ok(());
         }
 
         let auth_bytes = self.pack();
@@ -92,6 +100,7 @@ impl Delegation {
         {
             return Err(Error::VerifySignatureFailed);
         }
+        self.memoize_verified(key);
         Ok(())
     }
 
