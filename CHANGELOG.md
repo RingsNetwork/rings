@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `PeriodicMeasure::close` stops a measurement and waits until it has released its stores (#1083).
+  A drop releases them only after the persistence worker has written the final snapshot on a later
+  poll, so a store directory reopened in the same process right after a drop could still be held
+  (`Error::StorageDirectoryLocked`, #1039). `close` resolves once the worker has persisted any
+  pending snapshot and dropped both stores.
 - A node stamps its own writes in issue order (#1075, #1033; folds in #1076). Every operation a
   node stamps is issued strictly after every version it stamped or passed through before and
   every version it read for the key (its cached carrier, and the replica an owner holds), with
