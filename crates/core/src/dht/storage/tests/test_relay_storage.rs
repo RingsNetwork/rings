@@ -7,9 +7,9 @@ use super::data_entry_with_payload_len;
 use crate::consts::UNACKNOWLEDGED_RELAY_HOLDS_MAX;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::inbox::inbox_key;
-use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::Did;
+use crate::dht::RelayCustody;
 use crate::dht::StorageKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -30,6 +30,7 @@ async fn retained(root: &TempRoot, capacity: u32) -> Result<FileStorage> {
 /// `data` and `relay` as its two stores.
 fn ring(holder: &DelegateeKey, data: FileStorage, relay: FileStorage) -> PeerRing {
     PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(data))
+        .with_relay_replication(crate::tests::ungated_relay_replication())
         .with_relay_storage(Box::new(relay))
 }
 
@@ -88,7 +89,9 @@ async fn test_a_full_relay_store_refuses_the_hold() -> Result<()> {
     let first = Did::from(50u32);
     hold(&node, &holder, first).await?;
     assert_eq!(
-        node.carrier_store_for_write(EntryKind::RelayMessage)?
+        node.relay_storage
+            .as_ref()
+            .ok_or(Error::RelayStorageUnavailable)?
             .count()
             .await?,
         1
@@ -208,5 +211,50 @@ fn test_a_hold_beyond_the_bound_is_refused_and_none_kept_is_forgotten() -> Resul
     still.sort();
     kept.sort();
     assert_eq!(still, kept);
+    Ok(())
+}
+
+/// `Law (Asked)`: an owner's answer is taken only for a key with a query outstanding, once, and
+/// only as another node that holds relay mail; a hint change alone costs a repair pass. So a peer
+/// can neither name a holder unasked nor overwrite a hint by alternating answers.
+#[test]
+fn test_an_owner_answer_is_taken_once_for_an_outstanding_query_alone() -> Result<()> {
+    let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let ring = PeerRing::new_with_storage(
+        holder.delegator_did(),
+        3,
+        Box::new(crate::storage::MemStorage::new()),
+    );
+    let (key, named, other, storage_less) = (
+        Did::from(51u32),
+        Did::from(7u32),
+        Did::from(8u32),
+        Did::from(9u32),
+    );
+    ring.observe_relay_custody(storage_less, RelayCustody::HoldsNone)?;
+
+    // Unasked: nothing is taken.
+    assert!(!ring.name_relay_holder(key, Some(named))?);
+    assert!(ring.relay_holder_hints()?.is_empty());
+
+    // Asked: the first answer is taken, and a second answer to the same query is not.
+    ring.ask_relay_holder(key)?;
+    assert!(ring.name_relay_holder(key, Some(named))?);
+    assert!(!ring.name_relay_holder(key, Some(other))?);
+    assert_eq!(ring.relay_holder_hints()?.get(&key), Some(&named));
+
+    // Asked again: the same answer changes nothing and costs no pass.
+    ring.ask_relay_holder(key)?;
+    assert!(!ring.name_relay_holder(key, Some(named))?);
+    assert_eq!(ring.relay_holder_hints()?.get(&key), Some(&named));
+
+    // An answer naming this node or a node that holds no relay mail names no holder.
+    for unfit in [ring.did, storage_less] {
+        ring.ask_relay_holder(key)?;
+        assert!(ring.name_relay_holder(key, Some(unfit))?);
+        assert!(ring.relay_holder_hints()?.is_empty());
+        ring.ask_relay_holder(key)?;
+        assert!(ring.name_relay_holder(key, Some(named))?);
+    }
     Ok(())
 }

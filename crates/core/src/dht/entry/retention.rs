@@ -77,7 +77,7 @@
 //!   idempotent.
 //! - No loss: no live add is lost. An add leaves a carrier only by a remove covering it, a user
 //!   `Overwrite` register above it, the `max_data_len` cap, its own horizon, its carrier's
-//!   retention bound, or storage byte-budget eviction of the whole carrier:
+//!   retention bound, or storage byte-budget eviction of its element side:
 //!   `∀ a. t < τ(a) + H ∧ ¬covered(a) ∧ ¬(a.version < register(⨆ᵢ xᵢ)) ∧ a ∈ ⋃ᵢ xᵢ
 //!   ⇒ a ∈ retire_t(⨆ᵢ xᵢ)`, cap aside.
 //! - No resurrection: a remove `(e, r)` or a register leaves the replicas that hold it only at a
@@ -87,18 +87,25 @@
 //!   once the receiver has joined it, so it moves rather than drops. Every clock then reads
 //!   `t_q ≥ t_p − σ ≥ τ(r) + H ≥ τ(d) + H` for every add `d ≤ r` it shadowed, including the
 //!   dropping node's own clock should it step back by up to `σ`, so every carrier has already
-//!   retired those adds and none can serve them back. This holds barring storage byte-budget
-//!   eviction, which drops a carrier whatever it holds (see SECURITY.md).
-//! - Bound: a data carrier holds at most `max_data_len` elements, and at most one remove per
-//!   payload removed within the last `H + σ`. This is a rate bound, not a count cap: a cap
-//!   would drop a remove whose adds are still inside their horizon somewhere.
+//!   retired those adds and none can serve them back. Eviction keeps it too: the remove side
+//!   lives in a removal store that refuses and never evicts (#920, `chord::carrier_store`), so
+//!   the byte budget of the data store drops element sides only.
+//! - Bound (#921): a data carrier holds at most `max_data_len` elements and at most
+//!   `DATA_TOMBSTONE_MAX_LEN` unstable removes. The remove bound refuses, it never truncates:
+//!   a delta carrying more is inadmissible, and a join or operation whose result would hold
+//!   more is refused and changes nothing, since a truncated remove could still cover an add
+//!   inside its horizon somewhere. A refusal drops no remove a replica holds, so it keeps No
+//!   resurrection; replicas that refuse each other's deltas converge once the union fits. A
+//!   sync delta is no stronger than a writer: each of its removes either covers an add a
+//!   `Tombstone` could cover, with a dot at most `σ` later, or covers nothing and costs what an
+//!   `Extend` and `Tombstone` of a fresh value cost (removal-stability paper, Lemma 4).
 //!
 //! A relay inbox has no horizon: it has no reset floor, its tombstones are capped, and a held
 //! message lives as long as its carrier (see the `inbox` module).
 //!
 //! Size: the payload predicate is element-intrinsic, so filtering by it commutes with union
-//! and the carrier stays a lattice; together with the count cap `kind.max_data_len()` it bounds
-//! a carrier at `max_data_len × ENTRY_PAYLOAD_MAX_BYTES` element bytes. A byte budget
+//! and the carrier stays a lattice; together with the count cap `kind.max_data_len()` and the
+//! remove bound it bounds a data carrier at `DATA_CARRIER_WIRE_MAX` encoded bytes. A byte budget
 //! over the whole carrier is deliberately not used: "the newest payloads that fit" depends on
 //! the sizes of payloads a replica may already have dropped, so it is not a lattice morphism
 //! and replicas would diverge.
@@ -111,6 +118,7 @@ use super::EntryDot;
 use super::EntryKind;
 use super::EntryOperation;
 use super::EntryVersion;
+use super::TombstoneBound;
 use crate::consts::DEFAULT_RELAY_INBOX_TTL_MS;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::ENTRY_PAYLOAD_MAX_BYTES;
@@ -385,7 +393,7 @@ impl Entry {
     }
 
     /// The kind-independent part of the admission law: liveness, retention bound, version
-    /// clocks, and payload sizes.
+    /// clocks, payload sizes, and the tombstone bound.
     pub(crate) fn validate_bounds_at(&self, now_ms: u128) -> Result<()> {
         if !self.is_live_at(now_ms) {
             return Err(Error::EntryNotLive);
@@ -406,7 +414,23 @@ impl Entry {
         if !self.data.iter().all(payload_within_bound) {
             return Err(Error::EntryPayloadExceedsMax);
         }
-        Ok(())
+        self.check_tombstone_bound()
+    }
+
+    /// The tombstone law of a carrier under a refusing bound (#921; removal-stability paper,
+    /// Law 5): `Ok` iff it holds at most the bound's removes. Checked on a peer-supplied delta at
+    /// admission, and on the result of every join and operation before it is stored, so a store
+    /// never holds a data carrier past
+    /// [`DATA_TOMBSTONE_MAX_LEN`](crate::consts::DATA_TOMBSTONE_MAX_LEN) and a refused write changes
+    /// nothing; a truncating bound is enforced by materialization instead.
+    pub(crate) fn check_tombstone_bound(&self) -> Result<()> {
+        let count = self.crdt.tombstones.len();
+        match self.kind.tombstone_bound() {
+            TombstoneBound::Refuse(bound) if count > bound => {
+                Err(Error::EntryTombstonesExceedMax { count, bound })
+            }
+            TombstoneBound::Refuse(_) | TombstoneBound::Truncate(_) => Ok(()),
+        }
     }
 }
 

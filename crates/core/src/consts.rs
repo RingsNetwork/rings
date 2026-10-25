@@ -94,16 +94,82 @@ pub const RELAY_INBOX_MAX_LEN: usize = 64;
 /// a hold beyond this bound to its local sender (`Error::RelayHoldsUnacknowledgedFull`) rather
 /// than forget an earlier one.
 pub const UNACKNOWLEDGED_RELAY_HOLDS_MAX: usize = RELAY_INBOX_MAX_LEN;
+/// The default number of members a relay carrier is replicated to (#777, durable-records
+/// Section X): the first `r` nodes that hold relay mail from the carrier's key owner on. A held
+/// element is lost only if every one of them is lost within one repair delay; `r = 8` is aimed
+/// at a loss below `10⁻³` over the 24 h retention with 90 % browser members (durable-records,
+/// departure classes).
+pub const DEFAULT_RELAY_INBOX_REPLICAS: usize = 8;
+/// The default time a node is online before it declares that it holds relay mail (#777,
+/// durable-records `Law (Age gate)`): until then it routes and fetches its own mail, but takes
+/// no relay copy, so members are the nodes that stay.
+pub const DEFAULT_RELAY_AGE_GATE_MS: u64 = 2 * 60 * 1000;
 /// Maximum bytes of one element in a DHT storage entry.
 ///
 /// The bound is per element so that filtering by it is a lattice morphism; with
-/// [`ENTRY_DATA_MAX_LEN`] it bounds every carrier at `ENTRY_DATA_MAX_LEN * ENTRY_PAYLOAD_MAX_BYTES`.
+/// [`ENTRY_DATA_MAX_LEN`] and [`DATA_TOMBSTONE_MAX_LEN`] it bounds every data carrier at
+/// [`DATA_CARRIER_WIRE_MAX`] encoded bytes.
 pub const ENTRY_PAYLOAD_MAX_BYTES: usize = 32 * 1024;
-/// Carrier law: a full carrier must still be one transport message, since a hand-off, a
-/// republish, and a lookup answer each carry a whole carrier. Elements are already in their
-/// wire encoding; the carrier's wire form adds only codec framing, dots, and the message
-/// envelope, for which a quarter of [`TRANSPORT_MAX_SIZE`] is reserved.
+/// The most unstable removes one data carrier holds, `T_max` (#921; removal-stability paper,
+/// Def. 6): its element cap, so a lookup reply's removes are no larger than its elements' count.
+///
+/// Law: a delta carrying more removes is inadmissible, and a join or an operation whose result
+/// would hold more is refused, changing nothing; a data carrier's removes are never truncated,
+/// since dropping an unstable remove resurrects the adds it covers. It admits `T_max / (H + σ)`,
+/// about 10 removes a minute per topic, sustained; an application that needs more shards the
+/// topic.
+pub const DATA_TOMBSTONE_MAX_LEN: usize = ENTRY_DATA_MAX_LEN;
+/// The unstable removes one origin may have charged to it in an owner's removal store, `S`
+/// (#920; removal-stability paper, Law 6): one carrier's worth. An origin is the authenticated
+/// sender of the transition that raised a remove; a node this owner's view names as an owner of
+/// the placement is charged to the holder class instead, which no share bounds.
+pub const REMOVAL_ORIGIN_SHARE: usize = DATA_TOMBSTONE_MAX_LEN;
+/// The unstable removes an owner's removal store holds in all, `B_R = 64 S` (#920;
+/// removal-stability paper, Law 6), about 9.6 MB at [`ENTRY_TOMBSTONE_WIRE_MAX`]: filling it
+/// past one origin's share takes 63 other identities or a node the owner's view makes an owner
+/// of the placement, a Sybil attack or a Byzantine owner, both non-goals; #907 closes the first
+/// for the replay table and this store alike.
+pub const REMOVAL_STORE_MAX_REMOVES: usize = 64 * REMOVAL_ORIGIN_SHARE;
+/// Encoded bytes of one element's length prefix, at most: the varint of
+/// [`ENTRY_PAYLOAD_MAX_BYTES`].
+///
+/// Derivation: `32 768 < 2^21`, three 7-bit groups; witnessed with equality by
+/// `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_ELEMENT_PREFIX_WIRE_MAX: usize = 3;
+/// Encoded bytes of one element dot, at most.
+///
+/// Derivation: a version (a varint `u128` time, 19 bytes at its maximum; a varint `u32` counter,
+/// 5 bytes; two DIDs encoded as `0x`-prefixed hex strings, a one-byte length and 42 characters
+/// each) and a varint `u32` index (5 bytes), `19 + 5 + 43 + 43 + 5 = 115`; witnessed with
+/// equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_DOT_WIRE_MAX: usize = 115;
+/// Encoded bytes of one remove, at most: its 32-byte digest and its dot, `32 + 115 = 147`;
+/// witnessed with equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_TOMBSTONE_WIRE_MAX: usize = 32 + ENTRY_DOT_WIRE_MAX;
+/// Encoded bytes of a carrier's register, at most: the option tag and a version,
+/// `1 + 19 + 5 + 43 + 43 = 111`; witnessed with equality by
+/// `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_REGISTER_WIRE_MAX: usize = 111;
+/// Encoded bytes of a full data carrier's fixed fields, at most: its DID (43), the length
+/// prefixes of its elements, dots and removes (2 each at 1024), its kind (1), and its retention
+/// bound (an option tag and a varint `u128`, 20), `43 + 2 + 1 + 2 + 2 + 20 = 70`; witnessed with
+/// equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_CARRIER_HEADER_WIRE_MAX: usize = 70;
+/// Encoded bytes of a data carrier, at most (#921; removal-stability paper, Prop. 4): every
+/// element at [`ENTRY_PAYLOAD_MAX_BYTES`] with its prefix and dot, [`DATA_TOMBSTONE_MAX_LEN`]
+/// removes and a register, `W = w_0 + D_max (P_max + λ + w_D) + T_max w_T + w_ρ`, about 33.83 MB.
+///
+/// Witnessed with equality by `test_carrier_wire_suprema_are_the_widest_encodings`, which
+/// encodes a carrier at every bound.
+pub const DATA_CARRIER_WIRE_MAX: usize = ENTRY_CARRIER_HEADER_WIRE_MAX
+    + ENTRY_DATA_MAX_LEN
+        * (ENTRY_PAYLOAD_MAX_BYTES + ENTRY_ELEMENT_PREFIX_WIRE_MAX + ENTRY_DOT_WIRE_MAX)
+    + DATA_TOMBSTONE_MAX_LEN * ENTRY_TOMBSTONE_WIRE_MAX
+    + ENTRY_REGISTER_WIRE_MAX;
+/// Carrier law: a full carrier, removes included, must still be one transport message, since a
+/// hand-off, a republish, and a lookup answer each carry a whole carrier. A quarter of
+/// [`TRANSPORT_MAX_SIZE`] is reserved for the message and envelope around it.
 const _: () = assert!(
-    ENTRY_DATA_MAX_LEN * ENTRY_PAYLOAD_MAX_BYTES <= TRANSPORT_MAX_SIZE / 4 * 3,
+    DATA_CARRIER_WIRE_MAX <= TRANSPORT_MAX_SIZE / 4 * 3,
     "a full carrier must fit one transport message with room for its envelope"
 );

@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use super::custom::Reachability;
+use super::relay_replica::replicate_own_hold;
 use super::storage::operate_entry;
 use crate::dht::entry::inbox::HeldMessage;
 use crate::dht::entry::Entry;
@@ -41,8 +42,14 @@ pub(crate) async fn hold_for_offline_destination(
 ) -> Result<()> {
     let now_ms = get_epoch_ms();
     let held = HeldMessage::hold(payload.clone(), transport.message_signer(), now_ms)?;
-    let hold =
-        EntryOperation::Extend(Entry::inbox_delta(&held)?).stamped(now_ms, transport.dht.did)?;
+    let hold = transport
+        .dht
+        .stamp_operation(
+            EntryOperation::Extend(Entry::inbox_delta(&held)?),
+            now_ms,
+            None,
+        )
+        .await?;
     send_relay_hold(&transport, hold).await
 }
 
@@ -71,13 +78,17 @@ pub(crate) async fn send_relay_hold(
     transport
         .dht
         .await_relay_hold(digest, hold.clone(), target)?;
-    let result = operate_entry(transport, hold, Attempts::Single).await;
+    let result = operate_entry(transport, hold.clone(), Attempts::Single).await;
     let settled = match &result {
         Ok(()) => target == Some(local),
         Err(error) => !is_unplaced_hold(error),
     };
     if settled {
         transport.dht.forget_relay_hold(digest)?;
+    }
+    if result.is_ok() && target == Some(local) {
+        // This node took its own hold as the holder: the other members hold it too (#777).
+        replicate_own_hold(transport, &hold).await?;
     }
     result
 }

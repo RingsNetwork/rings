@@ -15,10 +15,13 @@ use super::PreparedInboundFrame;
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
 use crate::measure::Authentication;
+use crate::message::EdgeRelation;
+use crate::message::LinkWindows;
 use crate::message::Message;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::message::ReplayWindow;
 use crate::swarm::session_link::DelegationLessor;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
@@ -58,6 +61,36 @@ impl InboundProcessor {
             pending_attempt: Arc::new(Mutex::new(None)),
             pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
             session_link: Arc::new(Mutex::new(DelegationLessor::new())),
+            link_windows: Arc::new(FuturesMutex::new(LinkWindows::new())),
+        }
+    }
+
+    /// Commit the replay and origin-quota admission of a transaction addressed to this node in
+    /// the window its classification selects (#1081; durable-records, Law Window by
+    /// classification): this connection's volatile window for a link-local transaction
+    /// (Application traffic of a namespace that delegated its replay, from the authenticated
+    /// neighbour that originated it), the durable window for every other transaction.
+    pub(super) async fn admit_final_transaction(
+        &self,
+        payload: &MessagePayload,
+        message: &Message,
+        lane: InboundLane,
+        edge: EdgeRelation,
+    ) -> crate::error::Result<()> {
+        let class = lane
+            .class()
+            .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
+        match ReplayWindow::select(class, edge, || self.logical.delegates_replay(message)) {
+            ReplayWindow::Durable => {
+                self.logical
+                    .admit_final_transaction(payload, message, lane, edge)
+                    .await
+            }
+            ReplayWindow::Link => {
+                self.logical
+                    .admit_link_transaction(&self.link_windows, payload, message, lane, edge)
+                    .await
+            }
         }
     }
 

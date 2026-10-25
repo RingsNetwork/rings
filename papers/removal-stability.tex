@@ -330,11 +330,12 @@ replica that could keep a stale add.
 
 \begin{proposition}[One message]\label{prop:message}
 Let $w_T$, $w_D$ and $w_\rho$ be the postcard suprema of one remove, one dot and one register
-($142$, $110$ and $106$\,B: a dot is a varint $u128$, two $42$-character DIDs and a varint
+($147$, $115$ and $111$\,B: a version is a varint $u128$, a varint $u32$ counter and two
+$42$-character DIDs, and a dot adds a varint
 $u32$; a digest is $32$\,B).  Let $\lambda=3$ be the length prefix of a $32$\,KiB element and
 $w_0$ the carrier's fixed fields.  Every admitted data carrier encodes in at most
 \[
-W=w_0+\Dmax(\Pmax+\lambda+w_D)+\Tmax w_T+w_\rho\approx33.82\,\text{MB},
+W=w_0+\Dmax(\Pmax+\lambda+w_D)+\Tmax w_T+w_\rho\approx33.83\,\text{MB},
 \]
 with $W_\Rm=w_0+\Tmax w_T+w_\rho$ for its remove side.  The carrier law is
 $W+\mathtt{MAX\_PAYLOAD\_ENVELOPE\_OVERHEAD}\le\mathtt{TRANSPORT\_MAX\_SIZE}$
@@ -346,7 +347,7 @@ The cap $\Dmax$, the per-element bound $\Pmax$ and Law~\ref{law:admit} bound the
 each field is at most its supremum.
 \end{proof}
 
-The margin is wide: removes cost $145$\,KB at the cap, against $26$\,MB of headroom.  We pick
+The margin is wide: removes cost $151$\,KB at the cap, against $26$\,MB of headroom.  We pick
 $\Tmax=\Dmax$ for the size of a lookup reply, not for the message bound.
 
 \textbf{Honest rate.}  The cap admits $\Tmax/(H+\sigma)\approx10$ removes per minute per topic,
@@ -404,7 +405,7 @@ sent, and recounted at open.  Let $c_p(o)=|\{(t,e):o_p(t,e)=o\}|$ over unstable 
 \begin{law}[Origin share]\label{law:share}
 A transition from sender $o\ne\star$ that would raise $c_p(o)$ above
 $S=\Tmax$ is refused with $\Err(\Exhausted)$, and the slot is unchanged.  The store refuses
-any transition past its total $B_\Rm=64\,\Tmax$ removes ($\approx9.3$\,MB at $w_T$).  A
+any transition past its total $B_\Rm=64\,\Tmax$ removes ($\approx9.6$\,MB at $w_T$).  A
 transition that raises no $D_t(e)$ is never charged, and a charge is released when its remove
 is retired at stability.
 \end{law}
@@ -516,8 +517,15 @@ withdrawal (advertising turned off), at most once per lease.
 \begin{law}[Reader liveness]\label{law:reader}
 Let $\tau^*(d)$ be the dot of $d$ in the fetched carrier.  A reader at clock $t$ lists, for
 each DID, the descriptor with the greatest $\ell$ among those that verify and satisfy
-$t<\ell$ and $t<\tau^*(d)+T+\sigma$, where $T$ is the registry TTL ($90$\,s).
+\[
+\ell\le t+\Lambda+\sigma,\quad T\le\Lambda,\quad t\le\ell,\quad t\le\tau^*(d)+T+\sigma,
+\]
+where $T$ is the descriptor's signed freshness window (the registry TTL, $90$\,s by default).
 \end{law}
+
+The first two conditions bound terms the signer chose: a lease longer than $\Lambda$, or a
+window longer than the lease, is not a registry's, so no reader lists it.  A registrant
+configured with $T>\Lambda$ is refused at start, since no reader would list it.
 
 \begin{proposition}[Cost]\label{prop:hbcost}
 Heartbeats write no removes.  A registrant writes at most one remove per withdrawal within
@@ -535,12 +543,14 @@ most once per $\Lambda-2I$.
 
 \begin{proposition}[Ghost bound]\label{prop:ghost}
 Let a registrant stop at $t_s$.  If no node re-appends its bytes, it is listed until at most
-$t_s+T+\sigma$.  Against any writer or syncer, it is listed until at most
-$\ell\le t_s+\Lambda$.
+$t_s+T+\sigma$.  Against any writer or syncer, each lease it signed is listed only at clocks
+$t\in[\ell-\Lambda-\sigma,\ell]$, a window of at most $\Lambda+\sigma$, whatever $\ell$ the
+signer chose; for an honest signer $\ell\le t_s+\Lambda$.
 \end{proposition}
 \begin{proof}
-Its last honest dot has $\tau^*\le t_s$, which gives the first bound.  A re-append or a
-forged dot can raise $\tau^*$, but not the signed $\ell$, which gives the second.
+Its last honest dot has $\tau^*\le t_s$ and $T\le\Lambda$, which gives the first bound.  A
+re-append or a forged dot can raise $\tau^*$, but not the signed $\ell$, and Law~\ref{law:reader}
+requires $\ell-\Lambda-\sigma\le t\le\ell$, which gives the second.
 \end{proof}
 
 The cost is the trade-off of this law.  A replayed registrant can stay listed for up to

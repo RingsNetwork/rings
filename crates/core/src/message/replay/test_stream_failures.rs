@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::custody::RelayCustody;
+use super::lease::TRANSACTION_SEQUENCE_LEASE;
 use super::store::receiver_record;
 use super::store::record_key;
 use super::store::sender_record;
@@ -113,7 +114,11 @@ async fn test_one_corrupt_record_refuses_only_its_stream() -> Result<()> {
         replay.admit(stream(2), 0, digest(1)).await,
         Err(Error::TransactionReplay { .. })
     ));
-    assert_eq!(replay.reserve(stream(2), NonZeroU64::MIN).await?, 1..=1);
+    let resumed = TRANSACTION_SEQUENCE_LEASE;
+    assert_eq!(
+        replay.reserve(stream(2), NonZeroU64::MIN).await?,
+        resumed..=resumed
+    );
     assert_eq!(replay.reserve(stream(1), NonZeroU64::MIN).await?, 0..=0);
     assert_eq!(
         replay.admit(stream(3), 0, digest(4)).await?,
@@ -340,7 +345,11 @@ async fn test_a_torn_native_record_fails_its_stream_closed_until_cleared() -> Re
         restarted.admit(stream(1), 0, digest(1)).await?,
         SequenceVerdict::First
     );
-    assert_eq!(restarted.reserve(stream(2), NonZeroU64::MIN).await?, 6..=6);
+    let resumed = 5 + TRANSACTION_SEQUENCE_LEASE;
+    assert_eq!(
+        restarted.reserve(stream(2), NonZeroU64::MIN).await?,
+        resumed..=resumed
+    );
     drop(restarted);
     Ok(())
 }

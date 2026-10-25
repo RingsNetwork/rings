@@ -50,6 +50,7 @@ use crate::message::MessageVerificationExt;
 use crate::message::OriginQuotaCounters;
 use crate::message::PayloadSender;
 use crate::message::ReplayCounters;
+use crate::message::ReplayWindow;
 use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationInbox;
 use crate::swarm::application::SuccessorReport;
@@ -196,7 +197,22 @@ impl Swarm {
         self.transport
             .application()
             .delegations
-            .set(namespace_prefix, limit);
+            .set(namespace_prefix, limit == MessageLimit::Delegated);
+    }
+
+    /// Record the replay window of application payloads starting with `namespace_prefix`, from
+    /// the authenticated neighbour that originated them: [`ReplayWindow::Link`], a volatile
+    /// window of the link they arrived on, or [`ReplayWindow::Durable`] (#1081).
+    ///
+    /// Registered in advance and matched by core on its admission path, as
+    /// [`Self::set_admission_delegation`] is. Delegated replay is trusted local configuration: a
+    /// declaring namespace must act on each of its payloads at most once by its own replay key
+    /// (Obligation R of durable-records).
+    pub fn set_replay_delegation(&self, namespace_prefix: Vec<u8>, window: ReplayWindow) {
+        self.transport
+            .application()
+            .replay_delegations
+            .set(namespace_prefix, window == ReplayWindow::Link);
     }
 
     /// Whether an application payload belongs to a namespace registered as delegating through
@@ -205,6 +221,15 @@ impl Swarm {
         self.transport
             .application()
             .delegations
+            .delegates(application_payload)
+    }
+
+    /// Whether an application payload belongs to a namespace registered as delegating its
+    /// replay through [`Swarm::set_replay_delegation`].
+    pub fn delegates_replay(&self, application_payload: &[u8]) -> bool {
+        self.transport
+            .application()
+            .replay_delegations
             .delegates(application_payload)
     }
 

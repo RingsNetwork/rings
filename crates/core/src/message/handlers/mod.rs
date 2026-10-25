@@ -31,6 +31,10 @@ pub mod e2e;
 pub(crate) mod inbox;
 /// Handlers of relay custody: holder announcements and inbox fetches.
 mod relay_holder;
+/// Chain repair of relay carriers: one digest-set offer per chain neighbour and pass.
+pub(crate) mod relay_repair;
+/// Chain replication of relay holds: each member forwarding a hold to its next member.
+pub(crate) mod relay_replica;
 mod service_receipt;
 /// Operator and handler for DHT stabilization
 pub mod stabilization;

@@ -53,6 +53,7 @@ use serde::Serialize;
 use tokio::runtime::Runtime;
 
 use super::Provider;
+use super::ProviderStores;
 use super::Signer;
 use crate::error::Error;
 use crate::error::Result;
@@ -406,8 +407,9 @@ pub unsafe extern "C" fn rings_node_provider_destroy(provider_ptr: *mut Provider
 /// `storage_path` is a directory the provider owns: it opens the native node's stores under it,
 /// each at its authority, as the daemon does ([`NodeStores::open_under`]): the DHT data store in
 /// `data`, the transaction replay store in `transaction-replay` (authoritative), the relay inbox
-/// in `relay-inbox` (retained), the onion entry guards in `onion-entry-guards` (a durable cache),
-/// and the measurement stores. Reusing the same path across runs keeps the replay windows, held
+/// in `relay-inbox` (retained), the data namespace's remove sides in `dht-removals` (retained),
+/// the onion entry guards in `onion-entry-guards` (a durable cache), and the measurement
+/// stores. Reusing the same path across runs keeps the replay windows, held
 /// mail and entry guards (#1022); a fresh path is a fresh node state. Creation fails, returning
 /// NULL, when a store cannot be opened.
 ///
@@ -478,12 +480,15 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
                         acc,
                         acc_ty,
                         Signer::Sync(Box::new(wrapped_signer(signer))),
-                        Some(stores.data),
-                        Some(stores.relay),
-                        Some(stores.measure),
-                        Some(stores.evidence),
-                        Some(stores.guards),
-                        Some(stores.replay),
+                        ProviderStores {
+                            entry: Some(stores.data),
+                            relay: Some(stores.relay),
+                            removals: Some(stores.removals),
+                            measure: Some(stores.measure),
+                            evidence: Some(stores.evidence),
+                            guards: Some(stores.guards),
+                            replay: Some(stores.replay),
+                        },
                     )
                     .await
                 })?;
@@ -679,6 +684,7 @@ mod tests {
         }
         assert!(root.join("transaction-replay").is_dir());
         assert!(root.join("relay-inbox").is_dir());
+        assert!(root.join("dht-removals").is_dir());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -726,15 +732,10 @@ mod tests {
                     delegatee_key,
                     1,
                 );
-                Provider::new_provider_with_storage_internal(
-                    config,
-                    None,
-                    None,
-                    Some(Box::new(storage.clone())),
-                    None,
-                    None,
-                    None,
-                )
+                Provider::new_provider_with_storage_internal(config, ProviderStores {
+                    measure: Some(Box::new(storage.clone())),
+                    ..ProviderStores::default()
+                })
                 .await
             })
             .expect("test provider must initialize");

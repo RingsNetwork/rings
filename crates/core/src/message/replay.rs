@@ -24,6 +24,17 @@
 //! record, at most [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`], so the cost of an admission does not
 //! grow with the number of streams retained.
 //!
+//! An admission writes its stream's record every time; a reservation writes it only when it
+//! outruns the stream's durable lease of sender sequences, which then covers the next
+//! `TRANSACTION_SEQUENCE_LEASE` sequences (#1043). A restart resumes past the lease: it may
+//! skip sequences, never reuse one (the laws of [`lease`]). A link-local transaction (#1081) meets
+//! none of this: it is admitted by [`TransactionReplay::admit_on_link`] in a volatile window of
+//! the link it arrived on, which its connection holds ([`LinkWindows`]), and writes nothing
+//! (durable-records, Law Window by classification). The records of the transitions that
+//! run while one batch is written share the next batch, one flush for all of them, and each
+//! transition is released only once its batch is durable (the group-commit law of [`commit`],
+//! #916).
+//!
 //! **Law (fail closed per stream, #910).** The first operation restores the store from one scan
 //! of the storage and caches the result, including every record that does not restore. For a
 //! stream `s` whose stored record is damaged (torn, corrupt or unreadable, or holding another
@@ -34,7 +45,7 @@
 //!                        until the record is cleared and the node restarts
 //! ∀ s′ ≠ s restored.     state(s′) and the verdicts of s′ are those of a store without s
 //! ∀ s′ new.              s′ opens iff its table's streams + |U| < capacity
-//! cost(restore) = O(|store|), once;  cost(call) = 0 store reads + 1 record write
+//! cost(restore) = O(|store|), once;  cost(call) = 0 store reads + at most 1 record in a batch
 //! ```
 //!
 //! so no replay is admitted from, and no sequence is reused by, such a stream, while every stream
@@ -42,9 +53,9 @@
 //! its table's bound. The law covers the records the storage witnesses: the native store keeps a
 //! presence marker per record, so a record deleted or renamed outside it is missing, not a
 //! stream never seen; only a store lost whole (its directory, or the browser's database) reads
-//! as a stream never seen, for every stream, which is the reset below. Each record write of the
-//! native store is flushed, which bounds the node-wide transition rate (about 50 per
-//! second on macOS, see the replay chapter; group commit is tracked in #916). The unrestorable
+//! as a stream never seen, for every stream, which is the reset below. Each batch of the native
+//! store is flushed, which bounds the rate of batches, not of transitions (see the replay
+//! chapter). The unrestorable
 //! records are counted ([`ReplayCounters::unrestorable_record`]), each refusal is counted
 //! ([`ReplayCounters::unavailable_stream`]), and each is logged once at load with its storage
 //! record name. A scan that fails as a whole restores nothing: it is counted as a persistence
@@ -100,11 +111,16 @@ use crate::storage::KvStorageScan;
 use crate::swarm::transport::DELIVERY_BOUND;
 use crate::utils::Instant;
 
+mod commit;
 mod custody;
+mod lease;
 mod store;
 
+use self::commit::Journal;
+use self::commit::Ledger;
 pub(crate) use self::custody::RelayAdmission;
 pub(crate) use self::custody::RelayDelivery;
+use self::lease::allocate;
 use self::store::receiver_record;
 use self::store::restore;
 use self::store::sender_record;
@@ -389,6 +405,12 @@ fn record_naming(storage: &ReplayStorage) -> impl Fn(&str) -> String + '_ {
     |storage_key| storage.record_name(storage_key)
 }
 
+/// The volatile replay windows of one link (#1081): the window of each stream whose
+/// link-local transactions arrived on it. Held by the link's inbound stage, never written, and
+/// released with the link, so a window lives exactly one link generation (durable-records, Law
+/// Window by classification).
+pub(crate) type LinkWindows = BTreeMap<StreamKey, SequenceState>;
+
 /// Storage accepted by the transaction replay runtime.
 pub type ReplayStorage = Box<rings_runtime::maybe_send_sync!(dyn KvStorageScan<ReplayRecord>)>;
 
@@ -437,29 +459,29 @@ impl ReplayCounterState {
 
 /// Serialized sender allocator and receiver replay-window effect boundary.
 ///
-/// One mutex serializes every reservation and admission, and it is held across the store write
-/// of the stream's record, so the replay store's write latency bounds the rate of replay
-/// transitions node-wide. Each write is one record of at most
-/// [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`]; a lock per stream would let writes of different
-/// streams overlap.
+/// One mutex serializes every reservation and admission on the speculative tables, and the
+/// records are written by group commit outside it (the group-commit law of [`commit`], #916):
+/// the transitions that run while one batch is written join the next, which one store batch
+/// writes with one flush, and each transition is released only once its batch is durable. Each
+/// record is at most [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`].
 ///
-/// **Law (whole transitions).** A transition, once started, runs to its end: lock, persist the
-/// stream's record, update the in-memory table, unlock. [`Self::reserve`] and
+/// **Law (whole transitions).** A transition, once started, runs to its end: lock, apply its
+/// effect, join the open batch, unlock, and wait for the batch. [`Self::reserve`] and
 /// [`Self::admit_with_quota`] hand it to the runtime ([`rings_runtime::run_detached`]), so
-/// cancelling the caller abandons only the wait. Otherwise a cancelled caller would release the
-/// mutex while its record write still ran, the next transition of the stream would compute from
-/// a table without that write, and the stale write could land last on disk: a receiver replay,
-/// or re-signed sender sequences, after a restart.
+/// cancelling the caller abandons only the wait. Otherwise a cancelled caller could leave the
+/// speculative tables holding an effect its batch never carries, and the next transition of the
+/// stream would compute from it: a receiver replay, or re-signed sender sequences, after a
+/// restart.
 ///
 /// A cancelled caller's transition therefore commits, exactly as if the caller had dropped the
 /// verdict: an admission enters the window and is charged its quota, though nobody dispatches
 /// it, so a retransmission of that transaction is a `Replay` and the message is lost (as for
 /// any drop after admission); a reservation consumes its sequences, which leaves a gap the
 /// receiver accepts as `Advance`. Cancellation also no longer sheds a queued transition: each
-/// cancelled attempt still waits its turn and pays its flushed write.
+/// cancelled attempt still joins its batch.
 ///
 /// ```text
-/// caller ──call──▶ run_detached ─▶ [lock ─▶ persist ─▶ table := next ─▶ unlock]
+/// caller ──call──▶ run_detached ─▶ [lock ─▶ T̂ := t(T̂) ─▶ join batch ─▶ unlock] ─▶ durable
 ///   │ drop                                   (owned by the runtime, never torn)
 ///   └──────────▶ only the wait is abandoned
 /// ```
@@ -489,10 +511,13 @@ struct Admission {
 }
 
 struct TransactionAdmissionState {
-    /// The replay store, restored once on the first operation and cached from then on.
+    /// The replay store, restored once on the first operation and cached from then on; its
+    /// tables are the speculative ones (the group-commit law).
     store: Option<ReplayStore>,
     /// Runtime-local origin quotas.
     quota: OriginQuotaTable,
+    /// The open batch and the undo log of the one being written.
+    journal: Journal,
 }
 
 impl TransactionReplay {
@@ -517,6 +542,7 @@ impl TransactionReplay {
             state: Mutex::new(TransactionAdmissionState {
                 store: None,
                 quota: OriginQuotaTable::new(quota_config),
+                journal: Journal::default(),
             }),
             started_at: Instant::now(),
             counters: ReplayCounterState::default(),
@@ -559,7 +585,7 @@ impl TransactionReplay {
                 self.count_persistence_failure();
                 Error::TransactionReplayPersistence {
                     operation: "load",
-                    source: Box::new(source),
+                    source: Arc::new(source),
                 }
             })?;
             let restored = restore(records, record_naming(storage));
@@ -618,21 +644,9 @@ impl TransactionReplay {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Store one stream's `record` under `storage_key`; a failure is counted and returned.
-    async fn persist(&self, (storage_key, record): (String, ReplayRecord)) -> Result<()> {
-        self.storage()?
-            .put(storage_key.as_str(), &record)
-            .await
-            .map_err(|source| {
-                self.count_persistence_failure();
-                Error::TransactionReplayPersistence {
-                    operation: "store",
-                    source: Box::new(source),
-                }
-            })
-    }
-
-    /// Reserve and persist `count` sender sequences before returning the range to the signer.
+    /// Reserve `count` sender sequences, staging the stream's lease whenever they outrun it,
+    /// and return the range to the signer once its batch is durable (the laws of [`lease`] and
+    /// [`commit`]).
     ///
     /// The transition runs detached from the caller (the law of whole transitions): cancelling
     /// the caller abandons only the wait.
@@ -641,38 +655,38 @@ impl TransactionReplay {
         key: StreamKey,
         count: NonZeroU64,
     ) -> Result<RangeInclusive<u64>> {
-        let replay = Arc::clone(self);
-        run_whole(async move { replay.commit_reservation(key, count).await }).await
+        self.commit(move |replay, ledger| replay.allocate_in(ledger, key, count))
+            .await
     }
 
-    /// The reservation transition: lock, load, reserve, persist the stream's record, then update
-    /// the table.
-    async fn commit_reservation(
+    /// The reservation transition on the speculative state: allocate, stage the extended lease
+    /// if the allocation outruns the stream's lease, then update the table.
+    ///
+    /// ```text
+    /// allocate(table[key], count) ── ⊥ ──▶ Err(TransactionSequenceExhausted)
+    ///      │ extend = None ───────────────────────────▶ table[key] := next ──▶ range
+    ///      │ extend = Some(L) ──▶ stage D := L ───────▶ table[key] := next ──▶ range
+    /// ```
+    fn allocate_in(
         &self,
+        ledger: &mut Ledger<'_>,
         key: StreamKey,
         count: NonZeroU64,
     ) -> Result<RangeInclusive<u64>> {
-        let mut state = self.state.lock().await;
-        let store = self.load_store(&mut state.store).await?;
-        self.refuse_unavailable(store, ReplayTable::Sender, key)?;
-        let previous = store.tables.sender.get(&key).copied();
-        if previous.is_none() && !store.admits_new_stream(ReplayTable::Sender) {
+        self.refuse_unavailable(ledger.store, ReplayTable::Sender, key)?;
+        let previous = ledger.store.tables.sender.get(&key).copied();
+        if previous.is_none() && !ledger.store.admits_new_stream(ReplayTable::Sender) {
             return Err(Error::TransactionReplayStreamCapacityExceeded {
                 capacity: TRANSACTION_REPLAY_STREAM_CAPACITY,
             });
         }
-        let first = match previous {
-            Some(last) => last
-                .checked_add(1)
-                .ok_or(Error::TransactionSequenceExhausted { key })?,
-            None => 0,
-        };
-        let last = first
-            .checked_add(count.get().saturating_sub(1))
-            .ok_or(Error::TransactionSequenceExhausted { key })?;
-        self.persist(sender_record(&key, last)?).await?;
-        store.tables.sender.insert(key, last);
-        Ok(first..=last)
+        let allocation =
+            allocate(previous, count).ok_or(Error::TransactionSequenceExhausted { key })?;
+        if let Some(leased) = allocation.extend {
+            ledger.write(sender_record(&key, leased)?);
+        }
+        ledger.set_sender(key, allocation.next);
+        Ok(allocation.range)
     }
 
     /// Atomically commit replay classification and origin-quota admission before dispatch.
@@ -688,17 +702,12 @@ impl TransactionReplay {
         byte_cost: usize,
     ) -> Result<SequenceVerdict> {
         let clock = quota_clock(self.started_at);
-        let replay = Arc::clone(self);
-        run_whole(async move {
-            replay
-                .admit_at(key, sequence, digest, charge, byte_cost, clock)
-                .await
-        })
-        .await
+        self.admit_at(key, sequence, digest, charge, byte_cost, clock)
+            .await
     }
 
-    /// The admission transition: lock, load, classify, read the quota clock, reserve quota,
-    /// persist the stream's record, then update the table.
+    /// The admission transition: classify, read the quota clock, reserve quota, stage the
+    /// stream's record, then update the table, as one transition (the group-commit law).
     ///
     /// Law (Clock under the lock): `clock` is read only inside the critical section of
     /// `state`, so the instants the quota table receives follow the order in which
@@ -707,7 +716,7 @@ impl TransactionReplay {
     /// an instant read before the lock could be overtaken by a later reading that locked
     /// first (#953).
     async fn admit_at<C>(
-        &self,
+        self: &Arc<Self>,
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
@@ -716,9 +725,8 @@ impl TransactionReplay {
         clock: C,
     ) -> Result<SequenceVerdict>
     where
-        C: FnOnce() -> OriginQuotaInstant,
+        C: FnOnce() -> OriginQuotaInstant + rings_runtime::MaybeSend + 'static,
     {
-        let mut state = self.state.lock().await;
         let admission = Admission {
             key,
             sequence,
@@ -726,16 +734,17 @@ impl TransactionReplay {
             charge,
             byte_cost,
         };
-        self.admit_in(&mut state, admission, clock, None).await
+        self.commit(move |replay, ledger| replay.admit_in(ledger, admission, clock, None))
+            .await
     }
 
-    /// The admission transition on the locked `state`: classify, read the quota clock, reserve
-    /// quota, persist the stream's record, then update the table. A `relayed` delivery enters
-    /// the stream's custody in the same record write (the custody law of `custody`); a live one
+    /// The admission transition on the speculative state: classify, read the quota clock,
+    /// reserve quota, stage the stream's record, then update the table. A `relayed` delivery
+    /// enters the stream's custody in the same record (the custody law of `custody`); a live one
     /// leaves the custody as it is.
-    async fn admit_in<C>(
+    fn admit_in<C>(
         &self,
-        state: &mut TransactionAdmissionState,
+        ledger: &mut Ledger<'_>,
         admission: Admission,
         clock: C,
         relayed: Option<RelayDelivery>,
@@ -750,41 +759,24 @@ impl TransactionReplay {
             charge,
             byte_cost,
         } = admission;
-        let TransactionAdmissionState { store, quota } = state;
-        let store = self.load_store(store).await?;
-        self.refuse_unavailable(store, ReplayTable::Receiver, key)?;
-        let previous = store.tables.receiver.get(&key);
-        if previous.is_none() && !store.admits_new_stream(ReplayTable::Receiver) {
+        self.refuse_unavailable(ledger.store, ReplayTable::Receiver, key)?;
+        let previous = ledger.store.tables.receiver.get(&key);
+        if previous.is_none() && !ledger.store.admits_new_stream(ReplayTable::Receiver) {
             return Err(Error::TransactionReplayStreamCapacityExceeded {
                 capacity: TRANSACTION_REPLAY_STREAM_CAPACITY,
             });
         }
         let (next, verdict) = observe(previous.cloned(), sequence, digest);
-        match verdict {
-            SequenceVerdict::First | SequenceVerdict::Advance | SequenceVerdict::Late => {}
-            SequenceVerdict::Replay => {
-                self.counters.replay.fetch_add(1, Ordering::Relaxed);
-                return Err(Error::TransactionReplay { key, sequence });
-            }
-            SequenceVerdict::Fork { accepted, incoming } => {
-                self.counters.fork.fetch_add(1, Ordering::Relaxed);
-                return Err(Error::TransactionSequenceFork {
-                    key,
-                    sequence,
-                    evidence: Box::new(TransactionForkEvidence { accepted, incoming }),
-                });
-            }
-            SequenceVerdict::Stale { retained_min } => {
-                self.counters.stale.fetch_add(1, Ordering::Relaxed);
-                return Err(Error::TransactionSequenceStale {
-                    key,
-                    sequence,
-                    retained_min,
-                });
-            }
-        }
+        self.refuse_rejected(key, sequence, verdict)?;
 
-        let mut custody = store.tables.custody.get(&key).cloned().unwrap_or_default();
+        let mut custody = ledger
+            .store
+            .tables
+            .custody
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let entered = relayed.is_some();
         custody.extend(relayed);
         let record = receiver_record(&key, &next, &custody)?;
         let quota_key = OriginQuotaKey::new(
@@ -793,28 +785,100 @@ impl TransactionReplay {
             key.destination,
             charge.lane,
         );
-        let reservation = quota.reserve(quota_key, charge.message_limit, byte_cost, clock());
-        let quota_reservation = match reservation {
-            Ok(reservation) => reservation,
+        let reservation = ledger
+            .quota
+            .reserve(quota_key, charge.message_limit, byte_cost, clock());
+        match reservation {
+            Ok(reservation) => ledger.charged(reservation),
             Err(error) => {
                 self.quota_counters.record(charge.lane, &error);
                 return Err(quota_admission_error(quota_key, byte_cost, error));
             }
-        };
-        if let Err(error) = self.persist(record).await {
-            quota_reservation.rollback(quota);
-            return Err(error);
         }
-        store.tables.receiver.insert(key, next);
-        if !custody.is_empty() {
-            store.tables.custody.insert(key, custody);
+        ledger.write(record);
+        ledger.set_receiver(key, next);
+        if entered {
+            ledger.set_custody(key, custody);
         }
+        Ok(verdict)
+    }
+
+    /// Refuse, and count, a verdict that does not permit dispatch: `Replay`, `Fork` (with its
+    /// evidence) or `Stale`, whichever window observed it.
+    fn refuse_rejected(
+        &self,
+        key: StreamKey,
+        sequence: u64,
+        verdict: SequenceVerdict,
+    ) -> Result<()> {
+        match verdict {
+            SequenceVerdict::First | SequenceVerdict::Advance | SequenceVerdict::Late => Ok(()),
+            SequenceVerdict::Replay => {
+                self.counters.replay.fetch_add(1, Ordering::Relaxed);
+                Err(Error::TransactionReplay { key, sequence })
+            }
+            SequenceVerdict::Fork { accepted, incoming } => {
+                self.counters.fork.fetch_add(1, Ordering::Relaxed);
+                Err(Error::TransactionSequenceFork {
+                    key,
+                    sequence,
+                    evidence: Box::new(TransactionForkEvidence { accepted, incoming }),
+                })
+            }
+            SequenceVerdict::Stale { retained_min } => {
+                self.counters.stale.fetch_add(1, Ordering::Relaxed);
+                Err(Error::TransactionSequenceStale {
+                    key,
+                    sequence,
+                    retained_min,
+                })
+            }
+        }
+    }
+
+    /// Admit a link-local transaction of stream `key` in `window`, the volatile window of that
+    /// stream on the link it arrived on (#1081; durable-records, Law Window by classification):
+    /// observe, read the quota clock and reserve quota under the lock, then advance the window.
+    ///
+    /// Nothing is written, and the verdict is returned at once: it rests on the link's volatile
+    /// window and the runtime-local quotas, never on a durable state. The quota reservation is
+    /// logged into the pending batch, if any, so a failed batch still rewinds the quota table
+    /// last first (the fail-closed law of [`commit`]); the admission itself stands. A refusal
+    /// leaves `window` and the quotas unchanged.
+    pub(crate) async fn admit_on_link(
+        &self,
+        window: &mut Option<SequenceState>,
+        key: StreamKey,
+        sequence: u64,
+        digest: TransactionDigest,
+        charge: OriginQuotaCharge,
+        byte_cost: usize,
+    ) -> Result<SequenceVerdict> {
+        let clock = quota_clock(self.started_at);
+        let mut state = self.state.lock().await;
+        let TransactionAdmissionState { quota, journal, .. } = &mut *state;
+        let (next, verdict) = observe(window.clone(), sequence, digest);
+        self.refuse_rejected(key, sequence, verdict)?;
+        let quota_key = OriginQuotaKey::new(
+            key.network_id,
+            key.origin_account,
+            key.destination,
+            charge.lane,
+        );
+        let reservation = quota
+            .reserve(quota_key, charge.message_limit, byte_cost, clock())
+            .map_err(|error| {
+                self.quota_counters.record(charge.lane, &error);
+                quota_admission_error(quota_key, byte_cost, error)
+            })?;
+        journal.log_released_charge(reservation);
+        *window = Some(next);
         Ok(verdict)
     }
 
     #[cfg(test)]
     async fn admit(
-        &self,
+        self: &Arc<Self>,
         key: StreamKey,
         sequence: u64,
         digest: TransactionDigest,
@@ -853,6 +917,10 @@ mod test_browser_store;
 mod test_custody;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_durable_throughput;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_group_commit;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_lease;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_load_failures;
 #[cfg(all(test, not(target_family = "wasm")))]

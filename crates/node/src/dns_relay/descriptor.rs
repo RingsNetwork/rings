@@ -10,7 +10,7 @@
 //!
 //! ```text
 //!   σ(d) = (d, pk, network, ports : Port ⇀ ProxyProtocol, txt : SubName ⇀ [Value],
-//!           heartbeat, expiry, sig)
+//!           freshness, lease end, sig)        heard at the dot of its element
 //!   announcement(σ) = Announcement(ports, txt)       validated, or rejected
 //! ```
 
@@ -101,9 +101,10 @@ pub struct ServiceDescriptorBody {
     pub ports: Vec<ServedPort>,
     /// The TXT records the node publishes under its name.
     pub txt: Vec<ServedTxt>,
-    /// Heartbeat timestamp in milliseconds since Unix epoch.
-    pub heartbeat_at_ms: u128,
-    /// Expiry timestamp in milliseconds since Unix epoch.
+    /// Freshness window `T` in milliseconds: a reader holds the descriptor live only while it
+    /// heard it within `T` (see the lease law of `descriptor`).
+    pub fresh_for_ms: u64,
+    /// Lease end `ℓ` in milliseconds since Unix epoch.
     pub expires_at_ms: u128,
 }
 
@@ -139,6 +140,7 @@ impl SignedDescriptorBody for ServiceDescriptorBody {
         ServiceDescriptor {
             body: self,
             signature,
+            heartbeat_at_ms: 0,
         }
     }
 }
@@ -150,6 +152,11 @@ pub struct ServiceDescriptor {
     pub body: ServiceDescriptorBody,
     /// Signature covering `body`.
     pub signature: MessageVerification,
+    /// When the reader last heard this descriptor, in milliseconds since Unix epoch: the dot of
+    /// its element in the fetched service topic. Not signed and not encoded (see the lease law
+    /// of `descriptor`); `0` until heard.
+    #[serde(skip)]
+    pub heartbeat_at_ms: u128,
 }
 
 impl ServiceDescriptor {
@@ -211,15 +218,26 @@ impl SignedDescriptor for ServiceDescriptor {
     }
 
     fn descriptor_heartbeat_at_ms(&self) -> u128 {
-        self.body.heartbeat_at_ms
+        self.heartbeat_at_ms
     }
 
     fn descriptor_expires_at_ms(&self) -> u128 {
         self.body.expires_at_ms
     }
 
+    fn descriptor_fresh_for_ms(&self) -> u64 {
+        self.body.fresh_for_ms
+    }
+
     fn descriptor_signing_data(&self) -> Result<Vec<u8>> {
         self.body.signing_data()
+    }
+
+    fn heard_at(self, heartbeat_at_ms: u128) -> Self {
+        Self {
+            heartbeat_at_ms,
+            ..self
+        }
     }
 }
 

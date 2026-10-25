@@ -279,9 +279,10 @@ impl<'data> StorageSyncBatch<'data> {
         Ok(Some(StorageSyncBatchStep::Pending))
     }
 
-    /// Whether the relocation law lets this batch carry `placed`: a data topic always, a relay
-    /// inbox only as an ownership hand-off from a node that holds relay mail (see
-    /// `RelayNeighborhood::relocates_from`).
+    /// Whether the relocation law lets this batch carry `placed`: a data topic always; a relay
+    /// inbox as an ownership hand-off from a node that holds relay mail (see
+    /// `RelayNeighborhood::relocates_from`), or as an additive copy from another member of its
+    /// key (`Law (Replica admission)`, #777).
     ///
     /// Post: `false` skips the entry without acknowledging it, so its owner keeps it and offers
     /// it again on a later pass; it does not fail the batch, as the entry is not invalid, only
@@ -295,7 +296,7 @@ impl<'data> StorageSyncBatch<'data> {
             return Ok(true);
         }
         if !self.purpose.permits_source_cleanup() {
-            return Ok(false);
+            return transport.dht.admits_relay_copy(placed.key, self.sender);
         }
         transport.dht.relocates_relay_from(self.sender)
     }
@@ -304,14 +305,35 @@ impl<'data> StorageSyncBatch<'data> {
         let Some((key, admitted)) = self.accepted.get(self.persist_index) else {
             return Ok(self.complete());
         };
+        let (key, admitted) = (*key, admitted.clone());
 
-        transport
+        match transport
             .dht
-            .join_admitted_storage_entry(self.now_ms, *key, admitted.clone())
-            .await?;
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        crate::simulation::record_storage_persisted(transport.dht.did);
-        self.persist_index += 1;
+            .join_admitted_storage_entry(self.now_ms, key, admitted, self.sender)
+            .await
+        {
+            Ok(_) => {
+                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                crate::simulation::record_storage_persisted(transport.dht.did);
+                self.persist_index += 1;
+            }
+            // The join would hold more removes than the carrier's bound (#921), or than the
+            // sender's share or the removal store's total (#920): it changed nothing and is not
+            // acknowledged, so the sender keeps the entry and offers it again once removes here
+            // are collected; the rest of the batch persists.
+            Err(
+                error @ (Error::EntryTombstonesExceedMax { .. }
+                | Error::RemovalCapacityExhausted { .. }),
+            ) => {
+                tracing::debug!(
+                    %key,
+                    %error,
+                    "refusing a synced entry past a removal bound; its owner keeps it"
+                );
+                self.accepted.remove(self.persist_index);
+            }
+            Err(error) => return Err(error),
+        }
 
         if self.persist_index == self.accepted.len() {
             Ok(self.complete())
@@ -362,9 +384,9 @@ fn should_persist_synced_entry(
     if !storage_sync_destination_accepts_placement(destination, placed.key) {
         return Ok(false);
     }
-    // A relay carrier is persisted by its holder alone (`Law (Holder)`).
+    // A relay carrier is persisted by the members of its key alone (`Law (Members)`).
     if placed.entry.kind.is_relay_inbox() {
-        return transport.dht.holds_relay_key(placed.key);
+        return transport.dht.is_relay_member(placed.key);
     }
 
     match transport.dht.find_storage_owner(placed.key)? {

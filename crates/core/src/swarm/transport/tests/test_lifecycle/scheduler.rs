@@ -10,6 +10,7 @@ use crate::swarm::Arc;
 use crate::swarm::Error;
 use crate::swarm::Message;
 use crate::swarm::MessagePayload;
+use crate::tests::DispatchedFrames;
 #[tokio::test]
 async fn test_scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch() -> Result<()> {
     let (transport, peer, _attempt) = transport_with_routable_peer().await?;
@@ -19,7 +20,7 @@ async fn test_scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch()
         peer,
         peer,
     )?;
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&transport);
     dummy_controlled::pause_send_message_at_dispatch();
     let sending_transport = Arc::clone(&transport);
     let send = tokio::spawn(async move { sending_transport.send_payload_admitted(payload).await });
@@ -37,7 +38,7 @@ async fn test_scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch()
         .await
         .map_err(|error| Error::InvalidMessage(format!("send task failed: {error}")))??;
     assert_eq!(outcome, SendCompletionOutcome::Cancelled);
-    assert_eq!(dummy_controlled::sent_count(), 0);
+    assert_eq!(dispatched.count(), 0);
     Ok(())
 }
 
@@ -51,7 +52,7 @@ async fn test_scheduler_shutdown_after_backend_acceptance_preserves_detached_suc
         peer,
         peer,
     )?;
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&transport);
     dummy_controlled::set_drop_messages(true);
     dummy_controlled::pause_irrevocable_send();
     let sending_transport = Arc::clone(&transport);
@@ -71,7 +72,7 @@ async fn test_scheduler_shutdown_after_backend_acceptance_preserves_detached_suc
         .map_err(|error| Error::InvalidMessage(format!("send task failed: {error}")))??;
     dummy_controlled::set_drop_messages(false);
     assert_eq!(outcome, SendCompletionOutcome::Succeeded);
-    assert_eq!(dummy_controlled::sent_count(), 1);
+    assert_eq!(dispatched.count(), 1);
     assert_eq!(
         transport.outbound_admitted_transfer_total_for_test(),
         0,
@@ -89,7 +90,7 @@ async fn test_scheduler_shutdown_cancels_a_send_before_queue_acceptance() -> Res
         peer,
         peer,
     )?;
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&transport);
     dummy_controlled::set_drop_messages(true);
     dummy_controlled::pause_send_message_after_permit();
     let sending_transport = Arc::clone(&transport);
@@ -109,6 +110,6 @@ async fn test_scheduler_shutdown_cancels_a_send_before_queue_acceptance() -> Res
     dummy_controlled::release_post_permit_send_gate();
     dummy_controlled::set_drop_messages(false);
     assert_eq!(outcome, SendCompletionOutcome::Cancelled);
-    assert_eq!(dummy_controlled::sent_count(), 0);
+    assert_eq!(dispatched.count(), 0);
     Ok(())
 }

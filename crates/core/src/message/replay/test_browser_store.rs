@@ -72,3 +72,43 @@ async fn test_browser_store_fails_closed_only_on_the_stream_of_an_undecodable_ro
         Err(Error::TransactionReplay { .. })
     ));
 }
+
+/// Group commit in the browser (#916): admissions of many streams issued at once all commit
+/// through the strict IndexedDB store, sharing batches, and every one survives a reopen.
+#[wasm_bindgen_test::wasm_bindgen_test]
+async fn test_concurrent_browser_admissions_share_batches_and_survive_a_reopen() {
+    /// The IndexedDB database this test owns.
+    const STORAGE_NAME: &str = "rings-core/replay-store-group-commit";
+    /// The admissions issued at once.
+    const ADMISSIONS: u32 = 32;
+    let open = || IdbStorage::new_with_cap_name_and_authority(64, STORAGE_NAME, Authoritative);
+    let storage = open().await.expect("IndexedDB opens");
+    <IdbStorage as KvStorageInterface<ReplayRecord>>::clear(&storage)
+        .await
+        .expect("IndexedDB clears");
+    let stream = |origin: u32| {
+        StreamKey::new(
+            7,
+            Did::from(origin),
+            Did::from(99_u32),
+            MessageCategory::E2e,
+        )
+    };
+    let replay = TransactionReplay::new_shared(Box::new(storage));
+    let verdicts = futures::future::join_all(
+        (0..ADMISSIONS).map(|origin| replay.admit(stream(origin), 0, digest(1))),
+    )
+    .await;
+    assert!(verdicts
+        .iter()
+        .all(|verdict| matches!(verdict, Ok(SequenceVerdict::First))));
+    drop(replay);
+
+    let restarted = TransactionReplay::new_shared(Box::new(open().await.expect("reopens")));
+    for origin in 0..ADMISSIONS {
+        assert!(matches!(
+            restarted.admit(stream(origin), 0, digest(1)).await,
+            Err(Error::TransactionReplay { .. })
+        ));
+    }
+}

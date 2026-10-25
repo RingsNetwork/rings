@@ -1,5 +1,6 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::test_storage::Hooked;
 use super::test_storage::StorageHooks;
@@ -33,15 +34,15 @@ fn quota_config_with_capacity(message_burst: u64, max_records: usize) -> OriginQ
     OriginQuotaConfig::new(lane, lane, lane, lane)
 }
 
-fn runtime(message_burst: u64) -> TransactionReplay {
-    TransactionReplay::new_with_quota(
+fn runtime(message_burst: u64) -> Arc<TransactionReplay> {
+    Arc::new(TransactionReplay::new_with_quota(
         Some(Box::new(MemStorage::<ReplayRecord>::new())),
         quota_config(message_burst),
-    )
+    ))
 }
 
 async fn admit_at(
-    runtime: &TransactionReplay,
+    runtime: &Arc<TransactionReplay>,
     key: StreamKey,
     sequence: u64,
     digest: TransactionDigest,
@@ -54,7 +55,7 @@ async fn admit_at(
             digest,
             MessageCategory::Application.into(),
             1,
-            || OriginQuotaInstant::from_nanos(now),
+            move || OriginQuotaInstant::from_nanos(now),
         )
         .await
 }
@@ -136,10 +137,10 @@ async fn quota_rejection_does_not_advance_replay_and_retry_can_commit() -> Resul
 
 #[tokio::test]
 async fn capacity_rejection_preserves_replay_until_an_idle_slot_is_safe() -> Result<()> {
-    let runtime = TransactionReplay::new_with_quota(
+    let runtime = Arc::new(TransactionReplay::new_with_quota(
         Some(Box::new(MemStorage::<ReplayRecord>::new())),
         quota_config_with_capacity(1, 1),
-    );
+    ));
     let first = stream(1);
     let waiting = stream(2);
     assert_eq!(
@@ -207,10 +208,10 @@ impl StorageHooks for FailFirstPut {
 
 #[tokio::test]
 async fn replay_persistence_failure_rolls_back_provisional_quota() -> Result<()> {
-    let runtime = TransactionReplay::new_with_quota(
+    let runtime = Arc::new(TransactionReplay::new_with_quota(
         Some(Box::new(Hooked::new(FailFirstPut(AtomicBool::new(true))))),
         quota_config(1),
-    );
+    ));
     let key = stream(1);
     assert!(matches!(
         admit_at(&runtime, key, 0, digest(1), 0).await,
@@ -227,10 +228,11 @@ async fn replay_persistence_failure_rolls_back_provisional_quota() -> Result<()>
 }
 
 /// Law (Clock under the lock, #953): an admission reads the quota clock only while it holds
-/// the admission lock. Two admissions on one quota key are created in the order `A, B` and
-/// take the lock in the order `B, A`; an instant fixed at creation would hand `A` an instant
-/// older than the one `B` recorded and fail with `MonotonicTimeRegressed`. Read under the
-/// lock, the instants follow the lock order and both admissions commit.
+/// the admission lock. Two admissions on one quota key wait on the held lock; neither reads
+/// its clock until the lock is released, and the one that locks first reads first and is the
+/// stream's `First`. An instant fixed before the lock could hand the later locker an instant
+/// older than the one recorded and fail with `MonotonicTimeRegressed`; read under the lock,
+/// the instants follow the lock order and both admissions commit.
 #[tokio::test]
 async fn test_quota_clock_is_read_under_the_admission_lock() -> Result<()> {
     let runtime = runtime(4);
@@ -255,8 +257,13 @@ async fn test_quota_clock_is_read_under_the_admission_lock() -> Result<()> {
     assert!(readings.lock().expect("test clock lock").is_empty());
     drop(held);
 
-    assert_eq!(second.await?, SequenceVerdict::First);
-    assert_eq!(first.await?, SequenceVerdict::Late);
-    assert_eq!(*readings.lock().expect("test clock lock"), ["B", "A"]);
+    let (first, second) = (first.await?, second.await?);
+    let read = readings.lock().expect("test clock lock").clone();
+    let expected = match (first, second) {
+        (SequenceVerdict::First, SequenceVerdict::Advance) => ["A", "B"],
+        (SequenceVerdict::Late, SequenceVerdict::First) => ["B", "A"],
+        verdicts => panic!("unexpected verdicts {verdicts:?}"),
+    };
+    assert_eq!(read, expected);
     Ok(())
 }

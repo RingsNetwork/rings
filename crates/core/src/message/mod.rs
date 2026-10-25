@@ -32,6 +32,7 @@ mod admission_delegation;
 pub(crate) use admission_delegation::EdgeRelation;
 pub use admission_delegation::MessageLimit;
 pub(crate) use admission_delegation::OriginQuotaCharge;
+pub use admission_delegation::ReplayWindow;
 mod quota;
 pub use quota::OriginQuota;
 pub use quota::OriginQuotaArithmeticError;
@@ -54,6 +55,7 @@ pub use types::MessageCategory;
 
 mod replay;
 pub use replay::observe;
+pub(crate) use replay::LinkWindows;
 pub(crate) use replay::RelayAdmission;
 pub(crate) use replay::RelayDelivery;
 pub use replay::ReplayCounters;

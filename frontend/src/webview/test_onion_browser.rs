@@ -22,10 +22,10 @@ use rings_node::onion::OnionServiceName;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::rings_core::message::ReplayRecord;
 use rings_node::prelude::rings_core::message::ReplayStorage;
+use rings_node::prelude::rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
-use rings_node::prelude::rings_core::storage::MemStorage;
+use rings_node::prelude::rings_core::storage::RecordAuthority;
 use rings_node::prelude::uuid;
 use rings_node::prelude::StopToken;
 use rings_node::processor::Processor;
@@ -94,12 +94,21 @@ async fn test_webview_node_fetches_page_resources_through_browser_onion_exit() {
     );
 }
 
+/// Run the flow over a fresh loop, then shut the loop down whatever the flow's outcome, so its
+/// nodes stop before the next test of this page runs.
 async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
+    let onion_loop = browser_onion_loop().await?;
+    let flow = browser_onion_webview_flow(Rc::clone(&onion_loop.client)).await;
+    let shutdown = onion_loop.shutdown().await;
+    flow.and(shutdown)
+}
+
+/// The WebView flow through the loop whose client is `client`.
+async fn browser_onion_webview_flow(client: Rc<Provider>) -> WebviewResult<()> {
     let fixture_index = fixture_url("/index.html");
     let fixture_css = fixture_url("/site.css");
     let fixture_api = fixture_url("/api/data");
     let fixture_submit = fixture_url("/forms/submit");
-    let (client, _listeners) = browser_onion_loop().await?;
     let node = WebviewNode::new(client, controlled_origin()?, web_shell_bootstrap)?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
     let index = gateway_navigation(&node, &index_target).await?;
@@ -174,9 +183,9 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
 ///                  └─ relay₁ ─┘
 /// ```
 ///
-/// The listeners are returned with the client, and the caller holds them for as long as it
-/// routes through the loop.
-async fn browser_onion_loop() -> WebviewResult<(Rc<Provider>, Vec<ProviderListener>)> {
+/// The loop is returned whole: the caller routes through its client and then shuts it down
+/// ([`BrowserOnionLoop::shutdown`]).
+async fn browser_onion_loop() -> WebviewResult<BrowserOnionLoop> {
     let storage_suffix = uuid::Uuid::new_v4().to_simple().to_string();
     let fixture_authority = fixture_authority();
     let client = browser_provider(
@@ -230,13 +239,87 @@ async fn browser_onion_loop() -> WebviewResult<(Rc<Provider>, Vec<ProviderListen
         .chain(publishers)
         .map(|node| node.provider.listen())
         .collect::<Vec<_>>();
+    let onion_loop = BrowserOnionLoop {
+        client: Rc::clone(&client.provider),
+        nodes: iter::once(&client)
+            .chain(iter::once(&guard))
+            .chain(middle.iter())
+            .chain(iter::once(&exit))
+            .map(|node| Rc::clone(&node.provider))
+            .collect(),
+        listeners,
+    };
     poll_until(
         "the client directory to register the loop",
         registry_hang_guard(heartbeat),
         || loop_directory_ready(&client.provider, FIXTURE_MIDDLE_RELAYS + 2),
     )
     .await?;
-    Ok((client.provider, listeners))
+    Ok(onion_loop)
+}
+
+/// A running browser onion loop: its client, every node, and their listeners.
+struct BrowserOnionLoop {
+    /// The loop's client.
+    client: Rc<Provider>,
+    /// Every node of the loop, the client included.
+    nodes: Vec<Rc<Provider>>,
+    /// The listener of every node.
+    listeners: Vec<ProviderListener>,
+}
+
+impl BrowserOnionLoop {
+    /// Quiesce the loop, so that none of its nodes emits into the tests that run after this one
+    /// in the same page: every admitted link carries constant-rate cover (#880), each cell a
+    /// strict commit to its receiver's authoritative replay store (#916), and stabilization
+    /// links nodes beyond the loop's own edges.
+    ///
+    /// ```text
+    /// stop every listener ─▶ await each settled      (no stabilization can link again)
+    /// ∀ node, ∀ peer it lists ─▶ disconnect           (the loop's edges and every other link)
+    /// await, on activity: every node lists no peer    (no link left to emit on)
+    /// ```
+    async fn shutdown(self) -> WebviewResult<()> {
+        for listener in &self.listeners {
+            listener.stop();
+        }
+        for listener in &self.listeners {
+            JsFuture::from(listener.task())
+                .await
+                .map_err(|error| WebviewError::transport(format!("settle listener: {error:?}")))?;
+        }
+        for node in &self.nodes {
+            for peer in listed_peers(node).await? {
+                JsFuture::from(node.disconnect(peer, None))
+                    .await
+                    .map_err(|error| WebviewError::transport(format!("close link: {error:?}")))?;
+            }
+        }
+        poll_until("every loop node to hold no link", FLOW_HANG_GUARD, || {
+            let nodes = self.nodes.clone();
+            async move {
+                for node in &nodes {
+                    if !listed_peers(node).await?.is_empty() {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+        })
+        .await
+    }
+}
+
+/// The DIDs of every peer `provider` holds a connection to, as its `listPeers` reports them.
+async fn listed_peers(provider: &Provider) -> WebviewResult<Vec<String>> {
+    let listed = rpc(provider, "listPeers", Object::new().into()).await?;
+    let peers = Reflect::get(&listed, &JsValue::from_str("peers")).map_err(js_webview_error)?;
+    peers
+        .dyn_into::<Array>()
+        .map_err(|_| WebviewError::Browser("listPeers returned no peer array".to_string()))?
+        .iter()
+        .map(|peer| string_field(&peer, "did"))
+        .collect()
 }
 
 /// One fixture node: its provider and the peers its backend has admitted.
@@ -337,14 +420,21 @@ fn fixture_url(path: &str) -> String {
     format!("{}{path}", fixture_origin())
 }
 
-/// An in-memory replay store: this fixture's named choice until group commit (#916). An
-/// authoritative IndexedDB store commits each reservation and admission strictly, one at a time,
-/// at a measured p50 of about 15 ms (#1043); this flow's four requests take about 8,000 such
-/// writes over its four nodes, which outlasts its request deadline. The flow under test lives
-/// within one page's lifetime and asserts nothing about replay surviving a restart. #916 returns
-/// this fixture to the authoritative store the browser provider opens.
-fn volatile_replay_storage() -> ReplayStorage {
-    Box::new(MemStorage::<ReplayRecord>::new())
+/// The authoritative IndexedDB replay store of the node whose storage is `storage_name`, at
+/// `<storage name>/transaction-replay`, as the browser provider opens it (#1022). Its strict
+/// commits are shared by the transitions that run while one is in flight (group commit, #916),
+/// which is what lets this flow's replay writes fit its request deadline.
+async fn authoritative_replay_storage(storage_name: &str) -> WebviewResult<ReplayStorage> {
+    let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS)
+        .map_err(|error| WebviewError::transport(format!("replay row capacity: {error:?}")))?;
+    let storage = IdbStorage::new_with_cap_name_and_authority(
+        rows,
+        &format!("{storage_name}/transaction-replay"),
+        RecordAuthority::Authoritative,
+    )
+    .await
+    .map_err(|error| WebviewError::transport(format!("open replay storage: {error:?}")))?;
+    Ok(Box::new(storage))
 }
 
 async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewResult<FixtureNode> {
@@ -369,11 +459,12 @@ async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewR
             .await
             .map_err(|error| WebviewError::transport(format!("open idb storage: {error:?}")))?,
     );
+    let replay_storage = authoritative_replay_storage(storage_name).await?;
     let registry_heartbeat = config.registry_heartbeat_interval();
     let processor = ProcessorBuilder::from_config(&config)
         .map_err(|error| WebviewError::transport(format!("build processor config: {error:?}")))?
         .storage(storage)
-        .replay_storage(volatile_replay_storage())
+        .replay_storage(replay_storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .observer(activity_observer())
         .build()

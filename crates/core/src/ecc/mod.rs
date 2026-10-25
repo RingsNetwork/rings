@@ -30,11 +30,9 @@ pub mod prime_order;
 /// Signature schemes used by DID identity and provider login.
 pub mod signers;
 mod types;
-use elliptic_curve::generic_array::typenum::U32;
-use elliptic_curve::generic_array::GenericArray;
-use elliptic_curve::point::AffineCoordinates;
-use elliptic_curve::point::DecompressPoint;
-use elliptic_curve::sec1::ToEncodedPoint;
+use elliptic_curve::sec1::FromSec1Point;
+use elliptic_curve::sec1::Sec1Point;
+use elliptic_curve::sec1::ToSec1Point;
 use elliptic_curve::FieldBytes;
 pub use group::*;
 pub use keys::*;
@@ -114,29 +112,20 @@ impl TryFrom<PublicKey<33>> for ed25519_dalek::VerifyingKey {
     }
 }
 
-impl AffineCoordinates for PublicKey<33> {
-    type FieldRepr = GenericArray<u8, U32>;
-
-    fn x(&self) -> Self::FieldRepr {
-        let [_, x @ ..] = self.0;
-        GenericArray::<u8, U32>::from(x)
-    }
-
-    fn y_is_odd(&self) -> subtle::Choice {
-        let [prefix, ..] = self.0;
-        match prefix {
-            2u8 => Choice::from(1),
-            3u8 => Choice::from(0),
-            _ => Choice::from(0),
-        }
-    }
-}
-
 impl PublicKey<33> {
-    /// Map a PublicKey into secp256r1 affine point,
-    /// This function is an constant-time cryptographic implementations
+    /// Decode the SEC1 §2.3.3 compressed encoding `t ‖ x` into a secp256r1 affine point.
+    ///
+    /// `None` unless `t ∈ {0x02, 0x03}` and `x` is the x-coordinate of a curve point; `0x02`
+    /// selects the even `y`, `0x03` the odd one. The decoding is the library's
+    /// (`FromSec1Point`), as for secp256k1, so both curves share one tag convention. Only the
+    /// curve arithmetic is constant-time: the tag of a public key is public.
     pub fn ct_into_secp256r1_affine(self) -> CtOption<primeorder::AffinePoint<NistP256>> {
-        primeorder::AffinePoint::<NistP256>::decompress(&self.x(), self.y_is_odd())
+        match Sec1Point::<NistP256>::from_bytes(self.0) {
+            Ok(encoded) if encoded.is_compressed() => {
+                primeorder::AffinePoint::<NistP256>::from_sec1_point(&encoded).into()
+            }
+            Ok(_) | Err(_) => CtOption::new(primeorder::AffinePoint::IDENTITY, Choice::from(0)),
+        }
     }
 
     /// Map a PublicKey into secp256r1 public key,
@@ -157,7 +146,7 @@ impl PublicKey<33> {
 
 impl From<&SecretKey> for FieldBytes<NistP256> {
     fn from(val: &SecretKey) -> Self {
-        GenericArray::<u8, U32>::from(*val.ser())
+        FieldBytes::<NistP256>::from(*val.ser())
     }
 }
 
@@ -249,7 +238,7 @@ fn public_key_address(pubkey: &PublicKey<33>) -> PublicKeyAddress {
     let hash = match TryInto::<K256PublicKey>::try_into(*pubkey) {
         // if pubkey is ecdsa key
         Ok(pk) => {
-            let data = pk.to_encoded_point(false);
+            let data = pk.to_sec1_point(false);
             let data = data.as_bytes();
             debug_assert_eq!(data.first(), Some(&0x04));
             keccak256(data.get(1..).unwrap_or_default())
@@ -277,7 +266,7 @@ impl SecretKey {
     /// Generate a random secp256k1 secret key.
     pub fn random() -> Self {
         let mut rng = Hc128Rng::from_entropy();
-        Self(K256SecretKey::random(&mut rng))
+        Self(K256SecretKey::from(uniform_nonzero_scalar(&mut rng)))
     }
 
     /// Derive the Ethereum-style address for this secret key.
@@ -287,14 +276,14 @@ impl SecretKey {
 
     /// Sign a UTF-8 message after hashing it with Keccak-256.
     ///
-    /// Returns an error when the stored key is invalid or signing fails.
+    /// Always `Ok`: the key is validated at construction and RFC 6979 signing is total.
     pub fn sign(&self, message: &str) -> Result<SigBytes> {
         self.sign_raw(message.as_bytes())
     }
 
     /// Sign raw message bytes after hashing them with Keccak-256.
     ///
-    /// Returns an error when the stored key is invalid or signing fails.
+    /// Always `Ok`: the key is validated at construction and RFC 6979 signing is total.
     pub fn sign_raw(&self, message: &[u8]) -> Result<SigBytes> {
         let message_hash = keccak256(message);
         self.sign_hash(&message_hash)
@@ -302,10 +291,10 @@ impl SecretKey {
 
     /// Sign an already computed 32-byte message hash.
     ///
-    /// Returns an error when the stored key is invalid or signing fails.
+    /// Always `Ok`: the key is validated at construction and RFC 6979 signing is total.
     pub fn sign_hash(&self, message_hash: &[u8; 32]) -> Result<SigBytes> {
         let signing_key = K256SigningKey::from(&self.0);
-        let (signature, recover_id) = signing_key.sign_prehash_recoverable(message_hash)?;
+        let (signature, recover_id) = signing_key.sign_prehash_recoverable(message_hash);
         let mut sig_bytes: SigBytes = [0u8; 65];
         sig_bytes[0..64].copy_from_slice(signature.to_bytes().as_slice());
         sig_bytes[64] = recover_id.to_byte();
@@ -356,6 +345,11 @@ pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey
             .into(),
     )
 }
+
+#[cfg(test)]
+mod test_known_answers;
+#[cfg(test)]
+mod test_sec1;
 
 #[cfg(test)]
 pub(crate) mod tests {

@@ -12,7 +12,8 @@ use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
-use crate::dht::relay_holder::relay_handoff_targets;
+use crate::dht::relay_holder::relay_carrier_offer;
+use crate::dht::relay_holder::CarrierOffer;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::StorageKey;
@@ -196,26 +197,43 @@ impl PeerRing {
         ))
     }
 
-    /// Offer every relay carrier of `items` this node does not hold under its own view to the
-    /// nodes `relay_handoff_targets` names, as an ownership hand-off (`Law (Holder)`): onward to a
-    /// new head or past a storage-less run, or back to a previous holder that joined behind this
-    /// node. A carrier with no target stays here and is offered again on a later pass.
+    /// Hand every relay carrier of `items` this node keeps as no member to the nodes
+    /// `relay_carrier_offer` names (`Law (Chain repair)`): to the members, onward to a new head
+    /// or past a storage-less run, back to a previous holder that joined behind this node, or to
+    /// the holder the key's owner named (`Law (Owner places)`). A carrier with no target stays
+    /// here and is offered again on a later pass; a member's carriers are repaired by chain
+    /// repair instead, one offer per neighbour.
     ///
     /// Post S1/S2(copy): as [`Self::hand_off_beyond`]: nothing is removed here, and every
-    /// emitted `PlacedEntry` keeps its exact local placement key.
+    /// emitted `PlacedEntry` keeps its exact local placement key; only a hand-off's report can
+    /// remove the local copy, once a member holds it.
     fn hand_off_relay_carriers(&self, items: Vec<(StorageKey, Entry)>) -> Result<PeerRingAction> {
         let segment = self.relay_segment()?;
+        let hints = self.relay_holder_hints()?;
         Ok(items
             .into_iter()
             .flat_map(|(key, entry)| {
-                relay_handoff_targets(&segment, key.placement(), self.did)
-                    .into_iter()
-                    .map(move |holder| {
-                        PeerRingAction::sync_entries_for_handoff(
-                            StorageSyncDestination::PhysicalOwner(holder),
-                            vec![PlacedEntry::new(key.placement(), entry.clone())],
-                        )
-                    })
+                let named = hints.get(&key.placement()).copied();
+                let CarrierOffer { purpose, targets } = relay_carrier_offer(
+                    &segment,
+                    key.placement(),
+                    self.did,
+                    named,
+                    self.relay_replicas(),
+                );
+                // A member's copies go through chain repair, one offer per neighbour (`Law
+                // (Chain repair)`); a keeper that is no member hands its carrier off here.
+                let targets = if purpose.permits_source_cleanup() {
+                    targets
+                } else {
+                    Vec::new()
+                };
+                targets.into_iter().map(move |target| {
+                    PeerRingAction::sync_entries_for_handoff(
+                        StorageSyncDestination::PhysicalOwner(target),
+                        vec![PlacedEntry::new(key.placement(), entry.clone())],
+                    )
+                })
             })
             .collect::<Vec<_>>()
             .into())

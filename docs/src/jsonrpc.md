@@ -255,8 +255,13 @@ The signed descriptors of the online-node registry.
   `node_type` (`Native`, `Browser` or `Ffi`), `network_id`, `storage_redundancy`,
   `dht_virtual_nodes`, `capabilities` (`{onion_relay, holds_relay_mail}`: the relay's process
   epoch or `null`, and whether the node keeps a relay store and so holds relay mail),
-  `endpoint_hint`, `started_at_ms`, `heartbeat_at_ms`, `expires_at_ms`, `version` and
-  `signature`.
+  `endpoint_hint`, `started_at_ms`, `heartbeat_at_ms`, `fresh_for_ms`, `expires_at_ms`,
+  `version` and `signature`. A descriptor is a signed lease (#918): `expires_at_ms` is the
+  lease end and `fresh_for_ms` the freshness window, both signed, and `heartbeat_at_ms` is when
+  the serving node last heard it (its registry element's dot), which is not signed. A descriptor
+  is live while the time is at most the lease end and at most `heartbeat_at_ms + fresh_for_ms`
+  plus the 3 s skew tolerance; a lease ending more than 10 minutes and 3 s ahead, or a window
+  over 10 minutes, is never live.
 
 ### lookupOnionExits
 
@@ -268,7 +273,7 @@ The signed onion-exit descriptors.
 * Result: `exits`, a list of descriptors with `did`, `public_key`, `delegatee_public_key`,
   `process_epoch`, `node_type`, `network_id`, `service`, `policy` (`{allowed_targets,
   denied_targets, max_sessions, max_bytes_per_minute}`), `started_at_ms`, `heartbeat_at_ms`,
-  `expires_at_ms`, `version` and `signature`.
+  `fresh_for_ms`, `expires_at_ms`, `version` and `signature`, read as in `lookupOnlineNodes`.
 
 ### peerMeasurement
 

@@ -2,12 +2,15 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 
 #[cfg(not(target_family = "wasm"))]
+use super::lease::SenderLease;
+#[cfg(not(target_family = "wasm"))]
 use super::store::sender_record;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::observe;
+use crate::message::replay::lease::TRANSACTION_SEQUENCE_LEASE;
 use crate::message::replay::TRANSACTION_REPLAY_BACKTRACK;
 #[cfg(not(target_family = "wasm"))]
 use crate::message::replay::TRANSACTION_REPLAY_PAIR_CAPACITY;
@@ -284,8 +287,13 @@ async fn test_sender_and_receiver_state_survive_runtime_recreation() -> Result<(
     );
     drop(first_runtime);
 
+    // The restart resumes past the lease the first reservation wrote (the laws of `lease`).
     let restarted = TransactionReplay::new_shared(Box::new(storage));
-    assert_eq!(restarted.reserve(key, NonZeroU64::MIN).await?, 1..=1);
+    let resumed = TRANSACTION_SEQUENCE_LEASE;
+    assert_eq!(
+        restarted.reserve(key, NonZeroU64::MIN).await?,
+        resumed..=resumed
+    );
     assert!(matches!(
         restarted.admit(key, 0, digest(1)).await,
         Err(Error::TransactionReplay { .. })
@@ -330,7 +338,7 @@ async fn test_new_sender_stream_fails_closed_at_the_table_bound() -> Result<()> 
         for origin in 0..pairs {
             for class in CLASSES {
                 let key = StreamKey::new(1, Did::from(origin), destination, class);
-                store.tables.sender.insert(key, 0);
+                store.tables.sender.insert(key, SenderLease::restored(0));
             }
         }
         assert_eq!(
@@ -401,7 +409,7 @@ async fn test_browser_storage_round_trip_retains_nonempty_replay_state() {
             .reserve(key, NonZeroU64::MIN)
             .await
             .expect("sender state reloads"),
-        1..=1
+        TRANSACTION_SEQUENCE_LEASE..=TRANSACTION_SEQUENCE_LEASE
     );
     assert!(matches!(
         restarted.admit(key, u64::MAX, digest(1)).await,

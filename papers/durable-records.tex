@@ -51,6 +51,9 @@
 \newcommand{\W}{\mathcal{W}}
 \newcommand{\issue}[1]{\#{#1}}
 \newcommand{\jsq}[1]{\texttt{#1}}
+\newcommand{\nxt}{\operatorname{succ}}
+\newcommand{\own}{\operatorname{owner}}
+\newcommand{\Mem}{\mathcal{M}}
 
 \author{Ryan~J.~Kung%
 \thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
@@ -58,7 +61,8 @@ Manuscript created October 23, 2026.  This document specifies the durability mod
 local stores of Rings before 1.0 (\texttt{rings-core}, modules \texttt{storage},
 \texttt{message::replay} and \texttt{swarm::inbox}; \texttt{rings-node}, module
 \texttt{onion::entry\_guard}).  It is the law for issues \issue{911}, \issue{912},
-\issue{915}, \issue{923} and \issue{936} of \texttt{RingsNetwork/rings}.}}
+\issue{915}, \issue{916}, \issue{923}, \issue{936} and \issue{1081} of
+\texttt{RingsNetwork/rings}.}}
 \title{\huge Durable Records:\\
 One Presence and Survival Law\\
 for the Local Stores of a Rings Node}
@@ -86,7 +90,11 @@ detects total loss.  We state the crash obligation per platform, verified agains
 Chromium, Gecko and WebKit sources (only \jsq{strict} durability flushes in all three),
 forbid eviction for authoritative records, and give a custody law that makes relay mail
 survive a restart between admission and consumption, with the impossibility result that
-bounds what any receiver can do for mail that has fallen behind live traffic.
+bounds what any receiver can do for mail that has fallen behind live traffic.  A browser
+can only claim durability, since an ephemeral context is indistinguishable from a persistent
+one; we admit a node's own state on the claim, with each ephemeral session end as the
+documented reset, and admit custody of other nodes' mail on a claim only across $r\ge2$
+holders.
 }\hfill\null\par
 \vspace{0.5\baselineskip}}
 
@@ -114,7 +122,12 @@ before a restart, is refused as a replay on redelivery and lost.
 \issue{936} is a presence defect of a fact that lives in no store at all (that the queued mail
 was never consumed).  Section~\ref{sec:model} fixes the model, Section~\ref{sec:lattice} the
 authority lattice, Sections~\ref{sec:witness}--\ref{sec:custody} the five laws, and
-Section~\ref{sec:plan} the order of implementation.
+Section~\ref{sec:plan} the order of implementation.  One defect was found after the batch:
+\begin{description}[leftmargin=1.2em,style=nextline]
+\item[\issue{1036}] A browser context whose IndexedDB opens but is ephemeral (a private
+window, ephemeral partitioned storage) claims $\Durable$, and nothing the page observes
+tells it apart; Section~\ref{sec:claimed} rules on it.
+\end{description}
 
 \section{Model}\label{sec:model}
 
@@ -216,6 +229,9 @@ opened at $(c,m)$ only if $c\sqsupseteq\req(m)$.
 Under $c\sqsubset\Durable$ a crash may lose a completed write, so $\bot$ after recovery can
 be a loss; a meaning above $\Rebuild$ asserts that $\bot$ is not a loss.
 \end{proof}
+Law~\ref{law:admissible} reads $c$ as the crash class the platform establishes.  A browser
+can only claim it (Assumption~\ref{as:claimed}); Section~\ref{sec:claimed} states when a
+claimed class is admissible.
 
 The existing \texttt{RecordAuthority} is the two-point chain
 $\mathsf{Disposable}=(\Cached,\Rebuild)\sqsubset\mathsf{Authoritative}=(\Durable,\Auth)$
@@ -239,17 +255,26 @@ Entry guards & $(\Cached,\Rebuild)$ & $(\Durable,\Rebuild)$ \issue{911}\\
 Replay (native) & $(\Durable,\Auth)^{\ast}$ & $(\Durable,\Auth)$ \issue{915}\\
 Replay (browser) & $(\Cached,\Rebuild)^{\dagger}$ & $(\Durable,\Auth)$ \issue{912},\issue{923}\\
 Replay (no store given) & $(\Volatile,\Auth)$ & refused \issue{1022}\\
+\midrule
+\multicolumn{3}{@{}l}{Browser, where $\Durable$ is claimed ($\Durable^{\circ}$):}\\
+\quad relay carriers & $(\Durable,\Retained)$ & same, $r\ge2$ \issue{777}\\
+\quad replay & $(\Durable,\Auth)$ & same \issue{1036}\\
+\quad entry guards & $(\Durable,\Rebuild)$ & same\\
 \bottomrule
 \end{tabular}
 \\[2pt]
 {\footnotesize $^{\ast}$W missing; D only on unix.  $^{\dagger}$Decodes as $\Auth$ (F) but
-neither D (relaxed commit) nor N (row-cap eviction) holds.}
+neither D (relaxed commit) nor N (row-cap eviction) holds.\\
+$^{\circ}$Claimed (Assumption~\ref{as:claimed}).  $r$: the holders of a carrier
+(Law~\ref{law:redundant}), one today.}
 \end{table}
 
 Table~\ref{tab:stores} is the whole classification.  The two rows marked with new issues are
 inadmissible points the law exposes outside the five issues: relay carriers are the only
 copy of held mail (\issue{1021}), and a provider given no replay store runs replay at
-$(\Volatile,\Auth)$ (\issue{1022}).
+$(\Volatile,\Auth)$ (\issue{1022}).  The browser rows below the rule rest on a claimed crash
+class (Section~\ref{sec:claimed}); the carrier row is inadmissible at $r=1$, which
+\issue{777} closes.
 
 \section{Presence witness}\label{sec:witness}
 
@@ -392,6 +417,21 @@ N the program removes no row it was not told to.  By Assumption~\ref{as:idbloss}
 platform loses no proper subset of a database's rows, so no $\lambda_{\mathrm{part}}$ is
 reachable and W holds vacuously; total loss is Proposition~\ref{prop:total}.
 \end{proof}
+
+\begin{assumption}[A browser's crash class is claimed]\label{as:claimed}
+A page cannot observe whether its IndexedDB outlives the browsing session.  An ephemeral
+context (a private window, ephemeral partitioned third-party storage) opens, commits and
+fires \jsq{complete} as a persistent one does, and \jsq{navigator.storage.persisted()}
+reports exemption from eviction under storage pressure, not
+ephemerality~\cite{MDNEviction}.  We write $\Durable^{\circ}$ for a claimed $\Durable$:
+$\Durable$ in a persistent context, and $\Volatile$ with a $\lambda_{\mathrm{tot}}$ at
+session end in an ephemeral one.
+\end{assumption}
+
+Assumption~\ref{as:idbloss} holds in an ephemeral context too: its session end loses the
+whole partition, a total loss, so Proposition~\ref{prop:idbwitness} is unchanged.  By
+Proposition~\ref{prop:total} no witness in the domain detects that loss, so no observation at
+open separates $\Durable^{\circ}$ from $\Durable$.
 
 
 
@@ -646,6 +686,505 @@ So below the window the drain refuses as the live path does, which is the criter
 payload arriving live).  Delivering such mail needs the sender to put it on a stream that
 live traffic does not advance, a protocol change outside this law.
 
+\section{Group commit}\label{sec:group}
+
+One lock serializes every replay transition, and under Law~\ref{law:writeorder} or
+Law~\ref{law:strict} each one paid a flush: about $55$ transitions per second on the native
+store (macOS) and about $65$ in a browser (\issue{916}).  Group commit keeps the lock and
+the flush, and moves the wait from the lock to the release.
+
+\begin{definition}[Transition, batch]\label{def:batch}
+Transitions $t_1<t_2<\cdots$ run in lock order on the \emph{speculative} tables $\hat T$:
+$t_i(\hat T_{i-1})=(\hat T_i,\,w_i,\,r_i)$ with an optional record write
+$w_i=(n_i,v_i)$, a result $r_i$, and an undo entry $u_i$ with $u_i(\hat T_i)=\hat T_{i-1}$.
+Batches $B_1,B_2,\ldots$ partition the transitions into intervals of lock order.  Batch
+$B_j$ is written by one $\mathrm{put}^{*}(W_j)$, where $W_j(n)$ is the last $v_i$ of $B_j$
+written under $n$; the batches are written one at a time, in order, and $B_{j+1}$ gathers
+every transition that runs while $B_j$ is written.  $T$ denotes $\hat T$ at the end of the
+last batch whose $\mathrm{put}^{*}$ returned $\Ok$.
+\end{definition}
+
+\begin{law}[Group commit]\label{law:group}
+\begin{enumerate}[leftmargin=1.5em]
+\item \emph{Release.} $r_i$ is returned only after $\mathrm{put}^{*}(W_{j(i)})=\Ok$,
+whatever $r_i$ is (a refusal, or a transition that writes nothing): a result never rests on
+a state that is not durable.
+\item \emph{Atomicity per record.} $\mathrm{put}^{*}$ discharges A per name:
+$\forall\sigma'\in R_P.\ \forall n\in\dom W_j.\ \sigma'(n)\in\{\sigma(n),W_j(n)\}$, with no
+order promised across names.
+\item \emph{Order.} For every name, the values $\mathrm{put}^{*}$ makes durable follow lock
+order: batches are written in order, one at a time, and $W_j(n)$ is the last write to $n$
+in $B_j$.
+\item \emph{Fail closed.} $\mathrm{put}^{*}(W_j)=\Err$ $\Rightarrow$ every pending
+transition (those of $B_j$ and of every later batch, all computed on $\hat T$ past $T$)
+returns $\Err$, and $\hat T\leftarrow u_{\mathrm{first}}\circ\cdots\circ
+u_{\mathrm{last}}(\hat T)=T$: no member is adopted.  A failed $\mathrm{put}^{*}$ may have
+landed some of $W_j$ (atomicity is per record), so memory $\sqsubseteq$ disk, and every
+member durable but undone is a lost release (Prop.~\ref{prop:lostrelease}).
+\item \emph{Latency.} With $\phi$ a bound on one $\mathrm{put}^{*}$, a transition is
+released at most $2\phi$ after it ran: the batch in flight, then its own.
+\item \emph{Size.} $|\dom W_j|$ is at most the store's record bound, and its bytes at most
+the store's byte bound, since $W_j$ holds one record per name; $|B_j|$ is the number of
+transitions in flight, each held by its caller, as each was queued on the lock before.
+\end{enumerate}
+\end{law}
+
+\textbf{Native $\mathrm{put}^{*}$.}
+\begin{align*}
+&\forall n\in\dom W:\ \mathrm{write}(n.\mathtt{tmp});\ \mathrm{push}(n.\mathtt{tmp});\quad
+\mathrm{barrier};\\
+&\forall n:\ \mathrm{rename}(n.\mathtt{tmp},n);\quad \mathrm{sync}_{\mathrm{dir}};\\
+&[\,\forall n\notin P:\ \mathrm{create}(n.\mathtt{p});\quad
+\mathrm{sync}_{\mathrm{dir}}\,]\quad\text{(iff some $n\notin P$)}
+\end{align*}
+where $\mathrm{push}$ moves a file's data to the device and $\mathrm{barrier}$ makes every
+pushed byte durable.  On Apple targets $\mathrm{push}=\mathtt{fsync}$ and
+$\mathrm{barrier}=\mathtt{F\_FULLFSYNC}$ once, which flushes the whole drive
+cache~\cite{AppleFsync}; elsewhere $\mathrm{push}=\mathtt{fsync}$, already durable, and
+the barrier is empty.  A batch therefore pays two full flushes (three when it creates a
+marker), as one $\mathrm{put}$ did.  A rename is flushed only after the barrier, so a name
+never holds a torn record, and a marker is created only after its rename is flushed, so
+Invariant~\ref{inv:marker} holds: A and W per name, as Law~\ref{law:writeorder}.  A store
+that refuses (Law~\ref{law:refuse}) checks the whole batch against its budget before its
+first write.
+
+\textbf{IndexedDB $\mathrm{put}^{*}$.} One read-write transaction under
+Law~\ref{law:strict} holding every put of $W$, after one budget check: all or nothing,
+which is stronger than A per name.
+
+\begin{proposition}[A lost release]\label{prop:lostrelease}
+A member whose record landed and that was never released (a crash after some records of
+$W_j$ landed and before $B_j$ was released, or a failed $\mathrm{put}^{*}$ that landed it)
+is a transition that committed and whose caller dropped the result: an admission is in
+$\W_s$ and not dispatched (its retransmission is a replay, and the message is lost, as for
+any drop after admission); a lease extension covers sequences nobody was issued, so
+$\mathit{issued}\le\hat L\le D$ holds with $D$ the last write; a custody entry names a
+delivery still in the carrier, which the next pass requeues or the restriction drops, and a
+landed release retires early only what the application already took (the duplicate window
+of Law~\ref{law:custody}).
+\end{proposition}
+\begin{proof}
+By atomicity per record each name holds its value before $B_j$ or $W_j(n)$, and $W_j(n)$
+is $\hat T$ restricted to $n$ after the last member that wrote $n$.  No member was
+released (Release), so no caller acted on its result.
+\end{proof}
+
+\begin{corollary}[Leases]\label{cor:grouplease}
+The lease invariant of \texttt{message::replay::lease} becomes
+$\mathrm{returned}\le D$: a reservation is released only after the batch holding its own
+or an earlier lease extension is durable, while the speculative lease $\hat L$ may exceed
+$D$ until then.  A failed batch undoes $(\mathit{issued},\hat L)$ of members none of which
+was returned.
+\end{corollary}
+
+\begin{corollary}[Custody]\label{cor:groupcustody}
+$\W_s$ and $\K_s$ stay one record, and a batch writes one value per record, so a crash
+still cannot separate an admission from its custody entry, nor a release from its effect:
+Law~\ref{law:custody} holds unchanged.
+\end{corollary}
+
+\section{Link-local transactions}\label{sec:linklocal}
+
+Every onion cell, cover included, crosses each hop as a core transaction addressed to the
+next hop, and each such transaction is admitted in the receiver's durable replay window
+$\W_s$, one durable write per cell per hop (\issue{1043}).  Group commit
+(Law~\ref{law:group}) amortizes the flush, not the write: on the native durable store the
+onion loop of \issue{843} sustains $100$\,KB/s, against $575$\,KB/s with an in-memory
+replay store.  The onion layer already admits each cell at most once against its own replay
+store $R_i$~\cite{OnionPipeline}, so the durable window repeats that defence on the hot
+path.  This section states which transactions are admitted without $\W_s$, what replaces it, and why
+nothing is lost (\issue{1081}).
+
+\subsection{Classification}
+
+\begin{definition}[Link-local]\label{def:linklocal}
+Let $t$ be a transaction addressed to this node and delivered on connection $c$ of
+generation $g$.  Then
+\begin{align*}
+\mathrm{ll}(t,c)\ \Leftrightarrow\ {}&\mathrm{class}(t)=\mathsf{Application}\\
+\wedge\ {}&\mathrm{edge}(c,t)=\mathsf{Neighbour}\ \wedge\ \mathrm{ns}(t)\in D_r,
+\end{align*}
+where $\mathrm{edge}(c,t)=\mathsf{Neighbour}$ iff $c$'s handshake authenticated
+$\mathrm{origin}(t)$ and $g$ is live (\issue{888}), $\mathrm{ns}(t)$ is the namespace prefix of
+$t$'s application payload, and $D_r$ is the set of namespaces registered in advance, as
+data, as \emph{delegating replay}.
+\end{definition}
+
+The predicate reads the envelope (class and payload prefix) and the connection, and matches
+registered data: core never calls the application, exactly as for delegated admission
+(\issue{935}), of which $\mathrm{ll}$ is the replay counterpart.  The relay carrier is not
+signed, so ``direct'' is not read from the payload; the authenticated connection is the only
+unforgeable witness, and a relayed copy of $t$ is never link-local.
+
+\begin{obligation}[Delegated replay, R]\label{ob:delegated}
+A namespace in $D_r$ acts on each of its payloads at most once, by its own replay key,
+across connections, generations, envelopes and restarts of the receiver.
+\end{obligation}
+
+The onion namespace discharges R: $R_i[x]$ admits $(x,\nu)$ at most once while $x$ is live,
+$\nu$ is bound to the cell and $R_i$ is shared by every link (Prop.~Replay bounds (i)--(ii)
+of~\cite{OnionPipeline}); no layer outlives its filter, since $x\le\mathit{arr}+V$; and every
+restart draws a fresh process epoch, under which every layer sealed for an earlier epoch is
+rejected (D2, and Prop.~Replay bounds (vi)).
+
+\subsection{Replay authority}
+
+\begin{law}[Window by classification]\label{law:linklocal}
+\[
+\mathrm{window}(t,c)=
+\begin{cases}
+\W_{s,g}, & \mathrm{ll}(t,c),\\
+\W_s, & \text{otherwise,}
+\end{cases}
+\]
+where $\W_{s,g}$ is the replay window of stream $s$ on generation $g$, held in memory only,
+never written, and dropped when $g$ retires; $\W_s$ is the durable window.  Both observe by
+the same transition $\obs$, and the origin quota is charged as before (it is runtime-local).
+The sender is unchanged: its sequences come from its leased allocator, one stream per
+class, whichever window each transaction meets.
+\end{law}
+
+Classification is a function of $(t,c)$, so a given delivery meets exactly one window, and
+each window takes the sequences the other admitted as gaps, which $\obs$ admits as
+$\mathsf{Advance}$; a transaction delivered both directly and relayed meets both, which
+Prop.~\ref{prop:llloss} bounds.  A link-local transaction is never
+relayed, so it never enters relay custody, and Law~\ref{law:custody} is unchanged.
+
+\begin{proposition}[What the durable window gave a link-local transaction]
+\label{prop:llloss}
+Let $\mathrm{ll}(t,c)$.  Every delivery $t'$ with $\mathrm{digest}(t')=\mathrm{digest}(t)$
+that $\W_s$ would refuse and Law~\ref{law:linklocal} admits is sent by $\mathrm{origin}(t)$.
+\end{proposition}
+\begin{proof}
+Such a $t'$ either meets $\W_{s,g'}$ with $g'\ne g$ (a later generation, or after a receiver
+restart), or is a relayed copy meeting $\W_s$, which never saw $t$.  In the first case
+$\mathrm{edge}(c',t')=\mathsf{Neighbour}$, so $c'$ authenticated $\mathrm{origin}(t)$ as its
+sender.  In the second, the relay holds $t$, which crossed only $c$: each link's transport is
+authenticated and encrypted per connection, so $t$ is held only by its two ends, and
+$\mathrm{dest}(t)$ binds it to this node; this node delivering $t$ to itself is no replay.
+\end{proof}
+
+Hence, against the four threats of \issue{1081}:
+\begin{enumerate}[leftmargin=1.5em]
+\item \emph{Across a restart.} Only the origin can present $t$ again, and an origin can always
+sign a fresh transaction with the same payload: no window ever protected a receiver from its
+origin's resends.  Payload duplicates are R's, which the onion layer discharges by the
+epoch.
+\item \emph{From a different neighbour.} A neighbour $d\neq\mathrm{origin}(t)$ cannot present
+$t$ as $\mathsf{Neighbour}$, and $\W_s$, keyed by origin, never related two neighbours'
+traffic; a cell replayed across links is refused by $R_i$, which every link shares.
+\item \emph{The envelope rather than the cell.} The same envelope on the same generation is
+refused by $\W_{s,g}$; on another generation, or under a new envelope around the same cell,
+it is refused by R.
+\item \emph{What remains.} Nothing that R does not cover, so no further key rotation is
+needed: the process epoch is the rotation.
+\end{enumerate}
+
+\begin{proposition}[Why a volatile window, not none]\label{prop:llvolatile}
+$\W_{s,g}$ is not needed for R-soundness, but it keeps three properties at negligible cost:
+(i) core's dispatch law, at most once per window, holds for every transaction within a
+generation, so a namespace in $D_r$ never sees an envelope duplicate on one connection;
+(ii) $\mathsf{Stale}$ and $\mathsf{Fork}$ of a misbehaving neighbour stay classified and
+counted; (iii) it costs one in-memory $\obs$ (about $10\,\mu$s) and at most one window per
+live generation and class, $\le\mathcal R$ windows, bounded by the connection registry and
+released with each generation.
+\end{proposition}
+
+\subsection{Restart}
+
+\begin{proposition}[What a peer can replay into a restarted node]\label{prop:llrestart}
+After a restart of the receiver, every $\W_{s,g}$ is gone and every generation has ended;
+$\W_s$ persists.  A peer can deliver, as link-local, only transactions it signed itself, over
+a new generation $g'$; $\W_{s,g'}$ admits them, and the onion layer refuses every cell among
+them, since each was sealed for the receiver's previous process epoch (D2).  Within the new
+epoch, a cell is admitted at most once per $(x,\nu)$, and no cell older than $V$ is admitted.
+The replayable set is therefore empty for onion cells, and bounded by R for any namespace in
+$D_r$.  A restart of the sender ends its generation the same way, and its leased allocator
+never reuses a sequence; a link that flaps without a restart opens $g'$ with an empty window,
+and a frame of $g$ cannot arrive on $g'$.
+\end{proposition}
+
+\textbf{The rate this buys.}  Under Law~\ref{law:linklocal} an onion cell costs no durable write at any receiver; a
+sender still writes one lease per $64$ sequences (\issue{1043}).  The durable configuration
+then pays what the in-memory configuration pays for onion traffic, whose measured rate is
+$575$\,KB/s, still below the $1$\,MB/s of \issue{843}.  The law removes the durable cost; the
+remaining gap is not attributed here and must be found and closed for the acceptance of
+\issue{1081} to hold.
+
+\section{Claimed durability}\label{sec:claimed}
+
+A store at $(\Durable^{\circ},m)$ satisfies Law~\ref{law:admissible} read with the claim,
+and violates it read with the ephemeral case.  Which reading applies is fixed by whose state
+the store holds: refusing a node's own state refuses the node, while refusing state it holds
+for other nodes moves that state to another holder.
+
+\begin{law}[Own state on a claim]\label{law:ownclaim}
+A store of the node's own state (replay, entry guards) may be opened at
+$(\Durable^{\circ},m)$ for every $m$.  In an ephemeral context each session end is
+$\lambda_{\mathrm{tot}}$ of the store, the documented reset of Proposition~\ref{prop:total}.
+\end{law}
+
+For replay at $(\Durable^{\circ},\Auth)$ the reset is per ephemeral session: a receiver may
+admit an unexpired transaction once more, which its expiry bounds, and a sender restarts its
+streams at sequence $0$, which destinations see as $\mathsf{Stale}$ or $\mathsf{Fork}$ until
+it passes their retained high watermark.  For entry guards it is one re-selection of the
+first hop.
+
+Relay carriers are the other case.  Most nodes are expected to be browsers
+(\issue{1036}), so carriers must rest on browser holders: moving custody past every
+browser (\issue{1037}) would concentrate it on the few native nodes.  One
+$\Durable^{\circ}$ holder loses its carriers at an ephemeral session end, and a persistent
+but closed tab holds them unreachably until it returns.  Both are holder losses, so
+redundancy across holders replaces durability at one holder.
+
+\begin{law}[Redundant custody]\label{law:redundant}
+A carrier is admissible at $(\Durable^{\circ},\Retained)$ iff it is held by $r\ge2$ holders,
+the first $r$ relay-capable nodes from its key's owner under the holder law of
+\issue{1037}, and every repair period $T$ restores $r$ copies from any copy that survives.
+A carrier at an established $(\Durable,\Retained)$ is admissible at $r=1$.
+\end{law}
+
+\begin{proposition}[Survival across holders]\label{prop:redundant}
+Under Law~\ref{law:redundant} a held element is lost only if every holder that held it is
+lost (it left, or its storage was lost) within one repair period.
+\end{proposition}
+\begin{proof}
+A repair pass that runs while one copy of an element survives restores $r$ copies.  Between
+two passes the copies decrease only by holder loss, so the element is lost only if all of
+its copies, at least $r$ after the last pass, are lost before the next.
+\end{proof}
+
+Proposition~\ref{prop:atleastonce} then holds with its premise, a carrier that survives, read
+as the condition of Proposition~\ref{prop:redundant}.  Today $r=1$ for every carrier, so a
+browser carrier is an inadmissible point, as relay carriers in the data store were before
+\issue{1021}; \issue{777} implements the law: placement on the first $r$ relay-capable
+nodes, acknowledgements (\issue{1037}) that count holders, and its composition with the
+custody set $\K_s$.
+
+\section{Replicated custody}\label{sec:replicated}
+
+Law~\ref{law:redundant} fixes what must hold; this section fixes how, composed with the
+holder law of \issue{1037}, the owner query of \issue{1045}, the acknowledgements of
+\issue{1037}, and the custody set of Law~\ref{law:custody}.  Holders are lost to churn and
+to ephemeral sessions; availability against Byzantine holders is not claimed, so a member's
+copy is trusted as \issue{1037} trusts a relocating holder's.
+
+Write $\mathrm{holds}(n)$ for $n$'s declaration, $\nxt(n)$ for its successor head,
+$\own(k)$ for the $n$ with $k\in(n,\nxt(n)]$, and $p_j(n)$ for the $j$-th nearest node
+strictly behind $n$ with $\mathrm{holds}$.
+
+\begin{definition}[Members]\label{def:members}
+$\Mem_r(k)$ is the first $r$ nodes $n$ of $\own(k),\nxt(\own(k)),\nxt^2(\own(k)),\dots$
+with $\mathrm{holds}(n)$; its first, $h_0(k)$, is the holder of \issue{1037}.  The
+\emph{rank} of a member is $\mathrm{rank}_k(n)=|\{m\in\Mem_r(k): m\text{ before }n\}|$, and its
+\emph{next member} $\mathrm{next}_k(n)$ is the member of rank $\mathrm{rank}_k(n)+1$.  $r$ is
+configurable, default $r=8$, aimed at a held message's loss below $10^{-3}$ over its 24\,h
+retention with 90\% browser holders (\issue{777}); which session models it covers is stated
+with the departure classes below, and it is to be recalibrated on \issue{773}'s churn
+simulator.
+\end{definition}
+
+\begin{lemma}[Member range]\label{lem:range}
+For $n$ with $\mathrm{holds}(n)$: $n\in\Mem_r(k)\iff k\in(\nxt(p_r(n)),\nxt(n)]$, and
+$n=h_0(k)\iff k\in(\nxt(p_1(n)),\nxt(n)]$.
+\end{lemma}
+\begin{proof}
+$n\in\Mem_r(k)$ iff fewer than $r$ holders lie in $[\own(k),n)$, iff
+$\own(k)\in(p_r(n),n]$.  The arcs owned by the nodes from $\nxt(p_r(n))$ to $n$ are
+$(\nxt(p_r(n)),\nxt(n)]$.  At $r=1$ this is the holder's range of \issue{1037}.
+\end{proof}
+
+\begin{law}[Previous holders]\label{law:previous}
+Each repair pass every node $n$ passes to $\nxt(n)$ the list
+$\pi(n)=[(n,\nxt(n))]\mathbin{+\!\!+}\rho(n)[..r-1]$ if $\mathrm{holds}(n)$, and $\rho(n)$
+otherwise, where $\rho(n)$ is the list its predecessor last passed it; a node takes a list
+from its predecessor alone.  A list that comes round the ring to $n$ names every holder, and
+$n$'s search for members then continues round the ring.
+\end{law}
+
+By the induction of \issue{1037} along each storage-less run, every holder learns
+$p_1(n),\dots,p_r(n)$ with their successor heads, so Lemma~\ref{lem:range} is decided on
+local state.
+
+A member decides its rank on local state too: its list names $p_1,\dots,p_r$, so it counts
+the holders in $[\own(k),n)$.  It finds $\mathrm{next}_k(n)$ in its successor list, or, when no
+node of that list holds relay mail, by the owner query of \issue{1045} for the key just past
+its list's last node, whose owner answers the first holder at or after it; an owner whose view
+names none answers the last node it places, and the query is asked again past it.  So a member
+reaches the next member however long the run between them, and the successor list stays at its
+capacity of 3: with browsers holding relay mail (\issue{1036}) storage-less runs are short, and
+the query covers the rest.
+
+\begin{law}[Age gate]\label{law:agegate}
+A node declares that it holds relay mail only once it has been online for $A$, at least four
+stabilization periods (default 2\,min); until then it routes, and fetches its own mail from its
+holder (\issue{1037}), but is no member and takes no copy.
+\end{law}
+
+Replica maintenance costs each node about $r\,B/(N\bar L)$ bytes per unit time, $B$ the held
+bytes of the overlay, $N$ its nodes and $\bar L$ the mean member session~\cite{BlakeRodrigues}: at $r=8$, $10^5$ nodes
+and a fifth of them receiving a full carrier of 4\,KiB elements, about 27\,KiB/s per node at
+$\bar L=15$\,s against 0.7\,KiB/s at 10\,min, and a node that leaves within its first session
+pays its join copy before it is of use.  The gate excludes such nodes, and it makes members
+length-biased, which is the session model the default $r$ assumes.
+
+A member caches $\mathrm{next}_k(n)$ for the range of keys whose next member it is, until its
+view changes: every key of the range has the same next member, so one owner query serves them
+all, and a member asks at most one per view change.  The successor capacity is revisited only if
+measured runs routinely exceed it: raising it from 3 to 8 costs five more keep-alives a node,
+less than routed queries per hold.
+
+\begin{law}[Chain replication]\label{law:fanout}
+A hold goes to $h_0$, under the writer authority of \issue{1037}.  $h_0$ joins the element and
+forwards the hold to $\mathrm{next}_k(h_0)$, digest first: the bytes follow only when the next
+member lacks the element.  A member of rank $j$ that admits it
+(Law~\ref{law:admitcopy}) forwards it to its next member while $j<q(k)-1$, and the member of
+rank $q(k)-1$ acknowledges it to the member it came from; every member acknowledges the
+member it came from once its own next member acknowledged.  $h_0$ acknowledges the writer once
+its next member did, at once when $q(k)=1$.  Here $q(k)=r$, or the number of holders when a
+member's list came round the ring (Law~\ref{law:previous}) and names fewer.  The writer keeps
+and resends the hold until acknowledged, as before.
+\end{law}
+
+So an acknowledgement means that every one of the $q(k)$ members holds the element: a chain
+acknowledges only from its end, and no member acknowledges for another.
+
+\begin{law}[Replica admission]\label{law:admitcopy}
+$m$ admits a copy of the carrier at $k$ from $s$ iff $m\in\Mem_r(k)$
+(Lemma~\ref{lem:range}), $\mathrm{holds}(s)$, and $s$ is $m$'s previous member, $p_1(m)$ inside
+the range, or its next member.  Admitted elements pass the witness of the carrier as before; a
+copy is a join (S3).
+\end{law}
+
+\begin{law}[Chain repair]\label{law:memberrepair}
+Chain order is ring order over the holders, so every carrier a member $m$ keeps has the same
+chain neighbours, its previous holder $p_1(m)$ and its next holder $n_1(m)$, but at the ends of
+its range (rank 0 has no previous member, rank $r-1$ no next).  A repair pass, periodic or
+event-driven, sends at most one message to each of the two: the digest set of every carrier $m$
+keeps whose chain includes that neighbour, the bytes following only for the carriers it lacks.
+A member whose carriers an admitted copy changed offers them on to its other neighbour at once,
+in the same bundled form.  A keeper that is no member offers the carrier to the member it can
+name and deletes its copy only after a delete-capable acknowledgement from a member holding
+$\sqsupseteq$ its state (S1$''$, S2$'$ with member for holder).
+\end{law}
+
+\begin{law}[Event-driven repair]\label{law:eventrepair}
+A member that loses a node of its view, by a closed connection or a failed liveness check, runs
+Law~\ref{law:memberrepair} at once, on its new view, when that node was $p_1(m)$ or $n_1(m)$: one
+bundled exchange with each replacement neighbour, whatever the number of carriers.  The
+periodic pass of period $T$ remains the backstop.
+\end{law}
+
+\begin{proposition}[Repair delay]\label{prop:delay}
+After the loss of one member of $k$, every member of $k$ holds a copy again within
+$D\le T_d+r\,\delta$, where $T_d$ bounds the loss's detection (a connection close at once, a
+liveness failure within its check) and $\delta$ one chain hop (a send and a join, and the owner
+queries when the next member lies past the successor list); within $T$ when the event is
+missed.
+\end{proposition}
+\begin{proof}
+The loss is detected by the lost member's chain neighbours within $T_d$, and each runs
+Law~\ref{law:memberrepair} at once.  A copy that changes a member's carrier is offered on at
+once, so the hole closes along the chain in at most $r$ hops.  A missed event leaves the
+periodic pass.
+\end{proof}
+
+\textbf{Departure classes.}  $T_d$ depends on how a member leaves.  A \emph{graceful} departure
+closes its connections, so its neighbours detect it at once: $T_d\approx0$, and
+$D_g=r\,\delta$, seconds.  A \emph{silent} one (a crash, a dropped network, a suspended tab)
+is detected only when its liveness check fails, after \texttt{PEER\_LIVENESS\_TIMEOUT\_MS} of
+45\,s: $D_s\approx45\,\mathrm{s}+r\,\delta$, about a minute.  With $\sigma$ the fraction of
+departures that are silent and $\varepsilon_r(D)$ the probability that all $r$ members of a key
+are lost within one window $D$, a held message's loss over its retention is bounded, to first
+order, by the mixture
+\[
+\varepsilon\;\le\;(1-\sigma)\,\varepsilon_r(D_g)+\sigma\,\varepsilon_r(D_s),
+\]
+since an element's window opens with the loss of its first member, whose class sets $D$ (a
+later member's class only shortens or lengthens the same window's repair).  By
+the table of \issue{777}, $r=8$ meets $10^{-3}$ for Weibull ($k=0.5$) sessions of median
+1\,min at $D=60$\,s, so for any $\sigma$; for a median of 15\,s it meets it only at $D=10$\,s,
+that is with $\sigma\approx0$, and a silent fraction at that median needs $r\approx14$.  Two
+levers move $\sigma$ and $D_s$ instead of $r$: a leave on \jsq{pagehide} (\issue{1057}) makes a
+closing tab's departure graceful, and a shorter liveness timeout between chain neighbours
+(\issue{1070}), which are only $p_1(m)$ and $n_1(m)$, bounds $D_s$; with them $r=8$ covers the
+15\,s median.  The laws hold for every $r$; these figures
+only choose its default.
+
+\begin{proposition}[Acknowledged copies survive]\label{prop:copies}
+In a window where the views agree on $\Mem_r$ (S4), an acknowledged element has $q(k)$ copies,
+and is lost only if every member holding it is lost within $D$.
+\end{proposition}
+\begin{proof}
+Law~\ref{law:fanout} gives $q(k)$ copies at the acknowledgement.  Copies decrease only by a
+member's loss or by a deletion of Law~\ref{law:memberrepair}, made by a non-member after a
+member holds its state, which leaves the members' copies as they were.  By
+Proposition~\ref{prop:delay} a loss is repaired from any surviving copy within $D$, which is
+Proposition~\ref{prop:redundant} with $D$ for the repair period.
+\end{proof}
+
+\textbf{Outside S4.}  An acknowledgement taken while views disagree still means $q(k)$ nodes
+hold the element, each of which admitted it as a member of $k$ by its own view; it does not
+mean they are the members the views will agree on.  No copy is deleted without a member's
+acknowledgement (S1$''$), so their number does not fall but by node loss, and once the views
+agree Law~\ref{law:memberrepair} moves the copies to the members.  Until then the bound of
+Proposition~\ref{prop:copies} holds with $D$ extended by the convergence of
+Proposition~\ref{prop:converge}.
+
+\begin{proposition}[Convergence]\label{prop:converge}
+After one membership change the lists of Law~\ref{law:previous} settle within $r(L+1)$
+passes, $L$ the longest storage-less run.
+\end{proposition}
+\begin{proof}
+A list moves one hop per pass, and a change reaches the $r$-th holder after it through at
+most $r$ holders and the runs before each, $r(L+1)$ hops; at $r=1$ this is the bound of
+\issue{1037}.
+\end{proof}
+
+\textbf{Removal, fetch, owner.}  The recipient removes at the member it fetched from, and
+tombstones spread by Law~\ref{law:memberrepair}.  Tombstones stay capped at
+\texttt{RELAY\_INBOX\_MAX\_LEN}, so a lagging member can resurrect an element whose tombstone
+fell off the cap; its redelivery is refused by the recipient's window ($\mathsf{Replay}$, or
+$\mathsf{Stale}$ below it) and retired, case (ii) of Proposition~\ref{prop:atleastonce}, except
+after a replay reset (Law~\ref{law:ownclaim}), where its retention bounds it.  A recipient
+without a relay store fetches from $h_0$ and then down the chain; an element is the same
+holder-signed bytes at every member, so the drain's handed-over set and $\K_s$ deduplicate
+copies, and Law~\ref{law:custody} is unchanged.  Only $h_0$'s report restricts custody: a
+lagging member's copy may miss an element that still exists (\issue{1059}).
+
+\textbf{Store capacity.}  A node keeps about $r$ times the carriers it kept as a sole holder,
+so the relay store's budget scales with $r$: a browser's from 1024 rows to $1024\,r$, a native
+node's from 64\,MiB to $64\,r$\,MiB, a cap on a store that evicts nothing, not space it takes.
+A member whose store is full still refuses a copy (N): it does not acknowledge, so the chain
+acknowledges no writer, which resends until the sender proof expires and then drops the hold
+with a warning, as a full store's refusal did before.  So exhaustion never lowers $q(k)$; it
+refuses new mail.  Its blast radius is the keys whose chain contains the full member, those
+whose owner lies in $(p_r(m),m]$ (Lemma~\ref{lem:range}): about $r$ holders' arcs refuse new
+mail while it is full, and every other key is unaffected.  Isolating one origin's load from
+another's within a store is the per-origin share of \issue{907} and \issue{1060}, not this
+law's.
+
+\begin{proposition}[Message budget]\label{prop:budget}
+Per node and per repair pass: one list of Law~\ref{law:previous} and at most two bundled repair
+messages, so at most three, whatever the carriers it keeps; plus $2r$ for each hold it relays,
+and one bundled exchange per change of $p_1$ or $n_1$.
+\end{proposition}
+\begin{proof}
+Laws~\ref{law:previous}, \ref{law:memberrepair} and~\ref{law:eventrepair} as stated; a hold is
+one send to $h_0$, $r-1$ forwards, $r-1$ chain acknowledgements and one to the writer, and the
+owner queries of its hops are served by the cached next members.
+\end{proof}
+
+\textbf{Costs.}  A hold costs $r-1$ forwarded copies and $r-1$ acknowledgements, and the
+writer's acknowledgement waits for the chain's round trip, about $2(q-1)\,\delta\le2r\,\delta$.
+A member that leaves mid-chain stalls the acknowledgement until its loss is detected and the
+chain repaired, within $D+2r\,\delta$ of its departure ($D$ by its class); the writer keeps and
+resends the hold meanwhile, so the stall delays the acknowledgement and loses nothing.  A pass offers each carrier's
+digest set to two chain neighbours in one message each and copies only on a difference.  A
+list of
+Law~\ref{law:previous} carries $r$ pairs.  A best-effort leave on departure (\issue{1057})
+shortens $T_d$ and is never needed for this section's laws.
+
 \section{Implementation order}\label{sec:plan}
 
 \begin{center}
@@ -668,7 +1207,8 @@ The dependencies: 2 and 4 on the browser need the strict-commit seam of 2; 4 on 
 needs the write-through rename of 3; 5 needs nothing from 1--4, but its
 Proposition~\ref{prop:atleastonce} holds in full only with \issue{1021}.  PR~1 comes first because
 it is the only one that closes a safety gap reachable without a crash.  \issue{1021} and
-\issue{1022} follow the batch.
+\issue{1022} follow the batch; \issue{777} implements Law~\ref{law:redundant} by
+Section~\ref{sec:replicated}.
 
 \textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}: PR~5 changes the
 receiver record, so an old record does not decode and fails its stream closed; the operator
@@ -692,6 +1232,10 @@ survival, unix & fsync, rename, directory fsync\\
 survival, Windows & write-through rename (Law~\ref{law:writethrough})\\
 survival, browser & strict commit (Law~\ref{law:strict})\\
 presence of custody & $\K_s$ in the receiver record (Law~\ref{law:custody})\\
+own state, ephemeral & reset per session (Law~\ref{law:ownclaim})\\
+replay, link-local & volatile window, R (Law~\ref{law:linklocal})\\
+custody, browser & $r$-member chain (Laws~\ref{law:redundant}--\ref{law:eventrepair})\\
+throughput, durable & group commit (Law~\ref{law:group})\\
 \bottomrule
 \end{tabular}
 \end{center}

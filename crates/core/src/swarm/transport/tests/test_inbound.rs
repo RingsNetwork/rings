@@ -14,6 +14,7 @@ mod test_admission_delegation;
 mod test_application_backpressure;
 mod test_capacity_handoff;
 mod test_delegation_reference;
+mod test_link_replay;
 mod test_origin_quota;
 mod test_pre_admission;
 mod test_reassembly;

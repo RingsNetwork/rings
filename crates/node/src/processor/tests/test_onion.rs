@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use super::common::*;
 use super::*;
+use crate::descriptor::RegistryElement;
 use crate::onion::OnionProcessEpoch;
 use crate::onion::OnionProcessEpochCell;
 use crate::onion::OnionServiceName;
@@ -28,7 +29,13 @@ async fn test_onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
 
     let exits = processor.lookup_onion_exits("tcp", false).await?;
 
-    assert_eq!(exits, vec![exit_descriptor]);
+    assert_eq!(
+        exits
+            .iter()
+            .map(|descriptor| descriptor.to_element().ok())
+            .collect::<Vec<_>>(),
+        vec![exit_descriptor.to_element().ok()]
+    );
     assert!(exits
         .iter()
         .all(|descriptor| descriptor.verify_signature(processor.swarm.network_id())));
@@ -94,7 +101,10 @@ async fn test_onion_proxy_route_uses_presence_relays_without_exit_descriptor() -
         .iter()
         .enumerate()
         .all(|(index, did)| index == 2 || relay_dids.contains(did)));
-    assert_eq!(route.exit(), &exit_descriptor);
+    assert_eq!(
+        route.exit().to_element().ok(),
+        exit_descriptor.to_element().ok()
+    );
     Ok(())
 }
 

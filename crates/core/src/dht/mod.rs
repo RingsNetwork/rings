@@ -51,6 +51,8 @@ pub mod types;
 /// Chord-style virtual positions for storage ownership.
 pub mod virtual_node;
 
+pub use chord::ChargedRegister;
+pub use chord::ChargedRemove;
 pub use chord::EntryStorage;
 pub(crate) use chord::LookupSettlement;
 pub(crate) use chord::OperateRoute;
@@ -58,6 +60,11 @@ pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub(crate) use chord::PlacementLookup;
 pub use chord::RemoteAction as PeerRingRemoteAction;
+pub use chord::RemovalCharge;
+pub use chord::RemovalRecord;
+pub use chord::RemovalStorage;
+pub(crate) use chord::ReplicaAcknowledgement;
+pub(crate) use chord::ReplicationStep;
 pub(crate) use chord::StorageKey;
 pub use chord::TopoInfo;
 pub use did::Did;
@@ -66,6 +73,7 @@ pub use finger::FingerFixRequest;
 pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
 pub use relay_holder::RelayCustody;
+pub use relay_holder::RelayReplication;
 /// Test helper exposing the scheduler deadline for an in-flight finger lookup.
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use stabilization::finger_awaiting_report_deadline_for_test;

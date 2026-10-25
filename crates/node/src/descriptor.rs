@@ -5,13 +5,28 @@
 //! overlay. The body also carries `network_id` as a signed field; signing refuses a body whose
 //! stated overlay differs from the signer's, so a verified descriptor's stated overlay is the
 //! overlay it was signed for, and a descriptor issued in one overlay does not verify in another.
+//!
+//! Lease law (#918; removal-stability paper, Laws 8 and 9): a descriptor is a signed lease. Its
+//! body signs the lease end `expires_at_ms = ℓ` and the freshness window `fresh_for_ms = T`,
+//! and nothing that changes between heartbeats, so its bytes are fixed for the lease and a
+//! heartbeat re-appends them, which raises their dot without writing a remove. The time a
+//! reader last heard the descriptor, `heartbeat_at_ms = τ*`, is the dot of its element in the
+//! fetched carrier: it is not signed and not encoded, so a re-append or a forged dot can raise
+//! it, but never past the signed `ℓ`. A reader at `t` holds the descriptor live iff it verifies,
+//! its terms are admissible, `ℓ ≤ t + Λ + σ` and `T ≤ Λ` (`registry_lease`), and `t ≤ ℓ` and
+//! `t ≤ τ* + T + σ`. The terms are the signer's choice, so the reader bounds them: a lease longer
+//! than `Λ`, or a window longer than the lease, is never live, and a registrant that stops is
+//! listed at most `Λ + σ` after its last write against any signer, writer or syncer.
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use bytes::Bytes;
+use rings_core::consts::DEFAULT_TTL_MS;
 use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
 use rings_core::delegation::DelegateeKey;
+use rings_core::dht::entry::Entry as DhtEntry;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
@@ -35,6 +50,13 @@ pub(crate) trait SignedDescriptorBody: Sized {
     fn body_network_id(&self) -> u32;
     fn body_signing_data(&self) -> Result<Vec<u8>>;
     fn into_signed_descriptor(self, signature: MessageVerification) -> Self::Descriptor;
+}
+
+/// The registry lease `Λ`: the data default lifetime `L`, so a replayed descriptor outlives its
+/// registrant by at most `L` (removal-stability paper, Def. 7), and the bound a reader puts on
+/// every signed lease and freshness window.
+pub(crate) const fn registry_lease() -> Duration {
+    Duration::from_millis(DEFAULT_TTL_MS)
 }
 
 /// Sign `body` with the node's authority.
@@ -72,9 +94,15 @@ pub(crate) trait SignedDescriptor: Sized {
     /// The overlay the body states.
     fn descriptor_network_id(&self) -> u32;
     fn descriptor_signature(&self) -> &MessageVerification;
+    /// When a reader last heard this descriptor, `τ*`: unsigned (see the lease law).
     fn descriptor_heartbeat_at_ms(&self) -> u128;
+    /// The signed lease end `ℓ`.
     fn descriptor_expires_at_ms(&self) -> u128;
+    /// The signed freshness window `T`.
+    fn descriptor_fresh_for_ms(&self) -> u64;
     fn descriptor_signing_data(&self) -> Result<Vec<u8>>;
+    /// This descriptor as heard at `heartbeat_at_ms`, its element's dot: the one unsigned field.
+    fn heard_at(self, heartbeat_at_ms: u128) -> Self;
 
     /// Verify the signature under the receiver's overlay `network_id`, the DID/public-key
     /// binding of the signer, and that the body states that same overlay, so a verified
@@ -105,23 +133,51 @@ pub(crate) trait SignedDescriptor: Sized {
         signature.verify(domain, &data)
     }
 
+    /// The last instant a reader holds this descriptor live: `min(ℓ, τ* + T + σ)`.
+    fn descriptor_live_until_ms(&self) -> u128 {
+        let heard_until = self
+            .descriptor_heartbeat_at_ms()
+            .saturating_add(u128::from(self.descriptor_fresh_for_ms()))
+            .saturating_add(TS_OFFSET_TOLERANCE_MS);
+        self.descriptor_expires_at_ms().min(heard_until)
+    }
+
+    /// Whether this descriptor is no longer live at `now_ms`: its lease ended, or it was not
+    /// heard within its freshness window and the skew tolerance.
     fn descriptor_is_expired_at(&self, now_ms: u128) -> bool {
-        self.descriptor_expires_at_ms() < now_ms
+        self.descriptor_live_until_ms() < now_ms
     }
 
+    /// Whether the signed lease terms are within the reader's bounds at `now_ms`: the lease
+    /// ends at most `Λ + σ` from now and the freshness window is at most `Λ`. A longer lease or
+    /// window is the signer's choice, not a registry's, so it is never live.
+    fn descriptor_terms_admissible_at(&self, now_ms: u128) -> bool {
+        let lease_ms = registry_lease().as_millis();
+        self.descriptor_expires_at_ms()
+            <= now_ms
+                .saturating_add(lease_ms)
+                .saturating_add(TS_OFFSET_TOLERANCE_MS)
+            && u128::from(self.descriptor_fresh_for_ms()) <= lease_ms
+    }
+
+    /// Whether a reader at `now_ms` in overlay `network_id` lists this descriptor: it verifies,
+    /// its terms are admissible, and it is not expired (the lease law).
     fn descriptor_is_live_at(&self, now_ms: u128, network_id: u32) -> bool {
-        self.descriptor_verify_signature(network_id) && !self.descriptor_is_expired_at(now_ms)
+        self.descriptor_verify_signature(network_id)
+            && self.descriptor_terms_admissible_at(now_ms)
+            && !self.descriptor_is_expired_at(now_ms)
     }
 
-    /// Return whether this descriptor supersedes `other` of the same key: the later heartbeat
-    /// wins, and an equal heartbeat is decided by `(expiry, signed body, signature)`, so the
-    /// order is total on distinct descriptors. A descriptor whose content fails to encode never
-    /// supersedes, and is superseded by one that encodes.
+    /// Return whether this descriptor supersedes `other` of the same key: the later lease wins,
+    /// then the later heartbeat, and a tie is decided by `(signed body, signature)`, so the order
+    /// is total on distinct descriptors. The lease leads because it is signed: a replayed older
+    /// lease can be heard later than the current one, but never outranks it. A descriptor whose
+    /// content fails to encode never supersedes, and is superseded by one that encodes.
     fn supersedes(&self, other: &Self) -> bool {
         let rank = |descriptor: &Self| {
             (
-                descriptor.descriptor_heartbeat_at_ms(),
                 descriptor.descriptor_expires_at_ms(),
+                descriptor.descriptor_heartbeat_at_ms(),
             )
         };
         let content = |descriptor: &Self| {
@@ -196,31 +252,6 @@ where
     latest
 }
 
-/// Whether a registrant `own` that publishes at `now_ms` prunes the observed registry element
-/// `element`: its own earlier descriptors, which its publication replaces, and every element
-/// that does not decode as `D`, does not verify under `network_id`, or expired more than the
-/// clock-skew tolerance `σ` ago.
-///
-/// Law: an element is kept iff it is a descriptor of another registrant that verifies and is
-/// live at some clock within `σ` of this one, so no publisher carries junk forward to the
-/// element horizon, and a publisher whose clock runs ahead by up to `σ` never prunes a
-/// descriptor its registrant still holds live.
-pub(crate) fn prunes_registry_element<D>(
-    element: &[u8],
-    own: Did,
-    now_ms: u128,
-    network_id: u32,
-) -> bool
-where
-    D: SignedDescriptor + RegistryElement,
-{
-    D::from_element(element).map_or(true, |descriptor| {
-        descriptor.descriptor_did() == own
-            || !descriptor.descriptor_verify_signature(network_id)
-            || descriptor.descriptor_is_expired_at(now_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS))
-    })
-}
-
 /// A descriptor as one element of its DHT registry: the element is the descriptor's codec
 /// encoding, carried as is.
 ///
@@ -237,4 +268,32 @@ pub(crate) trait RegistryElement: Serialize + DeserializeOwned {
     fn from_element(element: &[u8]) -> Result<Self> {
         rings_codec::deserialize(element).map_err(Error::CodecDeserialize)
     }
+}
+
+/// The registry elements of `entry`, each with the issue time of its dot, `τ*`: the time the
+/// newest write of those bytes was stamped, which a heartbeat's re-append raises.
+///
+/// Law: a served carrier is normalized, so its dots align with its elements; an element without
+/// a dot (none in a normalized carrier) is not heard and is skipped.
+pub(crate) fn heard_elements(entry: &DhtEntry) -> impl Iterator<Item = (&Bytes, u128)> {
+    entry.data.iter().zip(
+        entry
+            .crdt
+            .dots
+            .iter()
+            .map(|dot| dot.version.logical_time_ms),
+    )
+}
+
+/// Decode every element of `entry` as `D`, heard at its dot; elements that do not decode are
+/// skipped.
+pub(crate) fn heard_descriptors<D>(entry: &DhtEntry) -> Vec<D>
+where D: SignedDescriptor + RegistryElement {
+    heard_elements(entry)
+        .filter_map(|(element, heard_at_ms)| {
+            D::from_element(element)
+                .ok()
+                .map(|descriptor| descriptor.heard_at(heard_at_ms))
+        })
+        .collect()
 }

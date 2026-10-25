@@ -55,6 +55,7 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::outbound_capacity_released;
+use crate::tests::DispatchedFrames;
 
 fn invalid_test_state(message: impl Into<String>) -> Error {
     Error::InvalidMessage(message.into())
@@ -216,7 +217,7 @@ async fn test_irrevocable_send_timeout_releases_scheduler_capacity() -> Result<(
     let peer = node2.did();
     let payload = tracked_payload(&node1, peer, b"irrevocable-send-timeout")?;
     let paused_send = PausedIrrevocableSendGuard::new();
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
 
     let error = node1
         .swarm
@@ -241,7 +242,7 @@ async fn test_irrevocable_send_timeout_releases_scheduler_capacity() -> Result<(
     )
     .await?;
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         0,
         "an irrevocable task that outlives its caller must not dispatch after connection retirement"
     );
@@ -254,7 +255,7 @@ async fn test_detached_deadline_cannot_succeed_after_irrevocable_chunk_admission
     let peer = node2.did();
     let _max_message_size = MaxMessageSizeGuard::new(8192);
     let paused_send = PausedIrrevocableSendGuard::new();
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let payload = tracked_payload(&node1, peer, &vec![7_u8; 50_000])?;
     let deadline = dummy_controlled::irrevocable_send_gate_entered();
 
@@ -280,7 +281,7 @@ async fn test_detached_deadline_cannot_succeed_after_irrevocable_chunk_admission
     )
     .await?;
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         0,
         "neither the first chunk nor any tail may dispatch after cancellation wins"
     );
@@ -291,7 +292,7 @@ async fn test_detached_deadline_cannot_succeed_after_irrevocable_chunk_admission
 async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let held = fill_application_window(&node1, peer, "lane-head").await?;
     let error = node1
         .swarm
@@ -313,7 +314,7 @@ async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<(
     })
     .await?;
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         OUTBOUND_LANE_WINDOW,
         "the timed-out successor must stop before its first frame"
     );
@@ -324,7 +325,7 @@ async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<(
 async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let held = fill_application_window(&node1, peer, "drop-lane-head").await?;
     let swarm = node1.swarm.clone();
     let successor = tokio::spawn(async move {
@@ -360,7 +361,7 @@ async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() ->
     })
     .await?;
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         OUTBOUND_LANE_WINDOW,
         "dropping the successor caller must stop it before its first frame"
     );
@@ -375,7 +376,7 @@ async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() ->
 async fn test_backlogged_cancellations_all_apply_behind_a_blocked_head() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let held = fill_application_window(&node1, peer, "backlog-lane-head").await?;
     let successors = (0..2)
         .map(|index| {
@@ -426,7 +427,7 @@ async fn test_backlogged_cancellations_all_apply_behind_a_blocked_head() -> Resu
     })
     .await?;
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         OUTBOUND_LANE_WINDOW,
         "only the window sends frames; both successors stop before their first"
     );
@@ -475,7 +476,7 @@ async fn test_cancelled_transfer_is_rejected_when_cancel_command_precedes_submit
 async fn test_shutdown_releases_batch_before_first_tracked_completion() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let _paused_dispatch = PausedDispatchGuard::new();
     node1.swarm.transport.pause_outbound_worker_for_test(peer);
     let payloads = (0..40)
@@ -531,7 +532,7 @@ async fn test_shutdown_releases_batch_before_first_tracked_completion() -> Resul
             .outbound_admitted_transfer_count_for_test(peer),
         Some(40)
     );
-    assert_eq!(dummy_controlled::sent_count(), 0);
+    assert_eq!(dispatched.count(), 0);
     node1.swarm.transport.disconnect(peer).await?;
     for (index, task) in tasks.into_iter().enumerate() {
         let outcome = timeout(Duration::from_secs(2), task)
@@ -805,7 +806,9 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     let _frame_deadlines = hold_frame_deadlines_for_test();
     let _max_size = MaxMessageSizeGuard::new(8192);
     let _paused_bulk_delivery = PausedDeliveryGuard::new();
+    // The baseline of `_pending_after_control`, which counts this thread's payload frames.
     dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
 
     node1
         .swarm
@@ -862,7 +865,7 @@ async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     // Both sends completed and the guard blocks a fourth: the wire carried exactly the first
     // chunk, the storage frame and the control frame, so control took the turn the bulk tail
     // was ready for.
-    assert_eq!(dummy_controlled::sent_count(), 3);
+    assert_eq!(dispatched.count(), 3);
 
     // The peer receives both and no chunk before them. Storage and control ride different
     // lanes, whose receive order the transport does not fix, so their order is not asserted.

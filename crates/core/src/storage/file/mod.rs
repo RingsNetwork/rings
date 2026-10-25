@@ -94,6 +94,7 @@ use serde::Serialize;
 use sha1::Digest;
 use sha1::Sha1;
 
+mod batch;
 mod lock;
 mod presence;
 
@@ -887,6 +888,24 @@ where V: Serialize + DeserializeOwned + Send + Sync
     fn record_name(&self, key: &str) -> String {
         file_name_for(key)
     }
+
+    /// Every record encoded first, each refused as a `put` refuses a value larger than the whole
+    /// budget, then stored by the batch plan (`batch`).
+    async fn put_batch(&self, records: &[(String, V)]) -> Result<()> {
+        let mut encoded = Vec::with_capacity(records.len());
+        for (key, value) in records {
+            let data = rings_codec::serialize(&(key, value)).map_err(Error::CodecSerialize)?;
+            let required = u64::try_from(data.len()).map_err(|_| Error::StorageCountOverflow)?;
+            if required > self.store.capacity {
+                return Err(Error::StorageValueExceedsCapacity {
+                    required,
+                    capacity: self.store.capacity,
+                });
+            }
+            encoded.push((file_name_for(key), data));
+        }
+        self.on_store(move |store| store.store_batch(encoded)).await
+    }
 }
 
 /// Whether `name` is a record name: 40 lower-case hex characters, the image of `file_name_for`
@@ -919,6 +938,8 @@ impl std::fmt::Debug for FileStorage {
     }
 }
 
+#[cfg(test)]
+mod test_batch;
 #[cfg(test)]
 mod test_durability;
 #[cfg(test)]

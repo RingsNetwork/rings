@@ -136,9 +136,10 @@ pub enum Error {
     TransactionReplayPersistence {
         /// Persistence operation that failed.
         operation: &'static str,
-        /// Storage failure retained as the source.
+        /// Storage failure retained as the source, shared by every transition of a failed
+        /// batch (#916).
         #[source]
-        source: Box<Error>,
+        source: std::sync::Arc<Error>,
     },
 
     /// Final-destination origin-quota admission failed.
@@ -256,6 +257,29 @@ pub enum Error {
     /// Entry payload exceeds the per-payload size bound
     #[error("Entry payload exceeds the per-payload size bound")]
     EntryPayloadExceedsMax,
+
+    /// A data carrier would hold more unstable removes than its bound (#921): a delta carrying
+    /// more is inadmissible, and a join or operation whose result would hold more is refused,
+    /// changing nothing.
+    #[error("Data carrier would hold {count} removes, past its bound of {bound}")]
+    EntryTombstonesExceedMax {
+        /// Removes the delta carries, or the result would hold.
+        count: usize,
+        /// The carrier's bound, `DATA_TOMBSTONE_MAX_LEN`.
+        bound: usize,
+    },
+
+    /// An owner's removal store would hold more unstable removes than a bound (#920): the
+    /// origin's share when `origin` is set, else the store's total. The write changes nothing.
+    #[error("Removal store would hold {held} removes, past its bound of {bound}")]
+    RemovalCapacityExhausted {
+        /// The origin whose share binds, or `None` for the store's total.
+        origin: Option<crate::dht::Did>,
+        /// Removes the store, or the origin, would hold.
+        held: usize,
+        /// The bound that binds.
+        bound: usize,
+    },
 
     /// Relay inbox element is not addressed to the peer the inbox is kept for
     #[error("Relay inbox element is not addressed to the peer the inbox is kept for")]

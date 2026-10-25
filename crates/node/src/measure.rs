@@ -1,5 +1,6 @@
 //! Runtime adapter for the pure `rings-measure` state relation.
 
+use std::convert::Infallible;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::channel::mpsc;
+use futures::channel::oneshot;
 use futures::lock::Mutex as AsyncMutex;
 use futures::FutureExt;
 use futures::StreamExt;
@@ -197,6 +199,8 @@ pub enum MeasureRuntimeError {
 pub struct PeriodicMeasure {
     state: Arc<MeasureState>,
     persistence_wake: mpsc::Sender<()>,
+    /// Resolves once the state, with its stores, is dropped (see `MeasureState::_released`).
+    released: oneshot::Receiver<Infallible>,
 }
 
 struct MeasureState {
@@ -207,6 +211,9 @@ struct MeasureState {
     clock: Arc<dyn MeasureClock>,
     /// The executor captured at construction, which owns persistence and flush work.
     spawner: Spawner,
+    /// Never sent on, only dropped: fields drop in declaration order, so this one drops after
+    /// both stores, and its receiver's `Canceled` is the event that the stores are released.
+    _released: oneshot::Sender<Infallible>,
 }
 
 impl MeasureState {
@@ -363,6 +370,7 @@ impl PeriodicMeasure {
             || evidence_load.evicted_records() > 0
             || evidence_load.rejected_replay_markers() > 0;
         let next_prune_at = next_prune_time(&ledger, now);
+        let (released_signal, released) = oneshot::channel();
         let state = Arc::new(MeasureState {
             storage,
             evidence_storage,
@@ -378,6 +386,7 @@ impl PeriodicMeasure {
             persistence_lock: AsyncMutex::new(()),
             clock,
             spawner,
+            _released: released_signal,
         });
         let (mut persistence_wake, receiver) = mpsc::channel(PERSISTENCE_WAKE_CAPACITY);
         state
@@ -389,7 +398,31 @@ impl PeriodicMeasure {
         Ok(Self {
             state,
             persistence_wake,
+            released,
         })
+    }
+
+    /// Stop this measurement and wait until it has released its stores.
+    ///
+    /// The persistence worker sees its wake channel close, persists the pending snapshot as on
+    /// a drop, and exits; a flush still running ends first.
+    ///
+    /// Post: no task of this measurement holds either store, so their directories can be opened
+    /// again in this process (one open store per directory, #1039). A plain drop releases them
+    /// too, but only once a later poll of the worker has written the final snapshot, so an open
+    /// right after a drop can find the directory still held (#1083). A storage operation whose
+    /// wait was abandoned (a timed-out [`Self::flush_with_timeout`]) holds its store until it
+    /// ends.
+    pub async fn close(self) {
+        let Self {
+            state,
+            persistence_wake,
+            released,
+        } = self;
+        drop(persistence_wake);
+        drop(state);
+        // The sender is never sent on: `Canceled` is the release.
+        let _ = released.await;
     }
 
     /// Persist a snapshot containing every update visible when this method starts.

@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::algebra::JoinSemilattice;
+use crate::consts::DATA_TOMBSTONE_MAX_LEN;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::consts::RELAY_INBOX_MAX_LEN;
 use crate::dht::Did;
@@ -56,8 +57,9 @@ impl EntryKind {
         matches!(self, EntryKind::RelayMessage)
     }
 
-    /// The replication a carrier of this kind actually gets when `requested` is configured: a
-    /// relay inbox has one owner and is never replicated.
+    /// The affine placements a carrier of this kind gets when `requested` is configured: a relay
+    /// inbox has one placement, its key, and is replicated to the members of that key instead
+    /// (`dht::relay_holder`, #777), never to affine rotations.
     pub const fn replication(self, requested: u16) -> u16 {
         match self {
             EntryKind::Data => requested,
@@ -65,17 +67,42 @@ impl EntryKind {
         }
     }
 
-    /// The greatest number of tombstones a carrier of this kind keeps. A data topic has no
-    /// count cap: a capped tombstone could be dropped while its add is still inside its element
-    /// horizon somewhere, and a stale replica would resurrect it; its tombstones are bounded by
-    /// rate instead, since each one retires `max_lifetime_ms + TS_OFFSET_TOLERANCE_MS` after its
-    /// dot (see the `retention` module). A relay inbox has one owner and one ack-gated
-    /// relocation at a time, so a stale copy can only be transient and the newest
-    /// [`RELAY_INBOX_MAX_LEN`] removals suffice to shadow it.
-    pub const fn max_tombstones(self) -> Option<usize> {
+    /// How a carrier of this kind bounds its removes (removal-stability paper, Law 5 and
+    /// Prop. 3).
+    ///
+    /// A data topic refuses past [`DATA_TOMBSTONE_MAX_LEN`] and never truncates: a dropped
+    /// tombstone could be one whose add is still inside its element horizon at another replica,
+    /// which would then resurrect it; a refused write drops nothing. A relay inbox keeps the
+    /// newest [`RELAY_INBOX_MAX_LEN`] removals: a lagging member (#777) may still resurrect an
+    /// element whose removal fell off the cap, and its redelivery is refused by the recipient's
+    /// receiver window and retired again, so the cap costs a redelivery, never a duplicate
+    /// dispatch.
+    pub const fn tombstone_bound(self) -> TombstoneBound {
         match self {
-            EntryKind::Data => None,
-            EntryKind::RelayMessage => Some(RELAY_INBOX_MAX_LEN),
+            EntryKind::Data => TombstoneBound::Refuse(DATA_TOMBSTONE_MAX_LEN),
+            EntryKind::RelayMessage => TombstoneBound::Truncate(RELAY_INBOX_MAX_LEN),
+        }
+    }
+}
+
+/// How a carrier bounds its removes: by refusing a write past the bound, or by keeping the newest
+/// removes up to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TombstoneBound {
+    /// A write whose result would hold more removes is refused, changing nothing.
+    Refuse(usize),
+    /// Only the newest removes, by dot, up to the bound are kept.
+    Truncate(usize),
+}
+
+impl TombstoneBound {
+    /// How many of `count` removes, oldest first, materialization drops: the excess over a
+    /// truncating bound, and none under a refusing one, which [`Entry::check_tombstone_bound`]
+    /// enforces instead.
+    const fn truncated(self, count: usize) -> usize {
+        match self {
+            Self::Refuse(_) => 0,
+            Self::Truncate(cap) => count.saturating_sub(cap),
         }
     }
 }
@@ -366,11 +393,26 @@ impl EntryOperation {
     /// Post: every carried entry has `expires_at_ms = Some(_)`; an absent bound becomes
     /// `now_ms + kind.default_lifetime_ms()`.
     pub fn stamped(self, now_ms: u128, actor: Did) -> Result<Self> {
+        self.stamped_after(now_ms, actor, None)
+    }
+
+    /// [`Self::stamped`], issuing any version it stamps strictly after `floor`: the issue law of
+    /// a node that stamps its operations in order (#1075), `logical_time = max(now, floor + 1)`
+    /// when `now` alone would not exceed `floor` (`EntryVersion::after`).
+    ///
+    /// Post: a version this call issues is greater than `floor`; an operation that already
+    /// carries its witnesses is returned with them unchanged.
+    pub fn stamped_after(
+        self,
+        now_ms: u128,
+        actor: Did,
+        floor: Option<EntryVersion>,
+    ) -> Result<Self> {
         let stamp = self.stamp_kind();
         self.try_map_entry(|entry| {
             let entry = entry.ensure_lifetime_from(now_ms);
             match stamp {
-                Some(kind) => entry.ensure_stamp_after(now_ms, actor, None, kind),
+                Some(kind) => entry.ensure_stamp_after(now_ms, actor, floor, kind),
                 None => Ok(entry),
             }
         })
@@ -484,7 +526,7 @@ impl Entry {
         actor: Did,
         floor: Option<EntryVersion>,
     ) -> Result<EntryVersion> {
-        Ok(EntryVersion::new(now_ms, actor, self.operation_digest()?).after(floor))
+        EntryVersion::new(now_ms, actor, self.operation_digest()?).after(floor)
     }
 
     fn ensure_stamp_after(
@@ -518,7 +560,8 @@ impl Entry {
             .chain(self.crdt.register)
     }
 
-    fn max_observed_version(&self) -> Option<EntryVersion> {
+    /// The greatest version this carrier holds: of a dot, a remove, or the register.
+    pub(crate) fn max_observed_version(&self) -> Option<EntryVersion> {
         self.versions().max()
     }
 
@@ -564,7 +607,7 @@ impl Entry {
     }
 
     /// Materialize a normalized buffer as an entry: elements in dot order under the count cap,
-    /// removes in dot order under the kind's tombstone cap.
+    /// removes in dot order, truncated only under a truncating tombstone bound.
     ///
     /// Pre: `buffer` is normalized, so no element is below the register or covered by a remove,
     /// and no digest is computed here.
@@ -597,9 +640,7 @@ impl Entry {
                 .cmp(&right.dot)
                 .then_with(|| left.element.cmp(&right.element))
         });
-        let tombstone_skip = kind
-            .max_tombstones()
-            .map_or(0, |cap| tombstones.len().saturating_sub(cap));
+        let tombstone_skip = kind.tombstone_bound().truncated(tombstones.len());
 
         Self {
             did: self.did,

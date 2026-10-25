@@ -335,7 +335,9 @@ async fn persistence_restores_complete_credit_and_epoch_state() {
         .flush()
         .await
         .unwrap_or_else(|error| panic!("measurement must flush: {error}"));
-    drop(measure);
+    // The persistence worker holds the store until it has written its final snapshot, on a
+    // poll after a drop; the reopen waits for that release instead of racing it (#1083).
+    measure.close().await;
 
     let restored = PeriodicMeasure::new_with_clock(
         Box::new(
@@ -354,6 +356,45 @@ async fn persistence_restores_complete_credit_and_epoch_state() {
         .unwrap_or_else(|| panic!("restored measurement must exist"));
     assert_eq!(projected.evidence.sent, 1);
     assert_eq!(projected.credit.bytes_sent_to_peer(), 17);
+}
+
+/// `close` is the release event (#1083): it waits for the worker to write the snapshot a record
+/// left pending and to drop the store, so the directory reopens at once and restores the record.
+#[tokio::test]
+async fn close_persists_the_pending_snapshot_and_releases_the_store() {
+    let path = "tmp/measure_close_release_test_db";
+    let storage = FileStorage::new_with_cap_and_path(4096, path)
+        .await
+        .unwrap_or_else(|error| panic!("test storage must open: {error}"));
+    KvStorageInterface::<MeasurementSnapshot<Did>>::clear(&storage)
+        .await
+        .unwrap_or_else(|error| panic!("test storage must clear: {error}"));
+    let clock = Arc::new(ManualMeasureClock::new(10));
+    let measure = PeriodicMeasure::new_with_clock(Box::new(storage), clock.clone())
+        .await
+        .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+    measure
+        .record(
+            did(),
+            Authentication::Authenticated,
+            MeasurementEvent::Sent { useful_bytes: 23 },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("measurement must apply: {error}"));
+    measure.close().await;
+
+    let reopened = FileStorage::new_with_cap_and_path(4096, path)
+        .await
+        .unwrap_or_else(|error| panic!("a closed measurement's store must reopen: {error}"));
+    let restored = PeriodicMeasure::new_with_clock(Box::new(reopened), clock)
+        .await
+        .unwrap_or_else(|error| panic!("measurement must restore: {error}"));
+    let projected = restored
+        .peer_measurement(did())
+        .await
+        .unwrap_or_else(|error| panic!("projection must succeed: {error}"))
+        .unwrap_or_else(|| panic!("the pending record must have been persisted at close"));
+    assert_eq!(projected.credit.bytes_sent_to_peer(), 23);
 }
 
 #[tokio::test]

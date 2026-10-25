@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! record_key(table, key) ≜ "rings-core:transaction-replay:stream:" ‖ table ‖ ":" ‖ hex(enc(key))
-//! record(Sender, key)    ≜ enc(Sender { key, last })
+//! record(Sender, key)    ≜ enc(Sender { key, leased })
 //! record(Receiver, key)  ≜ enc(Receiver { key, state, custody })
 //! ```
 //!
@@ -13,9 +13,11 @@
 //! write is bounded by [`TRANSACTION_REPLAY_RECORD_MAX_BYTES`] whatever the number of streams
 //! retained; the whole-snapshot rewrite it replaces grew with the table.
 //!
-//! **Law (faithful restore).** [`restore`] ∘ `write*` is the identity on the tables: every
-//! record carries its own [`StreamKey`] and is written under `record_key` of that key, and a
-//! record restores its stream iff it decodes and holds a valid window.
+//! **Law (faithful restore).** [`restore`] ∘ `write*` is the identity on the receiver tables
+//! and on each sender stream's lease: every record carries its own [`StreamKey`] and is written
+//! under `record_key` of that key, and a record restores its stream iff it decodes and holds a
+//! valid window. A sender record holds only its lease, so its allocator restores as
+//! `SenderLease::restored`, the whole lease counted as issued (the laws of `lease`).
 //!
 //! **Law (fail closed per stream).** Let `name` be the storage's
 //! [`record_name`](crate::storage::KvStorageScan::record_name) and `U` the names of the records
@@ -63,6 +65,7 @@ use serde::Serialize;
 
 use super::custody::RelayCustody;
 use super::custody::RELAY_CUSTODY_CAPACITY;
+use super::lease::SenderLease;
 use super::SequenceState;
 use super::StreamKey;
 use super::TRANSACTION_REPLAY_STREAM_CAPACITY;
@@ -82,7 +85,7 @@ const U64_MAX_BYTES: usize = 10;
 /// Largest canonical encoding of a [`SequenceState`]: `high`, then each window slot as a
 /// presence tag and a 32-byte digest.
 const SEQUENCE_STATE_MAX_BYTES: usize = U64_MAX_BYTES + TRANSACTION_REPLAY_WINDOW * (1 + 32);
-/// Largest encoded sender stream: the variant tag, the key and the last reserved sequence.
+/// Largest encoded sender stream: the variant tag, the key and the leased bound.
 const SENDER_STREAM_MAX_BYTES: usize = 1 + STREAM_KEY_MAX_BYTES + U64_MAX_BYTES;
 /// Largest canonical encoding of one relay delivery in custody: its sequence and its digest.
 const RELAY_DELIVERY_MAX_BYTES: usize = U64_MAX_BYTES + 32;
@@ -151,7 +154,7 @@ pub struct ReplayRecord(pub(super) Vec<u8>);
 /// The two tables of the replay store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReplayTable {
-    /// Sender allocators: the last sequence reserved per stream.
+    /// Sender allocators: the durable lease of sequences per stream.
     Sender,
     /// Receiver windows: the accepted-sequence window per stream.
     Receiver,
@@ -170,8 +173,8 @@ impl ReplayTable {
 /// The in-memory replay tables: sender allocators and receiver windows, by stream.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct ReplayTables {
-    /// Last sequence reserved per sender stream.
-    pub(super) sender: BTreeMap<StreamKey, u64>,
+    /// The allocator per sender stream: its last issued sequence and its lease.
+    pub(super) sender: BTreeMap<StreamKey, SenderLease>,
     /// Accepted-sequence window per receiver stream.
     pub(super) receiver: BTreeMap<StreamKey, SequenceState>,
     /// The relay deliveries in custody per receiver stream, only for streams that hold any
@@ -182,8 +185,8 @@ pub(super) struct ReplayTables {
 /// One stream as a record encodes it, borrowed for encoding.
 #[derive(Serialize)]
 enum StoredStreamRef<'a> {
-    /// A sender stream and its last reserved sequence.
-    Sender { key: &'a StreamKey, last: u64 },
+    /// A sender stream and the last sequence its lease covers.
+    Sender { key: &'a StreamKey, leased: u64 },
     /// A receiver stream, its window and its relay custody.
     Receiver {
         key: &'a StreamKey,
@@ -195,8 +198,8 @@ enum StoredStreamRef<'a> {
 /// One stream as a record decodes; the owned mirror of [`StoredStreamRef`].
 #[derive(Deserialize)]
 enum StoredStream {
-    /// A sender stream and its last reserved sequence.
-    Sender { key: StreamKey, last: u64 },
+    /// A sender stream and the last sequence its lease covers.
+    Sender { key: StreamKey, leased: u64 },
     /// A receiver stream and its window, boxed so the decoded sender variant stays small; a box
     /// encodes as its contents, so the record is that of [`StoredStreamRef::Receiver`].
     Receiver {
@@ -223,11 +226,12 @@ fn encode(stream: &StoredStreamRef<'_>) -> Result<ReplayRecord> {
         .map_err(Error::CodecSerialize)
 }
 
-/// The storage key and record of sender stream `key`, whose last reserved sequence is `last`.
-pub(super) fn sender_record(key: &StreamKey, last: u64) -> Result<(String, ReplayRecord)> {
+/// The storage key and record of sender stream `key`, whose lease covers every sequence up to
+/// `leased`.
+pub(super) fn sender_record(key: &StreamKey, leased: u64) -> Result<(String, ReplayRecord)> {
     Ok((
         record_key(ReplayTable::Sender, key)?,
-        encode(&StoredStreamRef::Sender { key, last })?,
+        encode(&StoredStreamRef::Sender { key, leased })?,
     ))
 }
 
@@ -316,7 +320,7 @@ impl ReplayStore {
 
 /// One restored stream: its table, its key and its state.
 enum RestoredStream {
-    /// A sender stream and its last reserved sequence.
+    /// A sender stream and the last sequence its lease covers.
     Sender(StreamKey, u64),
     /// A receiver stream, its window (still boxed as it decoded, so the sender variant stays
     /// small) and its relay custody.
@@ -326,7 +330,7 @@ enum RestoredStream {
 /// Restore one decoded record (pure): its stream, or what is wrong with it.
 fn restore_record(bytes: &[u8]) -> std::result::Result<RestoredStream, Defect> {
     match rings_codec::deserialize::<StoredStream>(bytes) {
-        Ok(StoredStream::Sender { key, last }) => Ok(RestoredStream::Sender(key, last)),
+        Ok(StoredStream::Sender { key, leased }) => Ok(RestoredStream::Sender(key, leased)),
         Ok(StoredStream::Receiver {
             key,
             state,
@@ -401,8 +405,11 @@ pub(super) fn restore(
         .map(|record| classify(record, &name))
         .fold(ReplayStore::default(), |mut restored, contribution| {
             match contribution {
-                Contribution::Stream(RestoredStream::Sender(key, last)) => {
-                    restored.tables.sender.insert(key, last);
+                Contribution::Stream(RestoredStream::Sender(key, leased)) => {
+                    restored
+                        .tables
+                        .sender
+                        .insert(key, SenderLease::restored(leased));
                 }
                 Contribution::Stream(RestoredStream::Receiver(key, state, custody)) => {
                     restored.tables.receiver.insert(key, *state);
@@ -432,6 +439,7 @@ mod tests {
     use super::ReplayTable;
     use super::ReplayTables;
     use super::RestoreFailure;
+    use super::SenderLease;
     use super::RECEIVER_STREAM_MAX_BYTES;
     use super::RELAY_CUSTODY_CAPACITY;
     use super::RELAY_DELIVERY_MAX_BYTES;
@@ -566,7 +574,7 @@ mod tests {
         ]);
         let restored = restore(records, by_key);
         let mut expected = ReplayTables::default();
-        expected.sender.insert(key, 7);
+        expected.sender.insert(key, SenderLease::restored(7));
         expected.receiver.insert(key, window);
         assert_eq!(restored.tables, expected);
         assert!(restored.unrestorable.is_empty());
@@ -608,7 +616,7 @@ mod tests {
                 .collect::<std::collections::BTreeMap<_, _>>()
         );
         let mut tables = ReplayTables::default();
-        tables.sender.insert(intact, 3);
+        tables.sender.insert(intact, SenderLease::restored(3));
         assert_eq!(restored.tables, tables);
         Ok(())
     }
@@ -759,7 +767,10 @@ mod tests {
         let capacity = u32::try_from(TRANSACTION_REPLAY_STREAM_CAPACITY)
             .map_err(|_| Error::TransactionReplayStateInvalid)?;
         for origin in 0..capacity - 1 {
-            store.tables.sender.insert(maximal_key(origin), 0);
+            store
+                .tables
+                .sender
+                .insert(maximal_key(origin), SenderLease::restored(0));
         }
         assert!(store.admits_new_stream(ReplayTable::Sender));
         assert!(store.admits_new_stream(ReplayTable::Receiver));

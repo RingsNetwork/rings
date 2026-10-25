@@ -28,6 +28,7 @@ use crate::error::SendClass;
 use crate::message::effects::core_actor_steps;
 use crate::message::effects::yield_core_actor_step;
 use crate::message::effects::CoreEffect;
+use crate::message::handlers::relay_replica::replicate_taken_hold;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
 use crate::message::types::RelayCarrierHeld;
@@ -90,17 +91,18 @@ async fn reset_storage_relay_destination(
         .await
 }
 
-/// Repair the misses a remote lookup observed for `entry`; a handler runs it, so each repair is
-/// only queued.
+/// Repair the misses a remote lookup observed for `entry`, supplied by `source`; a handler runs
+/// it, so each repair is only queued.
 async fn repair_observed_storage_misses(
     transport: Arc<SwarmTransport>,
     entry: Entry,
+    source: Did,
     redundancy: u16,
 ) -> Result<()> {
     let misses = transport.take_storage_misses(entry.did, redundancy)?;
     let repair = transport
         .dht
-        .read_repair_entry(entry, &misses, redundancy)
+        .read_repair_entry(entry, source, &misses, redundancy)
         .await?;
     run_storage_repair_transport_effects(&transport, &transport.protocol_egress(), repair).await
 }
@@ -145,7 +147,7 @@ pub(crate) async fn handle_storage_fetch_act(
             let misses = evidence.misses;
             let repair = transport
                 .dht
-                .read_repair_entry(evidence.entry, &misses, redundancy)
+                .read_repair_entry(evidence.entry, transport.dht.did, &misses, redundancy)
                 .await?;
             run_storage_repair_transport_effects(&transport, sender, repair).await?;
         }
@@ -239,9 +241,11 @@ pub(super) async fn handle_storage_store_act(
 }
 
 /// Apply or route `msg`. A relay hold from another node is answered to its writer: the holder
-/// acknowledges one it took (`RelayCarrierHeld`), and a target refuses one it does not take
-/// (`is_unplaced_hold`, `RelayCarrierRefused`). The writer keeps the hold until acknowledged,
-/// so an answer that is lost costs a resend, not the hold.
+/// replicates one it took to the other members of its key and acknowledges it
+/// (`RelayCarrierHeld`) once they all hold it, at once when they already do (`Law (Replicated
+/// hold)`, #777); a target refuses one it does not take (`is_unplaced_hold`,
+/// `RelayCarrierRefused`). The writer keeps the hold until acknowledged, so an answer that is
+/// lost costs a resend, not the hold.
 async fn handle_placed_entry_operation(
     handler: &MessageHandler,
     ctx: &MessagePayload,
@@ -252,7 +256,9 @@ async fn handle_placed_entry_operation(
     if is_hold && ctx.transaction.origin() != handler.dht.did {
         let hold = RelayHoldDigest::of(&msg.op)?;
         let answer = match &result {
-            Ok(()) => Some(Message::RelayCarrierHeld(RelayCarrierHeld { hold })),
+            Ok(()) => replicate_taken_hold(&handler.transport, &msg.op, ctx.transaction.origin())
+                .await?
+                .then_some(Message::RelayCarrierHeld(RelayCarrierHeld { hold })),
             Err(error) if is_unplaced_hold(error) => {
                 Some(Message::RelayCarrierRefused(RelayCarrierRefused { hold }))
             }
@@ -282,10 +288,22 @@ async fn place_entry_operation(
     msg.validate_placement(handler.transport.storage_redundancy())?;
 
     let dht = &handler.dht;
-    match dht.operate_route(msg.placement, msg.op.kind())? {
+    // A recipient removes from the member it read its inbox from, which applies the removal as a
+    // member of the key; repair carries the tombstone to the other members (#777).
+    let route = match &msg.op {
+        EntryOperation::Tombstone(entry)
+            if entry.kind.is_relay_inbox() && dht.is_relay_member(msg.placement)? =>
+        {
+            OperateRoute::Owned
+        }
+        op => dht.operate_route(msg.placement, op.kind())?,
+    };
+    match route {
         OperateRoute::Owned => {
             let now_ms = get_epoch_ms();
-            let op = msg.op.clone().stamped(now_ms, dht.did)?;
+            let op = dht
+                .stamp_operation(msg.op.clone(), now_ms, Some(msg.placement))
+                .await?;
             dht.operate_storage_entry(now_ms, msg.placement, op, ctx.transaction.origin())
                 .await
         }
@@ -300,7 +318,7 @@ async fn place_entry_operation(
 
 /// Execute copy-only storage repair actions through `egress`, under its discipline: the Swarm
 /// storage API waits for each repair's admission, a handler only queues it.
-async fn run_storage_repair_transport_effects<D: Discipline>(
+pub(crate) async fn run_storage_repair_transport_effects<D: Discipline>(
     transport: &SwarmTransport,
     egress: &Egress<'_, D>,
     act: PeerRingAction,
@@ -390,6 +408,22 @@ pub(crate) async fn operate_entry(
     handle_storage_store_act(transport.clone(), action, attempts).await
 }
 
+/// Remove `removal`, the recipient's tombstone of elements of its inbox, at `member`, the member
+/// of its inbox key it read them from, in one attempt (`Attempts::Single`): the member applies it
+/// as a member of the key, and repair carries it to the other members (#777). At this node
+/// itself, when it is that member, it is applied here.
+pub(crate) async fn remove_relay_elements_at(
+    transport: &Arc<SwarmTransport>,
+    removal: Entry,
+    member: Did,
+) -> Result<()> {
+    let action = transport
+        .dht
+        .operate_relay_removal_at(EntryOperation::Tombstone(removal), member)
+        .await?;
+    handle_storage_store_act(transport.clone(), action, Attempts::Single).await
+}
+
 fn next_hop_for_sync_entries(
     handler: &MessageHandler,
     ctx: &MessagePayload,
@@ -464,16 +498,26 @@ impl HandleMsg<FoundEntry> for MessageHandler {
         )?;
         if let Some(data) = found_entry {
             cache_lookup_reply(&self.transport, msg.resource, msg.redundancy, data.clone()).await?;
-            repair_observed_storage_misses(self.transport.clone(), data.clone(), msg.redundancy)
-                .await?;
+            repair_observed_storage_misses(
+                self.transport.clone(),
+                data.clone(),
+                ctx.transaction.origin(),
+                msg.redundancy,
+            )
+            .await?;
         } else if !msg.misses.is_empty() {
             if let Some(entry) = self
                 .dht
                 .local_cache_held(msg.resource, crate::utils::get_epoch_ms())
                 .await?
             {
-                repair_observed_storage_misses(self.transport.clone(), entry, msg.redundancy)
-                    .await?;
+                repair_observed_storage_misses(
+                    self.transport.clone(),
+                    entry,
+                    ctx.transaction.origin(),
+                    msg.redundancy,
+                )
+                .await?;
             }
         }
         Ok(())

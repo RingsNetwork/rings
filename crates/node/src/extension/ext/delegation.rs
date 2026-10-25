@@ -1,16 +1,20 @@
-//! Namespaces that delegate their admission (#888).
+//! Namespaces that delegate their admission (#888) or their replay (#1081).
 //!
 //! A [`Protocol`](super::Protocol) that admits its own direct-edge traffic, per sending
 //! neighbour, before its own processing declares it through
-//! [`Protocol::delegates_admission`](super::Protocol::delegates_admission). The registry
-//! publishes the declaration into core when the protocol is installed, under the same write lock
-//! that installs its handler, as the encoded prefix that names the namespace in every
+//! [`Protocol::delegates_admission`](super::Protocol::delegates_admission), and one that guards
+//! its own replay through [`Protocol::delegates_replay`](super::Protocol::delegates_replay). The
+//! registry publishes both declarations into core when the protocol is installed, under the same
+//! write lock that installs its handler, as the encoded prefix that names the namespace in every
 //! [`Envelope`]. Core matches the prefix on its own admission path; no node code runs there
 //! (#935):
 //!
 //! ```text
-//!   publish   : (namespace, 𝔹) → Swarm::set_admission_delegation(prefix(namespace), limit(𝔹))
+//!   publish   : (namespace, 𝔹_admission, 𝔹_replay)
+//!                 → Swarm::set_admission_delegation(prefix(namespace), limit(𝔹_admission))
+//!                 ; Swarm::set_replay_delegation(prefix(namespace), window(𝔹_replay))
 //!   limit     : true ↦ MessageLimit::Delegated, false ↦ MessageLimit::Enforced
+//!   window    : true ↦ ReplayWindow::Link,      false ↦ ReplayWindow::Durable
 //!   prefix    : namespace → encoded namespace   -- a prefix of every envelope of it
 //! ```
 //!
@@ -28,10 +32,30 @@
 //! at least `DELEGATED_MIN_CHARGE` bytes.
 
 use rings_core::message::MessageLimit;
+use rings_core::message::ReplayWindow;
 use rings_core::swarm::Swarm;
 
 use super::Envelope;
 use crate::error::Result;
+
+/// What a protocol delegates, read once at its registration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Delegation {
+    /// [`Protocol::delegates_admission`](super::Protocol::delegates_admission).
+    pub(crate) admission: bool,
+    /// [`Protocol::delegates_replay`](super::Protocol::delegates_replay).
+    pub(crate) replay: bool,
+}
+
+impl Delegation {
+    /// The declarations of `protocol`.
+    pub(crate) fn of(protocol: &impl super::Protocol) -> Self {
+        Self {
+            admission: protocol.delegates_admission(),
+            replay: protocol.delegates_replay(),
+        }
+    }
+}
 
 /// Publish a batch of declarations into `swarm`.
 ///
@@ -40,15 +64,20 @@ use crate::error::Result;
 /// it.
 pub(crate) fn publish<'a>(
     swarm: &Swarm,
-    declarations: impl IntoIterator<Item = (&'a str, bool)>,
+    declarations: impl IntoIterator<Item = (&'a str, Delegation)>,
 ) -> Result<()> {
-    for (namespace, delegates) in declarations {
-        let limit = if delegates {
-            MessageLimit::Delegated
-        } else {
-            MessageLimit::Enforced
+    for (namespace, delegation) in declarations {
+        let prefix = Envelope::namespace_prefix(namespace)?;
+        let limit = match delegation.admission {
+            true => MessageLimit::Delegated,
+            false => MessageLimit::Enforced,
         };
-        swarm.set_admission_delegation(Envelope::namespace_prefix(namespace)?, limit);
+        let window = match delegation.replay {
+            true => ReplayWindow::Link,
+            false => ReplayWindow::Durable,
+        };
+        swarm.set_admission_delegation(prefix.clone(), limit);
+        swarm.set_replay_delegation(prefix, window);
     }
     Ok(())
 }
