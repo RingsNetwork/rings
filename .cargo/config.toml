@@ -11,3 +11,12 @@ WASM_BINDGEN_TEST_TIMEOUT = { value = "120", force = false }
 
 [target.wasm32-unknown-unknown]
 runner = 'wasm-bindgen-test-runner'
+
+# ARMv8 AES and POLYVAL (#848). `aes` 0.8 and `polyval` 0.6 use the ARMv8 Cryptography
+# Extensions only under these cfgs; without them every aarch64 build runs the software fixslice
+# backend, about 80x slower per AEZ block than the hardware path. On Linux and macOS the
+# crates detect the extension at runtime under the cfgs and fall back to software on a CPU
+# without it, so the flags are scoped to those systems. x86_64 detects AES-NI at runtime
+# already and needs no flag. A `RUSTFLAGS` in the environment replaces these flags.
+[target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))']
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]

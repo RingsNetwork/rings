@@ -17,6 +17,18 @@
     declares nothing behaves as before.
   - **Operator step.** None.
 
+- aarch64 builds on Linux and macOS use the ARMv8 AES and POLYVAL instructions (#848). `aes` 0.8
+  and `polyval` 0.6 take them only under `--cfg aes_armv8` and `--cfg polyval_armv8`, so until
+  now every aarch64 build (Apple silicon, ARM servers) ran AEZ and DTLS on the software fixslice
+  backend, which cost 13.8% of the #843 loop's CPU (#1087). `.cargo/config.toml` now sets both
+  cfgs for those targets. The crates still detect the extension at runtime and fall back to
+  software on a CPU without it. x86_64 already detected AES-NI at runtime and is unchanged. CI
+  runs the `rings-aez` known answers on both backends, and the cluster image copies
+  `.cargo/`.
+  - **Operator step.** A build that sets `RUSTFLAGS` in the environment replaces the cargo
+    config's flags. To keep the hardware path, add `--cfg aes_armv8 --cfg polyval_armv8` to
+    such a `RUSTFLAGS` on aarch64.
+
 - `PeriodicMeasure::close` stops a measurement and waits until it has released its stores (#1083).
   A drop releases them only after the persistence worker has written the final snapshot on a later
   poll, so a store directory reopened in the same process right after a drop could still be held
