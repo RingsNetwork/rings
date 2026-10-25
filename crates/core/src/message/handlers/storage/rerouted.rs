@@ -81,8 +81,13 @@ impl Placement for LookupPlacement {
                     entry.clone(),
                 )
                 .await?;
-                super::repair_observed_storage_misses(transport.clone(), entry, self.redundancy)
-                    .await
+                super::repair_observed_storage_misses(
+                    transport.clone(),
+                    entry,
+                    transport.dht.did,
+                    self.redundancy,
+                )
+                .await
             }
             LookupSettlement::Missed(miss) => {
                 transport.observe_storage_misses(self.query.resource, self.redundancy, [miss])

@@ -77,7 +77,7 @@
 //!   idempotent.
 //! - No loss: no live add is lost. An add leaves a carrier only by a remove covering it, a user
 //!   `Overwrite` register above it, the `max_data_len` cap, its own horizon, its carrier's
-//!   retention bound, or storage byte-budget eviction of the whole carrier:
+//!   retention bound, or storage byte-budget eviction of its element side:
 //!   `∀ a. t < τ(a) + H ∧ ¬covered(a) ∧ ¬(a.version < register(⨆ᵢ xᵢ)) ∧ a ∈ ⋃ᵢ xᵢ
 //!   ⇒ a ∈ retire_t(⨆ᵢ xᵢ)`, cap aside.
 //! - No resurrection: a remove `(e, r)` or a register leaves the replicas that hold it only at a
@@ -87,8 +87,9 @@
 //!   once the receiver has joined it, so it moves rather than drops. Every clock then reads
 //!   `t_q ≥ t_p − σ ≥ τ(r) + H ≥ τ(d) + H` for every add `d ≤ r` it shadowed, including the
 //!   dropping node's own clock should it step back by up to `σ`, so every carrier has already
-//!   retired those adds and none can serve them back. This holds barring storage byte-budget
-//!   eviction, which drops a carrier whatever it holds (see SECURITY.md).
+//!   retired those adds and none can serve them back. Eviction keeps it too: the remove side
+//!   lives in a removal store that refuses and never evicts (#920, `chord::carrier_store`), so
+//!   the byte budget of the data store drops element sides only.
 //! - Bound (#921): a data carrier holds at most `max_data_len` elements and at most
 //!   `DATA_TOMBSTONE_MAX_LEN` unstable removes. The remove bound refuses, it never truncates:
 //!   a delta carrying more is inadmissible, and a join or operation whose result would hold

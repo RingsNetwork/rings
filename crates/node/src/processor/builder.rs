@@ -1,3 +1,5 @@
+use rings_core::dht::RemovalStorage;
+
 use super::config::validate_dht_virtual_nodes;
 use super::config::validate_onion_role_config;
 use super::*;
@@ -17,6 +19,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) onion_process_epoch: OnionProcessEpoch,
     pub(in crate::processor) storage: Option<EntryStorage>,
     pub(in crate::processor) relay_storage: Option<EntryStorage>,
+    pub(in crate::processor) removal_storage: Option<RemovalStorage>,
     pub(in crate::processor) replay_storage: Option<ReplayStorage>,
     pub(in crate::processor) origin_quota: OriginQuotaConfig,
     pub(in crate::processor) onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
@@ -58,6 +61,7 @@ impl ProcessorBuilder {
             onion_process_epoch: OnionProcessEpoch::random(),
             storage: None,
             relay_storage: None,
+            removal_storage: None,
             replay_storage: None,
             origin_quota: config.origin_quota,
             onion_entry_guard_storage: None,
@@ -121,6 +125,14 @@ impl ProcessorBuilder {
     /// (#1021). Without one, the node takes custody of no relay carrier.
     pub fn relay_storage(mut self, storage: EntryStorage) -> Self {
         self.relay_storage = Some(storage);
+        self
+    }
+
+    /// Set the storage of the data namespace's remove sides (`SwarmBuilder::removal_storage`):
+    /// a `RecordAuthority::Retained` store, so a remove survives a crash and is never evicted
+    /// before it is stable (#920). Without one, the remove sides are kept in memory.
+    pub fn removal_storage(mut self, storage: RemovalStorage) -> Self {
+        self.removal_storage = Some(storage);
         self
     }
 
@@ -257,6 +269,9 @@ impl ProcessorBuilder {
         }
         if let Some(relay_storage) = self.relay_storage {
             swarm_builder = swarm_builder.relay_storage(relay_storage);
+        }
+        if let Some(removal_storage) = self.removal_storage {
+            swarm_builder = swarm_builder.removal_storage(removal_storage);
         }
         swarm_builder = swarm_builder.origin_quota(self.origin_quota);
         let observer: rings_core::swarm::observer::SharedSwarmObserver = match self.observer {

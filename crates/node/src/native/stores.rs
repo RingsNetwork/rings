@@ -4,6 +4,7 @@
 //! ```text
 //! <data>                  DHT data store            Disposable      configured budget
 //! <data>/../relay-inbox        relay carriers       Retained        RELAY_INBOX_STORAGE_CAPACITY
+//! <data>/../dht-removals       remove sides         Retained      DHT_REMOVAL_STORAGE_CAPACITY
 //! <data>/../transaction-replay replay windows       Authoritative   TRANSACTION_REPLAY_STORAGE_CAPACITY
 //! <data>/../onion-entry-guards entry guards         DurableCache    ONION_ENTRY_GUARD_STORAGE_CAPACITY
 //! <measure>               peer measurements         Disposable      configured budget
@@ -18,6 +19,7 @@
 use std::path::Path;
 
 use rings_core::dht::EntryStorage;
+use rings_core::dht::RemovalStorage;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::file::FileStorage;
 use rings_core::storage::RecordAuthority;
@@ -42,6 +44,13 @@ pub const TRANSACTION_REPLAY_STORAGE_CAPACITY: u32 = 40 * 1024 * 1024;
 /// hold beyond the budget is refused, so the sender's message is not held, instead of evicting
 /// mail already held.
 pub const RELAY_INBOX_STORAGE_CAPACITY: u32 = 64 * 1024 * 1024;
+/// Byte budget of the store of the data namespace's remove sides (#920): at least the
+/// `REMOVAL_STORE_MAX_REMOVES` the charge index admits, each at most `ENTRY_TOMBSTONE_WIRE_MAX`
+/// bytes and a charge (about 9.6 MB and its per-record framing). The store is retained and
+/// evicts nothing: a remove beyond the budget is refused, never another one evicted.
+pub const DHT_REMOVAL_STORAGE_CAPACITY: u32 = 16 * 1024 * 1024;
+/// Directory of the store of the data namespace's remove sides, beside the data store.
+pub const DHT_REMOVAL_STORAGE_DIR: &str = "dht-removals";
 /// Directory of the onion entry-guard store, beside the data store.
 pub const ONION_ENTRY_GUARD_STORAGE_DIR: &str = "onion-entry-guards";
 /// Directory of the transaction replay store, beside the data store.
@@ -73,6 +82,8 @@ pub struct NodeStores {
     pub data: EntryStorage,
     /// The relay-inbox store (retained).
     pub relay: EntryStorage,
+    /// The store of the data namespace's remove sides (retained).
+    pub removals: RemovalStorage,
     /// The peer measurement store (disposable).
     pub measure: MeasureStorage,
     /// The provisional-evidence store (disposable).
@@ -108,6 +119,14 @@ impl NodeStores {
                 open_file(
                     beside_data(RELAY_INBOX_STORAGE_DIR),
                     RELAY_INBOX_STORAGE_CAPACITY,
+                    RecordAuthority::Retained,
+                )
+                .await?,
+            ),
+            removals: Box::new(
+                open_file(
+                    beside_data(DHT_REMOVAL_STORAGE_DIR),
+                    DHT_REMOVAL_STORAGE_CAPACITY,
                     RecordAuthority::Retained,
                 )
                 .await?,
@@ -172,6 +191,7 @@ mod tests {
             ONION_ENTRY_GUARD_STORAGE_DIR,
             TRANSACTION_REPLAY_STORAGE_DIR,
             RELAY_INBOX_STORAGE_DIR,
+            DHT_REMOVAL_STORAGE_DIR,
             PROVISIONAL_EVIDENCE_STORAGE_DIR,
         ] {
             assert_eq!(
@@ -214,6 +234,7 @@ mod tests {
         stores?;
         assert_eq!(dirs, [
             DATA_STORAGE_DIR,
+            DHT_REMOVAL_STORAGE_DIR,
             MEASURE_STORAGE_DIR,
             ONION_ENTRY_GUARD_STORAGE_DIR,
             PROVISIONAL_EVIDENCE_STORAGE_DIR,

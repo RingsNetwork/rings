@@ -268,6 +268,18 @@ pub enum Error {
         bound: usize,
     },
 
+    /// An owner's removal store would hold more unstable removes than a bound (#920): the
+    /// origin's share when `origin` is set, else the store's total. The write changes nothing.
+    #[error("Removal store would hold {held} removes, past its bound of {bound}")]
+    RemovalCapacityExhausted {
+        /// The origin whose share binds, or `None` for the store's total.
+        origin: Option<crate::dht::Did>,
+        /// Removes the store, or the origin, would hold.
+        held: usize,
+        /// The bound that binds.
+        bound: usize,
+    },
+
     /// Relay inbox element is not addressed to the peer the inbox is kept for
     #[error("Relay inbox element is not addressed to the peer the inbox is kept for")]
     RelayMessageNotAddressedToInbox,

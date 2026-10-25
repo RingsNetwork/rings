@@ -117,7 +117,7 @@ async fn test_a_delta_past_the_tombstone_bound_is_inadmissible() -> Result<()> {
     let forged = removes_only_carrier(did, DATA_TOMBSTONE_MAX_LEN + 1, now_ms, "forged")?;
 
     assert!(matches!(
-        node.join_storage_entry(now_ms, did, forged).await,
+        node.join_storage_entry(now_ms, did, forged, node.did).await,
         Err(Error::EntryTombstonesExceedMax { count, bound })
             if count == DATA_TOMBSTONE_MAX_LEN + 1 && bound == DATA_TOMBSTONE_MAX_LEN
     ));
@@ -136,6 +136,7 @@ async fn test_a_join_past_the_tombstone_bound_is_refused_and_changes_nothing() -
         now_ms,
         did,
         removes_only_carrier(did, DATA_TOMBSTONE_MAX_LEN, now_ms, "full")?,
+        node.did,
     )
     .await?;
     let before = stored(&node, did, now_ms).await?;
@@ -148,7 +149,8 @@ async fn test_a_join_past_the_tombstone_bound_is_refused_and_changes_nothing() -
         node.join_storage_entry(
             now_ms,
             did,
-            removes_only_carrier(did, 1, now_ms, "one-more")?
+            removes_only_carrier(did, 1, now_ms, "one-more")?,
+            node.did
         )
         .await,
         Err(Error::EntryTombstonesExceedMax { .. })
@@ -174,6 +176,7 @@ async fn test_a_remove_past_the_bound_is_refused_until_the_held_removes_are_stab
         now_ms,
         did,
         removes_only_carrier(did, DATA_TOMBSTONE_MAX_LEN, held_at_ms, "held")?,
+        node.did,
     )
     .await?;
     let before = stored(&node, did, now_ms).await?;

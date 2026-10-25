@@ -269,11 +269,13 @@ How a managed target is supervised:
 * `data_storage`: path and capacity in bytes of the DHT data store.
 * `measure_storage`: path and capacity in bytes of the peer measurement store.
 
-The daemon keeps three more stores in directories beside the data store, with fixed budgets:
+The daemon keeps four more stores in directories beside the data store, with fixed budgets:
 `transaction-replay` (the replay windows, authoritative), `relay-inbox` (the relay carriers this
-node holds or owns, retained: flushed and never evicted, 64 MiB, #1021) and `onion-entry-guards`
-(a durable cache). Back them up and remove them together with the data store; removing
-`relay-inbox` drops the mail held there.
+node holds or owns, retained: flushed and never evicted, 64 MiB, #1021), `dht-removals` (the
+removals of the data topics this node stores, retained: flushed and never evicted until they
+are collected, 16 MiB, #920) and `onion-entry-guards` (a durable cache). Back them up and remove
+them together with the data store; removing `relay-inbox` drops the mail held there, and
+removing `dht-removals` makes this node a fresh replica of every topic it stores.
 
 Files written before a field existed still load: an omitted field takes its default, and an
 omitted `gateway` section loads as no gateway at all.

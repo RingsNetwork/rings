@@ -16,6 +16,7 @@ use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
+use crate::dht::StorageKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -456,8 +457,10 @@ async fn test_found_empty_reply_repairs_misses_from_a_held_carrier_past_its_boun
 
     let repaired = node
         .dht()
-        .storage
-        .get(&placement_key.to_string())
+        .live_storage_entry(
+            StorageKey::new(EntryKind::Data, placement_key),
+            get_epoch_ms(),
+        )
         .await?
         .ok_or_else(|| Error::InvalidMessage("the missed placement is repaired".to_string()))?;
     assert!(repaired.data.is_empty());

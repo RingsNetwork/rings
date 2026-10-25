@@ -121,7 +121,10 @@ another node's read shows that an owner holds the write.
   after the dot it covers, where `σ` (3 s) bounds clock skew between nodes, and an overwrite's
   reset `H + σ` after it was issued. By then every copy of every write they shadowed has expired
   on every node, so no stale replica can bring the value back, and a topic that holds either
-  stays stored until it is collected (storage byte-budget eviction aside). There is no compaction
+  stays stored until it is collected. Tombstones live in a store of their own that never evicts
+  (#920): the data store's byte budget drops the values of a topic, never its tombstones, and
+  each sender of tombstones is charged for them, at most 1024 uncollected per sender and 65536
+  in all per node, so one writer cannot crowd out another's. There is no compaction
   operation: a reset stamped by one owner would erase every concurrent write that owner had
   not yet received.
 - **Bounds.** A topic holds at most 1024 elements (the oldest are dropped when the cap binds) and

@@ -90,17 +90,18 @@ async fn reset_storage_relay_destination(
         .await
 }
 
-/// Repair the misses a remote lookup observed for `entry`; a handler runs it, so each repair is
-/// only queued.
+/// Repair the misses a remote lookup observed for `entry`, supplied by `source`; a handler runs
+/// it, so each repair is only queued.
 async fn repair_observed_storage_misses(
     transport: Arc<SwarmTransport>,
     entry: Entry,
+    source: Did,
     redundancy: u16,
 ) -> Result<()> {
     let misses = transport.take_storage_misses(entry.did, redundancy)?;
     let repair = transport
         .dht
-        .read_repair_entry(entry, &misses, redundancy)
+        .read_repair_entry(entry, source, &misses, redundancy)
         .await?;
     run_storage_repair_transport_effects(&transport, &transport.protocol_egress(), repair).await
 }
@@ -145,7 +146,7 @@ pub(crate) async fn handle_storage_fetch_act(
             let misses = evidence.misses;
             let repair = transport
                 .dht
-                .read_repair_entry(evidence.entry, &misses, redundancy)
+                .read_repair_entry(evidence.entry, transport.dht.did, &misses, redundancy)
                 .await?;
             run_storage_repair_transport_effects(&transport, sender, repair).await?;
         }
@@ -466,16 +467,26 @@ impl HandleMsg<FoundEntry> for MessageHandler {
         )?;
         if let Some(data) = found_entry {
             cache_lookup_reply(&self.transport, msg.resource, msg.redundancy, data.clone()).await?;
-            repair_observed_storage_misses(self.transport.clone(), data.clone(), msg.redundancy)
-                .await?;
+            repair_observed_storage_misses(
+                self.transport.clone(),
+                data.clone(),
+                ctx.transaction.origin(),
+                msg.redundancy,
+            )
+            .await?;
         } else if !msg.misses.is_empty() {
             if let Some(entry) = self
                 .dht
                 .local_cache_held(msg.resource, crate::utils::get_epoch_ms())
                 .await?
             {
-                repair_observed_storage_misses(self.transport.clone(), entry, msg.redundancy)
-                    .await?;
+                repair_observed_storage_misses(
+                    self.transport.clone(),
+                    entry,
+                    ctx.transaction.origin(),
+                    msg.redundancy,
+                )
+                .await?;
             }
         }
         Ok(())

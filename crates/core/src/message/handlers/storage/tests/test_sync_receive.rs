@@ -281,6 +281,7 @@ async fn test_storage_sync_batch_refuses_a_join_past_the_tombstone_bound_without
             now,
             full_key,
             removes_only_carrier(full_key, DATA_TOMBSTONE_MAX_LEN, now, "held")?,
+            node.dht().did,
         )
         .await?;
     let held = node.dht().storage.get(&full_key.to_string()).await?;

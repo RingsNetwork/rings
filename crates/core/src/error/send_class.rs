@@ -238,6 +238,7 @@ impl Error {
             | Self::EntryDotIndexOutOfBounds { .. } | Self::EntryNotLive
             | Self::EntryLifetimeExceedsMax | Self::EntryVersionAheadOfClock
             | Self::EntryPayloadExceedsMax | Self::EntryTombstonesExceedMax { .. }
+            | Self::RemovalCapacityExhausted { .. }
             | Self::RelayMessageNotAddressedToInbox
             | Self::RelayMessageNotCustom | Self::RelayMessageUnverifiable
             | Self::RelayMessageHeldAheadOfClock | Self::RelayMessageHeldOutsideSenderProof
