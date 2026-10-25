@@ -14,9 +14,11 @@ runner = 'wasm-bindgen-test-runner'
 
 # ARMv8 AES and POLYVAL (#848). `aes` 0.8 and `polyval` 0.6 use the ARMv8 Cryptography
 # Extensions only under these cfgs; without them every aarch64 build runs the software fixslice
-# backend, about 80x slower per AEZ block than the hardware path. On Linux and macOS the
-# crates detect the extension at runtime under the cfgs and fall back to software on a CPU
-# without it, so the flags are scoped to those systems. x86_64 detects AES-NI at runtime
-# already and needs no flag. A `RUSTFLAGS` in the environment replaces these flags.
-[target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))']
+# backend, about 56x slower per AEZ block than the hardware path. Under the cfgs the crates still
+# ask `cpufeatures` at runtime: it detects the extension on Linux, Android and every Apple target
+# (macOS and iOS included), and answers false on any other aarch64 target unless the feature is
+# enabled statically, so a CPU or system without it falls back to software. The flags are
+# therefore safe on every aarch64 target, Android and iOS FFI builds included. x86_64 detects
+# AES-NI at runtime already and needs no flag. A `RUSTFLAGS` in the environment replaces these.
+[target.'cfg(target_arch = "aarch64")']
 rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]
