@@ -23,10 +23,13 @@ pub(crate) use payload::LinkControl;
 pub(crate) use payload::LinkFrame;
 pub use payload::MessagePayload;
 pub use payload::PayloadSender;
+pub use payload::PeerWireVersion;
 pub(crate) use payload::PerSlot;
 pub(crate) use payload::SlotEncoding;
 pub use payload::Transaction;
 pub(crate) use payload::WirePayload;
+pub use payload::WireVersionMismatch;
+pub use payload::WIRE_VERSION;
 
 mod admission_delegation;
 pub(crate) use admission_delegation::EdgeRelation;

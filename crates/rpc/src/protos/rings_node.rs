@@ -575,4 +575,8 @@ pub struct NodeDidRequest {}
 pub struct NodeDidResponse {
     /// Decentralized identifier of the local node.
     pub did: String,
+    /// The local node's wire version (#1104), which a node joining it over HTTP must share;
+    /// absent from a node before wire versioning.
+    #[serde(default)]
+    pub wire_version: Option<u16>,
 }
