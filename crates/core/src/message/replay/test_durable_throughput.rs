@@ -1,8 +1,9 @@
-//! Measured ceiling of replay transitions on a flushed native store (#909, #916).
+//! Measured latency and throughput of replay transitions on a flushed native store (#909, #916).
 //!
-//! Every reservation and admission writes its stream's record under the global replay lock,
-//! and an authoritative store flushes the file and the directory before the write returns, so
-//! the flush latency bounds the node-wide transition rate. This benchmark measures that bound;
+//! An authoritative store flushes before a batch of records returns, and every transition is
+//! released only once its batch is durable (the group-commit law of `commit`). One admission at
+//! a time therefore pays a whole batch write; admissions that run concurrently share batches,
+//! so the node-wide rate grows with the transitions in flight. This benchmark measures both;
 //! it is ignored by default because its figure depends on the disk, and is run with
 //!
 //! ```text
@@ -11,6 +12,9 @@
 
 use std::time::Duration;
 use std::time::Instant;
+
+use futures::StreamExt;
+use futures::TryStreamExt;
 
 use super::ReplayStorage;
 use super::StreamKey;
@@ -26,6 +30,24 @@ use crate::storage::RecordAuthority;
 
 /// Admissions measured per store.
 const ADMISSIONS: u32 = 512;
+/// Admissions in flight in the concurrent measurement: about the transitions a relay of an
+/// onion loop has outstanding across its links.
+const IN_FLIGHT: usize = 64;
+
+/// The stream of origin `origin` toward the fixed destination of the benchmark.
+fn stream(origin: u32) -> StreamKey {
+    StreamKey::new(
+        7,
+        Did::from(origin),
+        Did::from(u32::MAX),
+        MessageCategory::Application,
+    )
+}
+
+/// The digest of the benchmark transaction of origin `origin`.
+fn digest(origin: u32) -> TransactionDigest {
+    TransactionDigest::new([u8::try_from(origin % 251).unwrap_or(0); 32])
+}
 
 /// Admit the first transaction of `ADMISSIONS` streams through the production path (detached,
 /// quota-charged), one per origin so that no origin quota binds, and return each admission's
@@ -34,21 +56,46 @@ async fn admission_latencies(storage: ReplayStorage) -> Result<Vec<Duration>> {
     let replay = TransactionReplay::new_shared(storage);
     let mut latencies = Vec::new();
     for origin in 0..ADMISSIONS {
-        let key = StreamKey::new(
-            7,
-            Did::from(origin),
-            Did::from(u32::MAX),
-            MessageCategory::Application,
-        );
-        let digest = TransactionDigest::new([u8::try_from(origin % 251).unwrap_or(0); 32]);
         let started = Instant::now();
         replay
-            .admit_with_quota(key, 0, digest, MessageCategory::Application.into(), 0)
+            .admit_with_quota(
+                stream(origin),
+                0,
+                digest(origin),
+                MessageCategory::Application.into(),
+                0,
+            )
             .await?;
         latencies.push(started.elapsed());
     }
     latencies.sort();
     Ok(latencies)
+}
+
+/// Admit the first transaction of `ADMISSIONS` streams with [`IN_FLIGHT`] admissions running at
+/// once, and return the admissions per second.
+async fn concurrent_rate(storage: ReplayStorage) -> Result<f64> {
+    let replay = TransactionReplay::new_shared(storage);
+    let started = Instant::now();
+    futures::stream::iter(0..ADMISSIONS)
+        .map(|origin| {
+            let replay = std::sync::Arc::clone(&replay);
+            async move {
+                replay
+                    .admit_with_quota(
+                        stream(origin),
+                        0,
+                        digest(origin),
+                        MessageCategory::Application.into(),
+                        0,
+                    )
+                    .await
+            }
+        })
+        .buffer_unordered(IN_FLIGHT)
+        .try_collect::<Vec<_>>()
+        .await?;
+    Ok(f64::from(ADMISSIONS) / started.elapsed().as_secs_f64())
 }
 
 /// Print the throughput and latency quantiles of one store's admissions.
@@ -88,6 +135,16 @@ async fn test_durable_throughput_of_replay_admissions() -> Result<()> {
     report(
         "memory",
         &admission_latencies(Box::new(MemStorage::new())).await?,
+    );
+    let concurrent = FileStorage::new_with_cap_path_and_authority(
+        1 << 24,
+        root.join("concurrent"),
+        RecordAuthority::Authoritative,
+    )
+    .await?;
+    println!(
+        "authoritative file, {IN_FLIGHT} in flight: {:.0} admissions/s",
+        concurrent_rate(Box::new(concurrent)).await?
     );
     Ok(())
 }

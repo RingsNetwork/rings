@@ -136,9 +136,10 @@ pub enum Error {
     TransactionReplayPersistence {
         /// Persistence operation that failed.
         operation: &'static str,
-        /// Storage failure retained as the source.
+        /// Storage failure retained as the source, shared by every transition of a failed
+        /// batch (#916).
         #[source]
-        source: Box<Error>,
+        source: std::sync::Arc<Error>,
     },
 
     /// Final-destination origin-quota admission failed.

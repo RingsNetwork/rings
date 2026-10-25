@@ -132,6 +132,9 @@ web-sys = { version = "0.3.56", optional = true, features = [
 ] }
 
 # The write-through rename of the authoritative file store's durability law on Windows.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 

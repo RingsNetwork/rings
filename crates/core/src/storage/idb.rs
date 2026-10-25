@@ -577,6 +577,38 @@ where V: DeserializeOwned + Serialize + Sized
     fn record_name(&self, key: &str) -> String {
         key.to_owned()
     }
+
+    /// Every row in one read-write transaction, committed with this store's durability (one
+    /// strict commit for the whole batch): all or nothing. Every value is serialized and the
+    /// budget is checked for all the new keys before any row is queued, so a refusal queues no
+    /// write.
+    async fn put_batch(&self, records: &[(String, V)]) -> Result<()> {
+        let mut rows = std::collections::BTreeMap::new();
+        for (key, value) in records {
+            rows.insert(key.to_owned(), js_value::serialize(value)?);
+        }
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let scope = self.scope(IdbTransactionMode::Readwrite)?;
+        let mut incoming = 0_u32;
+        for key in rows.keys() {
+            let existing = scope.row(key).await?;
+            if existing.is_undefined() || existing.is_null() {
+                incoming = incoming.saturating_add(1);
+            }
+        }
+        if incoming > 0 {
+            let count = scope.count().await?;
+            if count.saturating_add(incoming) > self.cap {
+                self.make_room(&scope, count, incoming).await?;
+            }
+        }
+        for (key, data) in rows {
+            scope.put_stamped(key, data).await?;
+        }
+        scope.done().await
+    }
 }
 
 /// Decode one row of a scan as a record (pure). An undecodable row is named by its primary

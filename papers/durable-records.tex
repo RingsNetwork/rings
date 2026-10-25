@@ -61,7 +61,7 @@ Manuscript created October 23, 2026.  This document specifies the durability mod
 local stores of Rings before 1.0 (\texttt{rings-core}, modules \texttt{storage},
 \texttt{message::replay} and \texttt{swarm::inbox}; \texttt{rings-node}, module
 \texttt{onion::entry\_guard}).  It is the law for issues \issue{911}, \issue{912},
-\issue{915}, \issue{923} and \issue{936} of \texttt{RingsNetwork/rings}.}}
+\issue{915}, \issue{916}, \issue{923} and \issue{936} of \texttt{RingsNetwork/rings}.}}
 \title{\huge Durable Records:\\
 One Presence and Survival Law\\
 for the Local Stores of a Rings Node}
@@ -685,6 +685,103 @@ So below the window the drain refuses as the live path does, which is the criter
 payload arriving live).  Delivering such mail needs the sender to put it on a stream that
 live traffic does not advance, a protocol change outside this law.
 
+\section{Group commit}\label{sec:group}
+
+One lock serializes every replay transition, and under Law~\ref{law:writeorder} or
+Law~\ref{law:strict} each one paid a flush: about $55$ transitions per second on the native
+store (macOS) and about $65$ in a browser (\issue{916}).  Group commit keeps the lock and
+the flush, and moves the wait from the lock to the release.
+
+\begin{definition}[Transition, batch]\label{def:batch}
+Transitions $t_1<t_2<\cdots$ run in lock order on the \emph{speculative} tables $\hat T$:
+$t_i(\hat T_{i-1})=(\hat T_i,\,w_i,\,r_i)$ with an optional record write
+$w_i=(n_i,v_i)$, a result $r_i$, and an undo entry $u_i$ with $u_i(\hat T_i)=\hat T_{i-1}$.
+Batches $B_1,B_2,\ldots$ partition the transitions into intervals of lock order.  Batch
+$B_j$ is written by one $\mathrm{put}^{*}(W_j)$, where $W_j(n)$ is the last $v_i$ of $B_j$
+written under $n$; the batches are written one at a time, in order, and $B_{j+1}$ gathers
+every transition that runs while $B_j$ is written.  $T$ denotes $\hat T$ at the end of the
+last batch whose $\mathrm{put}^{*}$ returned $\Ok$.
+\end{definition}
+
+\begin{law}[Group commit]\label{law:group}
+\begin{enumerate}[leftmargin=1.5em]
+\item \emph{Release.} $r_i$ is returned only after $\mathrm{put}^{*}(W_{j(i)})=\Ok$,
+whatever $r_i$ is (a refusal, or a transition that writes nothing): a result never rests on
+a state that is not durable.
+\item \emph{Atomicity per record.} $\mathrm{put}^{*}$ discharges A per name:
+$\forall\sigma'\in R_P.\ \forall n\in\dom W_j.\ \sigma'(n)\in\{\sigma(n),W_j(n)\}$, with no
+order promised across names.
+\item \emph{Order.} For every name, the values $\mathrm{put}^{*}$ makes durable follow lock
+order: batches are written in order, one at a time, and $W_j(n)$ is the last write to $n$
+in $B_j$.
+\item \emph{Fail closed.} $\mathrm{put}^{*}(W_j)=\Err$ $\Rightarrow$ every pending
+transition (those of $B_j$ and of every later batch, all computed on $\hat T$ past $T$)
+returns $\Err$, and $\hat T\leftarrow u_{\mathrm{first}}\circ\cdots\circ
+u_{\mathrm{last}}(\hat T)=T$: no member is adopted.  A failed $\mathrm{put}^{*}$ may have
+landed some of $W_j$ (atomicity is per record), so memory $\sqsubseteq$ disk, and every
+member durable but undone is a lost release (Prop.~\ref{prop:lostrelease}).
+\item \emph{Latency.} With $\phi$ a bound on one $\mathrm{put}^{*}$, a transition is
+released at most $2\phi$ after it ran: the batch in flight, then its own.
+\item \emph{Size.} $|\dom W_j|$ is at most the store's record bound, and its bytes at most
+the store's byte bound, since $W_j$ holds one record per name; $|B_j|$ is the number of
+transitions in flight, each held by its caller, as each was queued on the lock before.
+\end{enumerate}
+\end{law}
+
+\textbf{Native $\mathrm{put}^{*}$.}
+\begin{align*}
+&\forall n\in\dom W:\ \mathrm{write}(n.\mathtt{tmp});\ \mathrm{push}(n.\mathtt{tmp});\quad
+\mathrm{barrier};\\
+&\forall n:\ \mathrm{rename}(n.\mathtt{tmp},n);\quad \mathrm{sync}_{\mathrm{dir}};\\
+&[\,\forall n\notin P:\ \mathrm{create}(n.\mathtt{p});\quad
+\mathrm{sync}_{\mathrm{dir}}\,]\quad\text{(iff some $n\notin P$)}
+\end{align*}
+where $\mathrm{push}$ moves a file's data to the device and $\mathrm{barrier}$ makes every
+pushed byte durable.  On Apple targets $\mathrm{push}=\mathtt{fsync}$ and
+$\mathrm{barrier}=\mathtt{F\_FULLFSYNC}$ once, which flushes the whole drive
+cache~\cite{AppleFsync}; elsewhere $\mathrm{push}=\mathtt{fsync}$, already durable, and
+the barrier is empty.  A batch therefore pays two full flushes (three when it creates a
+marker), as one $\mathrm{put}$ did.  A rename is flushed only after the barrier, so a name
+never holds a torn record, and a marker is created only after its rename is flushed, so
+Invariant~\ref{inv:marker} holds: A and W per name, as Law~\ref{law:writeorder}.  A store
+that refuses (Law~\ref{law:refuse}) checks the whole batch against its budget before its
+first write.
+
+\textbf{IndexedDB $\mathrm{put}^{*}$.} One read-write transaction under
+Law~\ref{law:strict} holding every put of $W$, after one budget check: all or nothing,
+which is stronger than A per name.
+
+\begin{proposition}[A lost release]\label{prop:lostrelease}
+A member whose record landed and that was never released (a crash after some records of
+$W_j$ landed and before $B_j$ was released, or a failed $\mathrm{put}^{*}$ that landed it)
+is a transition that committed and whose caller dropped the result: an admission is in
+$\W_s$ and not dispatched (its retransmission is a replay, and the message is lost, as for
+any drop after admission); a lease extension covers sequences nobody was issued, so
+$\mathit{issued}\le\hat L\le D$ holds with $D$ the last write; a custody entry names a
+delivery still in the carrier, which the next pass requeues or the restriction drops, and a
+landed release retires early only what the application already took (the duplicate window
+of Law~\ref{law:custody}).
+\end{proposition}
+\begin{proof}
+By atomicity per record each name holds its value before $B_j$ or $W_j(n)$, and $W_j(n)$
+is $\hat T$ restricted to $n$ after the last member that wrote $n$.  No member was
+released (Release), so no caller acted on its result.
+\end{proof}
+
+\begin{corollary}[Leases]\label{cor:grouplease}
+The lease invariant of \texttt{message::replay::lease} becomes
+$\mathrm{returned}\le D$: a reservation is released only after the batch holding its own
+or an earlier lease extension is durable, while the speculative lease $\hat L$ may exceed
+$D$ until then.  A failed batch undoes $(\mathit{issued},\hat L)$ of members none of which
+was returned.
+\end{corollary}
+
+\begin{corollary}[Custody]\label{cor:groupcustody}
+$\W_s$ and $\K_s$ stay one record, and a batch writes one value per record, so a crash
+still cannot separate an admission from its custody entry, nor a release from its effect:
+Law~\ref{law:custody} holds unchanged.
+\end{corollary}
+
 \section{Claimed durability}\label{sec:claimed}
 
 A store at $(\Durable^{\circ},m)$ satisfies Law~\ref{law:admissible} read with the claim,
@@ -1008,6 +1105,7 @@ survival, browser & strict commit (Law~\ref{law:strict})\\
 presence of custody & $\K_s$ in the receiver record (Law~\ref{law:custody})\\
 own state, ephemeral & reset per session (Law~\ref{law:ownclaim})\\
 custody, browser & $r$-member chain (Laws~\ref{law:redundant}--\ref{law:eventrepair})\\
+throughput, durable & group commit (Law~\ref{law:group})\\
 \bottomrule
 \end{tabular}
 \end{center}

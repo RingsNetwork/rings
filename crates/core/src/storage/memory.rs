@@ -149,6 +149,15 @@ where V: Clone + Send + Sync
     fn record_name(&self, key: &str) -> String {
         key.to_owned()
     }
+
+    /// Every pair in order under one write lock, so the batch is atomic as a whole.
+    async fn put_batch(&self, records: &[(String, V)]) -> Result<()> {
+        let mut table = self.write()?;
+        for (key, value) in records {
+            table.put(key.to_owned(), value.clone());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]

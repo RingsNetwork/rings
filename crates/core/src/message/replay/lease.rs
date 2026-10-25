@@ -3,8 +3,8 @@
 //!
 //! A sender stream's allocator is a pair `(issued, leased)` in memory, and its record holds one
 //! durable bound `D`. [`allocate`] is the pure transition; the reservation transition of
-//! `TransactionReplay` persists the lease an allocation extends to before it adopts the
-//! allocation or returns its range:
+//! `TransactionReplay` stages the lease an allocation extends to into its batch, and returns
+//! the range only once that batch is durable (the release law of `commit`, #916):
 //!
 //! ```text
 //! allocate((issued, leased), n) =
@@ -20,17 +20,20 @@
 //! returned for the stream. At every point where the process may stop, `I ≤ D`; a restarted
 //! allocator is `restore(D)`, so its first sequence is `D + 1 > I`, and no sequence is issued
 //! twice, whatever the crash point. Proof sketch, by induction over transitions, with two
-//! invariants:
+//! invariants over the allocator the released transitions leave (the durable prefix; later
+//! transitions run on a speculative allocator that a failed batch undoes, and return nothing
+//! before their batch is durable):
 //!
 //! - *(allocator)* `issued ≤ leased`: an in-lease allocation sets `issued := last ≤ leased`;
 //!   an extending one sets `issued := last ≤ L = leased`.
-//! - *(durability)* `leased ≤ D`: memory adopts `L` only after the write `D := L` succeeded,
-//!   and every write stores `L ≥ last > leased`, so no write, even a failed one that still
-//!   lands, lowers `D` below `leased`. A record write is atomic (each store leaves the record
-//!   whole at its previous or its new value), so `D` is always one of the written values.
+//! - *(durability)* `leased ≤ D`: a reservation is released only once the batch holding its
+//!   lease extension, or an earlier one, is durable, and every write stores `L ≥ last >
+//!   leased`, so no write, even a failed one that still lands, lowers `D` below `leased`. A
+//!   record write is atomic (each store leaves the record whole at its previous or its new
+//!   value), so `D` is always one of the written values.
 //!
-//! So `I = issued ≤ leased ≤ D` in a live run. A crash restores `(D, D)`, which keeps both
-//! invariants and `I ≤ D`. Each crash point in turn:
+//! So `I = issued ≤ leased ≤ D` over what was released. A crash restores `(D, D)`, which keeps
+//! both invariants and `I ≤ D`. Each crash point in turn:
 //!
 //! | Crash point                         | `D` at the restart | Restart issues from |
 //! |-------------------------------------|--------------------|---------------------|
@@ -40,8 +43,9 @@
 //! | at the block boundary (`I = D`)     | `D = I`            | `I + 1`             |
 //!
 //! Before the write, no sequence of the allocation was returned; after it, the range was
-//! durably covered before it was returned. A store lost whole is the documented reset of the
-//! module documentation, which no lease scheme can outlive.
+//! durably covered before it was returned. A crash after the batch's write and before its
+//! release is the second row: the range was covered and never returned. A store lost whole is
+//! the documented reset of the module documentation, which no lease scheme can outlive.
 //!
 //! **Law (a gap is harmless).** A restart skips the sequences `I + 1 ..= D` that the old run
 //! leased but never issued. A write stores `L = max(last, first + N − 1)`, with `first` the
