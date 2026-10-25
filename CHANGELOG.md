@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- Every frame names its wire version (#1104), so a node of another release is refused by
+  name, not by a codec error. A frame now opens with `RINGS\0` and the wire version, a
+  big-endian `u16`: the one part of the wire every version decodes alike. A frame of another
+  version is refused before its body is decoded, with `Error::IncompatibleWireVersion` naming
+  both versions. Before, a 0.34 node joining a 0.36 seed failed with "Answer offer info failed:
+  Codec deserialization error", and the other way round with "Decode error". The handshake
+  strings of `createOffer`, `answerOffer` and `acceptAnswer` and every link frame carry the
+  header, so both join paths do. A frame from before wire versioning, which opened with
+  `RINGS-PAYLOAD\0` or `RINGS-LINK\0`, is named as such. Over JSON-RPC the refusal is error
+  `210`, with data `{"ours": n, "theirs": m}`, where `theirs` is null for a node before wire
+  versioning. `nodeDid` returns `wire_version`, and `connectPeerViaHttp` refuses an endpoint of
+  another wire version, or of none, before it creates an offer. The native API sets the
+  `x-node-version` header, the crate version, on every response. The wire version starts at
+  `1` (`rings_core::message::WIRE_VERSION`).
+  - **Bump rule.** `WIRE_VERSION` goes up by exactly one with every change that a node of the
+    previous wire version would reject or misread: a frame, a message, a signature domain, or
+    a handshake rule. A change no peer can observe never bumps it, and the crate version moves
+    independently. Each bump is a total cutover: nothing decodes another version's frames,
+    and nothing is negotiated.
+  - **Library API.** `WIRE_VERSION`, `PeerWireVersion`, `WireVersionMismatch`,
+    `Error::IncompatibleWireVersion` (core and node), `INCOMPATIBLE_WIRE_VERSION_CODE` and
+    `NodeDidResponse::wire_version` are new. `Error::UnmarkedFrame` now also covers a header of
+    this version with an unknown kind.
+  - **Upgrade consequence.** Breaking on the wire: a node of this release and a node before it
+    cannot connect. The earlier one fails with its old codec error; this one names the earlier
+    one as a node before wire versioning. Seeds, browsers and embedders move together.
+  - **Operator step.** None beyond upgrading every node that must reach another.
+
 - A node can be closed before it is dropped (#1098). `Swarm::close`, `Processor::close` and
   `Provider::close` disconnect every peer, admitted or still handshaking, awaiting each physical
   close, and refuse every later connection with the new `Error::SwarmClosed`.

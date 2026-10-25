@@ -19,6 +19,7 @@ use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
+use rings_core::message::WIRE_VERSION;
 use rings_rpc::protos::rings_node::*;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 
@@ -143,8 +144,8 @@ impl HandleRpc<AnswerOfferRequest, AnswerOfferResponse> for Processor {
         }
         let encoded: Encoded = <Encoded as From<String>>::from(req.offer);
 
-        let offer_payload =
-            MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
+        let offer_payload = MessagePayload::from_encoded(&encoded)
+            .map_err(|error| ServerError::from_core_or(error, |_| ServerError::DecodeError))?;
 
         // The reply is the answer: the caller's offer, carried out of band, prevails over this
         // node's own sent overlay offer to the caller (`Law (Tie-break)`), so a caller without
@@ -177,8 +178,8 @@ impl HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse> for Processor {
         }
         let encoded = Encoded::from(req.answer);
 
-        let answer_payload =
-            MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
+        let answer_payload = MessagePayload::from_encoded(&encoded)
+            .map_err(|error| ServerError::from_core_or(error, |_| ServerError::DecodeError))?;
         answer_payload.transaction.signer();
 
         self.swarm
@@ -387,6 +388,7 @@ impl HandleRpc<NodeDidRequest, NodeDidResponse> for Processor {
         let did = self.did();
         Ok(NodeDidResponse {
             did: did.to_string(),
+            wire_version: Some(WIRE_VERSION),
         })
     }
 }
