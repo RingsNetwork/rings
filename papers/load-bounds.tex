@@ -147,19 +147,24 @@ is never allowed for an honest frame or message at a capacity bound.
 Every table $T$ has a per-edge floor $f_T$, a pool $\Pool_T$ and a local share $L_T$, with
 node-wide bound
 \[
-B_T=\Rg\, f_T+\Pool_T+L_T .
+B_T(s)=\Rg(s)\, f_T+\Pool_T+L_T,\qquad \Rg(s)=2(F+s+1),
 \]
-Let $\use_e$ be the number of items introduced by edge $e$.  A transition that adds an item
-introduced by $\pi$ is admitted iff:
+so a deployment that raises the successor count $s$ (\issue{774}, \issue{777}) raises the floors
+it reserves, $2f_T$ per successor, and nothing else.  Let $\use_e$ be the number of items
+introduced by edge $e$, and $o_e=\max(0,\use_e-f_T)$ its pool items.  The \emph{claimants} are
+the current edges with $o_e>0$ or a pending item over their floor, and the class $\delta$ of
+departed edges, whose items all count as $o_\delta$; let $n\ge1$ be their number.  A transition
+that adds an item introduced by $\pi$ is admitted iff:
 \begin{itemize}[leftmargin=1.2em]
 \item $\pi=e$ is current and $\use_e<f_T$ (the edge's floor); or
-\item the pool has room, $\sum_{e\ \text{current}}\max(0,\use_e-f_T)+\use_{\text{departed}}
-<\Pool_T$; or
+\item the pool has room, $\sum o<\Pool_T$, and the claimant is within its fair claim,
+$o_\pi<\lceil\Pool_T/n\rceil$; or
 \item $\pi=\lambda$ and $\use_\lambda<L_T$.
 \end{itemize}
 Otherwise it is refused or, where the law says so, it waits.  When an edge departs, its items
-stay in $T$ and are counted against the pool until they leave by $T$'s own law.  No item is ever
-dropped to make room.
+stay in $T$, in the departed class, until they leave by $T$'s own law.  No item is ever dropped
+to make room: a claimant above its fair claim after $n$ grew keeps what it holds and gains
+nothing until it falls below.
 \end{law}
 
 \begin{theorem}[Isolation]\label{theorem:isolation}
@@ -168,23 +173,40 @@ Under Law~\ref{law:edge}:
 \item $|T|\le B_T$ always;
 \item a transition introduced by a current edge $e$ with $\use_e<f_T$ is never refused, however
 many origins, edges or departed edges any other party controls;
+\item an over-floor edge is refused only once it holds its fair claim or the pool is full, and
+it is guaranteed $f_T+\lceil\Pool_T/n\rceil\ge f_T+\lceil\Pool_T/(\Rg+1)\rceil$ items as the
+other claimants' items expire, with $n-1$ of them;
 \item a party holding $k$ current edges, and any number of departed ones, occupies at most
-$k f_T+\Pool_T$ items.
+$k f_T+\lceil(k+1)\Pool_T/n\rceil$ items once its excess has expired, and never more than
+$kf_T+\Pool_T$.
 \end{enumerate}
 \end{theorem}
 \begin{proof}
 (1)~At most $\Rg$ edges are current, each holds at most $f_T$ items within its floor, the pool
 holds at most $\Pool_T$, and the local principal holds at most $L_T$.
 (2)~The floor test reads $\use_e$ alone, and only $e$'s own transitions change it.
-(3)~Items within a floor belong to a current edge, and every other item is in the pool.
+(3)~A claimant below $\lceil\Pool_T/n\rceil$ is refused only with a full pool, which then holds
+some claimant above its claim; that claimant gains nothing and its items leave by $T$'s law, so
+the pool drains to the fair claims, with $n\le\Rg+1$.
+(4)~A party's claimants are its $k$ edges and at most the departed class.
 \end{proof}
 
 Accounting to the origin, as the removal store did~\cite{RemovalStability} and the replay
-table's quota does, fails part~(3).  An origin costs nothing, so a party controls unboundedly
+table's quota does, fails part~(4).  An origin costs nothing, so a party controls unboundedly
 many, and the only bound left is the node-wide total.  The edge is the unit that is both
 authenticated and bounded in number.  The quota per origin stays: it is a rate within an edge,
 not a capacity.  Edge identities are free too, but replacing an edge moves its items to the
-pool, which Theorem~\ref{theorem:isolation} already counts.
+pool, which Theorem~\ref{theorem:isolation} already counts: rotating edges fills the departed
+class, which is one claimant.
+
+\textbf{Who overflows honestly.}  In an overlay of mostly browser nodes, the honest overflow is
+on relay edges: a browser reached through a seed sees every origin the seed forwards to it on
+that one edge.  Without the fair claim, a party with $k$ edges could take the whole pool and
+refuse every honest relay edge for the table's horizon.  With it, a relay edge keeps
+$\lceil\Pool_T/n\rceil$ however many edges the party holds.  The alternative of charging only
+streams whose origin is the delivering edge, and leaving relayed streams to the origin quota,
+reopens \issue{907}: a relayed final-destination stream is exactly the stream a free identity
+creates, and the quota is per origin.
 
 \section{Replay streams (\issue{907})}\label{sec:replay}
 
@@ -192,19 +214,20 @@ A receiver stream $s$ admits a transaction only while its proof is live,
 $t<ts+ttl$, with $ttl\le\mathtt{MAX\_TTL\_MS}=H$ and $ts\le t_{\mathrm{admit}}+\sigma$.
 
 \begin{definition}[Horizon]\label{def:streamhorizon}
-Let $a_s$ be the receiver's clock at the last admission of $s$.  The stream is \emph{spent} at
-$t$ iff $t\ge a_s+H+\sigma$.
+Let $x_s=\max(ts+ttl)$ over the transactions $s$ admitted, each with $ts\le t_{\mathrm{admit}}
++\sigma$ and $ttl\le H$.  The stream is \emph{spent} at $t$ iff $t\ge x_s+\sigma$.  So a stream
+of default-lifetime traffic is spent about $10$\,min after its last transaction, and none later
+than $H+2\sigma$.
 \end{definition}
 
 \begin{lemma}[Eviction is sound]\label{lem:evict}
 A spent stream can be forgotten without reopening replay.  Every transaction it ever admitted is
-then expired at every honest clock, so a stream opened afresh at $\mathsf{First}$ refuses them as
-dead proofs.
+then expired at this node's clock, even one stepped back by $\sigma$, so a stream opened afresh
+at $\mathsf{First}$ refuses them as dead proofs.
 \end{lemma}
 \begin{proof}
-Every admitted transaction has $ts\le a_s+\sigma$ and $ttl\le H$, so it expired by
-$a_s+H+\sigma\le t$.  Liveness is checked before replay, so it is refused at the proof, whatever
-the window holds.
+Every admitted transaction expires by $x_s\le t-\sigma$.  Liveness is checked before replay, so
+it is refused at the proof, whatever the window holds.
 \end{proof}
 
 \begin{law}[Stream admission]\label{law:streams}
@@ -214,32 +237,33 @@ The receiver table is a table under Law~\ref{law:edge}:
 relay-inbox delivery by $\lambda$.
 \item A stream leaves the table only when it is spent, by Lemma~\ref{lem:evict}.  A spent stream
 is retired lazily, when a new stream needs its slot.
-\item The record of a stream stores $(\pi(s), a_s)$, so a restart recovers the charges.
+\item The record of a stream stores $(\pi(s), x_s)$, so a restart recovers the charges.
 \end{itemize}
 Parameters:
 \begin{itemize}[leftmargin=1.2em]
 \item $f=32$ new streams per edge, $\Pool=4096$ and $L=1024$, so
-$B=328\cdot32+4096+1024=15\,616\le16\,384$, today's capacity;
+$B(3)=328\cdot32+4096+1024=15\,616\le16\,384$, today's capacity, and $B(s)=B(3)+64(s-3)$;
 \item the per-origin quota is unchanged.
 \end{itemize}
 A new stream past its bound is refused with \texttt{TransactionReplayStreamCapacityExceeded}, as
-today.  The refusal now lasts until a slot is spent, at most $H+\sigma$ (100\,min), and it
-reaches only the edge past its own floor.
+today.  The refusal now lasts until a slot is spent, at most $H+2\sigma$ (100\,min, about
+10\,min for default-lifetime traffic), and it reaches only an edge past its floor and its fair
+claim.
 \end{law}
 
 \begin{proposition}[No permanent lockout]\label{prop:nolockout}
 A party with $k$ edges and any number of origins can refuse new streams only through those $k$
 edges, and only once the pool is full.  For every other current edge, a new origin is refused
-only once that edge has itself introduced $f$ unspent streams.  Every refusal ends within
-$H+\sigma$ of the last admission on the streams that fill the bound.
+once that edge has itself introduced $f+\lceil\Pool/n\rceil$ unspent streams.  Every refusal
+ends within $H+2\sigma$ of the last admission on the streams that fill the bound.
 \end{proposition}
 \begin{proof}
 Theorem~\ref{theorem:isolation}, and Lemma~\ref{lem:evict} for the end of a refusal.
 \end{proof}
 
-A relay or seed that forwards many distinct origins can fill its own floor legitimately.  Its
-overflow then competes in the pool; the honest cost is a refusal for at most $H+\sigma$ on that
-edge alone.  The sender table holds this node's own streams, so it is local.
+A relay or seed that forwards many distinct origins can fill its own floor legitimately; its
+overflow then holds a fair claim of the pool, $\lceil\Pool/n\rceil\ge13$ at worst and $4096$
+alone, and past it the honest cost is a refusal on that edge until its streams are spent.  The sender table holds this node's own streams, so it is local.
 
 \section{The removal store, re-keyed}\label{sec:removal}
 
@@ -252,7 +276,7 @@ writes and repairs to $\lambda$;
 floor is the same.
 \end{itemize}
 Parameters: $f=128$ removes per edge, $\Pool=16\,384$ and $L=7\,168$, so
-$B=328\cdot128+16\,384+7\,168=65\,536$, today's total.  Theorem~\ref{theorem:isolation} then closes
+$B(3)=328\cdot128+16\,384+7\,168=65\,536$, today's total, and $B(s)=B(3)+256(s-3)$.  Theorem~\ref{theorem:isolation} then closes
 the Sybil residual that \issue{907} was to close: one mechanism serves both tables.
 
 \section{Received frames (\issue{934})}\label{sec:frames}
@@ -276,14 +300,15 @@ $A$.  After it, the liability is $\max(c,L')-R$.
 
 \begin{law}[Hard frame bound]\label{law:frames}
 Every lane has a floor $g_\ell$: $g_{\mathrm{prio}}=2$ for the priority lane (control, and the
-reclaim and demand frames), and $g_\ell=0$ for the data lanes.  A fresh generation grants only
-the floors.
+reclaim and demand frames), and $g_\ell=1$ for each of the three data lanes, so the first frame
+of a burst on any lane never waits a round trip.  A fresh generation grants only the floors.
 \begin{itemize}[leftmargin=1.2em]
 \item A data lane with queued frames and no credit sends a one-frame $\mathsf{Wanted}(\ell)$ on
-the priority lane.
+the priority lane; a receiver that admits a lane's floor frame also grants it pooled credit at
+once, so a burst's second frame waits at most the round trip its first frame already took.
 \item The receiver grants a lane credit beyond its floor only from the node's frame pool:
 \[
-\textstyle\sum\liab\le B_F=\Rg\, g_{\mathrm{prio}}+\Pool_F .
+\textstyle\sum\liab\le B_F(s)=\Rg(s)\,(g_{\mathrm{prio}}+3g_{\mathrm{data}})+\Pool_F .
 \]
 \item Demands are served first come, first served.
 \item A lane that received no frame for $T_{\mathrm{idle}}$ while holding pooled credit is shrunk
@@ -293,9 +318,12 @@ Parameters:
 \begin{itemize}[leftmargin=1.2em]
 \item $\Pool_F=256$ frames (16\,MiB, the soft limit of today);
 \item $T_{\mathrm{idle}}=$ two observed round trips;
-\item $B_F=328\cdot2+256=912$ frames, 57\,MiB.
+\item $B_F(3)=328\cdot5+256=1\,896$ frames, 118.5\,MiB, and $B_F(s)=B_F(3)+10(s-3)$ frames.
 \end{itemize}
-This is independent of how many connections are open.
+This is independent of how many connections are open.  Data-lane floors of $0$ would lower it to
+57\,MiB, at the cost of one round trip before the first frame on any idle lane: on an onion loop
+(\issue{843}) that is up to one round trip per hop whose lane went idle, on circuit setup and on
+the first cell after a pause.  We keep the floor at $1$, and the onion data plane pays nothing.
 \end{law}
 
 \begin{proposition}[Frames]\label{prop:frames}
@@ -308,7 +336,7 @@ it;
 \item a lane with queued frames is never blocked forever while the receiver keeps consuming
 (progress);
 \item an idle lane holds at most its floor after $T_{\mathrm{idle}}$ plus one round trip, so it
-starves no active lane;
+starves no active lane, and its first frame after the pause is sent at once;
 \item control traffic never waits for the pool.
 \end{enumerate}
 \end{proposition}
@@ -412,11 +440,11 @@ widest control message.
 \toprule
 Table & Bound & At the bound\\
 \midrule
-frames held & node $B_F$; lane floor & sender waits for credit (backpressure)\\
+frames held & node $B_F(s)$; lane floor & sender waits for credit (backpressure)\\
 mailbox bytes & edge budget, lane share, pool & arrival waits (backpressure)\\
 reassembly & inside the mailbox reservation & first chunk waits (backpressure)\\
-replay streams & $\Rg f+\Pool+L$ by edge & new stream refused, $\le H+\sigma$\\
-removal store & $\Rg f+\Pool+L$ by edge & write refused, unacked\\
+replay streams & $\Rg(s) f+\Pool+L$ by edge, fair pool & new stream refused, $\le H+2\sigma$\\
+removal store & $\Rg(s) f+\Pool+L$ by edge, fair pool & write refused, unacked\\
 origin & rate quota within its edge & refused for the rate window\\
 application inbox & 64\,MiB & dropped, counted (by design)\\
 \bottomrule
