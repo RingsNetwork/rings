@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.37.0
 
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
   Window by classification). A transaction is link-local when it is Application traffic, it
