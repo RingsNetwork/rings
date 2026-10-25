@@ -102,6 +102,7 @@ pub use crate::swarm::storage_api::ChordStorageInterfaceCacheChecker;
 pub use crate::swarm::storage_api::ScopedStorage;
 
 mod protocols;
+pub(crate) use protocols::verify_message_under;
 pub use protocols::DomainTag;
 pub use protocols::HopBudget;
 pub use protocols::MessageRelay;

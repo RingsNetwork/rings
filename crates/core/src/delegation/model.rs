@@ -17,6 +17,20 @@ pub(super) fn pack_delegation(delegatee_did: Did, ts_ms: u128, ttl_ms: u64) -> S
     format!("{delegatee_did}\n{ts_ms}\n{ttl_ms}")
 }
 
+/// How a verification treats a delegation's delegator authorization: the delegator's signature
+/// over the delegation, the costly part of verifying it (an ECDSA public-key recovery for a
+/// secp256k1 delegator).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DelegatorAuthorization {
+    /// Verify the delegator's signature.
+    Verify,
+    /// The delegator's signature over this exact delegation was verified earlier: a delegation a
+    /// link resolved from its lessor table (#1089). Only its expiry and the delegatee's
+    /// signature remain to check. Crate-private, so that it comes only from
+    /// `SlotEncoding::delegator_authorization`.
+    Established,
+}
+
 /// A serializable authorization proof signed by a delegator for a delegatee key.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct Delegation {
@@ -103,7 +117,30 @@ impl Delegation {
     /// Verify a message signed by the delegatee key at `at_ms`: the delegation must
     /// have been live then, whatever it is now.
     pub fn verify_at(&self, msg: &[u8], sig: impl AsRef<[u8]>, at_ms: u128) -> Result<()> {
-        self.verify_delegator_authorization_at(at_ms)?;
+        self.verify_under(msg, sig, at_ms, DelegatorAuthorization::Verify)
+    }
+
+    /// Verify a message signed by the delegatee key at `at_ms` under `authorization`: the
+    /// delegation must have been live then, and its delegator's signature is verified unless
+    /// `authorization` is [`DelegatorAuthorization::Established`].
+    ///
+    /// Law: `verify_under(m, s, t, Established) = verify_at(m, s, t)` for every delegation whose
+    /// delegator signature verifies; the expiry and the delegatee's signature are checked under
+    /// both.
+    pub(crate) fn verify_under(
+        &self,
+        msg: &[u8],
+        sig: impl AsRef<[u8]>,
+        at_ms: u128,
+        authorization: DelegatorAuthorization,
+    ) -> Result<()> {
+        match authorization {
+            DelegatorAuthorization::Verify => self.verify_delegator_authorization_at(at_ms)?,
+            DelegatorAuthorization::Established if self.is_expired_at(at_ms) => {
+                return Err(Error::DelegationExpired);
+            }
+            DelegatorAuthorization::Established => {}
+        }
         if !signers::secp256k1::verify(msg, &self.delegatee_did, sig) {
             return Err(Error::VerifySignatureFailed);
         }

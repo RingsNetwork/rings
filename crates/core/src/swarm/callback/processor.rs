@@ -13,6 +13,7 @@ use super::InboundProcessor;
 use super::LogicalInbound;
 use super::PreparedInboundFrame;
 use crate::chunk::MessageReassembler;
+use crate::delegation::DelegatorAuthorization;
 use crate::dht::Did;
 use crate::measure::Authentication;
 use crate::message::EdgeRelation;
@@ -21,6 +22,7 @@ use crate::message::Message;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::message::PerSlot;
 use crate::message::ReplayWindow;
 use crate::swarm::session_link::DelegationLessor;
 use crate::swarm::transport::PendingConnectionAttempt;
@@ -300,8 +302,9 @@ pub(super) fn prepare_resolved_frame(
     peer: Option<Did>,
     payload: MessagePayload,
     wire_bytes: usize,
+    authorization: PerSlot<DelegatorAuthorization>,
 ) -> crate::error::Result<PreparedInboundFrame> {
-    if !payload.verify_transaction_and_payload(network_id) {
+    if !payload.verify_transaction_and_payload_under(network_id, authorization) {
         log_inbound_verification_failure(peer, &payload, wire_bytes);
         return Err(crate::error::Error::InvalidMessage(
             "message verification failed or message expired".to_string(),
@@ -329,5 +332,12 @@ pub(crate) fn prepare_transport_frame_lane_for_test(
     bytes: &[u8],
 ) -> crate::error::Result<InboundLane> {
     let payload = MessagePayload::from_wire(bytes)?;
-    prepare_resolved_frame(network_id, None, payload, bytes.len()).map(|prepared| prepared.lane)
+    prepare_resolved_frame(
+        network_id,
+        None,
+        payload,
+        bytes.len(),
+        PerSlot::full_verification(),
+    )
+    .map(|prepared| prepared.lane)
 }

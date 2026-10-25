@@ -231,7 +231,11 @@ route.
   whose reference misses is dropped uncharged, never held, so a lane's frames reach admission
   in arrival order (#908). An origin delegation that expired in flight is not charged to the
   hop that carried it, and only when the rest of the frame verifies. An unrelated party
-  cannot populate a link's tables. [Details](docs/src/advanced-topic/delegation-references.md).
+  cannot populate a link's tables. A slot that resolves by reference is verified without its
+  delegator's signature: it resolves only against the receiver's lessor table, whose every entry
+  was leased from a frame that verified in full, so only its expiry and the delegatee's signature
+  remain to check (#1089). An inline slot is verified in full.
+  [Details](docs/src/advanced-topic/delegation-references.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.
 - **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures

@@ -37,6 +37,7 @@ use super::MessagePayload;
 use super::Transaction;
 use crate::delegation::Delegation;
 use crate::delegation::DelegationDigest;
+use crate::delegation::DelegatorAuthorization;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
@@ -86,6 +87,17 @@ impl<T> PerSlot<T> {
     }
 }
 
+impl PerSlot<DelegatorAuthorization> {
+    /// Both slots verified in full: a frame that arrived on no link, whose delegations no lessor
+    /// table has seen.
+    pub(crate) const fn full_verification() -> Self {
+        Self {
+            origin: DelegatorAuthorization::Verify,
+            hop: DelegatorAuthorization::Verify,
+        }
+    }
+}
+
 impl<T: PartialEq> PerSlot<T> {
     /// Whether both slots hold the same value: the image of the diagonal `T → T × T`, as on a
     /// frame whose origin is its own hop.
@@ -117,6 +129,22 @@ pub(crate) enum SlotEncoding {
     Inline,
     /// The session was carried as its digest.
     Referenced,
+}
+
+impl SlotEncoding {
+    /// How a receiver treats the delegator authorization of a slot that travelled this way.
+    ///
+    /// Law (Leased authority): a referenced slot resolves only against the receiver's lessor
+    /// table of the link, and every entry of that table was leased by `admit_verified` from a
+    /// frame that verified, the delegator's signature over that exact delegation included. So a
+    /// referenced slot's delegator authorization is established, and only its expiry and the
+    /// delegatee's signature remain to check (#1089). An inline slot is verified in full.
+    pub(crate) const fn delegator_authorization(self) -> DelegatorAuthorization {
+        match self {
+            Self::Inline => DelegatorAuthorization::Verify,
+            Self::Referenced => DelegatorAuthorization::Established,
+        }
+    }
 }
 
 impl DelegationRef<'_> {
@@ -411,4 +439,17 @@ fn resolve_inline(delegation: DelegationRef<'_>) -> Result<Delegation> {
         DelegationRef::Inline(session) => Ok(session.into_owned()),
         DelegationRef::Digest(digest) => Err(Error::DelegationReferenceUnresolved(digest)),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn test_only_a_referenced_slot_carries_an_established_authorization() {
+    assert_eq!(
+        SlotEncoding::Inline.delegator_authorization(),
+        DelegatorAuthorization::Verify
+    );
+    assert_eq!(
+        SlotEncoding::Referenced.delegator_authorization(),
+        DelegatorAuthorization::Established
+    );
 }
