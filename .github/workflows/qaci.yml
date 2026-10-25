@@ -512,6 +512,12 @@ jobs:
           RUSTFLAGS: --cfg aes_force_soft --cfg polyval_force_soft
         run: cargo test -p rings-aez --release
 
+      - name: Run the vendored webrtc-sctp tests
+        # The patched write loop (#1090), on Linux and on macOS, where upstream's #679 deadlocked.
+        # The fuzz artifact tests read `fuzz/artifacts`, which the crates.io package does not ship.
+        # `--locked` keeps to the Cargo.lock the package ships, as the crate is outside the workspace.
+        run: cargo test --manifest-path crates/transport/vendor/webrtc-sctp/Cargo.toml --locked --lib -- --skip fuzz_artifact_test
+
       - name: Run clippy for node ffi
         run: cargo clippy -p rings-node --features ffi
 

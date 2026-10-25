@@ -24,6 +24,17 @@
   link, is verified in full as before. One proof costs 66 µs instead of 133 µs when its slot is
   referenced (release, M1 Max). No operator step.
 
+- The WebRTC SCTP write loop marshals each gathered batch of packets in one blocking task
+  instead of one per packet (#1090). `webrtc-sctp 0.17.1` ran every outbound SCTP packet
+  through `tokio::task::spawn_blocking`, which on a multi-thread runtime cost about 38% of the
+  #843 onion loop's busy CPU in the blocking pool's lock, against 1.5% for the marshalling
+  itself. rings now carries `webrtc-sctp 0.17.1` in `crates/transport/vendor/webrtc-sctp` with
+  that one change, through `[patch.crates-io]`: the write loop still suspends into the blocking
+  pool once per wakeup, so the read loop keeps its turn at the association lock, and packets
+  are sent in the order they were gathered. The patch is removed with the move to webrtc-rs
+  0.21 (#1071). CI runs the crate's tests, including a new TSN-order test, on Linux and macOS.
+  No operator step.
+
 ## 0.37.0
 
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law

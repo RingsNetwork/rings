@@ -8,6 +8,7 @@ members = [
 ]
 exclude = [
     "crates/gateway/vendor/netlink-packet-core",
+    "crates/transport/vendor/webrtc-sctp",
 ]
 
 [workspace.package]
@@ -57,6 +58,10 @@ indexing_slicing = "deny"
 [patch.crates-io]
 # Upstream 0.8.2 with only its macro dependency redirected to maintained `pastey`.
 netlink-packet-core = { path = "crates/gateway/vendor/netlink-packet-core" }
+# Upstream 0.17.1 with one change (#1090): `Association::write_loop` marshals each gathered
+# batch of packets in one `spawn_blocking` instead of one per packet. Delete this patch and
+# `crates/transport/vendor/webrtc-sctp` at #1071, the move to webrtc-rs 0.21.
+webrtc-sctp = { path = "crates/transport/vendor/webrtc-sctp" }
 
 # Dependencies build optimized in the dev and test profiles; workspace crates stay at
 # `opt-level = 0`, so editing them recompiles as before. A law that signs or encrypts runs
