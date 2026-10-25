@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- A node that had a peer is freed when its owner drops it (#1093): at once if its runtime is
+  dropped with it, and otherwise once the work it has in flight ends (awaiting that end is
+  #1085). Each connection's callback held the swarm transport that holds the connection, and the
+  connection's inbound actor held it as long as the callback lived, so a dropped swarm that had
+  ever connected was never freed: not its transport, its connections, its DHT, nor its stores.
+  Since the per-store lock (#1039), a node started again in the same process on the same store
+  failed with `Error::StorageDirectoryLocked`. The callback and its actor now hold the transport
+  weakly and bind it for each event; an event that arrives after the transport is gone is
+  dropped, and an actor that finds it gone stops. Nothing changes on the wire. A peer connection
+  that was never closed still keeps its ICE sockets bound (#1098).
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
   Window by classification). A transaction is link-local when it is Application traffic, it
   arrived on the authenticated connection of its own origin, and its namespace declared delegated

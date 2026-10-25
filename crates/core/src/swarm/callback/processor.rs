@@ -10,8 +10,8 @@ use super::HeldInboundFrame;
 use super::InboundGate;
 use super::InboundLane;
 use super::InboundProcessor;
-use super::LogicalInbound;
 use super::PreparedInboundFrame;
+use super::WeakLogical;
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
 use crate::measure::Authentication;
@@ -46,16 +46,17 @@ fn log_inbound_verification_failure(
     );
 }
 
-impl InboundProcessor {
-    /// The connection stage of one connection over `transport`, judging reassembly timeouts by
-    /// `reassembly_clock`, with no connection attempt bound yet and empty holds.
-    pub(super) fn new(transport: Arc<SwarmTransport>, reassembly_clock: ReassemblyClock) -> Self {
+impl InboundProcessor<WeakLogical> {
+    /// The connection stage of one connection over `transport`, as the connection keeps it
+    /// (the release law of [`WeakLogical`]), judging reassembly timeouts by `reassembly_clock`,
+    /// with no connection attempt bound yet and empty holds.
+    pub(super) fn new(transport: &Arc<SwarmTransport>, reassembly_clock: ReassemblyClock) -> Self {
         let reassembler = MessageReassembler::with_limits_and_budget(
             transport.reassembly_limits(),
             transport.reassembly_budget(),
         );
         Self {
-            logical: LogicalInbound::new(transport),
+            logical: WeakLogical::new(transport),
             reassembler: Arc::new(FuturesMutex::new(reassembler)),
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),
@@ -65,6 +66,26 @@ impl InboundProcessor {
         }
     }
 
+    /// This stage bound to its transport for one event: `None` once the transport is gone.
+    ///
+    /// ```text
+    ///   upgrade : Stage WeakLogical → Option (Stage LogicalInbound)
+    ///   upgrade = traverse WeakLogical::upgrade      the per-connection state is shared, not copied
+    /// ```
+    pub(super) fn upgrade(&self) -> Option<InboundProcessor> {
+        Some(InboundProcessor {
+            logical: self.logical.upgrade()?,
+            reassembler: Arc::clone(&self.reassembler),
+            reassembly_clock: self.reassembly_clock.clone(),
+            pending_attempt: Arc::clone(&self.pending_attempt),
+            pre_admission: Arc::clone(&self.pre_admission),
+            session_link: Arc::clone(&self.session_link),
+            link_windows: Arc::clone(&self.link_windows),
+        })
+    }
+}
+
+impl InboundProcessor {
     /// Commit the replay and origin-quota admission of a transaction addressed to this node in
     /// the window its classification selects (#1081; durable-records, Law Window by
     /// classification): this connection's volatile window for a link-local transaction
@@ -94,12 +115,6 @@ impl InboundProcessor {
         }
     }
 
-    /// The instant every link step is judged at: the inbound clock, so a test can drive lease
-    /// and delegation expiry deterministically.
-    pub(super) fn now_ms(&self) -> u128 {
-        self.reassembly_clock.now_ms()
-    }
-
     /// The authentication of `peer` as of now: authenticated iff it is the peer of the
     /// handshake this callback is bound to and that handshake's generation is still active.
     /// An unparsable peer is unauthenticated.
@@ -118,6 +133,29 @@ impl InboundProcessor {
     pub(super) async fn record_receive_failure_now(&self, peer: Option<Did>) {
         let authentication = self.authentication_of(peer);
         self.record_receive_failure(peer, authentication).await;
+    }
+
+    /// Charge `peer`, if it parsed, one receive failure under `authentication`.
+    pub(super) async fn record_receive_failure(
+        &self,
+        peer: Option<Did>,
+        authentication: Authentication,
+    ) {
+        if let Some(peer) = peer {
+            self.logical
+                .transport
+                .record_peer_message_receive_failed(peer, authentication)
+                .await;
+        }
+    }
+}
+
+/// A connection's own state, which either form of its stage reads alike.
+impl<L> InboundProcessor<L> {
+    /// The instant every link step is judged at: the inbound clock, so a test can drive lease
+    /// and delegation expiry deterministically.
+    pub(super) fn now_ms(&self) -> u128 {
+        self.reassembly_clock.now_ms()
     }
 
     /// The receiving end of this connection's delegation references.
@@ -158,19 +196,6 @@ impl InboundProcessor {
             .pending_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(attempt);
-    }
-
-    pub(super) async fn record_receive_failure(
-        &self,
-        peer: Option<Did>,
-        authentication: Authentication,
-    ) {
-        if let Some(peer) = peer {
-            self.logical
-                .transport
-                .record_peer_message_receive_failed(peer, authentication)
-                .await;
-        }
     }
 }
 

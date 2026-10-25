@@ -33,6 +33,7 @@ use super::InboundFrameLease;
 use super::InboundProcessor;
 use super::LogicalInbound;
 use super::PreparedInboundFrame;
+use super::WeakLogical;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
@@ -192,7 +193,7 @@ pub(crate) struct InboundMailbox {
 
 impl InboundMailbox {
     pub(super) fn spawn(
-        processor: InboundProcessor,
+        processor: InboundProcessor<WeakLogical>,
         capacity: Arc<InboundCapacity>,
         reassembly_clock: ReassemblyClock,
     ) -> Self {
@@ -483,8 +484,14 @@ type InboundTaskFuture = Pin<Box<dyn Future<Output = InboundTaskCompletion> + Se
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 type InboundTaskFuture = Pin<Box<dyn Future<Output = InboundTaskCompletion>>>;
 
+/// The inbound actor of one connection.
+///
+/// It runs until its mailbox closes, which happens when the connection's callback is dropped,
+/// so it is the connection's, and holds the connection's stage weakly (the release law of
+/// [`WeakLogical`]): each event and each cleanup pass binds it, and a pass that finds the
+/// transport gone stops the actor, since nothing it holds can be delivered any more.
 struct InboundActor {
-    processor: InboundProcessor,
+    processor: InboundProcessor<WeakLogical>,
     receiver: mpsc::UnboundedReceiver<InboundCommand>,
     queues: InboundQueues,
     active: FuturesUnordered<InboundTaskFuture>,
@@ -498,7 +505,7 @@ struct InboundActor {
 
 impl InboundActor {
     fn new(
-        processor: InboundProcessor,
+        processor: InboundProcessor<WeakLogical>,
         receiver: mpsc::UnboundedReceiver<InboundCommand>,
         reassembly_clock: ReassemblyClock,
         cleanup_passes: Arc<GenerationWitness>,
@@ -519,8 +526,9 @@ impl InboundActor {
 
     async fn run(mut self) {
         loop {
-            if self.reassembly_cleanup_delay().is_zero() {
-                self.cleanup_expired_reassembly().await;
+            let cleanup_due = self.reassembly_cleanup_delay().is_zero();
+            if cleanup_due && !self.cleanup_expired_reassembly().await {
+                return;
             }
             self.release_started_reassembly_handoff();
             self.drain_available();
@@ -648,8 +656,7 @@ impl InboundActor {
 
     async fn handle_reassembly_cleanup_timer(&mut self, completed: bool) -> bool {
         if completed {
-            self.cleanup_expired_reassembly().await;
-            return true;
+            return self.cleanup_expired_reassembly().await;
         }
         tracing::error!("stopping inbound actor after reassembly timer scheduling failed");
         self.processor
@@ -663,11 +670,17 @@ impl InboundActor {
             .saturating_duration_since(Instant::now())
     }
 
-    async fn cleanup_expired_reassembly(&mut self) {
+    /// Remove the reassemblies expired by now, charging their peers. Post: `false` iff the
+    /// transport is gone, and nothing was removed; the actor then stops.
+    async fn cleanup_expired_reassembly(&mut self) -> bool {
+        let Some(processor) = self.processor.upgrade() else {
+            return false;
+        };
         let now_ms = self.reassembly_clock.now_ms();
-        self.processor.remove_expired_reassembly_at(now_ms).await;
+        processor.remove_expired_reassembly_at(now_ms).await;
         self.next_reassembly_cleanup = Instant::now() + REASSEMBLY_CLEANUP_INTERVAL;
         self.cleanup_passes.bump();
+        true
     }
 
     async fn finish_reassembly_after_close(&mut self) {
@@ -684,8 +697,9 @@ impl InboundActor {
             return;
         }
         loop {
-            self.cleanup_expired_reassembly().await;
-            if !self.processor.has_pending_reassembly().await {
+            if !self.cleanup_expired_reassembly().await
+                || !self.processor.has_pending_reassembly().await
+            {
                 return;
             }
             if !try_sleep(self.reassembly_cleanup_delay()).await {
@@ -746,7 +760,7 @@ impl InboundActor {
 }
 
 async fn process_event(
-    processor: InboundProcessor,
+    processor: InboundProcessor<WeakLogical>,
     event: InboundEvent,
     handoff_started: Option<Arc<AtomicBool>>,
 ) -> InboundTaskCompletion {
@@ -755,6 +769,15 @@ async fn process_event(
     }
     let lane = event.lane();
     let sequence = event.sequence;
+    // The event binds the transport for its span; one whose transport is gone is dropped with
+    // its completion, which tells a waiting submitter that the mailbox closed.
+    let Some(processor) = processor.upgrade() else {
+        return InboundTaskCompletion {
+            lane,
+            sequence,
+            next: None,
+        };
+    };
     match processor.pending_connection_admits(event.peer).await {
         Ok(true) => processor.logical.tap_inbound(&event.payload),
         Ok(false) => {
