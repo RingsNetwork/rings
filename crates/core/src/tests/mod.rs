@@ -202,6 +202,7 @@ pub(crate) fn volatile_relay_storage() -> crate::dht::EntryStorage {
 /// Relay replication with the default `r` and no age gate: the named choice of a fixture whose
 /// nodes hold relay mail from their first moment, where production waits for the age gate
 /// (`Law (Age gate)`, #777).
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(crate) fn ungated_relay_replication() -> crate::dht::RelayReplication {
     crate::dht::RelayReplication {
         age_gate_ms: 0,
