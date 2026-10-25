@@ -6,6 +6,7 @@ use super::test_support::next_generated_key;
 use super::test_support::next_payload_for_tx;
 use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::remote_storage_placement_after;
+use crate::consts::DATA_TOMBSTONE_MAX_LEN;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::delegation::DelegateeKey;
 use crate::dht::entry::EntryKind;
@@ -19,6 +20,7 @@ use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::handlers::HandlerContext;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
@@ -26,6 +28,7 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
+use crate::message::Principal;
 use crate::swarm::transport::StorageSyncBatch;
 use crate::swarm::transport::StorageSyncBatchStep;
 use crate::tests::default::assert_no_more_msg;
@@ -34,6 +37,7 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
 use crate::tests::non_affine_placement;
+use crate::tests::removes_only_carrier;
 use crate::tests::TEST_NETWORK_ID;
 use crate::utils::get_epoch_ms;
 
@@ -80,11 +84,14 @@ async fn test_sync_entries_handler_stores_entry_at_placement_key() -> Result<()>
     )?;
 
     handler
-        .handle(&context, &SyncEntriesWithSuccessor {
-            purpose: StorageSyncPurpose::OwnershipHandoff,
-            destination: StorageSyncDestination::PhysicalOwner(node.did()),
-            data: vec![PlacedEntry::new(placement_key, entry.clone())],
-        })
+        .handle(
+            &HandlerContext::unbound_for_test(&context),
+            &SyncEntriesWithSuccessor {
+                purpose: StorageSyncPurpose::OwnershipHandoff,
+                destination: StorageSyncDestination::PhysicalOwner(node.did()),
+                data: vec![PlacedEntry::new(placement_key, entry.clone())],
+            },
+        )
         .await?;
 
     assert_eq!(
@@ -120,11 +127,14 @@ async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
     )?;
 
     handler
-        .handle(&context, &SyncEntriesWithSuccessor {
-            purpose: StorageSyncPurpose::OwnershipHandoff,
-            destination: StorageSyncDestination::PhysicalOwner(node.did()),
-            data: vec![PlacedEntry::new(placement_key, entry)],
-        })
+        .handle(
+            &HandlerContext::unbound_for_test(&context),
+            &SyncEntriesWithSuccessor {
+                purpose: StorageSyncPurpose::OwnershipHandoff,
+                destination: StorageSyncDestination::PhysicalOwner(node.did()),
+                data: vec![PlacedEntry::new(placement_key, entry)],
+            },
+        )
         .await?;
 
     let stored = node
@@ -169,14 +179,17 @@ async fn test_sync_entries_handler_rejects_non_affine_placement_before_writing()
     )?;
 
     let result = handler
-        .handle(&context, &SyncEntriesWithSuccessor {
-            purpose: StorageSyncPurpose::OwnershipHandoff,
-            destination: StorageSyncDestination::PhysicalOwner(node.did()),
-            data: vec![
-                PlacedEntry::new(valid_placement, valid_entry),
-                PlacedEntry::new(invalid_placement, invalid_entry),
-            ],
-        })
+        .handle(
+            &HandlerContext::unbound_for_test(&context),
+            &SyncEntriesWithSuccessor {
+                purpose: StorageSyncPurpose::OwnershipHandoff,
+                destination: StorageSyncDestination::PhysicalOwner(node.did()),
+                data: vec![
+                    PlacedEntry::new(valid_placement, valid_entry),
+                    PlacedEntry::new(invalid_placement, invalid_entry),
+                ],
+            },
+        )
         .await;
 
     assert!(matches!(result, Err(Error::InvalidMessage(_))));
@@ -219,7 +232,8 @@ async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() 
             PlacedEntry::new(second_key, second),
         ],
     };
-    let mut batch = StorageSyncBatch::new(&msg, Did::from(1u32), get_epoch_ms());
+    let mut batch =
+        StorageSyncBatch::new(&msg, Did::from(1u32), Principal::Unbound, get_epoch_ms());
 
     assert!(matches!(
         batch.step(&node.swarm.transport).await?,
@@ -265,6 +279,50 @@ async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() 
     Ok(())
 }
 
+/// A synced carrier whose join would pass the tombstone bound (#921) is refused without an ack
+/// and holds back no other entry of its batch: the slot it targets keeps what it held, and its
+/// owner keeps it to offer again once removes here are collected.
+#[tokio::test]
+async fn test_storage_sync_batch_refuses_a_join_past_the_tombstone_bound_without_failing_it(
+) -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let now = get_epoch_ms();
+    let full_key = Did::from(43u32);
+    node.dht()
+        .join_storage_entry(
+            now,
+            full_key,
+            removes_only_carrier(full_key, DATA_TOMBSTONE_MAX_LEN, now, "held")?,
+            Principal::Local,
+        )
+        .await?;
+    let held = node.dht().storage.get(&full_key.to_string()).await?;
+    let admissible = live_entry(Did::from(41u32), vec![Bytes::from("kept")], EntryKind::Data);
+    let admissible_key = admissible.did;
+    let admissible_stored = admissible.clone().try_into_storage_entry()?;
+    let msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
+        destination: StorageSyncDestination::PhysicalOwner(node.did()),
+        data: vec![
+            PlacedEntry::new(full_key, removes_only_carrier(full_key, 1, now, "more")?),
+            PlacedEntry::new(admissible_key, admissible),
+        ],
+    };
+    let mut batch = StorageSyncBatch::new(&msg, Did::from(1u32), Principal::Unbound, now);
+    let acks = loop {
+        if let StorageSyncBatchStep::Complete(acks) = batch.step(&node.swarm.transport).await? {
+            break acks;
+        }
+    };
+
+    assert_eq!(acks, vec![SyncedEntryAck::new(
+        admissible_key,
+        admissible_stored
+    )]);
+    assert_eq!(node.dht().storage.get(&full_key.to_string()).await?, held);
+    Ok(())
+}
+
 /// An entry the receiver cannot admit (here one already past its retention bound on this clock,
 /// as an entry live on the sender's clock can be up to the skew tolerance later) is skipped
 /// without an ack and holds back no other entry of its batch: the admissible one is persisted
@@ -287,7 +345,7 @@ async fn test_storage_sync_batch_skips_an_inadmissible_entry_without_failing_the
             PlacedEntry::new(admissible_key, admissible),
         ],
     };
-    let mut batch = StorageSyncBatch::new(&msg, Did::from(1u32), now);
+    let mut batch = StorageSyncBatch::new(&msg, Did::from(1u32), Principal::Unbound, now);
     let acks = loop {
         if let StorageSyncBatchStep::Complete(acks) = batch.step(&node.swarm.transport).await? {
             break acks;
@@ -343,7 +401,9 @@ async fn test_sync_entries_handler_accepts_placement_destination_on_local_branch
         placement_key,
     )?;
 
-    handler.handle(&context, &msg).await?;
+    handler
+        .handle(&HandlerContext::unbound_for_test(&context), &msg)
+        .await?;
 
     assert_eq!(
         node1.dht().storage.get(&placement_key.to_string()).await?,
@@ -401,7 +461,9 @@ async fn test_additive_repair_sync_persists_without_cleanup_report() -> Result<(
         receiver.did(),
     )?;
 
-    receiver_handler.handle(&context, &sync_msg).await?;
+    receiver_handler
+        .handle(&HandlerContext::unbound_for_test(&context), &sync_msg)
+        .await?;
 
     assert_eq!(
         receiver
@@ -445,7 +507,9 @@ async fn test_sync_entries_handler_rejects_mismatched_placement_destination() ->
     )?;
     let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
 
-    receiver_handler.handle(&context, &sync_msg).await?;
+    receiver_handler
+        .handle(&HandlerContext::unbound_for_test(&context), &sync_msg)
+        .await?;
 
     assert_eq!(
         receiver
@@ -494,7 +558,9 @@ async fn test_sync_entries_handler_rejects_physical_destination_for_unowned_plac
     )?;
     let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
 
-    receiver_handler.handle(&context, &sync_msg).await?;
+    receiver_handler
+        .handle(&HandlerContext::unbound_for_test(&context), &sync_msg)
+        .await?;
 
     assert_eq!(
         receiver
@@ -548,7 +614,9 @@ async fn test_sync_entries_handler_acks_local_branch_with_successor_witness() ->
     )?;
     let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
 
-    receiver_handler.handle(&context, &sync_msg).await?;
+    receiver_handler
+        .handle(&HandlerContext::unbound_for_test(&context), &sync_msg)
+        .await?;
 
     assert_eq!(
         receiver

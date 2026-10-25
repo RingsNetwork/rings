@@ -4,6 +4,7 @@ FROM rust:1.97-trixie AS builder
 
 WORKDIR /src
 COPY Cargo.lock Cargo.toml README.md rust-toolchain.toml ./
+COPY .cargo ./.cargo
 COPY crates ./crates
 COPY examples ./examples
 

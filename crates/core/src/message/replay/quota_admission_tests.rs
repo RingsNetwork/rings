@@ -1,12 +1,15 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::test_storage::Hooked;
 use super::test_storage::StorageHooks;
 use super::*;
 use crate::message::MessageCategory;
+use crate::message::OriginQuotaInstant;
 use crate::message::OriginQuotaLaneConfig;
 use crate::storage::MemStorage;
+use crate::utils::get_epoch_ms;
 
 const ONE_SECOND: u128 = 1_000_000_000;
 
@@ -33,29 +36,32 @@ fn quota_config_with_capacity(message_burst: u64, max_records: usize) -> OriginQ
     OriginQuotaConfig::new(lane, lane, lane, lane)
 }
 
-fn runtime(message_burst: u64) -> TransactionReplay {
-    TransactionReplay::new_with_quota(
+fn runtime(message_burst: u64) -> Arc<TransactionReplay> {
+    Arc::new(TransactionReplay::with_quota_for_test(
         Some(Box::new(MemStorage::<ReplayRecord>::new())),
         quota_config(message_burst),
-    )
+    ))
+}
+
+/// An application admission of `key` at `sequence` costing one byte, introduced by this node.
+fn costing_one(key: StreamKey, sequence: u64, digest: TransactionDigest) -> Admission {
+    Admission {
+        byte_cost: 1,
+        ..Admission::for_test(key, sequence, digest, get_epoch_ms())
+    }
 }
 
 async fn admit_at(
-    runtime: &TransactionReplay,
+    runtime: &Arc<TransactionReplay>,
     key: StreamKey,
     sequence: u64,
     digest: TransactionDigest,
     now: u128,
 ) -> Result<SequenceVerdict> {
     runtime
-        .admit_at(
-            key,
-            sequence,
-            digest,
-            MessageCategory::Application.into(),
-            1,
-            || OriginQuotaInstant::from_nanos(now),
-        )
+        .admit_at(costing_one(key, sequence, digest), move || {
+            ReplayInstant::quota_at(OriginQuotaInstant::from_nanos(now))
+        })
         .await
 }
 
@@ -136,10 +142,10 @@ async fn quota_rejection_does_not_advance_replay_and_retry_can_commit() -> Resul
 
 #[tokio::test]
 async fn capacity_rejection_preserves_replay_until_an_idle_slot_is_safe() -> Result<()> {
-    let runtime = TransactionReplay::new_with_quota(
+    let runtime = Arc::new(TransactionReplay::with_quota_for_test(
         Some(Box::new(MemStorage::<ReplayRecord>::new())),
         quota_config_with_capacity(1, 1),
-    );
+    ));
     let first = stream(1);
     let waiting = stream(2);
     assert_eq!(
@@ -207,10 +213,10 @@ impl StorageHooks for FailFirstPut {
 
 #[tokio::test]
 async fn replay_persistence_failure_rolls_back_provisional_quota() -> Result<()> {
-    let runtime = TransactionReplay::new_with_quota(
+    let runtime = Arc::new(TransactionReplay::with_quota_for_test(
         Some(Box::new(Hooked::new(FailFirstPut(AtomicBool::new(true))))),
         quota_config(1),
-    );
+    ));
     let key = stream(1);
     assert!(matches!(
         admit_at(&runtime, key, 0, digest(1), 0).await,
@@ -227,10 +233,11 @@ async fn replay_persistence_failure_rolls_back_provisional_quota() -> Result<()>
 }
 
 /// Law (Clock under the lock, #953): an admission reads the quota clock only while it holds
-/// the admission lock. Two admissions on one quota key are created in the order `A, B` and
-/// take the lock in the order `B, A`; an instant fixed at creation would hand `A` an instant
-/// older than the one `B` recorded and fail with `MonotonicTimeRegressed`. Read under the
-/// lock, the instants follow the lock order and both admissions commit.
+/// the admission lock. Two admissions on one quota key wait on the held lock; neither reads
+/// its clock until the lock is released, and the one that locks first reads first and is the
+/// stream's `First`. An instant fixed before the lock could hand the later locker an instant
+/// older than the one recorded and fail with `MonotonicTimeRegressed`; read under the lock,
+/// the instants follow the lock order and both admissions commit.
 #[tokio::test]
 async fn test_quota_clock_is_read_under_the_admission_lock() -> Result<()> {
     let runtime = runtime(4);
@@ -242,21 +249,25 @@ async fn test_quota_clock_is_read_under_the_admission_lock() -> Result<()> {
             let mut readings = readings.lock().expect("test clock lock");
             let tick = readings.len() as u128;
             readings.push(label);
-            OriginQuotaInstant::from_nanos(tick * ONE_SECOND)
+            ReplayInstant::quota_at(OriginQuotaInstant::from_nanos(tick * ONE_SECOND))
         }
     };
-    let charge = || MessageCategory::Application.into();
 
     let held = runtime.state.lock().await;
-    let mut first = std::pin::pin!(runtime.admit_at(key, 0, digest(1), charge(), 1, clock("A")));
-    let mut second = std::pin::pin!(runtime.admit_at(key, 1, digest(2), charge(), 1, clock("B")));
+    let mut first = std::pin::pin!(runtime.admit_at(costing_one(key, 0, digest(1)), clock("A")));
+    let mut second = std::pin::pin!(runtime.admit_at(costing_one(key, 1, digest(2)), clock("B")));
     assert!(futures::poll!(first.as_mut()).is_pending());
     assert!(futures::poll!(second.as_mut()).is_pending());
     assert!(readings.lock().expect("test clock lock").is_empty());
     drop(held);
 
-    assert_eq!(second.await?, SequenceVerdict::First);
-    assert_eq!(first.await?, SequenceVerdict::Late);
-    assert_eq!(*readings.lock().expect("test clock lock"), ["B", "A"]);
+    let (first, second) = (first.await?, second.await?);
+    let read = readings.lock().expect("test clock lock").clone();
+    let expected = match (first, second) {
+        (SequenceVerdict::First, SequenceVerdict::Advance) => ["A", "B"],
+        (SequenceVerdict::Late, SequenceVerdict::First) => ["B", "A"],
+        verdicts => panic!("unexpected verdicts {verdicts:?}"),
+    };
+    assert_eq!(read, expected);
     Ok(())
 }

@@ -246,3 +246,140 @@ async fn test_writer_observes_only_what_owners_apply() -> Result<()> {
     assert_eq!(writer.cache.count().await?, 0);
     Ok(())
 }
+
+/// The data a writer's cache serves for the test resource, in the order it lists them.
+async fn cached_data(writer: &PeerRing) -> Result<Vec<String>> {
+    Ok(writer
+        .local_cache_get(Did::from(RESOURCE))
+        .await?
+        .map(|entry| {
+            entry
+                .data
+                .iter()
+                .map(|value| String::from_utf8_lossy(value).into_owned())
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Writer order (#1033, from #1076): a writer's successive writes to one key ascend in the dot
+/// order, so its cache and every replica list them in issue order, whatever its clock reads.
+///
+/// Two appends stamped in one millisecond tie on the time, and the operation digest then orders
+/// them; a step back of the clock inverts them outright. Each issue order below is written at one
+/// millisecond and over a clock that steps back, and between the two orders some pair has a
+/// digest order opposite to its issue order, so a stamp without the floor fails one of them.
+#[tokio::test]
+async fn test_successive_writes_keep_issue_order_whatever_the_clock() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    for order in [["111", "222", "333"], ["333", "222", "111"]] {
+        for clock in [[now_ms; 3], [now_ms, now_ms - 5, now_ms - 10]] {
+            let writer = reader();
+            let mut replica = None;
+            for (value, at_ms) in order.into_iter().zip(clock) {
+                let op = writer
+                    .stamp_operation(
+                        EntryOperation::Extend(carrier(&[value], at_ms)),
+                        at_ms,
+                        None,
+                    )
+                    .await?;
+                replica = Some(applied(&replica, &op, at_ms)?);
+                writer.local_cache_observe_write(op).await?;
+            }
+            assert_eq!(
+                cached_data(&writer).await?,
+                order,
+                "the writer's cache, {clock:?}"
+            );
+            let listed = replica.map(|entry| entry.data).unwrap_or_default();
+            assert_eq!(
+                listed,
+                order.map(bytes::Bytes::from),
+                "a replica, {clock:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Read order (#1033, from #1076): a write follows every value its writer read, even one
+/// another writer stamped ahead of the writer's clock.
+#[tokio::test]
+async fn test_write_follows_every_value_its_writer_read() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let writer = reader();
+    let ahead = stamped(EntryOperation::Extend, &["read"], now_ms + 50, OTHER)?;
+    writer.local_cache_put(ahead.entry().clone()).await?;
+
+    let op = writer
+        .stamp_operation(
+            EntryOperation::Extend(carrier(&["written"], now_ms)),
+            now_ms,
+            None,
+        )
+        .await?;
+    writer.local_cache_observe_write(op).await?;
+    assert_eq!(cached_data(&writer).await?, ["read", "written"]);
+    Ok(())
+}
+
+/// The cap (#1033, from #1076): the floor never lifts a write past the clock tolerance, so after
+/// reading a value stamped `σ` ahead of its clock, a writer's write is still admitted by its
+/// cache as by every owner, and its stamp leads its clock by at most `σ`.
+#[tokio::test]
+async fn test_write_after_a_value_at_the_tolerance_is_admitted() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let writer = reader();
+    let edge = stamped(
+        EntryOperation::Extend,
+        &["edge"],
+        now_ms + crate::consts::TS_OFFSET_TOLERANCE_MS,
+        OTHER,
+    )?;
+    writer.local_cache_put(edge.entry().clone()).await?;
+
+    let op = writer
+        .stamp_operation(
+            EntryOperation::Extend(carrier(&["written"], now_ms)),
+            now_ms,
+            None,
+        )
+        .await?;
+    op.entry().validate_bounds_at(now_ms)?;
+    assert!(op.entry().max_observed_version().is_some_and(
+        |version| version.logical_time_ms <= now_ms + crate::consts::TS_OFFSET_TOLERANCE_MS
+    ));
+    writer.local_cache_observe_write(op).await?;
+    let cached = cached_data(&writer).await?;
+    assert!(cached.iter().any(|value| value == "written"), "{cached:?}");
+    Ok(())
+}
+
+/// The cap holds against versions passed through, too: after this node forwards an operation a
+/// peer stamped `σ` ahead, its next own stamp still leads its clock by at most `σ`.
+#[tokio::test]
+async fn test_a_passed_through_version_drags_no_stamp_past_the_tolerance() -> Result<()> {
+    let now_ms = get_epoch_ms();
+    let node = reader();
+    let ahead = stamped(
+        EntryOperation::Extend,
+        &["ahead"],
+        now_ms + crate::consts::TS_OFFSET_TOLERANCE_MS,
+        OTHER,
+    )?;
+    node.stamp_operation(ahead, now_ms, None).await?;
+
+    let op = node
+        .stamp_operation(
+            EntryOperation::Extend(carrier(&["own"], now_ms)),
+            now_ms,
+            None,
+        )
+        .await?;
+    assert!(op.entry().max_observed_version().is_some_and(
+        |version| version.logical_time_ms <= now_ms + crate::consts::TS_OFFSET_TOLERANCE_MS
+    ));
+    op.entry().validate_bounds_at(now_ms)?;
+    Ok(())
+}

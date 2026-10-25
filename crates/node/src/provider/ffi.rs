@@ -53,6 +53,7 @@ use serde::Serialize;
 use tokio::runtime::Runtime;
 
 use super::Provider;
+use super::ProviderStores;
 use super::Signer;
 use crate::error::Error;
 use crate::error::Result;
@@ -249,9 +250,9 @@ impl ProviderHandle {
                 tracing::warn!("FFI provider listener thread panicked during shutdown");
             }
         }
-        flush_provider_before_runtime_shutdown(&provider, &runtime);
+        close_provider_before_runtime_shutdown(&provider, &runtime);
         drop(provider);
-        // Invariant: joined listeners, the completed flush thread, and the dropped provider have
+        // Invariant: joined listeners, the completed close thread, and the dropped provider have
         // released every intentional runtime clone. If an unexpected in-flight owner remains,
         // leaking the final Arc avoids dropping a Tokio runtime from an asynchronous/C-ABI path.
         match Arc::try_unwrap(runtime) {
@@ -266,24 +267,27 @@ impl ProviderHandle {
     }
 }
 
-fn flush_provider_before_runtime_shutdown(provider: &Arc<Provider>, runtime: &Arc<Runtime>) {
+/// Close `provider`'s network on `runtime` from a thread of its own, before the runtime shuts
+/// down: every connection is closed and the measurements are flushed ([`Provider::close`]), so
+/// a provider created again in this process finds none of this one's sockets bound (#1098).
+fn close_provider_before_runtime_shutdown(provider: &Arc<Provider>, runtime: &Arc<Runtime>) {
     let provider = provider.clone();
     let runtime = runtime.clone();
-    let flush_thread = std::thread::Builder::new()
-        .name("rings-ffi-measurement-flush".to_owned())
-        .spawn(move || runtime.block_on(provider.flush_measurements()));
-    match flush_thread {
-        Ok(flush_thread) => match flush_thread.join() {
+    let close_thread = std::thread::Builder::new()
+        .name("rings-ffi-provider-close".to_owned())
+        .spawn(move || runtime.block_on(provider.close()));
+    match close_thread {
+        Ok(close_thread) => match close_thread.join() {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                tracing::warn!(%error, "failed to flush FFI provider measurements during shutdown");
+                tracing::warn!(%error, "failed to close the FFI provider during shutdown");
             }
             Err(_) => {
-                tracing::warn!("FFI measurement flush thread panicked during shutdown");
+                tracing::warn!("FFI provider close thread panicked during shutdown");
             }
         },
         Err(error) => {
-            tracing::warn!(%error, "failed to start FFI measurement flush thread during shutdown");
+            tracing::warn!(%error, "failed to start the FFI provider close thread during shutdown");
         }
     }
 }
@@ -384,8 +388,9 @@ pub unsafe extern "C" fn rings_node_string_free(value: *mut c_char) {
 ///
 /// Passing null is a no-op. The function requests cooperative listener
 /// shutdown, joins listener threads started through [`rings_node_listen`],
-/// explicitly flushes measurement state even when listening never started, and
-/// then releases the handle. The pointer is invalid after this call.
+/// closes every connection of the node and flushes its measurement state, even
+/// when listening never started ([`Provider::close`]), and then releases the
+/// handle. The pointer is invalid after this call.
 ///
 /// # Safety
 ///
@@ -406,8 +411,9 @@ pub unsafe extern "C" fn rings_node_provider_destroy(provider_ptr: *mut Provider
 /// `storage_path` is a directory the provider owns: it opens the native node's stores under it,
 /// each at its authority, as the daemon does ([`NodeStores::open_under`]): the DHT data store in
 /// `data`, the transaction replay store in `transaction-replay` (authoritative), the relay inbox
-/// in `relay-inbox` (retained), the onion entry guards in `onion-entry-guards` (a durable cache),
-/// and the measurement stores. Reusing the same path across runs keeps the replay windows, held
+/// in `relay-inbox` (retained), the data namespace's remove sides in `dht-removals` (retained),
+/// the onion entry guards in `onion-entry-guards` (a durable cache), and the measurement
+/// stores. Reusing the same path across runs keeps the replay windows, held
 /// mail and entry guards (#1022); a fresh path is a fresh node state. Creation fails, returning
 /// NULL, when a store cannot be opened.
 ///
@@ -478,12 +484,15 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
                         acc,
                         acc_ty,
                         Signer::Sync(Box::new(wrapped_signer(signer))),
-                        Some(stores.data),
-                        Some(stores.relay),
-                        Some(stores.measure),
-                        Some(stores.evidence),
-                        Some(stores.guards),
-                        Some(stores.replay),
+                        ProviderStores {
+                            entry: Some(stores.data),
+                            relay: Some(stores.relay),
+                            removals: Some(stores.removals),
+                            measure: Some(stores.measure),
+                            evidence: Some(stores.evidence),
+                            guards: Some(stores.guards),
+                            replay: Some(stores.replay),
+                        },
                     )
                     .await
                 })?;
@@ -679,6 +688,7 @@ mod tests {
         }
         assert!(root.join("transaction-replay").is_dir());
         assert!(root.join("relay-inbox").is_dir());
+        assert!(root.join("dht-removals").is_dir());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -726,15 +736,10 @@ mod tests {
                     delegatee_key,
                     1,
                 );
-                Provider::new_provider_with_storage_internal(
-                    config,
-                    None,
-                    None,
-                    Some(Box::new(storage.clone())),
-                    None,
-                    None,
-                    None,
-                )
+                Provider::new_provider_with_storage_internal(config, ProviderStores {
+                    measure: Some(Box::new(storage.clone())),
+                    ..ProviderStores::default()
+                })
                 .await
             })
             .expect("test provider must initialize");

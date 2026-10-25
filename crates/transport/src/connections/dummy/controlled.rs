@@ -297,8 +297,8 @@ async fn send_gate_parked(gate: &'static LocalKey<watch::Sender<bool>>, parked: 
     let _reached = changes.wait_for(|state| *state == parked).await;
 }
 
-/// Test hook: force `send_message` to stay pending once this thread has already dispatched
-/// `threshold` messages. `None` disables the hook.
+/// Test hook: force every frame send to stay pending once this thread has already dispatched
+/// `threshold` payload frames ([`sent_count`]). `None` disables the hook.
 pub fn set_send_message_pending_after_sent_count(threshold: Option<usize>) {
     SEND_MESSAGE_PENDING_AFTER_SENT_COUNT.with(|pending_after| pending_after.set(threshold));
 }
@@ -386,8 +386,12 @@ pub fn set_drop_messages(on: bool) {
     DROP_MESSAGES.with(|drop| drop.set(on));
 }
 
-/// Test hook: number of data-channel messages `send_message` has dispatched on this thread.
-/// Paired with [`reset_sent_count`] to assert that a failed send enqueued nothing.
+/// Test hook: the payload frames every connection on this thread has dispatched; a credit frame
+/// is not counted (see `FrameCount`).
+///
+/// Every node of a test shares the thread, so the count holds a peer's answers as well. A test
+/// that counts its own sends counts them on its transport instead
+/// ([`DummyTransport::dispatched_payload_frames`](super::DummyTransport::dispatched_payload_frames)).
 pub fn sent_count() -> usize {
     super::SENT_COUNT.with(|c| c.get())
 }

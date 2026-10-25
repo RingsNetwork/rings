@@ -89,10 +89,12 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
     ///
     /// Post: `misses.is_empty()` is a no-op. Non-empty repair emits copy-only
     /// actions for exactly the observed misses and performs no additional
-    /// placement probing.
+    /// placement probing. A local repair charges the removes it raises to `introducer`, the
+    /// principal that delivered `entry` (this node for its own storage; #920, #907).
     async fn read_repair_entry(
         &self,
         entry: Entry,
+        introducer: crate::message::Principal,
         misses: &[PlacementMiss],
         redundancy: u16,
     ) -> Result<Action>;
@@ -126,8 +128,19 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 ///   With read-join this gives read-your-writes: once a write has returned `Ok`, every read of
 ///   `k` by its writer contains it while `k` stays resident and the write is live, whichever
 ///   owner a later lookup reaches.
+/// - Writer order (#1033, #1075): a node stamps its own write above every version it stamped or
+///   passed through and every version its cache holds for the key, capped one tick below
+///   `now + σ` (`PeerRing::stamp_operation`). Read-your-writes puts each of its writes to `k`
+///   in its cache before the next is issued, so its successive writes ascend in the dot order
+///   whatever its clock reads, every reader lists them in issue order, and a write follows
+///   every value its writer read.
 /// - Residency: evicting a key at capacity, or retiring it under the retention law,
 ///   un-observes it, and its next read starts again from the replies it gets.
+/// - Linearization (#922): a read is pure. It projects the value it loaded at its own clock,
+///   and it writes or removes nothing. Every state change is one transition under the cache
+///   transition: a put, an observation, or the eviction the count bound makes inside a put. A
+///   transition takes effect at its store put and a read at its store get, so a read that
+///   loaded a value before a concurrent put completed cannot drop that put.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageCache<Action>: Chord<Action> {

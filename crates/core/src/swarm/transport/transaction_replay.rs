@@ -6,9 +6,13 @@ use std::ops::RangeInclusive;
 use super::SwarmTransport;
 use crate::dht::Did;
 use crate::error::Result;
+use crate::message::spent_at;
+use crate::message::Admission;
+use crate::message::LinkWindows;
 use crate::message::MessageCategory;
 use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaCounters;
+use crate::message::Principal;
 use crate::message::RelayAdmission;
 use crate::message::RelayDelivery;
 use crate::message::ReplayCounters;
@@ -60,44 +64,84 @@ impl SwarmTransport {
         self.transaction_replay.reserve(key, count).await
     }
 
-    /// Atomically commit final-destination replay and origin-quota admission.
+    /// Atomically commit final-destination replay and origin-quota admission of `transaction`,
+    /// delivered by `introducer`.
     pub(crate) async fn admit_final_transaction(
         &self,
+        transaction: &Transaction,
+        charge: OriginQuotaCharge,
+        introducer: Principal,
+    ) -> Result<()> {
+        let admission = self.admission(transaction, charge, introducer)?;
+        self.transaction_replay
+            .admit_with_quota(admission)
+            .await
+            .map(|_| ())
+    }
+
+    /// Admit a link-local transaction in `windows`, the volatile replay windows of the link it
+    /// arrived on, with its origin-quota charge (#1081; see
+    /// [`TransactionReplay::admit_on_link`]): nothing is written, and a refusal leaves its
+    /// stream's window as it was.
+    pub(crate) async fn admit_link_transaction(
+        &self,
+        windows: &mut LinkWindows,
         transaction: &Transaction,
         charge: OriginQuotaCharge,
     ) -> Result<()> {
         let key = transaction.stream_key(self.network_id)?;
         let digest = transaction.digest()?;
-        self.transaction_replay
-            .admit_with_quota(
+        let mut window = windows.remove(&key);
+        let admitted = self
+            .transaction_replay
+            .admit_on_link(
+                &mut window,
                 key,
                 transaction.sequence,
                 digest,
                 charge,
                 logical_message_byte_cost(transaction),
             )
-            .await
-            .map(|_| ())
+            .await;
+        if let Some(window) = window {
+            windows.insert(key, window);
+        }
+        admitted.map(|_| ())
+    }
+
+    /// The admission of `transaction` under `charge`, delivered by `introducer` (pure).
+    fn admission(
+        &self,
+        transaction: &Transaction,
+        charge: OriginQuotaCharge,
+        introducer: Principal,
+    ) -> Result<Admission> {
+        let key = transaction.stream_key(self.network_id)?;
+        let proof = &transaction.verification;
+        Ok(Admission {
+            key,
+            sequence: transaction.sequence,
+            digest: transaction.digest()?,
+            charge,
+            byte_cost: logical_message_byte_cost(transaction),
+            introducer,
+            spent_at_ms: spent_at(key.class, proof.ts_ms, proof.ttl_ms),
+        })
     }
 
     /// Atomically commit final-destination replay, relay custody and origin-quota admission of
     /// a transaction a relay inbox delivered (the custody law of `message::replay`): either it
     /// enters the window and custody in one record write, or it is already in custody and is
-    /// queued again with nothing admitted.
+    /// queued again with nothing admitted. The delivery is out of this node's own relay inbox,
+    /// so a new stream is charged to the inbox principal `μ`, never to this node's own share
+    /// (load-bounds paper, Law 2).
     pub(crate) async fn admit_relayed_transaction(
         &self,
         transaction: &Transaction,
         charge: OriginQuotaCharge,
     ) -> Result<RelayAdmission> {
-        let (key, delivery) = self.relay_delivery(transaction)?;
-        self.transaction_replay
-            .admit_relayed(
-                key,
-                delivery,
-                charge,
-                logical_message_byte_cost(transaction),
-            )
-            .await
+        let admission = self.admission(transaction, charge, Principal::Inbox)?;
+        self.transaction_replay.admit_relayed(admission).await
     }
 
     /// Release a relay-delivered transaction from custody once the application took it.

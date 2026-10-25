@@ -29,6 +29,7 @@ use crate::dht::VirtualNodeConfig;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Principal;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 use crate::tests::expired;
@@ -39,12 +40,16 @@ use crate::tests::volatile_relay_storage;
 use crate::utils::get_epoch_ms;
 
 mod test_cache_join;
+mod test_cache_linearization;
 mod test_handoff;
 mod test_horizon;
 mod test_own_write;
 #[cfg(not(target_family = "wasm"))]
 mod test_relay_storage;
+mod test_removal_store;
 mod test_repair;
+mod test_stamp_order;
+mod test_tombstone_bound;
 
 fn data_entry(did: Did) -> Entry {
     live_entry(did, vec![], EntryKind::Data)
@@ -615,6 +620,7 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
     let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     // Standing alone, the node routes every position to itself and is the hold authority.
     let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()))
+        .with_relay_replication(crate::tests::ungated_relay_replication())
         .with_relay_storage(volatile_relay_storage());
     let destination = Did::from(50u32);
     let position = inbox_key(destination);
@@ -622,11 +628,11 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
 
     let park = EntryOperation::Overwrite(data_entry_with_data(position, "parked"))
         .stamped(now_ms, node.did)?;
-    node.operate_storage_entry(now_ms, position, park, node.did)
+    node.operate_storage_entry(now_ms, position, park, node.did, Principal::Local)
         .await?;
     let hold =
         EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
-    node.operate_storage_entry(now_ms, position, hold, node.did)
+    node.operate_storage_entry(now_ms, position, hold, node.did, Principal::Local)
         .await?;
 
     let topic = node
@@ -644,7 +650,9 @@ async fn test_data_topic_at_the_inbox_position_does_not_block_the_hold() -> Resu
     // Each namespace has its own store (#1021): the topic and the hold never share one.
     assert_eq!(node.storage.count().await?, 1);
     assert_eq!(
-        node.carrier_store_for_write(EntryKind::RelayMessage)?
+        node.relay_storage
+            .as_ref()
+            .ok_or(Error::RelayStorageUnavailable)?
             .count()
             .await?,
         1
@@ -697,6 +705,7 @@ async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result
     let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     // The slot is a relay carrier, so the yielding store is the relay store.
     let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()))
+        .with_relay_replication(crate::tests::ungated_relay_replication())
         .with_relay_storage(Box::new(YieldingStorage(MemStorage::new())));
     let destination = Did::from(50u32);
     let position = inbox_key(destination);
@@ -708,8 +717,8 @@ async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result
     let second =
         EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
     let (first, second) = futures::join!(
-        node.operate_storage_entry(now_ms, position, first, node.did),
-        node.operate_storage_entry(now_ms, position, second, node.did),
+        node.operate_storage_entry(now_ms, position, first, node.did, Principal::Local),
+        node.operate_storage_entry(now_ms, position, second, node.did, Principal::Local),
     );
     first?;
     second?;
@@ -730,8 +739,8 @@ async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result
     let third =
         EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
     let (removal, third) = futures::join!(
-        node.operate_storage_entry(now_ms, position, removal, destination),
-        node.operate_storage_entry(now_ms, position, third, node.did),
+        node.operate_storage_entry(now_ms, position, removal, destination, Principal::Unbound),
+        node.operate_storage_entry(now_ms, position, third, node.did, Principal::Local),
     );
     removal?;
     third?;
@@ -751,6 +760,7 @@ async fn test_interleaved_operations_on_one_slot_do_not_lose_a_write() -> Result
 async fn test_removal_against_nothing_held_stores_nothing() -> Result<()> {
     let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let node = PeerRing::new_with_storage(holder.delegator_did(), 3, Box::new(MemStorage::new()))
+        .with_relay_replication(crate::tests::ungated_relay_replication())
         .with_relay_storage(volatile_relay_storage());
     let now_ms = get_epoch_ms();
 
@@ -761,7 +771,7 @@ async fn test_removal_against_nothing_held_stores_nothing() -> Result<()> {
         EntryKind::Data,
     ))
     .stamped(now_ms, node.did)?;
-    node.operate_storage_entry(now_ms, topic, removal, node.did)
+    node.operate_storage_entry(now_ms, topic, removal, node.did, Principal::Local)
         .await?;
     assert_eq!(node.storage.count().await?, 0);
 
@@ -769,7 +779,7 @@ async fn test_removal_against_nothing_held_stores_nothing() -> Result<()> {
     let position = inbox_key(destination);
     let hold =
         EntryOperation::Extend(held_inbox_for(destination, &holder)?).stamped(now_ms, node.did)?;
-    node.operate_storage_entry(now_ms, position, hold, node.did)
+    node.operate_storage_entry(now_ms, position, hold, node.did, Principal::Local)
         .await?;
     let inbox = node
         .live_storage_entry(StorageKey::inbox_of(destination), now_ms)
@@ -781,7 +791,7 @@ async fn test_removal_against_nothing_held_stores_nothing() -> Result<()> {
 
     let removal = EntryOperation::Tombstone(inbox.removal_of(inbox.crdt.dots.clone()))
         .stamped(now_ms, node.did)?;
-    node.operate_storage_entry(now_ms, position, removal, destination)
+    node.operate_storage_entry(now_ms, position, removal, destination, Principal::Unbound)
         .await?;
     assert_eq!(node.storage.count().await?, 0);
     Ok(())
@@ -794,8 +804,13 @@ async fn test_join_storage_entry_rejects_pinned_register() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let placement_key = Did::from(100u32);
     let honest = data_entry_with_data(Did::from(10u32), "honest");
-    node.join_storage_entry(get_epoch_ms(), placement_key, honest.clone())
-        .await?;
+    node.join_storage_entry(
+        get_epoch_ms(),
+        placement_key,
+        honest.clone(),
+        Principal::Local,
+    )
+    .await?;
 
     let mut pinned = data_entry_with_data(Did::from(10u32), "pinned");
     pinned.crdt.register = Some(EntryVersion::new(
@@ -804,7 +819,7 @@ async fn test_join_storage_entry_rejects_pinned_register() -> Result<()> {
         Did::from(1u32),
     ));
     assert!(matches!(
-        node.join_storage_entry(get_epoch_ms(), placement_key, pinned)
+        node.join_storage_entry(get_epoch_ms(), placement_key, pinned, Principal::Local)
             .await,
         Err(Error::EntryVersionAheadOfClock)
     ));
@@ -825,7 +840,8 @@ async fn test_join_storage_entry_bounds_retention() -> Result<()> {
         node.join_storage_entry(
             get_epoch_ms(),
             placement_key,
-            expired(data_entry(Did::from(10u32)))
+            expired(data_entry(Did::from(10u32))),
+            Principal::Local
         )
         .await,
         Err(Error::EntryNotLive)
@@ -833,7 +849,7 @@ async fn test_join_storage_entry_bounds_retention() -> Result<()> {
     let mut overlong = data_entry(Did::from(10u32));
     overlong.expires_at_ms = Some(u128::MAX);
     assert!(matches!(
-        node.join_storage_entry(get_epoch_ms(), placement_key, overlong)
+        node.join_storage_entry(get_epoch_ms(), placement_key, overlong, Principal::Local)
             .await,
         Err(Error::EntryLifetimeExceedsMax)
     ));
@@ -853,10 +869,10 @@ async fn test_join_storage_entry_keeps_the_later_retention_bound() -> Result<()>
     let mut later = data_entry_with_data(Did::from(10u32), "b");
     later.expires_at_ms = Some(now_ms + 2_000);
 
-    node.join_storage_entry(now_ms, placement_key, later)
+    node.join_storage_entry(now_ms, placement_key, later, Principal::Local)
         .await?;
     let stored = node
-        .join_storage_entry(now_ms, placement_key, earlier)
+        .join_storage_entry(now_ms, placement_key, earlier, Principal::Local)
         .await?;
     assert_eq!(stored.expires_at_ms, Some(now_ms + 2_000));
     Ok(())

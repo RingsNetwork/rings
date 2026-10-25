@@ -8,6 +8,8 @@
 
 mod capacity;
 mod resource_order;
+mod slot_accounting;
+mod slot_roster;
 mod wait_queue;
 
 pub(crate) use capacity::admissible_capacity;
@@ -18,6 +20,12 @@ pub(crate) use capacity::CountedReservedCapacity;
 pub(crate) use capacity::ReservedCapacity;
 pub(crate) use resource_order::AdmissionLedger;
 pub(crate) use resource_order::ResourceOrderedQueue;
+pub use slot_accounting::Principal;
+pub use slot_accounting::ShareRefusal;
+pub(crate) use slot_accounting::Shares;
+pub(crate) use slot_accounting::SlotAccounting;
+pub(crate) use slot_roster::SlotRoster;
+pub(crate) use slot_roster::TableAccounting;
 pub(crate) use wait_queue::acquire_fair;
 pub(crate) use wait_queue::FairWaitBudget;
 pub(crate) use wait_queue::FairWaitQueue;

@@ -787,3 +787,46 @@ async fn test_a_dropped_request_future_leaves_no_handler() {
     assert!(pending.onerror().is_none());
     scope.done().await.unwrap();
 }
+
+/// The batch law on an authoritative store (#916): one batch stores every row and a later pair
+/// of one key supersedes an earlier one; a batch whose new keys do not fit is refused whole and
+/// stores none of its rows, its rewrites included.
+#[wasm_bindgen_test]
+async fn test_an_authoritative_batch_is_one_commit_and_refused_whole_over_the_budget() {
+    /// The IndexedDB database this test owns.
+    const STORAGE_NAME: &str = "rings-core/idb-batch";
+    let open = || {
+        IdbStorage::new_with_cap_name_and_authority(3, STORAGE_NAME, RecordAuthority::Authoritative)
+    };
+    let storage = open().await.expect("IndexedDB opens");
+    <IdbStorage as KvStorageInterface<String>>::clear(&storage)
+        .await
+        .expect("IndexedDB clears");
+    let pair = |key: &str, value: &str| (key.to_owned(), value.to_owned());
+    crate::storage::KvStorageScan::put_batch(&storage, &[
+        pair("a", "first"),
+        pair("b", "v"),
+        pair("a", "last"),
+    ])
+    .await
+    .expect("the batch stores");
+
+    let refused = crate::storage::KvStorageScan::put_batch(&storage, &[
+        pair("a", "rewrite"),
+        pair("c", "v"),
+        pair("d", "v"),
+    ])
+    .await;
+    assert!(matches!(
+        refused,
+        Err(crate::error::Error::StorageBudgetExhausted { .. })
+    ));
+    drop(storage);
+
+    let reopened = open().await.expect("IndexedDB reopens");
+    let mut rows = <IdbStorage as KvStorageInterface<String>>::get_all(&reopened)
+        .await
+        .expect("rows read");
+    rows.sort();
+    assert_eq!(rows, [pair("a", "last"), pair("b", "v")]);
+}

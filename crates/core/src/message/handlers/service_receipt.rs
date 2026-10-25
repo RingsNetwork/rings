@@ -12,6 +12,7 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
+use crate::message::handlers::HandlerContext;
 use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
@@ -281,7 +282,8 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<ProbeRequest> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &ProbeRequest) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &ProbeRequest) -> Result<()> {
+        let ctx = context.payload();
         ProbeEffectInterpreter::new(self)
             .run(ProbeEffect::request(self.dht.did, ctx, msg))
             .await
@@ -292,7 +294,8 @@ impl HandleMsg<ProbeRequest> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<ProbeOffer> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &ProbeOffer) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &ProbeOffer) -> Result<()> {
+        let ctx = context.payload();
         ProbeEffectInterpreter::new(self)
             .run(ProbeEffect::offer(self.dht.did, ctx, msg))
             .await
@@ -303,7 +306,8 @@ impl HandleMsg<ProbeOffer> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<ProbeAcknowledgement> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &ProbeAcknowledgement) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &ProbeAcknowledgement) -> Result<()> {
+        let ctx = context.payload();
         ProbeEffectInterpreter::new(self)
             .run(ProbeEffect::acknowledgement(self.dht.did, ctx, msg))
             .await

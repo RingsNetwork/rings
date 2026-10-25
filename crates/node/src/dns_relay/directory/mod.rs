@@ -22,7 +22,7 @@ use thiserror::Error;
 use super::descriptor::service_topic;
 use super::descriptor::ServiceDescriptor;
 use super::DidOwner;
-use crate::descriptor::RegistryElement;
+use crate::descriptor::heard_descriptors;
 use crate::prelude::rings_core::dht::Did;
 use crate::processor::Processor;
 
@@ -47,17 +47,14 @@ pub enum DirectoryError {
     },
 }
 
-/// The announcement the newest valid descriptor among `elements` makes for `did`, at `now_ms`
-/// in overlay `network_id`.
+/// The announcement the newest valid descriptor among `descriptors`, each heard at its
+/// element's dot, makes for `did`, at `now_ms` in overlay `network_id`.
 fn announcement_in(
-    elements: &[bytes::Bytes],
+    descriptors: Vec<ServiceDescriptor>,
     did: Did,
     now_ms: u128,
     network_id: u32,
 ) -> Option<Announcement> {
-    let descriptors = elements
-        .iter()
-        .filter_map(|element| ServiceDescriptor::from_element(element).ok());
     let latest = ServiceDescriptor::latest_valid_for(descriptors, did, now_ms, network_id)?;
     match latest.announcement() {
         Ok(announcement) => Some(announcement),
@@ -96,7 +93,8 @@ impl Directory for DhtDirectory {
             .map_err(|source| DirectoryError::Fetch { did, source })?;
         let now_ms = get_epoch_ms();
         let network_id = self.processor.swarm.network_id();
-        Ok(entry.and_then(|entry| announcement_in(&entry.data, did, now_ms, network_id)))
+        Ok(entry
+            .and_then(|entry| announcement_in(heard_descriptors(&entry), did, now_ms, network_id)))
     }
 }
 

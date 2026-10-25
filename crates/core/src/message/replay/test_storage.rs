@@ -3,7 +3,9 @@
 //!
 //! ```text
 //! Hooked<H> = H ∘ MemStorage     put k ↦ H.before_put k;
-//!                                get_all, scan ↦ H.before_scan; remove k ↦ H.before_remove k
+//!                                put_batch ks ↦ H.before_batch ks; ∀k ∈ ks: H.before_put k;
+//!                                get_all, scan ↦ H.before_scan; remove k ↦ H.before_remove k;
+//!                                remove_batch ks ↦ ∀k ∈ ks: H.before_remove k
 //! ```
 //!
 //! A hook that fails fails the operation before the store is touched; every other operation,
@@ -21,6 +23,12 @@ use crate::storage::ScannedRecord;
 pub(super) trait StorageHooks: Send + Sync {
     /// Runs before every `put` of `key`; an error fails the write.
     async fn before_put(&self, _key: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Runs before every batch of `keys`, before each key's `before_put`; an error fails the
+    /// batch.
+    async fn before_batch(&self, _keys: &[&str]) -> Result<()> {
         Ok(())
     }
 
@@ -100,5 +108,27 @@ impl<H: StorageHooks> KvStorageScan<ReplayRecord> for Hooked<H> {
     /// The memory store's naming: the key itself.
     fn record_name(&self, key: &str) -> String {
         self.inner.record_name(key)
+    }
+
+    /// The batch hook, the `put` hook of every key in order, then the memory store's
+    /// `put_batch`: a failing hook fails the whole batch before the store is touched.
+    async fn put_batch(&self, records: &[(String, ReplayRecord)]) -> Result<()> {
+        let keys = records
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>();
+        self.hooks.before_batch(&keys).await?;
+        for (key, _) in records {
+            self.hooks.before_put(key).await?;
+        }
+        self.inner.put_batch(records).await
+    }
+
+    /// The `remove` hook of every key in order, then the memory store's `remove_batch`.
+    async fn remove_batch(&self, keys: &[String]) -> Result<()> {
+        for key in keys {
+            self.hooks.before_remove(key).await?;
+        }
+        self.inner.remove_batch(keys).await
     }
 }

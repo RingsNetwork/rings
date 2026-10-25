@@ -112,7 +112,9 @@ where noted.
   that originated it, the `application` message limit is skipped, while the `application` byte
   limits and record bound still apply, each such message is charged at least 16 KiB
   (`DELEGATED_MIN_CHARGE`), and it shares the byte bucket with that neighbour's other
-  application traffic. Delegation is not configured here.
+  application traffic. A protocol may also declare delegated replay (#1081): its traffic from
+  that same neighbour is then admitted in a volatile replay window of the connection, and the
+  protocol guards its own replay. Delegation is not configured here.
 * `external_ip`, `webrtc_udp_port_min`, `webrtc_udp_port_max`: optional reachability hints, an
   externally visible address and a UDP port range for ICE. The two port bounds must be given
   together.
@@ -136,11 +138,14 @@ where noted.
 
 * `online_node_heartbeat_interval_secs`, `online_node_ttl_secs`, `online_node_type`,
   `advertise_presence`: how this node publishes its online-node descriptor.
-  A heartbeat interval must be below the descriptor TTL, and below the lifetime of a registry
-  write (10 minutes) less the clock-skew tolerance (3 seconds) and the time a heartbeat may
-  spend fetching the registry (2 seconds), which is 595 seconds; the same bound applies to
-  `onion_exit_heartbeat_interval_secs`. A node refuses to start otherwise, since a sole
-  registrant's descriptor would lapse between heartbeats.
+  A descriptor is a signed lease of 10 minutes whose bytes stay fixed, so each heartbeat
+  re-appends the same descriptor and writes no removal (#918); the TTL is how long after the
+  last heartbeat a reader still lists it. A heartbeat interval must be below the TTL, and below
+  half the lease, 300 seconds, so a lease spans more than two heartbeats; the TTL must be at
+  most the lease, since no reader lists a longer freshness window. The same bounds apply to
+  `onion_exit_heartbeat_interval_secs` and `onion_exit_ttl_secs`. A node refuses to start
+  otherwise. A descriptor that
+  someone else re-appends after its node stopped is listed at most until its lease ends.
 * `advertise_onion_relay`: advertise onion relay capability. The capability carries the node's
   process epoch, drawn afresh at every start, so layers sealed for an earlier process are
   rejected after a restart. It requires `advertise_presence`.
@@ -266,11 +271,13 @@ How a managed target is supervised:
 * `data_storage`: path and capacity in bytes of the DHT data store.
 * `measure_storage`: path and capacity in bytes of the peer measurement store.
 
-The daemon keeps three more stores in directories beside the data store, with fixed budgets:
+The daemon keeps four more stores in directories beside the data store, with fixed budgets:
 `transaction-replay` (the replay windows, authoritative), `relay-inbox` (the relay carriers this
-node holds or owns, retained: flushed and never evicted, 64 MiB, #1021) and `onion-entry-guards`
-(a durable cache). Back them up and remove them together with the data store; removing
-`relay-inbox` drops the mail held there.
+node holds or owns, retained: flushed and never evicted, 64 MiB, #1021), `dht-removals` (the
+removals of the data topics this node stores, retained: flushed and never evicted until they
+are collected, 24 MiB, #920, #907) and `onion-entry-guards` (a durable cache). Back them up and remove
+them together with the data store; removing `relay-inbox` drops the mail held there, and
+removing `dht-removals` makes this node a fresh replica of every topic it stores.
 
 Files written before a field existed still load: an omitted field takes its default, and an
 omitted `gateway` section loads as no gateway at all.

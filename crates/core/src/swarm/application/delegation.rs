@@ -1,7 +1,8 @@
-//! Namespaces whose admission the application delegated, as data core reads.
+//! Namespaces whose admission, or whose replay, the application delegated, as data core reads.
 //!
 //! ```text
-//!   app:  Swarm::set_admission_delegation(prefix, MessageLimit)  -- at protocol install / replace
+//!   app:  Swarm::set_admission_delegation(prefix, MessageLimit)   -- at protocol install / replace
+//!         Swarm::set_replay_delegation(prefix, ReplayWindow)       -- the same, for replay (#1081)
 //!   core: delegates(payload) = ∃ p ∈ prefixes. payload starts with p   -- on admission
 //! ```
 //!
@@ -14,25 +15,24 @@ use std::collections::BTreeSet;
 use std::sync::PoisonError;
 use std::sync::RwLock;
 
-use crate::message::MessageLimit;
-
-/// The encoded namespace prefixes whose application payloads delegate their admission.
+/// The encoded namespace prefixes whose application payloads delegate one decision: their
+/// admission's message limit, or their replay window.
 #[derive(Default)]
 pub(crate) struct DelegatedNamespaces {
     prefixes: RwLock<BTreeSet<Vec<u8>>>,
 }
 
 impl DelegatedNamespaces {
-    /// Record the message limit of payloads starting with `prefix`: delegated to their
-    /// namespace, or enforced by core.
-    pub(crate) fn set(&self, prefix: Vec<u8>, limit: MessageLimit) {
+    /// Record whether payloads starting with `prefix` delegate the decision to their
+    /// namespace (`delegated`) or leave it to core.
+    pub(crate) fn set(&self, prefix: Vec<u8>, delegated: bool) {
         let mut prefixes = self
             .prefixes
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        match limit {
-            MessageLimit::Delegated => prefixes.insert(prefix),
-            MessageLimit::Enforced => prefixes.remove(&prefix),
+        match delegated {
+            true => prefixes.insert(prefix),
+            false => prefixes.remove(&prefix),
         };
     }
 
@@ -49,17 +49,16 @@ impl DelegatedNamespaces {
 #[cfg(test)]
 mod tests {
     use super::DelegatedNamespaces;
-    use crate::message::MessageLimit;
 
     #[test]
     fn test_a_payload_delegates_exactly_while_its_prefix_is_registered() {
         let namespaces = DelegatedNamespaces::default();
         let prefix = b"\x03abc".to_vec();
         assert!(!namespaces.delegates(b"\x03abcpayload"));
-        namespaces.set(prefix.clone(), MessageLimit::Delegated);
+        namespaces.set(prefix.clone(), true);
         assert!(namespaces.delegates(b"\x03abcpayload"));
         assert!(!namespaces.delegates(b"\x03abd"));
-        namespaces.set(prefix, MessageLimit::Enforced);
+        namespaces.set(prefix, false);
         assert!(!namespaces.delegates(b"\x03abcpayload"));
     }
 }

@@ -10,13 +10,17 @@ use crate::chunk::ReassemblyLimits;
 use crate::delegation::DelegateeKey;
 use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
+use crate::dht::RelayReplication;
+use crate::dht::RemovalStorage;
 use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
+use crate::fair_admission::TableAccounting;
 use crate::measure::MeasureImpl;
 use crate::message::OriginQuotaConfig;
 use crate::message::ReplayStorage;
 use crate::message::TransactionReplay;
+use crate::message::RECEIVER_STREAM_SHARES;
 use crate::swarm::observer::NoopSwarmObserver;
 use crate::swarm::observer::SharedSwarmObserver;
 use crate::swarm::transport::SwarmTransport;
@@ -38,6 +42,8 @@ pub struct SwarmBuilder {
     reassembly_limits: ReassemblyLimits,
     dht_storage: EntryStorage,
     relay_storage: Option<EntryStorage>,
+    removal_storage: Option<RemovalStorage>,
+    relay_replication: RelayReplication,
     replay_storage: Option<ReplayStorage>,
     origin_quota: OriginQuotaConfig,
     delegatee_key: DelegateeKey,
@@ -67,6 +73,8 @@ impl SwarmBuilder {
             reassembly_limits: default_reassembly_limits(),
             dht_storage,
             relay_storage: None,
+            removal_storage: None,
+            relay_replication: RelayReplication::default(),
             replay_storage: None,
             origin_quota: OriginQuotaConfig::default(),
             delegatee_key,
@@ -160,6 +168,23 @@ impl SwarmBuilder {
         self
     }
 
+    /// Set the storage of the data namespace's remove sides (#920): a
+    /// `RecordAuthority::Retained` store, so a remove survives a crash and is never evicted
+    /// before it is stable. Without one, the remove sides are kept in memory, and each restart
+    /// makes this node a fresh replica.
+    pub fn removal_storage(mut self, storage: RemovalStorage) -> Self {
+        self.removal_storage = Some(storage);
+        self
+    }
+
+    /// Set how relay custody is replicated (#777): the members `r` each carrier is replicated
+    /// to, and how long this node is online before it declares that it holds relay mail. The
+    /// default is `RelayReplication::default()`: 8 members, after 2 minutes.
+    pub fn relay_replication(mut self, replication: RelayReplication) -> Self {
+        self.relay_replication = replication;
+        self
+    }
+
     /// Set the durable sender-sequence and receiver replay-window storage: an authoritative
     /// store. Without one, the swarm refuses every reservation and admission
     /// (`Error::TransactionReplayStorageUnavailable`, #1022), so it neither sends nor accepts a
@@ -188,6 +213,11 @@ impl SwarmBuilder {
             self.dht_finger_table_size,
             storage_virtual_node_config,
         );
+        let ring = match self.removal_storage {
+            Some(storage) => ring.with_removal_storage(storage),
+            None => ring,
+        };
+        let ring = ring.with_relay_replication(self.relay_replication);
         let dht = Arc::new(match self.relay_storage {
             Some(storage) => ring.with_relay_storage(storage),
             None => ring,
@@ -207,6 +237,7 @@ impl SwarmBuilder {
             transaction_replay: Arc::new(TransactionReplay::new_with_quota(
                 self.replay_storage,
                 self.origin_quota,
+                TableAccounting::new(RECEIVER_STREAM_SHARES),
             )),
             settings: SwarmTransportSettings::new(
                 self.dht_storage_redundancy,

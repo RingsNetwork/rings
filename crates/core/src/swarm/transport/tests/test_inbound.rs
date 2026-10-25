@@ -3,9 +3,14 @@ use std::time::Duration;
 use super::*;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
+use crate::dht::RelayCustody;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
+use crate::message::ConnectNodeSend;
+use crate::message::PeerWireVersion;
 use crate::message::SyncEntriesWithSuccessor;
+use crate::message::WireVersionMismatch;
+use crate::message::WIRE_VERSION;
 use crate::swarm::callback::inbound_application_capacity_for_test;
 use crate::swarm::callback::inbound_peer_capacity_for_test;
 use crate::tests::live_entry;
@@ -14,10 +19,44 @@ mod test_admission_delegation;
 mod test_application_backpressure;
 mod test_capacity_handoff;
 mod test_delegation_reference;
+mod test_link_replay;
 mod test_origin_quota;
 mod test_pre_admission;
 mod test_reassembly;
 mod test_storage_interleave;
+
+/// The frame-header law on the overlay path (#1104): an overlay handshake (`ConnectNodeSend`)
+/// that arrives on an admitted link in a frame of another wire version is refused before its
+/// body is decoded, naming both versions, and reaches no handler.
+#[tokio::test]
+async fn test_a_link_frame_of_another_wire_version_is_refused_before_decoding() -> Result<()> {
+    let transport = default_transport()?;
+    let recorder = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
+    pending.admit(&transport).await?;
+    let offer = Message::ConnectNodeSend(ConnectNodeSend {
+        sdp: String::new(),
+        dht_protocol_mode: transport.dht_protocol_mode(),
+        relay_custody: RelayCustody::Holds,
+    });
+    let theirs = WIRE_VERSION + 1;
+    let mut frame = local_wire(offer, &pending.session, transport.dht.did)?.to_vec();
+    frame[6..8].copy_from_slice(&theirs.to_be_bytes());
+
+    let refused = pending
+        .callback
+        .on_admitted_message_for_test(&pending.peer.to_string(), &frame)
+        .await;
+    assert!(matches!(
+        refused.as_ref().map_err(|error| error.downcast_ref::<Error>()),
+        Err(Some(Error::IncompatibleWireVersion(WireVersionMismatch {
+            ours: WIRE_VERSION,
+            theirs: PeerWireVersion::Versioned(version),
+        }))) if *version == theirs
+    ));
+    assert_eq!(recorder.observed(), 0);
+    Ok(())
+}
 
 /// Deliver `early` from `pending`'s peer before this end admits the handshake, where it is held
 /// unobserved, then admit the handshake on a data channel that opens while ICE still connects.

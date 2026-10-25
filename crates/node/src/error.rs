@@ -1,5 +1,7 @@
 //! A bunch of wrap errors.
 use rings_core::dht::Did;
+use rings_core::message::PeerWireVersion;
+use rings_core::message::WireVersionMismatch;
 
 use crate::onion::OnionProxyTargetError;
 use crate::onion::OnionRouteError;
@@ -49,6 +51,9 @@ impl OnionQueueAdmissionReason {
 /// A wrap `Result` contains custom errors.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The stable JSON-RPC code of [`Error::IncompatibleWireVersion`], which a client matches.
+pub const INCOMPATIBLE_WIRE_VERSION_CODE: u32 = 210;
+
 /// Errors enum mapping global custom errors.
 /// The error type can be expressed in decimal, where the high decs represent
 /// the error category and the low decs represent the error type.
@@ -89,6 +94,10 @@ pub enum Error {
     /// Accepting WebRTC answer data failed.
     #[error("Accept answer info failed: {0}.")]
     AcceptAnswer(rings_core::error::Error) = 209,
+    /// A handshake met a node of another wire version (#1104); over JSON-RPC its data is
+    /// `{"ours": n, "theirs": m}`, with `theirs` null for a peer before wire versioning.
+    #[error("Incompatible wire version: {0}.")]
+    IncompatibleWireVersion(WireVersionMismatch) = INCOMPATIBLE_WIRE_VERSION_CODE,
     /// Decoding structured data failed.
     #[error("Decode error.")]
     DecodeError = 300,
@@ -380,6 +389,46 @@ impl Error {
     pub fn code(&self) -> u32 {
         self.discriminant()
     }
+
+    /// The structured data a JSON-RPC caller matches beside the code: both wire versions of an
+    /// [`Self::IncompatibleWireVersion`], none for any other error.
+    fn data(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::IncompatibleWireVersion(mismatch) => Some(serde_json::json!({
+                "ours": mismatch.ours,
+                "theirs": mismatch.theirs.number(),
+            })),
+            _ => None,
+        }
+    }
+
+    /// `error` as this layer reports it: the core's refusal of a peer of another wire version
+    /// as [`Self::IncompatibleWireVersion`], any other error through `otherwise`.
+    pub(crate) fn from_core_or(
+        error: rings_core::error::Error,
+        otherwise: impl FnOnce(rings_core::error::Error) -> Self,
+    ) -> Self {
+        match error {
+            rings_core::error::Error::IncompatibleWireVersion(mismatch) => {
+                Self::IncompatibleWireVersion(mismatch)
+            }
+            error => otherwise(error),
+        }
+    }
+
+    /// The refusal a remote node returned for this node's wire version, as this node states it:
+    /// the remote's `ours` is this node's `theirs`. `None` for any other remote error.
+    fn remote_wire_refusal(error: &jsonrpc_core::Error) -> Option<Self> {
+        let code = jsonrpc_core::ErrorCode::ServerError(INCOMPATIBLE_WIRE_VERSION_CODE.into());
+        if error.code != code {
+            return None;
+        }
+        let theirs = error.data.as_ref()?.get("ours")?.as_u64()?;
+        let theirs = u16::try_from(theirs).ok()?;
+        Some(Self::IncompatibleWireVersion(
+            PeerWireVersion::Versioned(theirs).mismatch(),
+        ))
+    }
 }
 
 impl From<Error> for jsonrpc_core::Error {
@@ -387,7 +436,7 @@ impl From<Error> for jsonrpc_core::Error {
         Self {
             code: jsonrpc_core::ErrorCode::ServerError(e.code().into()),
             message: e.to_string(),
-            data: None,
+            data: e.data(),
         }
     }
 }
@@ -401,7 +450,14 @@ impl From<serde_saphyr::Error> for Error {
 
 impl From<rings_rpc::jsonrpc::RpcError> for Error {
     /// A remote node's JSON-RPC call failed: transport, decoding or an error the node returned.
+    /// The remote's refusal of this node's wire version is that refusal, as this node states it
+    /// ([`Error::IncompatibleWireVersion`]).
     fn from(error: rings_rpc::jsonrpc::RpcError) -> Self {
+        if let rings_rpc::jsonrpc::RpcError::JsonClientError(remote) = &error {
+            if let Some(refusal) = Error::remote_wire_refusal(remote) {
+                return refusal;
+            }
+        }
         Error::RemoteRpcError(error.to_string())
     }
 }

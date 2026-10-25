@@ -3,9 +3,11 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 
+use super::carrier_store::CarrierStore;
 use super::PeerRing;
 use super::PeerRingAction;
 use super::RemoteAction;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::entry::inbox::inbox_destination;
 use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::AdmittedEntry;
@@ -14,6 +16,7 @@ use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryLookupEvidence;
 use crate::dht::entry::EntryLookupKey;
 use crate::dht::entry::EntryOperation;
+use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
@@ -21,9 +24,9 @@ use crate::dht::relay_holder::RelayHolder;
 use crate::dht::topology;
 use crate::dht::types::ChordStorageCache;
 use crate::dht::Did;
-use crate::dht::EntryStorage;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::Principal;
 use crate::utils::get_epoch_ms;
 
 /// A lookup placement settled here.
@@ -154,7 +157,7 @@ impl Projection {
 /// [`Projection::WrittenBack`] read, so expiry, like the element horizon, is enforced lazily
 /// instead of by a sweeper.
 async fn live_entry(
-    store: &EntryStorage,
+    store: &CarrierStore<'_>,
     key: &str,
     now_ms: u128,
     projection: Projection,
@@ -187,7 +190,7 @@ fn projection_shape(entry: &Entry) -> (usize, usize, usize, bool) {
 /// than the one returned: `retire_t ∘ retire_s = retire_max(s, t)`, so every later read
 /// returns a value at least as retired.
 async fn retire_unless_live(
-    store: &EntryStorage,
+    store: &CarrierStore<'_>,
     key: &str,
     entry: Entry,
     now_ms: u128,
@@ -201,7 +204,8 @@ async fn retire_unless_live(
         return Ok(None);
     };
     if projection.writes_back() && projection_shape(&entry) != stored_shape {
-        store.put(key, &entry).await?;
+        // A retirement raises no remove, so it is charged to nobody and never refused for room.
+        store.put(key, &entry, Principal::Local, now_ms).await?;
     }
     Ok(Some(entry))
 }
@@ -212,11 +216,15 @@ async fn retire_unless_live(
 /// Pre: the caller holds the transition of `store`.
 /// Post: the stored value is `(live ⊔ admitted).retired_at(now_ms)` when a live value exists,
 /// otherwise `admitted.retired_at(now_ms)`, normalized for storage either way (the join
-/// normalizes the union, the admission normalized `admitted`); it is returned.
+/// normalizes the union, the admission normalized `admitted`); it is returned. A result past
+/// its tombstone bound is refused with `EntryTombstonesExceedMax`, and one whose raised removes
+/// the removal store's accounting refuses for `introducer` with `RemovalCapacityExhausted`;
+/// either way the slot is unchanged (#920, #921, #907).
 async fn join_live_entry(
-    store: &EntryStorage,
+    store: &CarrierStore<'_>,
     key: &str,
     admitted: AdmittedEntry,
+    introducer: Principal,
     now_ms: u128,
 ) -> Result<Entry> {
     let admitted = admitted.into_entry();
@@ -225,7 +233,8 @@ async fn join_live_entry(
         None => admitted,
     }
     .retired_at(now_ms);
-    store.put(key, &joined).await?;
+    joined.check_tombstone_bound()?;
+    store.put(key, &joined, introducer, now_ms).await?;
     Ok(joined)
 }
 
@@ -235,12 +244,15 @@ async fn join_live_entry(
 ///
 /// Pre: the caller holds the transition of `store`, and `op` passed the admission law.
 /// Post: the slot holds `(live or ⊥).operate(op)` when that is live at `now_ms`, and is clear
-/// otherwise, since a stored value is always live when written.
+/// otherwise, since a stored value is always live when written; a result past its tombstone
+/// bound, or raising removes the removal store's accounting refuses for `introducer`, is
+/// refused and the slot is unchanged (#920, #921, #907).
 async fn operate_live_entry(
-    store: &EntryStorage,
+    store: &CarrierStore<'_>,
     key: &str,
     op: EntryOperation,
     actor: Did,
+    introducer: Principal,
     now_ms: u128,
 ) -> Result<()> {
     let local = match live_entry(store, key, now_ms, Projection::ReturnedOnly).await? {
@@ -248,7 +260,10 @@ async fn operate_live_entry(
         None => op.gen_default_entry()?,
     };
     match local.operate(now_ms, op, actor)?.live_at(now_ms) {
-        Some(value) => store.put(key, &value).await,
+        Some(value) => {
+            value.check_tombstone_bound()?;
+            store.put(key, &value, introducer, now_ms).await
+        }
         None => store.remove(key).await,
     }
 }
@@ -283,7 +298,7 @@ impl PeerRing {
         let Some(store) = self.carrier_storage(kind) else {
             return Ok(None);
         };
-        live_entry(store, &key, now_ms, Projection::ReturnedOnly).await
+        live_entry(&store, &key, now_ms, Projection::ReturnedOnly).await
     }
 
     /// Read the live replicated entry stored at `key`.
@@ -296,7 +311,7 @@ impl PeerRing {
             return Ok(None);
         };
         let _transition = self.storage_transition.lock().await;
-        live_entry(store, &key.to_string(), now_ms, Projection::WrittenBack).await
+        live_entry(&store, &key.to_string(), now_ms, Projection::WrittenBack).await
     }
 
     /// Every live entry of both namespaces with its key, retiring the rest. Each store yields
@@ -321,7 +336,7 @@ impl PeerRing {
                     continue;
                 }
                 if let Some(entry) =
-                    retire_unless_live(store, &key, entry, now_ms, Projection::WrittenBack).await?
+                    retire_unless_live(&store, &key, entry, now_ms, Projection::WrittenBack).await?
                 {
                     live.push((slot, entry));
                 }
@@ -347,7 +362,7 @@ impl PeerRing {
         };
         let _transition = self.storage_transition.lock().await;
         let Some(local) =
-            live_entry(store, &key.to_string(), now_ms, Projection::WrittenBack).await?
+            live_entry(&store, &key.to_string(), now_ms, Projection::WrittenBack).await?
         else {
             return Ok(());
         };
@@ -365,12 +380,17 @@ impl PeerRing {
     /// Post: the stored value is the least upper bound of the previous live local
     /// value and `incoming` when a previous value exists; otherwise it is
     /// `incoming` normalized for storage. Either is projected to its element horizon at
-    /// `now_ms`, which commutes with the join.
+    /// `now_ms`, which commutes with the join. A result past its tombstone bound is refused with
+    /// `EntryTombstonesExceedMax`, and one whose raised removes the removal store's accounting
+    /// refuses for `introducer`, the principal that delivered it, with
+    /// `RemovalCapacityExhausted`; either way the slot is unchanged (#920, #921, #907), so an
+    /// unacknowledged hand-off stays with its sender.
     pub(crate) async fn join_storage_entry(
         &self,
         now_ms: u128,
         key: Did,
         incoming: Entry,
+        introducer: Principal,
     ) -> Result<Entry> {
         incoming.check_admissible_at(now_ms, self.network_id())?;
         let store = self.carrier_store_for_write(incoming.kind)?;
@@ -379,13 +399,14 @@ impl PeerRing {
         // The join normalizes the union once, so the incoming value is normalized on its own
         // only when there is nothing to join it with (`join_live_entry` takes an admitted value,
         // normalized first, so it would hash every element twice).
-        let local = live_entry(store, &key, now_ms, Projection::ReturnedOnly).await?;
+        let local = live_entry(&store, &key, now_ms, Projection::ReturnedOnly).await?;
         let stored = match local {
             Some(local) => local.join(incoming)?,
             None => incoming.try_into_storage_entry()?,
         }
         .retired_at(now_ms);
-        store.put(&key, &stored).await?;
+        stored.check_tombstone_bound()?;
+        store.put(&key, &stored, introducer, now_ms).await?;
         Ok(stored)
     }
 
@@ -396,21 +417,24 @@ impl PeerRing {
     /// Post: the stored value is the least upper bound of the previous live local value and
     /// `admitted` when a previous value exists; otherwise it is `admitted`, normalized by its
     /// admission. Either is projected to its element horizon at `now_ms`, which commutes with
-    /// the join.
+    /// the join; the raised removes are charged to `introducer` as in
+    /// [`Self::join_storage_entry`].
     pub(crate) async fn join_admitted_storage_entry(
         &self,
         now_ms: u128,
         key: Did,
         admitted: AdmittedEntry,
+        introducer: Principal,
     ) -> Result<Entry> {
         let store = self.carrier_store_for_write(admitted.kind())?;
         let key = StorageKey::new(admitted.kind(), key).to_string();
         let _transition = self.storage_transition.lock().await;
-        join_live_entry(store, &key, admitted, now_ms).await
+        join_live_entry(&store, &key, admitted, introducer, now_ms).await
     }
 
-    /// Apply a stamped operation issued by `writer` to the value stored at `placement` at time
-    /// `now_ms`.
+    /// Apply a stamped operation issued by `writer`, delivered by `introducer`, to the value
+    /// stored at `placement` at time `now_ms`; the removes it raises are charged to
+    /// `introducer`.
     ///
     /// Pre: `op` is stamped, and `writer` is its signer as the shell verified it (this node for
     /// a local operation). Admission is checked on the delta `op` carries, never on the join
@@ -428,6 +452,7 @@ impl PeerRing {
         placement: Did,
         op: EntryOperation,
         writer: Did,
+        introducer: Principal,
     ) -> Result<()> {
         match op.entry().kind {
             EntryKind::Data => op.validate_admissible_at(now_ms, self.network_id())?,
@@ -446,7 +471,7 @@ impl PeerRing {
         let store = self.carrier_store_for_write(op.kind())?;
         let key = StorageKey::new(op.kind(), placement).to_string();
         let _transition = self.storage_transition.lock().await;
-        operate_live_entry(store, &key, op, self.did, now_ms).await
+        operate_live_entry(&store, &key, op, self.did, introducer, now_ms).await
     }
 
     /// The step one placement of a lookup takes under the topology and local storage at
@@ -606,6 +631,109 @@ impl PeerRing {
         }
     }
 
+    /// Stamp `op` as this node's next operation at `now_ms`: the issue law of a hybrid logical
+    /// clock (#1075, #1033; folds in #1076).
+    ///
+    /// ```text
+    ///   observed = max_version(cache[k]) ⊔ max_version(replica[placement])      what it read
+    ///   floor    = cap(last ⊔ observed)        cap(v) = v with l = min(l, now + σ − 1)
+    ///   op'      = op.stamped_after(now, self, floor)
+    ///              v = (now, 0) if it exceeds floor, else (l_floor, c_floor + 1)  the HLC pair
+    ///   last    ← floor ⊔ cap(max_version(op'))
+    /// ```
+    ///
+    /// Laws:
+    /// - Issue order: every version a call issues is strictly after every version this node
+    ///   stamped or passed through before it, below the cap, so its operations are ordered as it
+    ///   issued them: two in one millisecond, or across a step back of its clock, and an append
+    ///   after an overwrite is never shadowed by that overwrite's reset floor.
+    /// - Read order: a write follows every value its writer read at its key: the key's cached
+    ///   carrier (which holds the writer's own earlier writes, #982) and, for an owner stamping
+    ///   at `placement`, the replica it holds there.
+    /// - Bound: the floor's millisecond is capped one tick below `now + σ`, and strict ascent
+    ///   raises the counter, never the millisecond (`EntryVersion::after`), so every version a
+    ///   call issues has `l ≤ now + σ − 1`, which every owner admits, and leads this node's
+    ///   clock by less than `σ`, however many writes it issues in one millisecond and however
+    ///   far ahead the versions it read or passed through are; a value read above the cap is
+    ///   followed only up to it. A writer is never blocked to wait for its clock.
+    /// - Clock: when the clock has passed the floor, the issued version is `(now, 0, …)`, so the
+    ///   millisecond of every dot is its issue time and the counter steps only within it.
+    /// - Counter: `c < 2³²` per millisecond; at the bound the write is refused with
+    ///   `EntryVersionAheadOfClock` (`EntryVersion::after`), unreachable below `4·10¹²` writes a
+    ///   second.
+    ///
+    /// An operation that already carries its witnesses keeps them and raises the floor to them.
+    pub(crate) async fn stamp_operation(
+        &self,
+        op: EntryOperation,
+        now_ms: u128,
+        placement: Option<Did>,
+    ) -> Result<EntryOperation> {
+        let observed = self.observed_version(&op, now_ms, placement).await?;
+        let ceiling = now_ms
+            .saturating_add(TS_OFFSET_TOLERANCE_MS)
+            .saturating_sub(1);
+        let cap = |version: EntryVersion| EntryVersion {
+            logical_time_ms: version.logical_time_ms.min(ceiling),
+            ..version
+        };
+        let mut last = self.last_stamped.lock().map_err(|_| Error::LockPoisoned)?;
+        let floor = (*last).max(observed).map(cap);
+        let stamped = op.stamped_after(now_ms, self.did, floor)?;
+        // The last value is kept capped, so a version passed through above the cap leaves this
+        // node's own stamps free to ascend by the counter below it.
+        *last = floor.max(stamped.entry().max_observed_version().map(cap));
+        Ok(stamped)
+    }
+
+    /// The greatest version this node has read at `op`'s key: of the cached carrier of a data
+    /// key, and of the replica it stores at `placement`, if it is given one.
+    async fn observed_version(
+        &self,
+        op: &EntryOperation,
+        now_ms: u128,
+        placement: Option<Did>,
+    ) -> Result<Option<EntryVersion>> {
+        let entry = op.entry();
+        let cached = match entry.kind {
+            EntryKind::Data => self
+                .local_cache_held(entry.did, now_ms)
+                .await?
+                .and_then(|held| held.max_observed_version()),
+            EntryKind::RelayMessage => None,
+        };
+        let replica = match placement {
+            Some(placement) => self
+                .live_storage_entry(StorageKey::new(entry.kind, placement), now_ms)
+                .await?
+                .and_then(|held| held.max_observed_version()),
+            None => None,
+        };
+        Ok(cached.max(replica))
+    }
+
+    /// The recipient's removal `op` of elements of its inbox, sent to `member`, the member of its
+    /// inbox key it read them from (#777): applied here when this node is that member, otherwise
+    /// a [`RemoteAction::FindEntryForOperate`] to it, which it applies as a member of the key.
+    pub(crate) async fn operate_relay_removal_at(
+        &self,
+        op: EntryOperation,
+        member: Did,
+    ) -> Result<PeerRingAction> {
+        let now_ms = get_epoch_ms();
+        let op = self.stamp_operation(op, now_ms, None).await?;
+        let placement = op.did()?;
+        if member == self.did {
+            self.operate_storage_entry(now_ms, placement, op, self.did, Principal::Local)
+                .await?;
+            return Ok(PeerRingAction::None);
+        }
+        Ok(PeerRingAction::RemoteAction(
+            member,
+            RemoteAction::FindEntryForOperate(Box::new(PlacedEntryOperation { placement, op })),
+        ))
+    }
+
     /// Apply `op` under a runtime `redundancy`: locally at every accepted placement, and as a
     /// [`RemoteAction::FindEntryForOperate`] toward every remote one.
     pub(crate) async fn entry_operate(
@@ -614,7 +742,7 @@ impl PeerRing {
         redundancy: u16,
     ) -> Result<PeerRingAction> {
         let now_ms = get_epoch_ms();
-        let op = op.stamped(now_ms, self.did)?;
+        let op = self.stamp_operation(op, now_ms, None).await?;
         let entry_key = op.did()?;
         let kind = op.entry().kind;
         let redundancy = kind.replication(redundancy);
@@ -622,8 +750,14 @@ impl PeerRing {
         for placement in entry_key.rotate_affine(redundancy)? {
             match self.operate_route(placement, kind)? {
                 OperateRoute::Owned => {
-                    self.operate_storage_entry(now_ms, placement, op.clone(), self.did)
-                        .await?;
+                    self.operate_storage_entry(
+                        now_ms,
+                        placement,
+                        op.clone(),
+                        self.did,
+                        Principal::Local,
+                    )
+                    .await?;
                 }
                 OperateRoute::Remote(next) => ret.push(PeerRingAction::RemoteAction(
                     next,
@@ -656,7 +790,7 @@ impl PeerRing {
         now_ms: u128,
     ) -> Result<Option<Entry>> {
         live_entry(
-            &self.cache,
+            &CarrierStore::Whole(&self.cache),
             &entry_key.to_string(),
             now_ms,
             Projection::ReturnedOnly,
@@ -687,9 +821,15 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         let key = entry.did.to_string();
         let admitted = entry.validate_admissible_at(now_ms, self.network_id())?;
         let _transition = self.cache_transition.lock().await;
-        join_live_entry(&self.cache, &key, admitted, now_ms)
-            .await
-            .map(drop)
+        join_live_entry(
+            &CarrierStore::Whole(&self.cache),
+            &key,
+            admitted,
+            Principal::Local,
+            now_ms,
+        )
+        .await
+        .map(drop)
     }
 
     /// Observe this node's own write `op` in the cache: `cache[k] ← (cache[k] or ⊥).operate(op)`,
@@ -713,7 +853,15 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         }
         let key = op.entry().did.to_string();
         let _transition = self.cache_transition.lock().await;
-        operate_live_entry(&self.cache, &key, op, self.did, now_ms).await
+        operate_live_entry(
+            &CarrierStore::Whole(&self.cache),
+            &key,
+            op,
+            self.did,
+            Principal::Local,
+            now_ms,
+        )
+        .await
     }
 
     /// Read a cached entry, as a lookup serves it.

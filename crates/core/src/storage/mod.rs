@@ -259,6 +259,26 @@ pub trait KvStorageScan<V>: KvStorageInterface<V> {
     /// The name under which this storage files the record of `key`, and under which
     /// [`Self::scan`] reports whatever it finds filed there.
     fn record_name(&self, key: &str) -> String;
+
+    /// Store every pair of `records` at once: one flush, or one commit, for the whole batch
+    /// instead of one per record (group commit, #916; durable-records, Law Group commit).
+    ///
+    /// **Law (batch).** A later pair of one key supersedes an earlier one. `Ok` means every
+    /// record is stored and, in a durable store, survives a crash (the durability law). A crash,
+    /// or an `Err`, leaves each record whole at its previous or its new value, with any subset
+    /// of them new and no order promised across keys; a store that refuses (never evicts)
+    /// refuses a batch that does not fit its budget whole, changing nothing. Required, as the
+    /// other two methods are: a default of one `put` per record would keep the law but pay one
+    /// flush per record, which is what the batch exists to avoid.
+    async fn put_batch(&self, records: &[(String, V)]) -> Result<()>;
+
+    /// Remove the record of every key of `keys` at once: one flush, or one commit, for the
+    /// whole batch (the batch law of [`Self::put_batch`], for removals).
+    ///
+    /// **Law (batch removal).** `Ok` means no key holds a record and, in a durable store, none
+    /// comes back after a crash; a crash, or an `Err`, leaves any subset of them removed. A key
+    /// that holds no record is skipped. Required, for the reason `put_batch` is.
+    async fn remove_batch(&self, keys: &[String]) -> Result<()>;
 }
 
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]

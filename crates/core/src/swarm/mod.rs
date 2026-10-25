@@ -49,7 +49,9 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::OriginQuotaCounters;
 use crate::message::PayloadSender;
+use crate::message::Principal;
 use crate::message::ReplayCounters;
+use crate::message::ReplayWindow;
 use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationInbox;
 use crate::swarm::application::SuccessorReport;
@@ -196,7 +198,22 @@ impl Swarm {
         self.transport
             .application()
             .delegations
-            .set(namespace_prefix, limit);
+            .set(namespace_prefix, limit == MessageLimit::Delegated);
+    }
+
+    /// Record the replay window of application payloads starting with `namespace_prefix`, from
+    /// the authenticated neighbour that originated them: [`ReplayWindow::Link`], a volatile
+    /// window of the link they arrived on, or [`ReplayWindow::Durable`] (#1081).
+    ///
+    /// Registered in advance and matched by core on its admission path, as
+    /// [`Self::set_admission_delegation`] is. Delegated replay is trusted local configuration: a
+    /// declaring namespace must act on each of its payloads at most once by its own replay key
+    /// (Obligation R of durable-records).
+    pub fn set_replay_delegation(&self, namespace_prefix: Vec<u8>, window: ReplayWindow) {
+        self.transport
+            .application()
+            .replay_delegations
+            .set(namespace_prefix, window == ReplayWindow::Link);
     }
 
     /// Whether an application payload belongs to a namespace registered as delegating through
@@ -205,6 +222,15 @@ impl Swarm {
         self.transport
             .application()
             .delegations
+            .delegates(application_payload)
+    }
+
+    /// Whether an application payload belongs to a namespace registered as delegating its
+    /// replay through [`Swarm::set_replay_delegation`].
+    pub fn delegates_replay(&self, application_payload: &[u8]) -> bool {
+        self.transport
+            .application()
+            .replay_delegations
             .delegates(application_payload)
     }
 
@@ -223,6 +249,19 @@ impl Swarm {
     /// 3) close the connection;
     pub async fn disconnect(&self, peer: Did) -> Result<()> {
         self.transport.disconnect(peer).await
+    }
+
+    /// Close this swarm: it opens no connection from now on, and every connection it has,
+    /// admitted or still handshaking, is disconnected and physically closed before this returns
+    /// (the close law of `SwarmTransport::close`, #1098).
+    ///
+    /// Each peer sees its connection close at once, as on [`Self::disconnect`], instead of
+    /// waiting for an ICE timeout. Call it before dropping a swarm that stops in a process that
+    /// goes on: dropping it frees the swarm (#1093), but a peer connection that was never closed
+    /// keeps its sockets bound. A closed swarm refuses every new connection with
+    /// [`Error::SwarmClosed`]; closing again is a no-op.
+    pub async fn close(&self) -> Result<()> {
+        self.transport.close().await
     }
 
     /// Start a non-routable handshake with a peer.
@@ -508,7 +547,8 @@ impl Swarm {
     /// earlier reply with [`OfferReply::CounterOffer`] when their sent overlay offer prevails on
     /// the DID tie-break (#947): that offer, a `ConnectNodeSend`, which the caller hands to the
     /// peer's `answer_offer`; the peer abandons its own offer and answers this one, and that
-    /// answer goes to the replying node's `accept_answer`.
+    /// answer goes to the replying node's `accept_answer`. Crossing no edge, the offer opens a
+    /// replay stream on this node's local share.
     pub async fn answer_offer(
         &self,
         offer_payload: MessagePayload,
@@ -531,6 +571,7 @@ impl Swarm {
             .admit_final_transaction(
                 &offer_payload.transaction,
                 MessageCategory::DhtControl.into(),
+                Principal::Local,
             )
             .await?;
 
@@ -583,6 +624,7 @@ impl Swarm {
     }
 
     /// Verify the answer payload and apply it to the pending generation, or to `expected` only.
+    /// Carried out of band, the answer opens a replay stream on this node's local share.
     async fn accept_answer_with(
         &self,
         expected: Option<PendingConnectionAttempt>,
@@ -606,6 +648,7 @@ impl Swarm {
             .admit_final_transaction(
                 &answer_payload.transaction,
                 MessageCategory::DhtControl.into(),
+                Principal::Local,
             )
             .await?;
 

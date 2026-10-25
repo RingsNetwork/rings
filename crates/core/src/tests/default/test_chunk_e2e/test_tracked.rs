@@ -23,12 +23,14 @@ use crate::tests::default::test_chunk_e2e::large_storage_sync_entries;
 use crate::tests::default::test_chunk_e2e::wait_for_test_condition;
 use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::outbound_capacity_released;
+use crate::tests::DispatchedFrames;
 #[tokio::test]
 async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let _pending_after_first_chunk = PendingAfterSentCountGuard::new(1);
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
@@ -39,7 +41,7 @@ async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending
     let send = tokio::spawn(async move { transport.send_storage_sync_tracked(msg).await });
 
     wait_for_test_condition("the tracked path must enter the real chunk tail", || {
-        dummy_controlled::sent_count() == 1
+        dispatched.count() == 1
     })
     .await;
     assert!(
@@ -54,7 +56,7 @@ async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending
         .expect("tracked storage sync task should not panic");
     assert_eq!(send_result?, StorageSyncOutcome::Deferred);
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         1,
         "route cancellation must prevent any additional chunk admission"
     );
@@ -65,7 +67,7 @@ async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending
 async fn test_tracked_storage_sync_timeout_closes_stalled_delivery_generation() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
 
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let pending_delivery = PendingDeliveryGuard::new();
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
@@ -80,7 +82,7 @@ async fn test_tracked_storage_sync_timeout_closes_stalled_delivery_generation() 
     .expect("tracked delivery deadline must bound a stuck delivery future")?;
 
     assert_eq!(outcome, StorageSyncOutcome::Deferred);
-    assert_eq!(dummy_controlled::sent_count(), 1);
+    assert_eq!(dispatched.count(), 1);
     assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
     assert!(
         outbound_capacity_released(&node1.swarm.transport, node2.did()),
@@ -88,7 +90,7 @@ async fn test_tracked_storage_sync_timeout_closes_stalled_delivery_generation() 
     );
 
     drop(pending_delivery);
-    assert_eq!(dummy_controlled::sent_count(), 1);
+    assert_eq!(dispatched.count(), 1);
     Ok(())
 }
 
@@ -157,7 +159,7 @@ async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() ->
 async fn test_dropping_tracked_storage_sync_requests_transfer_stop() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
 
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let pending_delivery = PendingDeliveryGuard::new();
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
@@ -168,7 +170,7 @@ async fn test_dropping_tracked_storage_sync_requests_transfer_stop() -> Result<(
     let send = tokio::spawn(async move { transport.send_storage_sync_tracked(msg).await });
 
     wait_for_test_condition("tracked send must reach the stalled delivery", || {
-        dummy_controlled::sent_count() == 1
+        dispatched.count() == 1
             && node1
                 .swarm
                 .transport
@@ -189,6 +191,6 @@ async fn test_dropping_tracked_storage_sync_requests_transfer_stop() -> Result<(
     .await;
 
     drop(pending_delivery);
-    assert_eq!(dummy_controlled::sent_count(), 1);
+    assert_eq!(dispatched.count(), 1);
     Ok(())
 }

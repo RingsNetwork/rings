@@ -159,8 +159,10 @@ sample_message_body!(QueryForTopoInfoReport, |fixture| QueryForTopoInfoReport {
     request_id: uuid::Uuid::nil(),
 });
 sample_message_body!(AnnounceRelayHolder, |fixture| AnnounceRelayHolder {
-    holder: fixture.did,
-    run_start: fixture.did,
+    previous: vec![PreviousRelayHolder {
+        holder: fixture.did,
+        run_start: fixture.did,
+    }],
 });
 sample_message_body!(FetchRelayInbox, |_fixture| FetchRelayInbox);
 sample_message_body!(RelayInboxReport, |_fixture| RelayInboxReport {
@@ -169,8 +171,29 @@ sample_message_body!(RelayInboxReport, |_fixture| RelayInboxReport {
 sample_message_body!(RelayCarrierRefused, |fixture| RelayCarrierRefused {
     hold: RelayHoldDigest::of(&EntryOperation::Extend(fixture.entry.clone()))?,
 });
+sample_message_body!(ReplicateRelayHold, |fixture| ReplicateRelayHold {
+    digest: RelayHoldDigest::of(&EntryOperation::Extend(fixture.entry.clone()))?,
+    hold: Some(EntryOperation::Extend(fixture.entry.clone())),
+});
+sample_message_body!(RelayCarrierDigests, |fixture| RelayCarrierDigests {
+    carriers: vec![RelayCarrierDigest::of(fixture.did, &fixture.entry)?],
+});
+sample_message_body!(RelayCarriersWanted, |fixture| RelayCarriersWanted {
+    keys: vec![fixture.did],
+});
+sample_message_body!(DeclareRelayCustody, |_fixture| DeclareRelayCustody {
+    custody: crate::dht::RelayCustody::Holds,
+});
 sample_message_body!(RelayCarrierHeld, |fixture| RelayCarrierHeld {
     hold: RelayHoldDigest::of(&EntryOperation::Extend(fixture.entry.clone()))?,
+});
+sample_message_body!(FindRelayHolder, |fixture| FindRelayHolder {
+    key: fixture.did
+});
+sample_message_body!(RelayHolderFound, |fixture| RelayHolderFound {
+    key: fixture.did,
+    holder: Some(fixture.did),
+    horizon: None,
 });
 sample_message_body!(Chunk, |fixture| Chunk {
     chunk: [0, 1],

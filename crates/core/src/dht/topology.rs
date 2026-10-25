@@ -39,6 +39,7 @@ use super::finger::FingerConvergenceStatus;
 use super::finger::FINGER_LOOKUP_MIN_INTERVAL_MS;
 use super::Did;
 use super::FingerFixRequest;
+use super::DEFAULT_FINGER_TABLE_SIZE;
 
 /// Bounded connection plans of claimed topology reports.
 mod connection_plan;
@@ -79,6 +80,32 @@ pub const RING_BITS: usize = 160;
 
 /// Default successor-list capacity used by the production builder and tests.
 pub const DEFAULT_SUCCESSOR_CAPACITY: usize = 3;
+
+/// Logical connections retained per topology reference slot.
+///
+/// Law: `total = RETAINED_CONNECTIONS_PER_REFERENCE_SLOT × (finger slots +
+/// successor capacity + 1 predecessor)`, where the finger slot count is
+/// [`DEFAULT_FINGER_TABLE_SIZE`], one slot per ring bit, the upper bound on the
+/// distinct fingers any peer can hold regardless of the locally configured
+/// table size. The first share is a bound: this node references at most that
+/// many peers. The second share is a heuristic, not a bound: Chord places no
+/// limit on how many peers may hold this node as a finger, so the share
+/// merely reserves room for the symmetric edges those peers keep open and
+/// for application-initiated direct connections. Excess in-degree is handled
+/// by the eviction order, not by the size. Pending handshakes count against
+/// the same total.
+pub(crate) const RETAINED_CONNECTIONS_PER_REFERENCE_SLOT: usize = 2;
+
+/// `R(s) = 2(F + s + 1)`: the connection records a node retains in any phase, so the edges
+/// current at once (load-bounds paper, Def. 1), 328 at [`DEFAULT_SUCCESSOR_CAPACITY`]. Every
+/// table under slot accounting reserves a floor per slot.
+pub(crate) const fn edge_slots(successor_capacity: usize) -> usize {
+    RETAINED_CONNECTIONS_PER_REFERENCE_SLOT.saturating_mul(
+        DEFAULT_FINGER_TABLE_SIZE
+            .saturating_add(successor_capacity)
+            .saturating_add(1),
+    )
+}
 
 /// Pure per-node topology state.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]

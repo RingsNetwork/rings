@@ -239,7 +239,13 @@ async fn test_https_loop_fetches_through_the_session_target() -> Result<()> {
 
 /// The throughput bench (#843): a `tcp` download of 8 MiB at `b = 16 KiB` over loopback links,
 /// at least 1 MB/s. Run with `--ignored`; it reports the rate it measured.
-#[tokio::test]
+///
+/// It runs on a multi-thread runtime, as a native node does by default (`--runtime
+/// multi-thread`). All five nodes share this process, so a current-thread runtime would put
+/// every node's work on one core and measure that core rather than the loop (#1087): the five
+/// nodes' WebRTC transports, signatures and onion crypto saturate it near 0.5 MB/s, below the
+/// paced rate `r = ρ·B/V ≈ 98` cells of 16 KiB per second per link.
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "benchmark"]
 async fn bench_tcp_download_rate() -> Result<()> {
     const DOWNLOAD: usize = 8 << 20;

@@ -100,7 +100,7 @@ impl StorageHooks for WritesRefused {
 /// persistence failure, since there is no store to fail.
 #[tokio::test]
 async fn test_a_runtime_without_a_store_refuses_every_transition() {
-    let runtime = std::sync::Arc::new(TransactionReplay::new_with_quota(
+    let runtime = std::sync::Arc::new(TransactionReplay::with_quota_for_test(
         None,
         crate::message::OriginQuotaConfig::default(),
     ));

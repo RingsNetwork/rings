@@ -501,6 +501,23 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: ./.github/actions/rust-cache
 
+      - name: Run AEZ known answers on the hardware AES backend
+        # The cargo config enables `aes_armv8`/`polyval_armv8` on aarch64 (#848); x86_64 detects
+        # AES-NI at runtime.
+        run: cargo test -p rings-aez --release
+
+      - name: Run AEZ known answers on the software AES backend
+        # An environment `RUSTFLAGS` replaces the cargo config's flags.
+        env:
+          RUSTFLAGS: --cfg aes_force_soft --cfg polyval_force_soft
+        run: cargo test -p rings-aez --release
+
+      - name: Run the vendored webrtc-sctp tests
+        # The patched write loop (#1090), on Linux and on macOS, where upstream's #679 deadlocked.
+        # The fuzz artifact tests read `fuzz/artifacts`, which the crates.io package does not ship.
+        # `--locked` keeps to the Cargo.lock the package ships, as the crate is outside the workspace.
+        run: cargo test --manifest-path crates/transport/vendor/webrtc-sctp/Cargo.toml --locked --lib -- --skip fuzz_artifact_test
+
       - name: Run clippy for node ffi
         run: cargo clippy -p rings-node --features ffi
 

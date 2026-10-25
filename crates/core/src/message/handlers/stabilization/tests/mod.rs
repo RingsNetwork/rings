@@ -5,6 +5,7 @@ use crate::delegation::DelegateeKey;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
+use crate::message::handlers::HandlerContext;
 use crate::message::Message;
 use crate::message::MessageSigner;
 use crate::swarm::Swarm;
@@ -33,7 +34,10 @@ async fn test_notify_predecessor_rejects_origin_mismatch_without_mutating_topolo
     let handler = MessageHandler::new(node.swarm.transport.clone());
 
     let result = handler
-        .handle(&context, &NotifyPredecessorSend { did: spoofed })
+        .handle(
+            &HandlerContext::unbound_for_test(&context),
+            &NotifyPredecessorSend { did: spoofed },
+        )
         .await;
 
     assert!(matches!(
@@ -57,7 +61,10 @@ async fn test_notify_predecessor_rejects_unadmitted_origin_without_mutating_topo
     let handler = MessageHandler::new(node.swarm.transport.clone());
 
     let result = handler
-        .handle(&context, &NotifyPredecessorSend { did: origin_did })
+        .handle(
+            &HandlerContext::unbound_for_test(&context),
+            &NotifyPredecessorSend { did: origin_did },
+        )
         .await;
 
     assert!(matches!(

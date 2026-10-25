@@ -1,20 +1,32 @@
+use futures::future::select;
+use futures::future::Either;
+
 use super::Stabilizer;
+use super::STABILIZATION_STOP_POLL_INTERVAL;
 use super::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
 use crate::dht::topology;
+use crate::dht::types::Chord;
 use crate::dht::types::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::StorageSyncDelivery;
 use crate::error::Result;
+use crate::lifecycle::StopToken;
 use crate::message::handlers::inbox::send_relay_hold;
+use crate::message::handlers::relay_repair::offer_relay_repair;
+use crate::message::handlers::relay_replica::resume_relay_replications;
 use crate::message::AnnounceRelayHolder;
+use crate::message::DeclareRelayCustody;
+use crate::message::FindRelayHolder;
 use crate::message::Message;
 use crate::message::PayloadSender;
+use crate::message::PreviousRelayHolder;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
 use crate::utils::get_epoch_ms;
+use crate::utils::try_sleep;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Observable completion state for one bounded storage repair pass.
@@ -277,13 +289,22 @@ impl Stabilizer {
             }
         }
         self.dht.forget_stale_relay_custody(&stale)?;
+        self.declare_opened_relay_custody().await?;
+        self.dht.prune_relay_replications(get_epoch_ms())?;
         self.resend_unacknowledged_relay_holds().await?;
+        self.repair_relay_chain().await?;
+        self.ask_owners_of_unplaced_relay_keys().await?;
         let Some((head, previous)) = self.dht.previous_relay_holder_to_pass()? else {
             return Ok(());
         };
         let record = Message::AnnounceRelayHolder(AnnounceRelayHolder {
-            holder: previous.holder,
-            run_start: previous.run_start,
+            previous: previous
+                .iter()
+                .map(|link| PreviousRelayHolder {
+                    holder: link.holder,
+                    run_start: link.run_start,
+                })
+                .collect(),
         });
         if let Err(error) = self
             .transport
@@ -298,6 +319,80 @@ impl Stabilizer {
                 error = ?error,
                 "STABILIZATION previous relay holder not queued; passed again next pass"
             );
+        }
+        Ok(())
+    }
+
+    /// Run the chain exchange at once on every loss of a chain neighbour, until `stop` (`Law
+    /// (Event-driven repair)`, #777): resume the holds whose next member was lost and offer one
+    /// digest set to each new chain neighbour, without waiting for the maintenance schedule's
+    /// repair window, which guards bulk storage sync and not these two messages. The periodic
+    /// repair pass remains the backstop.
+    ///
+    /// `Law (Wake)`: the listener is registered before the due flag is checked, so no loss is
+    /// missed; `stop` is observed between waits of at most `STABILIZATION_STOP_POLL_INTERVAL`.
+    ///
+    /// Bound: exchanges per second ≤ chain-neighbour losses per second. Each exchange is run by
+    /// taking the due flag, which only a loss sets, and losses that arrive before it is taken
+    /// share one exchange. It cannot amplify itself: an exchange sends digest offers, copies and
+    /// forwards and removes no peer, while a loss is a topology removal on a closed connection
+    /// or a failed liveness check, which no exchange causes.
+    pub(crate) async fn repair_relay_chain_on_loss(&self, stop: &StopToken) {
+        loop {
+            if stop.should_stop() {
+                return;
+            }
+            let loss = self.dht.listen_relay_chain_loss();
+            if self.dht.take_relay_chain_repair_due() {
+                if let Err(error) = self.repair_relay_chain().await {
+                    tracing::warn!(
+                        target: "rings_core::dht::stabilization",
+                        local = %self.dht.did,
+                        error = ?error,
+                        "STABILIZATION relay chain repair after a loss failed; the pass repeats it"
+                    );
+                }
+                continue;
+            }
+            let poll = Box::pin(try_sleep(STABILIZATION_STOP_POLL_INTERVAL));
+            if let Either::Right((false, _)) = select(loss, poll).await {
+                return;
+            }
+        }
+    }
+
+    /// The chain exchange: resume the holds whose next member is to be resolved again, and offer
+    /// one digest set to each chain neighbour (`Law (Chain repair)`).
+    pub(crate) async fn repair_relay_chain(&self) -> Result<()> {
+        resume_relay_replications(&self.transport).await?;
+        offer_relay_repair(&self.transport).await
+    }
+
+    /// Declare to every connected peer not declared to yet that this node holds relay mail, once
+    /// its age gate opened (`Law (Age gate)`, #777): those peers may have read its handshake while
+    /// it held none. A peer is recorded once its declaration is queued, so a declaration that is
+    /// not queued is sent again on the next pass to that peer alone.
+    async fn declare_opened_relay_custody(&self) -> Result<()> {
+        let custody = self.dht.relay_custody();
+        let connected = self.transport.get_connection_ids();
+        for peer in self.dht.undeclared_relay_custody_peers(connected)? {
+            let declaration = Message::DeclareRelayCustody(DeclareRelayCustody { custody });
+            if let Err(error) = self
+                .transport
+                .protocol_egress()
+                .send_message(declaration, peer)
+                .await
+            {
+                tracing::debug!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    %peer,
+                    error = ?error,
+                    "STABILIZATION relay custody declaration not queued; sent again next pass"
+                );
+                continue;
+            }
+            self.dht.record_relay_custody_declared(peer)?;
         }
         Ok(())
     }
@@ -323,6 +418,35 @@ impl Stabilizer {
                     local = %self.dht.did,
                     error = ?error,
                     "STABILIZATION relay hold not placed on this pass"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Ask the owner of every relay key kept here whose owner this view does not place for the
+    /// key's holder (`FindRelayHolder`, `Law (Owner places)`); its answer names the holder the
+    /// next pass offers the carrier to. A query that is not queued is asked again next pass.
+    /// Bound: at most one query per kept key whose owner this view does not place, per pass.
+    async fn ask_owners_of_unplaced_relay_keys(&self) -> Result<()> {
+        for key in self.dht.unplaced_relay_keys(get_epoch_ms()).await? {
+            let PeerRingAction::RemoteAction(next, _) = self.dht.find_successor(key)? else {
+                continue;
+            };
+            self.dht.ask_relay_holder(key)?;
+            let query = Message::FindRelayHolder(FindRelayHolder { key });
+            if let Err(error) = self
+                .transport
+                .protocol_egress()
+                .send_message(query, next)
+                .await
+            {
+                tracing::debug!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    %key,
+                    error = ?error,
+                    "STABILIZATION relay holder query not queued; asked again next pass"
                 );
             }
         }

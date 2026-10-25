@@ -61,6 +61,27 @@ async fn test_admission_retired_before_it_is_read_is_withdrawn() -> Result<()> {
     Ok(())
 }
 
+/// The release law (#1093): a connection's callback, its inbound actor running, holds its
+/// transport only weakly, so the transport is freed once its owner drops it, and an event that
+/// arrives after that has nothing to act on and is dropped.
+#[tokio::test]
+async fn test_a_callback_holds_its_transport_only_weakly() -> Result<()> {
+    let transport = default_transport()?;
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
+    let released = Arc::downgrade(&transport);
+    drop(transport);
+
+    assert!(
+        released.upgrade().is_none(),
+        "the callback or its inbound actor holds its transport"
+    );
+    callback
+        .on_data_channel_open(&SecretKey::random().address().to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_local_did_lifecycle_callbacks_are_ignored() -> Result<()> {
     let transport = default_transport()?;

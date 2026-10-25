@@ -1,7 +1,329 @@
 # Changelog
 
+## 0.37.0
+
+- Every frame names its wire version (#1104), so a node of another release is refused by
+  name, not by a codec error. A frame now opens with `RINGS\0` and the wire version, a
+  big-endian `u16`: the one part of the wire every version decodes alike. A frame of another
+  version is refused before its body is decoded, with `Error::IncompatibleWireVersion` naming
+  both versions. Before, a 0.34 node joining a 0.36 seed failed with "Answer offer info failed:
+  Codec deserialization error", and the other way round with "Decode error". The handshake
+  strings of `createOffer`, `answerOffer` and `acceptAnswer` and every link frame carry the
+  header, so both join paths do. A frame from before wire versioning, which opened with
+  `RINGS-PAYLOAD\0` or `RINGS-LINK\0`, is named as such. Over JSON-RPC the refusal is error
+  `210`, with data `{"ours": n, "theirs": m}`, where `theirs` is null for a node before wire
+  versioning. `nodeDid` returns `wire_version`, and `connectPeerViaHttp` refuses an endpoint of
+  another wire version, or of none, before it creates an offer. The native API sets the
+  `x-node-version` header, the crate version, on every response. The wire version starts at
+  `1` (`rings_core::message::WIRE_VERSION`).
+  - **Bump rule.** `WIRE_VERSION` goes up by exactly one with every change that a node of the
+    previous wire version would reject or misread: a frame, a message, a signature domain, or
+    a handshake rule. A change no peer can observe never bumps it, and the crate version moves
+    independently. Each bump is a total cutover: nothing decodes another version's frames,
+    and nothing is negotiated.
+  - **Library API.** `WIRE_VERSION`, `PeerWireVersion`, `WireVersionMismatch`,
+    `Error::IncompatibleWireVersion` (core and node), `INCOMPATIBLE_WIRE_VERSION_CODE` and
+    `NodeDidResponse::wire_version` are new. `Error::UnmarkedFrame` now also covers a header of
+    this version with an unknown kind. The header is 9 bytes against the old 14-byte marker,
+    so `MAX_CHUNK_ENVELOPE_OVERHEAD` drops from 912 to 907 and `MAX_PAYLOAD_ENVELOPE_OVERHEAD`
+    from 3697 to 3692, both still witnessed with equality.
+  - **Upgrade consequence.** Breaking on the wire: a node of this release and a node before it
+    cannot connect. The earlier one fails with its old codec error; this one names the earlier
+    one as a node before wire versioning. Seeds, browsers and embedders move together.
+  - **Operator step.** None beyond upgrading every node that must reach another.
+
+- A node can be closed before it is dropped (#1098). `Swarm::close`, `Processor::close` and
+  `Provider::close` disconnect every peer, admitted or still handshaking, awaiting each physical
+  close, and refuse every later connection with the new `Error::SwarmClosed`.
+  `rings_node_provider_destroy` closes its provider this way before the runtime shuts down. A
+  dropped node is freed (#1093), but a peer connection that was never closed kept its ICE
+  sockets bound for the life of the process, so an embedder that stops and starts nodes in one
+  process leaked them on every restart. An embedder should call `close` before dropping a node
+  it stops. Each peer then sees the connection close at once, as on `disconnect`, instead of
+  waiting for an ICE timeout. Awaiting the release of the stores and the end of the node's
+  background tasks is #1085.
+  - **Library API.** `Swarm::close`, `Processor::close`, `Provider::close` and
+    `Error::SwarmClosed` are new, all additive.
+  - **Upgrade consequence.** None: the wire format is unchanged.
+  - **Operator step.** None.
+
+- A node that had a peer is freed when its owner drops it (#1093): at once if its runtime is
+  dropped with it, and otherwise once the work it has in flight ends (awaiting that end is
+  #1085). Each connection's callback held the swarm transport that holds the connection, and the
+  connection's inbound actor held it as long as the callback lived, so a dropped swarm that had
+  ever connected was never freed: not its transport, its connections, its DHT, nor its stores.
+  Since the per-store lock (#1039), a node started again in the same process on the same store
+  failed with `Error::StorageDirectoryLocked`. The callback and its actor now hold the transport
+  weakly and bind it for each event; an event that arrives after the transport is gone is
+  dropped, and an actor that finds it gone stops. Nothing changes on the wire. A peer connection
+  that was never closed keeps its ICE sockets bound; close the node first (#1098).
+- aarch64 builds use the ARMv8 AES and POLYVAL instructions (#848). `aes` 0.8
+  and `polyval` 0.6 take them only under `--cfg aes_armv8` and `--cfg polyval_armv8`, so until
+  now every aarch64 build (Apple silicon, ARM servers) ran AEZ and DTLS on the software fixslice
+  backend, which cost 13.8% of the #843 loop's CPU (#1087). `.cargo/config.toml` now sets both
+  cfgs for every aarch64 target. The crates still detect the extension at runtime (Linux,
+  Android and every Apple target, iOS included) and fall back to software where it is missing or
+  undetectable. x86_64 already detected AES-NI at runtime and is unchanged. CI
+  runs the `rings-aez` known answers on both backends, and the cluster image copies
+  `.cargo/`.
+  - **Operator step.** A build that sets `RUSTFLAGS` in the environment replaces the cargo
+    config's flags. To keep the hardware path, add `--cfg aes_armv8 --cfg polyval_armv8` to
+    such a `RUSTFLAGS` on aarch64.
+
+- A delegation slot that resolves by reference skips its delegator's signature (#1089). Every
+  message carries two delegations, and recovering each delegator's ECDSA key cost 8.4% of the
+  #843 loop's CPU (#1087). A referenced slot resolves only against the link's lessor table, whose
+  every entry was leased from a frame that verified in full, so its delegator authorization is
+  established: it is now verified for its expiry and the delegatee's signature only (the new
+  `DelegatorAuthorization`, `Delegation::verify_under`). An inline slot, and every frame off a
+  link, is verified in full as before. One proof costs 66 µs instead of 133 µs when its slot is
+  referenced (release, M1 Max). No operator step.
+
+- The WebRTC SCTP write loop marshals each gathered batch of packets in one blocking task
+  instead of one per packet (#1090). `webrtc-sctp 0.17.1` ran every outbound SCTP packet
+  through `tokio::task::spawn_blocking`, which on a multi-thread runtime cost about 38% of the
+  #843 onion loop's busy CPU in the blocking pool's lock, against 1.5% for the marshalling
+  itself. rings now carries `webrtc-sctp 0.17.1` in `crates/transport/vendor/webrtc-sctp` with
+  that one change, through `[patch.crates-io]`: the write loop still suspends into the blocking
+  pool once per wakeup, so the read loop keeps its turn at the association lock, and packets
+  are sent in the order they were gathered. The patch is removed with the move to webrtc-rs
+  0.21 (#1071). CI runs the crate's tests, including a new TSN-order test, on Linux and macOS.
+  No operator step.
+
+- The replay receiver table and the removal store are shared by connection slot, not by
+  origin (#907; load-bounds paper, Laws 1 and 2, Sec. V). An origin is a free key pair, so
+  anyone could fill the receiver table with one transaction from each of 16384 fresh origins and
+  refuse every new origin for good. A node has `R(s) = 2(160 + s + 1)` connection slots; an
+  admitted connection takes the least free one and frees it when it is retired. Each item of
+  either table is now charged to the slot of the handshake-authenticated connection that
+  delivered it, to this node for its own writes, repairs and connection signaling, or to a
+  dedicated share: the relay inbox for mail delivered out of it, and custody for an ownership
+  hand-off of the range a node owns from the node its view names as the range's previous owner.
+  It is admitted within that slot's floor, its fair claim `⌈P / n⌉` of a shared pool, or the
+  share of its principal. An item stays charged to its slot after its connection leaves, so a
+  table never holds more than `R(s)·f + P + L + S` items however many connections rotate; a
+  connection admitted into a slot inherits what the slot still holds. The replay receiver
+  table has `f = 32`, `P = 3328`, `L = 1024`, inbox `768` (15616 streams at three successors,
+  within its hard capacity of 16384 up to 15 successors); the removal store `f = 128`,
+  `P = 16384`, `L = 7168`, custody `16384` (81920, filed in at most about 19.6 MB, so the native
+  `dht-removals` budget rises from 16 MiB to 24 MiB). A replay stream is retired once it is spent:
+  `σ` after its last proof expires, and for application streams another relay-inbox retention
+  plus `σ` later; a refusal therefore lasts until a stream of the refused slot is spent, never
+  for good. Handlers receive a `HandlerContext`, which carries the payload and the principal
+  that delivered it.
+  - **Breaking (library API).** `HandleMsg::handle` takes a `&HandlerContext`; its
+    `payload()` is the `MessagePayload`. `RemovalCharge` and `REMOVAL_ORIGIN_SHARE` are gone: a remove's charge
+    is a `Principal`. `Error::TransactionReplayStreamCapacityExceeded` and
+    `Error::RemovalCapacityExhausted` carry the introducer and the `ShareRefusal`.
+    `ChordStorageRepair::read_repair_entry` takes the principal that delivered the entry.
+    `KvStorageScan` gains the required method `remove_batch`, which removes records with one
+    flush, as `put_batch` writes them; the replay store retires spent streams in the batch
+    their admission joins.
+  - **Upgrade consequence.** A receiver replay record and a removal record each gain their
+    charge, so records of an earlier build do not restore (no protocol versioning before 1.0).
+  - **Operator step.** Stop the node and remove the `transaction-replay` store, the documented
+    reset of the replay guarantee, and the `dht-removals` store (browser: the IndexedDB stores
+    `<storage name>/transaction-replay` and `<storage name>/dht-removals`), then start it.
+    Replication rebuilds the removals a node holds.
+
+- Held relay mail expires 7 days after its hold (#907; load-bounds paper, Def. 3). A held
+  message retires `MAX_RELAY_INBOX_TTL_MS` after the instant its holder signed: every read, join
+  and sync of its inbox drops it, and a recipient never delivers it. Before, a held message
+  lived as long as its inbox, which every newer hold extended, so mail could linger without
+  bound and a member could deliver an old message after the recipient's replay window had
+  forgotten its stream. The rule reads the signed hold instant, not the element's dot, so every
+  replica drops the same messages and rewriting an old hold gains nothing.
+  - **Upgrade consequence.** Mail held more than 7 days ago is dropped at the first read of its
+    inbox.
+
+- Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
+  Window by classification). A transaction is link-local when it is Application traffic, it
+  arrived on the authenticated connection of its own origin, and its namespace declared delegated
+  replay. Such a transaction is admitted in a volatile replay window of that connection, which is
+  released with it; every other transaction, a relayed copy included, keeps the durable window.
+  A protocol declares delegated replay through the new `Protocol::delegates_replay` (default
+  `false`), published to core with the new `Swarm::set_replay_delegation`. The onion data plane
+  declares it: its replay store and process epoch already admit each cell at most once, across
+  links and restarts.
+  - **Library API.** `Swarm::set_replay_delegation`, `Swarm::delegates_replay`, `ReplayWindow`
+    and `Protocol::delegates_replay` are new, all additive: existing code compiles unchanged.
+  - **Upgrade consequence.** None: the replay record format is unchanged, and a node that
+    declares nothing behaves as before.
+  - **Operator step.** None.
+
+- `PeriodicMeasure::close` stops a measurement and waits until it has released its stores (#1083).
+  A drop releases them only after the persistence worker has written the final snapshot on a later
+  poll, so a store directory reopened in the same process right after a drop could still be held
+  (`Error::StorageDirectoryLocked`, #1039). `close` resolves once the worker has persisted any
+  pending snapshot and dropped both stores.
+
+- A node stamps its own writes in issue order (#1075, #1033; folds in #1076). Every operation a
+  node stamps is issued strictly after every version it stamped or passed through before and
+  every version it read for the key (its cached carrier, and the replica an owner holds), with
+  that floor capped one tick below `now + σ` (`PeerRing::stamp_operation`, a hybrid logical
+  clock). Before, a write was stamped at its millisecond alone, so two writes by one node in one
+  millisecond were ordered by their digests: an append right after an overwrite could fall
+  below the overwrite's reset floor and be dropped at every owner (#1075), and two appends could
+  be listed out of issue order (#1033). A node's writes now keep their issue order, even across
+  a step back of its clock, a write follows every value its writer read, and no stamp leads the
+  node's clock by more than the tolerance, however far ahead a value it read or forwarded was.
+  `EntryOperation::stamped_after` stamps above a given floor. `EntryVersion` gains the HLC
+  counter `counter`, ordered after the millisecond and before the issuer: a stamp after a floor
+  at the same or a later millisecond raises the counter instead of the millisecond, so a burst
+  of writes ascends strictly without running ahead of the clock.
+  - **Upgrade consequence.** The `EntryVersion` encoding changes (every dot, remove and
+    register), so stored and replicated DHT carriers of an earlier build do not decode (no
+    protocol versioning before 1.0); the carrier suprema grow by 5 bytes per dot and remove.
+  - **Operator step.** Remove the DHT data store while the node is stopped; replication
+    rebuilds it, and an undecodable stored carrier is otherwise retired on its next read. Relay
+    carriers held under an earlier build do not decode either and are retired (and logged), so
+    mail held across the upgrade is lost; drain held mail before upgrading.
+
+- Replay writes are group-committed (#916; durable-records, Law Group commit). A replay
+  transition still runs whole under the one replay lock, but the lock no longer covers the record
+  write: the transition applies its effect to the in-memory tables and stages its record, then
+  waits for its batch. The transitions that run while one batch is written gather into the next
+  batch. A native authoritative store writes a batch with one `F_FULLFSYNC` barrier on Apple
+  targets and one directory flush. IndexedDB writes it as one strict transaction. No result is
+  returned before its batch is durable, refusals included. A failed batch fails and undoes every
+  pending transition. One run on an M1 Max measured 922 admissions/s with 64 in flight, against
+  49–57 before. A lone admission still pays one batch write. The onion WebView test runs on the
+  authoritative IndexedDB replay store again.
+  - **Breaking (library API).** `KvStorageScan` gains the required method `put_batch`, so an
+    implementor of that trait must add it. `Error::TransactionReplayPersistence::source` is an
+    `Arc<Error>`, shared by the transitions of a failed batch.
+  - **Upgrade consequence.** None: the record format is unchanged.
+  - **Operator step.** None.
+
+- Registry heartbeats re-append a signed lease (#918; removal-stability paper, Laws 8 and 9).
+  An online-node, onion-exit or DNS-relay service descriptor no longer signs a heartbeat time:
+  it signs a lease end (`expires_at_ms`, 10 minutes after it is issued) and a freshness window
+  (`fresh_for_ms`, the configured TTL), so its bytes stay fixed for the lease and every heartbeat
+  appends the same element, which raises its dot and writes no tombstone. A heartbeat no longer
+  reads the registry or removes anything. A reader takes `heartbeat_at_ms` from the element's
+  dot, unsigned, and lists a descriptor while the time is at most the lease end and at most
+  `heartbeat_at_ms + fresh_for_ms + σ`, and never lists a lease ending more than 10 minutes
+  and 3 s ahead or a freshness window over 10 minutes, whatever the signer chose; of two leases
+  of one registrant the later one wins. A registrant renews its lease once fewer than two
+  heartbeats remain in it, or when a signed field changes. A heartbeat interval must now be below 300 seconds (half the lease), down from
+  595, and below the TTL, and a TTL must be at most 600 seconds (the lease). The
+  `lookupOnlineNodes` and `lookupOnionExits` results gain `fresh_for_ms`.
+  - **Upgrade consequence.** The descriptor encoding changes, so a node reads no descriptor an
+    earlier build published, and an earlier build reads none of this one's: registries list
+    only nodes on the same build (no protocol versioning before 1.0). A descriptor someone
+    re-appends after its registrant stopped stays listed until its lease ends, at most 10
+    minutes, where before it expired with its TTL.
+  - **Operator step.** None; earlier descriptors are ignored and expire within the element
+    horizon. A configuration with a heartbeat interval of 300 seconds or more, or a TTL over 600
+    seconds, is refused at start and must be lowered.
+
+- Data-topic removals are never evicted (#920; removal-stability paper, Laws 2–4 and 6). A
+  data carrier is stored as two records: its values in the data store, which its byte budget
+  may evict, and its tombstones and overwrite floor in a new retained store, `dht-removals`
+  beside the data store (browser: `<storage name>/dht-removals`, strict IndexedDB), which
+  flushes and never evicts. A write stores the remove side first and the values after; reads
+  glue the two without hashing, and the first operation after a node opens normalizes any
+  value a crash rolled back. Each uncollected remove is charged to the authenticated sender of
+  the write that raised it (a predecessor, a successor, or the node itself is the holder
+  class): a write that would pass 1024 for its sender (`REMOVAL_ORIGIN_SHARE`), or 65536 in
+  all (`REMOVAL_STORE_MAX_REMOVES`), fails with `RemovalCapacityExhausted` and changes nothing,
+  and a sync batch leaves such an entry unacknowledged. `SwarmBuilder::removal_storage`,
+  `ProcessorBuilder::removal_storage` and `PeerRing::with_removal_storage` set the store;
+  without one the removes are kept in memory. `ChordStorageRepair::read_repair_entry` takes
+  the node that supplied the entry.
+  - **Upgrade consequence.** A topic stored before this release keeps its tombstones in the
+    data store until it is next written, and is read as before meanwhile.
+  - **Operator step.** None required. An operator who wants the eviction law to hold from the
+    first eviction removes the data store while the node is stopped; replication rebuilds it.
+
+- Data-topic tombstones are bounded (#921; removal-stability paper, Law 5 and Prop. 4). A data
+  carrier holds at most `DATA_TOMBSTONE_MAX_LEN` (1024) uncollected removes. A delta carrying
+  more is not admitted, and a join, operation or repair whose result would hold more fails with
+  `EntryTombstonesExceedMax` and changes nothing; removes are never truncated, since a dropped
+  remove could resurrect a value it still covers elsewhere. A storage sync batch refuses such an
+  entry without acknowledging it and persists the rest, so its owner keeps it. The carrier law
+  now counts every field: a carrier at every bound encodes in exactly `DATA_CARRIER_WIRE_MAX`
+  (33 815 728) bytes, asserted to fit one transport message, with each encoding supremum
+  witnessed by a test. `EntryKind::max_tombstones` is replaced by `EntryKind::tombstone_bound`,
+  which says whether a kind refuses (data topics) or truncates (relay inboxes).
+  - **Upgrade consequence.** A topic that removes more than about 10 values a minute,
+    sustained, has its further removals refused until earlier ones are collected; shard such a
+    topic. Registries must run a build with #918, whose heartbeats remove nothing.
+  - **Operator step.** None.
+
+- Relay carriers are replicated to the first `r` nodes from their key's owner that hold relay
+  mail, down a chain (#777, durable-records Section X): `r` is configurable
+  (`RelayReplication`, `SwarmBuilder::relay_replication`, `ProcessorBuilder::relay_replication`)
+  and 8 by default, so held mail survives its holder's tab closing or private session ending as
+  long as another member survives the repair delay.
+  - The holder forwards a hold to its next member (the new `ReplicateRelayHold` message), each
+    member forwards it on, and acknowledgements return from the chain's end: the writer is
+    acknowledged (`RelayCarrierHeld`) only once every member holds the hold.
+  - A member's next member past its successor list is found by the owner query of #1045, whose
+    answer (`RelayHolderFound`) now also names the owner's last placed node (`horizon`) when it
+    names no holder, and is cached until the successor list changes.
+  - Each repair pass a member sends one digest set to each of its two chain neighbours (the new
+    `RelayCarrierDigests` and `RelayCarriersWanted` messages) and copies only the carriers that
+    differ; losing a chain neighbour runs that exchange at once, outside the repair schedule.
+  - A node declares that it holds relay mail only after 2 minutes online (at least four
+    stabilization periods), and then tells its connected peers (the new `DeclareRelayCustody`
+    message).
+  - `AnnounceRelayHolder` carries the sender's `r` nearest previous holders (`previous`), from
+    which every node decides whether, and at which rank, it is a member of a key.
+  - A recipient fetches its inbox from the holder and then down the chain, and removes what it
+    delivered at the member it read it from; only the holder's report restricts relay custody.
+  - A node keeps up to `r` times the relay carriers it kept before.
+  - **Upgrade consequence.** `AnnounceRelayHolder`, `RelayHolderFound` and `ReplicateRelayHold`
+    change shape and messages are added, with no version: nodes of this version and of an
+    earlier one cannot exchange relay custody, so every node of an overlay upgrades together.
+  - **Operator step.** Upgrade every node of the overlay at once. No store needs clearing: the
+    first repair passes copy every carrier down its chain.
+
+- **Breaking:** 33-byte public keys follow SEC1 §2.3.3 (#1072): the tag `0x02` marks an even
+  y-coordinate and `0x03` an odd one. Rings had both inverted, in `PublicKey::<33>::from_u8`
+  (compressing a 64-byte `x ‖ y`) and in the P-256 decoder `ct_into_secp256r1_affine`, so it
+  round-tripped only with itself; any standard SEC1 producer or consumer, such as Web Crypto,
+  WebAuthn or a wallet, got the negated point `(x, −y)`. P-256 keys are now decoded by the
+  library's SEC1 decoder, as secp256k1 keys already were, and a tag other than `0x02` or `0x03`
+  is refused. The prefix `0x00` keeps one meaning, the Ed25519 embedding `0x00 ‖ k` of a
+  32-byte key; it is not a point of unknown parity.
+  - **Upgrade consequence.** Keys secp256k1 derives itself (node, delegatee, E2E, ElGamal and
+    onion keys, and their DIDs) were already SEC1 and do not change. What changes is every
+    secp256r1 account key, whose 33 bytes, and so its DID, are new; every delegation signed by a
+    secp256r1 account, which no longer verifies; and every key given as 64 bytes `x ‖ y` (a
+    secp256r1 or secp256k1 account entity, an RPC `recipient_public_key`), which now denotes
+    `(x, y)` instead of `(x, −y)`. There is no compatibility path: an old encoding is dropped,
+    not converted, and nodes upgrade together.
+  - **Operator step.** While the node is stopped:
+    - native: delete the data and measure stores and every store beside them: the `data`,
+      `relay-inbox`, `dht-removals`, `transaction-replay`, `onion-entry-guards`, `measure` and
+      `provisional-evidence` directories (under `storage_path` for an FFI provider);
+    - browser: delete the site's IndexedDB databases `rings-node`, `rings-node/relay-inbox`,
+      `rings-node/dht-removals`, `rings-node/transaction-replay`,
+      `rings-node/onion-entry-guards`, `rings-node/measure` and
+      `rings-node/provisional-evidence`;
+    - a delegatee key file whose delegator is a secp256r1 account: issue a new one, since its
+      delegation no longer verifies. A key file `rings init` wrote needs no step.
+
 ## 0.36.0
 
+- A relay carrier no longer strands at its old holder when two relay-capable nodes join one
+  storage-less run longer than a successor list within one convergence window (#1045). The owner
+  of a relay key always places it, as the key lies in its own arc, so an old holder whose view
+  cannot place a carrier's key asks the key's owner for its holder (the new `FindRelayHolder` and
+  `RelayHolderFound` messages, routed as a lookup) on each repair pass, and offers the carrier
+  there too, taking only the first answer to a query it asked, at most one query per such key
+  and pass. The holder still takes only a key its own view makes it hold, so a wrong answer
+  moves nothing. No operator step beyond upgrading the overlay together: the message set grows
+  with no version.
+
+- Fetch-cache linearization (#922): a cache read is pure and every cache change is one
+  transition under the cache transition (removal-stability paper, Law 7), so a read that
+  retires a dead entry can no longer drop a concurrent put. The behaviour has held since #913;
+  this release adds the law to `ChordStorageCache` and a test that parks a read between its load
+  and its return while a put completes.
+  - **Upgrade consequence.** None.
+  - **Operator step.** None.
 - DNS relay (#1049): every node is named `<did>.<zone>` in each zone a relay serves, and the
   services it announces are reachable there from the internet. The new crate `rings-dns-relay`
   is the relay: an authoritative DNS server (`hickory-server`) for the zones delegated to it, an
@@ -28,6 +350,17 @@
   - **Upgrade consequence.** None: the descriptor is a new registry, and a node without the new
     sections publishes and runs nothing new.
   - **Operator step.** None, unless running a relay: see the DNS Relay chapter.
+- Sender sequences are reserved in leases (part of #1043). A reservation writes its stream's
+  replay record only when it outruns the stream's durable lease, which then covers at least the
+  next 64 sequences (`TRANSACTION_SEQUENCE_LEASE`). Reservations inside the lease are handed out
+  from memory. A stream sending one transaction at a time writes once per 64 transactions
+  instead of once per transaction. That removes about half the replay writes of a browser onion
+  request: about 1,030 instead of about 2,040. A restart resumes past the lease, so it may skip
+  up to 64 sequences, which the receiver takes as one `Advance`, and it never reuses a sequence.
+  - **Upgrade consequence.** None: the record bytes are unchanged. The sender record's value now
+    reads as the last leased sequence, and a record written by an earlier release holds the
+    last reserved sequence, which is a valid lease.
+  - **Operator step.** None.
 
 - RUSTSEC-2026-0387 (`crypto-bigint`: secret-dependent branches in constant-time operations) is
   ignored in `deny.toml` for now (#1051). The fix exists only in `crypto-bigint` 0.7.6, while

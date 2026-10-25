@@ -68,4 +68,14 @@ where
     fn record_name(&self, key: &str) -> String {
         self.as_ref().record_name(key)
     }
+
+    /// `put_batch` of the shared storage.
+    async fn put_batch(&self, records: &[(String, V)]) -> Result<()> {
+        self.as_ref().put_batch(records).await
+    }
+
+    /// `remove_batch` of the shared storage.
+    async fn remove_batch(&self, keys: &[String]) -> Result<()> {
+        self.as_ref().remove_batch(keys).await
+    }
 }

@@ -23,11 +23,13 @@ use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::handlers::HandlerContext;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
+use crate::message::Principal;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
@@ -35,6 +37,8 @@ use crate::tests::default::Node;
 use crate::tests::held_inbox_for;
 use crate::tests::live_entry;
 use crate::tests::manually_establish_connection;
+use crate::tests::removes_only_carrier;
+use crate::utils::get_epoch_ms;
 
 #[tokio::test]
 async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
@@ -72,7 +76,9 @@ async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
         receiver.did(),
     )?;
 
-    receiver_handler.handle(&context, &sync_msg).await?;
+    receiver_handler
+        .handle(&HandlerContext::unbound_for_test(&context), &sync_msg)
+        .await?;
 
     let payload = next_payload_for_tx(&sender, context.transaction.tx_id).await?;
     match payload.transaction.data::<Message>()? {
@@ -143,7 +149,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_a_holder_alo
     let from_stranger = receiver
         .swarm
         .transport
-        .persist_storage_sync_entries(&sync_msg, stranger)
+        .persist_storage_sync_entries(&sync_msg, stranger, Principal::Unbound)
         .await?;
     assert_eq!(from_stranger, vec![SyncedEntryAck::new(
         topic.did,
@@ -161,7 +167,7 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_a_holder_alo
     let from_predecessor = receiver
         .swarm
         .transport
-        .persist_storage_sync_entries(&sync_msg, predecessor)
+        .persist_storage_sync_entries(&sync_msg, predecessor, Principal::Unbound)
         .await?;
     assert_eq!(from_predecessor.len(), 2);
     assert!(receiver
@@ -170,6 +176,68 @@ async fn test_persist_synced_entries_relocates_a_relay_carrier_from_a_holder_alo
         .get(&inbox_slot(&inbox).to_string())
         .await?
         .is_some());
+    Ok(())
+}
+
+/// The removes a synced data entry raised, as the removal store charged them.
+async fn charges_of(node: &Node, topic: Did) -> Result<Vec<Principal>> {
+    let key = StorageKey::new(EntryKind::Data, topic).to_string();
+    Ok(node
+        .dht()
+        .removal_storage
+        .get(&key)
+        .await?
+        .map(|record| record.removes.iter().map(|remove| remove.charge).collect())
+        .unwrap_or_default())
+}
+
+/// Custody (load-bounds paper, Sec. V): an ownership hand-off from the node this node's view
+/// names as the previous owner is charged to the custody principal, while the same hand-off from
+/// any other node, and an additive repair from the previous owner, is charged to the principal
+/// that delivered it.
+#[tokio::test]
+async fn test_a_hand_off_from_the_previous_owner_is_charged_to_custody() -> Result<()> {
+    let receiver = prepare_node(SecretKey::random()).await;
+    let predecessor: Did = SecretKey::random().address().into();
+    let stranger: Did = SecretKey::random().address().into();
+    *receiver.dht().lock_predecessor()? = Some(predecessor);
+    let now_ms = get_epoch_ms();
+    let cases = [
+        (
+            StorageSyncPurpose::OwnershipHandoff,
+            predecessor,
+            Principal::Custody,
+        ),
+        (
+            StorageSyncPurpose::OwnershipHandoff,
+            stranger,
+            Principal::Unbound,
+        ),
+        (
+            StorageSyncPurpose::AdditiveRepair,
+            predecessor,
+            Principal::Unbound,
+        ),
+    ];
+    for (index, (purpose, sender, charged)) in cases.into_iter().enumerate() {
+        let topic = Did::from(20u32 + u32::try_from(index).unwrap_or_default());
+        let carrier = removes_only_carrier(topic, 2, now_ms, "hand-off")?;
+        let sync_msg = SyncEntriesWithSuccessor {
+            purpose,
+            destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
+            data: vec![PlacedEntry::new(topic, carrier)],
+        };
+        receiver
+            .swarm
+            .transport
+            .persist_storage_sync_entries(&sync_msg, sender, Principal::Unbound)
+            .await?;
+        assert_eq!(
+            charges_of(&receiver, topic).await?,
+            vec![charged; 2],
+            "{purpose:?}"
+        );
+    }
     Ok(())
 }
 
@@ -192,7 +260,7 @@ async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<
     let acks = receiver
         .swarm
         .transport
-        .persist_storage_sync_entries(&sync_msg, Did::from(1u32))
+        .persist_storage_sync_entries(&sync_msg, Did::from(1u32), Principal::Unbound)
         .await?;
 
     assert_eq!(acks, vec![SyncedEntryAck::new(
@@ -264,7 +332,9 @@ async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner(
     )?;
     let receiver_handler = MessageHandler::new(receiver.swarm.transport.clone());
 
-    receiver_handler.handle(&context, &sync_msg).await?;
+    receiver_handler
+        .handle(&HandlerContext::unbound_for_test(&context), &sync_msg)
+        .await?;
 
     assert_eq!(
         receiver

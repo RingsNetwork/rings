@@ -39,7 +39,8 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::receiver_record;
+use super::commit::Ledger;
+use super::Admission;
 use super::ReplayTable;
 use super::StreamKey;
 use super::TransactionDigest;
@@ -47,7 +48,6 @@ use super::TransactionReplay;
 use crate::consts::RELAY_INBOX_MAX_LEN;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::OriginQuotaCharge;
 
 /// Most relay deliveries in custody over the whole store: one per element a relay inbox holds.
 pub(crate) const RELAY_CUSTODY_CAPACITY: usize = RELAY_INBOX_MAX_LEN;
@@ -75,54 +75,39 @@ pub(crate) enum RelayAdmission {
 }
 
 impl TransactionReplay {
-    /// Admit the relay delivery `delivery` of stream `key` (the custody law): its transaction
-    /// enters the window and the delivery enters custody in one record write, unless the
-    /// delivery is already in custody.
+    /// Admit `admission` as a relay delivery (the custody law): its transaction enters the
+    /// window and the delivery enters custody in one record write, unless the delivery is
+    /// already in custody.
     ///
     /// Post: `Err(RelayCustodyFull)` at the custody bound, changing nothing; the window's
     /// refusals (`Replay`, `Fork`, `Stale`) and quota refusals as for a live admission.
     pub(crate) async fn admit_relayed(
         self: &std::sync::Arc<Self>,
-        key: StreamKey,
-        delivery: RelayDelivery,
-        charge: OriginQuotaCharge,
-        byte_cost: usize,
+        admission: Admission,
     ) -> Result<RelayAdmission> {
-        let clock = super::quota_clock(self.started_at);
-        let replay = std::sync::Arc::clone(self);
-        super::run_whole(async move {
-            let mut state = replay.state.lock().await;
-            let store = replay.load_store(&mut state.store).await?;
-            replay.refuse_unavailable(store, ReplayTable::Receiver, key)?;
-            if store
-                .tables
-                .custody
+        let clock = super::replay_clock(self.started_at);
+        let key = admission.key;
+        let delivery = RelayDelivery {
+            sequence: admission.sequence,
+            digest: admission.digest,
+        };
+        self.commit(move |replay, ledger| {
+            replay.refuse_unavailable(ledger.store, ReplayTable::Receiver, key)?;
+            let custody = &ledger.store.tables.custody;
+            if custody
                 .get(&key)
                 .is_some_and(|custody| custody.contains(&delivery))
             {
                 return Ok(RelayAdmission::InCustody);
             }
-            let held = store
-                .tables
-                .custody
-                .values()
-                .map(BTreeSet::len)
-                .sum::<usize>();
+            let held = custody.values().map(BTreeSet::len).sum::<usize>();
             if held >= RELAY_CUSTODY_CAPACITY {
                 return Err(Error::RelayCustodyFull {
                     capacity: RELAY_CUSTODY_CAPACITY,
                 });
             }
-            let admission = super::Admission {
-                key,
-                sequence: delivery.sequence,
-                digest: delivery.digest,
-                charge,
-                byte_cost,
-            };
             replay
-                .admit_in(&mut state, admission, clock, Some(delivery))
-                .await
+                .admit_in(ledger, admission, clock, Some(delivery))
                 .map(|_| RelayAdmission::Admitted)
         })
         .await
@@ -135,11 +120,8 @@ impl TransactionReplay {
         key: StreamKey,
         delivery: RelayDelivery,
     ) -> Result<()> {
-        let replay = std::sync::Arc::clone(self);
-        super::run_whole(async move {
-            let mut state = replay.state.lock().await;
-            let store = replay.load_store(&mut state.store).await?;
-            let Some(custody) = store.tables.custody.get(&key) else {
+        self.commit(move |_, ledger| {
+            let Some(custody) = ledger.store.tables.custody.get(&key) else {
                 return Ok(());
             };
             if !custody.contains(&delivery) {
@@ -147,7 +129,7 @@ impl TransactionReplay {
             }
             let mut released = custody.clone();
             released.remove(&delivery);
-            replay.rewrite_custody(store, key, released).await
+            rewrite_custody(ledger, key, released)
         })
         .await
     }
@@ -158,11 +140,9 @@ impl TransactionReplay {
         self: &std::sync::Arc<Self>,
         stored: BTreeSet<(StreamKey, RelayDelivery)>,
     ) -> Result<()> {
-        let replay = std::sync::Arc::clone(self);
-        super::run_whole(async move {
-            let mut state = replay.state.lock().await;
-            let store = replay.load_store(&mut state.store).await?;
-            let shrunk = store
+        self.commit(move |_, ledger| {
+            let shrunk = ledger
+                .store
                 .tables
                 .custody
                 .iter()
@@ -175,36 +155,20 @@ impl TransactionReplay {
                     (kept.len() < custody.len()).then_some((*key, kept))
                 })
                 .collect::<Vec<_>>();
-            for (key, kept) in shrunk {
-                replay.rewrite_custody(store, key, kept).await?;
-            }
-            Ok(())
+            shrunk
+                .into_iter()
+                .try_for_each(|(key, kept)| rewrite_custody(ledger, key, kept))
         })
         .await
     }
+}
 
-    /// Persist stream `key`'s receiver record with `custody`, then adopt it.
-    ///
-    /// Pre: `key` is a restored receiver stream of `store` (custody exists only beside a
-    /// window).
-    async fn rewrite_custody(
-        &self,
-        store: &mut super::ReplayStore,
-        key: StreamKey,
-        custody: RelayCustody,
-    ) -> Result<()> {
-        let window = store
-            .tables
-            .receiver
-            .get(&key)
-            .ok_or(Error::TransactionReplayStateInvalid)?;
-        self.persist(receiver_record(&key, window, &custody)?)
-            .await?;
-        if custody.is_empty() {
-            store.tables.custody.remove(&key);
-        } else {
-            store.tables.custody.insert(key, custody);
-        }
-        Ok(())
-    }
+/// Stage stream `key`'s receiver record with `custody`, and adopt it on the speculative state.
+///
+/// Pre: `key` is a restored receiver stream of the store (custody exists only beside a
+/// window).
+fn rewrite_custody(ledger: &mut Ledger<'_>, key: StreamKey, custody: RelayCustody) -> Result<()> {
+    ledger.set_custody(key, custody);
+    ledger.write(ledger.store.tables.receiver_record(&key)?);
+    Ok(())
 }

@@ -1,3 +1,5 @@
+use rings_core::dht::RemovalStorage;
+
 use super::config::validate_dht_virtual_nodes;
 use super::config::validate_onion_role_config;
 use super::*;
@@ -6,6 +8,7 @@ use crate::consts::DATA_REDUNDANT;
 use crate::dns_relay::ServiceOffer;
 #[cfg(rings_native)]
 use crate::dns_relay::ServiceRegistration;
+use crate::prelude::rings_core::dht::RelayReplication;
 
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {
@@ -17,6 +20,8 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) onion_process_epoch: OnionProcessEpoch,
     pub(in crate::processor) storage: Option<EntryStorage>,
     pub(in crate::processor) relay_storage: Option<EntryStorage>,
+    pub(in crate::processor) removal_storage: Option<RemovalStorage>,
+    pub(in crate::processor) relay_replication: Option<RelayReplication>,
     pub(in crate::processor) replay_storage: Option<ReplayStorage>,
     pub(in crate::processor) origin_quota: OriginQuotaConfig,
     pub(in crate::processor) onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
@@ -58,6 +63,8 @@ impl ProcessorBuilder {
             onion_process_epoch: OnionProcessEpoch::random(),
             storage: None,
             relay_storage: None,
+            removal_storage: None,
+            relay_replication: None,
             replay_storage: None,
             origin_quota: config.origin_quota,
             onion_entry_guard_storage: None,
@@ -121,6 +128,23 @@ impl ProcessorBuilder {
     /// (#1021). Without one, the node takes custody of no relay carrier.
     pub fn relay_storage(mut self, storage: EntryStorage) -> Self {
         self.relay_storage = Some(storage);
+        self
+    }
+
+    /// Set the storage of the data namespace's remove sides (`SwarmBuilder::removal_storage`):
+    /// a `RecordAuthority::Retained` store, so a remove survives a crash and is never evicted
+    /// before it is stable (#920). Without one, the remove sides are kept in memory.
+    pub fn removal_storage(mut self, storage: RemovalStorage) -> Self {
+        self.removal_storage = Some(storage);
+        self
+    }
+
+    /// Set how relay custody is replicated (#777): the members `r` each carrier is replicated
+    /// to, and how long the node is online before it holds relay mail. By default `r` is 8 and
+    /// the age gate is 2 minutes, raised to four stabilization periods when those are longer
+    /// (`Law (Age gate)` of durable-records); a value set here is taken as given.
+    pub fn relay_replication(mut self, replication: RelayReplication) -> Self {
+        self.relay_replication = Some(replication);
         self
     }
 
@@ -258,6 +282,20 @@ impl ProcessorBuilder {
         if let Some(relay_storage) = self.relay_storage {
             swarm_builder = swarm_builder.relay_storage(relay_storage);
         }
+        if let Some(removal_storage) = self.removal_storage {
+            swarm_builder = swarm_builder.removal_storage(removal_storage);
+        }
+        let stabilization_periods_ms =
+            u64::try_from(self.stabilize_interval.saturating_mul(4).as_millis())
+                .unwrap_or(u64::MAX);
+        let relay_replication = self.relay_replication.unwrap_or_else(|| {
+            let default = RelayReplication::default();
+            RelayReplication {
+                age_gate_ms: default.age_gate_ms.max(stabilization_periods_ms),
+                ..default
+            }
+        });
+        swarm_builder = swarm_builder.relay_replication(relay_replication);
         swarm_builder = swarm_builder.origin_quota(self.origin_quota);
         let observer: rings_core::swarm::observer::SharedSwarmObserver = match self.observer {
             Some(extra) => Arc::new(ChainedObserver {

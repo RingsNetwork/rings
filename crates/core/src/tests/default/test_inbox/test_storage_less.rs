@@ -28,7 +28,6 @@ use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_without_relay_storage;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
-use crate::tests::default::wait_for_storage_absence;
 use crate::tests::default::wait_for_storage_entry;
 use crate::tests::default::wait_for_storage_state;
 use crate::tests::default::wait_for_successor;
@@ -85,7 +84,9 @@ async fn rejoin_between(owner: &Node, returning: &Node, holder: &Node) -> Result
 
 /// The inbox key's owner keeps no relay store, so the message is held by the next node, which
 /// holds relay mail; when the recipient returns with a relay store of its own, it is the holder
-/// again: the next node hands the carrier back to it, and it delivers the message.
+/// again: the next node copies the carrier to it, staying a member of the key and keeping its
+/// own copy (#777, `Law (Chain repair)`), and the recipient delivers the message and removes it,
+/// a removal chain repair carries back to the next node.
 #[tokio::test]
 async fn test_mail_past_a_storage_less_owner_is_held_by_the_next_node_and_delivered() -> Result<()>
 {
@@ -98,14 +99,26 @@ async fn test_mail_past_a_storage_less_owner_is_held_by_the_next_node_and_delive
 
     let node2 = prepare_node(key2).await;
     rejoin_between(&node1, &node2, &node3).await?;
-    // node3's repair pass names node2 the holder of `node2 + 1`, and node2 takes the carrier
-    // from the next holder along its successor list.
+    // node3's repair pass names node2 the holder of `node2 + 1` and itself the next member, so
+    // it copies the carrier to node2 and keeps its own.
     node3.swarm.stabilizer().stabilize().await?;
     let inbox = StorageKey::inbox_of(node2.did());
     wait_for_storage_entry(&node2, inbox).await?;
-    wait_for_storage_absence(&node3, inbox).await?;
+    assert_eq!(
+        wait_for_storage_entry(&node3, inbox).await?.data.len(),
+        1,
+        "the next member keeps its copy"
+    );
 
-    drain_and_assert_delivered(&node2, node1.did()).await
+    drain_and_assert_delivered(&node2, node1.did()).await?;
+    // node2's repair pass copies its carrier, removal included, to node3.
+    node2.swarm.stabilizer().stabilize().await?;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+    wait_for_storage_state(&node3, inbox, "removal repaired", |stored| {
+        stored.is_some_and(|entry| entry.data.is_empty())
+    })
+    .await
+    .map(drop)
 }
 
 /// Neither the inbox key's owner nor the returning recipient keeps a relay store: the carrier

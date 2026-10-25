@@ -26,7 +26,7 @@ The library lands in `target/debug/` as `librings_node.dylib` (macOS), `librings
 | `rings_node_listen(provider)` | Starts message listening and Chord stabilization. |
 | `rings_node_request(provider, method, params)` | Calls one method of the [JSON-RPC API](jsonrpc.md) with a JSON `params` string; returns the reply as a string, or `NULL` when validation or execution fails. |
 | `rings_node_string_free(value)` | Releases a string returned by `rings_node_request`. |
-| `rings_node_provider_destroy(provider)` | Destroys the provider; the handle is invalid afterwards. |
+| `rings_node_provider_destroy(provider)` | Stops the listener, closes every connection of the node, flushes its measurements, and destroys the provider; the handle is invalid afterwards. |
 
 The constructor takes the same values `config.yaml` gives a native node: the `network_id`, an
 ICE server list in `[turn|stun]://<host>:<port>;...` form, the stabilization interval in
@@ -38,7 +38,8 @@ never sees the private key.
 `storage_path` is a directory the provider owns. Under it the provider opens the same stores a
 native node opens beside its data store, each at its authority: `data` (the DHT data store),
 `transaction-replay` (the replay windows, authoritative), `relay-inbox` (held mail, retained),
-`onion-entry-guards` (a durable cache), and `measure` with `provisional-evidence`. Pass the same
+`dht-removals` (the data topics' uncollected removals, retained), `onion-entry-guards` (a durable
+cache), and `measure` with `provisional-evidence`. Pass the same
 path on every run of the same node: the replay windows must survive a restart, or the node
 would accept replayed transactions and re-sign used sequences (#1022). A fresh path is a fresh
 node state.

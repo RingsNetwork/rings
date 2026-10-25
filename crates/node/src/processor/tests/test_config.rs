@@ -6,6 +6,7 @@ use rings_core::message::OriginQuotaLaneConfig;
 
 use super::common::*;
 use super::*;
+use crate::descriptor::registry_lease;
 use crate::processor::config::parse_webrtc_udp_port_range;
 use crate::registration::registry_refresh_bound;
 use crate::tests::test_processor_builder;
@@ -91,16 +92,15 @@ fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enable
     ));
 }
 
-/// Both registries accept a heartbeat interval just below `L − σ − P` and refuse one at it, at
-/// which a sole registrant's descriptor could lapse between heartbeats. The bound is pinned to
-/// the 595 s the configuration documentation states, so dropping or adding any of the three
-/// terms fails.
+/// Both registries accept a heartbeat interval just below half the registry lease, `Λ / 2`, and
+/// refuse one at it, at which a lease would no longer span two heartbeats (#918). The bound is
+/// pinned to the 300 s the configuration documentation states.
 #[test]
 fn test_registry_heartbeat_must_refresh_before_a_descriptor_expires() -> Result<()> {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
     let bound = registry_refresh_bound();
-    assert_eq!(bound, Duration::from_secs(595));
+    assert_eq!(bound, Duration::from_secs(300));
     let below = bound - Duration::from_millis(1);
 
     let presence = |interval: Duration| {
@@ -119,7 +119,7 @@ fn test_registry_heartbeat_must_refresh_before_a_descriptor_expires() -> Result<
         presence(bound),
         Err(Error::InvalidConfig(message))
             if message.contains("online_node_heartbeat_interval")
-                && message.contains("lifetime of a registry write")
+                && message.contains("half the registry lease")
     ));
 
     let exit = |interval: Duration| -> Result<_> {
@@ -142,9 +142,34 @@ fn test_registry_heartbeat_must_refresh_before_a_descriptor_expires() -> Result<
         exit(bound)?,
         Err(Error::InvalidConfig(message))
             if message.contains("onion_exit_heartbeat_interval")
-                && message.contains("lifetime of a registry write")
+                && message.contains("half the registry lease")
     ));
     Ok(())
+}
+
+/// A registry TTL longer than the lease is refused at start: readers refuse a freshness window
+/// past the lease (the lease law), so the node's own descriptor would never be listed.
+#[test]
+fn test_registry_ttl_must_not_exceed_the_lease() {
+    let key = SecretKey::random();
+    let delegatee_key = DelegateeKey::new_with_seckey(&key).unwrap();
+    let presence = |ttl: Duration| {
+        let mut config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            delegatee_key.clone(),
+            3,
+        );
+        config.online_node_ttl = ttl;
+        ProcessorBuilder::from_config(&config).and_then(ProcessorBuilder::build)
+    };
+    let lease = registry_lease();
+    assert!(presence(lease).is_ok());
+    assert!(matches!(
+        presence(lease + Duration::from_millis(1)),
+        Err(Error::InvalidConfig(message))
+            if message.contains("online_node_ttl") && message.contains("registry lease")
+    ));
 }
 
 #[test]

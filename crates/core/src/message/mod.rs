@@ -23,15 +23,19 @@ pub(crate) use payload::LinkControl;
 pub(crate) use payload::LinkFrame;
 pub use payload::MessagePayload;
 pub use payload::PayloadSender;
+pub use payload::PeerWireVersion;
 pub(crate) use payload::PerSlot;
 pub(crate) use payload::SlotEncoding;
 pub use payload::Transaction;
 pub(crate) use payload::WirePayload;
+pub use payload::WireVersionMismatch;
+pub use payload::WIRE_VERSION;
 
 mod admission_delegation;
 pub(crate) use admission_delegation::EdgeRelation;
 pub use admission_delegation::MessageLimit;
 pub(crate) use admission_delegation::OriginQuotaCharge;
+pub use admission_delegation::ReplayWindow;
 mod quota;
 pub use quota::OriginQuota;
 pub use quota::OriginQuotaArithmeticError;
@@ -54,6 +58,9 @@ pub use types::MessageCategory;
 
 mod replay;
 pub use replay::observe;
+pub(crate) use replay::spent_at;
+pub(crate) use replay::Admission;
+pub(crate) use replay::LinkWindows;
 pub(crate) use replay::RelayAdmission;
 pub(crate) use replay::RelayDelivery;
 pub use replay::ReplayCounters;
@@ -65,6 +72,7 @@ pub use replay::StreamKey;
 pub use replay::TransactionDigest;
 pub use replay::TransactionForkEvidence;
 pub(crate) use replay::TransactionReplay;
+pub(crate) use replay::RECEIVER_STREAM_SHARES;
 pub use replay::REORDER_DEADLINE;
 pub use replay::REORDER_WINDOW;
 pub use replay::TRANSACTION_REPLAY_RECORD_MAX_BYTES;
@@ -72,6 +80,9 @@ pub use replay::TRANSACTION_REPLAY_STORE_MAX_BYTES;
 pub use replay::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 pub use replay::TRANSACTION_REPLAY_STREAM_CAPACITY;
 pub use replay::TRANSACTION_REPLAY_WINDOW;
+
+pub use crate::fair_admission::Principal;
+pub use crate::fair_admission::ShareRefusal;
 
 mod service_receipt;
 #[cfg(test)]
@@ -93,6 +104,7 @@ pub use types::*;
 
 pub mod handlers;
 pub use handlers::HandleMsg;
+pub use handlers::HandlerContext;
 pub use handlers::MessageHandler;
 
 pub use crate::swarm::storage_api::ChordStorageInterface;
@@ -100,6 +112,7 @@ pub use crate::swarm::storage_api::ChordStorageInterfaceCacheChecker;
 pub use crate::swarm::storage_api::ScopedStorage;
 
 mod protocols;
+pub(crate) use protocols::verify_message_under;
 pub use protocols::DomainTag;
 pub use protocols::HopBudget;
 pub use protocols::MessageRelay;
