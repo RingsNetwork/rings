@@ -35,8 +35,6 @@
   0.21 (#1071). CI runs the crate's tests, including a new TSN-order test, on Linux and macOS.
   No operator step.
 
-## 0.37.0
-
 - The replay receiver table and the removal store are shared by connection slot, not by
   origin (#907; load-bounds paper, Laws 1 and 2, Sec. V). An origin is a free key pair, so
   anyone could fill the receiver table with one transaction from each of 16384 fresh origins and
@@ -79,6 +77,8 @@
   - **Upgrade consequence.** Mail held more than 7 days ago is dropped at the first read of its
     inbox.
 
+## 0.37.0
+
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
   Window by classification). A transaction is link-local when it is Application traffic, it
   arrived on the authenticated connection of its own origin, and its namespace declared delegated
@@ -99,6 +99,7 @@
   poll, so a store directory reopened in the same process right after a drop could still be held
   (`Error::StorageDirectoryLocked`, #1039). `close` resolves once the worker has persisted any
   pending snapshot and dropped both stores.
+
 - A node stamps its own writes in issue order (#1075, #1033; folds in #1076). Every operation a
   node stamps is issued strictly after every version it stamped or passed through before and
   every version it read for the key (its cached carrier, and the replica an owner holds), with
@@ -158,6 +159,7 @@
   - **Operator step.** None; earlier descriptors are ignored and expire within the element
     horizon. A configuration with a heartbeat interval of 300 seconds or more, or a TTL over 600
     seconds, is refused at start and must be lowered.
+
 - Data-topic removals are never evicted (#920; removal-stability paper, Laws 2–4 and 6). A
   data carrier is stored as two records: its values in the data store, which its byte budget
   may evict, and its tombstones and overwrite floor in a new retained store, `dht-removals`
@@ -176,6 +178,7 @@
     data store until it is next written, and is read as before meanwhile.
   - **Operator step.** None required. An operator who wants the eviction law to hold from the
     first eviction removes the data store while the node is stopped; replication rebuilds it.
+
 - Data-topic tombstones are bounded (#921; removal-stability paper, Law 5 and Prop. 4). A data
   carrier holds at most `DATA_TOMBSTONE_MAX_LEN` (1024) uncollected removes. A delta carrying
   more is not admitted, and a join, operation or repair whose result would hold more fails with
