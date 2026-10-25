@@ -5,6 +5,7 @@ use futures::lock::Mutex as FuturesMutex;
 use super::InboundLane;
 use super::LocalDelivery;
 use super::LogicalInbound;
+use super::WeakLogical;
 use crate::dht::Did;
 use crate::measure::Authentication;
 use crate::message::with_message_variants;
@@ -105,6 +106,25 @@ pub(super) fn edge_relation(
 ) -> EdgeRelation {
     let authenticated = matches!(authentication, Authentication::Authenticated);
     EdgeRelation::of(peer.filter(|_| authenticated), payload.transaction.origin())
+}
+
+impl WeakLogical {
+    /// The logical stage over `transport`, held weakly (the release law).
+    pub(super) fn new(transport: &Arc<SwarmTransport>) -> Self {
+        Self(Arc::downgrade(transport))
+    }
+
+    /// The logical stage for one event, while its transport lives.
+    ///
+    /// ```text
+    ///   upgrade : WeakLogical → Option LogicalInbound
+    ///   upgrade (WeakLogical::new t) = Some (LogicalInbound::new t)   while t lives;  None after
+    /// ```
+    ///
+    /// `None` is absorbing: once the transport is gone, every later upgrade is `None`.
+    pub(super) fn upgrade(&self) -> Option<LogicalInbound> {
+        self.0.upgrade().map(LogicalInbound::new)
+    }
 }
 
 impl LogicalInbound {

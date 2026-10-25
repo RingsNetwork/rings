@@ -66,6 +66,8 @@ mod test_session_link;
 mod test_stabilization;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_stabilization_failover;
+#[cfg(all(feature = "std", not(feature = "dummy")))]
+mod test_swarm_release;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_sync_storm;
 

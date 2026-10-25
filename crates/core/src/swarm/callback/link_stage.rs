@@ -5,7 +5,7 @@
 //! link-control frame, which grants or withdraws such a reference. This module is the
 //! imperative shell around that pure state: it reads the inbound clock, interprets the steps'
 //! verdicts (deliver, drop, confirm, disclaim), and hands every resolved frame to
-//! [`SwarmTransportCallback::verify_frame`] and then [`SwarmTransportCallback::gate_prepared_frame`],
+//! [`BoundCallback::verify_frame`] and then [`BoundCallback::gate_prepared_frame`],
 //! where verification and admission are what they were before references existed.
 //!
 //! Link law: a reference resolves only on a link, and this callback's link is the handshake it
@@ -34,10 +34,10 @@ use bytes::Bytes;
 use rings_transport::core::callback::InboundCreditLease;
 use rings_transport::core::pool::ChannelLane;
 
+use super::BoundCallback;
 use super::InboundFrameLease;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use super::OnMessageRecursionDepthGuard;
-use super::SwarmTransportCallback;
 use super::TransportCallbackError;
 use crate::dht::Did;
 use crate::message::LinkControl;
@@ -47,7 +47,7 @@ use crate::swarm::session_link::Resolution;
 use crate::swarm::session_link::ResolvedFrame;
 use crate::swarm::transport::PendingConnectionAttempt;
 
-impl SwarmTransportCallback {
+impl BoundCallback {
     /// Take one frame from the transport through the link stage.
     ///
     /// ```text
