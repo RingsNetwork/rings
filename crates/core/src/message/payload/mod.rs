@@ -27,6 +27,7 @@ use super::replay::StreamKey;
 use super::replay::TransactionDigest;
 use crate::delegation::DelegateeKey;
 use crate::delegation::Delegation;
+use crate::delegation::DelegatorAuthorization;
 use crate::dht::delivery::NextHop;
 use crate::dht::delivery::RouteStage;
 use crate::dht::Did;
@@ -38,6 +39,7 @@ use crate::error::Result;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::MessageKind;
+use crate::utils::get_epoch_ms;
 
 mod wire;
 
@@ -364,7 +366,21 @@ impl MessagePayload {
 
     /// Verify both the immutable origin transaction and the current payload carrier.
     pub(crate) fn verify_transaction_and_payload(&self, network_id: u32) -> bool {
-        self.transaction.verify(network_id) && MessageVerificationExt::verify(self, network_id)
+        self.verify_transaction_and_payload_under(network_id, PerSlot::full_verification())
+    }
+
+    /// [`Self::verify_transaction_and_payload`] with each slot's delegator authorization treated
+    /// as `authorization` says: the origin slot's for the transaction, the hop slot's for the
+    /// carrier.
+    pub(crate) fn verify_transaction_and_payload_under(
+        &self,
+        network_id: u32,
+        authorization: PerSlot<DelegatorAuthorization>,
+    ) -> bool {
+        let now_ms = get_epoch_ms();
+        self.transaction
+            .verify_under(network_id, now_ms, authorization.origin)
+            && MessageVerificationExt::verify_under(self, network_id, now_ms, authorization.hop)
     }
 }
 

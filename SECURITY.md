@@ -231,14 +231,11 @@ route.
   whose reference misses is dropped uncharged, never held, so a lane's frames reach admission
   in arrival order (#908). An origin delegation that expired in flight is not charged to the
   hop that carried it, and only when the rest of the frame verifies. An unrelated party
-  cannot populate a link's tables. [Details](docs/src/advanced-topic/delegation-references.md).
-- **Verified delegations.** A delegator's signature over a delegation is recovered once per exact
-  delegation and memoized under the full Keccak-256 of its encoding, so a delegation differing in
-  any byte, its signature included, is checked anew (#1089). The memo serves a delegation only
-  before its expiry minus one delivery bound, the expiry is checked on every message before the
-  memo is read, and the memo holds at most 329 delegations; eviction costs a recovery, never a
-  verdict. The delegatee's signature on each transaction is always checked. A delegation has no
-  revocation path; it ends at its expiry.
+  cannot populate a link's tables. A slot that resolves by reference is verified without its
+  delegator's signature: it resolves only against the receiver's lessor table, whose every entry
+  was leased from a frame that verified in full, so only its expiry and the delegatee's signature
+  remain to check (#1089). An inline slot is verified in full.
+  [Details](docs/src/advanced-topic/delegation-references.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.
 - **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures

@@ -17,14 +17,14 @@
 
 ## 0.37.0
 
-- A delegator's authorization of a delegation is verified once per exact delegation (#1089). Every
-  message carries two delegations, and recovering the delegator's ECDSA key for each cost 8.4%
-  of the #843 loop's CPU (#1087). The check now memoizes each delegation that verified, under the
-  full Keccak-256 of its encoding, and serves it only before its expiry minus one delivery bound
-  (`LEASE_MARGIN_MS`); the expiry is still checked on every call, and the delegatee's signature
-  on each transaction is unchanged. The memo holds at most 329 delegations (`R + 1` of the
-  load-bounds law, #1088) and drops the oldest. One check costs 68 µs when it recovers and under
-  1 µs when it is memoized (release, M1 Max). No operator step.
+- A delegation slot that resolves by reference skips its delegator's signature (#1089). Every
+  message carries two delegations, and recovering each delegator's ECDSA key cost 8.4% of the
+  #843 loop's CPU (#1087). A referenced slot resolves only against the link's lessor table, whose
+  every entry was leased from a frame that verified in full, so its delegator authorization is
+  established: it is now verified for its expiry and the delegatee's signature only (the new
+  `DelegatorAuthorization`, `Delegation::verify_under`). An inline slot, and every frame off a
+  link, is verified in full as before. One proof costs 66 µs instead of 133 µs when its slot is
+  referenced (release, M1 Max). No operator step.
 
 - Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
   Window by classification). A transaction is link-local when it is Application traffic, it

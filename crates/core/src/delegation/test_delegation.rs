@@ -4,6 +4,7 @@ use super::Account;
 use super::DelegateeKey;
 use super::Delegation;
 use super::DelegationBuilder;
+use super::DelegatorAuthorization;
 use crate::dht::Did;
 use crate::ecc::keys::SigningSecretKey;
 use crate::ecc::keys::VerificationPublicKey;
@@ -224,5 +225,65 @@ fn test_the_widest_delegation_bounds_every_account() {
             ..widest.clone()
         };
         assert!(encoded_len(&delegation) <= encoded_len(&widest));
+    }
+}
+
+/// `DelegatorAuthorization::Established` skips the delegator's signature alone: a delegation
+/// whose delegator signature is forged fails under `Verify` and passes under `Established`, as a
+/// caller that verified it earlier would see; the delegatee's signature and the expiry are
+/// checked under both.
+#[test]
+fn test_an_established_authorization_still_checks_expiry_and_the_delegatee_signature() {
+    let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
+    let msg = b"message";
+    let sig = delegatee_key.sign(msg).unwrap();
+    let mut forged = delegatee_key.delegation();
+    if let Some(byte) = forged.delegator_signature.first_mut() {
+        *byte ^= 1;
+    }
+    let at_ms = forged.created_at_ms();
+
+    assert!(forged
+        .verify_under(msg, &sig, at_ms, DelegatorAuthorization::Verify)
+        .is_err());
+    assert!(forged
+        .verify_under(msg, &sig, at_ms, DelegatorAuthorization::Established)
+        .is_ok());
+    assert!(forged
+        .verify_under(b"other", &sig, at_ms, DelegatorAuthorization::Established)
+        .is_err());
+    let expired = forged.expires_at_ms() + 1;
+    assert!(matches!(
+        forged.verify_under(msg, &sig, expired, DelegatorAuthorization::Established),
+        Err(crate::error::Error::DelegationExpired)
+    ));
+}
+
+/// The cost of verifying one message proof's delegation, with the delegator's signature
+/// recovered (`Verify`) and established (`Established`). Run with
+/// `--release -- --ignored --nocapture`.
+#[test]
+#[ignore = "benchmark"]
+fn bench_delegation_verification_by_authorization() {
+    const RUNS: u32 = 2000;
+    let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
+    let msg = b"message";
+    let sig = delegatee_key.sign(msg).unwrap();
+    let delegation = delegatee_key.delegation();
+    let at_ms = delegation.created_at_ms();
+    for authorization in [
+        DelegatorAuthorization::Verify,
+        DelegatorAuthorization::Established,
+    ] {
+        let started = std::time::Instant::now();
+        for _ in 0..RUNS {
+            delegation
+                .verify_under(msg, &sig, at_ms, authorization)
+                .unwrap();
+        }
+        println!(
+            "{authorization:?}: {:?} per proof",
+            started.elapsed() / RUNS
+        );
     }
 }

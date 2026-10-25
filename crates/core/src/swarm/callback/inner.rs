@@ -23,10 +23,12 @@ use super::InboundProcessor;
 use super::PreparedInboundFrame;
 use super::SwarmTransportCallback;
 use super::TransportCallbackError;
+use crate::delegation::DelegatorAuthorization;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::message::PerSlot;
 use crate::swarm::detached::run_detached_or_inline;
 use crate::swarm::session_link::expired_within_grace;
 use crate::swarm::transport::PendingConnectionAttempt;
@@ -307,6 +309,7 @@ impl SwarmTransportCallback {
         peer: Option<Did>,
         payload: MessagePayload,
         wire_len: usize,
+        authorization: PerSlot<DelegatorAuthorization>,
     ) -> Result<Option<PreparedInboundFrame>, TransportCallbackError> {
         let network_id = self.processor.logical.transport.network_id;
         // Law (expiry in flight): the hop answers only for its own delegation, so a frame whose
@@ -318,7 +321,7 @@ impl SwarmTransportCallback {
             );
             return Ok(None);
         }
-        match prepare_resolved_frame(network_id, peer, payload, wire_len) {
+        match prepare_resolved_frame(network_id, peer, payload, wire_len, authorization) {
             Ok(prepared) => Ok(Some(prepared)),
             Err(error) => {
                 self.processor.record_receive_failure_now(peer).await;

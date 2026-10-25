@@ -30,6 +30,7 @@ use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::delegation::DelegateeKey;
 use crate::delegation::Delegation;
+use crate::delegation::DelegatorAuthorization;
 use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::error::Result;
@@ -227,10 +228,22 @@ impl MessageVerification {
     /// transcript of `(domain, data, ts_ms, ttl_ms)`. Proof liveness is not judged here; see
     /// [`Self::is_live_at`].
     pub fn verify_at(&self, domain: SigningDomain, data: &[u8], at_ms: u128) -> bool {
+        self.verify_under(domain, data, at_ms, DelegatorAuthorization::Verify)
+    }
+
+    /// [`Self::verify_at`] with the delegation's delegator authorization treated as
+    /// `authorization` says (see [`DelegatorAuthorization`]).
+    pub fn verify_under(
+        &self,
+        domain: SigningDomain,
+        data: &[u8],
+        at_ms: u128,
+        authorization: DelegatorAuthorization,
+    ) -> bool {
         let msg = domain.transcript(data, self.ts_ms, self.ttl_ms);
 
         self.delegation
-            .verify_at(&msg, &self.sig, at_ms)
+            .verify_under(&msg, &self.sig, at_ms, authorization)
             .map_err(|e| {
                 tracing::warn!("MessageVerification verify failed: {:?}", e);
             })
@@ -262,11 +275,23 @@ impl MessageVerification {
     /// Verify the signature as of `at_ms`, requiring the proof to have been live then: the one
     /// composition of liveness, session validity, and signature every verifying path uses.
     pub fn verify_live_at(&self, domain: SigningDomain, data: &[u8], at_ms: u128) -> bool {
+        self.verify_live_under(domain, data, at_ms, DelegatorAuthorization::Verify)
+    }
+
+    /// [`Self::verify_live_at`] with the delegator authorization treated as `authorization`
+    /// says.
+    pub fn verify_live_under(
+        &self,
+        domain: SigningDomain,
+        data: &[u8],
+        at_ms: u128,
+        authorization: DelegatorAuthorization,
+    ) -> bool {
         if !self.is_live_at(at_ms) {
             tracing::warn!("message proof not live at the judged instant");
             return false;
         }
-        self.verify_at(domain, data, at_ms)
+        self.verify_under(domain, data, at_ms, authorization)
     }
 }
 
@@ -296,15 +321,27 @@ pub trait MessageVerificationExt {
     /// held message as of the instant its holder received it, so a sender's session expiring
     /// afterwards does not retroactively unverify a message that was valid when held.
     fn verify_at(&self, network_id: u32, at_ms: u128) -> bool {
+        self.verify_under(network_id, at_ms, DelegatorAuthorization::Verify)
+    }
+
+    /// [`Self::verify_at`] with the delegator authorization of the message's delegation treated
+    /// as `authorization` says (see [`DelegatorAuthorization`]).
+    fn verify_under(
+        &self,
+        network_id: u32,
+        at_ms: u128,
+        authorization: DelegatorAuthorization,
+    ) -> bool {
         let Ok(data) = self.verification_data() else {
             tracing::warn!("MessageVerificationExt verify get verification_data failed");
             return false;
         };
 
-        self.verification().verify_live_at(
+        self.verification().verify_live_under(
             SigningDomain::new(Self::DOMAIN_TAG, network_id),
             &data,
             at_ms,
+            authorization,
         )
     }
 

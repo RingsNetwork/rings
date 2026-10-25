@@ -42,6 +42,8 @@ use super::TransportCallbackError;
 use crate::dht::Did;
 use crate::message::LinkControl;
 use crate::message::LinkFrame;
+use crate::message::PerSlot;
+use crate::message::SlotEncoding;
 use crate::message::WirePayload;
 use crate::swarm::session_link::Resolution;
 use crate::swarm::session_link::ResolvedFrame;
@@ -124,7 +126,13 @@ impl SwarmTransportCallback {
     ) -> std::result::Result<(), TransportCallbackError> {
         let peer = Some(link.peer());
         let ResolvedFrame { payload, encoding } = resolved;
-        let Some(prepared) = self.verify_frame(peer, payload, lease.bytes.len()).await? else {
+        // A slot that resolved from this link's lessor table carries an established delegator
+        // authorization (`SlotEncoding::delegator_authorization`).
+        let authorization = encoding.map(SlotEncoding::delegator_authorization);
+        let Some(prepared) = self
+            .verify_frame(peer, payload, lease.bytes.len(), authorization)
+            .await?
+        else {
             return Ok(());
         };
         let confirm = self.processor.session_link().admit_verified(
@@ -152,7 +160,15 @@ impl SwarmTransportCallback {
                 return Err(error.into());
             }
         };
-        let Some(prepared) = self.verify_frame(peer, payload, lease.bytes.len()).await? else {
+        let Some(prepared) = self
+            .verify_frame(
+                peer,
+                payload,
+                lease.bytes.len(),
+                PerSlot::full_verification(),
+            )
+            .await?
+        else {
             return Ok(());
         };
         self.gate_prepared_frame(peer, prepared, lease).await
