@@ -274,7 +274,7 @@ impl Error {
             // local channels and schedulers
             | Self::ChannelSendMessageFailed | Self::ChannelRecvMessageFailed(_)
             | Self::OutboundSchedulerRuntimeUnavailable | Self::LockPoisoned
-            | Self::ApplicationInboxClaimed | Self::SwarmStopped
+            | Self::ApplicationInboxClaimed | Self::SwarmStopped | Self::SwarmClosed
             // inbound processing
             | Self::InboundMailboxCapacityExceeded { .. }
             | Self::InboundMailboxMemoryCapacityExceeded { .. }

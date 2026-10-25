@@ -239,6 +239,11 @@ impl Provider {
         self.processor.flush_measurements().await
     }
 
+    /// Close this node's network before it is dropped; see [`Processor::close`] (#1098).
+    pub async fn close(&self) -> Result<()> {
+        self.processor.close().await
+    }
+
     /// Create a provider instance with storage name
     pub(crate) async fn new_provider_with_storage_internal(
         config: ProcessorConfig,

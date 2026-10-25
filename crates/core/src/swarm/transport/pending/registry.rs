@@ -166,6 +166,8 @@ impl LifecycleBounds {
 /// triggers an eviction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::swarm::transport) enum ReservationVerdict {
+    /// The registry is closed (the close law of [`ConnectionLifecycleRegistry::close`]).
+    Closed,
     /// The peer already owns a lifecycle record.
     AlreadyConnected,
     /// The handshake working set is saturated.
@@ -200,6 +202,8 @@ impl ReservationVerdict {
 /// carries its signaling state ([`Handshake`]); `reserve_for` creates both and every transition
 /// out of `Pending` drops both, so neither outlives the other.
 ///
+/// Invariant (Closed): once `closed`, the map only shrinks: `reserve_for` refuses every peer.
+///
 /// Invariant: `|Pending ∪ Admitting| <= bounds.pending()` and `|State| <= bounds.total()`.
 /// Preservation: `reserve` is the only transition that grows the map and it
 /// checks both bounds; every other transition keeps or shrinks the map, so an
@@ -217,6 +221,8 @@ pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry {
     /// The signaling state of every pending record (`Invariant (Signaling)`).
     handshakes: BTreeMap<Did, Handshake>,
     send_terminal: BTreeSet<PendingConnectionAttempt>,
+    /// Whether the registry is closed (`Invariant (Closed)`).
+    closed: bool,
 }
 
 impl ConnectionLifecycleRegistry {
@@ -233,7 +239,22 @@ impl ConnectionLifecycleRegistry {
             peers: BTreeMap::new(),
             handshakes: BTreeMap::new(),
             send_terminal: BTreeSet::new(),
+            closed: false,
         }
+    }
+
+    /// Close the registry: it reserves no generation from now on, and the peers it holds a
+    /// record of, in any phase, are returned for their owner to disconnect.
+    ///
+    /// ```text
+    ///   close : Registry → (Registry, {Did})      close (r) = (r[closed ↦ true], dom r.peers)
+    /// ```
+    ///
+    /// Close law: every generation is reserved before the close, and is among the returned
+    /// peers, or is refused. Closing is idempotent; a second close returns the peers still held.
+    pub(in crate::swarm::transport) fn close(&mut self) -> BTreeSet<Did> {
+        self.closed = true;
+        self.peers.keys().copied().collect()
     }
 
     /// Reserve a pending generation for `peer` with a test-default signaling state: an
@@ -255,6 +276,7 @@ impl ConnectionLifecycleRegistry {
         handshake: Handshake,
     ) -> Result<PendingConnectionAttempt> {
         match self.reservation_verdict(peer) {
+            ReservationVerdict::Closed => return Err(Error::SwarmClosed),
             ReservationVerdict::AlreadyConnected => return Err(Error::AlreadyConnected),
             ReservationVerdict::PendingCapacityExceeded => {
                 return Err(Error::PendingConnectionCapacityExceeded {
@@ -305,10 +327,12 @@ impl ConnectionLifecycleRegistry {
         self.peers.contains_key(&peer)
     }
 
-    /// Decide `reserve(peer)` without mutating: duplicate peer first, then the
-    /// handshake bound, then the total bound.
+    /// Decide `reserve(peer)` without mutating: a closed registry first, then a duplicate peer,
+    /// then the handshake bound, then the total bound.
     pub(in crate::swarm::transport) fn reservation_verdict(&self, peer: Did) -> ReservationVerdict {
-        if self.contains(peer) {
+        if self.closed {
+            ReservationVerdict::Closed
+        } else if self.contains(peer) {
             ReservationVerdict::AlreadyConnected
         } else if self.pending_len() >= self.bounds.pending {
             ReservationVerdict::PendingCapacityExceeded
