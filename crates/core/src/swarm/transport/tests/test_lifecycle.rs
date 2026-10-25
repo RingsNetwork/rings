@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 #[cfg(feature = "dummy")]
 #[cfg(feature = "dummy")]
 use super::super::delivery::SendCompletionOutcome;
@@ -220,6 +222,39 @@ fn test_connection_lifecycle_registry_bounds_records_across_every_phase() -> Res
         ReservationVerdict::PendingCapacityExceeded
     );
     assert!(registry.reserve(peer_a, now).is_err());
+    Ok(())
+}
+
+/// The close law of the registry (#1098): closing returns every peer it holds a record of, in
+/// any phase, and from then on it refuses every reservation, before any other verdict.
+#[test]
+fn test_a_closed_registry_returns_its_peers_and_refuses_every_reservation() -> Result<()> {
+    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(2, 2));
+    let now = 1_000;
+    let admitted = SecretKey::random().address().into();
+    let pending = SecretKey::random().address().into();
+    let newcomer = SecretKey::random().address().into();
+    let attempt = registry.reserve(admitted, now)?;
+    assert!(registry.begin_admission(attempt));
+    registry
+        .admitting_connection(attempt)
+        .ok_or(Error::AlreadyConnected)?
+        .activate();
+    let _pending = registry.reserve(pending, now)?;
+
+    assert_eq!(registry.close(), BTreeSet::from([admitted, pending]));
+    for peer in [admitted, pending, newcomer] {
+        assert_eq!(
+            registry.reservation_verdict(peer),
+            ReservationVerdict::Closed
+        );
+        assert!(matches!(
+            registry.reserve(peer, now),
+            Err(Error::SwarmClosed)
+        ));
+    }
+    assert!(registry.remove_active(attempt));
+    assert_eq!(registry.close(), BTreeSet::from([pending]));
     Ok(())
 }
 
