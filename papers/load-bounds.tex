@@ -54,11 +54,11 @@ for a Rings Node under Free Identities}
 \noindent
 A Rings identity is a key digest, so anyone can mint as many as they like.  Every table a
 remote party can grow must therefore be accounted to something that is not free.  We take the
-authenticated neighbour edge: a connection the node itself admitted, of which it holds at most
-$\Rg$ at once.  One accounting law covers every such table: each current edge has a reserved
-floor, overflow and the charges of departed edges share a pool, and the node-wide bound is the
-sum.  An honest edge is then refused only past its own floor with the pool full, and a free
-identity consumes at most the share of the edge that carries it.  We apply the law to the
+authenticated neighbour edge: a connection the node itself admitted, which holds one of its
+$\Rg$ connection slots.  One accounting law covers every such table: each slot has a reserved
+floor, overflow shares a pool in fair claims, and the node-wide bound is the sum.  An honest
+edge is then refused only past its slot's floor and its fair claim, and a free identity
+consumes at most the share of the slot that carries it.  We apply the law to the
 receiver's replay streams (with an eviction horizon that cannot reopen replay), to the removal
 store, to received frames through a credit-reclaim protocol that makes the frame bound hard and
 independent of the connection count, and to reassembled messages, which are charged once at
@@ -104,16 +104,25 @@ $\Rg=2(F+s+1)$ connection records in any phase, where $F=160$ is the number of f
 $s$ the number of successors ($328$ at $s=3$).  So at most $\Rg$ edges are \emph{current} at
 any instant.  An edge identity is also a free key; what is bounded is the number of edges
 current at once.
+\item A \emph{slot} $\kappa\in K=\{0,\dots,\Rg-1\}$ is one unit of the registry's capacity.  An
+edge takes the least free slot $\kappa(e)$ when it is admitted and frees it when it is retired,
+both in the transition that announces it, so the current edges hold distinct slots.  A slot is
+not a topology reference: one edge may back several fingers and a successor, or none.
 \item A \emph{lane} $(e,\ell)$ is one of the four credit-controlled channels of an edge.
-\item The \emph{local} principal $\lambda$ is the node itself: its own operations, and
-deliveries out of its own stores.
+\item The \emph{local} principal $\lambda$ is the node itself: its own operations alone (its
+own writes and repairs, and out-of-band connection signaling it is handed).
+\item A \emph{dedicated} principal $d\in D_T$ is a duty of the node that remote input drives
+but no slot introduces, with a share of its own in table $T$: the inbox principal $\mu$, which
+introduces deliveries out of the node's own relay inbox (replay table only), and the custody
+principal $\chi$, which introduces the hand-off of a range the node owns (removal store only).
 \end{itemize}
 \end{definition}
 
 \begin{definition}[Table]\label{def:table}
 A table $T$ is a node-wide set of items that remote input can grow: replay streams, removal
 records, frames held, reassembly bytes, mailbox bytes.  Every item $x\in T$ carries a principal
-$\pi(x)\in\E\cup\{\lambda\}$, the edge or local principal that \emph{introduced} it, and it
+$\pi(x)\in K\cup\{\lambda\}\cup D_T$: the slot of the edge that \emph{introduced} it, the local
+principal, or a dedicated one, and it
 leaves $T$ only by a transition of $T$'s own law (consumption, retirement at a horizon, or an
 acknowledged move).
 \end{definition}
@@ -143,126 +152,179 @@ is never allowed for an honest frame or message at a capacity bound.
 
 \section{The accounting law}\label{sec:accounting}
 
-\begin{law}[Edge accounting]\label{law:edge}
-Every table $T$ has a per-edge floor $f_T$, a pool $\Pool_T$ and a local share $L_T$, with
-node-wide bound
-\[
-B_T(s)=\Rg(s)\, f_T+\Pool_T+L_T,\qquad \Rg(s)=2(F+s+1),
-\]
+\begin{law}[Slot accounting]\label{law:edge}
+Every table $T$ has a floor $f_T$ per slot, a pool $\Pool_T$, a local share $L_T$ and a share
+$S_d$ per dedicated principal $d\in D_T$, with node-wide bound
+\begin{gather*}
+B_T(s)=\Rg(s)\, f_T+\Pool_T+L_T+\textstyle\sum_{d\in D_T}S_d,\\
+\Rg(s)=2(F+s+1),
+\end{gather*}
 so a deployment that raises the successor count $s$ (\issue{774}, \issue{777}) raises the floors
-it reserves, $2f_T$ per successor, and nothing else.  Let $\use_e$ be the number of items
-introduced by edge $e$, and $o_e=\max(0,\use_e-f_T)$ its pool items.  The \emph{claimants} are
-the current edges with $o_e>0$ or a pending item over their floor, and the class $\delta$ of
-departed edges, whose items all count as $o_\delta$; let $n\ge1$ be their number.  A transition
-that adds an item introduced by $\pi$ is admitted iff:
+it reserves, $2f_T$ per successor, and nothing else.  Let $\use_\kappa$ be the number of items
+charged to slot $\kappa$, and $o_\kappa=\max(0,\use_\kappa-f_T)$ its pool items.  The
+\emph{claimants} are the slots with $o_\kappa>0$ or a pending item over their floor; let
+$n\ge1$ be their number.  An item introduced by $\pi$ is admitted iff:
 \begin{itemize}[leftmargin=1.2em]
-\item $\pi=e$ is current and $\use_e<f_T$ (the edge's floor); or
+\item $\pi=\kappa$ and $\use_\kappa<f_T$ (the slot's floor); or
 \item the pool has room, $\sum o<\Pool_T$, and the claimant is within its fair claim,
-$o_\pi<\lceil\Pool_T/n\rceil$; or
-\item $\pi=\lambda$ and $\use_\lambda<L_T$.
+$o_\kappa<\lceil\Pool_T/n\rceil$; or
+\item $\pi=\lambda$ and $\use_\lambda<L_T$; or
+\item $\pi=d\in D_T$ and $\use_d<S_d$.
 \end{itemize}
-Otherwise it is refused or, where the law says so, it waits.  When an edge departs, its items
-stay in $T$, in the departed class, until they leave by $T$'s own law.  No item is ever dropped
-to make room: a claimant above its fair claim after $n$ grew keeps what it holds and gains
-nothing until it falls below.
+A transition that adds several items is admitted iff each of them is, in order, and is refused
+whole otherwise.  A refused transition is refused or, where the law says so, it waits.  An item stays charged to its slot
+until it leaves by $T$'s own law, whoever holds the slot: a departure changes no charge, and an
+edge admitted into a slot inherits its usage.  No item is ever dropped to make room: a claimant
+above its fair claim after $n$ grew keeps what it holds and gains nothing until it falls below.
 \end{law}
 
 \begin{theorem}[Isolation]\label{theorem:isolation}
 Under Law~\ref{law:edge}:
 \begin{enumerate}[leftmargin=1.5em]
 \item $|T|\le B_T$ always;
-\item a transition introduced by a current edge $e$ with $\use_e<f_T$ is never refused, however
-many origins, edges or departed edges any other party controls;
-\item an over-floor edge is refused only once it holds its fair claim or the pool is full, and
-it is guaranteed $f_T+\lceil\Pool_T/n\rceil\ge f_T+\lceil\Pool_T/(\Rg+1)\rceil$ items as the
-other claimants' items expire, with $n-1$ of them;
-\item a party holding $k$ current edges, and any number of departed ones, occupies at most
-$k f_T+\lceil(k+1)\Pool_T/n\rceil$ items once its excess has expired, and never more than
-$kf_T+\Pool_T$.
+\item an item through slot $\kappa$ with $\use_\kappa<f_T$ is never refused, however many
+origins, edges or slots any other party controls; in particular an edge keeps its floor for as
+long as it holds its slot, less what the slot held when it was admitted.  The guarantee is per
+item: a transition adding $k$ items through $\kappa$ is admitted only if
+$k\le(f_T-\use_\kappa)+(\lceil\Pool_T/n\rceil-o_\kappa)$ with the pool's room, and is refused
+whole otherwise;
+\item an over-floor slot is refused only once it holds its fair claim or the pool is full, and
+it is guaranteed $f_T+\lceil\Pool_T/n\rceil\ge f_T+\lceil\Pool_T/\Rg\rceil$ items as the other
+claimants' items expire, with $n-1$ of them;
+\item the items of the slots a party holds or has held number at most $j f_T+\Pool_T$ for $j$
+such slots, and at most $\Rg f_T+\Pool_T$ however many edges it rotates.
 \end{enumerate}
 \end{theorem}
 \begin{proof}
-(1)~At most $\Rg$ edges are current, each holds at most $f_T$ items within its floor, the pool
-holds at most $\Pool_T$, and the local principal holds at most $L_T$.
-(2)~The floor test reads $\use_e$ alone, and only $e$'s own transitions change it.
+(1)~No transition moves an item between slots or into the pool: a departure changes no charge.
+Each slot holds at most $f_T$ items within its floor, the pool admits only while $\sum o<\Pool_T$,
+the local principal holds at most $L_T$, and each dedicated principal at most $S_d$.
+(2)~The floor test reads $\use_\kappa$ alone, and only transitions through $\kappa$ change it.
 (3)~A claimant below $\lceil\Pool_T/n\rceil$ is refused only with a full pool, which then holds
 some claimant above its claim; that claimant gains nothing and its items leave by $T$'s law, so
-the pool drains to the fair claims, with $n\le\Rg+1$.
-(4)~A party's claimants are its $k$ edges and at most the departed class.
+the pool drains to the fair claims, with $n\le\Rg$.
+(4)~By (1), with $j\le\Rg$.
 \end{proof}
+
+\begin{proposition}[Rotation residual]\label{prop:rotation}
+A party that rotates edges through free slots charges each slot it passes with up to $f_T$
+items, which stay until they leave by $T$'s law.  An honest edge later admitted into such a slot
+inherits that usage: it has no floor, only its fair claim, until those items leave.  Charging
+every free slot takes at most $\Rg-c$ admissions, with $c$ honest edges current, and an honest
+edge that holds its slot throughout is never affected.
+\end{proposition}
+\begin{proof}
+Law~\ref{law:edge}: a slot's charges outlive its edge, and Theorem~\ref{theorem:isolation}(2)
+for the edges that keep their slots.
+\end{proof}
+
+Proposition~\ref{prop:rotation} is the cost this law does not remove: free keys and connection
+churn can leave newly admitted edges without a floor for one horizon of $T$ per round of
+rotation.  Only a cost on admission removes it: an admission rate limit (\issue{1094}, before
+1.0) and position randomization (\issue{780}, 2.0).  Charging the edge identity instead of its
+slot is unsound: a departing identity's floor items stay, while a fresh identity brings a fresh
+floor, so rotation alone grows $|T|$ past $B_T$.
 
 Accounting to the origin, as the removal store did~\cite{RemovalStability} and the replay
 table's quota does, fails part~(4).  An origin costs nothing, so a party controls unboundedly
-many, and the only bound left is the node-wide total.  The edge is the unit that is both
+many, and the only bound left is the node-wide total.  The slot is the unit that is both
 authenticated and bounded in number.  The quota per origin stays: it is a rate within an edge,
-not a capacity.  Edge identities are free too, but replacing an edge moves its items to the
-pool, which Theorem~\ref{theorem:isolation} already counts: rotating edges fills the departed
-class, which is one claimant.
+not a capacity.
 
 \textbf{Who overflows honestly.}  In an overlay of mostly browser nodes, the honest overflow is
 on relay edges: a browser reached through a seed sees every origin the seed forwards to it on
 that one edge.  Without the fair claim, a party with $k$ edges could take the whole pool and
 refuse every honest relay edge for the table's horizon.  With it, a relay edge keeps
-$\lceil\Pool_T/n\rceil$ however many edges the party holds.  The alternative of charging only
+$\lceil\Pool_T/n\rceil$ however many slots the party holds.  The alternative of charging only
 streams whose origin is the delivering edge, and leaving relayed streams to the origin quota,
 reopens \issue{907}: a relayed final-destination stream is exactly the stream a free identity
 creates, and the quota is per origin.
 
 \section{Replay streams (\issue{907})}\label{sec:replay}
 
-A receiver stream $s$ admits a transaction only while its proof is live,
-$t<ts+ttl$, with $ttl\le\mathtt{MAX\_TTL\_MS}=H$ and $ts\le t_{\mathrm{admit}}+\sigma$.
+A receiver stream $s$ admits a transaction on two paths.  Live, only while its proof is live,
+$t\le ts+ttl$, with $ttl\le\mathtt{MAX\_TTL\_MS}=H$ and $ts\le t+\sigma$.  Out of a relay inbox,
+as of its hold instant $h$, which the witness bounds by the sender's proof, $h\le ts+ttl$; only
+an application message is ever held.
+
+\begin{definition}[Relay hold horizon]\label{def:relayhorizon}
+A relay element held at $h$ retires at $h+H_I$, $H_I=\mathtt{MAX\_RELAY\_INBOX\_TTL\_MS}$
+(7\,days): every replica projects it out of its carrier at a read, a join or a sync, and a drain
+never delivers it.  The predicate reads the signed hold instant, not the element's dot, so it is
+element-intrinsic and commutes with join, and a member that rewrites an old hold under a fresh
+dot gains nothing.  An element is projected out, never refused, so a carrier with an old
+element stays admissible.  Relay removes keep their cap.
+\end{definition}
 
 \begin{definition}[Horizon]\label{def:streamhorizon}
-Let $x_s=\max(ts+ttl)$ over the transactions $s$ admitted, each with $ts\le t_{\mathrm{admit}}
-+\sigma$ and $ttl\le H$.  The stream is \emph{spent} at $t$ iff $t\ge x_s+\sigma$.  So a stream
-of default-lifetime traffic is spent about $10$\,min after its last transaction, and none later
-than $H+2\sigma$.
+Let $x_s=\max(ts+ttl)$ over the transactions $s$ admitted, and
+$\iota(\mathsf{Application})=H_I+\sigma$, $\iota=0$ for every other class.  The stream is
+\emph{spent} at $t$ iff $t\ge x_s+\iota+\sigma$.  So a control, storage or E2E stream of
+default-lifetime traffic is spent about $10$\,min after its last transaction, and none later
+than $H+2\sigma$; an application stream $H_I+\sigma$ later.
 \end{definition}
 
 \begin{lemma}[Eviction is sound]\label{lem:evict}
 A spent stream can be forgotten without reopening replay.  Every transaction it ever admitted is
-then expired at this node's clock, even one stepped back by $\sigma$, so a stream opened afresh
-at $\mathsf{First}$ refuses them as dead proofs.
+then undeliverable at this node's clock, even one stepped back by $\sigma$, on either path, so a
+stream opened afresh at $\mathsf{First}$ never sees one again.
 \end{lemma}
 \begin{proof}
-Every admitted transaction expires by $x_s\le t-\sigma$.  Liveness is checked before replay, so
-it is refused at the proof, whatever the window holds.
+Live, a transaction is refused at its proof once $t>ts+ttl$, and $t-\sigma\ge x_s$.  Out of an
+inbox, it is delivered only while $t<h+H_I\le ts+ttl+H_I$, and $t-\sigma\ge x_s+H_I+\sigma$.
+Both checks run before replay, whatever the window holds.
 \end{proof}
 
 \begin{law}[Stream admission]\label{law:streams}
 The receiver table is a table under Law~\ref{law:edge}:
 \begin{itemize}[leftmargin=1.2em]
-\item A \emph{new} stream is introduced by the edge that delivered its first transaction, and a
-relay-inbox delivery by $\lambda$.
-\item A stream leaves the table only when it is spent, by Lemma~\ref{lem:evict}.  A spent stream
-is retired lazily, when a new stream needs its slot.
-\item The record of a stream stores $(\pi(s), x_s)$, so a restart recovers the charges.
+\item A \emph{new} stream is introduced by the slot of the edge that delivered its first
+transaction; a delivery out of the node's own relay inbox by $\mu$; out-of-band connection
+signaling by $\lambda$.
+\item A stream leaves the table only when it is spent and holds no relay custody, by
+Lemma~\ref{lem:evict}.  Spent streams are retired lazily, by the next admission that reads the
+clock past them, and their records are removed in that admission's batch.
+\item The record of a stream stores $(\pi(s), x_s+\iota+\sigma)$, so a restart recovers the
+charges.
 \end{itemize}
 Parameters:
 \begin{itemize}[leftmargin=1.2em]
-\item $f=32$ new streams per edge, $\Pool=4096$ and $L=1024$, so
-$B(3)=328\cdot32+4096+1024=15\,616\le16\,384$, today's capacity, and $B(s)=B(3)+64(s-3)$;
+\item $f=32$ new streams per slot, $\Pool=3328$, $L=1024$ and $M=S_\mu=768$, so
+$B(3)=328\cdot32+3328+1024+768=15\,616$ and $B(s)=B(3)+64(s-3)$;
+\item $B(s)\le C=16\,384$, the table's hard capacity, iff $s\le15$: up to 15 successors
+Theorem~\ref{theorem:isolation}(1) holds and the floors bind first, and past it the hard capacity
+refuses before a floor does;
 \item the per-origin quota is unchanged.
 \end{itemize}
 A new stream past its bound is refused with \texttt{TransactionReplayStreamCapacityExceeded}, as
-today.  The refusal now lasts until a slot is spent, at most $H+2\sigma$ (100\,min, about
-10\,min for default-lifetime traffic), and it reaches only an edge past its floor and its fair
-claim.
+today.  The refusal now lasts until a stream of the refused slot is spent, at most $H+2\sigma$
+(100\,min, about 10\,min for default-lifetime traffic) and $H+H_I+3\sigma$ for application
+streams, and it reaches only a slot past its floor and its fair claim.
 \end{law}
 
 \begin{proposition}[No permanent lockout]\label{prop:nolockout}
-A party with $k$ edges and any number of origins can refuse new streams only through those $k$
-edges, and only once the pool is full.  For every other current edge, a new origin is refused
-once that edge has itself introduced $f+\lceil\Pool/n\rceil$ unspent streams.  Every refusal
-ends within $H+2\sigma$ of the last admission on the streams that fill the bound.
+A party with $k$ slots and any number of origins can refuse new streams only through those $k$
+slots, and only once the pool is full.  For every other slot, a new origin is refused once that
+slot holds $f+\lceil\Pool/n\rceil$ unspent streams.  Every refusal ends within $H+2\sigma$, or
+$H+H_I+3\sigma$ for an application stream, of the last admission on the streams that fill the
+bound.
 \end{proposition}
 \begin{proof}
 Theorem~\ref{theorem:isolation}, and Lemma~\ref{lem:evict} for the end of a refusal.
 \end{proof}
 
+The application horizon is the price of offline mail: a stream must outlive every hold of its
+messages.  It lengthens what Proposition~\ref{prop:rotation} costs an honest newcomer in an
+application-charged slot to $H_I$, not what any principal can hold.
+
+Inbox mail draws on $\mu$, never on $L$, so a flood of mail cannot refuse this node's
+own signaling.  The residual: once mail from $M$ distinct origins is unspent, mail from a new
+origin is refused at delivery for up to $H_I+H+3\sigma$; its element stays held, unless its own
+hold horizon passes first.  A slot would not do better: a node's inbox mail all enters through
+its own store or one member's fetch reply, so charging the delivering slot isolates nothing.
+
 A relay or seed that forwards many distinct origins can fill its own floor legitimately; its
-overflow then holds a fair claim of the pool, $\lceil\Pool/n\rceil\ge13$ at worst and $4096$
+overflow then holds a fair claim of the pool, $\lceil\Pool/n\rceil\ge11$ at worst and $3328$
 alone, and past it the honest cost is a refusal on that edge until its streams are spent.  The sender table holds this node's own streams, so it is local.
 
 \section{The removal store, re-keyed}\label{sec:removal}
@@ -270,14 +332,28 @@ alone, and past it the honest cost is a refusal on that edge until its streams a
 Law~6 of~\cite{RemovalStability} charged each remove to its sender's origin.  We re-key it
 under Law~\ref{law:edge}:
 \begin{itemize}[leftmargin=1.2em]
-\item an operation or a sync is charged to the edge that delivered it, and this node's own
-writes and repairs to $\lambda$;
-\item the holder class goes away: a predecessor or successor is an edge like any other, so its
-floor is the same.
+\item an operation or a sync is charged to the slot of the edge that delivered it, and this
+node's own writes and repairs to $\lambda$; a read repair of a remote lookup reply is charged to
+the slot that delivered the reply, so lookup replies never draw on $L$;
+\item a hand-off sync of a placement this node's view makes it own, from the node its view names
+as the placement's previous owner (its predecessor or a successor), is charged to the custody
+principal $\chi$; every other sync from a predecessor or successor is charged to its slot, as
+any edge's.
 \end{itemize}
-Parameters: $f=128$ removes per edge, $\Pool=16\,384$ and $L=7\,168$, so
-$B(3)=328\cdot128+16\,384+7\,168=65\,536$, today's total, and $B(s)=B(3)+256(s-3)$.  Theorem~\ref{theorem:isolation} then closes
-the Sybil residual that \issue{907} was to close: one mechanism serves both tables.
+Parameters: $f=128$ removes per slot, $\Pool=16\,384$, $L=7\,168$ and $K=S_\chi=16\,384$, so
+$B(3)=328\cdot128+16\,384+7\,168+16\,384=81\,920$ and $B(s)=B(3)+256(s-3)$.  A store files
+each item in at most 239 bytes, the widest when every record holds one remove (its key, its
+DID, one remove and its charge), so $B(3)$ items take at most about 19.6\,MB.
+Theorem~\ref{theorem:isolation} then closes the Sybil residual that \issue{907} was to close: one
+mechanism serves both tables.
+
+A store admits one carrier per transition, at most $T_{\max}=1024$ removes, so all-or-none
+binds per topic.  The binding limit of a hand-off is cumulative: without $\chi$, every topic of
+a range a neighbour hands over draws on that neighbour's one slot, $f+\lceil\Pool/n\rceil$ in
+all, and a busy range (about $10$ removes a minute per topic stays $\approx1000$ unstable) would
+wait up to $H+\sigma$ while the new owner misses its reads.  The residuals of $\chi$: a
+Byzantine predecessor or successor can fill $K$ (a non-goal, as the holder class was), and an
+honest range of more than $K$ unstable removes still waits for them to stabilize.
 
 \section{Received frames (\issue{934})}\label{sec:frames}
 
@@ -443,8 +519,9 @@ Table & Bound & At the bound\\
 frames held & node $B_F(s)$; lane floor & sender waits for credit (backpressure)\\
 mailbox bytes & edge budget, lane share, pool & arrival waits (backpressure)\\
 reassembly & inside the mailbox reservation & first chunk waits (backpressure)\\
-replay streams & $\Rg(s) f+\Pool+L$ by edge, fair pool & new stream refused, $\le H+2\sigma$\\
-removal store & $\Rg(s) f+\Pool+L$ by edge, fair pool & write refused, unacked\\
+replay streams & $\Rg(s) f+\Pool+L+M$ by slot, fair pool & new stream refused, $\le H+2\sigma$
+($H+H_I+3\sigma$ application)\\
+removal store & $\Rg(s) f+\Pool+L+K$ by slot, fair pool & write refused, unacked\\
 origin & rate quota within its edge & refused for the rate window\\
 application inbox & 64\,MiB & dropped, counted (by design)\\
 \bottomrule
@@ -452,8 +529,9 @@ application inbox & 64\,MiB & dropped, counted (by design)\\
 \end{center}
 
 \textbf{What a free identity consumes.}  An origin alone consumes nothing beyond its quota on the
-edge that carries it.  An edge consumes its floors.  The pool is shared, and is the most that
-any number of free identities can take together.
+edge that carries it.  An edge consumes its slot's floors, which outlive it until its items
+leave.  The pool is shared, and is the most that any number of free identities can take
+together.
 
 \section{Implementation order}\label{sec:plan}
 
@@ -472,15 +550,17 @@ PR & Issue & Law\\
 \end{tabular}
 \end{center}
 
-PR~1 adds the edge-accounting primitive that PR~2 reuses for the mailbox.  PR~4 rewrites the
+PR~1 adds the slot-accounting primitive that PR~2 reuses for the mailbox, and the relay
+element horizon of Definition~\ref{def:relayhorizon}.  PR~4 rewrites the
 queue that PR~2 changes, so it follows PR~2.  PR~5 needs nothing from the others.
 
 \textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}:
 \begin{itemize}[leftmargin=1.2em]
-\item PR~1 changes the replay record, which gains its introducer and last admission.  Remove the
+\item PR~1 changes the replay record, which gains its introducer and spent instant.  Remove the
 \texttt{transaction-replay} store while the node is stopped; this is the documented reset of
-the durable-records law.  The removal store gains an edge charge, so remove
-\texttt{dht-removals} too.
+the durable-records law.  The removal store gains a slot charge, so remove
+\texttt{dht-removals} too.  Held mail now expires $H_I$ after its hold, even in a carrier that
+newer holds keep alive.
 \item PR~3 is a wire cutover with no step.
 \end{itemize}
 
