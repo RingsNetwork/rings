@@ -24,6 +24,7 @@ use rings_core::swarm::LaneCreditView;
 use rings_runtime::MaybeSendSync;
 
 use super::delegation;
+use super::delegation::Delegation;
 use super::Ctx;
 use super::Envelope;
 use super::Interpret;
@@ -538,11 +539,11 @@ impl Extensions {
         I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
         // Build (namespace, runner) outside the lock.
-        let prepared: Vec<(String, bool, Arc<DynHandler>)> = items
+        let prepared: Vec<(String, Delegation, Arc<DynHandler>)> = items
             .into_iter()
             .map(|(protocol, interpret)| {
                 let namespace = protocol.namespace().to_string();
-                let delegates = protocol.delegates_admission();
+                let delegates = Delegation::of(&protocol);
                 let state = Mutex::new(protocol.init());
                 let runner: Arc<DynHandler> = Arc::new(Runner {
                     protocol,
@@ -594,7 +595,7 @@ impl Extensions {
         I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
         let namespace = protocol.namespace().to_string();
-        let delegates = protocol.delegates_admission();
+        let delegates = Delegation::of(&protocol);
         let state = Mutex::new(protocol.init());
         let runner: Arc<DynHandler> = Arc::new(Runner {
             protocol,
@@ -636,6 +637,13 @@ impl Extensions {
     #[cfg(all(test, rings_native))]
     pub(crate) fn delegates_admission(&self, envelope: &[u8]) -> bool {
         self.core.processor.swarm.delegates_admission(envelope)
+    }
+
+    /// Whether an encoded envelope's namespace delegates its replay, as core reads it; see
+    /// [`Protocol::delegates_replay`].
+    #[cfg(all(test, rings_native))]
+    pub(crate) fn delegates_replay(&self, envelope: &[u8]) -> bool {
+        self.core.processor.swarm.delegates_replay(envelope)
     }
 }
 

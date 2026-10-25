@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Link-local onion cells no longer take a durable replay write (#1081; durable-records, Law
+  Window by classification). A transaction is link-local when it is Application traffic, it
+  arrived on the authenticated connection of its own origin, and its namespace declared delegated
+  replay. Such a transaction is admitted in a volatile replay window of that connection, which is
+  released with it; every other transaction, a relayed copy included, keeps the durable window.
+  A protocol declares delegated replay through the new `Protocol::delegates_replay` (default
+  `false`), published to core with the new `Swarm::set_replay_delegation`. The onion data plane
+  declares it: its replay store and process epoch already admit each cell at most once, across
+  links and restarts.
+  - **Library API.** `Swarm::set_replay_delegation`, `Swarm::delegates_replay`, `ReplayWindow`
+    and `Protocol::delegates_replay` are new, all additive: existing code compiles unchanged.
+  - **Upgrade consequence.** None: the replay record format is unchanged, and a node that
+    declares nothing behaves as before.
+  - **Operator step.** None.
+
 - `PeriodicMeasure::close` stops a measurement and waits until it has released its stores (#1083).
   A drop releases them only after the persistence worker has written the final snapshot on a later
   poll, so a store directory reopened in the same process right after a drop could still be held

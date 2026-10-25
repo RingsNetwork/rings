@@ -65,6 +65,8 @@ pub(crate) struct ApplicationPort {
     pub(crate) lookups: Arc<ApplicationLookups>,
     /// The namespaces whose admission the application delegated.
     pub(crate) delegations: DelegatedNamespaces,
+    /// The namespaces whose replay the application delegated (#1081).
+    pub(crate) replay_delegations: DelegatedNamespaces,
     /// Relay mail handed to the inbox and not yet retired from storage.
     pub(crate) relay_in_flight: RelayInFlight,
     /// Held by the pass over this node's relay inbox: a pass, from local storage or from a fetch,
@@ -79,6 +81,7 @@ impl ApplicationPort {
             outlet: ApplicationOutlet::new(),
             lookups: Arc::new(ApplicationLookups::default()),
             delegations: DelegatedNamespaces::default(),
+            replay_delegations: DelegatedNamespaces::default(),
             relay_in_flight: RelayInFlight::default(),
             relay_drain: FuturesMutex::new(()),
         }

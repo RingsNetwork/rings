@@ -10,6 +10,7 @@ use rings_transport::core::pool::ChannelLane;
 
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
+use crate::message::LinkWindows;
 use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
@@ -129,6 +130,10 @@ pub(super) struct InboundProcessor {
     /// resident until its slot is needed for a new one (the residence law of
     /// `swarm::session_link`). It lives and dies with the connection, and holds no frame.
     session_link: Arc<Mutex<DelegationLessor>>,
+    /// The volatile replay windows of this connection's link-local transactions (#1081). They
+    /// live and die with the connection, so each window spans one link generation and is
+    /// released with it (durable-records, Law Window by classification).
+    link_windows: Arc<FuturesMutex<LinkWindows>>,
 }
 
 /// What the transport handed over with one frame and takes back when the frame is done: the

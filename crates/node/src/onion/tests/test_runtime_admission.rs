@@ -1,4 +1,5 @@
-//! The onion runtime's registration delegates its namespace's admission (#888).
+//! The onion runtime's registration delegates its namespace's admission (#888) and replay
+//! (#1081).
 
 use std::sync::Arc;
 
@@ -25,16 +26,21 @@ fn extensions() -> Result<Extensions> {
 }
 
 /// Installing the onion runtime makes core skip the per-origin message count for onion cells,
-/// which the L9 link charge admits instead, and for nothing else.
+/// which the L9 link charge admits instead, and admit them in their link's volatile replay
+/// window, which the onion replay store and process epoch back (Obligation R); and for nothing
+/// else.
 #[tokio::test]
 async fn test_the_onion_runtime_delegates_only_its_namespace() -> Result<()> {
     let extensions = extensions()?;
     let cell = Envelope::new(ONION_CIRCUIT_NAMESPACE, Bytes::from_static(b"cell")).encode()?;
     let other = Envelope::new("echo", Bytes::from_static(b"x")).encode()?;
     assert!(!extensions.delegates_admission(&cell));
+    assert!(!extensions.delegates_replay(&cell));
 
     let _runtime = OnionRuntime::install(&extensions)?;
     assert!(extensions.delegates_admission(&cell));
+    assert!(extensions.delegates_replay(&cell));
     assert!(!extensions.delegates_admission(&other));
+    assert!(!extensions.delegates_replay(&other));
     Ok(())
 }

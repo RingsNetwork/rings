@@ -181,7 +181,6 @@ async fn advance_chunk_event(
     // matter how many envelopes carried it.
     let edge = edge_relation(event.peer, event.authentication, &payload);
     processor
-        .logical
         .admit_final_transaction(&payload, &message, lane, edge)
         .await?;
     event.permit.try_transition(lane, reservation)?;
