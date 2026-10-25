@@ -89,6 +89,9 @@ chrono = "0.4.23"
 dashmap = "5"
 dotenvy = "0.15.7"
 futures = { version = "0.3.21", features = ["alloc"] }
+# `Zeroizing<hmac::digest::Key<_>>` in the Sphinx header needs `GenericArray: Zeroize`; it was
+# enabled only transitively, by elliptic-curve 0.13, until rings-core moved to 0.14 (#1051).
+generic-array = { version = "0.14.7", features = ["zeroize"] }
 hkdf = "0.12.4"
 hmac = "0.12.1"
 jsonrpc-core = { workspace = true }

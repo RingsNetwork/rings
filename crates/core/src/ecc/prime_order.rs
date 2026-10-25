@@ -22,7 +22,6 @@
 
 use std::ops::Mul;
 
-use elliptic_curve::bigint::U512;
 use elliptic_curve::group::GroupEncoding;
 use elliptic_curve::ops::Reduce;
 use elliptic_curve::point::AffineCoordinates;
@@ -167,7 +166,7 @@ impl NonZeroScalar<Secp256k1> {
         wide.iter_mut()
             .zip(bytes.iter())
             .for_each(|(slot, byte)| *slot = *byte);
-        Self::try_from(Scalar::new(<K256Scalar as Reduce<U512>>::reduce_bytes(
+        Self::try_from(Scalar::new(<K256Scalar as Reduce<WideBytes>>::reduce(
             &wide,
         )))
         .ok()

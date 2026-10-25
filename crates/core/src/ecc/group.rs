@@ -47,6 +47,9 @@ use curve25519_dalek::scalar::Scalar as Ristretto255ScalarField;
 #[cfg(feature = "curve-ristretto255")]
 use curve25519_dalek::traits::Identity as _;
 use elliptic_curve::ff::Field as _;
+use elliptic_curve::CurveArithmetic;
+use elliptic_curve::FieldBytes;
+use elliptic_curve::NonZeroScalar as CurveNonZeroScalar;
 use k256::AffinePoint as K256AffinePoint;
 use k256::ProjectivePoint as K256ProjectivePoint;
 use k256::Scalar as K256Scalar;
@@ -67,6 +70,25 @@ use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+
+/// Sample `Z_n^*` of curve `C` uniformly by rejection over canonical scalar encodings.
+///
+/// Law: each draw fills `FieldBytes<C>` uniformly, and `NonZeroScalar::from_repr` accepts
+/// exactly the canonical encodings of `Z_n ∖ {0}`, so an accepted value is uniform on `Z_n^*`.
+/// The loop is variable-time only in the number of rejected draws, which are independent of the
+/// returned value. The RNG is the crate's `rand 0.8` source, so the `rand_core` major of the
+/// curve crates never enters a rings signature.
+pub(crate) fn uniform_nonzero_scalar<C: CurveArithmetic>(
+    rng: &mut impl RngCore,
+) -> CurveNonZeroScalar<C> {
+    loop {
+        let mut repr = FieldBytes::<C>::default();
+        rng.fill_bytes(&mut repr);
+        if let Some(scalar) = CurveNonZeroScalar::<C>::from_repr(repr).into_option() {
+            break scalar;
+        }
+    }
+}
 
 /// Curve-specific point-group and scalar-action operations implemented by curve markers.
 ///
@@ -617,12 +639,7 @@ impl CurveScalarField for Secp256k1 {
     }
 
     fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar {
-        loop {
-            let scalar = K256Scalar::generate_vartime(rng);
-            if !bool::from(scalar.is_zero()) {
-                break scalar;
-            }
-        }
+        *uniform_nonzero_scalar::<k256::Secp256k1>(rng)
     }
 }
 
@@ -632,14 +649,7 @@ impl_curve_group_adapter! {
         scalar: Secp256r1ScalarField,
         identity: Secp256r1ProjectivePoint::IDENTITY,
         generator: Secp256r1ProjectivePoint::GENERATOR,
-        random_scalar: |rng| {
-            loop {
-                let scalar = Secp256r1ScalarField::random(&mut *rng);
-                if !bool::from(scalar.is_zero()) {
-                    break scalar;
-                }
-            }
-        },
+        random_scalar: |rng| { *uniform_nonzero_scalar::<p256::NistP256>(rng) },
         add: |lhs: &Secp256r1ProjectivePoint, rhs: &Secp256r1ProjectivePoint| *lhs + *rhs,
         neg: |point: &Secp256r1ProjectivePoint| -*point,
         mul: |point: &Secp256r1ProjectivePoint, scalar: &Secp256r1ScalarField| *point * *scalar,
@@ -772,6 +782,8 @@ fn with_group_rng<R>(f: impl FnOnce(&mut Hc128Rng) -> R) -> R {
 
 #[cfg(test)]
 mod tests {
+    use elliptic_curve::PrimeField;
+
     use super::*;
     use crate::algebra::assert_field_laws;
     use crate::algebra::assert_module_action_laws;
@@ -837,6 +849,56 @@ mod tests {
         cyclic_module_laws::<Point<Bls12381G1>>();
         #[cfg(feature = "curve-ristretto255")]
         cyclic_module_laws::<Point<Ristretto255>>();
+    }
+
+    /// An RNG that replays a fixed byte script, so each rejection branch is reached on purpose.
+    struct ScriptedRng(std::collections::VecDeque<u8>);
+
+    impl RngCore for ScriptedRng {
+        fn next_u32(&mut self) -> u32 {
+            let mut bytes = [0u8; 4];
+            self.fill_bytes(&mut bytes);
+            u32::from_le_bytes(bytes)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut bytes = [0u8; 8];
+            self.fill_bytes(&mut bytes);
+            u64::from_le_bytes(bytes)
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            dest.iter_mut()
+                .for_each(|byte| *byte = self.0.pop_front().expect("script exhausted"));
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), rand::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    /// Law: the sampler rejects `0` and every non-canonical encoding `≥ n`, and returns the first
+    /// canonical non-zero draw unchanged.
+    fn sampler_rejects_zero_and_noncanonical<C: CurveArithmetic>() {
+        let mut one = FieldBytes::<C>::default();
+        if let Some(last) = one.last_mut() {
+            *last = 1;
+        }
+        let script = std::iter::repeat_n(0x00, one.len())
+            .chain(std::iter::repeat_n(0xff, one.len()))
+            .chain(one.iter().copied())
+            .collect();
+        let mut rng = ScriptedRng(script);
+        let sampled = uniform_nonzero_scalar::<C>(&mut rng);
+        assert_eq!(sampled.to_repr(), one);
+        assert!(rng.0.is_empty());
+    }
+
+    #[test]
+    fn test_uniform_nonzero_scalar_rejects_zero_and_noncanonical() {
+        sampler_rejects_zero_and_noncanonical::<k256::Secp256k1>();
+        sampler_rejects_zero_and_noncanonical::<p256::NistP256>();
     }
 
     #[test]
