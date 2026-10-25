@@ -554,6 +554,27 @@ impl Processor {
             .map_err(Error::CloseConnectionError)
     }
 
+    /// Close this node's network: the swarm opens no connection from now on and closes every
+    /// one it has (`Swarm::close`, #1098), then the applied measurements are flushed.
+    ///
+    /// Call it before dropping the last handle of a node that stops in a process that goes on:
+    /// dropping the node frees it (#1093), but a peer connection that was never closed keeps
+    /// its sockets bound. Stop a listener (`listen_with`) first; one still running finds every
+    /// new connection refused. Each peer sees its connection close at once instead of waiting
+    /// for an ICE timeout. Awaiting the release of the node's stores and the end of its
+    /// background tasks is #1085.
+    ///
+    /// Both steps run even if the first fails; the first failure is returned.
+    pub async fn close(&self) -> Result<()> {
+        let closed = self
+            .swarm
+            .close()
+            .await
+            .map_err(Error::CloseConnectionError);
+        let flushed = self.flush_measurements().await;
+        closed.and(flushed)
+    }
+
     /// check local cache of dht
     pub async fn storage_check_cache(&self, entry_key: Did) -> Option<entry::Entry> {
         self.swarm.storage_check_cache(entry_key).await

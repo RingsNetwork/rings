@@ -251,6 +251,19 @@ impl Swarm {
         self.transport.disconnect(peer).await
     }
 
+    /// Close this swarm: it opens no connection from now on, and every connection it has,
+    /// admitted or still handshaking, is disconnected and physically closed before this returns
+    /// (the close law of `SwarmTransport::close`, #1098).
+    ///
+    /// Each peer sees its connection close at once, as on [`Self::disconnect`], instead of
+    /// waiting for an ICE timeout. Call it before dropping a swarm that stops in a process that
+    /// goes on: dropping it frees the swarm (#1093), but a peer connection that was never closed
+    /// keeps its sockets bound. A closed swarm refuses every new connection with
+    /// [`Error::SwarmClosed`]; closing again is a no-op.
+    pub async fn close(&self) -> Result<()> {
+        self.transport.close().await
+    }
+
     /// Start a non-routable handshake with a peer.
     ///
     /// The peer becomes visible through the connection inspection APIs only

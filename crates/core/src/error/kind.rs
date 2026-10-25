@@ -1,5 +1,4 @@
-use std::fmt::Display;
-use std::fmt::Formatter;
+use super::detached_work::DetachedWork;
 
 /// Errors collections in ring-core.
 #[derive(thiserror::Error, Debug)]
@@ -157,9 +156,15 @@ pub enum Error {
     #[error(transparent)]
     ProvisionalEvidence(#[from] rings_measure::EvidenceError),
 
-    /// The frame carries neither the payload marker nor the link-control marker.
-    #[error("Frame carries no rings marker")]
+    /// The bytes are no Rings frame: they open with no frame header, or with the header of this
+    /// wire version and a kind it does not know.
+    #[error("Bytes carry no rings frame header")]
     UnmarkedFrame,
+
+    /// A frame of another wire version, refused before its body is decoded (the frame-header
+    /// law, #1104).
+    #[error("Incompatible wire version: {0}")]
+    IncompatibleWireVersion(crate::message::WireVersionMismatch),
 
     /// A payload that travels outside any link referenced a session instead of carrying it.
     #[error(
@@ -372,6 +377,10 @@ pub enum Error {
     /// The swarm stopped before the awaited answer arrived
     #[error("The swarm stopped before the awaited answer arrived")]
     SwarmStopped,
+
+    /// The swarm is closed: it opens no connection (see `Swarm::close`)
+    #[error("The swarm is closed and opens no connection")]
+    SwarmClosed,
 
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
@@ -978,23 +987,4 @@ pub enum Error {
     /// External Javascript error: {0}
     #[error("External Javascript error: {0}")]
     JsError(String),
-}
-
-/// Work the swarm runs detached from its caller and refuses when no runtime is current to
-/// carry it (see `swarm::detached`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DetachedWork {
-    /// A handshake negotiated in a protocol handler's context.
-    ProtocolHandshake,
-    /// A link-control send.
-    LinkControlSend,
-}
-
-impl Display for DetachedWork {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::ProtocolHandshake => "a protocol-context handshake",
-            Self::LinkControlSend => "a link-control send",
-        })
-    }
 }

@@ -34,6 +34,10 @@ use tower_http::cors::CorsLayer;
 
 use crate::util::expand_home;
 
+/// The response header that names this node's crate version on every API response (#1104),
+/// exposed to browsers by the CORS policy so a client reads it before joining.
+pub(crate) const NODE_VERSION_HEADER: HeaderName = HeaderName::from_static("x-node-version");
+
 const API_TOKEN_BYTES: usize = 32;
 const MIN_API_TOKEN_LEN: usize = 32;
 const DEFAULT_API_TOKEN_FILE: &str = "api-token";
@@ -175,7 +179,7 @@ impl ApiSecurity {
             .allow_origin(AllowOrigin::list(self.allowed_origins.clone()))
             .allow_methods([Method::GET, Method::POST])
             .allow_headers([AUTHORIZATION, CONTENT_TYPE, ACCEPT])
-            .expose_headers([HeaderName::from_static("x-node-version")])
+            .expose_headers([NODE_VERSION_HEADER])
     }
 
     /// Validate an external listener address against the explicit remote-bind policy.

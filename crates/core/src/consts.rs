@@ -68,7 +68,7 @@ pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 4;
 /// `test_chunk_envelope_reserves_are_the_widest_framed_chunk`: a larger reserve wastes the same
 /// bytes in every chunk frame (#925), a smaller one lets a frame overflow the channel. A field
 /// the framer sets differently changes the witness, which then re-derives this value.
-pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 912;
+pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 907;
 /// Bytes a whole `MessagePayload` encodes beyond its message's own encoding, at most: the
 /// envelope reserve of a payload sent unchunked, such as a storage hand-off batch.
 ///
@@ -78,7 +78,7 @@ pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 912;
 /// retracing a full hop budget of relays, which `Law (Bound)` of the path caps), and the
 /// length prefix of a message of up to `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes; the supremum,
 /// witnessed with equality by `test_payload_envelope_reserve_is_the_widest_envelope`.
-pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 3697;
+pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 3692;
 /// Smallest per-chunk *data* payload we are willing to produce. A peer that advertises a
 /// `max_message_size` so small that, after the envelope reserves, fewer than this many data bytes
 /// fit per chunk is rejected outright (`WireReserves::plan` returns `None`) rather than fragmenting a
