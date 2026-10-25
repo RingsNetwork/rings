@@ -241,14 +241,11 @@ async fn browser_onion_loop() -> WebviewResult<BrowserOnionLoop> {
         .collect::<Vec<_>>();
     let onion_loop = BrowserOnionLoop {
         client: Rc::clone(&client.provider),
-        edges: edges
-            .iter()
-            .map(|(offerer, answerer)| {
-                (
-                    Rc::clone(&offerer.provider),
-                    answerer.provider.address(),
-                )
-            })
+        nodes: iter::once(&client)
+            .chain(iter::once(&guard))
+            .chain(middle.iter())
+            .chain(iter::once(&exit))
+            .map(|node| Rc::clone(&node.provider))
             .collect(),
         listeners,
     };
@@ -261,38 +258,68 @@ async fn browser_onion_loop() -> WebviewResult<BrowserOnionLoop> {
     Ok(onion_loop)
 }
 
-/// A running browser onion loop: its client, the edges that link its nodes, and their
-/// listeners.
+/// A running browser onion loop: its client, every node, and their listeners.
 struct BrowserOnionLoop {
     /// The loop's client.
     client: Rc<Provider>,
-    /// Every edge, as its offerer and the answerer's address.
-    edges: Vec<(Rc<Provider>, String)>,
+    /// Every node of the loop, the client included.
+    nodes: Vec<Rc<Provider>>,
     /// The listener of every node.
     listeners: Vec<ProviderListener>,
 }
 
 impl BrowserOnionLoop {
-    /// Stop every listener and close every edge, then wait for each listener to settle. A node
-    /// whose links stay open keeps emitting its constant-rate cover traffic (#880), each cell a
-    /// strict commit to its authoritative replay store (#916), into the tests that run after
-    /// this one in the same page.
+    /// Quiesce the loop, so that none of its nodes emits into the tests that run after this one
+    /// in the same page: every admitted link carries constant-rate cover (#880), each cell a
+    /// strict commit to its receiver's authoritative replay store (#916), and stabilization
+    /// links nodes beyond the loop's own edges.
+    ///
+    /// ```text
+    /// stop every listener ─▶ await each settled      (no stabilization can link again)
+    /// ∀ node, ∀ peer it lists ─▶ disconnect           (the loop's edges and every other link)
+    /// await, on activity: every node lists no peer    (no link left to emit on)
+    /// ```
     async fn shutdown(self) -> WebviewResult<()> {
         for listener in &self.listeners {
             listener.stop();
-        }
-        for (offerer, answerer) in &self.edges {
-            JsFuture::from(offerer.disconnect(answerer.clone(), None))
-                .await
-                .map_err(|error| WebviewError::transport(format!("close edge: {error:?}")))?;
         }
         for listener in &self.listeners {
             JsFuture::from(listener.task())
                 .await
                 .map_err(|error| WebviewError::transport(format!("settle listener: {error:?}")))?;
         }
-        Ok(())
+        for node in &self.nodes {
+            for peer in listed_peers(node).await? {
+                JsFuture::from(node.disconnect(peer, None))
+                    .await
+                    .map_err(|error| WebviewError::transport(format!("close link: {error:?}")))?;
+            }
+        }
+        poll_until("every loop node to hold no link", FLOW_HANG_GUARD, || {
+            let nodes = self.nodes.clone();
+            async move {
+                for node in &nodes {
+                    if !listed_peers(node).await?.is_empty() {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+        })
+        .await
     }
+}
+
+/// The DIDs of every peer `provider` holds a connection to, as its `listPeers` reports them.
+async fn listed_peers(provider: &Provider) -> WebviewResult<Vec<String>> {
+    let listed = rpc(provider, "listPeers", Object::new().into()).await?;
+    let peers = Reflect::get(&listed, &JsValue::from_str("peers")).map_err(js_webview_error)?;
+    peers
+        .dyn_into::<Array>()
+        .map_err(|_| WebviewError::Browser("listPeers returned no peer array".to_string()))?
+        .iter()
+        .map(|peer| string_field(&peer, "did"))
+        .collect()
 }
 
 /// One fixture node: its provider and the peers its backend has admitted.
