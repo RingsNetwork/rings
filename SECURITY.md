@@ -23,6 +23,10 @@ communication layer minimizes leakage; the privacy layer provides privacy.**
   tag. `network_id` separates overlays; it is not a secret.
 - Honest peers run the protocol, refresh descriptors, and take part in stabilization and
   replication.
+- A party that can read a node's process memory, freed memory included, already holds the
+  node's long-lived delegatee key. Wiping derived key material once it is spent is defence in
+  depth against later reads, not a boundary; what is not wiped is listed under Known
+  Limitations (#852).
 
 ## Fault Model
 
@@ -279,15 +283,26 @@ route.
 
 ## Known Limitations
 
+- #852: the onion Sphinx key schedule (HKDF-SHA256, HMAC-SHA256) wipes its HMAC states on drop,
+  the PRK's in every `Hkdf` and the MAC key's in every `Hmac`, and the keys it returns. Three
+  transient stack copies inside the hkdf 0.13, hmac 0.13 and sha2 0.11 crates are not wiped,
+  and are overwritten by later calls: (a) the padded key block `K ⊕ opad` that HMAC's key setup
+  leaves, equivalent to `K` (the PRK, or the MAC key); (b) HKDF-Expand's previous output block
+  `T(i)`, which is a derived key or its first half; (c) SHA-256's message schedule, whose first
+  16 words are the block `K ⊕ ipad` or `K ⊕ opad`. (c) survives any HMAC above an unmodified
+  SHA-256, so an in-tree HMAC/HKDF would remove only (a) and (b).
 - #918: a registry descriptor that another node re-appends after its registrant stopped stays
   listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
   registrant leaves the listing within its TTL.
-- #907 (rotation residual, load-bounds paper, Prop. 1): a party that rotates connections
-  through free slots leaves each slot charged with up to its floor, so a connection admitted
-  later into such a slot has only its fair claim of the pool until those items leave: removes
-  and control, storage and E2E replay streams within about 100 minutes, application replay
-  streams within 7 days. A connection that keeps its slot is never affected. Only a cost on
-  admission removes this (#1094, #780).
+- #907, #1094 (rotation residual, load-bounds paper, Prop. 1): a party that rotates
+  connections through free slots leaves each slot charged with up to its floor. A new
+  connection takes the cleanest free slot, so it inherits charges only once every free slot is
+  charged: that takes `R − c` admissions within the life of the charged items, about 100
+  minutes for removes and control, storage and E2E replay streams and 7 days for application
+  replay streams. Such a connection then has only its fair claim of the pool until those items
+  leave. A connection that keeps its slot is never affected. An admission rate limit cannot
+  bound this without deferring honest churn, so only position randomization (#780) or a cost
+  on identity removes it.
 - #920, #907: a node's store of uncollected removals refuses a connection slot past its floor of
   128 and its fair claim of a pool of 16384, this node past 7168, and an ownership hand-off from
   the range's previous owner past a custody share of 16384, which a Byzantine predecessor or

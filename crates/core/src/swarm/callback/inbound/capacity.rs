@@ -30,6 +30,7 @@ use crate::fair_admission::Principal;
 use crate::fair_admission::ResourceOrderedQueue;
 use crate::fair_admission::Shares;
 use crate::fair_admission::SlotAccounting;
+use crate::fair_admission::SlotFloorUse;
 use crate::utils::GenerationWitness;
 
 const _: () = {
@@ -429,6 +430,12 @@ impl InboundCapacity {
                 );
             })
             .await)
+    }
+
+    /// The floor use of every slot in the open-message table at `now_ms` (load-bounds paper,
+    /// Def. 1).
+    pub(crate) fn open_floor_use_at(&self, now_ms: u128) -> SlotFloorUse {
+        self.open().floor_use_at(now_ms)
     }
 
     /// The open-message table, for one pure step.
