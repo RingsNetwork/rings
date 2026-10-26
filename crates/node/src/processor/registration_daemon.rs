@@ -4,7 +4,9 @@
 
 use super::*;
 
-async fn sleep_registration_interval_with_stop(
+/// Sleep `interval` unless `stop` or `sibling_stop` fires first: `Ok(true)` once the interval
+/// has elapsed, `Ok(false)` on a stop. The pause of every periodic node task between two runs.
+pub(crate) async fn sleep_unless_stopped(
     interval: Duration,
     stop: &StopToken,
     sibling_stop: &StopToken,
@@ -129,7 +131,7 @@ impl Processor {
         stop: &StopToken,
         sibling_stop: &StopToken,
     ) -> Result<Option<RegistrationTurn>> {
-        let heartbeat = sleep_registration_interval_with_stop(interval, stop, sibling_stop);
+        let heartbeat = sleep_unless_stopped(interval, stop, sibling_stop);
         let first_edge = self.first_admitted_edge(armed);
         futures::pin_mut!(heartbeat, first_edge);
         match futures::future::select(heartbeat, first_edge).await {

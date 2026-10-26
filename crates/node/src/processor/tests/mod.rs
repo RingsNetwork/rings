@@ -43,6 +43,8 @@ mod test_registration_published;
 mod test_gateway;
 #[cfg(all(feature = "dummy", rings_native))]
 mod test_http_handshake;
+#[cfg(all(feature = "dummy", rings_native))]
+mod test_mail;
 mod test_network;
 mod test_onion;
 mod test_registry;

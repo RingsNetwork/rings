@@ -42,10 +42,28 @@ fn rcpt(to: &str) -> Request<String> {
     }
 }
 
-/// The code of `next`'s reply.
+/// The code of `next`'s reply; a lookup has none yet.
 fn code(next: &Next) -> u16 {
     match next {
-        Next::Reply(reply) | Next::ReadData(reply) | Next::Close(reply) => reply.code,
+        Next::Reply(reply) | Next::ReadData(reply) | Next::Close(reply) | Next::StartTls(reply) => {
+            reply.code
+        }
+        Next::Lookup(_) => 0,
+    }
+}
+
+/// EHLO from `client`.
+fn ehlo() -> Request<String> {
+    Request::Ehlo {
+        host: "client".to_owned(),
+    }
+}
+
+/// The lines of the EHLO reply of `session`.
+fn ehlo_lines(session: &mut Session) -> Vec<String> {
+    match session.step(ehlo()) {
+        Next::Reply(reply) => reply.lines,
+        next => panic!("EHLO is answered: {next:?}"),
     }
 }
 
@@ -59,7 +77,7 @@ fn test_the_receiver_accepts_its_own_address_in_every_zone() {
         format!("me@{LABEL}.rings.rs"),
         format!("ME@{}.P2P.example.com", LABEL.to_uppercase()),
     ] {
-        assert!(role.accepts(&accepted), "{accepted}");
+        assert_eq!(role.accepts(&accepted), Some(true), "{accepted}");
     }
     for refused in [
         format!("you@{LABEL}.rings.rs"),
@@ -68,9 +86,14 @@ fn test_the_receiver_accepts_its_own_address_in_every_zone() {
         "me@example.com".to_owned(),
         "no-at-sign".to_owned(),
     ] {
-        assert!(!role.accepts(&refused), "{refused}");
+        assert_eq!(role.accepts(&refused), Some(false), "{refused}");
     }
-    assert!(Role::Submission.accepts("anyone@example.com"));
+    assert_eq!(Role::Submission.accepts("anyone@example.com"), Some(true));
+    assert_eq!(
+        Role::Directory.accepts("anyone@example.com"),
+        None,
+        "the directory decides"
+    );
 }
 
 #[test]
@@ -164,4 +187,71 @@ fn test_replies_encode_every_line_with_its_status() {
     let text = String::from_utf8(ehlo.encode()).unwrap();
     assert!(text.starts_with("250-mx.test greets client\r\n"), "{text}");
     assert!(text.ends_with("250 ENHANCEDSTATUSCODES\r\n"), "{text}");
+}
+
+#[test]
+fn test_a_directory_session_asks_its_shell_about_each_recipient() {
+    let mut session = Session::new(Role::Directory, "gw.test", 100, 2);
+    session.step(ehlo());
+    assert_eq!(
+        session.step(rcpt("d@a")),
+        Next::Reply(send_mail_first()),
+        "no lookup outside a transaction"
+    );
+    session.step(mail("a@b", 0));
+    assert_eq!(session.step(rcpt("d@a")), Next::Lookup("d@a".to_owned()));
+    for (lookup, reply) in [
+        (Lookup::Refused, 550),
+        (Lookup::Unavailable, 451),
+        (Lookup::Admitted, 250),
+    ] {
+        assert_eq!(session.admit("d@a".to_owned(), lookup).code, reply);
+    }
+    assert_eq!(session.admit("e@a".to_owned(), Lookup::Admitted).code, 250);
+    assert_eq!(
+        session.admit("f@a".to_owned(), Lookup::Admitted).code,
+        452,
+        "the recipient bound holds for admitted recipients"
+    );
+    assert!(matches!(session.step(Request::Data), Next::ReadData(_)));
+    let (transaction, _) = session.data(b"body".to_vec());
+    assert_eq!(
+        transaction.map(|transaction| transaction.to),
+        Some(vec!["d@a".to_owned(), "e@a".to_owned()])
+    );
+}
+
+#[test]
+fn test_starttls_is_offered_only_with_a_certificate_and_restarts_the_session() {
+    let mut plain = receiver();
+    assert!(!ehlo_lines(&mut plain).contains(&"STARTTLS".to_owned()));
+    assert_eq!(code(&plain.step(Request::StartTls)), 502);
+
+    let mut session = receiver().offering_starttls();
+    assert_eq!(
+        code(&session.step(Request::StartTls)),
+        503,
+        "STARTTLS before EHLO"
+    );
+    assert!(ehlo_lines(&mut session).contains(&"STARTTLS".to_owned()));
+    session.step(mail("a@b", 0));
+    assert_eq!(
+        code(&session.step(Request::StartTls)),
+        503,
+        "STARTTLS inside a transaction"
+    );
+    session.step(Request::Rset);
+    assert!(matches!(session.step(Request::StartTls), Next::StartTls(reply) if reply.code == 220));
+    session.secured();
+    assert_eq!(
+        code(&session.step(mail("a@b", 0))),
+        503,
+        "the client greets again under TLS"
+    );
+    assert!(!ehlo_lines(&mut session).contains(&"STARTTLS".to_owned()));
+    assert_eq!(
+        code(&session.step(Request::StartTls)),
+        503,
+        "TLS already active"
+    );
 }

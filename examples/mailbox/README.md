@@ -1,10 +1,13 @@
 # Rings mailbox example
 
-The mailbox `me@<did>.<zone>` as a program a Rings node serves through a DNS relay (#1049): mail
-from anywhere arrives over SMTP, and the user reads it with any mail client over IMAP.
+The mailbox `me@<did>.<zone>` as a program a Rings node serves through a DNS relay (#1049), or
+the mailbox `<did>@<domain>` of a node it runs itself, receiving through mail gateways (#1117):
+mail from anywhere arrives over SMTP, and the user reads it with any mail client over IMAP. The
+example also holds the mail gateway, `rings-mail-gateway`.
 
 ```text
   mail server ─▶ DNS relay ─▶ TCP relay over Rings ─▶ node ─▶ receiver (127.0.0.1:2525) ─▶ INBOX
+  mail server ─▶ gateway ─▶ DHT topic mail:<did> ─▶ node's poll ─▶ INBOX       (--rings-config)
   mail client ─▶ IMAP       (127.0.0.1:1143) ─▶ store
   mail client ─▶ submission (127.0.0.1:1587) ─▶ outbound queue ─▶ recipient's MX
 ```
@@ -32,9 +35,21 @@ from anywhere arrives over SMTP, and the user reads it with any mail client over
   `me@<did>.<zone>` resolves through the relay's DNS, so one node's mailbox writes to another's
   like any mail server.
 
-Every listener binds loopback: the node reaches the receiver through its TCP relay, and
-submission takes mail without a password, which only loopback makes safe. The example ends no
-TLS. An SMTP client silent for five minutes is told `421` and disconnected.
+- **Through gateways.** With `--rings-config`, the mailbox runs the Rings node of that
+  configuration itself, instead of `rings run`: it publishes the node's mail descriptor, polls
+  the node's mail topic, and files every mail it opens in the INBOX
+  (`rings_node::mail::recipient`).
+- **Gateway.** `rings-mail-gateway` runs a node of its own and an SMTP receiver for every
+  domain whose MX names it: RCPT is admitted only for a DID with a live mail descriptor (`550`
+  otherwise), and DATA seals the traced message to each recipient's delegatee key and writes it
+  to the recipient's topic. It answers `250` once an owner of each write reports storing it,
+  and `451` when no owner does within 60 seconds (`552` above 32 chunks, about 1 MiB). It keeps
+  nothing, and it offers STARTTLS with its own certificate (`--tls-cert`, `--tls-key`).
+
+Every mailbox listener binds loopback: the node reaches the receiver through its TCP relay, and
+submission takes mail without a password, which only loopback makes safe. The mailbox ends no
+TLS; the gateway, which listens publicly, ends STARTTLS. An SMTP client silent for five minutes
+is told `421` and disconnected.
 
 ## Run
 
@@ -57,11 +72,28 @@ and start the mailbox with `--receiver-proxy-protocol` to match (or leave both o
 Point a mail client at IMAP `127.0.0.1:1143` (user `me`, the password in
 `~/.rings/mailbox/password`) and SMTP `127.0.0.1:1587` (no authentication).
 
+To receive at `<did>@<domain>` through mail gateways instead, run the mailbox as the node:
+
+```sh
+cargo run -p rings-mailbox-example -- --rings-config ~/.rings/config.yaml
+```
+
+A gateway is its own node, with its own configuration, on a host whose port 25 the domains' MX
+records reach:
+
+```sh
+cargo run -p rings-mailbox-example --bin rings-mail-gateway -- \
+  --config ~/.rings/config.yaml --host mx.example.net --tls-cert mx.pem --tls-key mx.key
+```
+
 ## Module layout
 
 - `store`: the mailboxes, their model and its disk shell.
-- `smtp`: the SMTP session as a pure state machine, its socket shell for both listeners, and
-  the receiver's PROXY header reader.
+- `smtp`: the SMTP session as a pure state machine, its socket shell for every listener (with
+  STARTTLS), the receiver's PROXY header reader, and the certificate loader.
+- `gateway`: the mail gateway's SMTP front over the DHT side `rings_node::mail::gateway`.
+- `receive`: the mailbox as a recipient of its node's mail topic.
+- `node`: the Rings node the gateway, and a mailbox that receives through gateways, run.
 - `imap`: the IMAP session (its commands by what they act on), its view of the selected mailbox,
   MIME structure for FETCH, SEARCH, and the socket shell over `imap-next`.
 - `outbound`: the delivery queue, its retry schedule, the mail exchangers it delivers to, and
@@ -81,4 +113,8 @@ one mailbox to another through submission, including a bounce. `test_relay` puts
 relay's authority and ingress in front of the mailbox on the loopback: a mail server resolves
 `me@o1.rings.rs`, delivers to the owner's address, and the message lands in the INBOX with a
 `Received` header naming the server, read from the PROXY header. The hop over the Rings overlay
-between relay and owner is tested in `rings-node` over its in-memory transport.
+between relay and owner is tested in `rings-node` over its in-memory transport. `test_gateway`
+drives the gateway over a stand-in DHT: `550` for a DID with no live descriptor, a mail sealed
+once per DID and opened into its recipient's INBOX with its trace, `552` above the mail bound,
+`451` for a mail no owner confirms, and a session under STARTTLS. The DHT side, the descriptor's lookup, the write and the
+recipient's poll over the overlay, is tested in `rings-node` (`processor::tests::test_mail`).
