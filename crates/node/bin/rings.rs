@@ -8,7 +8,9 @@ compile_error!("the `dummy` test transport cannot run a node; build `rings` with
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -57,7 +59,6 @@ use rings_node::util::loader::ResourceLoader;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
 use tokio::task::JoinError;
-use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 
 const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -305,6 +306,7 @@ async fn build_processor(
         .onion_entry_guard_storage(stores.guards)
         .replay_storage(stores.replay)
         .measure(measure)
+        .stores_released(stores.released)
         .reassembly_limits(reassembly_limits);
     let builder = match service_offer {
         Some(offer) => builder.announce_services(offer),
@@ -325,14 +327,45 @@ fn onion_http_proxy_options(c: &config::Config) -> anyhow::Result<Option<OnionHt
     }))
 }
 
+/// One task the run owns, awaited or aborted by its owner: a [`JoinSet`] of that one task, so
+/// the run spawns nothing detached (the node crate forbids detached spawns, `clippy.toml`).
+struct OwnedTask<T>(JoinSet<T>);
+
+impl<T: Send + 'static> OwnedTask<T> {
+    /// Run `task` on the current runtime, owned by the returned handle; dropping the handle
+    /// aborts it.
+    fn spawn(task: impl Future<Output = T> + Send + 'static) -> Self {
+        let mut set = JoinSet::new();
+        set.spawn(task);
+        Self(set)
+    }
+
+    /// Abort the task; awaiting it then yields a cancelled [`JoinError`], unless it had ended.
+    fn abort(&mut self) {
+        self.0.abort_all();
+    }
+}
+
+impl<T: 'static> Future for OwnedTask<T> {
+    type Output = Result<T, JoinError>;
+
+    /// The task's result, once; a handle whose result was taken never yields again.
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        match self.0.poll_join_next(cx) {
+            Poll::Ready(Some(result)) => Poll::Ready(result),
+            Poll::Ready(None) | Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 /// Start the gateway task, if one is configured, and wait for its startup barrier.
 async fn start_gateway(
     runner: Option<NativeGatewayRunner>,
     stop: StopToken,
-) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
+) -> anyhow::Result<OwnedTask<anyhow::Result<()>>> {
     let configured = runner.is_some();
     let (started, startup) = tokio::sync::oneshot::channel();
-    let mut task = tokio::spawn(async move {
+    let mut task = OwnedTask::spawn(async move {
         match runner {
             Some(runner) => runner.run_with_startup_barrier(stop, started).await,
             None => std::future::pending::<anyhow::Result<()>>().await,
@@ -371,8 +404,8 @@ fn spawn_apis(
 }
 
 /// Run the processor's listener until `stop`; stopping before it is an error.
-fn spawn_processor(processor: Arc<Processor>, stop: StopToken) -> JoinHandle<anyhow::Result<()>> {
-    tokio::spawn(async move {
+fn spawn_processor(processor: Arc<Processor>, stop: StopToken) -> OwnedTask<anyhow::Result<()>> {
+    OwnedTask::spawn(async move {
         processor.listen_with(stop.clone()).await;
         if stop.should_stop() {
             Ok(())
@@ -387,8 +420,8 @@ fn spawn_processor(processor: Arc<Processor>, stop: StopToken) -> JoinHandle<any
 async fn await_foreground_exit(
     stop: StopSource,
     mut tasks: JoinSet<anyhow::Result<()>>,
-    mut gateway_task: JoinHandle<anyhow::Result<()>>,
-    mut processor_task: JoinHandle<anyhow::Result<()>>,
+    mut gateway_task: OwnedTask<anyhow::Result<()>>,
+    mut processor_task: OwnedTask<anyhow::Result<()>>,
     gateway_configured: bool,
 ) -> anyhow::Result<()> {
     enum ForegroundExit {
@@ -482,7 +515,7 @@ fn joined_task_result(
 async fn await_gateway_startup(
     configured: bool,
     startup: tokio::sync::oneshot::Receiver<()>,
-    gateway_task: &mut JoinHandle<anyhow::Result<()>>,
+    gateway_task: &mut OwnedTask<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
     if !configured {
         return Ok(());
@@ -494,7 +527,7 @@ async fn await_gateway_startup(
 }
 
 async fn await_task_cleanup(
-    task: &mut JoinHandle<anyhow::Result<()>>,
+    task: &mut OwnedTask<anyhow::Result<()>>,
     operation: &'static str,
 ) -> anyhow::Result<()> {
     match tokio::time::timeout(FOREGROUND_CLEANUP_TIMEOUT, &mut *task).await {
@@ -744,6 +777,7 @@ mod tests {
     use super::await_gateway_startup;
     use super::await_task_cleanup;
     use super::Cli;
+    use super::OwnedTask;
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
         let matches = Cli::command()
@@ -792,7 +826,7 @@ mod tests {
         let token = stop.token();
         let flushed = Arc::new(AtomicBool::new(false));
         let task_flushed = Arc::clone(&flushed);
-        let mut task = tokio::spawn(async move {
+        let mut task = OwnedTask::spawn(async move {
             token.stopped().await;
             task_flushed.store(true, Ordering::Release);
             Ok(())
@@ -809,7 +843,7 @@ mod tests {
     async fn gateway_startup_barrier_reports_early_failure() {
         let (started, startup) = tokio::sync::oneshot::channel();
         drop(started);
-        let mut task = tokio::spawn(async {
+        let mut task = OwnedTask::spawn(async {
             Err(anyhow::anyhow!("gateway activation failed before startup"))
         });
 

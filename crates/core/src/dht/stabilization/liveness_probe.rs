@@ -12,6 +12,10 @@
 //! peer that withholds credit is judged by its own queue and delays no other peer's probe. A
 //! probe that did not reach the queue is sent again on the next pass: the same challenge, under
 //! the deadline of its first issue, signed anew so its transaction's sequence is current.
+//!
+//! This node's relay chain neighbours are probed on the chain period by a pass of their own,
+//! run by the chain task beside the maintenance loop, and one whose probe goes unanswered for
+//! the chain timeout is suspected for relay custody (#1070).
 
 use super::Stabilizer;
 use crate::error::Result;
@@ -23,6 +27,7 @@ use crate::message::ProvisionalEpoch;
 use crate::swarm::transport::IssuedProbe;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::ProbePass;
+use crate::swarm::transport::ProbeScope;
 use crate::swarm::transport::ProbeWork;
 use crate::utils::get_epoch_ms_i64;
 
@@ -34,7 +39,36 @@ impl Stabilizer {
     /// its peer, and one peer's failure is that peer's alone. A peer that withholds credit
     /// therefore delays no other peer's probe and cannot make the step overrun its deadline.
     pub(super) async fn probe_peer_liveness(&self) -> Result<()> {
-        let Some(pass) = self.transport.liveness_probe_pass(get_epoch_ms_i64())? else {
+        self.run_probe_pass(ProbeScope::Every).await
+    }
+
+    /// Probe this node's relay chain neighbours that are due one on the chain period, and
+    /// suspect for relay custody each whose probe is the chain timeout unanswered (#1070,
+    /// `swarm::transport::liveness`): the chain moves past it at once, and nothing is evicted.
+    /// Run every `CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS` by the chain task.
+    pub(crate) async fn probe_relay_chain_neighbours(&self) -> Result<()> {
+        self.run_probe_pass(ProbeScope::ChainNeighbours).await?;
+        for peer in self
+            .transport
+            .unanswering_chain_neighbours(get_epoch_ms_i64())?
+        {
+            tracing::debug!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                %peer,
+                "STABILIZATION relay chain neighbour suspected: probe unanswered"
+            );
+            self.dht.suspect_relay_chain_neighbour(peer)?;
+        }
+        Ok(())
+    }
+
+    /// One probe pass of `scope`; see [`Self::probe_peer_liveness`].
+    async fn run_probe_pass(&self, scope: ProbeScope) -> Result<()> {
+        let Some(pass) = self
+            .transport
+            .liveness_probe_pass(get_epoch_ms_i64(), scope)?
+        else {
             return Ok(());
         };
         for &work in pass.work() {

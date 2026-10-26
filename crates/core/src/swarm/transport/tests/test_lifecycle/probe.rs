@@ -8,6 +8,7 @@ use super::super::super::outbound::SenderBound;
 use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::swarm::transport::tests::test_lifecycle::transport_with_routable_peer;
+use crate::swarm::transport::ProbeScope;
 use crate::swarm::Error;
 use crate::swarm::Message;
 use crate::swarm::MessagePayload;
@@ -19,15 +20,19 @@ use crate::utils::get_epoch_ms_i64;
 async fn test_one_probe_pass_runs_at_a_time() -> Result<()> {
     let (transport, _peer, _attempt) = transport_with_routable_peer().await?;
     let now_ms = get_epoch_ms_i64();
-    let open = transport.liveness_probe_pass(now_ms)?;
+    let open = transport.liveness_probe_pass(now_ms, ProbeScope::Every)?;
     assert!(open.is_some(), "no pass is running, so this one opens");
     assert!(
-        transport.liveness_probe_pass(now_ms)?.is_none(),
+        transport
+            .liveness_probe_pass(now_ms, ProbeScope::Every)?
+            .is_none(),
         "a second pass does not run beside the open one"
     );
     drop(open);
     assert!(
-        transport.liveness_probe_pass(now_ms)?.is_some(),
+        transport
+            .liveness_probe_pass(now_ms, ProbeScope::Every)?
+            .is_some(),
         "the right returns when the open pass ends"
     );
     Ok(())

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use bytes::Bytes;
@@ -23,6 +24,7 @@ use crate::dht::StorageKey;
 #[cfg(feature = "dummy")]
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
+use crate::error::Error;
 use crate::error::Result;
 use crate::message;
 use crate::message::FindSuccessorReportHandler;
@@ -32,6 +34,8 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 #[cfg(feature = "dummy")]
 use crate::message::MessageVerificationExt;
+use crate::message::OperationDigest;
+use crate::message::StoreOutcome;
 #[cfg(feature = "dummy")]
 use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
 #[cfg(feature = "dummy")]
@@ -43,8 +47,8 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
 use crate::tests::default::wait_for_storage_entry;
 use crate::tests::default::wait_for_successor;
-#[cfg(feature = "dummy")]
 use crate::tests::default::Node;
+use crate::tests::default::TEST_HANG_GUARD;
 #[cfg(feature = "dummy")]
 use crate::tests::fixed_secret_keys;
 use crate::tests::manually_establish_connection;
@@ -507,8 +511,9 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn test_handle_storage() -> Result<()> {
+/// Two nodes, each the other's successor, `node2` knowing `node1` as its predecessor: the
+/// owner of a placement a fixed key pair puts at `node2`.
+async fn connected_storage_pair() -> Result<(Node, Node)> {
     // random key may failed here, because if key1 is more close to virtual_peer
     // key2 will try send msg back to key1
     let key1 =
@@ -542,6 +547,12 @@ async fn test_handle_storage() -> Result<()> {
     wait_for_predecessor(&node2, node1.did()).await?;
     assert!(node1.dht().successors().list()?.contains(&node2.did()));
 
+    Ok((node1, node2))
+}
+
+#[tokio::test]
+async fn test_handle_storage() -> Result<()> {
+    let (node1, node2) = connected_storage_pair().await?;
     assert!(node2.dht().storage.count().await.unwrap() == 0);
     let message = String::from("this is a test string");
     // the entry_key is hash of string
@@ -552,6 +563,7 @@ async fn test_handle_storage() -> Result<()> {
             Message::OperateEntry(PlacedEntryOperation {
                 placement: entry.did,
                 op: EntryOperation::Overwrite(entry.clone()),
+                report: false,
             }),
             node2.did(),
         )
@@ -561,5 +573,64 @@ async fn test_handle_storage() -> Result<()> {
     assert!(node1.dht().storage.count().await.unwrap() == 0);
     assert!(node2.dht().storage.count().await.unwrap() > 0);
     assert_eq!(data.data[0], Bytes::from(message));
+    Ok(())
+}
+
+/// The one-report law of a store report (#866): the owner of an operation's placement reports a
+/// reported operation to its origin once, and an unreported one never. The origin's receipt,
+/// awaited before the operation leaves, resolves on the report.
+#[tokio::test]
+async fn test_an_owner_reports_a_reported_operation_once_and_an_unreported_one_never() -> Result<()>
+{
+    let (node1, node2) = connected_storage_pair().await?;
+    let unreported: Entry = ("unreported".to_string(), "a".to_string()).try_into()?;
+    let reported: Entry = ("reported".to_string(), "b".to_string()).try_into()?;
+    let reported_op = EntryOperation::Overwrite(reported.clone());
+    let digest = OperationDigest::of(&reported_op)?;
+    let receipt = node1
+        .swarm
+        .transport
+        .store_reports
+        .expect(digest, BTreeSet::from([reported.did]));
+
+    for (placement, op, report) in [
+        (
+            unreported.did,
+            EntryOperation::Overwrite(unreported.clone()),
+            false,
+        ),
+        (reported.did, reported_op, true),
+    ] {
+        node1
+            .swarm
+            .send_core_message_for_test(
+                Message::OperateEntry(PlacedEntryOperation {
+                    placement,
+                    op,
+                    report,
+                }),
+                node2.did(),
+            )
+            .await?;
+    }
+    let stored = tokio::time::timeout(TEST_HANG_GUARD, receipt)
+        .await
+        .map_err(|_| Error::InvalidMessage("no store report within the hang guard".to_string()))?;
+
+    assert_eq!(stored, Ok(()));
+    let mut reports = Vec::new();
+    while let Some(payload) = node1.try_listen_once().await {
+        if let Ok(Message::EntryStoreReport(report)) = payload.transaction.data::<Message>() {
+            reports.push(report);
+        }
+    }
+    assert_eq!(
+        reports.len(),
+        1,
+        "one report, for the reported operation only"
+    );
+    assert!(reports.iter().all(|report| report.operation == digest
+        && report.placement == reported.did
+        && report.outcome == StoreOutcome::Stored));
     Ok(())
 }

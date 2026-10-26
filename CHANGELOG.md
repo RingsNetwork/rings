@@ -1,5 +1,220 @@
 # Changelog
 
+## 0.38.0
+
+- A node learns when its registrations are stored at their owners (#866), from the owners
+  themselves, instead of polling the registry. A registration publish now asks each owner that
+  applies it for a store report. An `OperateEntry` carries `report`, and the owner of its
+  placement answers its origin with the new `EntryStoreReport` (`Stored` or `Refused`), routed
+  back like the other reports. A node that only forwards the operation reports nothing, so an
+  operation draws at most one report per placement it reaches, and one not asked draws none.
+  The origin keeps a bounded table of the operations it awaits. Each publish's `StoreReceipt`
+  resolves once every remote placement has reported it stored. A registration is ready once a
+  publish that began with an admitted edge has every report; one made alone reached no owner
+  (#855). `Processor::registrations_published` and `Provider::registrations_published` resolve
+  once every registration of the node is ready, and the browser onion e2e awaits them before
+  it reads the directory. Readiness names the owners of the publisher's view when it
+  published: in a topology still forming, a reader can reach another owner until a storage
+  repair or the next heartbeat carries the registration there. A registration asks for reports only until it is ready. A report
+  is an observation, not a trust claim: a lying owner shifts only its origin's signal, never a
+  reader's path.
+  - **Library API.** New: `ScopedStorage::storage_append_data_reported`,
+    `rings_core::swarm::storage_api::{StoreReceipt, StoreUnconfirmed}`,
+    `rings_core::message::{EntryStoreReport, OperationDigest, StoreOutcome}`, and the
+    `registrations_published` above. `PlacedEntryOperation` gains `report`.
+  - **Upgrade consequence.** Breaking on the wire, within wire version 2, which #934 opened for
+    this release: `OperateEntry` gains a field and `EntryStoreReport` is message 31. Nodes of
+    this release and of 0.37 do not connect, as for #934.
+  - **Operator step.** None beyond upgrading every node that must reach another.
+
+- The inbound reassembly barrier orders each message category alone (#927; load-bounds paper,
+  Sec. "The reassembly barrier", Def. "Per-category barrier", Prop. "Order per category").
+  A frame now waits only for earlier unfinished reassembly of its own category, judged by the
+  carrier its chunks took. Before, a data frame waited for every earlier reassembly, whatever
+  its category, and a control frame waited for none: the control exemption.
+  - This fixes a reordering. A peer advertising a small `max-message-size` (#1130) makes its
+    control messages arrive chunked. A control frame released from the pre-admission hold after
+    such a message could run before it.
+  - Behaviour change: a storage, E2E or application frame no longer waits behind another
+    category's reassembly. Order is guaranteed per category only; no protocol relies on order
+    across categories, which travel on separate data channels.
+  - The hand-off barrier that held the other data lanes behind a reassembled message is
+    removed.
+  - The test-only `BarrierControlExemption` ablation and its witness are replaced by a
+    per-category witness in the sync storm.
+
+  No operator step.
+
+- The hot paths of admission no longer scale with the number of waiters, edges or queued
+  items (#938; load-bounds paper, Sec. "Hot paths", Def. "Resource order", Obligation
+  "Admission complexity"). A `ResourceOrderedQueue` event visits only the waiters its freed
+  resources may unblock, `O((g + k + r) log n)`, through an indexed waitlist, where it judged
+  the whole queue before. The node's frame pool keeps its claimants incrementally and indexes
+  its demands, so a service visits only the demands it serves. A received frame takes its
+  link's lock once to be admitted and once to be released, and the pool's lock only when its
+  lane's demand or charge changes. Each node runs one admission watcher for its queued
+  protocol sends, not one task per send. The application inbox indexes its facts by peer.
+  Extension dispatch reads an envelope's namespace and payload without copying them. One
+  behaviour changes: a waiter blocked only for lack of room in its lane's reservation (or its
+  slot's floor of the open-message table) now holds it, so a later, smaller frame no longer
+  passes it there. A frame within its lane's reservation still never waits behind a borrower
+  of the shared pool, nor behind another peer's budget. Test-only counters (the transport's
+  `dummy` feature) measure each path, and the PR sync-storm matrix bounds each at its largest
+  size. No operator step.
+
+- Fix to the node frame pool merged in #934: the frames a rebalance freed went to the earliest
+  demand, often of an edge already at its share, so a starving edge could stay starved (load-
+  bounds paper, Law 3, amended). The pool now serves the demands of edges below their share
+  `⌊P_F / n⌋` first, then those between share and claim, each first come first served. No
+  operator step.
+
+- A node publishes its registrations again at its first edge (#855), so a relay, exit or DNS
+  relay service that starts listening before it joins the overlay is listed once it joins, not
+  a heartbeat (30 s) later. Before, a registration published with no admitted edge settled only
+  at the node itself. Nothing published it again before the next heartbeat; at most a later
+  storage repair pass carried that copy to an owner. Now a heartbeat that begins with no
+  admitted edge arms an early publish, and the first admitted edge fires it. The early publish
+  disarms it, so whatever the edges do, a registration publishes at most once between two
+  heartbeats beyond them. It is an ordinary heartbeat of the #918 lease: it re-appends the same
+  bytes under a fresh dot, so the descriptor bound, the freshness window and the lease end are
+  unchanged. `frontend/src/node.rs` already listens before it connects, and the browser onion
+  e2e now does the same.
+  - **Library API.** `Swarm::admitted_edges` and `Swarm::edges_changed`, with
+    `rings_core::swarm::edges::EdgesChanged`, are new and additive: the number of admitted
+    edges, and the event of its change.
+  - **Upgrade consequence.** None: the wire format is unchanged.
+  - **Operator step.** None.
+
+- Three vendored webrtc-sctp tests no longer race the write loop (#1127). They slept 10 ms
+  after writing and then dropped or reordered packets they assumed were already on the test
+  `Bridge`'s queue; on a loaded runner `test_assoc_reliable_retransmission` found it empty and
+  panicked. They now wait until the packets they act on are queued, a count of the client
+  connection's completed sends, and the retransmission test runs until both messages are
+  acknowledged. The race is upstream's and not the batch patch's (#1090), so the fix is not part
+  of webrtc-rs/webrtc#941; `RINGS-PATCH.md` records it. Also, a connection that already holds a
+  slot no longer reads the tables' floor use on admission (#1094). No operator step.
+
+- A new connection takes the cleanest free slot, not the least free one (#1094; load-bounds
+  paper, Def. 1 and Prop. 1, amended). A slot's floor use is its worst table's share of its
+  floor still charged by live items, over the replay streams, the removal store and the open
+  messages. Under least-free, a party that filled a slot and disconnected usually handed that
+  slot to the next connection, so one rotation could reach one newcomer; now a newcomer inherits
+  charges only once every free slot is charged, which takes `R − c` admissions per horizon, as a
+  party holding `R − c` connections at once always could. The paper records why an admission
+  rate limit cannot bound rotation without deferring honest churn under the session model.
+  No operator step.
+
+- An onion session that ends locally before its exit answers the open now reports why it
+  ended, no longer `OnionRouteError::ExitRefused` (#1118). The session driver sends its terminal
+  error to the opener: `LoopBuild` or a link send error for a loop that could not be built or
+  leave, `SessionFailed` for the liveness deadline, a lost reply or the exit's abort, and
+  `SessionFailed` for a driver dropped by its node's stop. `ExitRefused` now means only that
+  the exit answered with a refusal. The local HTTP proxy still answers `502` for every failure
+  to open, with no reason; its log line names the error. No operator step.
+
+- The onion Sphinx key schedule wipes its HMAC states on drop (#852). rings-node moves to
+  hkdf 0.13, hmac 0.13 and sha2 0.11, with `zeroize`: sha2's block cores now wipe their chaining
+  values, so the PRK's HMAC state in every `Hkdf` and the MAC key's in every `Hmac` are wiped
+  with them. The derived bytes are unchanged, as the header and wire golden tests pin. Three
+  transient stack copies inside those crates remain unwiped; SECURITY.md lists them under Known
+  Limitations, beside the new assumption that a reader of process memory already holds the
+  node's delegatee key. No operator step.
+
+- A closed node releases every store it was built over (#1085), so an embedder that stops a
+  node and starts it again in one process, on the same stores, opens them. `Provider::close`
+  now consumes the provider and runs the close law, each step once the one before has ended:
+  (a) every task of the node is told to stop, and every listener generation ends; (b) no task
+  of the node is live; (c) every connection is closed (#1098); (d) the measurements are
+  persisted; (e) the last clone of the node drops, and with it every store, whose release the
+  close awaits. Before, the node's own tasks (its application service, extension workers,
+  relay and onion pumps) held it past its close and its drop, so its stores stayed locked
+  (`Error::StorageDirectoryLocked`, #1039) for the life of the process. Every task of the
+  node layer now joins the node's task set, which the close stops and drains, and the crate's
+  `clippy.toml` forbids it every detached spawn, in its tests too. A relay whose fail-closed law
+  resets its local socket does so at the stop, where being dropped would close it cleanly. A
+  node still shared when it is closed reports `Error::ProviderStillShared { released }`: it is
+  stopped and its network closed, and `released` resolves once its last clone drops.
+  `rings_node_provider_destroy` closes its provider this way, so a provider created again on
+  the same `storage_path` opens its stores; the C ABI is unchanged. No step waits on a timer:
+  the close's latency is bounded by the timeouts of the work it awaits (a send of a relay
+  winding down, a handshake or a payload send the core detached, a replay flush).
+  - **Library API.** Breaking: 0.37's `Provider::close(&self)` becomes `Provider::close(self)`.
+    `Processor::close` keeps `&self` and is steps (c) and (d) only. New, additive:
+    `Error::ProviderStillShared` (code `1506`), `rings_node::release::StoresReleased`,
+    `NodeStores::released`, `ProcessorBuilder::stores_released`,
+    `rings_core::storage::file::StoreRelease` with `FileStorage::released`, and
+    `rings_runtime::TaskSet` with `Joined` and `Drained`. `Provider::set_backend` serves the
+    application until the node is closed.
+  - **Upgrade consequence.** None on the wire. A caller of `close` gives up its provider; a
+    caller still holding a clone gets `ProviderStillShared` and awaits `released`.
+  - **Operator step.** None.
+
+- A node holds a hard bound of received frames, whatever the number of connections (#934;
+  load-bounds paper, Law 3): about 405 MiB at the default 328 connections, against about
+  1.3 GiB before. Each lane has a floor it is always granted, the priority lane its whole window
+  of 16 frames and each data lane one frame; beyond it a data lane borrows from the node's frame
+  pool of 256 frames, first come, first served, up to its window and within its edge's fair
+  claim of the pool; when an edge below its share finds the pool full, the edges above their
+  shares are shrunk to them. A data lane idle for 1 s is shrunk to its floor and gives its
+  share back. The priority lane never borrows, so control
+  traffic never waits for other peers' load. This replaces the 16 MiB soft limit, which deferred
+  advertisements but bounded no burst.
+  - **Breaking (wire).** A total cutover: the credit frame becomes a per-lane signal,
+    `Credit(limit, generation)`, `Shrink(limit, generation)` or `Returned(bound, generation)`,
+    and the wire version goes to 2, so a node of 0.37 is refused by name (#1104). The bump rule
+    now reads per release: one bump for a release whose wire differs from the last released
+    wire version, shared by every change between the two.
+  - **Breaking (library API).** `NodeReceiveLoad` is `NodeFramePool`.
+  - **Upgrade consequence.** A fresh connection grants each data lane one frame until the
+    receiver lends it more on its first frame, so the second frame of a connection's first burst
+    on a data lane waits one round trip.
+  - **Operator step.** None beyond upgrading every node together.
+
+- A chunked message is charged once, at its first chunk, and is never refused or dropped for
+  capacity (#932; load-bounds paper, Law 4 and Prop. 4). Before, each chunk took its own
+  mailbox charge and a separate reassembly budget, and the completed message was charged again
+  at its full size on the inbound actor, where it could not wait: under load the charge did not
+  fit and the message was dropped, after the sender had seen every chunk accepted. Now the
+  first chunk `[0, n]` of `d₀` bytes reserves the `n·d₀` its buffer and its completed copy take,
+  waiting for capacity like any arrival; the message's later chunks take nothing and wait only
+  for their own carrier's earlier frames, and the completed message carries the charge into
+  dispatch. A message opens only at its first chunk, which must claim fewer than
+  `max_message_bytes` before its last chunk (`(n − 1)·d₀`), and no later chunk may be longer
+  than the first: an honest sender, which cuts equal chunks and keeps a message's chunks
+  contiguous on its class lane, never meets either bound.
+  - The first chunk's charge sits on the lane of its carrier's class, where the completed
+    message is dispatched, and in a new open-message table under slot accounting (floor
+    256 KiB per slot, pool 128 MiB in fair claims, at most 210 MiB of the mailbox at three
+    successors): a small message never waits behind another peer's large one, and a slot's
+    next large message queues behind the claim already waiting.
+  - An open message expires, as the sender's failure, once it falls behind a rate floor of
+    10 B/ms over the time its sender holds unused credit, less one lane window: a first chunk
+    sent alone holds its reservation for about 107 s, not up to its 100-minute TTL. A
+    throttled sender's clock pauses. A large message on a link that leaves its class less than
+    10 B/ms is expired too.
+  - **Breaking (library API).** `ReassemblyLimits` loses `max_total_buffered_cost` and
+    `slot_overhead` and gains `rate_floor` and `grace_chunks`, and `MessageReassembler` takes
+    the charge type its messages hold. `LaneCreditView::peer_unused` reads the credit a peer
+    holds unused on a lane.
+    `Error::InboundMailboxCapacityExceeded` and `Error::InboundPeerCapacityExceeded`, which
+    only the retired re-charge produced, are removed. The dummy transport's
+    `QueuedDeliveryKind::Message` names the lane its frame travels on, and the simulation's
+    schedules deliver one lane's frames in order, as every real transport does.
+  - **Upgrade consequence.** None on the wire: a sender already sends a message's chunks in
+    order and of equal length.
+  - **Operator step.** None.
+
+- Relay chain neighbours are probed every 2.5 s, and suspected for relay custody when a probe is
+  7.5 s unanswered (#1070), so a member that crashes, drops its network or is suspended is
+  replaced within about 10 s instead of after the 45 s liveness deadline. A suspect is no chain
+  member until it answers on time twice in a row, and both the suspicion and the clearing run
+  the chain exchange at once (#777), so a neighbour whose answers hover around 7.5 s changes the
+  chains at most twice per 12.5 s; suspicion evicts no peer, which still happens only at the 45 s
+  deadline. Each node
+  probes only its two chain neighbours this often, on the same probe clock as every peer: four
+  messages per 2.5 s, about 1.3 more a second, whatever `r`. No message changes; nodes of this
+  version and of an earlier one interoperate.
+
 ## 0.37.0
 
 - Every frame names its wire version (#1104), so a node of another release is refused by

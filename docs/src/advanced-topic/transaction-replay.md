@@ -240,7 +240,8 @@ An origin is a key pair, free to mint, so a bound per origin bounds nothing: bef
 fill the receiver table with one transaction from each of 16,384 fresh origins and refuse every new
 origin for good. The receiver table is now accounted by connection slot (the load-bounds paper,
 Law 2). A node has `R = 2(160 + s + 1)` slots, 328 at the default three successors; an admitted
-connection takes the least free slot and frees it when it is retired. A new stream is charged to
+connection takes the cleanest free slot (the one whose items use the least of their floor) and
+frees it when it is retired. A new stream is charged to
 its introducer:
 
 - the slot of the handshake-authenticated connection that delivered its first transaction;
@@ -258,9 +259,10 @@ origins and `k` slots can be refused only on those `k` slots.
 
 A stream stays charged to its slot after its connection leaves, so rotating connections never
 grows the table past its bound. The cost is that a connection admitted into a slot inherits what
-the slot still holds: a party that rotates connections through free slots can leave a newcomer
-with only its fair claim until those streams are spent (the paper's rotation residual). A
-connection that keeps its slot is never affected.
+the slot still holds. Because a newcomer takes the cleanest free slot, a party that rotates
+connections reaches it only by charging every free slot, which leaves the newcomer with only its
+fair claim until those streams are spent (the paper's rotation residual, #1094). A connection
+that keeps its slot is never affected.
 
 A stream leaves the table once it is spent: every transaction it admitted can no longer be
 delivered, by a clock up to `σ` behind.

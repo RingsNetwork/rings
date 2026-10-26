@@ -142,7 +142,8 @@ impl ApplicationData {
             | Message::ReplicateRelayHold(_)
             | Message::DeclareRelayCustody(_)
             | Message::RelayCarrierDigests(_)
-            | Message::RelayCarriersWanted(_) => None,
+            | Message::RelayCarriersWanted(_)
+            | Message::EntryStoreReport(_) => None,
         }
     }
 

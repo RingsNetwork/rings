@@ -97,8 +97,11 @@ use sha1::Sha1;
 mod batch;
 mod lock;
 mod presence;
+mod release;
 
 use std::collections::BTreeSet;
+
+pub use release::StoreRelease;
 
 use super::write_ordered::WriteOrderedMap;
 use crate::error::Error;
@@ -219,6 +222,8 @@ impl FileIndex {
 /// the blocking pool (the execution law).
 pub struct FileStorage {
     store: Arc<FileStore>,
+    /// Resolves once `store` is released (the release law, `release`).
+    released: StoreRelease,
 }
 
 /// The synchronous store behind a [`FileStorage`]: every method blocks on the file system.
@@ -229,6 +234,8 @@ struct FileStore {
     index: RwLock<FileIndex>,
     /// The exclusive lock of `root`, held while the store lives (the ownership law, `lock`).
     lock: lock::DirectoryLock,
+    /// Dropped after `lock`, as the last field: the release (the release law, `release`).
+    _released: release::ReleaseSignal,
 }
 
 /// One record file as a read found it: its bytes, or the error that kept them from the reader.
@@ -273,10 +280,19 @@ impl FileStorage {
         P: AsRef<std::path::Path>,
     {
         let root = path.as_ref().to_path_buf();
-        let store = blocking(move || FileStore::open(byte_capacity, root, authority)).await?;
+        let (signal, released) = release::release_signal();
+        let store =
+            blocking(move || FileStore::open(byte_capacity, root, authority, signal)).await?;
         Ok(Self {
             store: Arc::new(store),
+            released,
         })
+    }
+
+    /// The witness of this store's release: it resolves once the store is dropped by its last
+    /// holder, this handle and every operation still running, with its directory unlocked.
+    pub fn released(&self) -> StoreRelease {
+        self.released.clone()
     }
 
     /// Run `operation` on the store from the blocking pool (the execution law).
@@ -341,12 +357,17 @@ where
 
 impl FileStore {
     /// Open the store rooted at `root` with `authority`, creating it if absent, under a budget
-    /// of `byte_capacity` serialized bytes.
+    /// of `byte_capacity` serialized bytes, holding `released` until it drops (the release law).
     ///
     /// Post: the index mirrors the directory (stale `.tmp` files removed) and the budget law
     /// holds: a disposable open retires the oldest files down to the capacity, and an
     /// authoritative open over it fails.
-    fn open(byte_capacity: u32, root: PathBuf, authority: RecordAuthority) -> Result<Self> {
+    fn open(
+        byte_capacity: u32,
+        root: PathBuf,
+        authority: RecordAuthority,
+        released: release::ReleaseSignal,
+    ) -> Result<Self> {
         create_directory(&root, authority.flushes())?;
         let lock = lock::lock_directory(&root)?;
         let store = Self {
@@ -355,6 +376,7 @@ impl FileStore {
             authority,
             index: RwLock::new(FileIndex::default()),
             lock,
+            _released: released,
         };
         let mut index = store.write_index()?;
         *index = store.scan_directory()?;
@@ -966,5 +988,7 @@ mod test_file;
 mod test_lock;
 #[cfg(test)]
 mod test_presence;
+#[cfg(test)]
+mod test_release;
 #[cfg(test)]
 pub(crate) mod test_root;

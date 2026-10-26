@@ -23,6 +23,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use bytes::Bytes;
+use rings_core::ecc::PublicKey;
 use rings_test_support::with_hang_guard;
 
 use super::loop_network::open_policy;
@@ -159,6 +160,32 @@ async fn test_a_denied_target_is_refused_at_the_open() -> Result<()> {
     assert!(matches!(
         opened,
         Err(Error::OnionRouteError(OnionRouteError::ExitRefused))
+    ));
+    Ok(())
+}
+
+/// A session whose driver ends before `h` answers its open reports the driver's own error,
+/// never `ExitRefused` (#1118): with `r₀₂`'s session key off the curve, the client cannot build
+/// the open's loop, so the driver ends at its first send and `h` hears nothing.
+#[tokio::test]
+async fn test_a_session_ended_before_the_answer_is_not_refused() -> Result<()> {
+    let network = network(OnionServiceName::tcp(), EchoWorld, open_policy()).await?;
+    let [g, mut r02, h, r11] = network.route_hops();
+    r02.delegatee_public_key = PublicKey([0xff; 33]);
+    let route = network.route_over(OnionServiceName::tcp(), [g, r02, h, r11])?;
+
+    let opened = network
+        .client
+        .runtime
+        .open(OnionSessionRequest {
+            route,
+            ..request(&network, OnionServiceName::tcp())?
+        })
+        .await;
+
+    assert!(matches!(
+        opened,
+        Err(Error::OnionRouteError(OnionRouteError::LoopBuild(_)))
     ));
     Ok(())
 }

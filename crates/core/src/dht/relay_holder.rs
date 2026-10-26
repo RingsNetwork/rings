@@ -68,6 +68,7 @@
 //! ```
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
@@ -132,6 +133,13 @@ impl Default for RelayReplication {
         }
     }
 }
+
+/// The on-time probe answers in a row that clear a suspected chain neighbour (#1070, `Law
+/// (Clearing)`). With the chain period `P_c` and timeout `τ_c`, a neighbour whose answers
+/// hover around `τ_c` changes the chains at most twice, one suspicion and one clearing, per
+/// `τ_c + k·P_c` (12.5 s at `k = 2`): the late probe takes `τ_c`, and the `k` on-time probes
+/// that clear it are issued a period apart, the first no earlier than that late answer.
+pub(crate) const CHAIN_NEIGHBOUR_CLEARING_ANSWERS: u8 = 2;
 
 /// One node of a [`RelaySegment`] and its declaration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -354,6 +362,11 @@ pub(crate) struct RelayNeighborhood {
     passed: Option<Passed>,
     /// The members a carrier is replicated to, `r`, and so the previous holders a list keeps.
     replicas: usize,
+    /// Chain neighbours whose liveness probe went unanswered for the chain timeout (#1070), each
+    /// with the on-time answers it gave since: no member of any chain until
+    /// [`CHAIN_NEIGHBOUR_CLEARING_ANSWERS`] in a row. Suspicion moves the chain alone; the passed
+    /// list, whose agreement reads declarations, is read as before.
+    suspected: BTreeMap<Did, u8>,
 }
 
 impl Default for RelayNeighborhood {
@@ -370,7 +383,55 @@ impl RelayNeighborhood {
             storage_less: BTreeSet::new(),
             passed: None,
             replicas: replicas.max(1),
+            suspected: BTreeMap::new(),
         }
+    }
+
+    /// Whether `peer` is a candidate member of a chain: it holds relay mail as far as this node
+    /// knows, and is not suspected (#1070).
+    pub(crate) fn chains(&self, peer: Did) -> bool {
+        self.holds(peer) && !self.suspected.contains_key(&peer)
+    }
+
+    /// Suspect `peer`, a chain neighbour that has not answered its probe (#1070), with no
+    /// on-time answer since. Returns whether it was not suspected before: only that is a chain
+    /// change.
+    pub(crate) fn suspect(&mut self, peer: Did) -> bool {
+        match self.suspected.get_mut(&peer) {
+            Some(on_time) => {
+                *on_time = 0;
+                false
+            }
+            None => {
+                self.suspected.insert(peer, 0);
+                true
+            }
+        }
+    }
+
+    /// The suspected chain neighbours, which stay on the chain period until cleared (#1070).
+    pub(crate) fn suspects(&self) -> impl Iterator<Item = Did> + '_ {
+        self.suspected.keys().copied()
+    }
+
+    /// Record `peer`'s answer to its probe, `on_time` when it came within the chain timeout
+    /// (`Law (Clearing)`): a suspect is cleared by [`CHAIN_NEIGHBOUR_CLEARING_ANSWERS`] on-time
+    /// answers in a row, and a late answer starts the count again. Returns whether the
+    /// suspicion was cleared: only that is a chain change.
+    pub(crate) fn observe_answer(&mut self, peer: Did, on_time: bool) -> bool {
+        let Some(answers) = self.suspected.get_mut(&peer) else {
+            return false;
+        };
+        *answers = if on_time {
+            answers.saturating_add(1)
+        } else {
+            0
+        };
+        if *answers < CHAIN_NEIGHBOUR_CLEARING_ANSWERS {
+            return false;
+        }
+        self.suspected.remove(&peer);
+        true
     }
 
     /// Whether `peer` holds relay mail, as far as this node knows.
@@ -392,6 +453,7 @@ impl RelayNeighborhood {
     /// Forget `peer`, which left this node's topology, with any record it passed or names.
     pub(crate) fn forget(&mut self, peer: Did) {
         self.storage_less.remove(&peer);
+        self.suspected.remove(&peer);
         self.passed = self.passed.take().filter(|passed| passed.from != peer);
         self.forget_previous_holder(peer);
     }
@@ -510,18 +572,20 @@ impl RelayNeighborhood {
         agrees.then_some(passed)
     }
 
-    /// The nearest node behind this one that holds relay mail, `p₁`: the nearest previous holder
-    /// passed, or, before any list, the predecessor when it holds relay mail.
+    /// The nearest node behind this one that is a candidate chain member, `p₁`: the nearest
+    /// previous holder passed that is not suspected (#1070), or, before any list, the
+    /// predecessor when it holds relay mail and is not.
     pub(crate) fn nearest_previous_holder(&self, state: &TopologyState) -> Option<Did> {
         match self.previous_holders_in(state) {
             Some(passed) => passed
                 .previous
-                .first()
-                .map(|nearest| nearest.holder)
-                .filter(|holder| *holder != state.local),
+                .iter()
+                .map(|link| link.holder)
+                .take_while(|holder| *holder != state.local)
+                .find(|holder| self.chains(*holder)),
             None => state
                 .predecessor
-                .filter(|predecessor| self.holds(*predecessor)),
+                .filter(|predecessor| self.chains(*predecessor)),
         }
     }
 
@@ -546,7 +610,7 @@ impl RelayNeighborhood {
                     if link.holder != state.local {
                         nodes.push(RelayNode {
                             did: link.holder,
-                            holds: true,
+                            holds: self.chains(link.holder),
                         });
                     }
                     let after = at
@@ -587,11 +651,11 @@ impl RelayNeighborhood {
         segment
     }
 
-    /// `peer` with its declaration.
+    /// `peer` with its declaration, read as a candidate chain member (not suspected, #1070).
     fn node(&self, peer: Did) -> RelayNode {
         RelayNode {
             did: peer,
-            holds: self.holds(peer),
+            holds: self.chains(peer),
         }
     }
 

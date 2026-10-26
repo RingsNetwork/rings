@@ -27,6 +27,7 @@ mod timer;
 
 with_executor! {
     mod task;
+    mod task_set;
 
     #[cfg(not(all(feature = "browser", target_family = "wasm")))]
     pub use task::run_blocking;
@@ -37,6 +38,9 @@ with_executor! {
     pub use task::RuntimeUnavailable;
     pub use task::Spawner;
     pub use task::Unscheduled;
+    pub use task_set::Drained;
+    pub use task_set::Joined;
+    pub use task_set::TaskSet;
 }
 
 pub use bound::MaybeSend;

@@ -38,8 +38,8 @@ consume, and what refusal and backpressure look like at each bound (\texttt{ring
 module \texttt{callback}; \texttt{rings-core}, modules \texttt{fair\_admission},
 \texttt{swarm::callback::inbound}, \texttt{chunk}, \texttt{message::replay} and
 \texttt{dht::chord::carrier\_store}).  It is the law for issues \issue{907}, \issue{927},
-\issue{932}, \issue{934} and \issue{938} of \texttt{RingsNetwork/rings}, and closes the Sybil
-residual of the removal-stability law~\cite{RemovalStability}.}}
+\issue{932}, \issue{934}, \issue{938} and \issue{1094} of \texttt{RingsNetwork/rings}, and closes
+the Sybil residual of the removal-stability law~\cite{RemovalStability}.}}
 \title{\huge Load Bounds:\\
 Node, Edge and Lane Accounting\\
 for a Rings Node under Free Identities}
@@ -63,8 +63,8 @@ receiver's replay streams (with an eviction horizon that cannot reopen replay), 
 store, to received frames through a credit-reclaim protocol that makes the frame bound hard and
 independent of the connection count, and to reassembled messages, which are charged once at
 their first chunk so that no honest message is refused.  We state the complexity obligations of
-the admission hot paths, and show that the barrier's control exemption is the identity
-``a lane waits for reassembly iff it carries chunks''.
+the admission hot paths, and replace the reassembly barrier's control exemption by a barrier
+per message category, under which order is guaranteed per category only.
 }\hfill\null\par
 \vspace{0.5\baselineskip}}
 
@@ -88,8 +88,8 @@ where it cannot wait, and is dropped when that charge does not fit.  A chunk tha
 reassembly budget full is dropped too.
 \item[\issue{938}] Admission costs $O(n)$ per event and takes node-global locks per frame,
 exactly when the node is saturated.
-\item[\issue{927}] It is unclear whether the barrier's control exemption is still needed under
-per-lane credit.
+\item[\issue{927}] The reassembly barrier exempts control, which reorders chunked control, and
+orders data across categories, which no protocol needs.
 \end{description}
 
 \section{Model}\label{sec:model}
@@ -105,9 +105,15 @@ $s$ the number of successors ($328$ at $s=3$).  So at most $\Rg$ edges are \emph
 any instant.  An edge identity is also a free key; what is bounded is the number of edges
 current at once.
 \item A \emph{slot} $\kappa\in K=\{0,\dots,\Rg-1\}$ is one unit of the registry's capacity.  An
-edge takes the least free slot $\kappa(e)$ when it is admitted and frees it when it is retired,
-both in the transition that announces it, so the current edges hold distinct slots.  A slot is
-not a topology reference: one edge may back several fingers and a successor, or none.
+edge takes the \emph{cleanest} free slot $\kappa(e)$ when it is admitted and frees it when it
+is retired, both in the transition that announces it, so the current edges hold distinct slots.
+A slot is not a topology reference: one edge may back several fingers and a successor, or none.
+Let $\use^{t}_{T,\kappa}$ be the items of table $T$ (Def.~\ref{def:table}) charged to $\kappa$
+that are still live at $t$: an item past its instant is not counted, since the next admission of
+$T$ retires it.  The \emph{floor use} of $\kappa$ at $t$ is its worst table's,
+$w_t(\kappa)=\max_T\min(\use^{t}_{T,\kappa},f_T)/f_T$, the part of a floor that an edge admitted
+into $\kappa$ would inherit; the cleanest free slot is the one of least $w_t$, the least index
+among equals.
 \item A \emph{lane} $(e,\ell)$ is one of the four credit-controlled channels of an edge.
 \item The \emph{local} principal $\lambda$ is the node itself: its own operations alone (its
 own writes and repairs, and out-of-band connection signaling it is handed).
@@ -208,22 +214,57 @@ the pool drains to the fair claims, with $n\le\Rg$.
 
 \begin{proposition}[Rotation residual]\label{prop:rotation}
 A party that rotates edges through free slots charges each slot it passes with up to $f_T$
-items, which stay until they leave by $T$'s law.  An honest edge later admitted into such a slot
-inherits that usage: it has no floor, only its fair claim, until those items leave.  Charging
-every free slot takes at most $\Rg-c$ admissions, with $c$ honest edges current, and an honest
-edge that holds its slot throughout is never affected.
+items, which stay until they leave by $T$'s law.  An edge admitted at $t$ inherits
+$\min_{\kappa\in F_t}w_t(\kappa)$ of its floors, over the free slots $F_t$, $|F_t|=\Rg-c$ with
+$c$ edges current (Def.~\ref{def:principals}).  So:
+\begin{enumerate}[leftmargin=1.5em]
+\item \emph{Targeted.}  The party takes any of a newcomer's floor only if it has charged every
+free slot with items live at the newcomer's admission: $\Rg-c$ admissions within the life $h$ of
+those items, $h\le H+2\sigma$, or $H+H_I+3\sigma$ for application streams.
+\item \emph{Concurrent.}  A party that holds $\Rg-c$ edges at once, fills their floors and
+departs charges every free slot, under cleanest-first as under least-free, at the same $\Rg-c$
+admissions per horizon.  Against it the choice of slot changes nothing.
+\item \emph{Least-free.}  Had an edge taken the least free slot instead, (1) would fail: a
+departing edge usually frees the least free slot, which the next admission takes, so one
+admission per victim suffices.
+\item An edge that holds its slot throughout is never affected.
+\end{enumerate}
 \end{proposition}
 \begin{proof}
-Law~\ref{law:edge}: a slot's charges outlive its edge, and Theorem~\ref{theorem:isolation}(2)
-for the edges that keep their slots.
+Law~\ref{law:edge}: a slot's charges outlive its edge.  (1)~If some free slot has $w_t=0$, the
+newcomer takes one, and $w_t(\kappa)>0$ needs an item of $\kappa$ live at $t$, charged by an
+edge admitted into $\kappa$ within its life.  (2)~With every free slot charged, every choice
+inherits.  (3)~After the party's edge departs from the least free slot $\kappa$, $\kappa$ is the
+least free slot unless a lesser one was freed meanwhile.  (4)~Theorem~\ref{theorem:isolation}(2).
 \end{proof}
 
-Proposition~\ref{prop:rotation} is the cost this law does not remove: free keys and connection
-churn can leave newly admitted edges without a floor for one horizon of $T$ per round of
-rotation.  Only a cost on admission removes it: an admission rate limit (\issue{1094}, before
-1.0) and position randomization (\issue{780}, 2.0).  Charging the edge identity instead of its
-slot is unsound: a departing identity's floor items stay, while a fresh identity brings a fresh
-floor, so rotation alone grows $|T|$ past $B_T$.
+Cleanest-first is a strict improvement and not a new bound.  From any state, an admission
+inherits no more under it than under least-free, since it takes the least $w_t$ over the same
+free slots; and it removes the targeted attack of (3), one admission per victim, leaving only the
+concurrent bound of (2).  Proposition~\ref{prop:rotation}(2) is the cost this law does not
+remove: free keys and connection churn can leave newly admitted edges without a floor for one
+horizon of $T$ per round of $\Rg-c$ admissions.  Such a party is
+held only to its fair claim, $\lceil\Pool_T/n\rceil$, on the slots it charged, and an honest
+newcomer keeps that claim: degradation, never a refusal of an existing edge, and never a
+permanent lockout (Prop.~\ref{prop:nolockout}).
+
+\textbf{Why not an admission rate limit (\issue{1094}).}  Keeping every free slot charged costs
+$(\Rg-c)/h$ admissions per unit time, about $3$ a minute at $h=100$\,min, $\Rg=328$ and $c=28$,
+and any positive rate at the application horizon.  An honest node admits new edges at $c/\bar L$,
+with $\bar L$ the mean edge life: at most the mean session, $4.2$\,min for Weibull sessions of
+shape $0.5$ and median $1$\,min with 90\% browser nodes~\cite{DurableRecords}, so about $7$ a
+minute for a browser with $c\approx28$ and $70$ for a seed with $c\approx300$.  A limit that never
+defers honest churn therefore admits more than the attack needs, and a limit tight enough to
+bound it, burst plus refill below $\Rg-c$ per horizon, would defer a seed's restart (about $\Rg$
+reconnections at once) by tens of minutes.  Keying it by address is rejected (\issue{780}; many
+honest browsers share one address behind carrier-grade NAT), and keying it by slot is void, since
+the node assigns slots.  An honest joining storm meets none of this: every arrival is admitted at
+once into the cleanest slot.  The levers that remain are a cost on identity, which this law does
+not assume, and position randomization (\issue{780}, 2.0), which takes from a fresh identity the
+choice of where it lands.
+
+Charging the edge identity instead of its slot is unsound: a departing identity's floor items
+stay, while a fresh identity brings a fresh floor, so rotation alone grows $|T|$ past $B_T$.
 
 Accounting to the origin, as the removal store did~\cite{RemovalStability} and the replay
 table's quota does, fails part~(4).  An origin costs nothing, so a party controls unboundedly
@@ -358,155 +399,425 @@ honest range of more than $K$ unstable removes still waits for them to stabilize
 \section{Received frames (\issue{934})}\label{sec:frames}
 
 Let lane $(e,\ell)$ have advertised credit $A$ and released count $R$.  Its liability is
-$\liab=A-R$: the frames the receiver may still have to hold, in flight or held.  Today
-$\liab\le W=16$ per lane, but credit is cumulative and never shrinks, so $\sum\liab$ is bounded
-only by the connection count.
+$\liab=A-R$: the frames the receiver may still have to hold, held, in flight, or credited and
+not yet used.  Today $\liab\le W=16$ per lane, but every lane holds its whole window, so
+$\sum\liab$ is bounded only by the connection count: about 1.3\,GiB at $\Rg(3)$ edges.
 
 \begin{definition}[Reclaim]\label{def:reclaim}
-Two frames are added on the priority lane, both cumulative and idempotent:
+Every lane carries a generation $g$, and its credit frames name it: $\mathsf{Credit}(A,g)$.  Two
+frames are added, each on the lane it concerns, never charged against credit, and idempotent
+per generation:
 \begin{itemize}[leftmargin=1.2em]
-\item $\mathsf{Shrink}(\ell,L',g)$, receiver to sender: ``from generation $g$, your limit on
-lane $\ell$ is $L'$''.
-\item $\mathsf{Returned}(\ell,c,g)$, sender to receiver: ``I committed $c$ frames of $\ell$, and
-from now on I commit at most $\max(c,L')$''.
+\item $\mathsf{Shrink}(L',g)$, receiver to sender: ``from generation $g$, your limit is $L'$'',
+with $L'=\min(R+g_\ell,A)$.
+\item $\mathsf{Returned}(B,g)$, sender to receiver: ``I committed or reserved $c$ frames, and
+from now on I commit at most $B=\max(c,L')$''.
 \end{itemize}
-Until the $\mathsf{Returned}$ arrives, the receiver counts the lane's liability at its old
-$A$.  After it, the liability is $\max(c,L')-R$.
+The sender takes $B$ as its limit and ignores a credit of an older generation than its own.
+Until the
+$\mathsf{Returned}$ arrives, the receiver counts the lane's liability at its old $A$ and
+advertises nothing on it; after it, $A=B$.
 \end{definition}
 
 \begin{law}[Hard frame bound]\label{law:frames}
-Every lane has a floor $g_\ell$: $g_{\mathrm{prio}}=2$ for the priority lane (control, and the
-reclaim and demand frames), and $g_\ell=1$ for each of the three data lanes, so the first frame
-of a burst on any lane never waits a round trip.  A fresh generation grants only the floors.
+Every lane has a floor $g_\ell$ and a cap $W$: $g_\ell\le\liab(e,\ell)\le W=16$ always.  The
+priority lane's floor is its whole window, $g_{\mathrm{prio}}=W$, and it never borrows; each of
+the three data lanes has $g_\ell=1$, so the first frame of a burst on any lane never waits a
+round trip.
 \begin{itemize}[leftmargin=1.2em]
-\item A data lane with queued frames and no credit sends a one-frame $\mathsf{Wanted}(\ell)$ on
-the priority lane; a receiver that admits a lane's floor frame also grants it pooled credit at
-once, so a burst's second frame waits at most the round trip its first frame already took.
-\item The receiver grants a lane credit beyond its floor only from the node's frame pool:
-\[
-\textstyle\sum\liab\le B_F(s)=\Rg(s)\,(g_{\mathrm{prio}}+3g_{\mathrm{data}})+\Pool_F .
-\]
-\item Demands are served first come, first served.
-\item A lane that received no frame for $T_{\mathrm{idle}}$ while holding pooled credit is shrunk
-to its floor.
+\item \emph{Demand.}  The admission of a data lane's frame is its demand for pooled credit: a
+sender with queued frames always has its floor frame to send, or a frame the receiver holds,
+whose admission was the demand.  So no demand frame is needed.
+\item \emph{Pool.}  The receiver grants a data lane credit beyond its floor only from the
+node's frame pool, at most $W-g_\ell$ to one lane, and to one edge at most its fair claim of
+Law~\ref{law:edge}: with $p_e=\sum_\ell(\liab(e,\ell)-g_\ell)^+$ and $n\ge1$ the edges that hold
+pooled credit or wait for it,
+\begin{gather*}
+\textstyle p_e\le\lceil\Pool_F/n\rceil\ \text{when lent},\qquad\sum_e p_e\le\Pool_F,\\
+\textstyle\sum\liab\le B_F(s)=\Rg(s)\,(W+3)+\Pool_F .
+\end{gather*}
+\item Demands are served first come, first served, those of edges below their share
+$\lfloor\Pool_F/n\rfloor$ before those of edges between share and claim: a demand at its edge's
+claim waits without holding back a later one, and a lane lent more advertises it at once.
+\item \emph{Rebalance.}  While a demand of an edge holding less than its share
+$\lfloor\Pool_F/n\rfloor$ waits for a full pool, every edge holding more than its share is
+shrunk to it.  The shares fit the pool, $n\lfloor\Pool_F/n\rfloor\le\Pool_F$, as the claims need
+not; an edge at its share shrinks no other.
+\item \emph{Idle.}  A data lane that holds pooled credit and admitted no frame for
+$T_{\mathrm{idle}}$ is shrunk to its floor.
 \end{itemize}
 Parameters:
 \begin{itemize}[leftmargin=1.2em]
-\item $\Pool_F=256$ frames (16\,MiB, the soft limit of today);
-\item $T_{\mathrm{idle}}=$ two observed round trips;
-\item $B_F(3)=328\cdot5+256=1\,896$ frames, 118.5\,MiB, and $B_F(s)=B_F(3)+10(s-3)$ frames.
+\item $\Pool_F=256$ frames (16\,MiB, the soft limit it replaces);
+\item $T_{\mathrm{idle}}=1$\,s, on a tick the transport is driven by: the wall clock in a
+backend, the virtual clock in the deterministic simulation;
+\item $B_F(3)=328\cdot19+256=6\,488$ frames, about 405\,MiB at 64\,KiB, and
+$B_F(s)=B_F(3)+38(s-3)$ frames.
 \end{itemize}
-This is independent of how many connections are open.  Data-lane floors of $0$ would lower it to
-57\,MiB, at the cost of one round trip before the first frame on any idle lane: on an onion loop
-(\issue{843}) that is up to one round trip per hop whose lane went idle, on circuit setup and on
-the first cell after a pause.  We keep the floor at $1$, and the onion data plane pays nothing.
+This is independent of how many connections are open.
 \end{law}
+
+\textbf{Why $g_{\mathrm{prio}}=W$.}  The most priority-lane frames one edge had outstanding
+(held, in flight, or credited and unused) were measured over the dummy suite, with the window
+lifted and credit returned per frame: at most $10$ under asynchronous delivery; $16$ in every
+sync-storm case; $17$ under a controlled scheduler that holds deliveries on purpose, an
+artificial round trip.  Control above $16$ already waits for credit today, and still does; no
+smaller floor covers the bursts.  The frame count prices a control frame at the 64\,KiB a data
+frame may take: byte-denominated credit (\issue{937}) removes that artifact, and with it most
+of $\Rg(s)\,W$.
+
+\textbf{The cost of a fixed $T_{\mathrm{idle}}$.}  The transport has no round-trip estimate,
+so $T_{\mathrm{idle}}$ is a constant.  On a link whose round trip exceeds 1\,s, a lane that
+pauses for one round trip is shrunk, and its next burst waits one round trip for pooled credit
+again; no frame is refused.
 
 \begin{proposition}[Frames]\label{prop:frames}
 Under Law~\ref{law:frames}, for an honest sender:
 \begin{enumerate}[leftmargin=1.5em]
-\item $\sum\liab\le B_F$ in every interleaving, with shrink, return and demand frames reordered
-and duplicated;
+\item $\sum\liab\le B_F$ and $g_\ell\le\liab(e,\ell)\le W$ in every interleaving, with credit,
+shrink and return frames reordered and duplicated;
 \item no honest frame is refused: a frame sent under credit is within the liability counted for
 it;
 \item a lane with queued frames is never blocked forever while the receiver keeps consuming
 (progress);
 \item an idle lane holds at most its floor after $T_{\mathrm{idle}}$ plus one round trip, so it
 starves no active lane, and its first frame after the pause is sent at once;
+\item \emph{throughput}: an edge whose data lanes have frames queued holds, within one round
+trip of its demand, or two when the pool must be rebalanced first, at least
+$\min\bigl(3(W-1),\lfloor\Pool_F/n\rfloor\bigr)$ pooled frames besides its floors, $n\le\Rg(s)$ the
+edges holding or waiting for pooled credit, however busy the others are;
 \item control traffic never waits for the pool.
 \end{enumerate}
 \end{proposition}
 \begin{proof}[Proof sketch]
 (1)~Pooled credit is granted only when the counted liability fits, and the counted liability
 never falls below the true one: a shrink takes effect only once its $\mathsf{Returned}$ confirms
-what was committed.
-(2)~A frame committed under $A$ is counted until released.
-(3)~A blocked lane has a $\mathsf{Wanted}$ queued.  The pool refills as frames are released and
-idle lanes are shrunk, and service is first come, first served.
-(4)~The shrink frees the lane's pooled credit.
-(5)~The priority floor is reserved per edge.
-These are the model-checking obligations of the implementation, over the existing credit model
-with the new frames.
+what was committed, and a credit of an older generation is ignored.
+(2)~A frame committed under $A$ is counted until released, and $B\ge c$.
+(3)~A blocked lane's last admission is a pending demand.  The pool refills as frames are
+released and idle lanes are shrunk, and service is first come, first served.
+(4)~The shrink frees the lane's pooled credit, and its floor stays.
+(5)~A waiting edge below its share is lent from what is free; when nothing is, every edge above
+its share is shrunk to it, and the frames above the shares return within one round trip, which
+leaves the waiting edge its share, since $\sum_{e'\ne e}\min(p_{e'},\lfloor\Pool_F/n\rfloor)\le
+(n-1)\lfloor\Pool_F/n\rfloor\le\Pool_F-\lfloor\Pool_F/n\rfloor$.
+(6)~The priority lane's floor is its whole window, reserved per edge.
+These are the model-checking obligations of the implementation, over the credit model with
+shrink and return frames.
 \end{proof}
 
-This is a wire change: a total cutover, with no versioning before 1.0.  Byte-denominated credit
-(\issue{937}) composes with it, by counting $\liab$ in bytes, and is not required here.
+The guarantee~(5) is the price of a hard bound: before \issue{934} every lane had $W$ frames
+per round trip whatever the others did.  Now $n$ busy edges share $\Pool_F$, so each keeps its
+whole window on all three data lanes while $n\le5$ ($3(W-1)=45\le\lfloor256/5\rfloor=51$), and
+the floors plus $\lfloor256/n\rfloor$ pooled frames per round trip beyond; past 256 busy edges,
+the floors alone.  Without the
+claim, six busy edges would hold the whole pool, and every other data lane would be held to its
+floor, one frame per round trip, for as long as they keep sending.
+
+\textbf{Why the model shrinks once.}  The model of Proposition~\ref{prop:frames} lets a lane be
+shrunk once per path, which keeps its state space finite.  One is enough: the transitions read
+a generation only to compare it with another, so a state of generation $g$ whose older
+signals have all been ignored or delivered is, renamed by $g\mapsto0$, a state the model
+reaches with no shrink; and a signal of an older generation is a no-op at either end.  So a
+second shrink starts from a state the first already covers, and one shrink with credits of the
+older generation still in flight, delivered, duplicated and reordered across it, covers them
+all.
+
+\textbf{Composition.}  Received frames and the mailbox are disjoint memories: a frame counts in
+$B_F$ until it is handed to the mailbox, which happens only once its mailbox charge, and for a
+first chunk its item of $O$ (Def.~\ref{def:open}), is granted.  So inbound memory is at most
+$B_F\cdot64\,\mathrm{KiB}+M$, and neither bound consumes the other.  A first chunk that waits
+for $O$ holds its frame and its credit: backpressure, counted in $B_F$, whose pooled part the
+idle shrink returns.  The per-lane cap keeps Proposition~\ref{prop:noref}'s grace $Wd_0$ sound
+under pooled credit.
+
+This is a wire change: a total cutover, which wire version 2 names (\issue{1104}).
 
 \section{Reassembled messages (\issue{932})}\label{sec:reassembly}
 
+A message of $\mathit{len}$ bytes travels as chunks $[i,n]$ on one lane $(e,\ell)$, its
+\emph{carrier}, which is its class's lane: the sender cuts chunks of equal length $d_0$, the
+last shorter, and keeps them contiguous on the carrier.  Let $r(x)=2x$ be the retained bytes of
+$x$ received bytes (the buffer and the completed copy), $W$ the lane window
+(Law~\ref{law:frames}), $\mathit{TTL}$ the largest time to live a chunk may carry, and
+\[
+\rho=\frac{\texttt{max\_message\_bytes}}{\mathit{TTL}}
+=\frac{60\,\mathrm{MB}}{100\,\mathrm{min}}=10\ \mathrm{B/ms}.
+\]
+
+\begin{definition}[Open messages]\label{def:open}
+The table $O$ holds, in bytes, the reservation $r(n\,d_0)$ of every message whose first chunk
+was admitted and that has neither completed nor expired, charged to the slot of the edge that
+delivered that chunk (Law~\ref{law:edge}, an item being a byte), with
+$f_O=256$\,KiB, $\Pool_O=128$\,MiB, $L_O=0$ and no dedicated share:
+\[
+B_O(s)=\Rg(s)\,f_O+\Pool_O,\qquad B_O(3)=210\ \mathrm{MiB},
+\]
+within the mailbox's $M=256$\,MiB for $\Rg(s)\le512$, that is $s\le94$.  An item of $O$ is
+a byte of the mailbox too: $O$ bounds what open messages take of $M$, and $M-B_O$ stays for
+every other arrival.
+\end{definition}
+
+\begin{definition}[Credit-time]\label{def:credittime}
+Let an open message be sampled at instants $t_0<t_1<\dots$: its first chunk's admission, each
+later chunk's, and the receiver's sweeps, at most $\Delta$ apart.  At $t_k$ let $c_k=A-N$ be the
+credit on the carrier that the sender holds unused: advertised, $A$, and not yet used by an
+arrival, $N$.  Its credit-time advances over $[t_k,t_{k+1})$ by
+\[
+\hat\tau\mathrel{+}=\min\!\bigl(t_{k+1}-t_k,\;c_k\,d_0/\rho\bigr),
+\]
+the time its unused credit could have taken to send at $\rho$.  Credit the receiver holds back,
+by holding the frames that took it, batching its release, or not lending it pooled credit
+(Law~\ref{law:frames}), is not in $c_k$, so $\hat\tau$ pauses while the receiver throttles the
+sender.
+Read at the receiver, $c_k$ also counts credit still in transit to the sender, and frames the
+sender already spent it on that are still in flight; neither is the sender's doing, and the rate
+floor's grace covers both (Prop.~\ref{prop:noref}).
+Let $b$ be the message's bytes received.
+\end{definition}
+
 \begin{law}[One charge per message]\label{law:onecharge}
-The first chunk of a message, with header $[0,n]$ and data length $d_0$, reserves
-$m=n\cdot d_0$ (validated $\le$ \texttt{max\_message\_bytes}) once, on the inbound mailbox
-ledger: the edge's budget, the lane's share and the shared pool.  It takes that reservation as
-an \emph{arrival}, so it waits in resource order and is never refused for capacity.
+The first chunk $[0,n]$, of length $d_0$, reserves $m=r(n\,d_0)$ once, as an \emph{arrival}
+that waits in resource order and is never refused for capacity:
 \begin{itemize}[leftmargin=1.2em]
-\item Later chunks of the message must have length $\le d_0$, and they charge nothing.
-\item The reassembly buffer and the completed message live inside that one reservation.
-\item The mailbox transition at completion is a move, not a new charge.
-\item The reservation is released when the message's processing completes, or when the
-reassembly expires.
+\item on the mailbox ledger, on the edge's budget, on the share of its carrier's class lane,
+and on the shared pool; and
+\item in $O$, under Law~\ref{law:edge}: within the slot's floor, or else within the pool and
+its fair claim, as a whole.
+\end{itemize}
+It is valid only while $(n-1)\,d_0<\texttt{max\_message\_bytes}$: an honest message of at most
+that many bytes has $n=\lceil\mathit{len}/d_0\rceil$, so $n\,d_0$ passes its length by less than
+one chunk.
+\begin{itemize}[leftmargin=1.2em]
+\item Later chunks must have length $\le d_0$, and they charge nothing: they wait only behind
+the earlier arrivals of their own stream, which is ordered per peer, lane and carrier, so behind
+their own message's chunks alone.
+\item The reassembly buffer and the completed message live inside the one reservation.  At
+completion the message leaves $O$ and its mailbox reservation moves with it into dispatch, on
+its class lane: a move, not a new charge.
+\item \emph{Rate floor.}  The message expires, attributably, once
+$b<\rho\,\hat\tau-W d_0$.  It also expires at its own $\mathit{ts}+\mathit{ttl}$.  Either
+expiry releases the reservation.
 \end{itemize}
 The separate reassembly byte budget and its refusal ($\mathsf{Rejected}(\mathsf{Capacity})$)
 are retired.  The id and slot caps stay, as validity bounds.
 \end{law}
 
 \begin{proposition}[No honest message refused]\label{prop:noref}
-Under Law~\ref{law:onecharge}, no honest chunked message is refused or dropped for capacity, and
-no wait can deadlock.
+Under Law~\ref{law:onecharge}, no honest chunked message is refused or dropped for capacity, no
+wait can deadlock, and a sender whose carrier delivers at least $\rho$ while it holds credit is
+never expired by the rate floor.
 \end{proposition}
 \begin{proof}
 The only charge is the first chunk's, which waits as an arrival before it holds a lane ticket.
 The ordering laws of \texttt{ResourceOrderedQueue} cover it, and the capacity it waits for is
-released by events that do not wait on it.  The transition that used to re-charge, and could
-only be refused, now moves bytes already reserved.
+released by events that do not wait on it: a later chunk waits for no capacity, and its stream
+holds no other message's first chunk, so no message's completion waits on capacity another
+message holds.  The transition that used to re-charge, and could only be refused, now moves
+bytes already reserved.
+
+Rate floor: over $[t_k,t_{k+1})$ the sender holds $c_k$ unused credits and a backlog (its
+message is contiguous on the carrier), so it delivers $\min(c_k d_0,\rho(t_{k+1}-t_k))$ in it,
+which is what $\hat\tau$ advanced, times $\rho$, once its credit has reached it.  Between the two,
+$\rho\hat\tau$ runs ahead of $b$ only by the lane's outstanding liability: the frames the
+receiver still holds, the frames in flight to it, and the credit in transit to the sender, each
+counted in $c_k$ or missing from $b$.  That liability is at most $W$ frames, the lane window
+(Sec.~\ref{sec:frames}), however long the round trip.  So $b\ge\rho\hat\tau-W d_0$ throughout:
+the grace covers every outstanding credit, and a high-latency honest link is never expired.
 \end{proof}
 
-The cost is direction~1 of \issue{932}: a message holds its full size for its whole reassembly.
-This is bounded by the edge's budget and by the reassembly expiry, so a peer that announces and
-then stalls holds only its own budget.
+\begin{proposition}[Open messages]\label{prop:open}
+Let $G=(W+1)\,d_0/\rho+\Delta$, at most $107$\,s plus one sweep for $d_0\le64$\,KiB.  Under
+Law~\ref{law:onecharge}:
+\begin{enumerate}[leftmargin=1.5em]
+\item a first chunk through slot $\kappa$ with $\use_\kappa+m\le f_O$, and every other arrival,
+never waits for $O$ behind another edge, however many open messages other edges hold; within
+its own slot, first chunks take the floor first come first served
+(Def.~\ref{def:resorder}); open messages hold at most $B_O$ of the mailbox;
+\item an honest message that waits for the pool of $O$ waits at most $G$ beyond the honest
+messages ahead of it: an open message that sends nothing is expired within $G$, and a slot's
+next first chunk queues in resource order behind the claim already waiting;
+\item past $G$, every open message has $\rho\,\hat\tau\le b+W d_0$: the credit-time for which it
+holds its reservation is paid for by bytes its sender streamed.
+\end{enumerate}
+\end{proposition}
+\begin{proof}
+(1)~Theorem~\ref{theorem:isolation}(2) for $O$; an arrival that is not a first chunk takes no
+item of $O$.  (2)~A sender that holds its credit and sends nothing has $\hat\tau$ grow at the
+rate of time and $b=d_0$, so it meets $d_0<\rho\hat\tau-Wd_0$ after $(W+1)d_0/\rho$, and the next
+sweep expires it; resource order serves the waiting claim before a later one.
+(3)~The rate floor.
+\end{proof}
+
+\textbf{Residual.}  The receiver cannot tell a sender that withholds a message from one whose
+scheduler is busy with higher-priority classes between chunks: both hold credit and send
+nothing.  So a large message on a link that leaves its class less than $\rho$ is expired.  This
+is the cost of the rate floor; $\rho=\texttt{max\_message\_bytes}/\mathit{TTL}$ is the least
+rate at which holding a reservation is no cheaper than before \issue{932}, when it cost the
+bytes held.  A message so expired is the sender's to send again.
 
 \section{Hot paths (\issue{938})}\label{sec:hot}
 
 These are performance obligations, kept apart from the security laws above.
 
+\begin{definition}[Resource order]\label{def:resorder}
+A request $w$ has a stream $s(w)$, a footprint $F(w)$, the resources it would draw on now, and
+reliefs $\Rg(w)=\{(\rho,D)\}$: a resource $\rho\in F(w)$ whose release may shed $D\subseteq
+F(w)$.  The mailbox has $(\mathit{Lane}(\ell),\{\mathit{Shared}\})$ while the reservation of
+$\ell$ does not cover $w$, and $(\mathit{Floor}(\kappa),\{\mathit{OpenPool}\})$ while a first
+chunk is beyond the floor of its slot $\kappa$ but within it once $\kappa$ holds nothing.  A
+waiter refused by the ledger records its refusal $R(w)$, one budget's resources.  With
+$B(w)$ the blockers of $w$ below,
+\[
+\begin{aligned}
+B(w)&=\{s(w)\mid\exists v<w.\;s(v)=s(w)\}\cup\{r\in F(w)\mid\exists v<w.\;r\in H(v)\},\\
+H(v)&=\begin{cases}
+R(v) & v\ \text{refused},\\
+\{\rho\mid(\rho,D)\in\Rg(v)\} & B(v)\ne\emptyset,\
+  B(v)\subseteq\textstyle\bigcup_{(\rho,D)\in\Rg(v)}\{\rho\}\cup D,\\
+\emptyset & \text{otherwise},
+\end{cases}
+\end{aligned}
+\]
+and $w$ waits iff $B(w)\ne\emptyset$, else it is attempted.  A waiter blocked only for lack of
+room that a relief may make \emph{holds} the relief; one blocked by its stream or by its own
+budget holds nothing.
+\end{definition}
+
+\begin{proposition}[Order on reservations]\label{prop:resorder}
+Under Def.~\ref{def:resorder}:
+\begin{enumerate}[leftmargin=1.5em]
+\item a frame within its lane's reservation never waits behind a borrower of $\mathit{Shared}$,
+nor behind another peer's budget;
+\item a lane's reservation, and a slot's floor in $O$, are served first come first served: a
+later, smaller request does not pass an earlier one waiting for the room on them.
+\end{enumerate}
+\end{proposition}
+\begin{proof}
+(1)~Within its reservation, $\mathit{Shared}\notin F(w)$; a refusal by the node budget is
+$\{\mathit{Lane}(\ell'),\mathit{Shared}\}$, met only on $\ell'=\ell$, which is a borrower of
+$\ell$'s reservation room, not of $\mathit{Shared}$; another peer's budget
+$\mathit{Peer}(p')\notin F(w)$, and a waiter blocked by it holds nothing.  (2)~A waiter
+holding $\mathit{Lane}(\ell)$ blocks every later $w$ with $\mathit{Lane}(\ell)\in F(w)$, so
+every later request of $\ell$; likewise $\mathit{Floor}(\kappa)$.
+\end{proof}
+
+Item~2 is a change: before \issue{938}, a blocked waiter held nothing, so smaller frames could
+take a reservation's room ahead of a larger one indefinitely.  It is the first law of resource
+order, no overtaking on an exhausted resource, applied to the room a reservation frees.
+
 \begin{obligation}[Admission complexity]\label{ob:complexity}
 \begin{itemize}[leftmargin=1.2em]
-\item Each arrival, release and cancel in \texttt{ResourceOrderedQueue} costs
-$O(\log n)$ in the waiters: waiters are indexed by resource, and one ledger snapshot is taken
-per pass.
-\item Each received frame takes $O(1)$ lock acquisitions, and none of them on a node-global
-mutex: the node load is an atomic counter.
-\item The node load has hysteresis: advertisements are deferred above $H_{\mathrm{hi}}$ and
-resume below $H_{\mathrm{lo}}=H_{\mathrm{hi}}/2$.  Deferred links are kept in a set, so a
-release at the limit wakes no one, and crossing $H_{\mathrm{lo}}$ wakes each deferred link once.
+\item An arrival, release or cancel in \texttt{ResourceOrderedQueue} costs
+$O((g+k+r)\log n)$ in the $n$ waiters, where $g$ is the requests it grants and $r$ the
+resources it names.  A blocked waiter is parked under one blocker and its holds, a refused one
+under its refusal.  An event scans each freed resource's parked waiters in arrival order.  It
+stops at the first that parks under it again, since every later one is blocked behind that one;
+an invariant, one refusal per resource, keeps this rule exact.  The term $k$ counts the waiters
+a scan judges and parks under a different blocker: a resource the event freed was the blocker
+they were indexed by.  By the stop rule, a scan judges at most one waiter beyond its grants and
+its $k$.  Each such move is charged to the freeing of the blocker it leaves, at most once per
+freeing.
+\item A received frame takes its link's lock once to be admitted and once to be released.  It
+takes the node pool's lock only while its data lane wants pooled credit or its charge changes,
+at most once per lend, shrink or return of the lane (Law~\ref{law:frames}), never per frame
+in steady state.
+\item The pool's service costs $O(\log n)$ in the $n$ edges per demand it serves: the
+claimants are counted incrementally, and demands are indexed, so a service visits only the
+demands it can serve.
 \item Each peer runs one admission watcher, not one task per send.
 \item Unread admissions are indexed by peer.
 \end{itemize}
-They are verified against the sync-storm matrix, before and after each change.
+They are verified on the sync-storm matrix by operation counts, not by wall time, which the
+deterministic simulation does not model: lock acquisitions per received frame, waiters visited
+per queue event, demands visited per service, tasks spawned per send, and inbox items scanned
+per withdrawal, counted by test-only counters on the same seeds before and after, and each
+bounded by a regression assertion at the matrix's largest size.
 \end{obligation}
 
-\section{The barrier exemption (\issue{927})}\label{sec:barrier}
+\section{The reassembly barrier (\issue{927})}\label{sec:barrier}
 
-\begin{lemma}[One frame per lane]\label{lem:oneframe}
-If every path that hands a frame to core does so through its lane's FIFO, with at most one frame
-in hand-over per lane, then a lane that waits behind the reassembly barrier waits at most one
-reassembly frame's service, $\le2$\,s.  That is below the control deadline of 15\,s.
-\end{lemma}
+The inbound actor of a connection has one lane per category $\kappa\in K=\{\mathit{ctl},
+\mathit{sto},\mathit{e2e},\mathit{app}\}$ and a reassembly lane $\rho$, each serving one event
+at a time.  Events take sequence numbers $\mathit{seq}$ in ticket order.  A reassembled message
+keeps its final chunk's sequence and enters the lane of its category.  Before \issue{927} a data
+lane waited behind every earlier unfinished reassembly, whatever its category, and the control
+lane waited behind none: the \emph{control exemption}.
 
-The predicate \texttt{lane\_waits\_for\_reassembly} is ``the lane carries logical data''.
-Chunks travel only on their message's lane (the lane-mismatch refusal), and control messages
-are never chunked, so the predicate is exactly ``the lane can carry chunks''.  In that form it
-is the barrier's definition, not an exemption.
+Two facts of the code refute the old argument (``at most one frame in hand-over per lane, and
+control is never chunked'').
+\begin{enumerate}[leftmargin=1.5em]
+\item \emph{Pacing.}  An arrived frame is submitted awaited: its carrier's drainer hands over the
+next frame only once this one completed, and a final chunk's completion moves onto its
+reassembled message.  So on the paced path each carrier has at most one event in the actor.
+Frames released from the pre-admission hold are not paced: up to the peer's event share,
+$32$, enter at once, at admission.  Behind such a burst a control frame without the exemption
+would wait for up to $32$ reassembly frames.
+\item \emph{Chunked control.}  A payload is chunked whenever it exceeds the peer's advertised
+\texttt{max-message-size}, which has no floor (\issue{1130}), so control messages carrying an
+SDP can arrive chunked, on the control carrier.  Under the exemption, a control frame released
+after them in the same burst ran before their reassembled message: control reordered.
+\end{enumerate}
 
-\textbf{Decision.}  Keep the predicate, renamed for what it is.  Remove the ablation toggle
-\texttt{ProtectionLayer::BarrierControlExemption} and its legacy feedback-loop witness.  This is
-a subtraction, under two obligations checked in the implementation:
-\begin{itemize}[leftmargin=1.2em]
-\item every hand-off path obeys Lemma~\ref{lem:oneframe}, the pre-admission drain and the
-detached submissions included;
-\item no control message can exceed one frame.  This is asserted at compile time from the
-widest control message.
-\end{itemize}
+\begin{definition}[Per-category barrier]\label{def:barrier}
+The category $\kappa(e)$ of an event is its lane's for a whole frame, and its carrier's for a
+chunk; a chunk with no carrier, which only a test hands in, has $\kappa(e)=\top$.  Let $U$ be
+the reassembly events ticketed and not yet completed.  A lane $\kappa$ dispatches its front $f$
+iff
+\[
+\neg\exists u\in U.\;\mathit{seq}(u)<\mathit{seq}(f)\wedge\kappa(u)\in\{\kappa,\top\}.
+\]
+\end{definition}
+
+\begin{proposition}[Order per category]\label{prop:catorder}
+Under Def.~\ref{def:barrier}, the messages of one category are processed in sequence order,
+whole or chunked.  A frame of category $\kappa$ waits only behind unfinished reassembly of
+$\kappa$: at most one frame on the paced path, and at most the $\kappa$-chunks of one released
+burst.
+\end{proposition}
+\begin{proof}
+A lane serves in sequence order.  A reassembled message $m$ of $\kappa$ has the sequence of its
+final chunk $u$; every $\kappa$-frame $f$ with $\mathit{seq}(f)>\mathit{seq}(u)$ waits while
+$u\in U$, and $u$ leaves $U$ in the step that inserts $m$ into lane $\kappa$ at
+$\mathit{seq}(u)$, ahead of $f$.  The lane-mismatch refusal makes $m$'s category its carrier's,
+so $\kappa(u)$ is $m$'s lane.  The bounds are pacing's and the hold's.
+\end{proof}
+
+\textbf{Order is guaranteed per category only, and no protocol relies on cross-category
+order.}  Categories travel on separate data channels (\issue{906}), whose arrival order the
+transport does not relate, and the actor serves its lanes concurrently, so whole frames of two
+categories were never ordered; the old barrier ordered data only behind earlier reassembly.
+Every request and its report, and every exchange whose steps must be ordered, lies in one
+category:
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}p{0.36\columnwidth}p{0.56\columnwidth}@{}}
+\toprule
+Pair & Why order across categories is not needed\\
+\midrule
+storage sync and its report (\textit{sto}) against topology control (\textit{ctl}) & the
+sync names its signed destination and is forwarded by the current topology when not ours;
+persistence and acks are keyed by entry\\
+relay custody, holds and their acks against inbox fetches & all \textit{sto}; relayed mail
+and a direct \texttt{CustomMessage} take different paths and were never ordered\\
+link control against payloads & handled before the actor; keyed by delegation digest, with
+lease durations; an \texttt{Unknown} means the referencing frame was dropped and is resent\\
+E2E handshake and stream against custom messages & the handshake and stream are all
+\textit{e2e}; a custom message needs no E2E session\\
+DHT control requests and reports; storage requests and reports & each pair within
+\textit{ctl}, or within \textit{sto}\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Decision.}  Replace the node-wide barrier and its hand-off barrier by
+Def.~\ref{def:barrier}.  The control exemption is gone as a special case: control waits only
+behind chunked control, which a peer causes only by advertising a limit below its control
+messages.  A data category no longer waits behind another category's reassembly.  The ablation
+toggle \texttt{ProtectionLayer::BarrierControlExemption} and its legacy feedback-loop witness
+are removed; the storm witnesses that a control probe behind another category's reassembly
+backlog is not blocked, and a regression test that a chunked control message released from
+the hold keeps its place among later control.
 
 \section{Summary of bounds}\label{sec:summary}
 
@@ -516,9 +827,10 @@ widest control message.
 \toprule
 Table & Bound & At the bound\\
 \midrule
-frames held & node $B_F(s)$; lane floor & sender waits for credit (backpressure)\\
+frames held & node $B_F(s)$; lane floor and cap $W$ & sender waits for credit (backpressure)\\
 mailbox bytes & edge budget, lane share, pool & arrival waits (backpressure)\\
-reassembly & inside the mailbox reservation & first chunk waits (backpressure)\\
+open messages & $\Rg(s) f_O+\Pool_O$ by slot, fair pool, in the mailbox & first chunk waits
+(backpressure); expired below $\rho$\\
 replay streams & $\Rg(s) f+\Pool+L+M$ by slot, fair pool & new stream refused, $\le H+2\sigma$
 ($H+H_I+3\sigma$ application)\\
 removal store & $\Rg(s) f+\Pool+L+K$ by slot, fair pool & write refused, unacked\\
@@ -546,13 +858,14 @@ PR & Issue & Law\\
 3 & \issue{934} & Law~\ref{law:frames} (wire cutover)\\
 4 & \issue{938} & Obligation~\ref{ob:complexity}, measured\\
 5 & \issue{927} & Sec.~\ref{sec:barrier} (subtraction)\\
+6 & \issue{1094} & Def.~\ref{def:principals}; Prop.~\ref{prop:rotation}\\
 \bottomrule
 \end{tabular}
 \end{center}
 
 PR~1 adds the slot-accounting primitive that PR~2 reuses for the mailbox, and the relay
 element horizon of Definition~\ref{def:relayhorizon}.  PR~4 rewrites the
-queue that PR~2 changes, so it follows PR~2.  PR~5 needs nothing from the others.
+queue that PR~2 changes, so it follows PR~2.  PR~5 and PR~6 need nothing from the others.
 
 \textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}:
 \begin{itemize}[leftmargin=1.2em]

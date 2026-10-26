@@ -15,6 +15,7 @@ use std::sync::MutexGuard;
 use std::time::Duration;
 
 use rings_transport::connections::dummy_controlled;
+use rings_transport::core::pool::ChannelLane;
 use tokio::sync::Notify;
 
 use crate::swarm::transport::PEER_LIVENESS_PERIOD_MS;
@@ -34,9 +35,8 @@ pub(crate) use delivery::ScheduledDeliveryClass;
 pub(crate) use observations::observe_inbound_capacity;
 pub(crate) use observations::observe_outbound_global_capacity;
 pub(crate) use observations::observe_outbound_peer_capacity;
-pub(crate) use observations::observe_reassembly_capacity;
-pub(crate) use observations::record_barrier_control_blocked;
-pub(crate) use observations::record_barrier_control_completion;
+pub(crate) use observations::observe_reassembly_pending;
+pub(crate) use observations::record_control_waited_for_reassembly;
 pub(crate) use observations::record_outbound_submission;
 pub(crate) use observations::record_protection_violation;
 pub(crate) use observations::record_reassembly_advance;
@@ -48,10 +48,8 @@ pub(crate) use observations::record_storage_progress;
 pub(crate) use observations::record_storage_progress_between_entries;
 pub(crate) use observations::signal_storage_progress_probe;
 pub(crate) use observations::storage_progress_epoch;
-use observations::ControlCompletionWitness;
 pub(crate) use observations::ProductionCapacityObservations;
 pub(crate) use observations::ProductionTraceObservation;
-pub(crate) use service::reassembly_frame_service_ms;
 pub(crate) use service::wait_reassembly_service;
 pub(crate) use spawn::spawn_storage_progress_observer;
 
@@ -72,7 +70,6 @@ static SIMULATION_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) struct ProtectionProfile {
     class_reservations: bool,
     bounded_control_burst: bool,
-    barrier_control_exemption: bool,
     per_entry_yield: bool,
 }
 
@@ -81,7 +78,6 @@ impl ProtectionProfile {
     pub(crate) const ALL_ENABLED: Self = Self {
         class_reservations: true,
         bounded_control_burst: true,
-        barrier_control_exemption: true,
         per_entry_yield: true,
     };
 
@@ -89,7 +85,6 @@ impl ProtectionProfile {
     pub(crate) const LEGACY_ALL_DISABLED: Self = Self {
         class_reservations: false,
         bounded_control_burst: false,
-        barrier_control_exemption: false,
         per_entry_yield: false,
     };
 
@@ -105,14 +100,6 @@ impl ProtectionProfile {
     pub(crate) const fn without_bounded_control_burst() -> Self {
         Self {
             bounded_control_burst: false,
-            ..Self::ALL_ENABLED
-        }
-    }
-
-    /// Return a profile with only the barrier control exemption disabled.
-    pub(crate) const fn without_barrier_control_exemption() -> Self {
-        Self {
-            barrier_control_exemption: false,
             ..Self::ALL_ENABLED
         }
     }
@@ -133,10 +120,6 @@ impl ProtectionProfile {
         self.bounded_control_burst
     }
 
-    pub(crate) const fn barrier_control_exemption(self) -> bool {
-        self.barrier_control_exemption
-    }
-
     pub(crate) const fn per_entry_yield(self) -> bool {
         self.per_entry_yield
     }
@@ -146,15 +129,13 @@ impl ProtectionProfile {
         match (
             self.class_reservations,
             self.bounded_control_burst,
-            self.barrier_control_exemption,
             self.per_entry_yield,
         ) {
-            (true, true, true, true) => "all-enabled",
-            (false, true, true, true) => "no-class-reservations",
-            (true, false, true, true) => "no-bounded-control-burst",
-            (true, true, false, true) => "no-barrier-control-exemption",
-            (true, true, true, false) => "no-per-entry-yield",
-            (false, false, false, false) => "legacy-all-disabled",
+            (true, true, true) => "all-enabled",
+            (false, true, true) => "no-class-reservations",
+            (true, false, true) => "no-bounded-control-burst",
+            (true, true, false) => "no-per-entry-yield",
+            (false, false, false) => "legacy-all-disabled",
             _ => "custom",
         }
     }
@@ -167,9 +148,6 @@ impl ProtectionProfile {
         }
         if !self.bounded_control_burst {
             layers.insert(ProtectionLayer::BoundedControlBurst);
-        }
-        if !self.barrier_control_exemption {
-            layers.insert(ProtectionLayer::BarrierControlExemption);
         }
         if !self.per_entry_yield {
             layers.insert(ProtectionLayer::PerEntryYield);
@@ -185,8 +163,6 @@ pub(crate) enum ProtectionLayer {
     ClassReservations,
     /// Sustained control traffic may indefinitely preempt a runnable lower class.
     BoundedControlBurst,
-    /// A control frame may wait behind a chunk-reassembly handoff.
-    BarrierControlExemption,
     /// A storage batch may continue to its next entry without yielding the actor.
     PerEntryYield,
 }
@@ -203,7 +179,13 @@ struct SimulationRuntimeState {
     reassembly_service_enabled: bool,
     delivery_cache: BTreeMap<u64, ScheduledDelivery>,
     delivery_order: BTreeSet<u64>,
-    non_control_delivery_order: BTreeSet<u64>,
+    /// The pending deliveries the lane law lets a schedule select (see
+    /// `delivery::refresh_delivery_cache`).
+    selectable_order: BTreeSet<u64>,
+    /// The selectable deliveries that are not control.
+    non_control_selectable_order: BTreeSet<u64>,
+    /// Each connection lane's pending messages, oldest first.
+    lane_queues: BTreeMap<(String, ChannelLane), BTreeSet<u64>>,
     unreported_deliveries: BTreeSet<u64>,
     last_inspected_delivery: Option<u64>,
     outbound_submission_ms: BTreeMap<uuid::Uuid, u64>,
@@ -230,7 +212,9 @@ impl SimulationRuntimeState {
             reassembly_service_enabled: false,
             delivery_cache: BTreeMap::new(),
             delivery_order: BTreeSet::new(),
-            non_control_delivery_order: BTreeSet::new(),
+            selectable_order: BTreeSet::new(),
+            non_control_selectable_order: BTreeSet::new(),
+            lane_queues: BTreeMap::new(),
             unreported_deliveries: BTreeSet::new(),
             last_inspected_delivery: None,
             outbound_submission_ms: BTreeMap::new(),
@@ -284,15 +268,15 @@ impl SimulationRuntimeState {
     }
 
     fn choose_delivery_sequence(&mut self) -> Result<u64, SimulationRuntimeError> {
-        let Some(max_sequence) = self.delivery_order.last().copied() else {
+        let Some(max_sequence) = self.selectable_order.last().copied() else {
             return Err(SimulationRuntimeError::EmptyDeliveryQueue);
         };
         self.schedule_rng_state = dummy_controlled::mix_seed(self.schedule_rng_state);
         let ticket = self.schedule_rng_state % max_sequence.saturating_add(1);
-        self.delivery_order
+        self.selectable_order
             .range(ticket..)
             .next()
-            .or_else(|| self.delivery_order.first())
+            .or_else(|| self.selectable_order.first())
             .copied()
             .ok_or(SimulationRuntimeError::EmptyDeliveryQueue)
     }
@@ -303,8 +287,7 @@ impl SimulationRuntimeState {
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct ProtectionObservations {
     violations: BTreeSet<ProtectionLayer>,
-    barrier_control_blocked: bool,
-    barrier_control_completion: Option<ControlCompletionWitness>,
+    control_waited_for_reassembly: bool,
     storage_progress_between_entries: bool,
 }
 
@@ -314,34 +297,18 @@ impl ProtectionObservations {
         &self.violations
     }
 
-    /// Whether a production reassembly ordering barrier rejected control.
-    pub(crate) const fn barrier_control_blocked(&self) -> bool {
-        self.barrier_control_blocked
+    /// Whether the production reassembly barrier held a control frame back, which only an
+    /// earlier unfinished reassembly of control may do (#927).
+    pub(crate) const fn control_waited_for_reassembly(&self) -> bool {
+        self.control_waited_for_reassembly
     }
 
     fn record(&mut self, layer: ProtectionLayer) {
         self.violations.insert(layer);
     }
 
-    fn record_barrier_blocked(&mut self) {
-        self.barrier_control_blocked = true;
-        if self
-            .barrier_control_completion
-            .is_some_and(|witness| witness.observed_virtual_ms > witness.deadline_virtual_ms)
-        {
-            self.record(ProtectionLayer::BarrierControlExemption);
-        }
-    }
-
-    /// Record the completion of a control frame that waited behind a barrier: every completion
-    /// is recorded, and one observed past its deadline violates the barrier control exemption
-    /// once the barrier is known to have blocked it.
-    fn record_barrier_control_completion(&mut self, witness: ControlCompletionWitness) {
-        self.barrier_control_completion = Some(witness);
-        if self.barrier_control_blocked && witness.observed_virtual_ms > witness.deadline_virtual_ms
-        {
-            self.record(ProtectionLayer::BarrierControlExemption);
-        }
+    fn record_control_waited_for_reassembly(&mut self) {
+        self.control_waited_for_reassembly = true;
     }
 
     fn record_storage_progress_between_entries(&mut self) {
@@ -494,17 +461,17 @@ impl SimulationRuntimeGuard {
         verify_effect_boundary()?;
         with_runtime_mut(|runtime| {
             refresh_delivery_cache(runtime)?;
-            if runtime.delivery_order.is_empty() {
+            if runtime.selectable_order.is_empty() {
                 return Ok(None);
             }
             let sequence = match strategy {
-                DeliveryStrategy::Fifo => runtime.delivery_order.first().copied(),
-                DeliveryStrategy::Lifo => runtime.delivery_order.last().copied(),
+                DeliveryStrategy::Fifo => runtime.selectable_order.first().copied(),
+                DeliveryStrategy::Lifo => runtime.selectable_order.last().copied(),
                 DeliveryStrategy::Seeded => Some(runtime.choose_delivery_sequence()?),
                 DeliveryStrategy::AdversarialControlLast => runtime
-                    .non_control_delivery_order
+                    .non_control_selectable_order
                     .first()
-                    .or_else(|| runtime.delivery_order.first())
+                    .or_else(|| runtime.selectable_order.first())
                     .copied(),
             };
             let sequence = sequence.ok_or(SimulationRuntimeError::EmptyDeliveryQueue)?;
@@ -890,6 +857,7 @@ mod tests {
             bytes: 0,
             enqueued_virtual_ms: 0,
             deadline_virtual_ms: None,
+            lane: None,
         };
 
         assert!(matches!(
@@ -919,7 +887,6 @@ mod tests {
         let cases = [
             ProtectionProfile::without_class_reservations(),
             ProtectionProfile::without_bounded_control_burst(),
-            ProtectionProfile::without_barrier_control_exemption(),
             ProtectionProfile::without_per_entry_yield(),
             ProtectionProfile::LEGACY_ALL_DISABLED,
         ];
@@ -927,16 +894,14 @@ mod tests {
             (
                 profile.class_reservations(),
                 profile.bounded_control_burst(),
-                profile.barrier_control_exemption(),
                 profile.per_entry_yield(),
             )
         });
         assert_eq!(observations, [
-            (false, true, true, true),
-            (true, false, true, true),
-            (true, true, false, true),
-            (true, true, true, false),
-            (false, false, false, false),
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
         ]);
         assert_eq!(enabled, ProtectionProfile::ALL_ENABLED);
     }

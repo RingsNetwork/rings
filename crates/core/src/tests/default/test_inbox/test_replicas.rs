@@ -18,7 +18,12 @@ use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::lifecycle::StopSource;
 use crate::message::Message;
+use crate::message::ProbeRequest;
 use crate::swarm::application::ApplicationData;
+use crate::swarm::transport::ProbeScope;
+use crate::swarm::transport::ProbeWork;
+use crate::swarm::transport::CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS;
+use crate::swarm::transport::CHAIN_NEIGHBOUR_SUSPICION_MS;
 use crate::tests::default::gen_pure_dht;
 use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_without_relay_storage;
@@ -31,6 +36,7 @@ use crate::tests::default::Node;
 use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::manually_establish_connection;
 use crate::utils::get_epoch_ms;
+use crate::utils::get_epoch_ms_i64;
 
 /// The ring `first → second → third → first` of three nodes that hold relay mail.
 async fn ring_of_three(first: &Node, second: &Node, third: &Node) -> Result<()> {
@@ -310,5 +316,136 @@ async fn test_a_chain_neighbours_loss_runs_the_chain_exchange_at_once() -> Resul
         .await
         .map_err(|error| crate::error::Error::InvalidMessage(error.to_string()))?;
     assert!(offered, "node1 offered nothing to node4 after losing node3");
+    Ok(())
+}
+
+/// Suspect node1's next chain neighbour `peer` on a probe issued the chain timeout ago, and
+/// return the probe's challenge.
+async fn suspect_by_a_late_probe(node1: &Node, peer: Did) -> Result<ProbeRequest> {
+    let request = node1.swarm.transport.force_peer_liveness_probe_issued_at(
+        peer,
+        get_epoch_ms_i64() - CHAIN_NEIGHBOUR_SUSPICION_MS - 1,
+    )?;
+    node1
+        .swarm
+        .stabilizer()
+        .probe_relay_chain_neighbours()
+        .await?;
+    Ok(request)
+}
+
+/// Answer `peer`'s outstanding probe of `request` at node1.
+fn answer(node1: &Node, peer: Did, request: ProbeRequest) -> Result<()> {
+    assert!(node1.swarm.transport.answer_liveness_probe(peer, request)?);
+    Ok(())
+}
+
+/// Give node1 an on-time answer from `peer`: a probe issued now, answered at once.
+fn answer_on_time(node1: &Node, peer: Did) -> Result<()> {
+    let request = node1
+        .swarm
+        .transport
+        .force_peer_liveness_probe_issued_at(peer, get_epoch_ms_i64())?;
+    answer(node1, peer, request)
+}
+
+/// A ring of three holders whose views have settled, node1 first.
+async fn settled_ring() -> Result<(Node, Node, Node)> {
+    let [key1, key3, key4] = gen_ordered_keys::<3>();
+    let node1 = prepare_node(key1).await;
+    let node3 = prepare_node(key3).await;
+    let node4 = prepare_node(key4).await;
+    ring_of_three(&node1, &node3, &node4).await?;
+    let ring = [&node1, &node3, &node4];
+    settle_previous_holders(&ring, &ring).await?;
+    Ok((node1, node3, node4))
+}
+
+/// A chain neighbour whose probe goes unanswered for the chain timeout is suspected for relay
+/// custody (#1070): the chain moves past it and the chain exchange is due at once, but it is not
+/// evicted; two on-time answers in a row clear the suspicion, which is again a chain change.
+#[tokio::test]
+async fn test_an_unanswering_chain_neighbour_is_suspected_and_cleared_without_eviction(
+) -> Result<()> {
+    let (node1, node3, node4) = settled_ring().await?;
+    assert_eq!(node1.dht().relay_chain_neighbours()?.1, Some(node3.did()));
+    node1.dht().take_relay_chain_repair_due();
+
+    let late = suspect_by_a_late_probe(&node1, node3.did()).await?;
+    assert!(node1.dht().is_relay_suspected(node3.did())?);
+    assert!(
+        node1.dht().take_relay_chain_repair_due(),
+        "the suspicion is a chain change"
+    );
+    assert_eq!(node1.dht().relay_chain_neighbours()?.1, Some(node4.did()));
+    assert!(
+        node1.swarm.transport.has_active_connection(node3.did()),
+        "suspicion evicts nothing"
+    );
+
+    // The late answer does not clear it; two on-time answers in a row do.
+    answer(&node1, node3.did(), late)?;
+    answer_on_time(&node1, node3.did())?;
+    assert!(node1.dht().is_relay_suspected(node3.did())?);
+    assert!(!node1.dht().take_relay_chain_repair_due());
+    answer_on_time(&node1, node3.did())?;
+    assert!(!node1.dht().is_relay_suspected(node3.did())?);
+    assert!(
+        node1.dht().take_relay_chain_repair_due(),
+        "the clearing is a chain change"
+    );
+    assert_eq!(node1.dht().relay_chain_neighbours()?.1, Some(node3.did()));
+    Ok(())
+}
+
+/// A neighbour whose answers alternate late and on time never clears, so it changes the chains
+/// once, not once per period (`Law (Clearing)`): the chain changes per neighbour stay within one
+/// suspicion and one clearing per `τ_c + k·P_c`.
+#[tokio::test]
+async fn test_a_flapping_chain_neighbour_changes_the_chains_once() -> Result<()> {
+    let (node1, node3, _node4) = settled_ring().await?;
+    let before = node1.dht().relay_chain_changes_for_test();
+    for _ in 0..5 {
+        let late = suspect_by_a_late_probe(&node1, node3.did()).await?;
+        answer(&node1, node3.did(), late)?;
+        answer_on_time(&node1, node3.did())?;
+    }
+    assert!(node1.dht().is_relay_suspected(node3.did())?);
+    assert_eq!(
+        node1.dht().relay_chain_changes_for_test() - before,
+        1,
+        "five late/on-time cycles are one suspicion"
+    );
+    answer_on_time(&node1, node3.did())?;
+    assert!(!node1.dht().is_relay_suspected(node3.did())?);
+    assert_eq!(node1.dht().relay_chain_changes_for_test() - before, 2);
+    Ok(())
+}
+
+/// A suspect stays on the chain period (`Law (Clearing)`): the chains skip it, but the chain
+/// probe pass still issues its probe a chain period after the last, so the on-time answers that
+/// clear it come on the schedule the clearing bound counts.
+#[tokio::test]
+async fn test_a_suspect_is_still_probed_on_the_chain_period() -> Result<()> {
+    let (node1, node3, node4) = settled_ring().await?;
+    let late = suspect_by_a_late_probe(&node1, node3.did()).await?;
+    answer(&node1, node3.did(), late)?;
+    assert!(node1.dht().is_relay_suspected(node3.did())?);
+    let (previous, next) = node1.dht().relay_chain_neighbours()?;
+    assert!(previous != Some(node3.did()) && next == Some(node4.did()));
+
+    let transport = &node1.swarm.transport;
+    transport
+        .restart_peer_liveness_period_for_test(node3.did(), CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS)?;
+    let pass = transport
+        .liveness_probe_pass(get_epoch_ms_i64(), ProbeScope::ChainNeighbours)?
+        .ok_or_else(|| crate::error::Error::InvalidMessage("probe pass busy".to_string()))?;
+    assert!(
+        pass.work().iter().any(|work| matches!(
+            work,
+            ProbeWork::Issue(attempt) if attempt.peer() == node3.did()
+        )),
+        "the suspect's probe is due on the chain period"
+    );
     Ok(())
 }

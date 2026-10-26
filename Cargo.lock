@@ -603,6 +603,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -1331,6 +1332,7 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -1493,7 +1495,7 @@ dependencies = [
  "ff 0.13.1",
  "generic-array",
  "group 0.13.0",
- "hkdf",
+ "hkdf 0.12.4",
  "pem-rfc7468",
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
@@ -2107,6 +2109,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
 dependencies = [
  "hmac 0.12.1",
+]
+
+[[package]]
+name = "hkdf"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
+dependencies = [
+ "hmac 0.13.0",
 ]
 
 [[package]]
@@ -3862,7 +3873,7 @@ dependencies = [
 
 [[package]]
 name = "rings-aez"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "aes",
  "subtle",
@@ -3873,7 +3884,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "postcard",
  "serde",
@@ -3881,7 +3892,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -3907,7 +3918,7 @@ dependencies = [
  "event-listener 5.4.2",
  "futures",
  "hex",
- "hkdf",
+ "hkdf 0.12.4",
  "itertools 0.10.5",
  "js-sys",
  "k256",
@@ -3952,7 +3963,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3962,7 +3973,7 @@ dependencies = [
 
 [[package]]
 name = "rings-dns-relay"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "hickory-proto",
@@ -3984,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "rings-gateway"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -4003,11 +4014,11 @@ dependencies = [
 
 [[package]]
 name = "rings-logo"
-version = "0.37.0"
+version = "0.38.0"
 
 [[package]]
 name = "rings-mailbox-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4035,7 +4046,7 @@ dependencies = [
 
 [[package]]
 name = "rings-measure"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4045,7 +4056,7 @@ dependencies = [
 
 [[package]]
 name = "rings-native-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4060,7 +4071,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -4068,7 +4079,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -4088,9 +4099,8 @@ dependencies = [
  "dotenvy",
  "form_urlencoded",
  "futures",
- "generic-array",
- "hkdf",
- "hmac 0.12.1",
+ "hkdf 0.13.0",
+ "hmac 0.13.0",
  "home",
  "js-sys",
  "jsonrpc-core",
@@ -4118,7 +4128,7 @@ dependencies = [
  "serde-saphyr",
  "serde-wasm-bindgen",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.1",
  "smoltcp",
  "strum",
  "subtle",
@@ -4144,7 +4154,7 @@ dependencies = [
 
 [[package]]
 name = "rings-relay-example"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "rings-core",
  "rings-node",
@@ -4153,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4177,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "rings-runtime"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "futures",
  "futures-timer",
@@ -4192,7 +4202,7 @@ dependencies = [
 
 [[package]]
 name = "rings-test-support"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "futures",
  "rings-core",
@@ -4201,7 +4211,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4233,7 +4243,7 @@ dependencies = [
 
 [[package]]
 name = "rings-webview"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "async-trait",
  "chrono",

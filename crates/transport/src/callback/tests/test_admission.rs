@@ -23,7 +23,7 @@ async fn test_admission_dispatches_decoded_payload_once() {
             admitted: Arc::clone(&admitted),
         }),
         Notifier::default(),
-        NodeReceiveLoad::new(),
+        NodeFramePool::new(),
     );
     let data = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
 
@@ -61,7 +61,7 @@ async fn test_prepare_inbound_frame_reports_malformed_oversized_and_over_credit_
             invalid: Arc::clone(&invalid),
         }),
         Notifier::default(),
-        NodeReceiveLoad::new(),
+        NodeFramePool::new(),
     ));
     let valid = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
 
@@ -108,7 +108,7 @@ async fn test_admitted_frame_cannot_cross_callback_instances() {
                 admitted: Arc::clone(&admitted),
             }),
             Notifier::default(),
-            NodeReceiveLoad::new(),
+            NodeFramePool::new(),
         )
     };
     // Distinct identities must reject both another peer and a replacement callback

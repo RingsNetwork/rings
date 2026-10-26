@@ -22,6 +22,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use bytes::BytesMut;
+use futures::future::select;
+use futures::future::Either;
+use futures::pin_mut;
 use rings_core::utils::get_epoch_ms;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -222,15 +225,32 @@ impl NativeOnionOpenStream {
         self.relay_with(local, None)
     }
 
-    /// Spawn the pump of `local` against the session with the idle timeout `idle_timeout`, or
-    /// none; a failed pump records the failure in the session's witness, then resets `local`.
+    /// Spawn the pump of `local` against the session, as a task of the session's node, with the
+    /// idle timeout `idle_timeout`, or none; a failed pump records the failure in the session's
+    /// witness, then resets `local`. The node's stop ends the pump as failed, since its bytes
+    /// did not end with the session's `fin`; with no executor to pump on, the session fails at
+    /// once.
     fn relay_with<S>(self, local: S, idle_timeout: Option<Duration>) -> OnionSessionWitness
     where S: OnionLocalStream {
         let witness = self.stream.witness();
+        let Ok(spawner) = self.stream.tasks().spawner() else {
+            witness.record_failed();
+            local.reset();
+            return witness;
+        };
         let recorded = witness.clone();
         let (sender, receiver) = self.stream.split();
-        tokio::spawn(async move {
-            let (local, end) = pump_tcp_duplex(local, sender, receiver, idle_timeout).await;
+        spawner.spawn_winding_down(move |stop| async move {
+            let mut local = local;
+            let end = {
+                let pump = pump_tcp_duplex(&mut local, sender, receiver, idle_timeout);
+                let stopped = stop.stopped();
+                pin_mut!(pump, stopped);
+                match select(pump, stopped).await {
+                    Either::Left(((_, end), _)) => end,
+                    Either::Right(((), _)) => OnionPumpEnd::Failed,
+                }
+            };
             if end == OnionPumpEnd::Failed {
                 recorded.record_failed();
                 local.reset();

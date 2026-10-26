@@ -29,9 +29,15 @@ mod common;
 mod controlled;
 #[cfg(rings_native)]
 mod test_bootstrap_probe;
+#[cfg(rings_native)]
+mod test_close;
 mod test_config;
 #[cfg(all(feature = "dummy", rings_native))]
 mod test_dns_relay;
+#[cfg(feature = "dummy")]
+mod test_first_edge;
+#[cfg(feature = "dummy")]
+mod test_registration_published;
 // The gateway tests reach a real public network by design; the `dummy` build has none.
 #[cfg(all(rings_native, not(feature = "dummy")))]
 mod test_gateway;

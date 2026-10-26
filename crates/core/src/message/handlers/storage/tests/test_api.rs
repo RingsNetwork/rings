@@ -64,6 +64,7 @@ async fn test_storage_store_fetches_remote_entry_into_cache() -> Result<()> {
                 Message::OperateEntry(PlacedEntryOperation {
                     placement,
                     op: EntryOperation::Overwrite(x),
+                    ..
                 }) if placement == entry_key && x.did == entry_key
             ))
     })

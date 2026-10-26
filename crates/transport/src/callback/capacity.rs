@@ -3,8 +3,8 @@
 //!
 //! There is no node-wide frame budget to refuse an honest frame against: each connection holds
 //! at most [`INBOUND_PEER_FRAME_CAPACITY`] frames, by the credit laws of [`crate::core::credit`],
-//! and across connections the bound is the soft bound of
-//! [`NodeReceiveLoad`](crate::callback::NodeReceiveLoad).
+//! and across connections at most `B_F`, by the node's
+//! [`NodeFramePool`](crate::callback::NodeFramePool) (load-bounds paper, Law 3).
 
 #[cfg(any(test, rings_transport_webrtc))]
 use std::sync::atomic::AtomicU8;

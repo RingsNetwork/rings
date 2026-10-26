@@ -62,6 +62,7 @@ use crate::error::Result;
 use crate::fair_admission::Principal;
 use crate::fair_admission::Shares;
 use crate::fair_admission::SlotAccounting;
+use crate::fair_admission::SlotFloorUse;
 use crate::fair_admission::TableAccounting;
 use crate::storage::KvStorageInterface;
 
@@ -326,6 +327,11 @@ pub(crate) struct RemovalIndex {
 }
 
 impl RemovalIndex {
+    /// The floor use of every slot in the removal store at `now_ms` (load-bounds paper, Def. 1).
+    pub(crate) fn floor_use_at(&self, now_ms: u128) -> SlotFloorUse {
+        self.accounting.floor_use_at(now_ms)
+    }
+
     /// An index not yet recovered, accounting in `accounting`.
     pub(crate) fn new(accounting: TableAccounting) -> Self {
         Self {

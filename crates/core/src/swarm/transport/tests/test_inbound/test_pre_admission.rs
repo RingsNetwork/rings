@@ -54,3 +54,57 @@ async fn test_retired_frame_queued_on_lane_is_not_delivered() -> Result<()> {
     assert_eq!(application.inbounds(), 0);
     Ok(())
 }
+
+/// A chunked control message keeps its place among later control (load-bounds paper, Prop.
+/// "Order per category", #927). The frames held before admission are released at once,
+/// unpaced: the chunks of a control message, on the control carrier as a small advertised
+/// message size makes them (#1130), then a later control frame. The later frame waits for the
+/// reassembled message, where the old control exemption let it run first: each chunk's
+/// reassembly takes its deterministic service time, during which the later frame is ready.
+#[tokio::test(start_paused = true)]
+async fn test_a_released_chunked_control_message_stays_ahead_of_later_control() -> Result<()> {
+    let runtime = crate::simulation::SimulationRuntimeGuard::enter(
+        927,
+        1_700_000_000_000,
+        crate::simulation::ProtectionProfile::ALL_ENABLED,
+    )
+    .map_err(|error| Error::InvalidMessage(format!("{error:?}")))?;
+    runtime
+        .enable_reassembly_service()
+        .map_err(|error| Error::InvalidMessage(format!("{error:?}")))?;
+    let transport = default_transport()?;
+    let application = ApplicationRecorder::attach(&transport)?;
+    let pending = pending_peer(&transport).await?;
+    let (cid, local) = (pending.peer.to_string(), transport.dht.did);
+    let control_carrier = Some(MessageCategory::DhtControl.channel_lane());
+    let (first, later) = (Did::from(1_u32), Did::from(2_u32));
+
+    let chunked = local_wire(noop_control_message(first), &pending.session, local)?;
+    let chunks = Chunk::stream(chunked, 64).collect::<Vec<_>>();
+    assert!(chunks.len() > 1, "the control message spans several chunks");
+    let later_frame = local_wire(noop_control_message(later), &pending.session, local)?;
+    let frames = chunks
+        .into_iter()
+        .map(|chunk| local_wire(Message::Chunk(chunk), &pending.session, local))
+        .chain([Ok(later_frame)])
+        .collect::<Result<Vec<_>>>()?;
+    let held = frames.len();
+    for frame in frames {
+        pending
+            .callback
+            .on_carried_message_for_test(&cid, &frame, control_carrier)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    }
+    assert_eq!(pending.callback.pre_admission_held_count_for_test(), held);
+
+    pending.admit(&transport).await?;
+    let mut reports = Vec::new();
+    while reports.len() < 2 {
+        if let Message::FindSuccessorReport(report) = application.next_tapped().await? {
+            reports.push(report.did);
+        }
+    }
+    assert_eq!(reports, vec![first, later]);
+    Ok(())
+}

@@ -910,6 +910,7 @@ fn assert_enabled_outcome(outcome: &ScenarioOutcome) {
 
 mod artifacts;
 mod cases;
+mod hot_paths;
 mod pressure;
 mod scenario;
 mod trace;
@@ -920,9 +921,9 @@ use artifacts::persist_trace_artifact;
 use artifacts::runtime_replay_snapshot;
 use artifacts::FailureState;
 use artifacts::ScenarioFailureGuard;
-use pressure::exercise_barrier_control_exemption;
 use pressure::exercise_bounded_control_burst;
 use pressure::exercise_per_entry_yield;
+use pressure::exercise_reassembly_barrier_per_category;
 use pressure::new_deliveries_with_controls;
 use scenario::run_scenario;
 use trace::TraceDriver;

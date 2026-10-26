@@ -37,6 +37,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::processor::Processor;
 use crate::sync_lock::lock;
+use crate::tasks::NodeTasks;
 
 /// Upper bound on synchronous feedback iterations within one protocol turn.
 const MAX_FIXPOINT_STEPS: u32 = 1024;
@@ -73,6 +74,11 @@ impl Core {
     /// This node's DID.
     pub fn did(&self) -> Did {
         self.processor.did()
+    }
+
+    /// The node's tasks, onto which every engine and shell task is spawned (`crate::tasks`).
+    pub(crate) fn tasks(&self) -> &NodeTasks {
+        self.processor.tasks()
     }
 
     /// Whether `peer`'s link generation is admitted now; `false` when the lifecycle cannot be
@@ -244,6 +250,11 @@ impl Scope {
     /// This node's DID.
     pub fn did(&self) -> Did {
         self.core.did()
+    }
+
+    /// The node's tasks, onto which this scope's shell spawns its own (`crate::tasks`).
+    pub(crate) fn tasks(&self) -> &NodeTasks {
+        self.core.tasks()
     }
 
     /// The namespace this scope is confined to.

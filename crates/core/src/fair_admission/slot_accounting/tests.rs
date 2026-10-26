@@ -5,10 +5,12 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 
+use super::FloorUse;
 use super::Principal;
 use super::ShareRefusal;
 use super::Shares;
 use super::SlotAccounting;
+use super::SlotFloorUse;
 
 /// The small table of the exhaustive check: `f = 1`, `P = 2`, `L = 1`.
 const SMALL: Shares = Shares {
@@ -82,6 +84,17 @@ fn recomputed(state: &SlotAccounting) -> (usize, usize) {
         })
 }
 
+/// Whether `items` items of `principal` are admitted one by one, each charged before the next
+/// is judged: the definition [`SlotAccounting::admit_items`] states in closed form.
+fn admitted_one_by_one(state: &SlotAccounting, principal: Principal, items: usize) -> bool {
+    let mut next = state.clone();
+    (0..items).all(|_| {
+        let admitted = next.admit(principal).is_ok();
+        next.hold(principal, 1);
+        admitted
+    })
+}
+
 /// Check every law on one reachable state.
 fn check(state: &SlotAccounting) {
     let held = state.expiry.values().sum::<usize>();
@@ -97,6 +110,18 @@ fn check(state: &SlotAccounting) {
         "{state:?}"
     );
     for principal in principals() {
+        // A transition of several items is admitted whole iff each is, in order; and a slot
+        // within its floor is never refused, however many items it adds.
+        for items in 0..=3 {
+            assert_eq!(
+                state.admit_items(principal, items).is_ok(),
+                admitted_one_by_one(state, principal, items),
+                "{principal:?} ×{items} {state:?}"
+            );
+            if state.within_floor(principal, items) {
+                assert_eq!(state.admit_items(principal, items), Ok(()), "{state:?}");
+            }
+        }
         let verdict = state.admit(principal);
         // Isolation: a slot below its floor is always admitted.
         if matches!(principal, Principal::Slot(_)) && state.held(principal) < SMALL.floor {
@@ -254,4 +279,44 @@ fn test_the_reserved_shares_are_apart() {
     }
     assert_eq!(accounting.admit(Principal::Slot(0)), Ok(()));
     assert_eq!(accounting.len(), shares.bound(0) - 1);
+}
+
+/// Floor use (paper, Def. 1): `FloorUse` orders as the fraction `min(u, f) / f`, exactly, with a
+/// use past the floor equal to the full floor; and `SlotFloorUse::join` is a join-semilattice
+/// (associative, commutative, idempotent, with the empty map as identity), exhaustive over
+/// small uses of two tables with floors 2 and 4 on two slots.
+#[test]
+fn test_floor_use_orders_as_its_fraction_and_joins_as_a_semilattice() {
+    assert_eq!(FloorUse::of(1, 2), FloorUse::of(2, 4));
+    assert_eq!(FloorUse::of(5, 2), FloorUse::of(2, 2));
+    assert_eq!(FloorUse::of(3, 0), FloorUse::CLEAN);
+    assert!(FloorUse::of(1, 4) < FloorUse::of(1, 2));
+
+    let table = |floor: usize, uses: [usize; 2]| {
+        let mut accounting = SlotAccounting::new(Shares {
+            floor,
+            pool: 64,
+            local: 0,
+            inbox: 0,
+            custody: 0,
+        });
+        for (slot, used) in (0_u16..).zip(uses) {
+            (0..used).for_each(|_| accounting.charge(Principal::Slot(slot), 10));
+        }
+        accounting.floor_use_at(0)
+    };
+    let uses = |slots: &SlotFloorUse| [slots.of(0), slots.of(1)];
+    let tables: Vec<SlotFloorUse> = (0..=3)
+        .flat_map(|a| (0..=3).map(move |b| [a, b]))
+        .flat_map(|used| [table(2, used), table(4, used)])
+        .collect();
+    for x in &tables {
+        assert_eq!(uses(&x.clone().join(SlotFloorUse::default())), uses(x));
+        assert_eq!(uses(&x.clone().join(x.clone())), uses(x));
+        for y in &tables {
+            let xy = x.clone().join(y.clone());
+            assert_eq!(uses(&xy), uses(&y.clone().join(x.clone())));
+            assert_eq!(uses(&xy), [0, 1].map(|slot| x.of(slot).max(y.of(slot))));
+        }
+    }
 }

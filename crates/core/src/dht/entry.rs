@@ -155,6 +155,9 @@ pub struct PlacedEntryOperation {
     pub placement: Did,
     /// Operation to apply at `placement`.
     pub op: EntryOperation,
+    /// Whether the owner that applies or refuses the operation at `placement` reports it to the
+    /// operation's origin (`message::types::store_report`, #866).
+    pub report: bool,
 }
 
 impl PlacedEntryOperation {
