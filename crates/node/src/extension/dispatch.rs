@@ -232,12 +232,15 @@ impl NamespaceQueues {
     /// Queue the encoded envelope `bytes` from `from` for its namespace's worker, starting the
     /// worker on first use; drop it, counted, when it is refused, telling the namespace of a drop
     /// from an admitted peer ([`LinkFact::Dropped`]). Never waits.
-    pub(super) fn submit(&mut self, from: Did, bytes: &[u8]) {
-        let Ok(envelope) = Envelope::decode(bytes) else {
+    ///
+    /// The envelope is read in place: its payload is a slice of `bytes`, and its namespace is
+    /// copied only when the namespace's queue is first made.
+    pub(super) fn submit(&mut self, from: Did, bytes: &Bytes) {
+        let Ok(envelope) = Envelope::view(bytes) else {
             self.drops.record(DispatchDrop::Undecodable);
             return;
         };
-        let Some(route) = self.core.route(envelope.namespace.as_str()) else {
+        let Some(route) = self.core.route(envelope.namespace) else {
             self.drops.record(DispatchDrop::Unregistered);
             return;
         };
@@ -260,7 +263,7 @@ impl NamespaceQueues {
         let queued = Queued::Envelope {
             route,
             from,
-            payload: envelope.payload,
+            payload: bytes.slice_ref(envelope.payload),
             weight,
         };
         if queue.sender.unbounded_send(queued).is_err() {
@@ -274,7 +277,7 @@ impl NamespaceQueues {
     /// waits and never refuses for room.
     pub(super) fn submit_link_fact(&mut self, fact: LinkFact) {
         for (namespace, route) in self.core.routes() {
-            let queue = queue_of(&mut self.queues, self.core.tasks(), &self.stop, namespace);
+            let queue = queue_of(&mut self.queues, self.core.tasks(), &self.stop, &namespace);
             match fact {
                 LinkFact::Admitted(_) | LinkFact::Retired(_) => queue.tell(route, fact),
                 LinkFact::Dropped(peer) => queue.tell_dropped(route, peer),
@@ -309,11 +312,12 @@ fn queue_of<'queues>(
     queues: &'queues mut HashMap<String, NamespaceQueue>,
     tasks: &NodeTasks,
     stop: &StopToken,
-    namespace: String,
+    namespace: &str,
 ) -> &'queues NamespaceQueue {
-    queues
-        .entry(namespace)
-        .or_insert_with(|| spawn_worker(tasks, stop.clone()))
+    if !queues.contains_key(namespace) {
+        queues.insert(namespace.to_owned(), spawn_worker(tasks, stop.clone()));
+    }
+    &queues[namespace]
 }
 
 /// Start the worker of one namespace as a node task of `tasks`: it dispatches its envelopes in

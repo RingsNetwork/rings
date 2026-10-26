@@ -45,6 +45,7 @@
 //!   `ApplicationMessage::tx_id`, the key an application that needs exactly-once delivery
 //!   deduplicates by.
 
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -103,12 +104,45 @@ struct Queued {
     consumed: Option<oneshot::Sender<()>>,
 }
 
+/// The facts of one peer still queued, in order: by the bound on facts, at most two of its
+/// lifecycle facts and two of its drops (`[MessageDropped] [PeerRetired] [PeerAdmitted]
+/// [MessageDropped]`).
+#[derive(Default)]
+struct PeerFacts {
+    /// Its queued admissions (`true`) and retirements (`false`), by position.
+    lifecycle: VecDeque<(Position, bool)>,
+    /// Its queued drops, by position.
+    drops: VecDeque<Position>,
+}
+
+impl PeerFacts {
+    /// The position of its last queued admission or retirement.
+    fn last_lifecycle(&self) -> Option<Position> {
+        self.lifecycle.back().map(|(at, _)| *at)
+    }
+
+    /// Whether it queues nothing.
+    fn is_empty(&self) -> bool {
+        self.lifecycle.is_empty() && self.drops.is_empty()
+    }
+}
+
+/// The position of an item in the queue's one order: a number given once, in order.
+type Position = u64;
+
 /// The state both ends share under one lock.
 struct Queue {
     claim: Claim,
     /// Whether core dropped its outlet: no item will ever be added.
     closed: bool,
-    items: VecDeque<Queued>,
+    /// The queued items in order, by position, so an unread admission is withdrawn where it
+    /// stands without moving the rest.
+    items: BTreeMap<Position, Queued>,
+    /// The position the next item gets.
+    next: Position,
+    /// The facts every peer still queues, so recording a fact reads its peer's facts, never the
+    /// queue (load-bounds paper, Obligation "Admission complexity", #938).
+    facts: BTreeMap<Did, PeerFacts>,
     /// `Σ weight(messages)` plus the weight every live [`InboxRoom`] holds.
     weight: usize,
     /// Live messages dropped because they did not fit.
@@ -116,6 +150,19 @@ struct Queue {
 }
 
 impl Queue {
+    /// An unclaimed, empty queue.
+    fn new() -> Self {
+        Self {
+            claim: Claim::Unclaimed,
+            closed: false,
+            items: BTreeMap::new(),
+            next: 0,
+            facts: BTreeMap::new(),
+            weight: 0,
+            dropped: 0,
+        }
+    }
+
     /// Whether `weight` more bytes fit: always into an inbox holding none.
     fn fits(&self, weight: usize) -> bool {
         self.weight == 0 || self.weight.saturating_add(weight) <= APPLICATION_INBOX_WEIGHT
@@ -133,6 +180,14 @@ impl Queue {
         Ok(())
     }
 
+    /// Append `queued`, at the next position, which it returns.
+    fn append(&mut self, queued: Queued) -> Position {
+        let at = self.next;
+        self.next = at.saturating_add(1);
+        self.items.insert(at, queued);
+        at
+    }
+
     /// Queue `message` under the `weight` [`Self::admit`] admitted for it. An inbox released
     /// since then discards it, together with its signal: its weight left with the release.
     fn push(
@@ -142,7 +197,7 @@ impl Queue {
         consumed: Option<oneshot::Sender<()>>,
     ) {
         if self.claim == Claim::Claimed {
-            self.items.push_back(Queued {
+            self.append(Queued {
                 delivery: ApplicationDelivery::Message(message),
                 weight,
                 consumed,
@@ -151,69 +206,94 @@ impl Queue {
     }
 
     /// Record `event`: a retirement withdraws an unread admission it ends, with the drops after
-    /// it; a drop waiting since `peer`'s last admission or retirement absorbs a later one.
+    /// it; a drop waiting since `peer`'s last admission or retirement absorbs a later one. Reads
+    /// and writes `peer`'s facts alone, never the queue's other items.
     fn record(&mut self, event: SwarmEvent) {
         if self.claim == Claim::Released {
             return;
         }
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        rings_transport::hot_path::record(rings_transport::hot_path::HotPath::InboxRecord, 1);
+        let peer = match event {
+            SwarmEvent::PeerAdmitted { peer }
+            | SwarmEvent::PeerRetired { peer }
+            | SwarmEvent::MessageDropped { peer } => peer,
+        };
+        let facts = self.facts.entry(peer).or_default();
         match event {
-            SwarmEvent::PeerRetired { peer } => {
-                let last = self.last_lifecycle_fact(peer);
-                let unread_admission = last.filter(|at| {
-                    matches!(
-                        self.items.get(*at).map(|queued| &queued.delivery),
-                        Some(ApplicationDelivery::Event(SwarmEvent::PeerAdmitted { .. }))
-                    )
-                });
-                if let Some(at) = unread_admission {
-                    let dropped = ApplicationDelivery::Event(SwarmEvent::MessageDropped { peer });
-                    let after = self.items.split_off(at);
-                    self.items.extend(
-                        after
-                            .into_iter()
-                            .skip(1)
-                            .filter(|queued| queued.delivery != dropped),
+            SwarmEvent::PeerRetired { .. } => {
+                if let Some(&(admitted_at, true)) = facts.lifecycle.back() {
+                    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                    rings_transport::hot_path::charge(
+                        rings_transport::hot_path::HotPath::InboxRecord,
+                        u64::try_from(facts.drops.len()).unwrap_or(u64::MAX),
                     );
+                    facts.lifecycle.pop_back();
+                    let withdrawn = facts
+                        .drops
+                        .iter()
+                        .copied()
+                        .filter(|at| *at > admitted_at)
+                        .collect::<Vec<_>>();
+                    facts.drops.retain(|at| *at < admitted_at);
+                    if facts.is_empty() {
+                        self.facts.remove(&peer);
+                    }
+                    self.items.remove(&admitted_at);
+                    for at in withdrawn {
+                        self.items.remove(&at);
+                    }
                     return;
                 }
             }
-            SwarmEvent::MessageDropped { peer } => {
-                let since = self.last_lifecycle_fact(peer).map_or(0, |at| at + 1);
-                if self
-                    .items
-                    .iter()
-                    .skip(since)
-                    .any(|queued| queued.delivery == ApplicationDelivery::Event(event))
-                {
+            SwarmEvent::MessageDropped { .. } => {
+                let since = facts.last_lifecycle();
+                let waiting = facts
+                    .drops
+                    .back()
+                    .is_some_and(|at| since.is_none_or(|since| *at > since));
+                if waiting {
                     return;
                 }
             }
             SwarmEvent::PeerAdmitted { .. } => {}
         }
-        self.items.push_back(Queued {
+        let at = self.append(Queued {
             delivery: ApplicationDelivery::Event(event),
             weight: 0,
             consumed: None,
         });
+        let facts = self.facts.entry(peer).or_default();
+        match event {
+            SwarmEvent::PeerAdmitted { .. } => facts.lifecycle.push_back((at, true)),
+            SwarmEvent::PeerRetired { .. } => facts.lifecycle.push_back((at, false)),
+            SwarmEvent::MessageDropped { .. } => facts.drops.push_back(at),
+        }
     }
 
-    /// The position of the last queued admission or retirement of `peer`.
-    fn last_lifecycle_fact(&self, peer: Did) -> Option<usize> {
-        self.items.iter().rposition(|queued| match queued.delivery {
-            ApplicationDelivery::Event(
-                SwarmEvent::PeerAdmitted { peer: fact } | SwarmEvent::PeerRetired { peer: fact },
-            ) => fact == peer,
-            _ => false,
-        })
-    }
-
-    /// The next item, releasing its weight and firing its consumption signal.
+    /// The next item, releasing its weight, firing its consumption signal, and forgetting it
+    /// from its peer's facts.
     fn take(&mut self) -> Option<ApplicationDelivery> {
+        let (at, queued) = self.items.pop_first()?;
         let Queued {
             delivery,
             weight,
             consumed,
-        } = self.items.pop_front()?;
+        } = queued;
+        if let ApplicationDelivery::Event(
+            SwarmEvent::PeerAdmitted { peer }
+            | SwarmEvent::PeerRetired { peer }
+            | SwarmEvent::MessageDropped { peer },
+        ) = delivery
+        {
+            if let Some(facts) = self.facts.get_mut(&peer) {
+                facts.lifecycle.retain(|(fact, _)| *fact != at);
+                facts.drops.retain(|fact| *fact != at);
+                if facts.is_empty() {
+                    self.facts.remove(&peer);
+                }
+            }
+        }
         self.weight = self.weight.saturating_sub(weight);
         if let Some(consumed) = consumed {
             let _ = consumed.send(());
@@ -225,6 +305,7 @@ impl Queue {
     fn release(&mut self) {
         self.claim = Claim::Released;
         self.items.clear();
+        self.facts.clear();
         self.weight = 0;
     }
 }
@@ -253,13 +334,7 @@ impl ApplicationOutlet {
     pub(crate) fn new() -> Self {
         Self {
             shared: Arc::new(Shared {
-                queue: Mutex::new(Queue {
-                    claim: Claim::Unclaimed,
-                    closed: false,
-                    items: VecDeque::new(),
-                    weight: 0,
-                    dropped: 0,
-                }),
+                queue: Mutex::new(Queue::new()),
                 ready: Event::new(),
             }),
         }

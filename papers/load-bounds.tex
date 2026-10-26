@@ -436,7 +436,8 @@ pooled credit or wait for it,
 \textstyle p_e\le\lceil\Pool_F/n\rceil\ \text{when lent},\qquad\sum_e p_e\le\Pool_F,\\
 \textstyle\sum\liab\le B_F(s)=\Rg(s)\,(W+3)+\Pool_F .
 \end{gather*}
-\item Demands are served first come, first served within the claims: a demand at its edge's
+\item Demands are served first come, first served, those of edges below their share
+$\lfloor\Pool_F/n\rfloor$ before those of edges between share and claim: a demand at its edge's
 claim waits without holding back a later one, and a lane lent more advertises it at once.
 \item \emph{Rebalance.}  While a demand of an edge holding less than its share
 $\lfloor\Pool_F/n\rfloor$ waits for a full pool, every edge holding more than its share is
@@ -630,8 +631,9 @@ Let $G=(W+1)\,d_0/\rho+\Delta$, at most $107$\,s plus one sweep for $d_0\le64$\,
 Law~\ref{law:onecharge}:
 \begin{enumerate}[leftmargin=1.5em]
 \item a first chunk through slot $\kappa$ with $\use_\kappa+m\le f_O$, and every other arrival,
-never waits for $O$, however many open messages other edges hold; open messages hold at most
-$B_O$ of the mailbox;
+never waits for $O$ behind another edge, however many open messages other edges hold; within
+its own slot, first chunks take the floor first come first served
+(Def.~\ref{def:resorder}); open messages hold at most $B_O$ of the mailbox;
 \item an honest message that waits for the pool of $O$ waits at most $G$ beyond the honest
 messages ahead of it: an open message that sends nothing is expired within $G$, and a slot's
 next first chunk queues in resource order behind the claim already waiting;
@@ -658,20 +660,79 @@ bytes held.  A message so expired is the sender's to send again.
 
 These are performance obligations, kept apart from the security laws above.
 
+\begin{definition}[Resource order]\label{def:resorder}
+A request $w$ has a stream $s(w)$, a footprint $F(w)$, the resources it would draw on now, and
+reliefs $\Rg(w)=\{(\rho,D)\}$: a resource $\rho\in F(w)$ whose release may shed $D\subseteq
+F(w)$.  The mailbox has $(\mathit{Lane}(\ell),\{\mathit{Shared}\})$ while the reservation of
+$\ell$ does not cover $w$, and $(\mathit{Floor}(\kappa),\{\mathit{OpenPool}\})$ while a first
+chunk is beyond the floor of its slot $\kappa$ but within it once $\kappa$ holds nothing.  A
+waiter refused by the ledger records its refusal $R(w)$, one budget's resources.  With
+$B(w)$ the blockers of $w$ below,
+\[
+\begin{aligned}
+B(w)&=\{s(w)\mid\exists v<w.\;s(v)=s(w)\}\cup\{r\in F(w)\mid\exists v<w.\;r\in H(v)\},\\
+H(v)&=\begin{cases}
+R(v) & v\ \text{refused},\\
+\{\rho\mid(\rho,D)\in\Rg(v)\} & B(v)\ne\emptyset,\
+  B(v)\subseteq\textstyle\bigcup_{(\rho,D)\in\Rg(v)}\{\rho\}\cup D,\\
+\emptyset & \text{otherwise},
+\end{cases}
+\end{aligned}
+\]
+and $w$ waits iff $B(w)\ne\emptyset$, else it is attempted.  A waiter blocked only for lack of
+room that a relief may make \emph{holds} the relief; one blocked by its stream or by its own
+budget holds nothing.
+\end{definition}
+
+\begin{proposition}[Order on reservations]\label{prop:resorder}
+Under Def.~\ref{def:resorder}:
+\begin{enumerate}[leftmargin=1.5em]
+\item a frame within its lane's reservation never waits behind a borrower of $\mathit{Shared}$,
+nor behind another peer's budget;
+\item a lane's reservation, and a slot's floor in $O$, are served first come first served: a
+later, smaller request does not pass an earlier one waiting for the room on them.
+\end{enumerate}
+\end{proposition}
+\begin{proof}
+(1)~Within its reservation, $\mathit{Shared}\notin F(w)$; a refusal by the node budget is
+$\{\mathit{Lane}(\ell'),\mathit{Shared}\}$, met only on $\ell'=\ell$, which is a borrower of
+$\ell$'s reservation room, not of $\mathit{Shared}$; another peer's budget
+$\mathit{Peer}(p')\notin F(w)$, and a waiter blocked by it holds nothing.  (2)~A waiter
+holding $\mathit{Lane}(\ell)$ blocks every later $w$ with $\mathit{Lane}(\ell)\in F(w)$, so
+every later request of $\ell$; likewise $\mathit{Floor}(\kappa)$.
+\end{proof}
+
+Item~2 is a change: before \issue{938}, a blocked waiter held nothing, so smaller frames could
+take a reservation's room ahead of a larger one indefinitely.  It is the first law of resource
+order, no overtaking on an exhausted resource, applied to the room a reservation frees.
+
 \begin{obligation}[Admission complexity]\label{ob:complexity}
 \begin{itemize}[leftmargin=1.2em]
-\item Each arrival, release and cancel in \texttt{ResourceOrderedQueue} costs
-$O(\log n)$ in the waiters: waiters are indexed by resource, and one ledger snapshot is taken
-per pass.
-\item Each received frame takes $O(1)$ lock acquisitions, and none of them on a node-global
-mutex: the node load is an atomic counter.
-\item The node load has hysteresis: advertisements are deferred above $H_{\mathrm{hi}}$ and
-resume below $H_{\mathrm{lo}}=H_{\mathrm{hi}}/2$.  Deferred links are kept in a set, so a
-release at the limit wakes no one, and crossing $H_{\mathrm{lo}}$ wakes each deferred link once.
+\item An arrival, release or cancel in \texttt{ResourceOrderedQueue} costs
+$O((g+k+r)\log n)$ in the $n$ waiters, where $g$ is the requests it grants and $r$ the
+resources it names.  A blocked waiter is parked under one blocker and its holds, a refused one
+under its refusal.  An event scans each freed resource's parked waiters in arrival order.  It
+stops at the first that parks under it again, since every later one is blocked behind that one;
+an invariant, one refusal per resource, keeps this rule exact.  The term $k$ counts the waiters
+a scan judges and parks under a different blocker: a resource the event freed was the blocker
+they were indexed by.  By the stop rule, a scan judges at most one waiter beyond its grants and
+its $k$.  Each such move is charged to the freeing of the blocker it leaves, at most once per
+freeing.
+\item A received frame takes its link's lock once to be admitted and once to be released.  It
+takes the node pool's lock only while its data lane wants pooled credit or its charge changes,
+at most once per lend, shrink or return of the lane (Law~\ref{law:frames}), never per frame
+in steady state.
+\item The pool's service costs $O(\log n)$ in the $n$ edges per demand it serves: the
+claimants are counted incrementally, and demands are indexed, so a service visits only the
+demands it can serve.
 \item Each peer runs one admission watcher, not one task per send.
 \item Unread admissions are indexed by peer.
 \end{itemize}
-They are verified against the sync-storm matrix, before and after each change.
+They are verified on the sync-storm matrix by operation counts, not by wall time, which the
+deterministic simulation does not model: lock acquisitions per received frame, waiters visited
+per queue event, demands visited per service, tasks spawned per send, and inbox items scanned
+per withdrawal, counted by test-only counters on the same seeds before and after, and each
+bounded by a regression assertion at the matrix's largest size.
 \end{obligation}
 
 \section{The barrier exemption (\issue{927})}\label{sec:barrier}

@@ -348,6 +348,12 @@ impl SlotAccounting {
             && self.held(principal).saturating_add(items) <= self.shares.floor
     }
 
+    /// Whether `items` items of slot `principal` fit its floor once it holds nothing: whether
+    /// a release of its items may bring them within it (pure).
+    pub(crate) fn fits_floor(&self, principal: Principal, items: usize) -> bool {
+        matches!(principal, Principal::Slot(_)) && items <= self.shares.floor
+    }
+
     /// Charge `principal` one item that leaves at `until_ms`.
     ///
     /// Pre: [`Self::admit`] admitted it, or it is restored from a store whose items the

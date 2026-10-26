@@ -14,17 +14,20 @@
 //!
 //! Actions are the arrival of any request not yet arrived, a waiter claiming its grant, the
 //! release of a claimed grant, and (once) the cancellation of a waiter, granted or not. Every
-//! arrival, release and cancellation serves the discipline under check to its fixpoint.
+//! arrival, release and cancellation is an event of the [`Waitlist`] under check, which judges
+//! the waiters it may unblock; the state holds the waitlist with its indices.
 //!
 //! Properties:
 //!
-//! - `Always` no overtaking: within a pass, no request is granted whose footprint meets the
-//!   refusal of an earlier request of the same pass;
+//! - `Always` no overtaking: no event grants a request whose footprint meets the refusal, judged
+//!   on the ledger as the grant found it, of an earlier waiter the discipline holds refused;
 //! - `Always` stream order: no granted request has an earlier request of its stream still
 //!   waiting ungranted;
 //! - `Always` independence (no lost wake-up): no waiter is left ungranted that the ledger
-//!   would admit, unless an earlier ungranted waiter shares its stream or has a refusal, judged
-//!   on the ledger on its own, that meets its footprint. Each earlier waiter is judged
+//!   would admit, unless an earlier ungranted waiter shares its stream, is refused, judged on
+//!   the ledger on its own, by a budget that meets its footprint, or holds their lane's
+//!   reservation: the reservation would cover it once idle but does not now, and neither its
+//!   stream nor its own peer's budget holds it back. Each earlier waiter is judged
 //!   independently, never through the waiters a pass skipped, so it is not a pass restated;
 //! - `Eventually` resolved: every path ends with every request released or cancelled;
 //! - `Sometimes` a later request passes a waiting one, a waiter is refused, and all are resolved,
@@ -32,20 +35,23 @@
 //!
 //! Each property is shown not to be vacuous by a mutant discipline that the checker refutes:
 //! one first-in-first-out queue (independence), admission that ignores refusals (no overtaking), a
-//! skipped request that does not hold its stream (stream order), and a cancellation that runs
-//! no pass (eventually resolved).
+//! blocked request that does not hold its stream (stream order), a withdrawal that scans nothing
+//! (eventually resolved), a release that scans nothing (independence), and a request that holds
+//! its lane while its own peer's budget blocks it (independence: another peer waits behind that
+//! budget).
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::collections::VecDeque;
 
 use stateright::Checker;
 use stateright::Model;
 use stateright::Property;
 
-use super::resource_order::serve;
 use super::resource_order::AdmissionLedger;
-use super::resource_order::Waiting;
+use super::waitlist::Arrival;
+use super::waitlist::Mutant;
+use super::waitlist::Served;
+use super::waitlist::Waitlist;
 
 /// The node budget, in units.
 const CAP: u8 = 3;
@@ -123,6 +129,17 @@ impl Ledger {
         self.lanes[usize::from(request.lane)] + request.size <= RES[usize::from(request.lane)]
     }
 
+    /// Whether `request`'s lane reservation does not cover it now but would once idle: a
+    /// release on its lane may shed `Shared` from its footprint.
+    fn relieved_by_lane(&self, request: &Request) -> bool {
+        !self.covers(request) && request.size <= RES[usize::from(request.lane)]
+    }
+
+    /// Whether `request`'s own budget, its peer's, admits it.
+    fn peer_admits(&self, request: &Request) -> bool {
+        self.peers[usize::from(request.peer)] + request.size <= PEER_CAP
+    }
+
     /// Admit `request`, or name the refusing resources (peer first, as in production).
     fn admit(&mut self, request: &Request) -> Result<(), Vec<Resource>> {
         if self.peers[usize::from(request.peer)] + request.size > PEER_CAP {
@@ -137,6 +154,20 @@ impl Ledger {
         Ok(())
     }
 
+    /// Every budget's resources that refuse `request`, whichever production checks first: a
+    /// waiter refused by two budgets holds both, though it was told of one.
+    fn refusing(&self, request: &Request) -> Vec<Resource> {
+        let mut refusing = Vec::new();
+        if !self.peer_admits(request) {
+            refusing.push(Resource::Peer(request.peer));
+        }
+        let total: u8 = self.lanes.iter().sum();
+        if total + request.size > CAP.saturating_sub(self.held_back(request.lane)) {
+            refusing.extend([Resource::Lane(request.lane), Resource::Shared]);
+        }
+        refusing
+    }
+
     /// Release `request`'s units.
     fn release(&mut self, request: &Request) {
         self.lanes[usize::from(request.lane)] -= request.size;
@@ -144,14 +175,15 @@ impl Ledger {
     }
 }
 
-/// One admission attempt of a pass: the request, its footprint, and the refusal, if refused.
-type Attempt = (Request, Vec<Resource>, Option<Vec<Resource>>);
+/// One admission attempt of an event: the request, the ledger it was judged on, and whether it
+/// was admitted.
+type Attempt = (Request, Ledger, bool);
 
-/// The abstract ledger as an [`AdmissionLedger`], recording every attempt of a pass.
+/// The abstract ledger as an [`AdmissionLedger`], recording every attempt of an event.
 struct ModelLedger {
     /// The admitted units.
     ledger: RefCell<Ledger>,
-    /// The attempts of the pass, in order.
+    /// The attempts of the event, in order.
     attempts: RefCell<Vec<Attempt>>,
 }
 
@@ -180,29 +212,32 @@ impl AdmissionLedger for ModelLedger {
         Self::footprint_of(&self.ledger.borrow(), request)
     }
 
+    fn reliefs(&self, request: &Request) -> Vec<(Resource, Vec<Resource>)> {
+        let ledger = self.ledger.borrow();
+        Vec::from_iter(
+            ledger
+                .relieved_by_lane(request)
+                .then(|| (Resource::Lane(request.lane), vec![Resource::Shared])),
+        )
+    }
+
     fn try_admit(&self, request: &Request) -> Result<u8, Vec<Resource>> {
-        let footprint = self.footprint(request);
+        let before = *self.ledger.borrow();
         let outcome = self.ledger.borrow_mut().admit(request);
         self.attempts
             .borrow_mut()
-            .push((*request, footprint, outcome.clone().err()));
+            .push((*request, before, outcome.is_ok()));
         outcome.map(|()| request.id)
     }
 }
 
-/// A discipline of one pass: production, or a mutant that must be refuted.
+/// A discipline: production, or a mutant that must be refuted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Discipline {
-    /// [`serve`] itself.
+    /// The production [`Waitlist`].
     Production,
-    /// One first-in-first-out queue: the pass stops at the first refusal.
-    Fifo,
-    /// Every waiter is attempted, whatever earlier waiters were refused by.
-    IgnoreRefusals,
-    /// A skipped waiter does not hold its stream.
-    SkipFreesStream,
-    /// [`serve`], but a cancellation runs no pass.
-    CancelWithoutPass,
+    /// A [`Waitlist`] broken by `Mutant`.
+    Broken(Mutant),
 }
 
 /// The state of the model.
@@ -210,17 +245,19 @@ enum Discipline {
 struct State {
     /// The admitted units.
     ledger: Ledger,
-    /// The waiting requests in arrival order, with whether a pass granted them.
-    queue: VecDeque<(u8, bool)>,
-    /// The arrival sequence of each request, once arrived.
-    arrival: [Option<u8>; WORKLOAD.len()],
+    /// The ungranted requests, as the discipline indexes them.
+    waitlist: Waitlist<Request, Resource>,
+    /// The requests granted and not yet claimed.
+    granted: BTreeSet<u8>,
+    /// The arrival of each request, once arrived.
+    arrival: [Option<Arrival>; WORKLOAD.len()],
     /// The requests holding a claimed grant.
     held: BTreeSet<u8>,
     /// The requests released or cancelled.
     resolved: BTreeSet<u8>,
     /// Cancellations still allowed.
     cancels: u8,
-    /// Whether some pass granted a request past an earlier refusal it draws on.
+    /// Whether some event granted a request past an earlier refusal it draws on.
     overtaken: bool,
 }
 
@@ -230,20 +267,22 @@ impl State {
         self.resolved.len() == WORKLOAD.len()
     }
 
+    /// The ungranted requests, in arrival order.
+    fn ungranted(&self) -> Vec<Request> {
+        self.waitlist
+            .requests()
+            .map(|(_, request)| *request)
+            .collect()
+    }
+
     /// Whether a granted request arrived after a request still waiting ungranted that is
     /// `related` to it.
     fn granted_past_a_waiter(&self, related: impl Fn(&Request, &Request) -> bool) -> bool {
-        let mut granted = self
-            .queue
-            .iter()
-            .filter(|(_, granted)| *granted)
-            .map(|(id, _)| *id)
-            .chain(self.held.iter().copied());
-        granted.any(|later| {
-            self.queue.iter().any(|(earlier, granted)| {
-                !granted
-                    && related(&request(*earlier), &request(later))
-                    && self.arrival[usize::from(*earlier)] < self.arrival[usize::from(later)]
+        let ungranted = self.ungranted();
+        self.granted.iter().chain(self.held.iter()).any(|later| {
+            ungranted.iter().any(|earlier| {
+                related(earlier, &request(*later))
+                    && self.arrival[usize::from(earlier.id)] < self.arrival[usize::from(*later)]
             })
         })
     }
@@ -252,19 +291,24 @@ impl State {
     /// justify its wait: no earlier ungranted waiter of its stream, and none whose refusal on
     /// that ledger, judged on its own, meets the waiter's footprint.
     ///
-    /// Each earlier waiter is judged independently against the ledger, not by replaying a
-    /// pass: a waiter a pass skipped still counts by its own refusal, and nothing is inherited
-    /// transitively from the waiters it skipped.
+    /// Each earlier waiter is judged independently against the ledger, not by replaying the
+    /// discipline: a waiter it blocked still counts by its own refusal, and nothing is inherited
+    /// transitively from the waiters it blocked.
     fn admissible_waiter_left(&self) -> bool {
-        let ungranted = self
-            .queue
-            .iter()
-            .filter(|(_, granted)| !granted)
-            .map(|(id, _)| request(*id))
-            .collect::<Vec<_>>();
-        let refusal = |waiter: &Request| {
-            let mut ledger = self.ledger;
-            ledger.admit(waiter).err().unwrap_or_default()
+        let ungranted = self.ungranted();
+        let refusal = |waiter: &Request| self.ledger.refusing(waiter);
+        // An earlier waiter holds its lane's reservation against `waiter` when it is on that
+        // lane, the reservation alone would admit it once covering it, and neither its stream
+        // nor its own peer's budget holds it back.
+        let holds_lane = |earlier: &Request, waiter: &Request| {
+            let first_of_stream = ungranted
+                .iter()
+                .find(|other| (other.peer, other.lane) == (earlier.peer, earlier.lane))
+                == Some(earlier);
+            earlier.lane == waiter.lane
+                && self.ledger.relieved_by_lane(earlier)
+                && self.ledger.peer_admits(earlier)
+                && first_of_stream
         };
         ungranted.iter().enumerate().any(|(position, waiter)| {
             let mut ledger = self.ledger;
@@ -274,6 +318,7 @@ impl State {
                     || refusal(earlier)
                         .iter()
                         .any(|resource| footprint.contains(resource))
+                    || holds_lane(earlier, waiter)
             });
             ledger.admit(waiter).is_ok() && !justified
         })
@@ -297,106 +342,75 @@ fn request(id: u8) -> Request {
     WORKLOAD[usize::from(id)]
 }
 
-/// One mutant pass over `waiting`: the stand-in for the production pass that `discipline`
-/// makes; returns how many requests it granted.
-fn mutant_pass(
-    ledger: &ModelLedger,
-    waiting: &mut [Waiting<ModelLedger>],
-    discipline: Discipline,
-) -> usize {
-    let mut exhausted = BTreeSet::new();
-    let mut granted = 0;
-    for waiter in waiting.iter_mut().filter(|waiter| waiter.grant.is_none()) {
-        let stream = ledger.stream(&waiter.request);
-        let blocked = match discipline {
-            Discipline::Fifo => !exhausted.is_empty(),
-            Discipline::IgnoreRefusals => false,
-            _ => {
-                exhausted.contains(&stream)
-                    || ledger
-                        .footprint(&waiter.request)
-                        .iter()
-                        .any(|resource| exhausted.contains(resource))
-            }
-        };
-        if blocked {
+/// Whether some admission of `attempts` granted a request whose footprint meets the refusal,
+/// judged on the ledger it was admitted on, of an earlier waiter of `refused`, the waiters the
+/// discipline held refused when the event began, not granted before it in the event.
+fn overtakes(attempts: &[Attempt], refused: &[Request]) -> bool {
+    let mut granted = BTreeSet::new();
+    for (request, before, admitted) in attempts {
+        if !admitted {
             continue;
         }
-        match ledger.try_admit(&waiter.request) {
-            Ok(grant) => {
-                waiter.grant = Some(grant);
-                granted += 1;
-            }
-            Err(refused) => {
-                exhausted.extend(refused);
-                exhausted.insert(stream);
-            }
+        let footprint = ModelLedger::footprint_of(before, request);
+        let passed = refused
+            .iter()
+            .take_while(|earlier| earlier.id != request.id)
+            .filter(|earlier| !granted.contains(&earlier.id))
+            .any(|earlier| {
+                let mut ledger = *before;
+                ledger
+                    .admit(earlier)
+                    .err()
+                    .is_some_and(|refusal| refusal.iter().any(|r| footprint.contains(r)))
+            });
+        if passed {
+            return true;
         }
-    }
-    granted
-}
-
-/// Whether some pass of `attempts` granted a request whose footprint meets the refusal of an
-/// earlier request of the same pass. A pass visits the queue in arrival order, so a new pass
-/// begins where an attempt's position does not exceed the previous one's.
-fn overtakes(attempts: &[Attempt], position: impl Fn(u8) -> usize) -> bool {
-    let mut refusals: Vec<&Vec<Resource>> = Vec::new();
-    let mut last = None;
-    for (request, footprint, refused) in attempts {
-        let at = position(request.id);
-        if last.is_some_and(|last| at <= last) {
-            refusals.clear();
-        }
-        last = Some(at);
-        match refused {
-            Some(refused) => refusals.push(refused),
-            None => {
-                let met = refusals
-                    .iter()
-                    .any(|refused| refused.iter().any(|resource| footprint.contains(resource)));
-                if met {
-                    return true;
-                }
-            }
-        }
+        granted.insert(request.id);
     }
     false
 }
 
-/// Serve `state` under `discipline`, recording an overtaking.
-fn pass(state: &mut State, discipline: Discipline) {
+/// The resources a release of `request` frees: its peer's budget, its lane's share and the
+/// node budget, as the inbound mailbox names them.
+fn freed(request: &Request) -> [Resource; 3] {
+    [
+        Resource::Peer(request.peer),
+        Resource::Lane(request.lane),
+        Resource::Shared,
+    ]
+}
+
+/// Run `event` on `state`'s waitlist against its ledger, then record its grants and whether it
+/// overtook.
+fn event(
+    state: &mut State,
+    event: impl FnOnce(&mut Waitlist<Request, Resource>, &ModelLedger) -> Served<u8>,
+) {
     let ledger = ModelLedger {
         ledger: RefCell::new(state.ledger),
         attempts: RefCell::new(Vec::new()),
     };
-    let mut waiting: Vec<Waiting<ModelLedger>> = state
-        .queue
-        .iter()
-        .map(|(id, granted)| Waiting {
-            request: request(*id),
-            grant: granted.then_some(*id),
-        })
-        .collect();
-    match discipline {
-        Discipline::Production | Discipline::CancelWithoutPass => {
-            serve(&ledger, waiting.as_mut_slice(), |waiter| waiter);
-        }
-        Discipline::Fifo | Discipline::IgnoreRefusals | Discipline::SkipFreesStream => {
-            while mutant_pass(&ledger, waiting.as_mut_slice(), discipline) > 0 {}
-        }
-    }
-    let queue = state.queue.clone();
-    let position = |id: u8| {
-        queue
-            .iter()
-            .position(|(queued, _)| *queued == id)
-            .unwrap_or(usize::MAX)
+    let refused = state
+        .waitlist
+        .refused()
+        .map(|(_, request)| *request)
+        .collect::<Vec<_>>();
+    let served = event(&mut state.waitlist, &ledger);
+    // A waiter the event withdrew holds nothing against it.
+    let left = |request: &&Request| {
+        state
+            .waitlist
+            .requests()
+            .any(|(_, waiting)| waiting.id == request.id)
+            || served.granted.iter().any(|(_, id)| *id == request.id)
     };
-    state.overtaken |= overtakes(&ledger.attempts.borrow(), position);
+    let refused = refused.iter().filter(left).copied().collect::<Vec<_>>();
+    state.overtaken |= overtakes(&ledger.attempts.borrow(), &refused);
     state.ledger = ledger.ledger.into_inner();
-    for ((_, granted), waiter) in state.queue.iter_mut().zip(waiting) {
-        *granted = waiter.grant.is_some();
-    }
+    state
+        .granted
+        .extend(served.granted.into_iter().map(|(_, id)| id));
 }
 
 /// One transition of [`State`].
@@ -425,9 +439,14 @@ impl Model for AdmissionModel {
     type State = State;
 
     fn init_states(&self) -> Vec<State> {
+        let waitlist = match self.discipline {
+            Discipline::Production => Waitlist::default(),
+            Discipline::Broken(mutant) => Waitlist::mutant(mutant),
+        };
         vec![State {
             ledger: Ledger::default(),
-            queue: VecDeque::new(),
+            waitlist,
+            granted: BTreeSet::new(),
             arrival: [None; WORKLOAD.len()],
             held: BTreeSet::new(),
             resolved: BTreeSet::new(),
@@ -443,13 +462,19 @@ impl Model for AdmissionModel {
         {
             actions.push(Action::Arrive(candidate.id));
         }
-        for (id, granted) in state.queue.iter().copied() {
-            if granted {
-                actions.push(Action::Claim(id));
-            }
-            if state.cancels > 0 {
-                actions.push(Action::Cancel(id));
-            }
+        for id in state.granted.iter().copied() {
+            actions.push(Action::Claim(id));
+        }
+        if state.cancels > 0 {
+            let waiting = state.waitlist.requests().map(|(_, request)| request.id);
+            actions.extend(
+                state
+                    .granted
+                    .iter()
+                    .copied()
+                    .chain(waiting)
+                    .map(Action::Cancel),
+            );
         }
         actions.extend(state.held.iter().copied().map(Action::Release));
     }
@@ -458,32 +483,42 @@ impl Model for AdmissionModel {
         let mut state = last.clone();
         match action {
             Action::Arrive(id) => {
-                let sequence = u8::try_from(state.arrival.iter().flatten().count()).ok()?;
-                state.arrival[usize::from(id)] = Some(sequence);
-                state.queue.push_back((id, false));
-                pass(&mut state, self.discipline);
+                let mut arrived = None;
+                event(&mut state, |waitlist, ledger| {
+                    let (arrival, served) = waitlist.arrive(ledger, request(id));
+                    arrived = Some(arrival);
+                    served
+                });
+                state.arrival[usize::from(id)] = arrived;
             }
             Action::Claim(id) => {
-                let position = state.queue.iter().position(|entry| *entry == (id, true))?;
-                state.queue.remove(position);
+                state.granted.remove(&id).then_some(())?;
                 state.held.insert(id);
             }
             Action::Release(id) => {
                 state.held.remove(&id).then_some(())?;
                 state.ledger.release(&request(id));
                 state.resolved.insert(id);
-                pass(&mut state, self.discipline);
+                event(&mut state, |waitlist, ledger| {
+                    waitlist.release(ledger, freed(&request(id)))
+                });
             }
             Action::Cancel(id) => {
-                let position = state.queue.iter().position(|(queued, _)| *queued == id)?;
-                let (_, granted) = state.queue.remove(position)?;
-                if granted {
-                    state.ledger.release(&request(id));
-                }
                 state.cancels -= 1;
                 state.resolved.insert(id);
-                if self.discipline != Discipline::CancelWithoutPass {
-                    pass(&mut state, self.discipline);
+                let silent = self.discipline == Discipline::Broken(Mutant::WithdrawWithoutScan);
+                if state.granted.remove(&id) {
+                    state.ledger.release(&request(id));
+                    if !silent {
+                        event(&mut state, |waitlist, ledger| {
+                            waitlist.release(ledger, freed(&request(id)))
+                        });
+                    }
+                } else {
+                    let arrival = state.arrival[usize::from(id)]?;
+                    event(&mut state, |waitlist, ledger| {
+                        waitlist.withdraw(ledger, arrival).1
+                    });
                 }
             }
         }
@@ -507,7 +542,7 @@ impl Model for AdmissionModel {
                 |_, state: &State| state.passed(),
             ),
             Property::sometimes("a waiter is refused", |_, state: &State| {
-                state.queue.iter().any(|(_, granted)| !granted)
+                state.waitlist.len() > 0
             }),
             Property::sometimes("all resolved", |_, state: &State| state.done()),
         ]
@@ -549,12 +584,15 @@ fn test_resource_order_satisfies_its_laws() {
 /// (among others it may also break).
 #[test]
 fn test_each_resource_order_mutant_is_refuted() {
-    for (discipline, law) in [
-        (Discipline::Fifo, "independence"),
-        (Discipline::IgnoreRefusals, "no overtaking"),
-        (Discipline::SkipFreesStream, "stream order"),
-        (Discipline::CancelWithoutPass, "resolved"),
+    for (mutant, law) in [
+        (Mutant::Fifo, "independence"),
+        (Mutant::IgnoreRefusals, "no overtaking"),
+        (Mutant::SkipFreesStream, "stream order"),
+        (Mutant::WithdrawWithoutScan, "resolved"),
+        (Mutant::ReleaseWithoutScan, "independence"),
+        (Mutant::HoldWhateverBlocks, "independence"),
     ] {
+        let discipline = Discipline::Broken(mutant);
         assert!(
             refuted(discipline).contains(law),
             "{discipline:?} must be refuted by `{law}`"

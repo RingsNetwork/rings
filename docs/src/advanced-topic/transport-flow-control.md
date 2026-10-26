@@ -123,9 +123,12 @@ lane.
   (`fair_admission::ResourceOrderedQueue`): first come first served per exhausted resource (a
   peer's budget, a lane's share, the shared pool) and per peer, lane and transport carrier. A
   frame within its lane's reservation, such as DHT control, therefore never waits behind
-  another lane's borrower, and one peer at its budget never holds back another peer. The order
-  is model checked: no overtaking on an exhausted resource, stream order, no admissible arrival
-  left waiting, and every wait resolved.
+  another lane's borrower, and one peer at its budget never holds back another peer. An
+  arrival waiting only for room in its lane's reservation (or in its slot's floor of the
+  open-message table) holds that room, so a later, smaller frame does not pass it there
+  (#938). An event judges only the waiters its freed resources may unblock, through an
+  indexed waitlist. The order is model checked: no overtaking on an exhausted resource, stream
+  order, no admissible arrival left waiting, and every wait resolved.
 - A chunked message is charged once, at its first chunk `[0, n]` of `d₀` bytes, for the
   `n·d₀` its buffer and its completed copy take (#932; load-bounds paper, Law 4). That charge
   sits on the lane of the message's class and in the open-message table, by the connection
