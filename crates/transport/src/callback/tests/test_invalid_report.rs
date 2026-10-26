@@ -14,7 +14,7 @@ async fn test_invalid_frame_reports_use_one_coalesced_worker() {
             invalid: Arc::clone(&invalid),
         }),
         Notifier::default(),
-        NodeReceiveLoad::new(),
+        NodeFramePool::new(),
     );
 
     for index in 0..64 {
@@ -35,7 +35,7 @@ async fn test_cancelling_invalid_frame_worker_discards_backlog_and_allows_replac
         "peer",
         Box::new(PendingInvalidCallback),
         Notifier::default(),
-        NodeReceiveLoad::new(),
+        NodeFramePool::new(),
     );
     assert!(callback.queue_invalid_inbound_frame());
     let mut drain = Box::pin(callback.drain_invalid_inbound_frames());
@@ -57,7 +57,7 @@ async fn test_invalid_frame_backlog_is_bounded_and_yields_between_quanta() {
             invalid: Arc::clone(&invalid),
         }),
         Notifier::default(),
-        NodeReceiveLoad::new(),
+        NodeFramePool::new(),
     );
     for _ in 0..INVALID_FRAME_REPORT_BACKLOG_CAPACITY.saturating_add(32) {
         callback.queue_invalid_inbound_frame();

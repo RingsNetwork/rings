@@ -15,12 +15,13 @@ use futures::FutureExt;
 
 use crate::callback::link_credit::LaneCreditView;
 use crate::callback::link_credit::LinkCredit;
-use crate::callback::link_credit::NodeReceiveLoad;
+use crate::callback::link_credit::NodeFramePool;
+use crate::core::credit::LaneSignal;
 use crate::core::credit::LANE_CREDIT_WINDOW;
 use crate::core::pool::ChannelLane;
 
 /// The lane every law is checked on: the Application lane's index.
-const LANE: ChannelLane = ChannelLane::new(3);
+const LANE: ChannelLane = ChannelLane::PRIORITY;
 
 /// A waker that records whether it was woken.
 #[derive(Default)]
@@ -34,7 +35,7 @@ impl ArcWake for Flag {
 
 /// A fresh connection generation's credit.
 fn link() -> Arc<LinkCredit> {
-    Arc::new(LinkCredit::new(Arc::from("peer"), NodeReceiveLoad::new()))
+    Arc::new(LinkCredit::new(Arc::from("peer"), NodeFramePool::new()))
 }
 
 /// Read-only: the view reads the free credit of its own lane, reading and waiting reserve
@@ -58,8 +59,8 @@ fn test_the_view_reads_its_lane_and_reserves_nothing() {
     assert_eq!(view.free(), Some(0));
     assert_eq!(
         LaneCreditView::new(&link, ChannelLane::new(2)).free(),
-        Some(LANE_CREDIT_WINDOW),
-        "another lane's credit is its own"
+        Some(1),
+        "another lane's credit is its own: a data lane's floor"
     );
 
     drop(held);
@@ -82,7 +83,10 @@ fn test_a_wait_ends_at_the_grant_or_at_the_close() {
 
     let mut granted = pin!(view.credited());
     assert_eq!(granted.as_mut().poll(&mut context), Poll::Pending);
-    link.grant(LANE, LANE_CREDIT_WINDOW + 1);
+    link.apply(LANE, LaneSignal::Credit {
+        limit: LANE_CREDIT_WINDOW + 1,
+        generation: 0,
+    });
     assert!(
         flag.0.swap(false, Ordering::SeqCst),
         "the grant wakes the wait"

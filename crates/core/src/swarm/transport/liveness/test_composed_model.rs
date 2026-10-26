@@ -30,8 +30,8 @@
 //!     frame to `B`'s actor only once the previous one completed (`InboundCompletion::Await`),
 //!     so each lane holds at most one event of the per-peer share, [`PEER_EVENTS`], which a
 //!     lane-0 event needs a free slot of. Hand-off is a transition; the exception for frames
-//!     released from a hold (`LogHeld`) and the node-wide receive load (`NodeReceiveLoad`) are
-//!     not modelled.
+//!     released from a hold (`LogHeld`) and the node's frame pool (`NodeFramePool`), which
+//!     lane 0 never borrows from, are not modelled.
 //!   - Probe and answer slots: a probe, and a direct answer, take no shared outbound capacity
 //!     (`outbound::sender_bounded`), so frames that other traffic holds cannot refuse them. An
 //!     answer `B` relays for another origin takes shared capacity, never the slot, so a flood of

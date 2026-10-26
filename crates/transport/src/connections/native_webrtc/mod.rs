@@ -27,12 +27,14 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::callback::admit_inbound_data_channel;
+use crate::callback::credit_pump::check_idle_lanes;
 use crate::callback::credit_pump::pump_lane_credits;
 use crate::callback::credit_pump::CREDIT_RESEND_PAUSE;
+use crate::callback::credit_pump::LANE_IDLE_PERIOD;
 use crate::callback::data_channel_label;
 use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
-use crate::callback::NodeReceiveLoad;
+use crate::callback::NodeFramePool;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::credit::CreditIndex;
@@ -319,7 +321,7 @@ pub struct WebrtcTransport {
     udp_port_range: Option<WebrtcUdpPortRange>,
     pool: Pool<WebrtcConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
-    receive_load: NodeReceiveLoad,
+    frame_pool: NodeFramePool,
 }
 
 impl WebrtcConnection {
@@ -420,7 +422,7 @@ impl WebrtcTransport {
             external_address,
             udp_port_range,
             pool: Pool::new(),
-            receive_load: NodeReceiveLoad::new(),
+            frame_pool: NodeFramePool::new(),
         }
     }
 }
@@ -795,7 +797,7 @@ impl TransportInterface for WebrtcTransport {
             cid,
             callback,
             webrtc_data_channel_state_notifier.clone(),
-            self.receive_load.clone(),
+            self.frame_pool.clone(),
         ));
 
         // Wire open/close on the channels *this* side creates (the pool), not
@@ -834,9 +836,14 @@ impl TransportInterface for WebrtcTransport {
                 CREDIT_RESEND_PAUSE,
             );
             rings_runtime::spawn_detached(pump).is_ok()
-        });
+        }) && rings_runtime::spawn_detached(check_idle_lanes(
+            Arc::downgrade(inner_cb.link_credit()),
+            LANE_IDLE_PERIOD,
+        ))
+        .is_ok();
         if !spawned {
-            // Without its pump the connection would advertise no credit after the first window.
+            // Without its pump the connection would advertise no credit after the first window,
+            // and without its idle check a lane would keep its share of the pool for good.
             self.close_connection_if_current(&connection).await?;
             return Err(Error::CreditPumpUnavailable(cid.to_string()));
         }

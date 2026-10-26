@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 
 use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
-use crate::callback::NodeReceiveLoad;
+use crate::callback::NodeFramePool;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::credit::CreditIndex;
@@ -216,7 +216,7 @@ pub struct DummyConnection {
 pub struct DummyTransport {
     pool: Pool<DummyConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
-    receive_load: NodeReceiveLoad,
+    frame_pool: NodeFramePool,
     /// The payload frames every connection of this transport has dispatched; see
     /// [`Self::dispatched_payload_frames`].
     dispatched: Arc<AtomicUsize>,
@@ -267,18 +267,21 @@ impl DummyConnection {
         }
     }
 
-    /// Start this connection's credit pumps, one per lane: every credit its receive side
-    /// advertises is granted to the paired connection directly, the dummy link carrying credit
-    /// without latency. A credit is released only for a frame that arrived, so it always has a
-    /// paired connection to go to; once that connection is gone its senders are gone with it,
-    /// and the credit has no one to reach. The pumps stop when this connection's callback is
-    /// dropped. Post: `false` when a pump cannot be spawned.
+    /// Start this connection's credit pumps, one per lane: every signal its lanes queue (a
+    /// credit or shrink of its receive side, a return of its send side) is applied to the paired
+    /// connection directly, the dummy link carrying signals without latency. A signal always
+    /// answers a frame or a signal of the paired connection, so it has one to go to; once that
+    /// connection is gone its ends are gone with it, and the signal has no one to reach. The
+    /// dummy link runs no idle check of its own: a test drives it by event
+    /// (`LinkCredit::idle_check`), so no wall-clock timer changes a deterministic schedule.
+    /// The pumps stop when this connection's callback is dropped. Post: `false` when a pump
+    /// cannot be spawned.
     fn spawn_credit_pumps(self: &Arc<Self>) -> bool {
         CreditIndex::ALL.into_iter().all(|index| {
             let link = Arc::clone(self.callback.link_credit());
             let connection = Arc::downgrade(self);
             let pump = async move {
-                while let Some(credit) = link.next_credit(index).await {
+                while let Some(signal) = link.next_signal(index).await {
                     let Some(conn) = connection.upgrade() else {
                         continue;
                     };
@@ -286,7 +289,7 @@ impl DummyConnection {
                         continue;
                     }
                     if let Some(remote) = conn.remote_conn() {
-                        remote.callback.link_credit().grant(index.lane(), credit);
+                        remote.callback.link_credit().apply(index.lane(), signal);
                     }
                 }
             };
@@ -428,7 +431,7 @@ impl DummyTransport {
 
         Self {
             pool: Pool::new(),
-            receive_load: NodeReceiveLoad::new(),
+            frame_pool: NodeFramePool::new(),
             dispatched: Arc::default(),
         }
     }
@@ -564,7 +567,7 @@ impl FrameSink for DummyConnection {
         }
         let count = match frame {
             TransportMessage::Custom(_) => FrameCount::Payload(Arc::clone(&self.dispatched)),
-            TransportMessage::Credit(_) => FrameCount::Credit,
+            TransportMessage::Signal(_) => FrameCount::Credit,
         };
         let data = rings_codec::serialize(&frame).map(Bytes::from)?;
         if !permit.allows() {
@@ -710,7 +713,7 @@ impl TransportInterface for DummyTransport {
             cid,
             callback,
             Notifier::default(),
-            self.receive_load.clone(),
+            self.frame_pool.clone(),
         );
         let conn = DummyConnection::new(inner_callback, Arc::clone(&self.dispatched));
 

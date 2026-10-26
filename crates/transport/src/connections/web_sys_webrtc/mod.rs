@@ -29,13 +29,15 @@ use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
 use crate::callback::admit_inbound_data_channel;
+use crate::callback::credit_pump::check_idle_lanes;
 use crate::callback::credit_pump::pump_lane_credits;
 use crate::callback::credit_pump::CREDIT_RESEND_PAUSE;
+use crate::callback::credit_pump::LANE_IDLE_PERIOD;
 use crate::callback::data_channel_label;
 use crate::callback::inbound_frame_exceeds_protocol_ceiling;
 use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
-use crate::callback::NodeReceiveLoad;
+use crate::callback::NodeFramePool;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::credit::CreditIndex;
@@ -190,7 +192,7 @@ pub struct WebSysWebrtcTransport {
     ice_servers: Vec<IceServer>,
     pool: Pool<WebSysWebrtcConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
-    receive_load: NodeReceiveLoad,
+    frame_pool: NodeFramePool,
 }
 
 impl WebSysWebrtcConnection {
@@ -278,7 +280,7 @@ impl WebSysWebrtcTransport {
         Self {
             ice_servers,
             pool: Pool::new(),
-            receive_load: NodeReceiveLoad::new(),
+            frame_pool: NodeFramePool::new(),
         }
     }
 }
@@ -594,7 +596,7 @@ impl TransportInterface for WebSysWebrtcTransport {
             cid,
             callback,
             webrtc_data_channel_state_notifier.clone(),
-            self.receive_load.clone(),
+            self.frame_pool.clone(),
         ));
 
         let channel_pool = Rc::new(ChannelPool::default());
@@ -627,6 +629,10 @@ impl TransportInterface for WebSysWebrtcTransport {
                 CREDIT_RESEND_PAUSE,
             ));
         }
+        spawn_local(check_idle_lanes(
+            Arc::downgrade(inner_cb.link_credit()),
+            LANE_IDLE_PERIOD,
+        ));
         Ok(connection)
     }
 
@@ -751,7 +757,7 @@ mod tests {
             "peer",
             Box::new(IgnoredCallback),
             Notifier::default(),
-            NodeReceiveLoad::new(),
+            NodeFramePool::new(),
         ))
     }
 
@@ -856,7 +862,7 @@ mod tests {
                 invalid_frames: Rc::clone(&invalid_frames),
             }),
             Notifier::default(),
-            NodeReceiveLoad::new(),
+            NodeFramePool::new(),
         ));
         let connection = RtcPeerConnection::new().expect("browser peer connection must construct");
         let channel = connection.create_data_channel("invalid-frame-accounting");

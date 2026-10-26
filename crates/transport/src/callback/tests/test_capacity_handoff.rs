@@ -7,7 +7,7 @@ use bytes::Bytes;
 
 use super::InboundFrameAdmission;
 use super::InnerTransportCallback;
-use super::NodeReceiveLoad;
+use super::NodeFramePool;
 use crate::core::callback::AdmittedInboundMessage;
 use crate::core::callback::TransportCallback;
 use crate::core::pool::ChannelLane;
@@ -53,7 +53,7 @@ async fn test_downstream_handoff_releases_the_credit_before_callback_completion(
         "peer",
         Box::new(PendingAfterCapacityHandoff),
         Notifier::default(),
-        NodeReceiveLoad::new(),
+        NodeFramePool::new(),
     );
     let raw_dropped = Arc::new(AtomicBool::new(false));
     let raw = Bytes::from_owner(DropObservedBytes {
