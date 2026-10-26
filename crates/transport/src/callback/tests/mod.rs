@@ -32,15 +32,15 @@ fn wire(message: &TransportMessage) -> Bytes {
     Bytes::from(rings_codec::serialize(message).expect("transport frame must serialize"))
 }
 
-/// An [`IgnoredCallback`] for `peer` with the production credit window, its receive load
-/// counted in `load`.
-fn loaded_callback(peer: &str, load: NodeReceiveLoad) -> InnerTransportCallback {
-    InnerTransportCallback::new(peer, Box::new(IgnoredCallback), Notifier::default(), load)
+/// An [`IgnoredCallback`] for `peer` with the production credit windows, its data lanes lent
+/// from `pool`.
+fn pooled_callback(peer: &str, pool: NodeFramePool) -> InnerTransportCallback {
+    InnerTransportCallback::new(peer, Box::new(IgnoredCallback), Notifier::default(), pool)
 }
 
 /// An [`IgnoredCallback`] for `peer` with the production credit window, alone on its node.
 fn callback(peer: &str) -> InnerTransportCallback {
-    loaded_callback(peer, NodeReceiveLoad::new())
+    pooled_callback(peer, NodeFramePool::new())
 }
 
 /// Admit a full [`LANE_CREDIT_WINDOW`] of copies of the custom frame `raw` on `lane`, holding
@@ -61,26 +61,38 @@ fn admit_window(
         .collect()
 }
 
-/// The credit `lane`'s pump at `callback` would send now, taken from its outbox; `None` when
+/// The signal `lane`'s pump at `callback` would send now, taken from its outbox; `None` when
 /// none is due.
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
-fn take_due_credit(callback: &InnerTransportCallback, lane: ChannelLane) -> Option<u64> {
+fn take_due_signal(
+    callback: &InnerTransportCallback,
+    lane: ChannelLane,
+) -> Option<crate::core::credit::LaneSignal> {
     use futures::FutureExt;
 
     use crate::core::credit::credit_index;
 
     callback
         .link_credit()
-        .next_credit(credit_index(lane))
+        .next_signal(credit_index(lane))
         .now_or_never()
         .flatten()
 }
 
-/// Reserve a full [`LANE_CREDIT_WINDOW`] of send credit on `lane` at `callback`, holding every
-/// reservation.
+/// The credit of generation `0` up to `limit`.
+#[cfg(any(feature = "dummy", feature = "native-webrtc"))]
+const fn credit(limit: u64) -> crate::core::credit::LaneSignal {
+    crate::core::credit::LaneSignal::Credit {
+        limit,
+        generation: 0,
+    }
+}
+
+/// Reserve every free send credit on `lane` at `callback`, holding every reservation: a fresh
+/// lane's floor, its whole window for the priority lane and one frame for a data lane.
 ///
-/// Pre: `lane` holds a whole window of unreserved credit and the link is open. Post: the next
-/// reservation on `lane` waits until one of the returned reservations drops or credit arrives.
+/// Pre: the link is open. Post: the next reservation on `lane` waits until one of the returned
+/// reservations drops or credit arrives.
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
 fn reserve_window(
     callback: &InnerTransportCallback,
@@ -88,13 +100,15 @@ fn reserve_window(
 ) -> Vec<crate::callback::link_credit::CreditReservation> {
     use futures::FutureExt;
 
-    (0..LANE_CREDIT_WINDOW)
+    let view = callback.send_credit_view(lane);
+    let free = view.free().expect("a fresh lane is open");
+    (0..free)
         .map(|_| {
             callback
                 .link_credit()
                 .reserve(lane)
                 .now_or_never()
-                .expect("a fresh lane has a window of credit")
+                .expect("a free credit is reserved at once")
                 .expect("a fresh lane is open")
         })
         .collect()

@@ -4,8 +4,8 @@
 //! bounded by what its sender streams. The receiver samples the message at instants
 //! `t₀ < t₁ < …` (its chunks' arrivals and the reassembler's sweeps) and reads at each the credit
 //! `c` its sender holds unused on the carrier: advertised by this end and not yet used. Credit
-//! the receiver holds back (the frames that took it, a release awaiting its batch, an
-//! advertisement deferred at the node's soft limit) is not in `c`, so the clock pauses while the
+//! the receiver holds back (the frames that took it, a release awaiting its batch, pooled credit
+//! the node's frame pool has not lent) is not in `c`, so the clock pauses while the
 //! receiver throttles the sender. Read at the receiver, `c` also counts credit still in transit
 //! to the sender and frames already sent on it that are still in flight: with the frames the
 //! receiver holds, that is the lane's outstanding liability, at most one window `W`, however

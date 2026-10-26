@@ -17,7 +17,7 @@ use web_sys::RtcSessionDescriptionInit;
 
 use super::WebSysWebrtcConnection;
 use crate::callback::InnerTransportCallback;
-use crate::callback::NodeReceiveLoad;
+use crate::callback::NodeFramePool;
 use crate::core::callback::TransportCallback;
 use crate::core::pool::ChannelPool;
 use crate::core::transport::ConnectionInterface;
@@ -85,7 +85,7 @@ async fn local_close_ends_a_gathering_in_progress() {
             "peer",
             Box::new(IgnoredCallback),
             Notifier::default(),
-            NodeReceiveLoad::new(),
+            NodeFramePool::new(),
         )),
     );
 

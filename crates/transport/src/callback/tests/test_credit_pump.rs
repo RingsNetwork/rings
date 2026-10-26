@@ -17,6 +17,7 @@ use super::link_send::FrameSink;
 use super::wire;
 use crate::connection_ref::ConnectionRef;
 use crate::core::credit::credit_index;
+use crate::core::credit::LaneSignal;
 use crate::core::credit::LANE_CREDIT_WINDOW;
 use crate::core::pool::ChannelLane;
 use crate::core::transport::ConnectionInterface;
@@ -49,7 +50,7 @@ impl FrameSink for FlakyCreditConnection {
         _: ChannelLane,
         _: SendPermit,
     ) -> Result<DeliveryFuture> {
-        let TransportMessage::Credit(credit) = frame else {
+        let TransportMessage::Signal(LaneSignal::Credit { limit: credit, .. }) = frame else {
             return Err(Error::DataChannelOpen("only credit frames are sent".into()));
         };
         let failed = self

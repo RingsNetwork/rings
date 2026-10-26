@@ -14,47 +14,66 @@ link](delegation-references.md)).
 
 A receiver holds at most `LANE_CREDIT_WINDOW` (16) frames of a lane, so at most
 `INBOUND_PEER_FRAME_CAPACITY` (64) frames of at most `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes per
-connection. It advertises more credit, as a cumulative and idempotent `TransportMessage::Credit`
-frame, as the protocol takes frames over. A sender holds a custom frame until its lane has
-credit. A received credit frame is applied on arrival, never behind received data, and is not
-itself charged. On the sending side a credit frame goes out on its own lane, so it may wait
-behind up to a window of this end's committed frames on that lane.
+connection. Every lane has a floor it is always granted: the priority lane its whole window, each
+data lane one frame. Beyond its floor a data lane borrows from the node's frame pool, up to the
+window (see below). The receiver advertises credit, as a cumulative `Credit(limit, generation)`
+signal, as the protocol takes frames over, and at once when the pool lends a lane more. A sender
+holds a custom frame until its lane has credit. A received signal is applied on arrival, never
+behind received data, and is not itself charged. On the sending side a signal goes out on its
+own lane, so it may wait behind up to a window of this end's committed frames on that lane.
 
 Credit counts frames, not bytes, so it caps each lane's throughput toward one neighbour at a
 window per round trip: about 160 small messages per second at a 100 ms round trip (53 at
 300 ms), or about 10 MiB/s of 64 KiB frames (3.3 MiB/s). Byte-denominated credit, sent ahead of
 queued data, would lift both (#937).
 
-The laws, model checked with stateright over every interleaving, with credits reordered and
-duplicated (`rings-transport`, `core::credit`):
+The laws, model checked with stateright over every interleaving, with credit, shrink and return
+signals reordered and duplicated (`rings-transport`, `core::credit`):
 
 - an honest sender never exceeds the advertised credit;
-- a lane's occupancy never exceeds its window;
+- a lane's occupancy, and its counted liability (held, in flight, or credited and unused), never
+  exceed its window, and its share never exceeds the pool;
 - an honest sender is never blocked forever while the receiver keeps consuming, makes every
-  advertisement it deferred, and resends every credit whose send failed;
+  advertisement due, and resends every signal whose send failed;
 - one lane's backlog never blocks another lane.
 
 A frame beyond the advertised credit is a protocol violation: it is refused, reported to the
 callback as an invalid frame, and logged.
 
-What a node holds of received frames is bounded twice:
+What a node holds of received frames is bounded hard, whatever the number of connections
+(#934; load-bounds paper, Law 3):
 
-- **Hard, per connection.** A connection holds at most 4 lanes × 16 frames × 64 KiB = 4 MiB at
-  the receiver under credit. Connection admission keeps at most `2 × (160 + successors + 1)`
-  connections (328 with the default 3 successors), so a node holds at most about 1.3 GiB, and
-  that only if every connection fills the credit it holds at once.
-- **Soft, per node.** While the frames a node's connections hold together exceed 16 MiB
-  (`NODE_RECEIVE_SOFT_LIMIT_BYTES`), no lane but the priority lane advertises new credit; a
-  lane that releases a batch meanwhile defers its advertisement, and the release that brings
-  the node below the limit makes every deferred one. The priority lane
-  (`ChannelLane::PRIORITY`), which core gives to DHT control, is never deferred. The receiver
-  refuses as invalid a frame whose content belongs to another lane than the one it arrived on
-  (a chunked message by the lane every chunk shared), so the priority lane's credit carries
-  DHT control alone. A peer's control traffic, and with it every link's liveness, therefore
-  never waits for what other peers make the node hold. Deferring narrows what senders may send
-  next, never what they were granted, so no honest frame is refused; the node exceeds the
-  limit by at most the credit already advertised and one priority window per connection. A
-  hard node-wide bound needs credit that can be taken back, a wire change (#934).
+- **Floors and the pool.** A connection's lanes always hold their floors: 16 frames on the
+  priority lane and one on each data lane. Beyond its floor, a data lane is lent credit from the
+  node's frame pool (`NodeFramePool`, 256 frames, 16 MiB): the admission of a data lane's frame
+  is its demand, served first come, first served, up to the lane's window and within its edge's
+  fair claim, `⌈256 / n⌉` frames with `n` the edges holding or waiting for pooled credit. When an
+  edge below its share, `⌊256 / n⌋`, finds the pool full, every edge above its share is shrunk
+  to it. So a busy edge keeps at least `min(45, ⌊256 / n⌋)` pooled frames, its three data lanes'
+  whole windows while at most five edges are busy, however busy the others are. With connection
+  admission keeping at most `2 × (160 + successors + 1)` connections (328 with the default 3
+  successors), a node holds at most `328 × 19 + 256 = 6 488` frames, about 405 MiB of 64 KiB
+  frames, against about 1.3 GiB before.
+- **Reclaim.** A data lane that holds a share of the pool and admitted no frame for
+  `LANE_IDLE_PERIOD` (1 s) is shrunk to its floor: the receiver sends `Shrink(limit, generation)`
+  on the lane, the sender answers `Returned(bound, generation)`, the frames it committed or will
+  commit at most, and the share goes back to the pool. Credits name their generation, so one
+  of an older generation, still in transit, is ignored. On a link whose round trip exceeds 1 s,
+  a lane paused for one round trip is shrunk and its next burst waits one round trip for pooled
+  credit again; no frame is refused.
+- **The priority lane never borrows.** Its floor is its whole window, so a peer's control
+  traffic, and with it every link's liveness, never waits for what other peers make the node
+  hold. The receiver refuses as invalid a frame whose content belongs to another lane than the
+  one it arrived on (a chunked message by the lane every chunk shared), so the priority lane's
+  credit carries DHT control alone. Measured over the test suite, one edge had at most 10
+  priority frames outstanding under asynchronous delivery and 16 in the sync storms, so a
+  smaller floor would make control wait; bursts above 16 wait for credit as they did before.
+  Counting frames prices a control frame at the 64 KiB a data frame may take; byte-denominated
+  credit would remove that (#937).
+
+Received frames and the mailbox are separate memories: a frame counts here until it is handed to
+the mailbox, which happens only once its mailbox charge is granted, so inbound memory is at
+most the frame bound plus the mailbox's 256 MiB.
 
 A wait for credit is backpressure, not a verdict on the peer: it ends when credit arrives or
 when the connection generation ends (it fails or closes), and the wait itself never retires a
