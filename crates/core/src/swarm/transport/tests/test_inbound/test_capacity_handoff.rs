@@ -1,7 +1,7 @@
 use rings_transport::callback::AdmittedInboundFrame;
 use rings_transport::callback::InboundFrameAdmission;
 use rings_transport::callback::InnerTransportCallback;
-use rings_transport::callback::NodeReceiveLoad;
+use rings_transport::callback::NodeFramePool;
 use rings_transport::core::callback::AdmittedInboundMessage;
 use rings_transport::core::credit::LANE_CREDIT_WINDOW;
 use rings_transport::core::pool::ChannelLane;
@@ -86,7 +86,7 @@ async fn test_raw_transport_lease_is_held_until_core_capacity_admission() -> Res
         &peer.peer.to_string(),
         Box::new(SharedCoreCallback(Arc::clone(&core_callback))),
         Notifier::default(),
-        NodeReceiveLoad::new(),
+        NodeFramePool::new(),
     ));
     let frame = admit_raw_frame(&transport_callback, raw.clone())?;
     // Fill the rest of the lane's window, so only the dispatched frame's release can admit more.
