@@ -58,7 +58,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
-use rings_runtime::Spawner;
 use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -76,6 +75,7 @@ use crate::extension::transport::Initiator;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::SlotRegistration;
 use crate::extension::transport::TransportKind;
+use crate::tasks::wound_down;
 
 /// Connect timeout for a local service dial.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -241,7 +241,7 @@ impl TransportSessions {
             "relay engine acted with a scope outside the session's namespace"
         );
         // Acquired before the slot is claimed, so a missing runtime claims nothing.
-        let Ok(spawner) = Spawner::current() else {
+        let Ok(spawner) = scope.tasks().spawner() else {
             return EffectEnqueue::Failed;
         };
         let task = match RelayTask::register(self.clone(), scope, key) {
@@ -249,19 +249,11 @@ impl TransportSessions {
             SlotRegistration::AlreadyPresent => return EffectEnqueue::AlreadyPresent,
             SlotRegistration::Failed => return EffectEnqueue::Failed,
         };
-        spawner.spawn(async move {
-            match kind {
-                TransportKind::Tcp => {
-                    match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
-                        Ok(Ok(stream)) => tcp::relay_tcp(task, stream, Bytes::new()).await,
-                        _ => task.refuse().await,
-                    }
-                }
-                TransportKind::Udp => match udp::bind_connected_udp(addr).await {
-                    Some(socket) => udp::relay_udp_connected(task, socket).await,
-                    None => task.refuse().await,
-                },
-            }
+        let cancel = task.cancel.clone();
+        // Winding down: a cancel at the node's stop resets the local socket and tears down the
+        // session (the fail-closed end of `tcp::relay_tcp`), where a drop would close it cleanly.
+        spawner.spawn_winding_down(move |stop| {
+            wound_down(stop, connected(task, addr, kind), move || cancel.cancel())
         });
         EffectEnqueue::Enqueued
     }
@@ -396,7 +388,7 @@ impl TransportSessions {
         };
         // Acquired before any slot or flow is claimed; without a runtime the pending
         // connection is dropped and the reducer untracks `key`.
-        let Ok(spawner) = Spawner::current() else {
+        let Ok(spawner) = scope.tasks().spawner() else {
             return Some(key);
         };
         match pending {
@@ -410,23 +402,28 @@ impl TransportSessions {
                     SlotRegistration::AlreadyPresent => return None,
                     SlotRegistration::Failed => return Some(key),
                 };
-                spawner.spawn(async move {
-                    // Released when this task ends, however it ends.
-                    let _hold = hold;
-                    if open(&task.scope, &task.key, service.as_str())
-                        .await
-                        .is_err()
-                    {
-                        task.refuse().await;
-                        return;
-                    }
-                    match task.sessions.current_generation(&task.key) {
-                        Some(generation) if generation == task.generation => {
-                            tcp::relay_tcp(task, stream, preamble).await;
+                let cancel = task.cancel.clone();
+                // Winding down, as for `connect`: the stop resets the accepted socket.
+                spawner.spawn_winding_down(move |stop| {
+                    let relayed = async move {
+                        // Released when this task ends, however it ends.
+                        let _hold = hold;
+                        if open(&task.scope, &task.key, service.as_str())
+                            .await
+                            .is_err()
+                        {
+                            task.refuse().await;
+                            return;
                         }
-                        None => cancel_open(&task.scope, &task.key).await,
-                        Some(_) => {}
-                    }
+                        match task.sessions.current_generation(&task.key) {
+                            Some(generation) if generation == task.generation => {
+                                tcp::relay_tcp(task, stream, preamble).await;
+                            }
+                            None => cancel_open(&task.scope, &task.key).await,
+                            Some(_) => {}
+                        }
+                    };
+                    wound_down(stop, relayed, move || cancel.cancel())
                 });
             }
             Pending::Udp { socket, src, first } => {
@@ -819,6 +816,21 @@ async fn cancel_open(scope: &Scope, key: &SessionKey) {
         from_opener: opened_by_us(key),
     })
     .await;
+}
+
+/// The server side of the session `task`: connect `addr` over `kind` and relay it, or refuse the
+/// session when it cannot be reached.
+async fn connected(task: RelayTask, addr: SocketAddr, kind: TransportKind) {
+    match kind {
+        TransportKind::Tcp => match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => tcp::relay_tcp(task, stream, Bytes::new()).await,
+            _ => task.refuse().await,
+        },
+        TransportKind::Udp => match udp::bind_connected_udp(addr).await {
+            Some(socket) => udp::relay_udp_connected(task, socket).await,
+            None => task.refuse().await,
+        },
+    }
 }
 
 /// Send a [`Frame`] to `peer` over the overlay, under the scope's own namespace.

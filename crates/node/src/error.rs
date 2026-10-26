@@ -324,6 +324,16 @@ pub enum Error {
     /// The runtime could not run a timer.
     #[error("Timer error: {0}")]
     Timer(#[from] rings_runtime::TimerError) = 1505,
+    /// A closed node is still shared, so its stores are not yet released
+    /// ([`Provider::close`](crate::provider::Provider::close)): they are once its last clone
+    /// drops, which `released` witnesses.
+    #[error(
+        "The node is closed but still shared: its stores are released when its last clone drops"
+    )]
+    ProviderStillShared {
+        /// Resolves once every store of the node is released.
+        released: crate::release::StoresReleased,
+    } = 1506,
     /// Onion route construction or validation failed.
     #[error("Onion route error: {0}")]
     OnionRouteError(OnionRouteError) = 1601,

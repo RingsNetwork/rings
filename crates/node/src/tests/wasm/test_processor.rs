@@ -7,7 +7,6 @@ use rings_core::swarm::application::ApplicationData;
 use rings_core::swarm::application::ApplicationDelivery;
 use rings_core::swarm::application::ApplicationInbox;
 use rings_core::swarm::application::ApplicationMessage;
-use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_test::*;
 
 use crate::prelude::*;
@@ -76,7 +75,10 @@ impl ObservedProcessor {
         let (texts_sender, texts) = mpsc::unbounded();
         let (recorder, transitions) = peer_transitions();
         let inbox = processor.swarm.application_inbox().unwrap();
-        spawn_local(record_inbox(inbox, texts_sender, recorder));
+        processor
+            .tasks()
+            .spawn(record_inbox(inbox, texts_sender, recorder))
+            .unwrap();
         Self {
             processor,
             transitions,
@@ -199,13 +201,19 @@ async fn test_processor_handshake_and_msg() {
 
         console_log!("listen");
         let p1_listener = p1.processor.clone();
-        spawn_local(async move {
-            p1_listener.listen().await;
-        });
+        p1.processor
+            .tasks()
+            .spawn(async move {
+                p1_listener.listen().await;
+            })
+            .unwrap();
         let p2_listener = p2.processor.clone();
-        spawn_local(async move {
-            p2_listener.listen().await;
-        });
+        p2.processor
+            .tasks()
+            .spawn(async move {
+                p2_listener.listen().await;
+            })
+            .unwrap();
 
         console_log!("processor_hs_connect_1_2");
         create_connection(&p1, &p2).await;

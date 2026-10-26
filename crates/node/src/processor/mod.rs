@@ -88,6 +88,8 @@ use crate::registration::validate_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
+use crate::release::StoresReleased;
+use crate::tasks::NodeTasks;
 
 const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -157,6 +159,10 @@ pub struct Processor {
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
     measure: Option<Arc<PeriodicMeasure>>,
+    /// The release witnesses of the file stores this processor is built over (#1085).
+    stores_released: StoresReleased,
+    /// The stop and the task set of this node (`crate::tasks`), shared by every clone.
+    tasks: NodeTasks,
     /// Serializes listener generations across every clone and wrapper of this processor.
     /// Ownership includes graceful maintenance shutdown and measurement flushing.
     listener_lifecycle_lock: Arc<futures::lock::Mutex<()>>,
@@ -186,6 +192,16 @@ impl Processor {
 
     pub(crate) fn delegatee_key(&self) -> &DelegateeKey {
         &self.delegatee_key
+    }
+
+    /// The stop and the task set of this node (`crate::tasks`).
+    pub(crate) fn tasks(&self) -> &NodeTasks {
+        &self.tasks
+    }
+
+    /// The release witnesses of the file stores this processor is built over (#1085).
+    pub(crate) fn stores_released(&self) -> StoresReleased {
+        self.stores_released.clone()
     }
 
     #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -484,7 +500,35 @@ impl Processor {
     where F: FnOnce() {
         let _listener_lifecycle_guard = self.listener_lifecycle_lock.lock().await;
         on_started();
-        self.run_listener_generation(stop).await;
+        self.run_listener_generation_until(stop).await;
+    }
+
+    /// Run one listener generation until `stop` or the node's stop asks it to exit: each is
+    /// forwarded to the one stop the generation observes, so it winds down cooperatively on
+    /// either, and a close (#1085) ends it as the caller's stop does.
+    async fn run_listener_generation_until(&self, stop: StopToken) {
+        let generation = StopSource::new();
+        let node = self.tasks.stop_token();
+        let forward = async {
+            let caller = stop.stopped();
+            let node = node.stopped();
+            futures::pin_mut!(caller, node);
+            let _ = futures::future::select(caller, node).await;
+            generation.request_stop();
+        };
+        let run = self.run_listener_generation(generation.token());
+        futures::pin_mut!(forward, run);
+        if let futures::future::Either::Left(((), run)) =
+            futures::future::select(forward, run).await
+        {
+            run.await;
+        }
+    }
+
+    /// Wait until no listener generation runs: the one running, if any, has ended with its
+    /// cleanup and measurement flush.
+    pub(crate) async fn await_listener_generations(&self) {
+        drop(self.listener_lifecycle_lock.lock().await);
     }
 
     /// Run maintenance and registration loops for the generation holding the lifecycle lock.
@@ -529,7 +573,7 @@ impl Processor {
         Ok(())
     }
 
-    #[cfg(all(test, feature = "ffi"))]
+    #[cfg(all(test, rings_native))]
     pub(crate) async fn record_authenticated_measurement_for_test(
         &self,
         peer: Did,
@@ -557,12 +601,11 @@ impl Processor {
     /// Close this node's network: the swarm opens no connection from now on and closes every
     /// one it has (`Swarm::close`, #1098), then the applied measurements are flushed.
     ///
-    /// Call it before dropping the last handle of a node that stops in a process that goes on:
-    /// dropping the node frees it (#1093), but a peer connection that was never closed keeps
-    /// its sockets bound. Stop a listener (`listen_with`) first; one still running finds every
-    /// new connection refused. Each peer sees its connection close at once instead of waiting
-    /// for an ICE timeout. Awaiting the release of the node's stores and the end of its
-    /// background tasks is #1085.
+    /// These are steps (c) and (d) of [`Provider::close`](crate::provider::Provider::close)
+    /// only: this stops no task and releases no store. A node that stops in a process that
+    /// goes on is closed with `Provider::close`, which also stops the node's tasks and awaits
+    /// the release of its stores (#1085). Each peer sees its connection close at once instead
+    /// of waiting for an ICE timeout.
     ///
     /// Both steps run even if the first fails; the first failure is returned.
     pub async fn close(&self) -> Result<()> {

@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use ppp::v2::Addresses;
 use ppp::v2::Header;
-use rings_core::lifecycle::StopToken;
 use rings_dns_relay::AddressRegistry;
 use rings_dns_relay::AdmissionLimits;
 use rings_dns_relay::Ingress;
@@ -38,6 +37,7 @@ use crate::processor::Processor;
 use crate::provider::Provider;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
+use crate::tasks::NodeTasks;
 use crate::tests::native::prepare_processor;
 
 /// A node with its TCP relay installed and its application inbox served.
@@ -53,9 +53,7 @@ impl Node {
         let processor = Arc::new(processor);
         let provider = Provider::from_processor(Arc::clone(&processor));
         let relay = RelayHandle::install(&provider.extensions())?;
-        let inbox = provider.application_service(None, StopToken::never())?;
-        rings_runtime::spawn_detached(inbox)
-            .map_err(|_| Error::ExtensionError("no runtime to serve the inbox".to_owned()))?;
+        provider.serve_application(None)?;
         Ok(Self {
             processor,
             relay,
@@ -66,7 +64,7 @@ impl Node {
     /// Serve `port` of this node's relayed address, behind a PROXY protocol header, with an
     /// echo service on the loopback, and publish the descriptor saying so.
     async fn offer_echo(&self, port: u16) -> Result<SocketAddr> {
-        let target = echo_service().await;
+        let target = echo_service(self.processor.tasks()).await?;
         self.relay
             .register_tcp_service(relay_service(port), target)
             .await?;
@@ -84,21 +82,26 @@ impl Node {
     }
 }
 
-/// A loopback service that sends back every byte a connection sends, then closes it.
-async fn echo_service() -> SocketAddr {
+/// A loopback service that sends back every byte a connection sends, then closes it: its
+/// listener and its connections are tasks of the node it serves (`tasks`).
+async fn echo_service(tasks: &NodeTasks) -> Result<SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
+    let connections = tasks.clone();
+    tasks.spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
-            tokio::spawn(async move {
+            let echoed = connections.spawn(async move {
                 let mut received = Vec::new();
                 if stream.read_to_end(&mut received).await.is_ok() {
                     let _ = stream.write_all(&received).await;
                 }
             });
+            if echoed.is_err() {
+                break;
+            }
         }
-    });
-    address
+    })?;
+    Ok(address)
 }
 
 /// The ingress of `relay` on `listener`, routing `owner`, bound to `::1`, through the relay's

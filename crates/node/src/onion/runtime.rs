@@ -19,8 +19,6 @@
 
 use std::num::NonZeroUsize;
 
-use rings_runtime::Spawner;
-
 use super::circuit::OnionAlgebra;
 use super::circuit::OnionCircuitProtocol;
 use super::circuit::OnionCircuitShell;
@@ -102,11 +100,12 @@ impl OnionRuntime {
         // fact behind it (`circuit::shell`, the linearisation obligation).
         let reconcile = OnionLinkFact::Reconcile.encode()?;
         let injecting = scope.clone();
-        Spawner::current()?.spawn(async move {
+        let tasks = injecting.tasks().clone();
+        tasks.spawn(async move {
             if let Err(error) = injecting.inject(reconcile).await {
                 tracing::warn!(%error, "onion data plane could not reconcile its link table");
             }
-        });
+        })?;
         Ok(Self {
             scope,
             loops: OnionLoopClient::new(core.did(), tags, link_sender),

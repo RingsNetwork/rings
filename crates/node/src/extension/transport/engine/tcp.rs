@@ -8,7 +8,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::message::REORDER_DEADLINE;
-use rings_runtime::Spawner;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -42,7 +41,7 @@ impl TransportSessions {
         peer: Did,
         service: String,
     ) {
-        let Ok(spawner) = Spawner::current() else {
+        let Ok(spawner) = scope.tasks().spawner() else {
             tracing::error!("transport listen on {local_addr} requires a runtime");
             return;
         };
@@ -301,7 +300,7 @@ mod tests {
         deadline: Duration,
     ) -> Result<(
         TcpStream,
-        tokio::task::JoinHandle<()>,
+        crate::test_support::TestTask<()>,
         Arc<TransportSessions>,
         SessionKey,
     )> {
@@ -310,7 +309,7 @@ mod tests {
         let client = TcpStream::connect(address).await.map_err(io_error)?;
         let (server, _) = listener.accept().await.map_err(io_error)?;
         let (task, sessions, key) = relay_task_for_test("tcp")?;
-        let relay = tokio::spawn(relay_tcp_with_timeouts(
+        let relay = crate::test_support::TestTask::spawn(relay_tcp_with_timeouts(
             task,
             server,
             Bytes::new(),
@@ -321,7 +320,7 @@ mod tests {
     }
 
     /// Wait for the relay task to end.
-    async fn joined(relay: tokio::task::JoinHandle<()>) -> Result<()> {
+    async fn joined(relay: crate::test_support::TestTask<()>) -> Result<()> {
         relay
             .await
             .map_err(|error| Error::ExtensionError(format!("relay task failed: {error}")))

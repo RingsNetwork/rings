@@ -26,7 +26,7 @@ The library lands in `target/debug/` as `librings_node.dylib` (macOS), `librings
 | `rings_node_listen(provider)` | Starts message listening and Chord stabilization. |
 | `rings_node_request(provider, method, params)` | Calls one method of the [JSON-RPC API](jsonrpc.md) with a JSON `params` string; returns the reply as a string, or `NULL` when validation or execution fails. |
 | `rings_node_string_free(value)` | Releases a string returned by `rings_node_request`. |
-| `rings_node_provider_destroy(provider)` | Stops the listener, closes every connection of the node, flushes its measurements, and destroys the provider; the handle is invalid afterwards. |
+| `rings_node_provider_destroy(provider)` | Stops the listener and every task of the node, closes its connections, flushes its measurements, and releases every store under its `storage_path`, so a provider created again on that path in this process opens them; then destroys the provider, and the handle is invalid afterwards. |
 
 The constructor takes the same values `config.yaml` gives a native node: the `network_id`, an
 ICE server list in `[turn|stun]://<host>:<port>;...` form, the stabilization interval in

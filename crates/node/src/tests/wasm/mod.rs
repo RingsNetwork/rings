@@ -10,7 +10,6 @@ use futures::StreamExt;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
-use rings_core::lifecycle::StopToken;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::swarm::application::SwarmEvent;
 use rings_rpc::protos::rings_node::*;
@@ -206,10 +205,9 @@ pub async fn new_provider() -> ObservedProvider {
     let processor = prepare_processor().await;
     let provider = Provider::from_processor(Arc::new(processor));
     let (recorder, transitions) = peer_transitions();
-    let service = provider
-        .application_service(Some(Arc::new(recorder)), StopToken::never())
+    provider
+        .serve_application(Some(Arc::new(recorder)))
         .unwrap();
-    wasm_bindgen_futures::spawn_local(service);
     ObservedProvider {
         provider,
         transitions,

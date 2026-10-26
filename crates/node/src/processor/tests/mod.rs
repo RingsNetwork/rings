@@ -29,6 +29,8 @@ mod common;
 mod controlled;
 #[cfg(rings_native)]
 mod test_bootstrap_probe;
+#[cfg(rings_native)]
+mod test_close;
 mod test_config;
 #[cfg(all(feature = "dummy", rings_native))]
 mod test_dns_relay;

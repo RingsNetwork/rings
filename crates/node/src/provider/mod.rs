@@ -38,6 +38,7 @@ use crate::prelude::wasm_export;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
+use crate::release::StoresReleased;
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub mod browser;
@@ -105,6 +106,8 @@ pub(crate) struct ProviderStores {
     pub(crate) guards: Option<OnionEntryGuardStorage>,
     /// The transaction replay store.
     pub(crate) replay: Option<ReplayStorage>,
+    /// The release witnesses of the file stores above, none for a store with no directory.
+    pub(crate) released: StoresReleased,
 }
 
 #[allow(dead_code)]
@@ -239,9 +242,78 @@ impl Provider {
         self.processor.flush_measurements().await
     }
 
-    /// Close this node's network before it is dropped; see [`Processor::close`] (#1098).
-    pub async fn close(&self) -> Result<()> {
-        self.processor.close().await
+    /// Close this node and release every store it holds, so that the stores can be opened
+    /// again in this process: an in-process re-init (#1085).
+    ///
+    /// Law (close): the steps run in this order, each once the one before it has ended.
+    ///
+    /// ```text
+    ///   (a) stop     every node task is told to end; every listener generation ends
+    ///   (b) drain    no node task is live (the one-spawn law of `crate::tasks`)
+    ///   (c) network  every connection is closed, and no new one is admitted (#1098)
+    ///   (d) flush    the measurements are persisted
+    ///   (e) release  no node task is live again; the last clone of the node drops, and with
+    ///                it every store
+    /// ```
+    ///
+    /// Steps (c) and (d) are [`Processor::close`]. A node task spawned after (b), during (c) or
+    /// (d) (by a callback of the closing network, say), starts with the stop already fired: it
+    /// ends at its first suspension point, or winds down within its bound. (e) drains again
+    /// before the release, so no such task holds the node into it.
+    ///
+    /// Post: `Ok` means every store the node was built over is released and its directory
+    /// unlocked (the release law of `rings_core::storage::file`), so an open of those stores in
+    /// this process succeeds. `Err(Error::ProviderStillShared { released })` means another clone
+    /// of the node, a `Provider` or the [`Processor`] it shares, is still held. Steps (a) to (d)
+    /// have run, so the node is stopped and its network closed. Its stores are released only
+    /// when the last clone drops, and `released` resolves then. Any other `Err` is the first
+    /// failure of step (c) or (d); step (e) has run all the same, so the stores are released.
+    /// On the shared path a failure of (c) or (d) is logged, since `released` is what the
+    /// caller needs next.
+    ///
+    /// Bound: no step waits on a timer of its own: each is woken by the end it awaits. (a) and
+    /// (b) last one suspension of each node task. A task winding down at the stop (a relay
+    /// resetting its socket and sending its session's close) adds a send, bounded by the send
+    /// timeout, and a listener generation adds its measurement flush. (c) is the swarm's close
+    /// of its connections. (e) also awaits the tasks the core detached that still hold a part
+    /// of the node. Each of those either ends with the dropped node (an inbound actor, the
+    /// outbound workers, whose channels close with it), is bounded by its own timeout (a
+    /// handshake, a payload send), or is a replay transition or flush, which ends after its
+    /// write.
+    pub async fn close(self) -> Result<()> {
+        let tasks = self.processor.tasks().clone();
+        tasks.stop();
+        self.processor.await_listener_generations().await;
+        tasks.drained().await;
+        let closed = self.processor.close().await;
+        tasks.drained().await;
+        let released = self.processor.stores_released();
+        let Self {
+            processor,
+            handler,
+            extensions,
+            dispatch_drops,
+            onion_runtime,
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
+            onion_directory_endpoint,
+        } = self;
+        drop((handler, extensions, dispatch_drops, onion_runtime));
+        #[cfg(all(feature = "browser", target_family = "wasm"))]
+        drop(onion_directory_endpoint);
+        // Atomic: `Some` only for the last strong clone, which a `Weak` upgrade cannot race.
+        match Arc::into_inner(processor) {
+            Some(processor) => {
+                drop(processor);
+                released.await;
+                closed
+            }
+            None => {
+                if let Err(error) = closed {
+                    tracing::warn!(%error, "a shared node failed to close its network");
+                }
+                Err(Error::ProviderStillShared { released })
+            }
+        }
     }
 
     /// Create a provider instance with storage name
@@ -257,6 +329,7 @@ impl Provider {
             evidence: evidence_storage,
             guards: onion_entry_guard_storage,
             replay: replay_storage,
+            released,
         } = stores;
         let entry_storage = entry_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let measure_storage = measure_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
@@ -279,7 +352,8 @@ impl Provider {
         let processor_builder = ProcessorBuilder::from_config(&config)?
             .storage(entry_storage)
             .onion_entry_guard_storage(onion_entry_guard_storage)
-            .measure(measure);
+            .measure(measure)
+            .stores_released(released);
         let processor_builder = match replay_storage {
             Some(replay_storage) => processor_builder.replay_storage(replay_storage),
             None => processor_builder,
@@ -369,13 +443,27 @@ impl Provider {
     /// Call once, after registering every protocol whose messages may already be on their way
     /// (relay mail included): from the claim on, an envelope of a namespace not yet registered
     /// is dropped, counted. The inbox is claimed once, so a second call fails with
-    /// `ApplicationInboxClaimed`. Serving never stops; use
-    /// [`application_service`](Provider::application_service) for a stoppable one.
+    /// `ApplicationInboxClaimed`. Serving lasts until the node is closed ([`Provider::close`]):
+    /// the service is a node task (#1085). Use
+    /// [`application_service`](Provider::application_service) for one under a stop of the
+    /// caller's.
     pub fn set_backend(&self) -> Result<()> {
-        let service = self.application_service(None, StopToken::never())?;
-        rings_runtime::spawn_detached(service).map_err(|_| {
+        self.serve_application(None)
+    }
+
+    /// [`Self::set_backend`] with `observer` handed the peer facts and unrouted E2E messages.
+    pub(crate) fn serve_application(
+        &self,
+        observer: Option<Arc<dyn BackendObserver>>,
+    ) -> Result<()> {
+        let tasks = self.processor.tasks();
+        // Acquired before the inbox is claimed, so a missing runtime claims nothing.
+        let spawner = tasks.spawner().map_err(|_| {
             Error::ExtensionError("no runtime to serve the application inbox".to_owned())
-        })
+        })?;
+        let service = self.application_service(observer, tasks.stop_token())?;
+        spawner.spawn(service);
+        Ok(())
     }
 
     /// Claim the swarm's application inbox now and return the future that serves it with the
