@@ -39,7 +39,13 @@
 //!
 //! Every transition costs `O(log |T|)`: the aggregates `Σo` and the count of claimants are kept
 //! incrementally, by re-weighing the one principal a transition touches.
+//!
+//! **Floor use** (paper, Def. 1, #1094). What an edge admitted into slot `κ` would inherit of
+//! the table's floor is `min(u_t(κ), f) / f`, with `u_t` counting only the items still live at
+//! `t` ([`SlotAccounting::floor_use_at`]); over every table, a slot's floor use is its worst
+//! table's ([`SlotFloorUse::join`]), and an edge takes the free slot of least floor use.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
@@ -61,6 +67,83 @@ pub enum Principal {
     /// production connection is bound to its handshake and holds a slot while admitted, so only
     /// a delivery racing its edge's retirement is one; it has no floor, only its fair claim.
     Unbound,
+}
+
+/// The part of a slot's floor that its items use, `min(u, f) / f`, ordered as that fraction:
+/// what an edge admitted into the slot would inherit of the floor (paper, Def. 1).
+///
+/// The order is exact (cross-multiplied), so two uses are equal iff their fractions are; a
+/// table with no floor has nothing to inherit, and its use is [`FloorUse::CLEAN`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FloorUse {
+    /// `min(u, f)`.
+    used: usize,
+    /// `f`, at least 1.
+    floor: usize,
+}
+
+impl FloorUse {
+    /// `0`: a slot whose floor is untouched.
+    pub(crate) const CLEAN: Self = Self { used: 0, floor: 1 };
+
+    /// `min(used, floor) / floor`, or [`Self::CLEAN`] for a table with no floor.
+    const fn of(used: usize, floor: usize) -> Self {
+        match floor {
+            0 => Self::CLEAN,
+            _ => Self {
+                used: if used < floor { used } else { floor },
+                floor,
+            },
+        }
+    }
+}
+
+impl Ord for FloorUse {
+    /// `a/b ≤ c/d ⇔ a·d ≤ c·b` for `b, d > 0`, exact in `u128`.
+    fn cmp(&self, other: &Self) -> Ordering {
+        let scaled = |part: &Self, by: &Self| (part.used as u128) * (by.floor as u128);
+        scaled(self, other).cmp(&scaled(other, self))
+    }
+}
+
+impl PartialOrd for FloorUse {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for FloorUse {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for FloorUse {}
+
+/// The floor use of every slot over one or more tables: a slot absent is clean.
+///
+/// Laws: [`Self::join`] is pointwise `max`, so it is associative, commutative and idempotent,
+/// with the empty map ([`Self::default`]) as its identity: the tables combine in any order into
+/// each slot's worst table (paper, Def. 1).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SlotFloorUse(BTreeMap<u16, FloorUse>);
+
+impl SlotFloorUse {
+    /// The worst of `self` and `other`, slot by slot.
+    pub(crate) fn join(mut self, other: Self) -> Self {
+        for (slot, floor_use) in other.0 {
+            self.0
+                .entry(slot)
+                .and_modify(|held| *held = (*held).max(floor_use))
+                .or_insert(floor_use);
+        }
+        self
+    }
+
+    /// The floor use of `slot`: [`FloorUse::CLEAN`] if no table charges it.
+    pub(crate) fn of(&self, slot: u16) -> FloorUse {
+        self.0.get(&slot).copied().unwrap_or(FloorUse::CLEAN)
+    }
 }
 
 /// The shares of one table: the floor per slot, the pool, the local share and the dedicated
@@ -306,6 +389,35 @@ impl SlotAccounting {
             self.expiry.remove(&(until_ms, principal));
         }
         self.release(principal, 1);
+    }
+
+    /// The floor use of every charged slot at `now_ms` (paper, Def. 1): its items still live at
+    /// `now_ms`, so an item at or past its instant, which the table's next admission retires
+    /// ([`Self::advance`]), is not counted. Pure; `O(slots charged + items past their instant)`.
+    pub(crate) fn floor_use_at(&self, now_ms: u128) -> SlotFloorUse {
+        let mut live: BTreeMap<u16, usize> = self
+            .held
+            .iter()
+            .filter_map(|(principal, held)| match principal {
+                Principal::Slot(slot) => Some((*slot, *held)),
+                _ => None,
+            })
+            .collect();
+        self.expiry
+            .iter()
+            .take_while(|((until_ms, _), _)| *until_ms <= now_ms)
+            .for_each(|((_, principal), items)| {
+                if let Principal::Slot(slot) = principal {
+                    if let Some(held) = live.get_mut(slot) {
+                        *held = held.saturating_sub(*items);
+                    }
+                }
+            });
+        SlotFloorUse(
+            live.into_iter()
+                .map(|(slot, held)| (slot, FloorUse::of(held, self.shares.floor)))
+                .collect(),
+        )
     }
 
     /// Forget every item whose instant is at or before `now_ms`.
