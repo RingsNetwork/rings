@@ -7,6 +7,7 @@ pub mod protocols;
 pub mod transport;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use futures::FutureExt;
 use rings_core::lifecycle::StopToken;
 use rings_core::message::CustomMessage;
@@ -109,7 +110,7 @@ impl Backend {
                 from,
                 data: ApplicationData::Custom(CustomMessage(bytes)),
                 ..
-            }) => namespaces.submit(from, &bytes),
+            }) => namespaces.submit(from, &Bytes::from(bytes)),
             ApplicationDelivery::Message(message) => {
                 if let Some(observer) = self.observer.as_deref() {
                     observer.e2e_message(&message);

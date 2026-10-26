@@ -910,6 +910,7 @@ fn assert_enabled_outcome(outcome: &ScenarioOutcome) {
 
 mod artifacts;
 mod cases;
+mod hot_paths;
 mod pressure;
 mod scenario;
 mod trace;

@@ -223,28 +223,32 @@ fn parse_strategy(value: &str) -> DeliveryStrategy {
 #[ignore = "explicit PR sync-storm size matrix"]
 async fn test_pr_ring_and_hotspot_size_matrix() {
     for count in [10, 25, 50] {
-        assert_and_report_enabled(
-            run_scenario(
+        for (topology, base) in [
+            (ScenarioTopology::Ring, 700),
+            (ScenarioTopology::Hotspot, 800),
+        ] {
+            let scenario = run_scenario(
                 count,
-                ScenarioTopology::Ring,
-                700 + count as u64,
+                topology,
+                base + count as u64,
                 ProtectionProfile::ALL_ENABLED,
                 DeliveryStrategy::Fifo,
-            )
-            .await,
-        );
-        assert_and_report_enabled(
-            run_scenario(
-                count,
-                ScenarioTopology::Hotspot,
-                800 + count as u64,
-                ProtectionProfile::ALL_ENABLED,
-                DeliveryStrategy::Fifo,
-            )
-            .await,
-        );
+            );
+            // At the largest size, every hot path also stays within its regression bound
+            // (#938).
+            match count {
+                PR_MATRIX_LARGEST => {
+                    let counts = super::hot_paths::hot_path_counts(scenario).await;
+                    super::hot_paths::assert_hot_path_bounds(count, &counts);
+                }
+                _ => assert_and_report_enabled(scenario.await),
+            }
+        }
     }
 }
+
+/// The PR matrix's largest node count, at which the hot paths' bounds are asserted.
+const PR_MATRIX_LARGEST: usize = 50;
 
 #[tokio::test(start_paused = true)]
 #[ignore = "nightly extended N=50 seed matrix"]
@@ -265,7 +269,7 @@ async fn test_nightly_extended_seed_matrix() {
     }
 }
 
-fn assert_and_report_enabled(outcome: ScenarioOutcome) {
+pub(super) fn assert_and_report_enabled(outcome: ScenarioOutcome) {
     println!("{}", outcome.diagnostic());
     assert_enabled_outcome(&outcome);
 }
