@@ -326,11 +326,14 @@ async fn test_assoc_reliable_ordered_reordered() -> Result<()> {
     fill(&mut sbufl);
 
     let (br, ca, cb) = Bridge::new(0, None, None);
+    let recorder = RecordingConn::new(Arc::new(ca));
 
     let (a0, mut a1) =
-        create_new_association_pair(&br, Arc::new(ca), Arc::new(cb), AckMode::NoDelay, 0).await?;
+        create_new_association_pair(&br, recorder.clone(), Arc::new(cb), AckMode::NoDelay, 0)
+            .await?;
 
     let (s0, s1) = establish_session_pair(&br, &a0, &mut a1, SI).await?;
+    let base = recorder.sends();
 
     {
         let a = a0.association_internal.lock().await;
@@ -355,7 +358,7 @@ async fn test_assoc_reliable_ordered_reordered() -> Result<()> {
         .await?;
     assert_eq!(n, sbuf.len(), "unexpected length of received data");
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    recorder.queued(base, 2).await?; // one packet per 1000-byte message
     br.reorder(0).await;
     br.process().await;
 
@@ -633,15 +636,18 @@ async fn test_assoc_reliable_retransmission() -> Result<()> {
     static MSG2: Bytes = Bytes::from_static(b"DEFG");
 
     let (br, ca, cb) = Bridge::new(0, None, None);
+    let recorder = RecordingConn::new(Arc::new(ca));
 
     let (a0, mut a1) =
-        create_new_association_pair(&br, Arc::new(ca), Arc::new(cb), AckMode::NoDelay, 0).await?;
+        create_new_association_pair(&br, recorder.clone(), Arc::new(cb), AckMode::NoDelay, 0)
+            .await?;
     {
         let mut a = a0.association_internal.lock().await;
         a.rto_mgr.set_rto(100, true);
     }
 
     let (s0, s1) = establish_session_pair(&br, &a0, &mut a1, SI).await?;
+    let base = recorder.sends();
 
     let n = s0
         .write_sctp(&MSG1, PayloadProtocolIdentifier::Binary)
@@ -653,15 +659,13 @@ async fn test_assoc_reliable_retransmission() -> Result<()> {
         .await?;
     assert_eq!(n, MSG2.len(), "unexpected length of received data");
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    recorder.queued(base, 1).await?; // MSG1's packet, which may also bundle MSG2
     log::debug!("dropping packet");
     br.drop_offset(0, 0, 1).await; // drop the first packet (second one should be sacked)
 
-    // process packets for 200 msec
-    for _ in 0..20 {
-        br.tick().await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    // process packets until both messages are acknowledged: the first one only once the
+    // retransmission timer (100 msec) has resent it, however long that takes to reach the bridge
+    flush_buffers(&br, &a0, &a1).await;
 
     let mut buf = vec![0u8; 32];
 
@@ -1039,11 +1043,14 @@ async fn test_assoc_unreliable_rexmit_unordered_fragment() -> Result<()> {
     fill(&mut sbuf[..]);
 
     let (br, ca, cb) = Bridge::new(0, None, None);
+    let recorder = RecordingConn::new(Arc::new(ca));
 
     let (a0, mut a1) =
-        create_new_association_pair(&br, Arc::new(ca), Arc::new(cb), AckMode::NoDelay, 0).await?;
+        create_new_association_pair(&br, recorder.clone(), Arc::new(cb), AckMode::NoDelay, 0)
+            .await?;
 
     let (s0, s1) = establish_session_pair(&br, &a0, &mut a1, SI).await?;
+    let base = recorder.sends();
 
     // When we set the reliability value to 0 [times], then it will cause
     // the chunk to be abandoned immediately after the first transmission.
@@ -1069,7 +1076,7 @@ async fn test_assoc_unreliable_rexmit_unordered_fragment() -> Result<()> {
     assert_eq!(n, sbuf.len(), "unexpected length of received data");
 
     //log::debug!("flush_buffers");
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    recorder.queued(base, 2).await?; // the two packets it drops
     br.drop_offset(0, 0, 2).await; // drop the second fragment of the first chunk (second chunk should be sacked)
     flush_buffers(&br, &a0, &a1).await;
 
@@ -2602,6 +2609,40 @@ async fn test_association_handle_packet_before_init() -> Result<()> {
 struct RecordingConn {
     inner: Arc<dyn Conn + Send + Sync>,
     sent: std::sync::Mutex<Vec<Bytes>>,
+    /// The number of sends that have returned.
+    sends: tokio::sync::watch::Sender<usize>,
+}
+
+/// The longest a test waits for packets to reach the bridge before it fails: a failure bound,
+/// never a pacing.
+const QUEUED_WAIT: Duration = Duration::from_secs(5);
+
+impl RecordingConn {
+    fn new(inner: Arc<dyn Conn + Send + Sync>) -> Arc<Self> {
+        Arc::new(RecordingConn {
+            inner,
+            sent: std::sync::Mutex::new(vec![]),
+            sends: tokio::sync::watch::channel(0).0,
+        })
+    }
+
+    /// The number of sends that have returned.
+    fn sends(&self) -> usize {
+        *self.sends.borrow()
+    }
+
+    /// Wait until `n` more sends than `base` have returned. Over a `Bridge`, a packet is in its
+    /// queue once its send returns (`Bridge::push` queues it before returning), so a test that
+    /// drops or reorders queued packets waits here for the packets it acts on, instead of
+    /// sleeping and assuming the write loop sent them in time.
+    async fn queued(&self, base: usize, n: usize) -> Result<()> {
+        let mut sends = self.sends.subscribe();
+        tokio::time::timeout(QUEUED_WAIT, sends.wait_for(|sent| *sent >= base + n))
+            .await
+            .map_err(|_| Error::Other(format!("{n} packets did not reach the bridge")))?
+            .map_err(|_| Error::Other("the recorder is gone".to_owned()))?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2617,7 +2658,9 @@ impl Conn for RecordingConn {
     }
     async fn send(&self, buf: &[u8]) -> util::Result<usize> {
         self.sent.lock().unwrap().push(Bytes::copy_from_slice(buf));
-        self.inner.send(buf).await
+        let sent = self.inner.send(buf).await;
+        self.sends.send_modify(|sends| *sends += 1);
+        sent
     }
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> util::Result<usize> {
         self.inner.send_to(buf, target).await
@@ -2648,10 +2691,7 @@ async fn test_assoc_write_loop_sends_data_chunks_in_tsn_order() -> Result<()> {
     fill(&mut sbuf);
 
     let (br, ca, cb) = Bridge::new(0, None, None);
-    let recorder = Arc::new(RecordingConn {
-        inner: Arc::new(ca),
-        sent: std::sync::Mutex::new(vec![]),
-    });
+    let recorder = RecordingConn::new(Arc::new(ca));
     let (a0, mut a1) =
         create_new_association_pair(&br, recorder.clone(), Arc::new(cb), AckMode::NoDelay, 0)
             .await?;
