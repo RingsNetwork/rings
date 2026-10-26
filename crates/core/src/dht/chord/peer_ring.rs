@@ -590,9 +590,7 @@ impl PeerRing {
         })?;
         self.forget_relay_custody(did)?;
         if chain_neighbour {
-            self.relay_chain_repair_due
-                .store(true, std::sync::atomic::Ordering::Release);
-            self.relay_chain_losses.advance();
+            self.relay_chain_changed();
         }
         Ok(if chain_neighbour {
             TopologyRemoval::Referenced

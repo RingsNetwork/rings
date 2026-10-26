@@ -20,6 +20,7 @@ use crate::message::ProbeRequest;
 use crate::message::ProvisionalEpoch;
 use crate::message::TRANSACTION_REPLAY_WINDOW;
 use crate::swarm::application::ApplicationData;
+use crate::swarm::transport::ProbeScope;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::default::connected_nodes;
 use crate::tests::default::credit_starvation::starve;
@@ -315,7 +316,7 @@ async fn test_a_resent_probe_is_answered_after_a_replay_window_of_newer_control(
         .active_attempt(peer)?
         .ok_or(Error::SwarmMissDidInTable(peer))?;
     let pass = transport
-        .liveness_probe_pass(now_ms)?
+        .liveness_probe_pass(now_ms, ProbeScope::Every)?
         .ok_or_else(|| Error::InvalidMessage("no other pass runs".to_string()))?;
     let original = transport
         .protocol_egress()

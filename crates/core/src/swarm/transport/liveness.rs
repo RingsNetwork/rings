@@ -34,8 +34,18 @@
 //!   releases its right with the probe still unsent, for the next pass.
 //! - **Pinned.** A probe rides only the connection of the generation it judges
 //!   (`SenderBound::Probe`): after a reconnect, the successor's clock would not know its answer.
+//! - **Chain neighbours (#1070).** This node's relay chain neighbours, `p₁` and `n₁` (#777), are
+//!   probed every [`CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS`] instead of every
+//!   [`PEER_LIVENESS_PERIOD_MS`], on the same clock, so a peer is never probed twice. A chain
+//!   neighbour whose probe is [`CHAIN_NEIGHBOUR_SUSPICION_MS`] unanswered is *suspected* for
+//!   relay custody alone, and the chain moves past it; it is evicted only by the ordinary
+//!   [`PEER_LIVENESS_TIMEOUT_MS`], and two on-time answers in a row clear the suspicion
+//!   (`Law (Clearing)` of `dht::relay_holder`). A silent loss of a chain neighbour is so
+//!   detected within `T_d ≤ P_c + τ_c = 10 s`, and a slow but live one costs a chain shift and
+//!   back, never a copy, at most twice per `τ_c + 2·P_c = 12.5 s`.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::MutexGuard;
 use std::time::Duration;
 
@@ -55,6 +65,31 @@ use crate::utils::get_epoch_ms_i64;
 pub(crate) const PEER_LIVENESS_PERIOD_MS: i64 = 15_000;
 /// Deadline of a probe's answer, counted from its issue, after which the peer is evicted.
 pub(crate) const PEER_LIVENESS_TIMEOUT_MS: i64 = 45_000;
+/// Interval between two probes of a relay chain neighbour (#1070), `P_c`: with
+/// [`CHAIN_NEIGHBOUR_SUSPICION_MS`] it bounds a chain neighbour's silent-loss detection at
+/// `P_c + τ_c = 10 s`, the `D = 10 s` column of the replication table of #777.
+pub(crate) const CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS: i64 = 2_500;
+/// How long a relay chain neighbour's probe goes unanswered, counted from its issue, before the
+/// neighbour is suspected for relay custody (#1070), `τ_c`. Suspicion moves the chain past it
+/// and evicts nothing.
+pub(crate) const CHAIN_NEIGHBOUR_SUSPICION_MS: i64 = 7_500;
+
+// The chain bounds, checked at compile time: a chain neighbour's silent loss is detected within
+// `P_c + τ_c = 10 s`, the period is below the suspicion timeout, and suspicion comes before
+// eviction.
+const _: () = assert!(CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS + CHAIN_NEIGHBOUR_SUSPICION_MS == 10_000);
+const _: () = assert!(CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS < CHAIN_NEIGHBOUR_SUSPICION_MS);
+const _: () = assert!(CHAIN_NEIGHBOUR_SUSPICION_MS < PEER_LIVENESS_TIMEOUT_MS);
+
+/// Which peers a probe pass probes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProbeScope {
+    /// Every admitted peer: the stabilization pass.
+    Every,
+    /// This node's relay chain neighbours alone: the chain liveness pass, run every
+    /// [`CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS`].
+    ChainNeighbours,
+}
 
 /// The outstanding probe of a generation: its challenge, its issue instant, and whether it
 /// reached its peer's queue. The challenge is the probe's identity: a probe sent again is
@@ -88,11 +123,10 @@ impl ProbeClock {
         }
     }
 
-    /// Whether a probe is due at `now_ms`: none is outstanding and a period has passed since
-    /// the latest issue.
-    pub(crate) fn due(&self, now_ms: i64) -> bool {
-        self.outstanding.is_none()
-            && now_ms.saturating_sub(self.last_issued_ms) >= PEER_LIVENESS_PERIOD_MS
+    /// Whether a probe is due at `now_ms` under `period_ms`: none is outstanding and a period
+    /// has passed since the latest issue.
+    pub(crate) fn due(&self, now_ms: i64, period_ms: i64) -> bool {
+        self.outstanding.is_none() && now_ms.saturating_sub(self.last_issued_ms) >= period_ms
     }
 
     /// Issue the probe of challenge `request` at `now_ms`. Refused (`false`) while another
@@ -148,6 +182,14 @@ impl ProbeClock {
     /// When the outstanding probe was issued, if one is.
     pub(crate) fn outstanding_since_ms(&self) -> Option<i64> {
         self.outstanding.map(|outstanding| outstanding.issued_ms)
+    }
+
+    /// Whether the outstanding probe is [`CHAIN_NEIGHBOUR_SUSPICION_MS`] old at `now_ms`: a
+    /// chain neighbour that has not answered it is suspected for relay custody.
+    pub(crate) fn suspected(&self, now_ms: i64) -> bool {
+        self.outstanding_since_ms().is_some_and(|issued_ms| {
+            now_ms.saturating_sub(issued_ms) >= CHAIN_NEIGHBOUR_SUSPICION_MS
+        })
     }
 
     /// The expiry evidence at `now_ms`: the outstanding probe is `TIMEOUT` old.
@@ -305,9 +347,17 @@ impl PeerLivenessMap {
         });
     }
 
-    /// What the probe pass must do at `now_ms`: issue a probe of every active generation that
-    /// is due one, and send again every outstanding probe that has not reached the queue.
-    fn probe_work(&mut self, active: &ActiveConnectionSet, now_ms: i64) -> Vec<ProbeWork> {
+    /// What the probe pass of `scope` must do at `now_ms`: issue a probe of every active
+    /// generation in scope that is due one, a chain neighbour of `chain` under the chain period
+    /// and every other peer under the ordinary one, and send again every outstanding probe in
+    /// scope that has not reached the queue.
+    fn probe_work(
+        &mut self,
+        active: &ActiveConnectionSet,
+        now_ms: i64,
+        chain: &BTreeSet<Did>,
+        scope: ProbeScope,
+    ) -> Vec<ProbeWork> {
         self.retain_active(active);
         for attempt in active.iter() {
             self.peers
@@ -316,9 +366,15 @@ impl PeerLivenessMap {
         }
         active
             .iter()
+            .filter(|attempt| scope == ProbeScope::Every || chain.contains(&attempt.peer))
             .filter_map(|attempt| {
                 let liveness = self.peers.get(&attempt.peer)?;
-                if liveness.clock.due(now_ms) {
+                let period_ms = if chain.contains(&attempt.peer) {
+                    CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS
+                } else {
+                    PEER_LIVENESS_PERIOD_MS
+                };
+                if liveness.clock.due(now_ms, period_ms) {
                     return Some(ProbeWork::Issue(attempt));
                 }
                 let request = liveness.clock.unsent()?;
@@ -414,15 +470,38 @@ impl SwarmTransport {
         }
     }
 
-    /// Open the probe pass at `now_ms`, with what it must do. `None` while another pass runs:
-    /// that pass does the work.
-    pub(crate) fn liveness_probe_pass(&self, now_ms: i64) -> Result<Option<ProbePass<'_>>> {
+    /// The peers probed on the chain period (#1070): this node's relay chain neighbours and the
+    /// neighbours it suspects, which the chains skip but whose on-time answers must come on the
+    /// chain period to clear them as `Law (Clearing)` states; none while it holds no relay mail,
+    /// since it is then no member of any chain.
+    fn chain_neighbour_set(&self) -> Result<BTreeSet<Did>> {
+        if !self.dht.holds_relay_mail() {
+            return Ok(BTreeSet::new());
+        }
+        let (previous, next) = self.dht.relay_chain_neighbours()?;
+        Ok(previous
+            .into_iter()
+            .chain(next)
+            .chain(self.dht.relay_suspects()?)
+            .collect())
+    }
+
+    /// Open the probe pass of `scope` at `now_ms`, with what it must do. `None` while another
+    /// pass runs: that pass does the work.
+    pub(crate) fn liveness_probe_pass(
+        &self,
+        now_ms: i64,
+        scope: ProbeScope,
+    ) -> Result<Option<ProbePass<'_>>> {
         let Some(exclusive) = self.probe_pass.try_lock() else {
             return Ok(None);
         };
+        let chain = self.chain_neighbour_set()?;
         let work = self.with_connection_lifecycle(|| {
             let active = self.active_connections()?;
-            Ok(self.peer_liveness()?.probe_work(&active, now_ms))
+            Ok(self
+                .peer_liveness()?
+                .probe_work(&active, now_ms, &chain, scope))
         })?;
         Ok(Some(ProbePass {
             _exclusive: exclusive,
@@ -506,21 +585,52 @@ impl SwarmTransport {
         .map(|_| ())
     }
 
-    /// Clear `provider`'s outstanding probe on its answer carrying `request`. Returns whether
-    /// that probe was the outstanding one.
+    /// Clear `provider`'s outstanding probe on its answer carrying `request`, and count the
+    /// answer toward clearing a suspicion of `provider` for relay custody, on time iff it came
+    /// within the chain timeout (#1070, `Law (Clearing)`). Returns whether that probe was the
+    /// outstanding one.
     pub(crate) fn answer_liveness_probe(
         &self,
         provider: Did,
         request: ProbeRequest,
     ) -> Result<bool> {
-        self.with_connection_lifecycle(|| {
+        let now_ms = get_epoch_ms_i64();
+        let answered = self.with_connection_lifecycle(|| {
             let Some(attempt) = self.active_attempt(provider)? else {
-                return Ok(false);
+                return Ok(None);
             };
-            Ok(self
-                .peer_liveness()?
-                .generation_mut(provider, attempt.generation)
-                .is_some_and(|liveness| liveness.clock.answer(request)))
+            let mut liveness = self.peer_liveness()?;
+            let Some(record) = liveness.generation_mut(provider, attempt.generation) else {
+                return Ok(None);
+            };
+            let on_time = !record.clock.suspected(now_ms);
+            Ok(record.clock.answer(request).then_some(on_time))
+        })?;
+        if let Some(on_time) = answered {
+            self.dht.observe_chain_neighbour_answer(provider, on_time)?;
+        }
+        Ok(answered.is_some())
+    }
+
+    /// This node's relay chain neighbours whose outstanding probe is
+    /// [`CHAIN_NEIGHBOUR_SUSPICION_MS`] unanswered at `now_ms`: to suspect for relay custody.
+    pub(crate) fn unanswering_chain_neighbours(&self, now_ms: i64) -> Result<Vec<Did>> {
+        let chain = self.chain_neighbour_set()?;
+        self.with_connection_lifecycle(|| {
+            let liveness = self.peer_liveness()?;
+            let mut unanswering = Vec::new();
+            for peer in chain {
+                let Some(attempt) = self.active_attempt(peer)? else {
+                    continue;
+                };
+                if liveness
+                    .generation(peer, attempt.generation)
+                    .is_some_and(|record| record.clock.suspected(now_ms))
+                {
+                    unanswering.push(peer);
+                }
+            }
+            Ok(unanswering)
         })
     }
 
@@ -597,7 +707,9 @@ impl SwarmTransport {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn peer_liveness_probe_due_for_test(&self, peer: Did) -> Result<bool> {
         let now_ms = get_epoch_ms_i64();
-        self.edit_peer_liveness_for_test(peer, |liveness| liveness.clock.due(now_ms))
+        self.edit_peer_liveness_for_test(peer, |liveness| {
+            liveness.clock.due(now_ms, PEER_LIVENESS_PERIOD_MS)
+        })
     }
 
     /// Whether `peer`'s outstanding probe reached its queue.
@@ -611,14 +723,15 @@ impl SwarmTransport {
         })
     }
 
-    /// Make `peer`'s active generation carry an outstanding probe issued at `issued_ms`, which no
-    /// answer matches, recording the generation if liveness has not yet.
+    /// Make `peer`'s active generation carry an outstanding probe issued at `issued_ms`,
+    /// recording the generation if liveness has not yet; its challenge is returned, which only
+    /// a test can answer.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn force_peer_liveness_probe_issued_at(
         &self,
         peer: Did,
         issued_ms: i64,
-    ) -> Result<()> {
+    ) -> Result<ProbeRequest> {
         let epoch = crate::message::ProvisionalEpoch::from_unix_seconds(0);
         let request = ProbeRequest::random_for_epoch(epoch);
         self.with_connection_lifecycle(|| {
@@ -628,7 +741,7 @@ impl SwarmTransport {
             let mut liveness = PeerLiveness::new(attempt.generation, issued_ms);
             liveness.clock.issue(request, issued_ms);
             self.peer_liveness()?.peers.insert(peer, liveness);
-            Ok(())
+            Ok(request)
         })
     }
 
@@ -676,6 +789,8 @@ mod test_composed_model;
 #[cfg(test)]
 mod tests {
     use super::ProbeClock;
+    use super::CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS;
+    use super::CHAIN_NEIGHBOUR_SUSPICION_MS;
     use super::PEER_LIVENESS_PERIOD_MS;
     use super::PEER_LIVENESS_TIMEOUT_MS;
     use crate::message::ProbeRequest;
@@ -687,14 +802,45 @@ mod tests {
     }
 
     /// One outstanding: a second issue is refused, so the first answer stays acceptable.
+    /// A chain neighbour is probed on the chain period, on the same clock as any peer, and is
+    /// suspected once its probe is the chain timeout unanswered, well before the eviction
+    /// deadline (#1070).
+    #[test]
+    fn test_a_chain_neighbour_is_probed_sooner_and_suspected_before_eviction() {
+        let request = probe();
+        let mut clock = ProbeClock::admitted_at(0);
+        assert!(!clock.due(
+            CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS - 1,
+            CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS
+        ));
+        assert!(clock.due(
+            CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS,
+            CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS
+        ));
+        assert!(!clock.due(CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS, PEER_LIVENESS_PERIOD_MS));
+        assert!(clock.issue(request, 0));
+        assert!(!clock.suspected(CHAIN_NEIGHBOUR_SUSPICION_MS - 1));
+        assert!(clock.suspected(CHAIN_NEIGHBOUR_SUSPICION_MS));
+        assert!(
+            clock.expiry(CHAIN_NEIGHBOUR_SUSPICION_MS).is_none(),
+            "suspicion evicts nothing"
+        );
+        assert!(clock.expiry(PEER_LIVENESS_TIMEOUT_MS).is_some());
+        assert!(clock.answer(request));
+        assert!(
+            !clock.suspected(PEER_LIVENESS_TIMEOUT_MS),
+            "an answer clears the suspicion"
+        );
+    }
+
     #[test]
     fn test_a_probe_is_never_issued_over_an_outstanding_one() {
         let (first, second) = (probe(), probe());
         let mut clock = ProbeClock::admitted_at(0);
-        assert!(!clock.due(PEER_LIVENESS_PERIOD_MS - 1));
-        assert!(clock.due(PEER_LIVENESS_PERIOD_MS));
+        assert!(!clock.due(PEER_LIVENESS_PERIOD_MS - 1, PEER_LIVENESS_PERIOD_MS));
+        assert!(clock.due(PEER_LIVENESS_PERIOD_MS, PEER_LIVENESS_PERIOD_MS));
         assert!(clock.issue(first, PEER_LIVENESS_PERIOD_MS));
-        assert!(!clock.due(3 * PEER_LIVENESS_PERIOD_MS));
+        assert!(!clock.due(3 * PEER_LIVENESS_PERIOD_MS, PEER_LIVENESS_PERIOD_MS));
         assert!(!clock.issue(second, 3 * PEER_LIVENESS_PERIOD_MS));
         assert!(!clock.answer(second));
         assert!(clock.answer(first));
@@ -721,7 +867,7 @@ mod tests {
     fn test_an_unanswered_probe_keeps_its_deadline_from_issue() {
         let mut clock = ProbeClock::admitted_at(0);
         assert!(clock.issue(probe(), PEER_LIVENESS_PERIOD_MS));
-        assert!(!clock.due(3 * PEER_LIVENESS_PERIOD_MS));
+        assert!(!clock.due(3 * PEER_LIVENESS_PERIOD_MS, PEER_LIVENESS_PERIOD_MS));
         assert_eq!(
             clock.remaining_ms(PEER_LIVENESS_PERIOD_MS),
             Some(PEER_LIVENESS_TIMEOUT_MS)
