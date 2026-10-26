@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
 use super::InboundLane;
@@ -33,7 +34,12 @@ const _: () = {
     // minimum, and one maximum legal frame always fits that minimum.
     assert!(INBOUND_PEER_CAPACITY < INBOUND_MAILBOX_CAPACITY);
     assert!(INBOUND_PEER_BYTE_CAPACITY < INBOUND_MAILBOX_BYTE_CAPACITY);
-    assert!(retained_wire_bytes(crate::consts::TRANSPORT_MAX_SIZE) <= INBOUND_PEER_BYTE_CAPACITY);
+    // The largest charge an honest first chunk takes, `n·d₀` for a message of at most
+    // `TRANSPORT_MAX_SIZE` cut into data-channel-sized chunks, fits one peer's budget (#932).
+    assert!(
+        retained_wire_bytes(crate::consts::TRANSPORT_MAX_SIZE + MAX_DATA_CHANNEL_MESSAGE_SIZE)
+            <= INBOUND_PEER_BYTE_CAPACITY
+    );
     assert!(INBOUND_RESERVED_TRANSFERS_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_CAPACITY);
     assert!(INBOUND_RESERVED_BYTES_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_BYTE_CAPACITY);
     assert!(memory_reservation(MAX_DATA_CHANNEL_MESSAGE_SIZE) <= INBOUND_RESERVED_BYTES_PER_LANE);
@@ -41,13 +47,6 @@ const _: () = {
 
 pub(super) const fn memory_reservation(bytes: usize) -> usize {
     retained_wire_bytes(bytes)
-}
-
-pub(super) fn memory_capacity_error(requested_bytes: usize) -> Error {
-    Error::InboundMailboxMemoryCapacityExceeded {
-        requested_bytes,
-        capacity_bytes: INBOUND_MAILBOX_BYTE_CAPACITY,
-    }
 }
 
 pub(super) fn peer_memory_capacity_error(peer: Option<Did>, requested_bytes: usize) -> Error {
@@ -152,15 +151,18 @@ impl InboundPeerCapacityState {
 
 /// A resource an inbound arrival draws on, or the stream it is ordered in.
 ///
-/// An arrival of `peer` on `lane` draws on `Peer(peer)` and `Lane(lane)`, and on `Shared` when
-/// its lane's fixed reservation does not cover it. A refusal by the peer's budget names
+/// A charged arrival of `peer` on `lane` draws on `Peer(peer)` and `Lane(lane)`, and on `Shared`
+/// when its lane's fixed reservation does not cover it. A refusal by the peer's budget names
 /// `Peer(peer)`; a refusal by the node-wide budget names `Lane(lane)` and `Shared`, since a
 /// lane is refused only beyond its reservation. So a frame that fits its lane's reservation never
-/// waits behind a borrower of the shared pool, and no peer waits behind another peer's budget.
+/// waits behind a borrower of the shared pool, and no peer waits behind another peer's budget. A
+/// covered arrival ([`InboundCharge::Covered`]) draws on nothing and waits for its stream alone.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum InboundResource {
-    /// The arrivals of one peer on one lane, admitted in arrival order.
-    Stream(Option<Did>, InboundLane),
+    /// The arrivals of one peer on one lane through one transport carrier, admitted in arrival
+    /// order: the order the sender's class lane gave them, in which a chunked message's chunks
+    /// are contiguous.
+    Stream(Option<Did>, InboundLane, Option<ChannelLane>),
     /// One peer's budget.
     Peer(Option<Did>),
     /// One lane's share of the node-wide budget.
@@ -169,14 +171,26 @@ pub(crate) enum InboundResource {
     Shared,
 }
 
+/// What one inbound arrival reserves on the mailbox ledger (load-bounds paper, Law 4, #932).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InboundCharge {
+    /// The retained bytes of the arrival: a whole frame's, or, for the first chunk of a
+    /// message, the whole message's.
+    Bytes(usize),
+    /// Nothing: a later chunk of a message, whose first chunk was charged for all of it.
+    Covered,
+}
+
 /// One inbound arrival's capacity request.
 pub(crate) struct InboundRequest {
     /// The sending peer, if known.
     peer: Option<Did>,
     /// The lane the arrival is classified to.
     lane: InboundLane,
-    /// The retained bytes the arrival reserves.
-    bytes: usize,
+    /// The transport lane whose credit the arrival took, if any.
+    carrier: Option<ChannelLane>,
+    /// What the arrival reserves.
+    charge: InboundCharge,
 }
 
 /// A set of at most three inbound resources.
@@ -194,9 +208,12 @@ pub(crate) struct InboundCapacity {
     /// Arrivals waiting for capacity ([`InboundResource`]); the credit law bounds them, per
     /// connection, by its lanes' windows, since each holds a frame admitted under credit.
     waiters: ResourceOrderedQueue<Arc<InboundCapacity>>,
-    /// Bumped after every reservation, transition, or release is applied and
-    /// its locks are released, so tests await the admitted count by event.
+    /// Bumped after every reservation or release is applied and its locks are released, and
+    /// after every event ends, so tests await the admitted count by event.
     applied: GenerationWitness,
+    /// Test builds: the admitted events not yet handled ([`LiveEvent`]).
+    #[cfg(test)]
+    live_events: std::sync::atomic::AtomicUsize,
 }
 
 impl InboundCapacity {
@@ -206,41 +223,57 @@ impl InboundCapacity {
             peer_states: Mutex::new(BTreeMap::new()),
             waiters: ResourceOrderedQueue::new(),
             applied: GenerationWitness::default(),
+            #[cfg(test)]
+            live_events: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    /// Reserve `bytes` for `peer` on `lane` at once, or refuse with the refusing budget's error.
+    /// Reserve `bytes` for `peer` on `lane` at once, or name the budget that refused it.
     #[cfg(test)]
     pub(super) fn try_acquire(
         self: &Arc<Self>,
         peer: Option<Did>,
         lane: InboundLane,
         bytes: usize,
-    ) -> Result<InboundCapacityPermit> {
-        self.try_reserve(&InboundRequest { peer, lane, bytes })
-            .map_err(|refusal| refusal.into_error(peer, bytes))
+    ) -> std::result::Result<InboundCapacityPermit, InboundRefusal> {
+        self.try_reserve(&InboundRequest {
+            peer,
+            lane,
+            carrier: None,
+            charge: InboundCharge::Bytes(bytes),
+        })
     }
 
-    /// Reserve `request` at once, or name the budget that refused it.
+    /// Reserve `request` at once, or name the budget that refused it; a covered request
+    /// reserves nothing and is never refused.
     fn try_reserve(
         self: &Arc<Self>,
         request: &InboundRequest,
     ) -> std::result::Result<InboundCapacityPermit, InboundRefusal> {
-        self.move_reservation(request.peer, None, (request.lane, request.bytes))?;
+        let held = match request.charge {
+            InboundCharge::Bytes(bytes) => {
+                self.reserve(request.peer, (request.lane, bytes))?;
+                Some(HeldCharge {
+                    capacity: Arc::clone(self),
+                    peer: request.peer,
+                    lane: request.lane,
+                    bytes,
+                })
+            }
+            InboundCharge::Covered => None,
+        };
         Ok(InboundCapacityPermit {
-            capacity: Arc::clone(self),
-            peer: request.peer,
-            lane: request.lane,
-            bytes: request.bytes,
+            held,
+            #[cfg(test)]
+            _event: LiveEvent::new(self),
         })
     }
 
-    /// Move one reservation of `peer` from `from` (none for a fresh one) to `to`: both budgets
-    /// change together, or neither does and the refusing budget is named.
-    fn move_reservation(
+    /// Reserve `bytes` of `peer` on `lane`: both budgets change together, or neither does and
+    /// the refusing budget is named.
+    fn reserve(
         &self,
         peer: Option<Did>,
-        from: Option<(InboundLane, usize)>,
         (lane, bytes): (InboundLane, usize),
     ) -> std::result::Result<(), InboundRefusal> {
         let mut peer_states = self
@@ -253,13 +286,11 @@ impl InboundCapacity {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut next_peer = peer_states.get(&peer).copied().unwrap_or_default();
         let mut next = *state;
-        if let Some((from_lane, from_bytes)) = from {
-            next_peer.release(from_bytes);
-            next.release(from_lane, from_bytes);
-        }
-        next_peer.try_reserve(bytes).map_err(InboundRefusal::Peer)?;
+        next_peer
+            .try_reserve(bytes)
+            .map_err(|_| InboundRefusal::Peer)?;
         next.try_reserve(lane, bytes)
-            .map_err(InboundRefusal::Mailbox)?;
+            .map_err(|_| InboundRefusal::Mailbox)?;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         crate::simulation::observe_inbound_capacity(
             (
@@ -287,17 +318,23 @@ impl InboundCapacity {
     /// Law (no refusal of a valid arrival). An arrival within the request bounds is never
     /// dropped for want of mailbox capacity: it waits, in resource order ([`InboundResource`]),
     /// keeping its sender's lane credit, and the wait is logged at `warn` once. A request beyond
-    /// the bounds is refused at once. A later transition of the admitted event may be refused
-    /// ([`InboundCapacityPermit::try_transition`]).
+    /// the bounds is refused at once. An admitted charge is never re-charged: a chunked message
+    /// is charged once, at its first chunk, and its later chunks are covered (#932).
     pub(super) async fn acquire(
         self: &Arc<Self>,
-        peer: Option<Did>,
-        lane: InboundLane,
-        bytes: usize,
+        (peer, lane, carrier): (Option<Did>, InboundLane, Option<ChannelLane>),
+        charge: InboundCharge,
     ) -> Result<InboundCapacityPermit> {
-        validate_memory_request(lane, bytes)?;
-        validate_peer_memory_request(peer, bytes)?;
-        let request = InboundRequest { peer, lane, bytes };
+        if let InboundCharge::Bytes(bytes) = charge {
+            validate_memory_request(lane, bytes)?;
+            validate_peer_memory_request(peer, bytes)?;
+        }
+        let request = InboundRequest {
+            peer,
+            lane,
+            carrier,
+            charge,
+        };
         Ok(self
             .waiters
             .acquire(self, request, || {
@@ -306,7 +343,7 @@ impl InboundCapacity {
                 tracing::warn!(
                     peer = ?peer,
                     lane = ?lane,
-                    bytes,
+                    charge = ?charge,
                     "inbound backpressure: the mailbox is full; the arrival waits for capacity \
                      and holds its sender's credit"
                 );
@@ -314,13 +351,20 @@ impl InboundCapacity {
             .await)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn admitted_count_for_test(&self) -> usize {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .0
             .admitted_count()
+    }
+
+    /// Test builds: the admitted events not yet handled; unlike the admitted count, it leaves
+    /// out the charges open messages hold, which wait for their peer, not for this node.
+    #[cfg(test)]
+    pub(crate) fn live_events_for_test(&self) -> usize {
+        self.live_events.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -348,15 +392,18 @@ impl AdmissionLedger for Arc<InboundCapacity> {
     type Resources = InboundResources;
 
     fn stream(&self, request: &InboundRequest) -> InboundResource {
-        InboundResource::Stream(request.peer, request.lane)
+        InboundResource::Stream(request.peer, request.lane, request.carrier)
     }
 
     fn footprint(&self, request: &InboundRequest) -> InboundResources {
+        let InboundCharge::Bytes(bytes) = request.charge else {
+            return inbound_resources([None, None, None]);
+        };
         let reserved = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .covers(request.lane, request.bytes);
+            .covers(request.lane, bytes);
         inbound_resources([
             Some(InboundResource::Peer(request.peer)),
             Some(InboundResource::Lane(request.lane)),
@@ -369,10 +416,10 @@ impl AdmissionLedger for Arc<InboundCapacity> {
         request: &InboundRequest,
     ) -> std::result::Result<InboundCapacityPermit, InboundResources> {
         self.try_reserve(request).map_err(|refusal| match refusal {
-            InboundRefusal::Peer(_) => {
+            InboundRefusal::Peer => {
                 inbound_resources([Some(InboundResource::Peer(request.peer)), None, None])
             }
-            InboundRefusal::Mailbox(_) => inbound_resources([
+            InboundRefusal::Mailbox => inbound_resources([
                 Some(InboundResource::Lane(request.lane)),
                 Some(InboundResource::Shared),
                 None,
@@ -381,74 +428,43 @@ impl AdmissionLedger for Arc<InboundCapacity> {
     }
 }
 
-/// The budget that refused a reservation, and the measure it was refused by.
-#[derive(Clone, Copy, Debug)]
-enum InboundRefusal {
+/// The budget that refused a reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InboundRefusal {
     /// The peer's budget.
-    Peer(CountedReservationRejection),
+    Peer,
     /// The node-wide budget.
-    Mailbox(CountedReservationRejection),
+    Mailbox,
 }
 
 impl InboundRefusal {
-    /// The error of refusing `bytes` for `peer`.
-    fn into_error(self, peer: Option<Did>, bytes: usize) -> Error {
+    /// Test builds: the error of refusing `bytes` for `peer`.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn into_error(self, peer: Option<Did>, bytes: usize) -> Error {
         match self {
-            Self::Peer(CountedReservationRejection::Count) => Error::InboundPeerCapacityExceeded {
-                peer,
-                capacity: INBOUND_PEER_CAPACITY,
+            Self::Peer => peer_memory_capacity_error(peer, bytes),
+            Self::Mailbox => Error::InboundMailboxMemoryCapacityExceeded {
+                requested_bytes: bytes,
+                capacity_bytes: INBOUND_MAILBOX_BYTE_CAPACITY,
             },
-            Self::Peer(CountedReservationRejection::Bytes) => {
-                peer_memory_capacity_error(peer, bytes)
-            }
-            Self::Mailbox(CountedReservationRejection::Count) => {
-                Error::InboundMailboxCapacityExceeded {
-                    capacity: INBOUND_MAILBOX_CAPACITY,
-                }
-            }
-            Self::Mailbox(CountedReservationRejection::Bytes) => memory_capacity_error(bytes),
         }
     }
 }
 
-/// The inbound capacity one admitted frame holds, returned to its ledger when dropped.
-pub(crate) struct InboundCapacityPermit {
+/// Capacity reserved on the mailbox ledger for one peer on one lane, returned to the ledger
+/// when dropped: the charge of one frame, or of one chunked message (#932).
+pub(crate) struct HeldCharge {
     /// The ledger the capacity is held in.
     capacity: Arc<InboundCapacity>,
-    /// The sending peer, if known, whose share the frame draws on.
+    /// The sending peer, if known, whose share the charge draws on.
     peer: Option<Did>,
-    /// The logical lane the frame is admitted on.
-    pub(super) lane: InboundLane,
-    /// The bytes the frame holds.
-    pub(super) bytes: usize,
+    /// The lane the charge is reserved on.
+    lane: InboundLane,
+    /// The retained bytes reserved.
+    bytes: usize,
 }
 
-impl InboundCapacityPermit {
-    /// Re-charge an admitted event at `lane` and `bytes`, or refuse it, changing nothing.
-    ///
-    /// A transition is not an arrival, and the ordering laws of the waiting arrivals do not
-    /// cover it: it runs on the actor while the event holds its lane ticket, and capacity is
-    /// released by the events that actor completes, so waiting here could deadlock. It
-    /// therefore takes capacity at once, ahead of waiting arrivals, and is refused when the
-    /// budgets cannot hold it; a refused reassembled message is dropped (#932).
-    pub(super) fn try_transition(&mut self, lane: InboundLane, bytes: usize) -> Result<()> {
-        if lane == self.lane && bytes == self.bytes {
-            return Ok(());
-        }
-        validate_memory_request(lane, bytes)?;
-        validate_peer_memory_request(self.peer, bytes)?;
-        self.capacity
-            .move_reservation(self.peer, Some((self.lane, self.bytes)), (lane, bytes))
-            .map_err(|refusal| refusal.into_error(self.peer, bytes))?;
-        self.lane = lane;
-        self.bytes = bytes;
-        // A transition may release capacity a waiter is refused for.
-        self.capacity.waiters.serve(&self.capacity);
-        Ok(())
-    }
-}
-
-impl Drop for InboundCapacityPermit {
+impl Drop for HeldCharge {
     fn drop(&mut self) {
         let mut peer_states = self
             .capacity
@@ -472,6 +488,61 @@ impl Drop for InboundCapacityPermit {
         self.capacity.waiters.serve(&self.capacity);
         // Test builds: an inbound release is a state change that quiescence probes read.
         #[cfg(test)]
+        crate::tests::activity::record_activity();
+    }
+}
+
+/// The inbound capacity one admitted event holds: its charge, if it has one, returned to its
+/// ledger when dropped.
+///
+/// ```text
+/// take ; restore(c) = id     restore(take) leaves the ledger unchanged
+/// ```
+pub(crate) struct InboundCapacityPermit {
+    /// The charge the event holds; `None` for a covered arrival, or once taken.
+    held: Option<HeldCharge>,
+    /// Test builds: the event's place in the live-event count, which quiescence probes read.
+    #[cfg(test)]
+    _event: LiveEvent,
+}
+
+impl InboundCapacityPermit {
+    /// Take this permit's charge out, leaving a permit that holds nothing in its place: the move
+    /// of a first chunk's charge into its message (#932), never a release or a new charge.
+    pub(super) fn take(&mut self) -> Option<HeldCharge> {
+        self.held.take()
+    }
+
+    /// Put `charge` back on this permit: the move of a completed message's charge onto the
+    /// event that delivers it (#932), never a new charge.
+    pub(super) fn restore(&mut self, charge: Option<HeldCharge>) {
+        self.held = charge;
+    }
+}
+
+/// Test builds: one admitted event, counted live on its ledger from its admission until it is
+/// handled, whatever charge it holds; the charge an open message holds is not an event.
+#[cfg(test)]
+struct LiveEvent(Arc<InboundCapacity>);
+
+#[cfg(test)]
+impl LiveEvent {
+    /// Count one event live on `capacity`.
+    fn new(capacity: &Arc<InboundCapacity>) -> Self {
+        capacity
+            .live_events
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(Arc::clone(capacity))
+    }
+}
+
+#[cfg(test)]
+impl Drop for LiveEvent {
+    fn drop(&mut self) {
+        self.0
+            .live_events
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.applied.bump();
         crate::tests::activity::record_activity();
     }
 }

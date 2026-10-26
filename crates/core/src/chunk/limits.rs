@@ -8,35 +8,33 @@ use crate::consts::TRANSPORT_MAX_SIZE;
 /// numbers come from: the shell supplies them (see [`ReassemblyLimits::production`]), the
 /// reassembler only enforces what it is given, and tests can use small limits instead of giant
 /// synthetic payloads.
+///
+/// Every limit is a validity bound an honest sender never meets, not a capacity: the memory a
+/// message takes is charged once, by its first chunk, on the receiver's mailbox ledger
+/// (load-bounds paper, Law 4, #932).
 #[derive(Debug, Clone, Copy)]
 pub struct ReassemblyLimits {
-    /// Max number of distinct in-flight message ids (a cheap first-line cap; the byte budgets are
-    /// the real memory guard).
+    /// Max number of distinct in-flight message ids on one connection: an honest sender keeps
+    /// a message's chunks contiguous on its class lane, so it has at most one open per lane.
     pub max_pending_messages: usize,
     /// Max `data` bytes a single chunk may carry.
     pub max_chunk_data_len: usize,
-    /// Max buffered data bytes for one in-flight message.
+    /// Max bytes of one message: a first chunk `[0, n]` of `d₀` bytes opens a message only while
+    /// `(n − 1)·d₀ < max_message_bytes`, so the `n·d₀` it is charged for passes the message's
+    /// own length by less than one chunk.
     pub max_message_bytes: usize,
     /// Max number of slots (chunks) one in-flight message may have - i.e. the largest `total` a
     /// chunk may claim. Caps the slot/`BTreeMap` count of a single message so a hostile peer cannot
     /// use one id with a huge `total` and tiny chunks to allocate millions of slots while staying
     /// under [`max_message_bytes`](Self::max_message_bytes) (which only counts data bytes).
     pub max_chunks_per_message: usize,
-    /// Max buffered cost (data bytes + per-slot overhead) summed across all in-flight messages.
-    pub max_total_buffered_cost: usize,
-    /// Bookkeeping charge per slot - a *conservative estimate* (not an exact measurement) of the
-    /// `BTreeMap` node plus `Bytes` header/refcount a slot costs, so a flood of *tiny* chunks is
-    /// bounded by slot count, not only by summed data bytes. Real per-slot heap use may differ;
-    /// this is deliberately generous so the budget over- rather than under-counts.
-    pub slot_overhead: usize,
     /// Max number of recently-completed message ids remembered as tombstones, to suppress a
     /// re-delivery if a message is fully retransmitted after it already completed (within its TTL
-    /// window). The same number separately caps invalid-terminal ids and ids rejected before local
-    /// capacity could retain state. Invalid ids fail open without peer attribution when their set
-    /// is full, with a bounded saturation horizon preserving that decision while tombstones drain;
-    /// capacity-history saturation temporarily rejects all new ids for that peer. Thus
-    /// terminal bookkeeping retains at most three times this many ids across the independent
-    /// completed, invalid, and capacity sets, plus two scalar saturation horizons. NOTE: past
+    /// window). The same number separately caps invalid-terminal ids. Invalid ids fail open
+    /// without peer attribution when their set is full, with a bounded saturation horizon
+    /// preserving that decision while tombstones drain. Thus terminal bookkeeping retains at most
+    /// twice this many ids across the independent completed and invalid sets, plus one scalar
+    /// saturation horizon. NOTE: past
     /// this many *concurrent* live completion
     /// tombstones the oldest is dropped even if its TTL has not elapsed, so the "no
     /// post-completion redelivery" guarantee holds only for the most recent `max_completed_ids`
@@ -58,33 +56,21 @@ impl ReassemblyLimits {
             // The sender never produces chunks smaller than `MIN_CHUNK_DATA`, so a legitimate
             // message needs at most this many; a larger `total` is forged.
             max_chunks_per_message: TRANSPORT_MAX_SIZE / MIN_CHUNK_DATA + 1,
-            // Admits several concurrent maximum-size transfers while staying hard-bounded.
-            max_total_buffered_cost: TRANSPORT_MAX_SIZE * 4,
-            slot_overhead: 128,
             max_completed_ids: 1024,
         }
     }
 
-    /// Lower-concurrency limits for constrained deployments.
+    /// Lower-bookkeeping limits for constrained deployments.
     ///
-    /// The per-message ceiling remains protocol-compatible with production.
-    /// Constrained nodes instead admit fewer simultaneous messages and only one
-    /// maximum-size reassembly, including its contiguous output copy.
+    /// The per-message ceiling remains protocol-compatible with production; constrained nodes
+    /// keep fewer open ids and completion tombstones. Their reassembly memory is bounded, as
+    /// every node's, by the mailbox ledger its first chunks are charged on.
     pub fn constrained() -> Self {
-        const CONSTRAINED_MESSAGE_BYTES: usize = TRANSPORT_MAX_SIZE;
-        const CONSTRAINED_MAX_CHUNKS: usize = CONSTRAINED_MESSAGE_BYTES / MIN_CHUNK_DATA + 1;
-        const CONSTRAINED_SLOT_OVERHEAD: usize = 128;
-        const CONSTRAINED_TOTAL_COST: usize =
-            crate::fair_admission::retained_wire_bytes(CONSTRAINED_MESSAGE_BYTES)
-                + CONSTRAINED_MAX_CHUNKS * CONSTRAINED_SLOT_OVERHEAD;
-
         Self {
             max_pending_messages: 64,
             max_chunk_data_len: MAX_DATA_CHANNEL_MESSAGE_SIZE,
-            max_message_bytes: CONSTRAINED_MESSAGE_BYTES,
-            max_chunks_per_message: CONSTRAINED_MAX_CHUNKS,
-            max_total_buffered_cost: CONSTRAINED_TOTAL_COST,
-            slot_overhead: CONSTRAINED_SLOT_OVERHEAD,
+            max_message_bytes: TRANSPORT_MAX_SIZE,
+            max_chunks_per_message: TRANSPORT_MAX_SIZE / MIN_CHUNK_DATA + 1,
             max_completed_ids: 256,
         }
     }
@@ -99,22 +85,8 @@ impl ReassemblyLimits {
             max_chunk_data_len: self.max_chunk_data_len.max(1),
             max_message_bytes: self.max_message_bytes.max(1),
             max_chunks_per_message: self.max_chunks_per_message.max(1),
-            max_total_buffered_cost: self.max_total_buffered_cost.max(1),
-            slot_overhead: self.slot_overhead,
             max_completed_ids: self.max_completed_ids.max(1),
         }
-    }
-
-    /// Pending cost one peer may retain. One maximum-size legitimate message
-    /// still fits, while the node-wide budget keeps capacity available to other
-    /// peers instead of allowing a single incomplete-chunk flood to consume it.
-    pub(super) fn max_peer_buffered_cost(self) -> usize {
-        self.max_message_bytes
-            .saturating_add(
-                self.max_chunks_per_message
-                    .saturating_mul(self.slot_overhead),
-            )
-            .min(self.max_total_buffered_cost)
     }
 }
 

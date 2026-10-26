@@ -53,10 +53,7 @@ impl InboundProcessor<WeakLogical> {
     /// (the release law of [`WeakLogical`]), judging reassembly timeouts by `reassembly_clock`,
     /// with no connection attempt bound yet and empty holds.
     pub(super) fn new(transport: &Arc<SwarmTransport>, reassembly_clock: ReassemblyClock) -> Self {
-        let reassembler = MessageReassembler::with_limits_and_budget(
-            transport.reassembly_limits(),
-            transport.reassembly_budget(),
-        );
+        let reassembler = MessageReassembler::with_limits(transport.reassembly_limits());
         Self {
             logical: WeakLogical::new(transport),
             reassembler: Arc::new(FuturesMutex::new(reassembler)),

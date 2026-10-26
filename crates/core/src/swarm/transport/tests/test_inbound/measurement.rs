@@ -1,15 +1,13 @@
 use super::*;
 
 /// Reassembly limits small enough to reach in a test: one pending message of at most four
-/// chunks of 1 KiB, a 4 KiB shared budget, and four remembered completions.
+/// chunks of 1 KiB, and four remembered completions.
 fn small_reassembly_limits() -> ReassemblyLimits {
     ReassemblyLimits {
         max_pending_messages: 1,
         max_chunk_data_len: 1_024,
         max_message_bytes: 1_024,
         max_chunks_per_message: 4,
-        max_total_buffered_cost: 4_096,
-        slot_overhead: 8,
         max_completed_ids: 4,
     }
 }
@@ -84,17 +82,18 @@ impl BufferedPartial {
             self.transport.dht.did,
         )?;
         self.pending.receive(&frame).await?;
-        assert!(self.transport.reassembly_budget().buffered_cost_for_test() > 0);
+        // The open message holds the charge its first chunk took on the mailbox ledger.
+        assert!(self.transport.inbound_capacity().admitted_count_for_test() > 0);
         Ok((frame, expiry))
     }
 
-    /// Resolve once the shared reassembly budget is empty and `failures` receive failures are
-    /// charged to the peer.
+    /// Resolve once the mailbox ledger holds nothing, every open message's charge released,
+    /// and `failures` receive failures are charged to the peer.
     async fn await_released_with_failures(&self, failures: usize) {
         let peer = self.pending.peer;
         self.transport
-            .reassembly_budget()
-            .await_buffered_cost_for_test(|cost| cost == 0)
+            .inbound_capacity()
+            .await_admitted_count_for_test(|count| count == 0)
             .await;
         self.measure
             .await_recorded(|measure| {
@@ -154,7 +153,7 @@ async fn test_invalid_chunk_shape_records_peer_receive_failure() -> Result<()> {
 async fn test_reassembly_rejections_score_only_invalid_input_and_release_resources() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = small_reassembly_transport(&measure)?;
-    let budget = transport.reassembly_budget();
+    let capacity = transport.inbound_capacity();
     let pending = pending_peer(&transport).await?;
     pending.activate(&transport)?;
     let peer = pending.peer;
@@ -167,17 +166,10 @@ async fn test_reassembly_rejections_score_only_invalid_input_and_release_resourc
         |chunk: Chunk| local_wire(Message::Chunk(chunk), &pending.session, transport.dht.did);
 
     pending.receive(&deliver(first.clone())?).await?;
-    assert!(budget.buffered_cost_for_test() > 0);
+    assert!(capacity.admitted_count_for_test() > 0);
 
+    // A duplicate of the first chunk is a replay, which is no evidence.
     pending.receive(&deliver(first.clone())?).await?;
-
-    pending
-        .receive(&deliver(Chunk {
-            chunk: [0, 2],
-            data: Bytes::from_static(b"second"),
-            meta: ChunkMeta::default(),
-        })?)
-        .await?;
     assert_eq!(failed_receive_count(&measure, peer)?, 0);
 
     let conflict_frame = deliver(Chunk {
@@ -200,7 +192,8 @@ async fn test_reassembly_rejections_score_only_invalid_input_and_release_resourc
             .callback
             .inbound_for_test()
             .admitted_count_for_test(),
-        0
+        1,
+        "the open message still holds its first chunk's charge until it expires"
     );
 
     pending.receive(&conflict_frame).await?;
@@ -212,12 +205,14 @@ async fn test_reassembly_rejections_score_only_invalid_input_and_release_resourc
 
     pending.callback.inbound_for_test().close_for_test();
     drop(pending);
-    budget.await_buffered_cost_for_test(|cost| cost == 0).await;
+    capacity
+        .await_admitted_count_for_test(|count| count == 0)
+        .await;
     Ok(())
 }
 
 #[tokio::test]
-async fn test_expired_partial_reassembly_releases_shared_budget_without_more_peer_traffic(
+async fn test_expired_partial_reassembly_releases_its_charge_without_more_peer_traffic(
 ) -> Result<()> {
     let (partial, frame, expiry) = BufferedPartial::new(b"partial").await?;
     let peer = partial.pending.peer;
@@ -245,8 +240,8 @@ async fn test_expired_partial_reassembly_releases_shared_budget_without_more_pee
     assert!(
         partial
             .transport
-            .reassembly_budget()
-            .buffered_cost_for_test()
+            .inbound_capacity()
+            .admitted_count_for_test()
             > 0,
         "closing before TTL must retain only bounded reassembly cleanup state"
     );

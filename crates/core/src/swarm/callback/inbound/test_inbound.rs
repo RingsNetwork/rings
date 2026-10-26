@@ -1,6 +1,8 @@
 use futures::FutureExt;
+use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
+use super::capacity::InboundRefusal;
 use super::*;
 use crate::message::MessageCategory;
 
@@ -75,9 +77,12 @@ fn test_maximum_transport_frame_fits_every_lane_reservation() {
         // Each lane's reservation admits at once: the acquisition completes without waiting.
         capacity
             .acquire(
-                Some(Did::from(u32::try_from(peer + 1).expect("test peer fits"))),
-                lane,
-                reserved,
+                (
+                    Some(Did::from(u32::try_from(peer + 1).expect("test peer fits"))),
+                    lane,
+                    None,
+                ),
+                InboundCharge::Bytes(reserved),
             )
             .now_or_never()
             .unwrap_or(Err(Error::InboundMailboxClosed))
@@ -86,26 +91,6 @@ fn test_maximum_transport_frame_fits_every_lane_reservation() {
     .expect("every lane must admit one maximum transport frame from its reservation");
 
     assert_eq!(permits.len(), INBOUND_LANE_COUNT);
-}
-
-fn reserve_application_bytes(
-    capacity: &Arc<InboundCapacity>,
-    total: usize,
-) -> Vec<InboundCapacityPermit> {
-    let mut remaining = total;
-    let mut peer = 1_u32;
-    let mut permits = Vec::new();
-    while remaining > 0 {
-        let bytes = remaining.min(INBOUND_PEER_BYTE_CAPACITY);
-        permits.push(
-            capacity
-                .try_acquire(Some(Did::from(peer)), APPLICATION_LANE, bytes)
-                .expect("application blocker must fit within the declared limits"),
-        );
-        remaining -= bytes;
-        peer = peer.saturating_add(1);
-    }
-    permits
 }
 
 #[cfg_attr(
@@ -127,12 +112,12 @@ fn test_inbound_capacity_reserves_count_for_every_lane() {
                 1,
             )
         })
-        .collect::<Result<Vec<_>>>()
+        .collect::<std::result::Result<Vec<_>, _>>()
         .expect("application may borrow capacity not reserved for other lanes");
 
     assert!(matches!(
         capacity.try_acquire(Some(Did::from(u32::MAX)), APPLICATION_LANE, 1),
-        Err(Error::InboundMailboxCapacityExceeded { .. })
+        Err(InboundRefusal::Mailbox)
     ));
     for (peer_index, lane) in [DHT_CONTROL_LANE, REASSEMBLY_LANE, STORAGE_LANE, E2E_LANE]
         .into_iter()
@@ -155,7 +140,7 @@ fn test_inbound_capacity_reserves_count_for_every_lane() {
     }
     assert!(matches!(
         capacity.try_acquire(Some(Did::from(u32::MAX)), DHT_CONTROL_LANE, 1),
-        Err(Error::InboundMailboxCapacityExceeded { .. })
+        Err(InboundRefusal::Mailbox)
     ));
     drop(permits);
     assert!(capacity.try_acquire(None, APPLICATION_LANE, 1).is_ok());
@@ -187,7 +172,7 @@ fn test_inbound_capacity_reserves_memory_for_every_lane() {
 
     assert!(matches!(
         capacity.try_acquire(Some(Did::from(3_u32)), APPLICATION_LANE, 1),
-        Err(Error::InboundMailboxMemoryCapacityExceeded { .. })
+        Err(InboundRefusal::Mailbox)
     ));
     let control = capacity
         .try_acquire(
@@ -202,58 +187,99 @@ fn test_inbound_capacity_reserves_memory_for_every_lane() {
     assert!(capacity.try_acquire(None, APPLICATION_LANE, 1).is_ok());
 }
 
+/// A covered arrival, a later chunk of a message its first chunk was charged for, takes nothing
+/// from the ledger: it is admitted at once while every budget is full (#932).
 #[cfg_attr(
     all(feature = "wasm", target_family = "wasm"),
     wasm_bindgen_test::wasm_bindgen_test
 )]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), test)]
-fn test_reassembly_handoff_rejects_capacity_pressure_without_waiting() {
+fn test_a_covered_arrival_is_admitted_while_the_ledger_is_full() {
     let capacity = Arc::new(InboundCapacity::new());
-    let blockers = reserve_application_bytes(&capacity, 240 * 1024 * 1024);
-    let mut handoff = capacity
-        .try_acquire(Some(Did::from(2_u32)), REASSEMBLY_LANE, 1)
-        .expect("reassembly retains its reserved byte budget");
-
-    assert!(matches!(
-        handoff.try_transition(APPLICATION_LANE, 16 * 1024 * 1024),
-        Err(Error::InboundMailboxMemoryCapacityExceeded { .. })
-    ));
-    assert_eq!(handoff.lane, REASSEMBLY_LANE);
-    assert_eq!(handoff.bytes, 1);
-
-    drop(blockers);
-    handoff
-        .try_transition(APPLICATION_LANE, 16 * 1024 * 1024)
-        .expect("failed transition must preserve the original reservation atomically");
+    let peer = Some(Did::from(1_u32));
+    let blocker = capacity
+        .try_acquire(peer, REASSEMBLY_LANE, INBOUND_PEER_BYTE_CAPACITY)
+        .expect("one peer may take its whole budget");
+    assert_eq!(
+        capacity.try_acquire(peer, REASSEMBLY_LANE, 1).err(),
+        Some(InboundRefusal::Peer)
+    );
+    let covered = capacity
+        .acquire((peer, REASSEMBLY_LANE, None), InboundCharge::Covered)
+        .now_or_never()
+        .expect("a covered arrival never waits for capacity")
+        .expect("a covered arrival is never refused");
+    drop(covered);
+    drop(blocker);
 }
 
+/// No later chunk waits behind another class's message: arrivals are ordered per transport
+/// carrier, so a covered chunk of one message is admitted while the first chunk of a message on
+/// another carrier of the same peer waits for the capacity the first message holds. Ordered per
+/// lane alone, the covered chunk would queue behind it, and neither message could complete.
 #[cfg_attr(
     all(feature = "wasm", target_family = "wasm"),
     wasm_bindgen_test::wasm_bindgen_test
 )]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), test)]
-fn test_reassembly_reservation_expands_before_logical_lane_transition() {
+fn test_a_later_chunk_never_waits_behind_another_carriers_first_chunk() {
+    let capacity = Arc::new(InboundCapacity::new());
+    let peer = Some(Did::from(1_u32));
+    let (storage, application) = (Some(ChannelLane::new(1)), Some(ChannelLane::new(3)));
+    let first = capacity
+        .acquire(
+            (peer, REASSEMBLY_LANE, storage),
+            InboundCharge::Bytes(INBOUND_PEER_BYTE_CAPACITY),
+        )
+        .now_or_never()
+        .expect("the first message's first chunk fits the peer's budget")
+        .expect("within the request bounds");
+    let mut other = Box::pin(capacity.acquire(
+        (peer, REASSEMBLY_LANE, application),
+        InboundCharge::Bytes(1024),
+    ));
+    assert!(
+        (&mut other).now_or_never().is_none(),
+        "the other message's first chunk waits for the peer's budget"
+    );
+    let later = capacity
+        .acquire((peer, REASSEMBLY_LANE, storage), InboundCharge::Covered)
+        .now_or_never()
+        .expect("the first message's later chunk never waits behind it")
+        .expect("a covered arrival is never refused");
+    drop(later);
+    drop(first);
+    assert!(
+        other.now_or_never().is_some_and(|granted| granted.is_ok()),
+        "the waiting first chunk is granted once the first message releases its charge"
+    );
+}
+
+/// `take` moves a charge without releasing it: the taken charge holds it, the permit left in
+/// its place holds nothing, and the charge is released once, when the taken charge drops. The
+/// event ends with its permit, whoever holds the charge.
+#[cfg_attr(
+    all(feature = "wasm", target_family = "wasm"),
+    wasm_bindgen_test::wasm_bindgen_test
+)]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), test)]
+fn test_taking_a_charge_moves_it_without_releasing_it() {
     let capacity = Arc::new(InboundCapacity::new());
     let peer = Some(Did::from(7_u32));
     let mut permit = capacity
-        .try_acquire(peer, REASSEMBLY_LANE, 1)
-        .expect("the raw chunk frame must fit in the reassembly lane");
-    let decoded_bytes = INBOUND_PEER_BYTE_CAPACITY / 2;
-
-    permit
-        .try_transition(REASSEMBLY_LANE, decoded_bytes)
-        .expect("the completed payload must replace the raw-frame reservation");
-
-    assert!(matches!(
-        capacity.try_acquire(
-            peer,
-            APPLICATION_LANE,
-            INBOUND_PEER_BYTE_CAPACITY - decoded_bytes + 1,
-        ),
-        Err(Error::InboundPeerMemoryCapacityExceeded { .. })
-    ));
-    assert_eq!(permit.lane, REASSEMBLY_LANE);
-    assert_eq!(permit.bytes, decoded_bytes);
+        .try_acquire(peer, REASSEMBLY_LANE, INBOUND_PEER_BYTE_CAPACITY)
+        .expect("one peer may take its whole budget");
+    let taken = permit.take();
+    assert_eq!(capacity.live_events_for_test(), 1);
+    drop(permit);
+    assert_eq!(capacity.live_events_for_test(), 0, "the event ended");
+    assert_eq!(
+        capacity.try_acquire(peer, REASSEMBLY_LANE, 1).err(),
+        Some(InboundRefusal::Peer),
+        "dropping the covered remainder releases nothing"
+    );
+    drop(taken);
+    assert!(capacity.try_acquire(peer, REASSEMBLY_LANE, 1).is_ok());
 }
 
 #[cfg_attr(
@@ -285,15 +311,12 @@ fn test_one_peer_cannot_exhaust_another_peers_inbound_allowance() {
     let control_peer = Some(Did::from(2_u32));
     let permits = (0..INBOUND_PEER_CAPACITY)
         .map(|_| capacity.try_acquire(noisy_peer, APPLICATION_LANE, 1))
-        .collect::<Result<Vec<_>>>()
+        .collect::<std::result::Result<Vec<_>, _>>()
         .expect("one peer may use exactly its own count allowance");
 
     assert!(matches!(
         capacity.try_acquire(noisy_peer, APPLICATION_LANE, 1),
-        Err(Error::InboundPeerCapacityExceeded {
-            peer,
-            capacity: INBOUND_PEER_CAPACITY,
-        }) if peer == noisy_peer
+        Err(InboundRefusal::Peer)
     ));
     assert!(capacity
         .try_acquire(control_peer, DHT_CONTROL_LANE, 1)

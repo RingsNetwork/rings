@@ -56,8 +56,10 @@ mod ticket;
 use self::barrier::lane_waits_for_reassembly;
 use self::barrier::ReassemblyHandoffBarrier;
 use self::capacity::memory_reservation;
+pub(super) use self::capacity::HeldCharge;
 pub(crate) use self::capacity::InboundCapacity;
-use self::capacity::InboundCapacityPermit;
+pub(super) use self::capacity::InboundCapacityPermit;
+use self::capacity::InboundCharge;
 pub(crate) use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
@@ -294,10 +296,8 @@ impl InboundMailbox {
         }
         // Capacity before the ticket: an arrival waiting for capacity holds no sequence, so
         // the actor's ordering never waits on it.
-        let permit = self
-            .capacity
-            .acquire(peer, lane, memory_reservation(bytes.len()))
-            .await?;
+        let charge = arrival_charge(&prepared.message, bytes.len());
+        let permit = self.capacity.acquire((peer, lane, carrier), charge).await?;
         let ticket = self.reserve_ticket(lane)?;
         let PreparedInboundFrame {
             payload,
@@ -390,9 +390,10 @@ impl InboundMailbox {
     pub(crate) fn hold_application_capacity_for_test(
         &self,
         peer: crate::dht::Did,
-    ) -> Result<impl Drop> {
+    ) -> Result<InboundCapacityPermit> {
         self.capacity
             .try_acquire(Some(peer), InboundLane::Application, 1)
+            .map_err(|refusal| refusal.into_error(Some(peer), 1))
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -760,6 +761,31 @@ impl InboundActor {
         {
             self.reassembly_handoff_barrier = None;
         }
+    }
+}
+
+/// What an arrival of `wire_bytes` carrying `message` reserves on the mailbox ledger
+/// (load-bounds paper, Law 4, #932): a chunked message is charged once, at its first chunk
+/// `[0, n]` of `d₀` bytes, for the retained `n·d₀` its buffer and its completed copy take (never
+/// less than its own frame); a later chunk is covered by that charge; any other frame is charged
+/// its own retained bytes.
+///
+/// ```text
+/// Chunk [0, n], d₀ ──▶ Bytes(max(retained(n·d₀), retained(wire)))
+/// Chunk [i > 0, n] ──▶ Covered
+/// otherwise ─────────▶ Bytes(retained(wire))
+/// ```
+fn arrival_charge(message: &crate::message::Message, wire_bytes: usize) -> InboundCharge {
+    let frame = memory_reservation(wire_bytes);
+    match message {
+        crate::message::Message::Chunk(chunk) => match chunk.chunk {
+            [0, total] => {
+                let message = memory_reservation(total.saturating_mul(chunk.data.len()));
+                InboundCharge::Bytes(message.max(frame))
+            }
+            _ => InboundCharge::Covered,
+        },
+        _ => InboundCharge::Bytes(frame),
     }
 }
 

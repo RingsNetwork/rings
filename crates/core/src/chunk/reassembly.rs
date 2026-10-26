@@ -2,9 +2,6 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_transport::core::pool::ChannelLane;
@@ -14,76 +11,44 @@ use super::Chunk;
 use super::ReassemblyLimits;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
-use crate::fair_admission::try_reserve_atomic;
 use crate::utils::get_epoch_ms;
 
-/// One message being reassembled: the chunks seen so far, keyed by position.
-pub(super) struct Pending {
+/// One message being reassembled: the chunks seen so far, keyed by position, and the charge
+/// its first chunk took for the whole message.
+pub(super) struct Pending<C> {
     /// total number of chunks the message claims (from `chunk[1]`).
     total: usize,
+    /// `d₀`, the data length of the first chunk, which no later chunk may exceed, so the
+    /// message's data never passes the `n·d₀` its first chunk was charged for.
+    first_len: usize,
     /// received positions -> bytes. A `BTreeMap` dedups by position (first write wins) and keeps
     /// the data ordered, so assembly is a single in-order concat.
     pub(super) slots: BTreeMap<usize, Bytes>,
-    /// running sum of buffered data bytes, so the per-message cap is O(1) to check.
-    pub(super) data_bytes: usize,
     /// creation time / ttl of the first chunk seen, used for TTL eviction.
     ts_ms: u128,
     ttl_ms: u64,
     /// This logical transmission already produced its one peer-attributable failure.
     failure_charged: bool,
-    /// Local capacity rejected at least one chunk, so later incompletion is not peer evidence.
-    local_capacity_rejected: bool,
     /// Every retained chunk was bound to an authenticated peer at ingress.
     peer_attributable: bool,
     /// The lane the first chunk arrived on, which every later chunk must share.
     carrier: Option<ChannelLane>,
+    /// The charge the first chunk took for the whole message (load-bounds paper, Law 4): held
+    /// while the message is reassembled and handed on with it, released by drop.
+    charge: C,
 }
 
-impl Pending {
-    fn new(
-        total: usize,
-        ts_ms: u128,
-        ttl_ms: u64,
-        peer_attributable: bool,
-        carrier: Option<ChannelLane>,
-    ) -> Self {
-        Self {
-            total,
-            slots: BTreeMap::new(),
-            data_bytes: 0,
-            ts_ms,
-            ttl_ms,
-            failure_charged: false,
-            local_capacity_rejected: false,
-            peer_attributable,
-            carrier,
-        }
-    }
-
+impl<C> Pending<C> {
     /// Complete iff every position has arrived. Each inserted position is unique (map key) and in
     /// `0..total`, so `slots.len() == total` iff the present set is exactly `{0..total-1}`.
     fn is_complete(&self) -> bool {
         self.slots.len() == self.total
     }
 
-    /// Buffered cost charged to the global budget: data bytes plus `slot_overhead` per slot.
-    /// Saturating arithmetic, so adversarial limit values can never overflow/wrap the budget -
-    /// an overflowing cost simply saturates to `usize::MAX` and is rejected as over-budget.
-    pub(super) fn cost(&self, slot_overhead: usize) -> usize {
-        self.slots
-            .len()
-            .saturating_mul(slot_overhead)
-            .saturating_add(self.data_bytes)
-    }
-
     /// Whether `chunk`, carried on `carrier`, joins this in-flight message: it agrees on the
-    /// message's shape and provenance and fills a position still free. Returns the data bytes
-    /// already buffered, for the per-message cap.
-    fn admits(
-        &self,
-        chunk: &Chunk,
-        carrier: Option<ChannelLane>,
-    ) -> std::result::Result<usize, Rejected> {
+    /// message's shape and provenance, is no longer than the first chunk, and fills a position
+    /// still free.
+    fn admits(&self, chunk: &Chunk, carrier: Option<ChannelLane>) -> Result<(), Rejected> {
         let [position, total] = chunk.chunk;
         if self.total != total {
             return Err(Rejected::TotalMismatch);
@@ -98,16 +63,16 @@ impl Pending {
         if self.carrier != carrier {
             return Err(Rejected::CarrierMismatch);
         }
+        // The first chunk was charged for `n·d₀`; a longer chunk would pass that charge.
+        if chunk.data.len() > self.first_len {
+            return Err(Rejected::LongerThanFirst);
+        }
         // First write per position wins; a duplicate position is a no-op, not an error.
         match self.slots.get(&position) {
             Some(existing) if existing == &chunk.data => Err(Rejected::DuplicatePosition),
             Some(_) => Err(Rejected::ConflictingPosition),
-            None => Ok(self.data_bytes),
+            None => Ok(()),
         }
-    }
-
-    fn assemble(self) -> Bytes {
-        self.slots.into_values().flatten().collect()
     }
 }
 
@@ -131,22 +96,29 @@ impl LogicalTransmission {
 /// fragments. Buffers a message's chunks keyed by id and yields the complete [`Bytes`] once every
 /// position has arrived (then forgets it).
 ///
-/// Correct under duplicates / retransmits (first write per position wins *during* assembly,
-/// out-of-order arrival sorted), partial delivery (TTL eviction), and a message **fully
-/// retransmitted after it already completed**: a completed id is kept as a tombstone until it would
-/// expire, so a late re-send within the TTL window is dropped rather than re-assembled and delivered
-/// twice.
+/// Correct under duplicates / retransmits (first write per position wins *during* assembly),
+/// partial delivery (TTL eviction), and a message **fully retransmitted after it already
+/// completed**: a completed id is kept as a tombstone until it would expire, so a late re-send
+/// within the TTL window is dropped rather than re-assembled and delivered twice.
 ///
-/// **Bounded against a hostile peer** by the [`ReassemblyLimits`] it is built with: every accepted
-/// chunk is validated and charged to both a per-peer pending-cost limit and a node-wide budget, so
-/// reassembly memory cannot grow without limit no matter how the load is shaped. Per-chunk data,
-/// per-message data, slot overhead, the pending/terminal id counts, and the completed-id tombstone
-/// set are all capped, and an already-expired chunk is rejected before it can be delivered or
-/// buffered.
-pub struct MessageReassembler {
-    pub(super) pending: HashMap<Uuid, Pending>,
-    /// Sum of `Pending::cost(..)` over this peer's `pending` entries.
-    pub(super) buffered_cost: usize,
+/// **One charge per message** (load-bounds paper, Law 4, #932). A message is opened only by its
+/// first chunk, `[0, n]` with data length `d₀`, and only when `(n − 1)·d₀` stays below
+/// [`ReassemblyLimits::max_message_bytes`]; the charge `C` that chunk brings (the receiver's
+/// mailbox reservation of `n·d₀`) is held with the message. Every later chunk is at most `d₀`
+/// long, so the message never outgrows that charge, and the charge a later chunk brings is
+/// dropped. The charge leaves with the completed message ([`RetainedReassembly`]), or is dropped
+/// when the message expires or the reassembler closes. The reassembler itself holds no budget
+/// and refuses nothing for capacity: its remaining caps (ids, slots, chunk length, message
+/// length) are validity bounds an honest sender never meets.
+///
+/// ```text
+/// chunk [0, n], d₀ ── new id, (n − 1)·d₀ < max ──▶ open(charge)        (Incomplete)
+/// chunk [i, n], dᵢ ── open, dᵢ ≤ d₀, slot free ───▶ insert; drop charge (Incomplete | Complete)
+/// chunk [i > 0, n] ── no open message ────────────▶ Rejected(Invalid | Replay)
+/// expiry, close ──────────────────────────────────▶ drop(message, charge)
+/// ```
+pub struct MessageReassembler<C = ()> {
+    pub(super) pending: HashMap<Uuid, Pending<C>>,
     /// Tombstones for ids that have already been delivered, each paired with its expiry
     /// (`ts_ms + ttl_ms`). A chunk for one of these is dropped, so a post-completion retransmit of a
     /// whole message is not re-assembled and delivered again. `VecDeque` for FIFO/TTL eviction, the
@@ -164,126 +136,54 @@ pub struct MessageReassembler {
     /// already-scored expiries remain replays until this horizon. This prevents a retained expiry
     /// from being charged again merely because an older tombstone drains first.
     failure_tracking_saturated_until: u128,
-    /// Transmissions rejected by local capacity before any pending state was retained. Their ids
-    /// are blocked until expiry, preventing a later tail from becoming an incomplete message that
-    /// is incorrectly attributed to the peer.
-    capacity_rejected: VecDeque<(Uuid, u128)>,
-    capacity_rejected_ids: HashSet<Uuid>,
-    /// When the bounded capacity-id set is full, all new ids are locally rejected until every
-    /// untracked rejection that extended this horizon must itself be stale. Existing pending ids
-    /// can still make progress, so this cannot hide their genuine expiry failures.
-    capacity_tracking_saturated_until: u128,
     /// The bounds enforced on every incoming chunk.
     limits: ReassemblyLimits,
-    budget: Arc<ReassemblyBudget>,
 }
 
-/// Node-wide retained chunk cost shared by every per-peer reassembler.
-pub(crate) struct ReassemblyBudget {
-    pub(super) buffered_cost: AtomicUsize,
-    limit: usize,
-    /// Bumped after every applied reservation or release.
-    applied: crate::utils::GenerationWitness,
-}
-
-impl ReassemblyBudget {
-    pub(crate) fn new(limits: ReassemblyLimits) -> Self {
-        Self {
-            buffered_cost: AtomicUsize::new(0),
-            limit: limits.normalized().max_total_buffered_cost,
-            applied: crate::utils::GenerationWitness::default(),
-        }
-    }
-
-    fn try_reserve(&self, cost: usize) -> bool {
-        let reserved = try_reserve_atomic(&self.buffered_cost, cost, self.limit);
-        if reserved {
-            self.applied.bump();
-        }
-        reserved
-    }
-
-    fn release(&self, cost: usize) {
-        if self
-            .buffered_cost
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_sub(cost)
-            })
-            .is_err()
-        {
-            tracing::error!(cost, "reassembly budget release exceeded retained cost");
-        }
-        self.applied.bump();
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn buffered_cost_for_test(&self) -> usize {
-        self.buffered_cost.load(Ordering::Acquire)
-    }
-
-    /// Resolve once `predicate` holds over the retained cost, re-checked on
-    /// every reservation or release.
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) async fn await_buffered_cost_for_test(&self, predicate: impl Fn(usize) -> bool) {
-        self.applied
-            .await_until(|_generation| predicate(self.buffered_cost_for_test()))
-            .await;
-    }
-}
-
-/// Completed bytes that remain charged to the node budget until core admission takes ownership.
-pub(crate) struct RetainedReassembly {
+/// A completed message and the charge its first chunk took for it.
+pub(crate) struct RetainedReassembly<C> {
     bytes: Bytes,
-    budget: Arc<ReassemblyBudget>,
-    cost: usize,
+    /// The charge, handed on with the message.
+    charge: C,
     /// The lane every chunk of the message arrived on.
     carrier: Option<ChannelLane>,
 }
 
 /// Result of applying one chunk to a reassembler.
-pub(crate) enum ReassemblyOutcome {
+pub(crate) enum ReassemblyOutcome<C> {
     /// The chunk was admitted but the message is not complete yet.
     Incomplete,
-    /// The chunk completed a message whose output remains budget-charged.
-    Complete(RetainedReassembly),
+    /// The chunk completed a message, which carries its charge.
+    Complete(RetainedReassembly<C>),
     /// The chunk was rejected without mutating retained reassembly state.
     Rejected(ReassemblyRejection),
 }
 
-/// Whether a rejected chunk is evidence about the remote peer or local state.
+/// Whether a rejected chunk is evidence about the remote peer: no rejection is for capacity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReassemblyRejection {
     /// The wire shape, timestamp, metadata, or size is remotely invalid.
     Invalid,
-    /// Local per-peer or node-wide reassembly capacity was exhausted.
-    Capacity,
     /// The chunk is stale or repeats a position or a message already accepted.
     Replay,
 }
 
-impl RetainedReassembly {
+impl<C> RetainedReassembly<C> {
     /// The lane every chunk of the message arrived on, for the receiver to check against the
     /// lane its content belongs to.
     pub(crate) const fn carrier(&self) -> Option<ChannelLane> {
         self.carrier
     }
 
-    fn into_bytes(mut self) -> Bytes {
-        self.budget.release(self.cost);
-        self.cost = 0;
-        std::mem::take(&mut self.bytes)
+    /// The message's bytes and its charge.
+    pub(crate) fn into_parts(self) -> (Bytes, C) {
+        (self.bytes, self.charge)
     }
 }
 
-impl AsRef<[u8]> for RetainedReassembly {
+impl<C> AsRef<[u8]> for RetainedReassembly<C> {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
-    }
-}
-
-impl Drop for RetainedReassembly {
-    fn drop(&mut self) {
-        self.budget.release(self.cost);
     }
 }
 
@@ -294,37 +194,51 @@ impl Default for MessageReassembler {
 }
 
 impl MessageReassembler {
-    /// Empty reassembler with [`ReassemblyLimits::production`] bounds.
+    /// Empty reassembler with [`ReassemblyLimits::production`] bounds, holding no charge.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Empty reassembler enforcing the given `limits`. Tests use this with small limits to exercise
-    /// the admission rule without giant synthetic payloads.
-    pub fn with_limits(limits: ReassemblyLimits) -> Self {
-        let budget = Arc::new(ReassemblyBudget::new(limits));
-        Self::with_limits_and_budget(limits, budget)
+    /// Accept one chunk. Returns the fully reassembled payload when this chunk completes its
+    /// message (which is then forgotten), otherwise `None`.
+    pub fn handle(&mut self, chunk: Chunk) -> Option<Bytes> {
+        self.handle_at(chunk, get_epoch_ms())
     }
 
-    /// Empty per-peer reassembler charged to a node-wide shared budget.
-    pub(crate) fn with_limits_and_budget(
-        limits: ReassemblyLimits,
-        budget: Arc<ReassemblyBudget>,
-    ) -> Self {
+    /// [`handle`](Self::handle) with the clock injected, so tests drive expiry/admission against a
+    /// controlled `now` through the real production path instead of poking internal state.
+    pub(super) fn handle_at(&mut self, chunk: Chunk, now: u128) -> Option<Bytes> {
+        match self.handle_charged_at(chunk, (), now, true, None).0 {
+            ReassemblyOutcome::Complete(retained) => Some(retained.into_parts().0),
+            ReassemblyOutcome::Incomplete | ReassemblyOutcome::Rejected(_) => None,
+        }
+    }
+
+    /// Accept one chunk while preserving incomplete, complete, and rejected states.
+    #[cfg(test)]
+    pub(crate) fn handle_retained_outcome_at(
+        &mut self,
+        chunk: Chunk,
+        now: u128,
+    ) -> ReassemblyOutcome<()> {
+        self.handle_charged_at(chunk, (), now, true, None).0
+    }
+}
+
+impl<C> MessageReassembler<C> {
+    /// Empty reassembler enforcing the given `limits`, whose messages hold charges `C`. Tests
+    /// use this with small limits to exercise the admission rule without giant synthetic
+    /// payloads.
+    pub fn with_limits(limits: ReassemblyLimits) -> Self {
         Self {
             pending: HashMap::new(),
-            buffered_cost: 0,
             completed: VecDeque::new(),
             completed_ids: HashSet::new(),
             failed: VecDeque::new(),
             failed_ids: HashSet::new(),
             failure_tracking_saturated_until: 0,
-            capacity_rejected: VecDeque::new(),
-            capacity_rejected_ids: HashSet::new(),
-            capacity_tracking_saturated_until: 0,
             // Clamp nonsensical caps so a caller cannot disable an invariant (e.g. a `0` cap).
             limits: limits.normalized(),
-            budget,
         }
     }
 
@@ -348,9 +262,8 @@ impl MessageReassembler {
         self.pending.len()
     }
 
-    /// Drop messages whose TTL has elapsed, returning their cost to the budget, and evict
-    /// completed-id tombstones that have likewise expired (a retransmit past its expiry is rejected
-    /// anyway).
+    /// Drop messages whose TTL has elapsed, with their charges, and evict completed-id
+    /// tombstones that have likewise expired (a retransmit past its expiry is rejected anyway).
     pub fn remove_expired(&mut self) {
         let _ = self.remove_expired_at(get_epoch_ms());
     }
@@ -365,32 +278,17 @@ impl MessageReassembler {
     /// No more chunks can arrive after the owning mailbox closes, so completed
     /// and rejected-id tombstones have no purpose. Incomplete messages are
     /// retained only when their original authenticated ingress can still yield
-    /// one failure at TTL; all other buffers release their shared budget now.
+    /// one failure at TTL; all other messages are dropped with their charges now.
     pub(crate) fn prepare_for_close(&mut self) -> bool {
-        let buffered_cost = &mut self.buffered_cost;
-        let budget = &self.budget;
-        let slot_overhead = self.limits.slot_overhead;
-        self.pending.retain(|_, pending| {
-            let retained = pending.peer_attributable
-                && !(pending.failure_charged || pending.local_capacity_rejected);
-            if !retained {
-                let cost = pending.cost(slot_overhead);
-                *buffered_cost = buffered_cost.saturating_sub(cost);
-                budget.release(cost);
-            }
-            retained
-        });
+        self.pending
+            .retain(|_, pending| pending.peer_attributable && !pending.failure_charged);
         self.clear_terminal_history();
         !self.pending.is_empty()
     }
 
-    /// Release every close-time pending buffer when no timer can deliver TTL cleanup.
+    /// Drop every close-time message, with its charge, when no timer can deliver TTL cleanup.
     pub(crate) fn discard_after_close_timer_failure(&mut self) {
-        for pending in self.pending.values() {
-            self.budget.release(pending.cost(self.limits.slot_overhead));
-        }
         self.pending.clear();
-        self.buffered_cost = 0;
         self.clear_terminal_history();
     }
 
@@ -400,28 +298,20 @@ impl MessageReassembler {
         self.failed.clear();
         self.failed_ids.clear();
         self.failure_tracking_saturated_until = 0;
-        self.capacity_rejected.clear();
-        self.capacity_rejected_ids.clear();
-        self.capacity_tracking_saturated_until = 0;
     }
 
     /// [`remove_expired`](Self::remove_expired) with the clock injected (tests pass a controlled
-    /// `now` to drive the real eviction logic).
+    /// `now` to drive the real eviction logic); returns how many expired messages are peer
+    /// evidence.
     pub(crate) fn remove_expired_at(&mut self, now: u128) -> usize {
         self.evict_expired_terminal_history(now);
         let mut expired_count = 0_usize;
         let mut expired_transmissions = Vec::new();
-        let buffered_cost = &mut self.buffered_cost;
-        let budget = &self.budget;
-        let slot_overhead = self.limits.slot_overhead;
         self.pending.retain(|id, p| {
             let alive = p.ts_ms.saturating_add(p.ttl_ms as u128) > now;
             if !alive {
-                let cost = p.cost(slot_overhead);
-                *buffered_cost = buffered_cost.saturating_sub(cost);
-                budget.release(cost);
                 expired_transmissions.push(LogicalTransmission::new(*id, p.ts_ms, p.ttl_ms));
-                if !(p.failure_charged || p.local_capacity_rejected) && p.peer_attributable {
+                if !p.failure_charged && p.peer_attributable {
                     expired_count = expired_count.saturating_add(1);
                 }
             }
@@ -463,107 +353,44 @@ impl MessageReassembler {
             }
             alive
         });
-        let capacity_rejected_ids = &mut self.capacity_rejected_ids;
-        self.capacity_rejected.retain(|&(id, expiry)| {
-            let alive = expiry > now;
-            if !alive {
-                capacity_rejected_ids.remove(&id);
-            }
-            alive
-        });
     }
 
-    /// Forget a message (e.g. after it has been delivered), returning its cost to the budget.
+    /// Forget a message (e.g. after it has been delivered), dropping its charge.
     pub fn remove(&mut self, id: Uuid) {
-        if let Some(p) = self.pending.remove(&id) {
-            let cost = p.cost(self.limits.slot_overhead);
-            self.buffered_cost = self.buffered_cost.saturating_sub(cost);
-            self.budget.release(cost);
-        }
+        self.pending.remove(&id);
     }
 
-    /// Accept one chunk. Returns the fully reassembled payload when this chunk completes its
-    /// message (which is then forgotten), otherwise `None`.
+    /// Accept one chunk that brought `charge`, against the caller's clock, and also report how
+    /// many older incomplete logical messages expired before admission; the runtime adapter
+    /// records one peer failure per expired message.
     ///
     /// Imperative shell over a functional core: expire stale state, ask the pure `classify` for an
-    /// admission verdict, and apply it. Accepted data mutation stays in `admit`; the shell records
-    /// only bounded terminal/capacity evidence for rejected chunks so local loss cannot become a
-    /// peer failure and one logical id cannot produce conflicting terminal outcomes.
-    pub fn handle(&mut self, chunk: Chunk) -> Option<Bytes> {
-        self.handle_at(chunk, get_epoch_ms())
-    }
-
-    /// Accept one chunk while retaining the completed output's node-wide budget charge.
-    #[cfg(test)]
-    pub(crate) fn handle_retained(&mut self, chunk: Chunk) -> Option<RetainedReassembly> {
-        match self.handle_retained_outcome(chunk) {
-            ReassemblyOutcome::Complete(bytes) => Some(bytes),
-            ReassemblyOutcome::Incomplete | ReassemblyOutcome::Rejected(_) => None,
-        }
-    }
-
-    /// Accept one chunk while preserving incomplete, complete, and rejected states.
-    #[cfg(test)]
-    pub(crate) fn handle_retained_outcome(&mut self, chunk: Chunk) -> ReassemblyOutcome {
-        self.handle_retained_at(chunk, get_epoch_ms()).0
-    }
-
-    #[cfg(test)]
-    pub(crate) fn handle_retained_outcome_at(
+    /// admission verdict, and apply it. Accepted data mutation stays in `admit`, which keeps
+    /// `charge` iff the chunk opens its message; the shell records only bounded terminal evidence
+    /// for rejected chunks, so one logical id cannot produce conflicting terminal outcomes.
+    pub(crate) fn handle_charged_at(
         &mut self,
         chunk: Chunk,
-        now: u128,
-    ) -> ReassemblyOutcome {
-        self.handle_retained_at(chunk, now).0
-    }
-
-    /// [`handle`](Self::handle) with the clock injected, so tests drive expiry/admission against a
-    /// controlled `now` through the real production path instead of poking internal state.
-    pub(super) fn handle_at(&mut self, chunk: Chunk, now: u128) -> Option<Bytes> {
-        match self.handle_retained_at(chunk, now).0 {
-            ReassemblyOutcome::Complete(bytes) => Some(bytes.into_bytes()),
-            ReassemblyOutcome::Incomplete | ReassemblyOutcome::Rejected(_) => None,
-        }
-    }
-
-    fn handle_retained_at(&mut self, chunk: Chunk, now: u128) -> (ReassemblyOutcome, usize) {
-        self.handle_retained_at_with_attribution(chunk, now, true, None)
-    }
-
-    /// Accept one chunk against the caller's clock and also report how many older incomplete
-    /// logical messages expired before admission; the runtime adapter records one peer failure
-    /// per expired message.
-    ///
-    /// The inbound processor supplies its injected reassembly clock so admission freshness and
-    /// cleanup expiry agree on one `now`.
-    pub(crate) fn handle_retained_at_with_attribution(
-        &mut self,
-        chunk: Chunk,
+        charge: C,
         now: u128,
         peer_attributable: bool,
         carrier: Option<ChannelLane>,
-    ) -> (ReassemblyOutcome, usize) {
+    ) -> (ReassemblyOutcome<C>, usize) {
         // Reclaim expired pending entries and tombstones first, before classify reads them, so
         // invalid traffic still frees memory and an expired tombstone cannot suppress a fresh
         // message that reuses its id after the TTL window.
         let expired = self.remove_expired_at(now);
         let outcome = match self.classify(&chunk, now, carrier) {
-            Ok(cost) => self.admit(chunk, cost, peer_attributable, carrier),
+            Ok(()) => self.admit(chunk, charge, peer_attributable, carrier),
             Err(reason) => {
                 tracing::debug!(?reason, id = ?chunk.meta.id, "reassembler dropped chunk");
                 let rejection = match reason.rejection() {
-                    ReassemblyRejection::Invalid => {
-                        if self.mark_logical_failure(&chunk, now) {
-                            ReassemblyRejection::Invalid
-                        } else {
-                            ReassemblyRejection::Replay
-                        }
+                    ReassemblyRejection::Invalid if self.mark_logical_failure(&chunk, now) => {
+                        ReassemblyRejection::Invalid
                     }
-                    ReassemblyRejection::Capacity => {
-                        self.mark_pending_capacity_rejection(&chunk);
-                        ReassemblyRejection::Capacity
+                    ReassemblyRejection::Invalid | ReassemblyRejection::Replay => {
+                        ReassemblyRejection::Replay
                     }
-                    ReassemblyRejection::Replay => ReassemblyRejection::Replay,
                 };
                 ReassemblyOutcome::Rejected(rejection)
             }
@@ -571,19 +398,15 @@ impl MessageReassembler {
         (outcome, expired)
     }
 
-    /// The pure admission rule: `(state, chunk, now) -> Ok(cost) | Err(reason)`. Borrows `&self`,
-    /// mutates nothing, does no I/O. On success it returns the buffered cost [`admit`] must charge;
-    /// on failure a typed [`Rejected`] reason. Validating the existing pending entry here, before
-    /// accepted-data mutation, is what keeps buffer accounting exact. The surrounding shell may
-    /// retain bounded failure/capacity evidence after this pure verdict.
-    ///
-    /// [`admit`]: Self::admit
+    /// The pure admission rule: `(state, chunk, now) -> Ok(()) | Err(reason)`. Borrows `&self`,
+    /// mutates nothing, does no I/O; on failure a typed [`Rejected`] reason. The surrounding shell
+    /// may retain bounded failure evidence after this pure verdict.
     fn classify(
         &self,
         chunk: &Chunk,
         now: u128,
         carrier: Option<ChannelLane>,
-    ) -> std::result::Result<usize, Rejected> {
+    ) -> Result<(), Rejected> {
         let meta = &chunk.meta;
         let transmission = LogicalTransmission::new(meta.id, meta.ts_ms, meta.ttl_ms);
         if self
@@ -593,9 +416,6 @@ impl MessageReassembler {
             || self.failed_ids.contains(&transmission)
         {
             return Err(Rejected::AlreadyFailed);
-        }
-        if self.capacity_rejected_ids.contains(&meta.id) {
-            return Err(Rejected::CapacityRejectedId);
         }
         if meta.ttl_ms > MAX_TTL_MS {
             return Err(Rejected::TtlTooLarge);
@@ -627,33 +447,24 @@ impl MessageReassembler {
         if self.completed_ids.contains(&meta.id) {
             return Err(Rejected::AlreadyCompleted);
         }
-
-        // Bytes already buffered for this id (`0` for a new message). Used for the per-message cap
-        // below, which must hold for the first chunk too, not only once a pending entry exists, or a
-        // caller-supplied `max_chunk_data_len > max_message_bytes` could admit an oversized chunk.
-        let buffered_for_id = match self.pending.get(&meta.id) {
-            None if self.capacity_tracking_saturated_until > now => {
-                return Err(Rejected::CapacityTrackingFull);
-            }
-            // A new id: admit only if there is room for another concurrent message.
+        match self.pending.get(&meta.id) {
+            Some(pending) => pending.admits(chunk, carrier),
+            // Only the first chunk, which the receiver charged for the whole message, opens it;
+            // an honest sender sends a message's chunks in order on one lane.
+            None if position != 0 => Err(Rejected::MissingFirstChunk),
+            // An honest connection has at most one message open per lane.
             None if self.pending.len() >= self.limits.max_pending_messages => {
-                return Err(Rejected::PendingFull);
+                Err(Rejected::PendingFull)
             }
-            None => 0,
-            Some(pending) => pending.admits(chunk, carrier)?,
-        };
-        // Per-message data cap, enforced uniformly across the first and subsequent chunks.
-        if buffered_for_id.saturating_add(chunk.data.len()) > self.limits.max_message_bytes {
-            return Err(Rejected::PerMessageBytes);
+            // `(n − 1)·d₀ < max`: an honest message of at most `max` bytes cut into chunks of
+            // `d₀` has `n = ⌈len / d₀⌉`, so its first `n − 1` chunks hold fewer than `max` bytes.
+            None if (total - 1).saturating_mul(chunk.data.len())
+                >= self.limits.max_message_bytes =>
+            {
+                Err(Rejected::PerMessageBytes)
+            }
+            None => Ok(()),
         }
-
-        // Cost charged to both the peer and node budgets: this slot's data plus its fixed overhead.
-        // Saturating arithmetic keeps a pathological `slot_overhead` from wrapping either limit.
-        let cost = chunk.data.len().saturating_add(self.limits.slot_overhead);
-        if self.buffered_cost.saturating_add(cost) > self.limits.max_peer_buffered_cost() {
-            return Err(Rejected::PeerBudget);
-        }
-        Ok(cost)
     }
 
     fn mark_logical_failure(&mut self, chunk: &Chunk, now: u128) -> bool {
@@ -694,125 +505,54 @@ impl MessageReassembler {
             .max(now.saturating_add(MAX_TTL_MS as u128));
     }
 
-    fn mark_pending_capacity_rejection(&mut self, chunk: &Chunk) {
-        let meta = &chunk.meta;
-        if let Some(pending) = self.pending.get_mut(&meta.id) {
-            if pending.ts_ms == meta.ts_ms && pending.ttl_ms == meta.ttl_ms {
-                pending.local_capacity_rejected = true;
-                return;
-            }
-        }
-        self.mark_capacity_rejected_id(meta.id, meta.ts_ms, meta.ttl_ms);
-    }
-
-    fn mark_capacity_rejected_id(&mut self, id: Uuid, ts_ms: u128, ttl_ms: u64) {
-        let expiry = ts_ms.saturating_add(ttl_ms.min(MAX_TTL_MS) as u128);
-        if self.capacity_rejected_ids.contains(&id) {
-            return;
-        }
-        if self.capacity_rejected_ids.len() >= self.limits.max_completed_ids {
-            self.capacity_tracking_saturated_until =
-                self.capacity_tracking_saturated_until.max(expiry);
-            return;
-        }
-        self.capacity_rejected_ids.insert(id);
-        self.capacity_rejected.push_back((id, expiry));
-    }
-
-    /// The sole buffer mutation: insert a [`classify`]-approved `chunk` (charging `cost`), and if it
-    /// completes its message, take it out, refund its budget, tombstone the id, and return the
-    /// reassembled payload.
+    /// The sole buffer mutation: insert a [`classify`]-approved `chunk`; a first chunk opens its
+    /// message with `charge`, any other drops it. If the chunk completes its message, take it
+    /// out, tombstone the id, and return the reassembled payload with its charge.
     ///
     /// [`classify`]: Self::classify
     fn admit(
         &mut self,
         chunk: Chunk,
-        cost: usize,
+        charge: C,
         peer_attributable: bool,
         carrier: Option<ChannelLane>,
-    ) -> ReassemblyOutcome {
-        if !self.budget.try_reserve(cost) {
-            self.mark_pending_capacity_rejection(&chunk);
-            tracing::debug!(
-                reason = ?Rejected::GlobalBudget,
-                id = ?chunk.meta.id,
-                "reassembler dropped chunk"
-            );
-            return ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity);
-        }
+    ) -> ReassemblyOutcome<C> {
         let id = chunk.meta.id;
         let [position, total] = chunk.chunk;
-        let mut pending = self.pending.remove(&id).unwrap_or_else(|| {
-            Pending::new(
+        let mut pending = match self.pending.remove(&id) {
+            Some(pending) => pending,
+            None => Pending {
                 total,
-                chunk.meta.ts_ms,
-                chunk.meta.ttl_ms,
+                first_len: chunk.data.len(),
+                slots: BTreeMap::new(),
+                ts_ms: chunk.meta.ts_ms,
+                ttl_ms: chunk.meta.ttl_ms,
+                failure_charged: false,
                 peer_attributable,
                 carrier,
-            )
-        });
+                charge,
+            },
+        };
         pending.peer_attributable &= peer_attributable;
-        pending.data_bytes = pending.data_bytes.saturating_add(chunk.data.len());
         pending.slots.insert(position, chunk.data);
-        self.buffered_cost = self.buffered_cost.saturating_add(cost);
 
         if !pending.is_complete() {
             self.pending.insert(id, pending);
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-            crate::simulation::observe_reassembly_capacity(
-                self.budget.buffered_cost.load(Ordering::Acquire),
-                self.budget.limit,
-                self.buffered_cost,
-                self.limits.max_peer_buffered_cost(),
+            crate::simulation::observe_reassembly_pending(
                 self.pending.len(),
                 self.limits.max_pending_messages,
             );
             return ReassemblyOutcome::Incomplete;
         }
-        let output_cost = pending.data_bytes;
-        if !self.budget.try_reserve(output_cost) {
-            self.mark_capacity_rejected_id(id, pending.ts_ms, pending.ttl_ms);
-            let dropped_cost = pending.cost(self.limits.slot_overhead);
-            self.buffered_cost = self.buffered_cost.saturating_sub(dropped_cost);
-            self.budget.release(dropped_cost);
-            tracing::debug!(
-                reason = ?Rejected::GlobalBudget,
-                ?id,
-                output_cost,
-                "reassembler dropped completed message before output allocation"
-            );
-            return ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity);
-        }
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        crate::simulation::observe_reassembly_capacity(
-            self.budget.buffered_cost.load(Ordering::Acquire),
-            self.budget.limit,
-            self.buffered_cost,
-            self.limits.max_peer_buffered_cost(),
-            self.pending.len().saturating_add(1),
-            self.limits.max_pending_messages,
-        );
-        let carrier = pending.carrier;
-        let done = pending;
-        let done_cost = done.cost(self.limits.slot_overhead);
-        let expiry = done.ts_ms.saturating_add(done.ttl_ms as u128);
-        self.buffered_cost = self.buffered_cost.saturating_sub(done_cost);
-        let bytes = done.assemble();
-        self.budget.release(done_cost);
+        let expiry = pending.ts_ms.saturating_add(pending.ttl_ms as u128);
         // Tombstone the id until it would expire, so a later full retransmit is suppressed.
         self.mark_completed(id, expiry);
         ReassemblyOutcome::Complete(RetainedReassembly {
-            bytes,
-            budget: self.budget.clone(),
-            cost: output_cost,
-            carrier,
+            bytes: pending.slots.into_values().flatten().collect(),
+            charge: pending.charge,
+            carrier: pending.carrier,
         })
-    }
-}
-
-impl Drop for MessageReassembler {
-    fn drop(&mut self) {
-        self.budget.release(self.buffered_cost);
     }
 }
 
@@ -836,10 +576,8 @@ enum Rejected {
     AlreadyCompleted,
     /// This in-flight logical transmission already produced its failure outcome.
     AlreadyFailed,
-    /// This logical id was previously rejected by local capacity before retaining state.
-    CapacityRejectedId,
-    /// Bounded local capacity-history tracking is saturated, so new ids fail closed locally.
-    CapacityTrackingFull,
+    /// A later chunk of a message no first chunk opened.
+    MissingFirstChunk,
     /// A new id, but [`ReassemblyLimits::max_pending_messages`] is already reached.
     PendingFull,
     /// `total` disagrees with the in-flight message's.
@@ -848,29 +586,22 @@ enum Rejected {
     MetadataMismatch,
     /// The chunk arrived on another lane than the in-flight message's first chunk.
     CarrierMismatch,
+    /// The chunk is longer than its message's first chunk.
+    LongerThanFirst,
     /// This position is already buffered (a duplicate/retransmit).
     DuplicatePosition,
     /// This position is buffered with different bytes.
     ConflictingPosition,
-    /// Admitting would exceed the message's [`ReassemblyLimits::max_message_bytes`].
+    /// The first chunk claims a message of [`ReassemblyLimits::max_message_bytes`] or more.
     PerMessageBytes,
-    /// Admitting would exceed this peer's derived pending-cost allowance.
-    PeerBudget,
-    /// Admitting would exceed the global [`ReassemblyLimits::max_total_buffered_cost`].
-    GlobalBudget,
 }
 
 impl Rejected {
     const fn rejection(self) -> ReassemblyRejection {
         match self {
-            Self::AlreadyCompleted
-            | Self::AlreadyFailed
-            | Self::DuplicatePosition => ReassemblyRejection::Replay,
-            Self::CapacityRejectedId
-            | Self::CapacityTrackingFull
-            | Self::PendingFull
-            | Self::PeerBudget
-            | Self::GlobalBudget => ReassemblyRejection::Capacity,
+            Self::AlreadyCompleted | Self::AlreadyFailed | Self::DuplicatePosition => {
+                ReassemblyRejection::Replay
+            }
             Self::TtlTooLarge
             | Self::FutureTimestamp
             // An expired-on-arrival id has no retained expiry outcome. Treat it
@@ -879,9 +610,12 @@ impl Rejected {
             | Self::Malformed
             | Self::TooManyChunks
             | Self::ChunkTooLarge
+            | Self::MissingFirstChunk
+            | Self::PendingFull
             | Self::TotalMismatch
             | Self::MetadataMismatch
             | Self::CarrierMismatch
+            | Self::LongerThanFirst
             | Self::ConflictingPosition
             | Self::PerMessageBytes => ReassemblyRejection::Invalid,
         }

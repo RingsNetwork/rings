@@ -18,12 +18,15 @@
 //! - **Receive** - [`MessageReassembler`] collects incoming [`Chunk`]s keyed by message id and
 //!   yields the original payload once every position has arrived.
 //!
-//! The receiver is robust to the realities of a multi-hop / DHT overlay: out-of-order arrival,
+//! The receiver is robust to the realities of a multi-hop / DHT overlay: out-of-order positions
+//! after the first chunk,
 //! **duplicates / retransmits** (first write per position wins), and partial messages (evicted
-//! by TTL). It is also bounded against a hostile peer: per-chunk and per-message byte caps, a
-//! global buffered-cost ceiling (charging a per-slot overhead so tiny-chunk floods are bounded by
-//! count too), an id-count cap, and up-front rejection of already-expired chunks. No single id and
-//! no peer-supplied `total` can drive memory without limit. See [`MessageReassembler`].
+//! by TTL). It is also bounded against a hostile peer: a message is opened only by its first
+//! chunk, which the receiver charges once for the whole message on its mailbox ledger, and no
+//! later chunk may outgrow that charge (load-bounds paper, Law 4, #932); per-chunk and per-message
+//! byte caps, a slot cap, an id-count cap, and up-front rejection of already-expired chunks are
+//! validity bounds. No single id and no peer-supplied `total` can drive memory past the charge.
+//! See [`MessageReassembler`].
 //!
 //! ```text
 //!   send    : Bytes -> [Chunk{ chunk=[i, n], data=data_i, meta } | i in 0..n]
@@ -41,10 +44,8 @@ pub use framing::Framing;
 pub use framing::WireReserves;
 pub use limits::ReassemblyLimits;
 pub use reassembly::MessageReassembler;
-pub(crate) use reassembly::ReassemblyBudget;
 pub(crate) use reassembly::ReassemblyOutcome;
 pub(crate) use reassembly::ReassemblyRejection;
-pub(crate) use reassembly::RetainedReassembly;
 
 #[cfg(test)]
 mod tests;

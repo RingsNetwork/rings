@@ -102,13 +102,17 @@ lane.
 - The core inbound mailbox makes an arrival wait rather than refuse it, while the arrival keeps
   its credit. Waiting arrivals are admitted in resource order
   (`fair_admission::ResourceOrderedQueue`): first come first served per exhausted resource (a
-  peer's budget, a lane's share, the shared pool) and per peer and lane. A frame within its
-  lane's reservation, such as DHT control, therefore never waits behind another lane's
-  borrower, and one peer at its budget never holds back another peer. The order is model
-  checked: no overtaking on an exhausted resource, stream order, no admissible arrival left
-  waiting, and every wait resolved. The order covers arrivals; a reassembled message is
-  re-charged at its full size on the actor, where it cannot wait, and is dropped if the
-  budgets cannot hold it (#932).
+  peer's budget, a lane's share, the shared pool) and per peer, lane and transport carrier. A
+  frame within its lane's reservation, such as DHT control, therefore never waits behind
+  another lane's borrower, and one peer at its budget never holds back another peer. The order
+  is model checked: no overtaking on an exhausted resource, stream order, no admissible arrival
+  left waiting, and every wait resolved.
+- A chunked message is charged once, at its first chunk `[0, n]` of `d₀` bytes, for the
+  `n·d₀` its buffer and its completed copy take (#932; load-bounds paper, Law 4). That charge
+  waits as an arrival like any frame's; the message's later chunks take nothing, and they wait
+  only for their own carrier's earlier frames, so they never wait behind capacity their own
+  message holds. The completed message carries the charge into dispatch: no reassembled
+  message is ever refused or dropped for capacity, and an expired one releases its charge.
 - Core's outbound scheduler serves only lanes that hold credit, and times a send only for the
   transport's acceptance, never for the receiver's consumption.
 - An inbound lane's progress depends only on local resources (`swarm::transport::egress`).

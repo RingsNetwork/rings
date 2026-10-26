@@ -436,11 +436,16 @@ This is a wire change: a total cutover, with no versioning before 1.0.  Byte-den
 
 \begin{law}[One charge per message]\label{law:onecharge}
 The first chunk of a message, with header $[0,n]$ and data length $d_0$, reserves
-$m=n\cdot d_0$ (validated $\le$ \texttt{max\_message\_bytes}) once, on the inbound mailbox
-ledger: the edge's budget, the lane's share and the shared pool.  It takes that reservation as
-an \emph{arrival}, so it waits in resource order and is never refused for capacity.
+$m=n\cdot d_0$ once, on the inbound mailbox ledger: the edge's budget, the lane's share and the
+shared pool.  It is valid only while $(n-1)\,d_0<\texttt{max\_message\_bytes}$: an honest
+message of at most that many bytes, cut into chunks of $d_0$, has $n=\lceil\mathit{len}/d_0\rceil$,
+so $m$ passes its length by less than one chunk.  It takes that reservation as an
+\emph{arrival}, so it waits in resource order and is never refused for capacity.
 \begin{itemize}[leftmargin=1.2em]
-\item Later chunks of the message must have length $\le d_0$, and they charge nothing.
+\item Later chunks of the message must have length $\le d_0$, and they charge nothing: they
+wait only behind the earlier arrivals of their own stream, which is ordered per peer, lane and
+transport carrier, so behind their own message's chunks alone (a sender keeps a chunked
+message contiguous on its class lane).
 \item The reassembly buffer and the completed message live inside that one reservation.
 \item The mailbox transition at completion is a move, not a new charge.
 \item The reservation is released when the message's processing completes, or when the
@@ -457,7 +462,9 @@ no wait can deadlock.
 \begin{proof}
 The only charge is the first chunk's, which waits as an arrival before it holds a lane ticket.
 The ordering laws of \texttt{ResourceOrderedQueue} cover it, and the capacity it waits for is
-released by events that do not wait on it.  The transition that used to re-charge, and could
+released by events that do not wait on it: a later chunk waits for no capacity, and its stream
+holds no other message's first chunk, so no message's completion waits on capacity another
+message holds.  The transition that used to re-charge, and could
 only be refused, now moves bytes already reserved.
 \end{proof}
 

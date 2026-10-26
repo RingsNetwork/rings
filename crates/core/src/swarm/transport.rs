@@ -36,7 +36,6 @@ use rings_transport::delivery::DeliveryFuture;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
 use self::storage_sync::StorageSyncAckMap;
-use crate::chunk::ReassemblyBudget;
 use crate::chunk::ReassemblyLimits;
 use crate::delegation::DelegateeKey;
 use crate::delegation::Delegation;
@@ -194,7 +193,6 @@ pub struct SwarmTransport {
     storage_redundancy: u16,
     dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
-    reassembly_budget: Arc<ReassemblyBudget>,
     inbound_capacity: Arc<InboundCapacity>,
     connection_lifecycle: ConnectionLifecycleBoundary,
     /// Core's side of the application boundary (#935).
@@ -328,7 +326,6 @@ impl SwarmTransport {
             storage_redundancy: settings.storage_redundancy,
             dht_virtual_nodes: settings.dht_virtual_nodes,
             reassembly_limits: settings.reassembly_limits,
-            reassembly_budget: Arc::new(ReassemblyBudget::new(settings.reassembly_limits)),
             inbound_capacity: Arc::new(InboundCapacity::new()),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             application: ApplicationPort::new(),
@@ -476,10 +473,6 @@ impl SwarmTransport {
         self.reassembly_limits
     }
 
-    pub(crate) fn reassembly_budget(&self) -> Arc<ReassemblyBudget> {
-        self.reassembly_budget.clone()
-    }
-
     pub(crate) fn inbound_capacity(&self) -> Arc<InboundCapacity> {
         self.inbound_capacity.clone()
     }
@@ -496,9 +489,15 @@ impl SwarmTransport {
         &self.inbound_tap
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
         self.inbound_capacity.admitted_count_for_test()
+    }
+
+    /// Test builds: the inbound events admitted and not yet handled.
+    #[cfg(test)]
+    pub(crate) fn inbound_live_events_for_test(&self) -> usize {
+        self.inbound_capacity.live_events_for_test()
     }
 
     /// Core's side of the application boundary: the inbox it writes, the lookups it answers
