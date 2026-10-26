@@ -89,11 +89,11 @@ chrono = "0.4.23"
 dashmap = "5"
 dotenvy = "0.15.7"
 futures = { version = "0.3.21", features = ["alloc"] }
-# `Zeroizing<hmac::digest::Key<_>>` in the Sphinx header needs `GenericArray: Zeroize`; it was
-# enabled only transitively, by elliptic-curve 0.13, until rings-core moved to 0.14 (#1051).
-generic-array = { version = "0.14.7", features = ["zeroize"] }
-hkdf = "0.12.4"
-hmac = "0.12.1"
+# The Sphinx key schedule (#852): with `zeroize`, sha2's block cores wipe their state on drop, so
+# the HMAC states inside `Hkdf` and `Hmac` (the PRK's and the MAC key's ipad/opad chaining values)
+# are wiped with them; hkdf 0.13 builds on the same `HmacCore`.
+hkdf = "0.13.0"
+hmac = { version = "0.13.0", features = ["zeroize"] }
 jsonrpc-core = { workspace = true }
 log = { version = "0.4", features = ["std"] }
 rand = { version = "0.8.5", features = ["getrandom"] }
@@ -109,7 +109,7 @@ rings-transport = { workspace = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde-saphyr = "1.3.0"
 serde_json = "1.0.70"
-sha2 = "0.10.6"
+sha2 = { version = "0.11.1", features = ["zeroize"] }
 strum = "0.25.0"
 subtle = "2.4.1"
 thiserror = "1"

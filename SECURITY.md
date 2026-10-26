@@ -23,6 +23,10 @@ communication layer minimizes leakage; the privacy layer provides privacy.**
   tag. `network_id` separates overlays; it is not a secret.
 - Honest peers run the protocol, refresh descriptors, and take part in stabilization and
   replication.
+- A party that can read a node's process memory, freed memory included, already holds the
+  node's long-lived delegatee key. Wiping derived key material once it is spent is defence in
+  depth against later reads, not a boundary; what is not wiped is listed under Known
+  Limitations (#852).
 
 ## Fault Model
 
@@ -279,6 +283,14 @@ route.
 
 ## Known Limitations
 
+- #852: the onion Sphinx key schedule (HKDF-SHA256, HMAC-SHA256) wipes its HMAC states on drop,
+  the PRK's in every `Hkdf` and the MAC key's in every `Hmac`, and the keys it returns. Three
+  transient stack copies inside the hkdf 0.13, hmac 0.13 and sha2 0.11 crates are not wiped,
+  and are overwritten by later calls: (a) the padded key block `K ⊕ opad` that HMAC's key setup
+  leaves, equivalent to `K` (the PRK, or the MAC key); (b) HKDF-Expand's previous output block
+  `T(i)`, which is a derived key or its first half; (c) SHA-256's message schedule, whose first
+  16 words are the block `K ⊕ ipad` or `K ⊕ opad`. (c) survives any HMAC above an unmodified
+  SHA-256, so an in-tree HMAC/HKDF would remove only (a) and (b).
 - #918: a registry descriptor that another node re-appends after its registrant stopped stays
   listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
   registrant leaves the listing within its TTL.
