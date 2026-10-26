@@ -116,6 +116,7 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::fair_admission::Principal;
+use crate::fair_admission::SlotFloorUse;
 use crate::fair_admission::TableAccounting;
 use crate::message::quota::quota_admission_error;
 use crate::message::quota::OriginQuotaCounterState;
@@ -568,6 +569,12 @@ impl TransactionReplay {
     /// Current observable counters.
     pub(crate) fn counters(&self) -> ReplayCounters {
         self.counters.snapshot()
+    }
+
+    /// The floor use of every slot in the receiver table at `now_ms` (load-bounds paper,
+    /// Def. 1).
+    pub(crate) fn floor_use_at(&self, now_ms: u128) -> SlotFloorUse {
+        self.accounting.floor_use_at(now_ms)
     }
 
     /// Current aggregate origin-quota rejection counters.

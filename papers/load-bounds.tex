@@ -38,8 +38,8 @@ consume, and what refusal and backpressure look like at each bound (\texttt{ring
 module \texttt{callback}; \texttt{rings-core}, modules \texttt{fair\_admission},
 \texttt{swarm::callback::inbound}, \texttt{chunk}, \texttt{message::replay} and
 \texttt{dht::chord::carrier\_store}).  It is the law for issues \issue{907}, \issue{927},
-\issue{932}, \issue{934} and \issue{938} of \texttt{RingsNetwork/rings}, and closes the Sybil
-residual of the removal-stability law~\cite{RemovalStability}.}}
+\issue{932}, \issue{934}, \issue{938} and \issue{1094} of \texttt{RingsNetwork/rings}, and closes
+the Sybil residual of the removal-stability law~\cite{RemovalStability}.}}
 \title{\huge Load Bounds:\\
 Node, Edge and Lane Accounting\\
 for a Rings Node under Free Identities}
@@ -105,9 +105,15 @@ $s$ the number of successors ($328$ at $s=3$).  So at most $\Rg$ edges are \emph
 any instant.  An edge identity is also a free key; what is bounded is the number of edges
 current at once.
 \item A \emph{slot} $\kappa\in K=\{0,\dots,\Rg-1\}$ is one unit of the registry's capacity.  An
-edge takes the least free slot $\kappa(e)$ when it is admitted and frees it when it is retired,
-both in the transition that announces it, so the current edges hold distinct slots.  A slot is
-not a topology reference: one edge may back several fingers and a successor, or none.
+edge takes the \emph{cleanest} free slot $\kappa(e)$ when it is admitted and frees it when it
+is retired, both in the transition that announces it, so the current edges hold distinct slots.
+A slot is not a topology reference: one edge may back several fingers and a successor, or none.
+Let $\use^{t}_{T,\kappa}$ be the items of table $T$ (Def.~\ref{def:table}) charged to $\kappa$
+that are still live at $t$: an item past its instant is not counted, since the next admission of
+$T$ retires it.  The \emph{floor use} of $\kappa$ at $t$ is its worst table's,
+$w_t(\kappa)=\max_T\min(\use^{t}_{T,\kappa},f_T)/f_T$, the part of a floor that an edge admitted
+into $\kappa$ would inherit; the cleanest free slot is the one of least $w_t$, the least index
+among equals.
 \item A \emph{lane} $(e,\ell)$ is one of the four credit-controlled channels of an edge.
 \item The \emph{local} principal $\lambda$ is the node itself: its own operations alone (its
 own writes and repairs, and out-of-band connection signaling it is handed).
@@ -208,22 +214,57 @@ the pool drains to the fair claims, with $n\le\Rg$.
 
 \begin{proposition}[Rotation residual]\label{prop:rotation}
 A party that rotates edges through free slots charges each slot it passes with up to $f_T$
-items, which stay until they leave by $T$'s law.  An honest edge later admitted into such a slot
-inherits that usage: it has no floor, only its fair claim, until those items leave.  Charging
-every free slot takes at most $\Rg-c$ admissions, with $c$ honest edges current, and an honest
-edge that holds its slot throughout is never affected.
+items, which stay until they leave by $T$'s law.  An edge admitted at $t$ inherits
+$\min_{\kappa\in F_t}w_t(\kappa)$ of its floors, over the free slots $F_t$, $|F_t|=\Rg-c$ with
+$c$ edges current (Def.~\ref{def:principals}).  So:
+\begin{enumerate}[leftmargin=1.5em]
+\item \emph{Targeted.}  The party takes any of a newcomer's floor only if it has charged every
+free slot with items live at the newcomer's admission: $\Rg-c$ admissions within the life $h$ of
+those items, $h\le H+2\sigma$, or $H+H_I+3\sigma$ for application streams.
+\item \emph{Concurrent.}  A party that holds $\Rg-c$ edges at once, fills their floors and
+departs charges every free slot, under cleanest-first as under least-free, at the same $\Rg-c$
+admissions per horizon.  Against it the choice of slot changes nothing.
+\item \emph{Least-free.}  Had an edge taken the least free slot instead, (1) would fail: a
+departing edge usually frees the least free slot, which the next admission takes, so one
+admission per victim suffices.
+\item An edge that holds its slot throughout is never affected.
+\end{enumerate}
 \end{proposition}
 \begin{proof}
-Law~\ref{law:edge}: a slot's charges outlive its edge, and Theorem~\ref{theorem:isolation}(2)
-for the edges that keep their slots.
+Law~\ref{law:edge}: a slot's charges outlive its edge.  (1)~If some free slot has $w_t=0$, the
+newcomer takes one, and $w_t(\kappa)>0$ needs an item of $\kappa$ live at $t$, charged by an
+edge admitted into $\kappa$ within its life.  (2)~With every free slot charged, every choice
+inherits.  (3)~After the party's edge departs from the least free slot $\kappa$, $\kappa$ is the
+least free slot unless a lesser one was freed meanwhile.  (4)~Theorem~\ref{theorem:isolation}(2).
 \end{proof}
 
-Proposition~\ref{prop:rotation} is the cost this law does not remove: free keys and connection
-churn can leave newly admitted edges without a floor for one horizon of $T$ per round of
-rotation.  Only a cost on admission removes it: an admission rate limit (\issue{1094}, before
-1.0) and position randomization (\issue{780}, 2.0).  Charging the edge identity instead of its
-slot is unsound: a departing identity's floor items stay, while a fresh identity brings a fresh
-floor, so rotation alone grows $|T|$ past $B_T$.
+Cleanest-first is a strict improvement and not a new bound.  From any state, an admission
+inherits no more under it than under least-free, since it takes the least $w_t$ over the same
+free slots; and it removes the targeted attack of (3), one admission per victim, leaving only the
+concurrent bound of (2).  Proposition~\ref{prop:rotation}(2) is the cost this law does not
+remove: free keys and connection churn can leave newly admitted edges without a floor for one
+horizon of $T$ per round of $\Rg-c$ admissions.  Such a party is
+held only to its fair claim, $\lceil\Pool_T/n\rceil$, on the slots it charged, and an honest
+newcomer keeps that claim: degradation, never a refusal of an existing edge, and never a
+permanent lockout (Prop.~\ref{prop:nolockout}).
+
+\textbf{Why not an admission rate limit (\issue{1094}).}  Keeping every free slot charged costs
+$(\Rg-c)/h$ admissions per unit time, about $3$ a minute at $h=100$\,min, $\Rg=328$ and $c=28$,
+and any positive rate at the application horizon.  An honest node admits new edges at $c/\bar L$,
+with $\bar L$ the mean edge life: at most the mean session, $4.2$\,min for Weibull sessions of
+shape $0.5$ and median $1$\,min with 90\% browser nodes~\cite{DurableRecords}, so about $7$ a
+minute for a browser with $c\approx28$ and $70$ for a seed with $c\approx300$.  A limit that never
+defers honest churn therefore admits more than the attack needs, and a limit tight enough to
+bound it, burst plus refill below $\Rg-c$ per horizon, would defer a seed's restart (about $\Rg$
+reconnections at once) by tens of minutes.  Keying it by address is rejected (\issue{780}; many
+honest browsers share one address behind carrier-grade NAT), and keying it by slot is void, since
+the node assigns slots.  An honest joining storm meets none of this: every arrival is admitted at
+once into the cleanest slot.  The levers that remain are a cost on identity, which this law does
+not assume, and position randomization (\issue{780}, 2.0), which takes from a fresh identity the
+choice of where it lands.
+
+Charging the edge identity instead of its slot is unsound: a departing identity's floor items
+stay, while a fresh identity brings a fresh floor, so rotation alone grows $|T|$ past $B_T$.
 
 Accounting to the origin, as the removal store did~\cite{RemovalStability} and the replay
 table's quota does, fails part~(4).  An origin costs nothing, so a party controls unboundedly
@@ -635,13 +676,14 @@ PR & Issue & Law\\
 3 & \issue{934} & Law~\ref{law:frames} (wire cutover)\\
 4 & \issue{938} & Obligation~\ref{ob:complexity}, measured\\
 5 & \issue{927} & Sec.~\ref{sec:barrier} (subtraction)\\
+6 & \issue{1094} & Def.~\ref{def:principals}; Prop.~\ref{prop:rotation}\\
 \bottomrule
 \end{tabular}
 \end{center}
 
 PR~1 adds the slot-accounting primitive that PR~2 reuses for the mailbox, and the relay
 element horizon of Definition~\ref{def:relayhorizon}.  PR~4 rewrites the
-queue that PR~2 changes, so it follows PR~2.  PR~5 needs nothing from the others.
+queue that PR~2 changes, so it follows PR~2.  PR~5 and PR~6 need nothing from the others.
 
 \textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}:
 \begin{itemize}[leftmargin=1.2em]

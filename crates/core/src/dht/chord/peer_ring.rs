@@ -80,6 +80,7 @@ use crate::dht::FingerFixRequest;
 use crate::dht::FingerTable;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::SlotFloorUse;
 use crate::fair_admission::SlotRoster;
 use crate::fair_admission::TableAccounting;
 use crate::lifecycle::epoch::Epoch;
@@ -303,6 +304,11 @@ impl PeerRing {
     /// The connection slots of this node (see [`Self::edges`](PeerRing#structfield.edges)).
     pub(crate) fn edges(&self) -> &SlotRoster {
         &self.edges
+    }
+
+    /// The floor use of every slot in the removal store at `now_ms` (load-bounds paper, Def. 1).
+    pub(crate) fn removal_floor_use_at(&self, now_ms: u128) -> SlotFloorUse {
+        self.removal_index.floor_use_at(now_ms)
     }
 
     /// This ring replicating relay custody as `replication` says (#777).

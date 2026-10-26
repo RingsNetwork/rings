@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- A new connection takes the cleanest free slot, not the least free one (#1094; load-bounds
+  paper, Def. 1 and Prop. 1, amended). A slot's floor use is its worst table's share of its
+  floor still charged by live items, over the replay streams, the removal store and the open
+  messages. Under least-free, a party that filled a slot and disconnected usually handed that
+  slot to the next connection, so one rotation could reach one newcomer; now a newcomer inherits
+  charges only once every free slot is charged, which takes `R − c` admissions per horizon, as a
+  party holding `R − c` connections at once always could. The paper records why an admission
+  rate limit cannot bound rotation without deferring honest churn under the session model.
+  No operator step.
+
 - An onion session that ends locally before its exit answers the open now reports why it
   ended, no longer `OnionRouteError::ExitRefused` (#1118). The session driver sends its terminal
   error to the opener: `LoopBuild` or a link send error for a loop that could not be built or

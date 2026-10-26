@@ -282,12 +282,15 @@ route.
 - #918: a registry descriptor that another node re-appends after its registrant stopped stays
   listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
   registrant leaves the listing within its TTL.
-- #907 (rotation residual, load-bounds paper, Prop. 1): a party that rotates connections
-  through free slots leaves each slot charged with up to its floor, so a connection admitted
-  later into such a slot has only its fair claim of the pool until those items leave: removes
-  and control, storage and E2E replay streams within about 100 minutes, application replay
-  streams within 7 days. A connection that keeps its slot is never affected. Only a cost on
-  admission removes this (#1094, #780).
+- #907, #1094 (rotation residual, load-bounds paper, Prop. 1): a party that rotates
+  connections through free slots leaves each slot charged with up to its floor. A new
+  connection takes the cleanest free slot, so it inherits charges only once every free slot is
+  charged: that takes `R − c` admissions within the life of the charged items, about 100
+  minutes for removes and control, storage and E2E replay streams and 7 days for application
+  replay streams. Such a connection then has only its fair claim of the pool until those items
+  leave. A connection that keeps its slot is never affected. An admission rate limit cannot
+  bound this without deferring honest churn, so only position randomization (#780) or a cost
+  on identity removes it.
 - #920, #907: a node's store of uncollected removals refuses a connection slot past its floor of
   128 and its fair claim of a pool of 16384, this node past 7168, and an ownership hand-off from
   the range's previous owner past a custody share of 16384, which a Byzantine predecessor or
