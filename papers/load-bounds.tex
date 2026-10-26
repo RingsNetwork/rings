@@ -434,43 +434,118 @@ This is a wire change: a total cutover, with no versioning before 1.0.  Byte-den
 
 \section{Reassembled messages (\issue{932})}\label{sec:reassembly}
 
+A message of $\mathit{len}$ bytes travels as chunks $[i,n]$ on one lane $(e,\ell)$, its
+\emph{carrier}, which is its class's lane: the sender cuts chunks of equal length $d_0$, the
+last shorter, and keeps them contiguous on the carrier.  Let $r(x)=2x$ be the retained bytes of
+$x$ received bytes (the buffer and the completed copy), $W$ the lane window
+(Law~\ref{law:frames}), $\mathit{TTL}$ the largest time to live a chunk may carry, and
+\[
+\rho=\frac{\texttt{max\_message\_bytes}}{\mathit{TTL}}
+=\frac{60\,\mathrm{MB}}{100\,\mathrm{min}}=10\ \mathrm{B/ms}.
+\]
+
+\begin{definition}[Open messages]\label{def:open}
+The table $O$ holds, in bytes, the reservation $r(n\,d_0)$ of every message whose first chunk
+was admitted and that has neither completed nor expired, charged to the slot of the edge that
+delivered that chunk (Law~\ref{law:edge}, an item being a byte), with
+$f_O=256$\,KiB, $\Pool_O=128$\,MiB, $L_O=0$ and no dedicated share:
+\[
+B_O(s)=\Rg(s)\,f_O+\Pool_O,\qquad B_O(3)=210\ \mathrm{MiB},
+\]
+within the mailbox's $M=256$\,MiB for $\Rg(s)\le512$, that is $s\le94$.  An item of $O$ is
+a byte of the mailbox too: $O$ bounds what open messages take of $M$, and $M-B_O$ stays for
+every other arrival.
+\end{definition}
+
+\begin{definition}[Credit-time]\label{def:credittime}
+Let an open message be sampled at instants $t_0<t_1<\dots$: its first chunk's admission, each
+later chunk's, and the receiver's sweeps, at most $\Delta$ apart.  At $t_k$ let $c_k=A-N$ be the
+credit on the carrier that the sender holds unused: advertised, $A$, and not yet used by an
+arrival, $N$.  Its credit-time advances over $[t_k,t_{k+1})$ by
+\[
+\hat\tau\mathrel{+}=\min\!\bigl(t_{k+1}-t_k,\;c_k\,d_0/\rho\bigr),
+\]
+the time its unused credit could have taken to send at $\rho$.  Credit the receiver holds back,
+by holding the frames that took it, batching its release, or deferring its advertisement at the
+node's soft limit, is not in $c_k$, so $\hat\tau$ pauses while the receiver throttles the sender.
+Let $b$ be the message's bytes received.
+\end{definition}
+
 \begin{law}[One charge per message]\label{law:onecharge}
-The first chunk of a message, with header $[0,n]$ and data length $d_0$, reserves
-$m=n\cdot d_0$ once, on the inbound mailbox ledger: the edge's budget, the lane's share and the
-shared pool.  It is valid only while $(n-1)\,d_0<\texttt{max\_message\_bytes}$: an honest
-message of at most that many bytes, cut into chunks of $d_0$, has $n=\lceil\mathit{len}/d_0\rceil$,
-so $m$ passes its length by less than one chunk.  It takes that reservation as an
-\emph{arrival}, so it waits in resource order and is never refused for capacity.
+The first chunk $[0,n]$, of length $d_0$, reserves $m=r(n\,d_0)$ once, as an \emph{arrival}
+that waits in resource order and is never refused for capacity:
 \begin{itemize}[leftmargin=1.2em]
-\item Later chunks of the message must have length $\le d_0$, and they charge nothing: they
-wait only behind the earlier arrivals of their own stream, which is ordered per peer, lane and
-transport carrier, so behind their own message's chunks alone (a sender keeps a chunked
-message contiguous on its class lane).
-\item The reassembly buffer and the completed message live inside that one reservation.
-\item The mailbox transition at completion is a move, not a new charge.
-\item The reservation is released when the message's processing completes, or when the
-reassembly expires.
+\item on the mailbox ledger, on the edge's budget, on the share of its carrier's class lane,
+and on the shared pool; and
+\item in $O$, under Law~\ref{law:edge}: within the slot's floor, or else within the pool and
+its fair claim, as a whole.
+\end{itemize}
+It is valid only while $(n-1)\,d_0<\texttt{max\_message\_bytes}$: an honest message of at most
+that many bytes has $n=\lceil\mathit{len}/d_0\rceil$, so $n\,d_0$ passes its length by less than
+one chunk.
+\begin{itemize}[leftmargin=1.2em]
+\item Later chunks must have length $\le d_0$, and they charge nothing: they wait only behind
+the earlier arrivals of their own stream, which is ordered per peer, lane and carrier, so behind
+their own message's chunks alone.
+\item The reassembly buffer and the completed message live inside the one reservation.  At
+completion the message leaves $O$ and its mailbox reservation moves with it into dispatch, on
+its class lane: a move, not a new charge.
+\item \emph{Rate floor.}  The message expires, attributably, once
+$b<\rho\,\hat\tau-W d_0$.  It also expires at its own $\mathit{ts}+\mathit{ttl}$.  Either
+expiry releases the reservation.
 \end{itemize}
 The separate reassembly byte budget and its refusal ($\mathsf{Rejected}(\mathsf{Capacity})$)
 are retired.  The id and slot caps stay, as validity bounds.
 \end{law}
 
 \begin{proposition}[No honest message refused]\label{prop:noref}
-Under Law~\ref{law:onecharge}, no honest chunked message is refused or dropped for capacity, and
-no wait can deadlock.
+Under Law~\ref{law:onecharge}, no honest chunked message is refused or dropped for capacity, no
+wait can deadlock, and a sender whose carrier delivers at least $\rho$ while it holds credit is
+never expired by the rate floor.
 \end{proposition}
 \begin{proof}
 The only charge is the first chunk's, which waits as an arrival before it holds a lane ticket.
 The ordering laws of \texttt{ResourceOrderedQueue} cover it, and the capacity it waits for is
 released by events that do not wait on it: a later chunk waits for no capacity, and its stream
 holds no other message's first chunk, so no message's completion waits on capacity another
-message holds.  The transition that used to re-charge, and could
-only be refused, now moves bytes already reserved.
+message holds.  The transition that used to re-charge, and could only be refused, now moves
+bytes already reserved.
+
+Rate floor: over $[t_k,t_{k+1})$ the sender holds $c_k$ unused credits and a backlog (its
+message is contiguous on the carrier), so it delivers $\min(c_k d_0,\rho(t_{k+1}-t_k))$ in it,
+which is what $\hat\tau$ advanced, times $\rho$.  Of what it delivered, $b$ lacks only the
+frames the receiver still holds, at most $W$, which hold their credit.  So
+$b\ge\rho\hat\tau-W d_0$ throughout.
 \end{proof}
 
-The cost is direction~1 of \issue{932}: a message holds its full size for its whole reassembly.
-This is bounded by the edge's budget and by the reassembly expiry, so a peer that announces and
-then stalls holds only its own budget.
+\begin{proposition}[Open messages]\label{prop:open}
+Let $G=(W+1)\,d_0/\rho+\Delta$, at most $107$\,s plus one sweep for $d_0\le64$\,KiB.  Under
+Law~\ref{law:onecharge}:
+\begin{enumerate}[leftmargin=1.5em]
+\item a first chunk through slot $\kappa$ with $\use_\kappa+m\le f_O$, and every other arrival,
+never waits for $O$, however many open messages other edges hold; open messages hold at most
+$B_O$ of the mailbox;
+\item an honest message that waits for the pool of $O$ waits at most $G$ beyond the honest
+messages ahead of it: an open message that sends nothing is expired within $G$, and a slot's
+next first chunk queues in resource order behind the claim already waiting;
+\item past $G$, every open message has $\rho\,\hat\tau\le b+W d_0$: the credit-time for which it
+holds its reservation is paid for by bytes its sender streamed.
+\end{enumerate}
+\end{proposition}
+\begin{proof}
+(1)~Theorem~\ref{theorem:isolation}(2) for $O$; an arrival that is not a first chunk takes no
+item of $O$.  (2)~A sender that holds its credit and sends nothing has $\hat\tau$ grow at the
+rate of time and $b=d_0$, so it meets $d_0<\rho\hat\tau-Wd_0$ after $(W+1)d_0/\rho$, and the next
+sweep expires it; resource order serves the waiting claim before a later one.
+(3)~The rate floor.
+\end{proof}
+
+\textbf{Residual.}  The receiver cannot tell a sender that withholds a message from one whose
+scheduler is busy with higher-priority classes between chunks: both hold credit and send
+nothing.  So a large message on a link that leaves its class less than $\rho$ is expired.  This
+is the cost of the rate floor; $\rho=\texttt{max\_message\_bytes}/\mathit{TTL}$ is the least
+rate at which holding a reservation is no cheaper than before \issue{932}, when it cost the
+bytes held.  A message so expired is the sender's to send again.
 
 \section{Hot paths (\issue{938})}\label{sec:hot}
 
@@ -525,7 +600,8 @@ Table & Bound & At the bound\\
 \midrule
 frames held & node $B_F(s)$; lane floor & sender waits for credit (backpressure)\\
 mailbox bytes & edge budget, lane share, pool & arrival waits (backpressure)\\
-reassembly & inside the mailbox reservation & first chunk waits (backpressure)\\
+open messages & $\Rg(s) f_O+\Pool_O$ by slot, fair pool, in the mailbox & first chunk waits
+(backpressure); expired below $\rho$\\
 replay streams & $\Rg(s) f+\Pool+L+M$ by slot, fair pool & new stream refused, $\le H+2\sigma$
 ($H+H_I+3\sigma$ application)\\
 removal store & $\Rg(s) f+\Pool+L+K$ by slot, fair pool & write refused, unacked\\

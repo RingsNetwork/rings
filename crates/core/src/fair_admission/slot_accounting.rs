@@ -181,7 +181,11 @@ impl SlotAccounting {
     /// `o(π)`, the pool items of `principal` (pure); none for a principal with a share of its
     /// own.
     fn pool_items(&self, principal: Principal) -> usize {
-        let held = self.held(principal);
+        self.pool_items_at(principal, self.held(principal))
+    }
+
+    /// The pool items of `principal` were it to hold `held` items (pure).
+    fn pool_items_at(&self, principal: Principal, held: usize) -> usize {
         match principal {
             Principal::Slot(_) => held.saturating_sub(self.shares.floor),
             Principal::Unbound => held,
@@ -202,26 +206,50 @@ impl SlotAccounting {
 
     /// Whether one more item introduced by `principal` is admitted (the admission law; pure).
     pub(crate) fn admit(&self, principal: Principal) -> Result<(), ShareRefusal> {
+        self.admit_items(principal, 1)
+    }
+
+    /// Whether `items` more items introduced by `principal` are admitted together: each of them
+    /// in order, so the transition is admitted whole or refused whole (pure).
+    ///
+    /// With `o' = o(π)` after the items, `Δ = o' − o(π)` of them fall to the pool, and
+    ///
+    /// ```text
+    /// admit(π, k) ⟺ u(π) + k ≤ S            (a share of its own)
+    ///             ∨ Δ = 0                    (within the slot's floor)
+    ///             ∨ Σo + Δ ≤ P ∧ o(π) + Δ ≤ ⌈P / n⌉
+    /// admit(π, 1) = the admission law, item by item
+    /// ```
+    ///
+    /// `n` counts `π` from its first pool item on, so it is the same for each of the `Δ`.
+    pub(crate) fn admit_items(
+        &self,
+        principal: Principal,
+        items: usize,
+    ) -> Result<(), ShareRefusal> {
         let held = self.held(principal);
         if let Some(share) = self.shares.reserved(principal) {
-            return match held < share {
+            return match held.saturating_add(items) <= share {
                 true => Ok(()),
                 false => Err(ShareRefusal::ReservedShare { held, share }),
             };
         }
-        if matches!(principal, Principal::Slot(_)) && held < self.shares.floor {
+        let claimed = self.pool_items(principal);
+        let overflow = self
+            .pool_items_at(principal, held.saturating_add(items))
+            .saturating_sub(claimed);
+        if overflow == 0 {
             return Ok(());
         }
-        if self.pool_held >= self.shares.pool {
+        if self.pool_held.saturating_add(overflow) > self.shares.pool {
             return Err(ShareRefusal::PoolFull {
                 held: self.pool_held,
                 pool: self.shares.pool,
             });
         }
-        let claimed = self.pool_items(principal);
         let claimants = self.claimants + usize::from(claimed == 0);
         let claim = self.shares.pool.div_ceil(claimants.max(1));
-        match claimed < claim {
+        match claimed.saturating_add(overflow) <= claim {
             true => Ok(()),
             false => Err(ShareRefusal::FairClaim {
                 held: claimed,
@@ -230,14 +258,41 @@ impl SlotAccounting {
         }
     }
 
+    /// Whether `items` more items of slot `principal` stay within its floor, which nothing
+    /// refuses (pure); a principal that is not a slot has no floor.
+    pub(crate) fn within_floor(&self, principal: Principal, items: usize) -> bool {
+        matches!(principal, Principal::Slot(_))
+            && self.held(principal).saturating_add(items) <= self.shares.floor
+    }
+
     /// Charge `principal` one item that leaves at `until_ms`.
     ///
     /// Pre: [`Self::admit`] admitted it, or it is restored from a store whose items the
     /// admission law put there.
     pub(crate) fn charge(&mut self, principal: Principal, until_ms: u128) {
+        self.hold(principal, 1);
+        *self.expiry.entry((until_ms, principal)).or_default() += 1;
+    }
+
+    /// Charge `principal` `items` items that leave only by [`Self::release`]: a table whose
+    /// items leave when their holder drops them, not at an instant.
+    ///
+    /// Pre: [`Self::admit_items`] admitted them.
+    pub(crate) fn hold(&mut self, principal: Principal, items: usize) {
         self.reweigh(principal, |accounting| {
-            *accounting.held.entry(principal).or_default() += 1;
-            *accounting.expiry.entry((until_ms, principal)).or_default() += 1;
+            *accounting.held.entry(principal).or_default() += items;
+        });
+    }
+
+    /// Forget `items` items of `principal` that [`Self::hold`] charged.
+    pub(crate) fn release(&mut self, principal: Principal, items: usize) {
+        self.reweigh(principal, |accounting| {
+            if let Some(held) = accounting.held.get_mut(&principal) {
+                *held = held.saturating_sub(items);
+                if *held == 0 {
+                    accounting.held.remove(&principal);
+                }
+            }
         });
     }
 
@@ -250,14 +305,7 @@ impl SlotAccounting {
         if *count == 0 {
             self.expiry.remove(&(until_ms, principal));
         }
-        self.reweigh(principal, |accounting| {
-            if let Some(held) = accounting.held.get_mut(&principal) {
-                *held = held.saturating_sub(1);
-                if *held == 0 {
-                    accounting.held.remove(&principal);
-                }
-            }
-        });
+        self.release(principal, 1);
     }
 
     /// Forget every item whose instant is at or before `now_ms`.

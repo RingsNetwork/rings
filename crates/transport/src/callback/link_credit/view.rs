@@ -1,8 +1,10 @@
-//! A read-only view of one lane's send credit, for a sender that shapes its own emission.
+//! A read-only view of one lane's credit: its send side, for a sender that shapes its own
+//! emission, and its receive side, for a receiver that judges whether its peer holds credit.
 //!
 //! ```text
 //!   view(lane)       = (link, lane)            holds the link weakly: no connection kept alive
 //!   free(view)       = limit − committed − reserved,   or None once the link is gone
+//!   peer_unused(view) = advertised − received,         the peer's side of the same lane
 //!   credited(view)   resolves once free(view) ≥ 1 (true), or once the link is gone (false)
 //! ```
 //!
@@ -33,7 +35,7 @@ use crate::core::credit::credit_index;
 use crate::core::credit::CreditIndex;
 use crate::core::pool::ChannelLane;
 
-/// A read-only view of one lane's send credit on one connection generation; see the module
+/// A read-only view of one lane's credit on one connection generation; see the module
 /// documentation.
 ///
 /// Clone law: clones view the same lane of the same connection generation.
@@ -69,6 +71,15 @@ impl LaneCreditView {
         let link = self.link.upgrade()?;
         let state = link.lock();
         (!state.closed).then(|| state.send[self.index].free())
+    }
+
+    /// The frames the peer may send on the lane now: the credit this end advertised and the
+    /// peer has not used (see `ReceiveWindow::unused`), or `None` once the connection
+    /// generation is gone. A receiver judges by it whether a stalled lane is the peer's doing.
+    pub fn peer_unused(&self) -> Option<u64> {
+        let link = self.link.upgrade()?;
+        let state = link.lock();
+        (!state.closed).then(|| state.receive[self.index].unused())
     }
 
     /// Wait until the lane may send one frame without waiting for credit (`true`), or until the

@@ -320,6 +320,13 @@ impl ReceiveWindow {
         })
     }
 
+    /// The credit the sender holds unused: frames advertised and not yet arrived. A frame the
+    /// receiver still holds, a release awaiting its batch, or an advertisement the receiver
+    /// defers is not in it, so it counts only what the sender could send now.
+    pub(crate) const fn unused(self) -> u64 {
+        self.advertised.saturating_sub(self.received)
+    }
+
     /// Frames admitted and not yet released.
     #[cfg(test)]
     pub(crate) const fn occupancy(self) -> u64 {

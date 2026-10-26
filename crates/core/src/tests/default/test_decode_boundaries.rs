@@ -229,6 +229,7 @@ fn generated_reassembly_limits() -> ReassemblyLimits {
         max_message_bytes: 512,
         max_chunks_per_message: 16,
         max_completed_ids: 8,
+        ..ReassemblyLimits::production()
     }
 }
 

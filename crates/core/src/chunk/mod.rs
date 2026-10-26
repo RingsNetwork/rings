@@ -21,7 +21,8 @@
 //! The receiver is robust to the realities of a multi-hop / DHT overlay: out-of-order positions
 //! after the first chunk,
 //! **duplicates / retransmits** (first write per position wins), and partial messages (evicted
-//! by TTL). It is also bounded against a hostile peer: a message is opened only by its first
+//! by TTL, or once they fall below the rate floor over the credit-time their sender held unused
+//! credit for). It is also bounded against a hostile peer: a message is opened only by its first
 //! chunk, which the receiver charges once for the whole message on its mailbox ledger, and no
 //! later chunk may outgrow that charge (load-bounds paper, Law 4, #932); per-chunk and per-message
 //! byte caps, a slot cap, an id-count cap, and up-front rejection of already-expired chunks are
@@ -36,6 +37,7 @@
 
 mod framing;
 mod limits;
+mod progress;
 mod reassembly;
 
 pub use framing::Chunk;

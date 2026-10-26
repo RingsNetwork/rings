@@ -7,6 +7,8 @@ use bytes::Bytes;
 use rings_transport::core::pool::ChannelLane;
 use uuid::Uuid;
 
+use super::progress::Progress;
+use super::progress::RateFloor;
 use super::Chunk;
 use super::ReassemblyLimits;
 use crate::consts::MAX_TTL_MS;
@@ -36,9 +38,25 @@ pub(super) struct Pending<C> {
     /// The charge the first chunk took for the whole message (load-bounds paper, Law 4): held
     /// while the message is reassembled and handed on with it, released by drop.
     charge: C,
+    /// The message's credit-time ledger, which its rate floor reads.
+    progress: Progress,
 }
 
 impl<C> Pending<C> {
+    /// The rate floor of this message under `limits`.
+    fn rate_floor(&self, limits: &ReassemblyLimits) -> RateFloor {
+        RateFloor {
+            rate: limits.rate_floor,
+            chunk: u64::try_from(self.first_len).unwrap_or(u64::MAX),
+            grace_chunks: limits.grace_chunks,
+        }
+    }
+
+    /// Whether the message is past its own expiry at `now`.
+    fn ttl_expired(&self, now: u128) -> bool {
+        self.ts_ms.saturating_add(u128::from(self.ttl_ms)) <= now
+    }
+
     /// Complete iff every position has arrived. Each inserted position is unique (map key) and in
     /// `0..total`, so `slots.len() == total` iff the present set is exactly `{0..total-1}`.
     fn is_complete(&self) -> bool {
@@ -106,7 +124,7 @@ impl LogicalTransmission {
 /// [`ReassemblyLimits::max_message_bytes`]; the charge `C` that chunk brings (the receiver's
 /// mailbox reservation of `n·d₀`) is held with the message. Every later chunk is at most `d₀`
 /// long, so the message never outgrows that charge, and the charge a later chunk brings is
-/// dropped. The charge leaves with the completed message ([`RetainedReassembly`]), or is dropped
+/// dropped. The charge leaves with the completed message (`RetainedReassembly`), or is dropped
 /// when the message expires or the reassembler closes. The reassembler itself holds no budget
 /// and refuses nothing for capacity: its remaining caps (ids, slots, chunk length, message
 /// length) are validity bounds an honest sender never meets.
@@ -115,8 +133,14 @@ impl LogicalTransmission {
 /// chunk [0, n], d₀ ── new id, (n − 1)·d₀ < max ──▶ open(charge)        (Incomplete)
 /// chunk [i, n], dᵢ ── open, dᵢ ≤ d₀, slot free ───▶ insert; drop charge (Incomplete | Complete)
 /// chunk [i > 0, n] ── no open message ────────────▶ Rejected(Invalid | Replay)
-/// expiry, close ──────────────────────────────────▶ drop(message, charge)
+/// expiry, stall, close ───────────────────────────▶ drop(message, charge)
 /// ```
+///
+/// **Rate floor.** An open message also expires, attributably, once the bytes it received fall
+/// below the rate floor over the credit-time its sender held unused credit for, less one lane
+/// window of grace (`progress`; load-bounds paper, Def. 7 and Law 4). The caller reads that
+/// credit, per carrier, from its transport; a caller that reads none (`|_| 0`, as the plain API
+/// does) never advances the clock, and a message then expires at its TTL alone.
 pub struct MessageReassembler<C = ()> {
     pub(super) pending: HashMap<Uuid, Pending<C>>,
     /// Tombstones for ids that have already been delivered, each paired with its expiry
@@ -208,7 +232,10 @@ impl MessageReassembler {
     /// [`handle`](Self::handle) with the clock injected, so tests drive expiry/admission against a
     /// controlled `now` through the real production path instead of poking internal state.
     pub(super) fn handle_at(&mut self, chunk: Chunk, now: u128) -> Option<Bytes> {
-        match self.handle_charged_at(chunk, (), now, true, None).0 {
+        match self
+            .handle_charged_at(chunk, (), (now, no_credit), true, None)
+            .0
+        {
             ReassemblyOutcome::Complete(retained) => Some(retained.into_parts().0),
             ReassemblyOutcome::Incomplete | ReassemblyOutcome::Rejected(_) => None,
         }
@@ -221,7 +248,8 @@ impl MessageReassembler {
         chunk: Chunk,
         now: u128,
     ) -> ReassemblyOutcome<()> {
-        self.handle_charged_at(chunk, (), now, true, None).0
+        self.handle_charged_at(chunk, (), (now, no_credit), true, None)
+            .0
     }
 }
 
@@ -304,11 +332,25 @@ impl<C> MessageReassembler<C> {
     /// `now` to drive the real eviction logic); returns how many expired messages are peer
     /// evidence.
     pub(crate) fn remove_expired_at(&mut self, now: u128) -> usize {
+        self.sweep_at(now, no_credit)
+    }
+
+    /// Sample every open message at `now`, its sender holding `credit(carrier)` unused, and drop
+    /// those past their TTL or below their rate floor, with their charges; returns how many of
+    /// them are peer evidence.
+    pub(crate) fn sweep_at(
+        &mut self,
+        now: u128,
+        credit: impl Fn(Option<ChannelLane>) -> u64,
+    ) -> usize {
         self.evict_expired_terminal_history(now);
         let mut expired_count = 0_usize;
         let mut expired_transmissions = Vec::new();
+        let limits = self.limits;
         self.pending.retain(|id, p| {
-            let alive = p.ts_ms.saturating_add(p.ttl_ms as u128) > now;
+            let floor = p.rate_floor(&limits);
+            p.progress.observe(now, credit(p.carrier), floor);
+            let alive = !p.ttl_expired(now) && !p.progress.stalled(floor);
             if !alive {
                 expired_transmissions.push(LogicalTransmission::new(*id, p.ts_ms, p.ttl_ms));
                 if !p.failure_charged && p.peer_attributable {
@@ -372,16 +414,21 @@ impl<C> MessageReassembler<C> {
         &mut self,
         chunk: Chunk,
         charge: C,
-        now: u128,
+        (now, credit): (u128, impl Fn(Option<ChannelLane>) -> u64),
         peer_attributable: bool,
         carrier: Option<ChannelLane>,
     ) -> (ReassemblyOutcome<C>, usize) {
-        // Reclaim expired pending entries and tombstones first, before classify reads them, so
-        // invalid traffic still frees memory and an expired tombstone cannot suppress a fresh
-        // message that reuses its id after the TTL window.
-        let expired = self.remove_expired_at(now);
+        // Reclaim expired and stalled pending entries and tombstones first, before classify
+        // reads them, so invalid traffic still frees memory and an expired tombstone cannot
+        // suppress a fresh message that reuses its id after the TTL window.
+        let expired = self.sweep_at(now, &credit);
         let outcome = match self.classify(&chunk, now, carrier) {
-            Ok(()) => self.admit(chunk, charge, peer_attributable, carrier),
+            Ok(()) => self.admit(
+                chunk,
+                charge,
+                (now, credit(carrier)),
+                (peer_attributable, carrier),
+            ),
             Err(reason) => {
                 tracing::debug!(?reason, id = ?chunk.meta.id, "reassembler dropped chunk");
                 let rejection = match reason.rejection() {
@@ -514,13 +561,19 @@ impl<C> MessageReassembler<C> {
         &mut self,
         chunk: Chunk,
         charge: C,
-        peer_attributable: bool,
-        carrier: Option<ChannelLane>,
+        (now, credit): (u128, u64),
+        (peer_attributable, carrier): (bool, Option<ChannelLane>),
     ) -> ReassemblyOutcome<C> {
         let id = chunk.meta.id;
         let [position, total] = chunk.chunk;
+        let received = u64::try_from(chunk.data.len()).unwrap_or(u64::MAX);
         let mut pending = match self.pending.remove(&id) {
-            Some(pending) => pending,
+            Some(mut pending) => {
+                let floor = pending.rate_floor(&self.limits);
+                pending.progress.observe(now, credit, floor);
+                pending.progress.receive(received);
+                pending
+            }
             None => Pending {
                 total,
                 first_len: chunk.data.len(),
@@ -531,6 +584,7 @@ impl<C> MessageReassembler<C> {
                 peer_attributable,
                 carrier,
                 charge,
+                progress: Progress::open(now, credit, received),
             },
         };
         pending.peer_attributable &= peer_attributable;
@@ -620,4 +674,10 @@ impl Rejected {
             | Self::PerMessageBytes => ReassemblyRejection::Invalid,
         }
     }
+}
+
+/// The credit reading of a caller that reads none: no sender ever holds unused credit, so the
+/// rate floor's clock never advances.
+const fn no_credit(_carrier: Option<ChannelLane>) -> u64 {
+    0
 }

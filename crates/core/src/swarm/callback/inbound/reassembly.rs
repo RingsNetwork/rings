@@ -23,10 +23,11 @@ impl InboundProcessor {
         carrier: Option<ChannelLane>,
     ) -> ReassemblyOutcome<Option<HeldCharge>> {
         let now_ms = self.reassembly_clock.now_ms();
+        let credit = self.carrier_credit();
         let (outcome, expired) = self.reassembler.lock().await.handle_charged_at(
             chunk,
             charge,
-            now_ms,
+            (now_ms, credit),
             matches!(authentication, Authentication::Authenticated),
             carrier,
         );
@@ -34,8 +35,24 @@ impl InboundProcessor {
         outcome
     }
 
+    /// The credit this connection's peer holds unused on each carrier, for the rate floor of
+    /// its open messages (load-bounds paper, Def. 7): read before the reassembler is locked, so
+    /// no transport lock is taken under it; none before a connection attempt is bound.
+    fn carrier_credit(&self) -> impl Fn(Option<ChannelLane>) -> u64 {
+        let credit = self
+            .pending_attempt()
+            .map(|attempt| self.logical.transport.peer_unused_credit(attempt))
+            .unwrap_or_default();
+        move |carrier| {
+            carrier
+                .and_then(|lane| credit.get(usize::from(lane.index())).copied())
+                .unwrap_or(0)
+        }
+    }
+
     pub(super) async fn remove_expired_reassembly_at(&self, now_ms: u128) {
-        let expired = self.reassembler.lock().await.remove_expired_at(now_ms);
+        let credit = self.carrier_credit();
+        let expired = self.reassembler.lock().await.sweep_at(now_ms, credit);
         self.record_expired_reassembly_failures(None, expired).await;
     }
 

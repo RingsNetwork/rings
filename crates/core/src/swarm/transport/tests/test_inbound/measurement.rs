@@ -9,6 +9,7 @@ fn small_reassembly_limits() -> ReassemblyLimits {
         max_message_bytes: 1_024,
         max_chunks_per_message: 4,
         max_completed_ids: 4,
+        ..ReassemblyLimits::production()
     }
 }
 

@@ -23,8 +23,10 @@ fn small_limits() -> ReassemblyLimits {
         max_message_bytes: 100,
         max_chunks_per_message: 64,
         max_completed_ids: 8,
+        ..ReassemblyLimits::production()
     }
 }
 
 mod adversarial;
 mod basic;
+mod rate_floor;

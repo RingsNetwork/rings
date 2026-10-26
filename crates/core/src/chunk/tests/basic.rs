@@ -466,19 +466,19 @@ fn test_the_first_chunk_charge_is_held_and_handed_on_with_its_message() {
     assert_eq!(chunks.len(), 3);
 
     assert!(matches!(
-        r.handle_charged_at(chunks[0].clone(), charge(), now, true, None)
+        r.handle_charged_at(chunks[0].clone(), charge(), (now, |_| 0), true, None)
             .0,
         ReassemblyOutcome::Incomplete
     ));
     assert_eq!(dropped(), 0, "the first chunk's charge is held");
     assert!(matches!(
-        r.handle_charged_at(chunks[1].clone(), charge(), now, true, None)
+        r.handle_charged_at(chunks[1].clone(), charge(), (now, |_| 0), true, None)
             .0,
         ReassemblyOutcome::Incomplete
     ));
     assert_eq!(dropped(), 1, "a later chunk's charge is dropped at once");
     let ReassemblyOutcome::Complete(message) = r
-        .handle_charged_at(chunks[2].clone(), charge(), now, true, None)
+        .handle_charged_at(chunks[2].clone(), charge(), (now, |_| 0), true, None)
         .0
     else {
         panic!("the third chunk completes the message");
@@ -490,7 +490,7 @@ fn test_the_first_chunk_charge_is_held_and_handed_on_with_its_message() {
 
     let ttl_ms = u128::from(chunks[0].meta.ttl_ms);
     let expiring = chunks_of(&"helloworld".repeat(8).into(), 32);
-    r.handle_charged_at(expiring[0].clone(), charge(), now, true, None);
+    r.handle_charged_at(expiring[0].clone(), charge(), (now, |_| 0), true, None);
     assert_eq!(dropped(), 3);
     assert_eq!(r.remove_expired_at(expiring[0].meta.ts_ms + ttl_ms), 1);
     assert_eq!(dropped(), 4, "an expired message drops its charge");
@@ -557,7 +557,7 @@ fn test_a_chunk_that_changes_lanes_is_refused_and_the_message_keeps_its_carrier(
     };
     let handle = |reassembler: &mut MessageReassembler, chunk, carrier| {
         reassembler
-            .handle_charged_at(chunk, (), now, true, Some(carrier))
+            .handle_charged_at(chunk, (), (now, |_| 0), true, Some(carrier))
             .0
     };
     assert!(matches!(

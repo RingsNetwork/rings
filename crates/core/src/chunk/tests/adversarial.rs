@@ -55,7 +55,8 @@ fn test_close_timer_failure_drops_every_open_message_with_its_charge() {
             ttl_ms: 100,
         },
     };
-    let (outcome, _) = reassembler.handle_charged_at(first, Arc::clone(&charge), now, true, None);
+    let (outcome, _) =
+        reassembler.handle_charged_at(first, Arc::clone(&charge), (now, |_| 0), true, None);
     assert!(matches!(outcome, ReassemblyOutcome::Incomplete));
     assert_eq!(
         Arc::strong_count(&charge),

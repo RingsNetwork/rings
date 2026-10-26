@@ -489,11 +489,6 @@ impl SwarmTransport {
         &self.inbound_tap
     }
 
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
-        self.inbound_capacity.admitted_count_for_test()
-    }
-
     /// Test builds: the inbound events admitted and not yet handled.
     #[cfg(test)]
     pub(crate) fn inbound_live_events_for_test(&self) -> usize {

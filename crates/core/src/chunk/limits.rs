@@ -1,7 +1,16 @@
+use rings_transport::core::credit::LANE_CREDIT_WINDOW;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
+use crate::consts::MAX_TTL_MS;
 use crate::consts::MIN_CHUNK_DATA;
 use crate::consts::TRANSPORT_MAX_SIZE;
+
+/// `ρ = max_message_bytes / TTL`: 60 MB over 100 min, 10 bytes per millisecond, the least rate
+/// at which holding an open message's reservation is no cheaper than holding the bytes
+/// themselves (load-bounds paper, Law 4, #932).
+const RATE_FLOOR_BYTES_PER_MS: u64 = TRANSPORT_MAX_SIZE as u64 / MAX_TTL_MS;
+
+const _: () = assert!(RATE_FLOOR_BYTES_PER_MS == 10);
 
 /// The limits a [`super::MessageReassembler`] enforces on incoming chunks, as an explicit value
 /// rather than module globals. This keeps the core admission rule independent of *where* the
@@ -9,9 +18,10 @@ use crate::consts::TRANSPORT_MAX_SIZE;
 /// reassembler only enforces what it is given, and tests can use small limits instead of giant
 /// synthetic payloads.
 ///
-/// Every limit is a validity bound an honest sender never meets, not a capacity: the memory a
+/// Every cap is a validity bound an honest sender never meets, not a capacity: the memory a
 /// message takes is charged once, by its first chunk, on the receiver's mailbox ledger
-/// (load-bounds paper, Law 4, #932).
+/// (load-bounds paper, Law 4, #932). The rate floor bounds how long an open message holds that
+/// charge: by what its sender streams while it holds credit.
 #[derive(Debug, Clone, Copy)]
 pub struct ReassemblyLimits {
     /// Max number of distinct in-flight message ids on one connection: an honest sender keeps
@@ -40,6 +50,12 @@ pub struct ReassemblyLimits {
     /// post-completion redelivery" guarantee holds only for the most recent `max_completed_ids`
     /// completions within a TTL window.
     pub max_completed_ids: usize,
+    /// `ρ`, in bytes per millisecond: an open message expires once the bytes it received fall
+    /// below `ρ` times the credit-time its sender held unused credit for, less the grace (Law 4).
+    pub rate_floor: u64,
+    /// `W`, the grace of the rate floor in chunks: the frames a receiver may hold unprocessed
+    /// while their sender's credit is spent, one lane window.
+    pub grace_chunks: u64,
 }
 
 impl ReassemblyLimits {
@@ -57,6 +73,8 @@ impl ReassemblyLimits {
             // message needs at most this many; a larger `total` is forged.
             max_chunks_per_message: TRANSPORT_MAX_SIZE / MIN_CHUNK_DATA + 1,
             max_completed_ids: 1024,
+            rate_floor: RATE_FLOOR_BYTES_PER_MS,
+            grace_chunks: LANE_CREDIT_WINDOW,
         }
     }
 
@@ -72,6 +90,8 @@ impl ReassemblyLimits {
             max_message_bytes: TRANSPORT_MAX_SIZE,
             max_chunks_per_message: TRANSPORT_MAX_SIZE / MIN_CHUNK_DATA + 1,
             max_completed_ids: 256,
+            rate_floor: RATE_FLOOR_BYTES_PER_MS,
+            grace_chunks: LANE_CREDIT_WINDOW,
         }
     }
 
@@ -86,6 +106,8 @@ impl ReassemblyLimits {
             max_message_bytes: self.max_message_bytes.max(1),
             max_chunks_per_message: self.max_chunks_per_message.max(1),
             max_completed_ids: self.max_completed_ids.max(1),
+            rate_floor: self.rate_floor.max(1),
+            grace_chunks: self.grace_chunks,
         }
     }
 }

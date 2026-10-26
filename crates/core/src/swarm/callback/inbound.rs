@@ -296,7 +296,12 @@ impl InboundMailbox {
         }
         // Capacity before the ticket: an arrival waiting for capacity holds no sequence, so
         // the actor's ordering never waits on it.
-        let charge = arrival_charge(&prepared.message, bytes.len());
+        let introducer = Arrival {
+            peer,
+            authentication,
+        }
+        .introducer(processor.logical.transport.dht.edges());
+        let charge = arrival_charge(&prepared.message, bytes.len(), (carrier, introducer));
         let permit = self.capacity.acquire((peer, lane, carrier), charge).await?;
         let ticket = self.reserve_ticket(lane)?;
         let PreparedInboundFrame {
@@ -764,25 +769,31 @@ impl InboundActor {
     }
 }
 
-/// What an arrival of `wire_bytes` carrying `message` reserves on the mailbox ledger
-/// (load-bounds paper, Law 4, #932): a chunked message is charged once, at its first chunk
-/// `[0, n]` of `d₀` bytes, for the retained `n·d₀` its buffer and its completed copy take (never
-/// less than its own frame); a later chunk is covered by that charge; any other frame is charged
-/// its own retained bytes.
+/// What an arrival of `wire_bytes` carrying `message`, on `carrier` from the slot
+/// `introducer`, reserves on the mailbox ledger (load-bounds paper, Law 4, #932): a chunked
+/// message is charged once, at its first chunk `[0, n]` of `d₀` bytes, for the retained `n·d₀`
+/// its buffer and its completed copy take (never less than its own frame), on the lane of its
+/// carrier's class and in the open-message table; a later chunk is covered by that charge; any
+/// other frame is charged its own retained bytes.
 ///
 /// ```text
-/// Chunk [0, n], d₀ ──▶ Bytes(max(retained(n·d₀), retained(wire)))
+/// Chunk [0, n], d₀ ──▶ Message(max(retained(n·d₀), retained(wire)), lane(carrier), introducer)
 /// Chunk [i > 0, n] ──▶ Covered
 /// otherwise ─────────▶ Bytes(retained(wire))
 /// ```
-fn arrival_charge(message: &crate::message::Message, wire_bytes: usize) -> InboundCharge {
+fn arrival_charge(
+    message: &crate::message::Message,
+    wire_bytes: usize,
+    (carrier, introducer): (Option<ChannelLane>, Principal),
+) -> InboundCharge {
     let frame = memory_reservation(wire_bytes);
     match message {
         crate::message::Message::Chunk(chunk) => match chunk.chunk {
-            [0, total] => {
-                let message = memory_reservation(total.saturating_mul(chunk.data.len()));
-                InboundCharge::Bytes(message.max(frame))
-            }
+            [0, total] => InboundCharge::Message {
+                bytes: memory_reservation(total.saturating_mul(chunk.data.len())).max(frame),
+                lane: InboundLane::of_carrier(carrier),
+                introducer,
+            },
             _ => InboundCharge::Covered,
         },
         _ => InboundCharge::Bytes(frame),
@@ -905,3 +916,5 @@ fn finish_completion(completion: InboundCompletion, result: Result<()>) {
 
 #[cfg(test)]
 mod test_inbound;
+#[cfg(test)]
+mod test_open_messages;
