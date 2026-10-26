@@ -153,10 +153,26 @@ struct LinkCreditState {
     outbox: PerLane<SignalOutbox>,
     /// What the node's pool counts for each lane: its charge as last reported.
     charged: PerLane<u64>,
+    /// Whether each lane's demand waits in the node's pool, so a later admission needs no
+    /// other until the pool serves it.
+    demanding: PerLane<bool>,
     /// Each lane's credit pump, while it waits for the lane's outbox.
     pump: PerLane<Option<Waker>>,
     /// Whether the connection is gone: waiting senders fail and the pump stops.
     closed: bool,
+}
+
+impl LinkCreditState {
+    /// Advertise the credit the releases of the lane of `index` have completed, queuing it for
+    /// the lane's pump, whose waker it returns; nothing on a closed link.
+    fn advertise_locked(&mut self, index: CreditIndex) -> Option<Waker> {
+        if self.closed {
+            return None;
+        }
+        let (limit, generation) = self.receive[index].advertise(CreditWindow::of(index))?;
+        self.outbox[index].queue(LaneSignal::Credit { limit, generation });
+        self.pump[index].take()
+    }
 }
 
 #[cfg(rings_transport_backend)]
@@ -212,6 +228,7 @@ impl LinkCredit {
                 receive: PerLane::from_fn(|index| ReceiveWindow::new(CreditWindow::of(index))),
                 outbox: PerLane::default(),
                 charged: PerLane::default(),
+                demanding: PerLane::default(),
                 pump: PerLane::default(),
                 closed: false,
             }),
@@ -225,6 +242,8 @@ impl LinkCredit {
 
     /// The state, for one transition.
     fn lock(&self) -> MutexGuard<'_, LinkCreditState> {
+        #[cfg(feature = "dummy")]
+        crate::hot_path::lock_taken();
         lock_recover(&self.state)
     }
 
@@ -325,7 +344,9 @@ impl LinkCredit {
     }
 
     /// Admit one arriving frame of `lane`: a data lane's admission is also its demand on the
-    /// node's pool (Law 3).
+    /// node's pool (Law 3), queued once until the pool serves it, so an admission takes the
+    /// pool's lock only to queue a new demand (load-bounds paper, Obligation "Admission
+    /// complexity").
     ///
     /// Post: `Ok` holds the frame's place in the window until the permit drops; `Err` is a
     /// frame beyond the advertised credit, which the window does not count.
@@ -334,15 +355,24 @@ impl LinkCredit {
         lane: ChannelLane,
     ) -> std::result::Result<CreditPermit, CreditViolation> {
         let index = credit_index(lane);
+        #[cfg(feature = "dummy")]
+        let locks = crate::hot_path::locks();
         let wants = {
             let mut state = self.lock();
+            let state = &mut *state;
             let receive = &mut state.receive[index];
             receive.admit()?;
-            receive.want(CreditWindow::of(index)) > 0
+            let wants = receive.want(CreditWindow::of(index)) > 0;
+            wants && !mem::replace(&mut state.demanding[index], wants)
         };
         if wants {
             self.pool.demand(self, index);
         }
+        #[cfg(feature = "dummy")]
+        crate::hot_path::record(
+            crate::hot_path::HotPath::FrameAdmission,
+            crate::hot_path::locks().saturating_sub(locks),
+        );
         Ok(CreditPermit {
             link: Arc::clone(self),
             index,
@@ -356,6 +386,12 @@ impl LinkCredit {
             true => 0,
             false => state.receive[index].want(CreditWindow::of(index)),
         }
+    }
+
+    /// The pool served the demand of the lane of `index`: the lane's next admission that wants
+    /// more queues a new one.
+    pub(super) fn served(&self, index: CreditIndex) {
+        self.lock().demanding[index] = false;
     }
 
     /// Take `share` of the pool for the lane of `index`, which the pool counted already: the
@@ -424,9 +460,26 @@ impl LinkCredit {
     /// Release one admitted frame of credit index `index`: advertise the credit it completes,
     /// and report the lane's charge, which a lane draining after a shrink gives back.
     fn release(&self, index: CreditIndex) {
-        self.lock().receive[index].release();
-        self.settle(index);
-        self.advertise_due([index]);
+        #[cfg(feature = "dummy")]
+        let locks = crate::hot_path::locks();
+        // One transition: the release, the charge it changes, and the credit it completes.
+        let (charge, pump) = {
+            let mut state = self.lock();
+            let state = &mut *state;
+            let window = CreditWindow::of(index);
+            state.receive[index].release();
+            let after = state.receive[index].charge(window);
+            let before = mem::replace(&mut state.charged[index], after);
+            let pump = state.advertise_locked(index);
+            ((before, after), pump)
+        };
+        self.pool.adjust(self.edge, charge.0, charge.1);
+        pump.into_iter().for_each(Waker::wake);
+        #[cfg(feature = "dummy")]
+        crate::hot_path::record(
+            crate::hot_path::HotPath::FrameRelease,
+            crate::hot_path::locks().saturating_sub(locks),
+        );
     }
 
     #[cfg(any(feature = "dummy", rings_transport_webrtc))]
@@ -468,17 +521,10 @@ impl LinkCredit {
                 return;
             }
             let state = &mut *state;
-            let mut pumps = Vec::new();
-            for index in indices {
-                let Some((limit, generation)) =
-                    state.receive[index].advertise(CreditWindow::of(index))
-                else {
-                    continue;
-                };
-                state.outbox[index].queue(LaneSignal::Credit { limit, generation });
-                pumps.extend(state.pump[index].take());
-            }
-            pumps
+            indices
+                .into_iter()
+                .filter_map(|index| state.advertise_locked(index))
+                .collect::<Vec<_>>()
         };
         pumps.into_iter().for_each(Waker::wake);
     }

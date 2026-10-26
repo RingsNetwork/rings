@@ -914,6 +914,8 @@ fn finish_completion(completion: InboundCompletion, result: Result<()>) {
     }
 }
 
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+mod test_admission_saturation;
 #[cfg(test)]
 mod test_inbound;
 #[cfg(test)]

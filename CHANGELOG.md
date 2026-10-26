@@ -27,6 +27,29 @@
     this release and of 0.37 do not connect, as for #934.
   - **Operator step.** None beyond upgrading every node that must reach another.
 
+- The hot paths of admission no longer scale with the number of waiters, edges or queued
+  items (#938; load-bounds paper, Sec. "Hot paths", Def. "Resource order", Obligation
+  "Admission complexity"). A `ResourceOrderedQueue` event visits only the waiters its freed
+  resources may unblock, `O((g + k + r) log n)`, through an indexed waitlist, where it judged
+  the whole queue before. The node's frame pool keeps its claimants incrementally and indexes
+  its demands, so a service visits only the demands it serves. A received frame takes its
+  link's lock once to be admitted and once to be released, and the pool's lock only when its
+  lane's demand or charge changes. Each node runs one admission watcher for its queued
+  protocol sends, not one task per send. The application inbox indexes its facts by peer.
+  Extension dispatch reads an envelope's namespace and payload without copying them. One
+  behaviour changes: a waiter blocked only for lack of room in its lane's reservation (or its
+  slot's floor of the open-message table) now holds it, so a later, smaller frame no longer
+  passes it there. A frame within its lane's reservation still never waits behind a borrower
+  of the shared pool, nor behind another peer's budget. Test-only counters (the transport's
+  `dummy` feature) measure each path, and the PR sync-storm matrix bounds each at its largest
+  size. No operator step.
+
+- Fix to the node frame pool merged in #934: the frames a rebalance freed went to the earliest
+  demand, often of an edge already at its share, so a starving edge could stay starved (load-
+  bounds paper, Law 3, amended). The pool now serves the demands of edges below their share
+  `⌊P_F / n⌋` first, then those between share and claim, each first come first served. No
+  operator step.
+
 - A node publishes its registrations again at its first edge (#855), so a relay, exit or DNS
   relay service that starts listening before it joins the overlay is listed once it joins, not
   a heartbeat (30 s) later. Before, a registration published with no admitted edge settled only

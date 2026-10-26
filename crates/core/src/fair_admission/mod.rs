@@ -11,6 +11,7 @@ mod resource_order;
 mod slot_accounting;
 mod slot_roster;
 mod wait_queue;
+mod waitlist;
 
 pub(crate) use capacity::admissible_capacity;
 pub(crate) use capacity::retained_wire_bytes;

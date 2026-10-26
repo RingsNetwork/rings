@@ -223,6 +223,8 @@ pub struct SwarmTransport {
     inbound_tap: InboundTap,
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
     outbound_schedulers: OutboundSchedulers,
+    /// The node's watcher of every detached send's first-frame admission.
+    admission_watcher: payload_send::AdmissionWatcher,
     measured_disconnects: Mutex<MeasuredDisconnectMap>,
     measure: Option<MeasureImpl>,
     transaction_replay: Arc<TransactionReplay>,
@@ -354,6 +356,7 @@ impl SwarmTransport {
             inbound_tap: InboundTap::default(),
             storage_repair_cursor: Mutex::new(None),
             outbound_schedulers: OutboundSchedulers::new(measure.clone()),
+            admission_watcher: payload_send::AdmissionWatcher::default(),
             measured_disconnects: Mutex::new(BTreeMap::new()),
             measure,
             transaction_replay,
