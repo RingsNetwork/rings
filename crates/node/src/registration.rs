@@ -17,6 +17,12 @@
 //! Ghost bound (removal-stability paper, Prop. 10): a registrant that stops at `t_s` is listed
 //! until at most `t_s + T + σ` while nobody re-appends its bytes, and until at most its signed
 //! lease end `ℓ ≤ t_s + Λ` against any writer or syncer.
+//!
+//! Trigger (#855): a registration publishes at every heartbeat, and once more at its node's
+//! first admitted edge after a heartbeat that began with none (`republish_due`). Such a
+//! heartbeat settled at the node alone, and the early publish routes the same lease through the
+//! edge to the registry's owners. It is a heartbeat of the lease like any other, so the
+//! boundedness law and the ghost bound hold as stated.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -97,6 +103,35 @@ pub(crate) const fn default_advertise_presence() -> bool {
 /// one included (`2I < Λ`).
 pub(crate) fn registry_refresh_bound() -> Duration {
     registry_lease() / 2
+}
+
+/// Whether the publish after one that began with `edges_at_start` admitted edges may come
+/// before its heartbeat (#855): only after a heartbeat that began with none, which settled at
+/// this node alone and reached no registry owner. An early publish arms nothing.
+///
+/// ```text
+///   armed(heartbeat, e₀) = heartbeat ∧ e₀ = 0
+/// ```
+pub(crate) const fn early_publish_armed(heartbeat: bool, edges_at_start: usize) -> bool {
+    heartbeat && edges_at_start == 0
+}
+
+/// Whether an armed registration publishes now, before its heartbeat (#855): it has an admitted
+/// edge, through which a publish reaches the registry's owners. A first registration made before
+/// the node joined the overlay is thus published again at its first edge, not one heartbeat
+/// later.
+///
+/// Law (first edge): only a heartbeat arms the trigger and the early publish disarms it, so
+/// under any sequence of admissions and retirements a registration publishes at most once
+/// between two heartbeats beyond them. An early publish is an ordinary heartbeat of the lease
+/// (the heartbeat law of [`DhtRegistrationPublisher`]): it raises the dots of the same bytes, so
+/// the boundedness law, the freshness window `T` and the lease end `ℓ` are unchanged.
+///
+/// ```text
+///   republish_due(armed, e) = armed ∧ e ≥ 1
+/// ```
+pub(crate) const fn republish_due(armed: bool, admitted_edges: usize) -> bool {
+    armed && admitted_edges > 0
 }
 
 /// Validate a registry's scheduling when the switch `advertise_setting` enables it: the
@@ -548,3 +583,6 @@ impl RegistrationTask for OnlineNodeRegistration {
         self.publish_descriptor(context).await.map(|_| ())
     }
 }
+
+#[cfg(test)]
+mod test_first_edge;
