@@ -100,7 +100,7 @@ async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() ->
 
     let (last, chunk_count) = deliver_leading_chunks(
         &relay.callback,
-        &relay.peer.to_string(),
+        (&relay.peer.to_string(), None),
         &relay.session,
         local_did,
         reassembled.to_wire()?,

@@ -49,10 +49,6 @@ impl InboundLane {
         }
     }
 
-    pub(super) const fn is_logical_data(self) -> bool {
-        matches!(self, Self::Storage | Self::E2e | Self::Application)
-    }
-
     /// The message class this lane carries; the reassembly lane's class is
     /// unknown until the reassembled message is decoded.
     pub(in crate::swarm::callback) const fn class(self) -> Option<MessageCategory> {
@@ -76,6 +72,17 @@ impl InboundLane {
                     .is_some_and(|class| Some(class.channel_lane()) == carrier)
             })
             .unwrap_or(Self::Reassembly)
+    }
+
+    /// The category an event of this lane that arrived on `carrier` is ordered in: its own
+    /// lane's for a frame of known class, and its carrier's for a chunk, whose reassembled
+    /// message the lane-mismatch refusal holds to that class; the reassembly lane itself, which
+    /// orders every category, for a chunk on no carrier.
+    pub(super) fn category(self, carrier: Option<ChannelLane>) -> Self {
+        match self {
+            Self::Reassembly => Self::of_carrier(carrier),
+            lane => lane,
+        }
     }
 
     /// Whether a frame of this lane may have arrived on `carrier`, the transport lane whose

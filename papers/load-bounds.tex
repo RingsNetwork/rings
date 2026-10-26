@@ -63,8 +63,8 @@ receiver's replay streams (with an eviction horizon that cannot reopen replay), 
 store, to received frames through a credit-reclaim protocol that makes the frame bound hard and
 independent of the connection count, and to reassembled messages, which are charged once at
 their first chunk so that no honest message is refused.  We state the complexity obligations of
-the admission hot paths, and show that the barrier's control exemption is the identity
-``a lane waits for reassembly iff it carries chunks''.
+the admission hot paths, and replace the reassembly barrier's control exemption by a barrier
+per message category, under which order is guaranteed per category only.
 }\hfill\null\par
 \vspace{0.5\baselineskip}}
 
@@ -88,8 +88,8 @@ where it cannot wait, and is dropped when that charge does not fit.  A chunk tha
 reassembly budget full is dropped too.
 \item[\issue{938}] Admission costs $O(n)$ per event and takes node-global locks per frame,
 exactly when the node is saturated.
-\item[\issue{927}] It is unclear whether the barrier's control exemption is still needed under
-per-lane credit.
+\item[\issue{927}] The reassembly barrier exempts control, which reorders chunked control, and
+orders data across categories, which no protocol needs.
 \end{description}
 
 \section{Model}\label{sec:model}
@@ -674,28 +674,89 @@ release at the limit wakes no one, and crossing $H_{\mathrm{lo}}$ wakes each def
 They are verified against the sync-storm matrix, before and after each change.
 \end{obligation}
 
-\section{The barrier exemption (\issue{927})}\label{sec:barrier}
+\section{The reassembly barrier (\issue{927})}\label{sec:barrier}
 
-\begin{lemma}[One frame per lane]\label{lem:oneframe}
-If every path that hands a frame to core does so through its lane's FIFO, with at most one frame
-in hand-over per lane, then a lane that waits behind the reassembly barrier waits at most one
-reassembly frame's service, $\le2$\,s.  That is below the control deadline of 15\,s.
-\end{lemma}
+The inbound actor of a connection has one lane per category $\kappa\in K=\{\mathit{ctl},
+\mathit{sto},\mathit{e2e},\mathit{app}\}$ and a reassembly lane $\rho$, each serving one event
+at a time.  Events take sequence numbers $\mathit{seq}$ in ticket order.  A reassembled message
+keeps its final chunk's sequence and enters the lane of its category.  Before \issue{927} a data
+lane waited behind every earlier unfinished reassembly, whatever its category, and the control
+lane waited behind none: the \emph{control exemption}.
 
-The predicate \texttt{lane\_waits\_for\_reassembly} is ``the lane carries logical data''.
-Chunks travel only on their message's lane (the lane-mismatch refusal), and control messages
-are never chunked, so the predicate is exactly ``the lane can carry chunks''.  In that form it
-is the barrier's definition, not an exemption.
+Two facts of the code refute the old argument (``at most one frame in hand-over per lane, and
+control is never chunked'').
+\begin{enumerate}[leftmargin=1.5em]
+\item \emph{Pacing.}  An arrived frame is submitted awaited: its carrier's drainer hands over the
+next frame only once this one completed, and a final chunk's completion moves onto its
+reassembled message.  So on the paced path each carrier has at most one event in the actor.
+Frames released from the pre-admission hold are not paced: up to the peer's event share,
+$32$, enter at once, at admission.  Behind such a burst a control frame without the exemption
+would wait for up to $32$ reassembly frames.
+\item \emph{Chunked control.}  A payload is chunked whenever it exceeds the peer's advertised
+\texttt{max-message-size}, which has no floor (\issue{1130}), so control messages carrying an
+SDP can arrive chunked, on the control carrier.  Under the exemption, a control frame released
+after them in the same burst ran before their reassembled message: control reordered.
+\end{enumerate}
 
-\textbf{Decision.}  Keep the predicate, renamed for what it is.  Remove the ablation toggle
-\texttt{ProtectionLayer::BarrierControlExemption} and its legacy feedback-loop witness.  This is
-a subtraction, under two obligations checked in the implementation:
-\begin{itemize}[leftmargin=1.2em]
-\item every hand-off path obeys Lemma~\ref{lem:oneframe}, the pre-admission drain and the
-detached submissions included;
-\item no control message can exceed one frame.  This is asserted at compile time from the
-widest control message.
-\end{itemize}
+\begin{definition}[Per-category barrier]\label{def:barrier}
+The category $\kappa(e)$ of an event is its lane's for a whole frame, and its carrier's for a
+chunk; a chunk with no carrier, which only a test hands in, has $\kappa(e)=\top$.  Let $U$ be
+the reassembly events ticketed and not yet completed.  A lane $\kappa$ dispatches its front $f$
+iff
+\[
+\neg\exists u\in U.\;\mathit{seq}(u)<\mathit{seq}(f)\wedge\kappa(u)\in\{\kappa,\top\}.
+\]
+\end{definition}
+
+\begin{proposition}[Order per category]\label{prop:catorder}
+Under Def.~\ref{def:barrier}, the messages of one category are processed in sequence order,
+whole or chunked.  A frame of category $\kappa$ waits only behind unfinished reassembly of
+$\kappa$: at most one frame on the paced path, and at most the $\kappa$-chunks of one released
+burst.
+\end{proposition}
+\begin{proof}
+A lane serves in sequence order.  A reassembled message $m$ of $\kappa$ has the sequence of its
+final chunk $u$; every $\kappa$-frame $f$ with $\mathit{seq}(f)>\mathit{seq}(u)$ waits while
+$u\in U$, and $u$ leaves $U$ in the step that inserts $m$ into lane $\kappa$ at
+$\mathit{seq}(u)$, ahead of $f$.  The lane-mismatch refusal makes $m$'s category its carrier's,
+so $\kappa(u)$ is $m$'s lane.  The bounds are pacing's and the hold's.
+\end{proof}
+
+\textbf{Order is guaranteed per category only, and no protocol relies on cross-category
+order.}  Categories travel on separate data channels (\issue{906}), whose arrival order the
+transport does not relate, and the actor serves its lanes concurrently, so whole frames of two
+categories were never ordered; the old barrier ordered data only behind earlier reassembly.
+Every request and its report, and every exchange whose steps must be ordered, lies in one
+category:
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}p{0.36\columnwidth}p{0.56\columnwidth}@{}}
+\toprule
+Pair & Why order across categories is not needed\\
+\midrule
+storage sync and its report (\textit{sto}) against topology control (\textit{ctl}) & the
+sync names its signed destination and is forwarded by the current topology when not ours;
+persistence and acks are keyed by entry\\
+relay custody, holds and their acks against inbox fetches & all \textit{sto}; relayed mail
+and a direct \texttt{CustomMessage} take different paths and were never ordered\\
+link control against payloads & handled before the actor; keyed by delegation digest, with
+lease durations; an \texttt{Unknown} means the referencing frame was dropped and is resent\\
+E2E handshake and stream against custom messages & the handshake and stream are all
+\textit{e2e}; a custom message needs no E2E session\\
+DHT control requests and reports; storage requests and reports & each pair within
+\textit{ctl}, or within \textit{sto}\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Decision.}  Replace the node-wide barrier and its hand-off barrier by
+Def.~\ref{def:barrier}.  The control exemption is gone as a special case: control waits only
+behind chunked control, which a peer causes only by advertising a limit below its control
+messages.  A data category no longer waits behind another category's reassembly.  The ablation
+toggle \texttt{ProtectionLayer::BarrierControlExemption} and its legacy feedback-loop witness
+are removed; the storm witnesses that a control probe behind another category's reassembly
+backlog is not blocked, and a regression test that a chunked control message released from
+the hold keeps its place among later control.
 
 \section{Summary of bounds}\label{sec:summary}
 

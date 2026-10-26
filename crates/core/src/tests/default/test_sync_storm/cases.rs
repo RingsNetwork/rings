@@ -6,14 +6,9 @@ use futures::future::Either;
 use super::*;
 use crate::swarm::application::ApplicationData;
 
-/// Each single-layer ablation at N=10 exposes exactly the proposition its layer protects, except
-/// the layers per-lane credit subsumes.
+/// Each single-layer ablation at N=10 exposes exactly the proposition its layer protects.
 #[tokio::test(start_paused = true)]
-async fn test_n10_single_ablation_matrix_exposes_each_unsubsumed_proposition() {
-    // Each single-layer ablation exposes exactly its proposition, except the barrier control
-    // exemption: per-lane credit dispatch bounds the barrier's wait to one hand-over, so
-    // without the exemption control is delayed but never starved, and nothing is violated
-    // (#927).
+async fn test_n10_single_ablation_matrix_exposes_each_proposition() {
     let cases = [
         (
             ProtectionProfile::without_class_reservations(),
@@ -22,10 +17,6 @@ async fn test_n10_single_ablation_matrix_exposes_each_unsubsumed_proposition() {
         (
             ProtectionProfile::without_bounded_control_burst(),
             BTreeSet::from([ProtectionLayer::BoundedControlBurst]),
-        ),
-        (
-            ProtectionProfile::without_barrier_control_exemption(),
-            BTreeSet::new(),
         ),
         (
             ProtectionProfile::without_per_entry_yield(),
@@ -212,7 +203,6 @@ fn parse_profile(value: &str) -> ProtectionProfile {
         "all-enabled" => ProtectionProfile::ALL_ENABLED,
         "no-class-reservations" => ProtectionProfile::without_class_reservations(),
         "no-bounded-control-burst" => ProtectionProfile::without_bounded_control_burst(),
-        "no-barrier-control-exemption" => ProtectionProfile::without_barrier_control_exemption(),
         "no-per-entry-yield" => ProtectionProfile::without_per_entry_yield(),
         "legacy-all-disabled" => ProtectionProfile::LEGACY_ALL_DISABLED,
         _ => panic!("unsupported SYNC_STORM_PROFILE {value}"),

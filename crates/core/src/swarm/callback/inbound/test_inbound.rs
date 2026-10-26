@@ -18,44 +18,48 @@ fn test_inbound_lane_mapping_is_total_and_reserves_one_extra_lane() {
 
     assert_eq!(lanes.map(InboundLane::index), [0, 1, 2, 3]);
     assert_eq!(REASSEMBLY_LANE.index(), MessageCategory::COUNT);
-    assert!(!DHT_CONTROL_LANE.is_logical_data());
-    assert!(!REASSEMBLY_LANE.is_logical_data());
-    assert!(lanes
-        .iter()
-        .skip(1)
-        .copied()
-        .all(InboundLane::is_logical_data));
 }
 
+/// A chunk is ordered in its carrier's category, a whole frame in its own lane's, and a chunk
+/// on no carrier in every category.
 #[test]
-fn test_reassembly_handoff_blocks_reassembly_and_orders_only_data_lanes() {
-    let barrier = ReassemblyHandoffBarrier::new(7);
-
-    // The barrier itself gates only the reassembly lane; data lanes are ordered
-    // against it by the actor's barrier sequence, control lanes never wait.
-    assert!(barrier.blocks(REASSEMBLY_LANE));
-    assert!(!barrier.blocks(STORAGE_LANE));
-    assert!(!barrier.blocks(APPLICATION_LANE));
-    assert!(!barrier.blocks(DHT_CONTROL_LANE));
-    assert!(lane_waits_for_reassembly(STORAGE_LANE));
-    assert!(lane_waits_for_reassembly(APPLICATION_LANE));
-    assert!(!lane_waits_for_reassembly(DHT_CONTROL_LANE));
-    assert!(!barrier.has_started());
-
-    barrier.start_marker().store(true, Ordering::Release);
-    assert!(barrier.has_started());
+fn test_a_chunk_is_ordered_in_its_carriers_category() {
+    let category = |class: MessageCategory| REASSEMBLY_LANE.category(Some(class.channel_lane()));
+    assert_eq!(category(MessageCategory::DhtControl), DHT_CONTROL_LANE);
+    assert_eq!(category(MessageCategory::Storage), STORAGE_LANE);
+    assert_eq!(category(MessageCategory::Application), APPLICATION_LANE);
+    assert_eq!(REASSEMBLY_LANE.category(None), REASSEMBLY_LANE);
+    assert_eq!(
+        STORAGE_LANE.category(Some(MessageCategory::Application.channel_lane())),
+        STORAGE_LANE
+    );
 }
 
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+/// A lane waits only for earlier unfinished reassembly of its own category, or of no carrier:
+/// control waits behind chunked control and not behind an application backlog, and a finished
+/// reassembly releases what it held (load-bounds paper, Def. "Per-category barrier").
 #[test]
-fn test_barrier_exemption_ablation_blocks_real_control_lane() {
-    let _runtime = crate::simulation::SimulationRuntimeGuard::enter(
-        43,
-        1_700_000_000_000,
-        crate::simulation::ProtectionProfile::without_barrier_control_exemption(),
-    )
-    .expect("simulation runtime must install");
-    assert!(lane_waits_for_reassembly(DHT_CONTROL_LANE));
+fn test_a_lane_waits_only_for_reassembly_of_its_category() {
+    let mut unfinished = UnfinishedReassembly::default();
+    unfinished.begin(3, APPLICATION_LANE);
+    unfinished.begin(5, DHT_CONTROL_LANE);
+
+    assert!(unfinished.blocks(APPLICATION_LANE, 4));
+    assert!(!unfinished.blocks(APPLICATION_LANE, 2));
+    assert!(!unfinished.blocks(STORAGE_LANE, 4));
+    assert!(!unfinished.blocks(E2E_LANE, 9));
+    assert!(!unfinished.blocks(DHT_CONTROL_LANE, 4));
+    assert!(unfinished.blocks(DHT_CONTROL_LANE, 6));
+
+    unfinished.end(5);
+    assert!(!unfinished.blocks(DHT_CONTROL_LANE, 6));
+    unfinished.begin(7, REASSEMBLY_LANE);
+    assert!(unfinished.blocks(DHT_CONTROL_LANE, 8));
+    assert!(unfinished.blocks(STORAGE_LANE, 8));
+    unfinished.end(3);
+    unfinished.end(7);
+    unfinished.end(7);
+    assert!(!unfinished.blocks(APPLICATION_LANE, 8));
 }
 
 #[test]
