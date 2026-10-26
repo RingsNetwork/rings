@@ -14,7 +14,6 @@ use rings_core::dht::Did;
 use tokio::sync::futures::Notified;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::evidence::Admissions;
@@ -31,6 +30,7 @@ use crate::prelude::StopSource;
 use crate::seed::SeedPeer;
 use crate::seed::SeedPeerError;
 use crate::seed::ValidatedSeedPeer;
+use crate::test_support::TestTask;
 
 /// Fixed jitter seed so slow-cadence instants replay identically.
 const JITTER_SEED: u64 = 7;
@@ -245,7 +245,7 @@ struct Running {
     port: Arc<ScriptedPort>,
     evidence: Arc<ReachabilityEvidence>,
     stop: StopSource,
-    task: JoinHandle<()>,
+    task: TestTask<()>,
 }
 
 impl Running {
@@ -255,7 +255,7 @@ impl Running {
         let stop = StopSource::new();
         let supervisor =
             BootstrapSupervisor::new(targets(peers), port.clone(), evidence.clone(), JITTER_SEED);
-        let task = tokio::spawn(supervisor.run(stop.token()));
+        let task = TestTask::spawn(supervisor.run(stop.token()));
         Self {
             port,
             evidence,

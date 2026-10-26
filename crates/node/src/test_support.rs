@@ -1,9 +1,16 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::task::Context;
+use std::task::Poll;
 
 use rings_core::delegation::DelegateeKey;
+use tokio::task::AbortHandle;
+use tokio::task::JoinError;
+use tokio::task::JoinSet;
 
 use crate::error::Result;
 use crate::extension::ext::Extensions;
@@ -107,5 +114,51 @@ where K: Clone + Eq
     pub(crate) fn release(&self) {
         self.released.store(true, Ordering::Release);
         self.release.notify_waiters();
+    }
+}
+
+/// A task a test owns: it runs on the current runtime until it ends or its handle drops, which
+/// aborts it. So a test spawns nothing detached either, and the one-spawn law of
+/// `crate::tasks` holds in test builds too. A [`JoinSet`] of that one task, awaited for the
+/// task's result as a `JoinHandle` is.
+pub(crate) struct TestTask<T> {
+    /// The set holding the task, which aborts it when dropped.
+    set: JoinSet<T>,
+    /// The task's handle in the set.
+    handle: AbortHandle,
+}
+
+impl<T: Send + 'static> TestTask<T> {
+    /// Run `task` on the current runtime, owned by the returned handle.
+    ///
+    /// Pre: called inside a Tokio runtime.
+    pub(crate) fn spawn(task: impl Future<Output = T> + Send + 'static) -> Self {
+        let mut set = JoinSet::new();
+        let handle = set.spawn(task);
+        Self { set, handle }
+    }
+}
+
+impl<T> TestTask<T> {
+    /// Whether the task has ended, by completing, panicking or being aborted.
+    pub(crate) fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+
+    /// Abort the task; awaiting it then yields a cancelled [`JoinError`], unless it had ended.
+    pub(crate) fn abort(&self) {
+        self.handle.abort();
+    }
+}
+
+impl<T: 'static> Future for TestTask<T> {
+    type Output = std::result::Result<T, JoinError>;
+
+    /// The task's result, once; a handle whose result was taken never yields again.
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.set.poll_join_next(cx) {
+            Poll::Ready(Some(result)) => Poll::Ready(result),
+            Poll::Ready(None) | Poll::Pending => Poll::Pending,
+        }
     }
 }

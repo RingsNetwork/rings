@@ -1,7 +1,8 @@
 # The one-spawn law of `src/tasks.rs` (#1085): every task of the node layer joins a task set,
 # the node's (`NodeTasks`) or one its owner awaits (`rings_runtime::TaskSet`), so a close can
-# stop it and await its end. No spawn here may detach a task. Test builds are exempt
-# (`src/lib.rs`), and the binary owns its tasks through `JoinSet`.
+# stop it and await its end. No spawn here may detach a task, in tests either: a test owns its
+# tasks (`TestTask`, `src/test_support.rs`) or runs them as tasks of a node it owns, and the
+# binary owns its tasks through `JoinSet`.
 disallowed-methods = [
     { path = "tokio::task::spawn", reason = "spawn through `NodeTasks` (src/tasks.rs) so a close awaits the task (#1085)" },
     { path = "tokio::task::spawn_local", reason = "spawn through `NodeTasks` (src/tasks.rs) so a close awaits the task (#1085)" },

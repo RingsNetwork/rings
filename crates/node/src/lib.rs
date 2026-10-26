@@ -4,7 +4,6 @@
 #![cfg_attr(
     test,
     allow(
-        clippy::disallowed_methods,
         clippy::expect_used,
         clippy::indexing_slicing,
         clippy::panic,

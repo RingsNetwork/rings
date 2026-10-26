@@ -3,9 +3,9 @@
 //!
 //! Law (one spawn): every task of the node layer is spawned through [`NodeTasks`], onto the
 //! node's task set. `clippy.toml` forbids this crate every detached spawn of an executor
-//! (`tokio::spawn`, `spawn_local`, the spawns of `rings_runtime`), outside test builds; the
-//! task set's spawn, which only this module calls, is the one left. So no task of the node can
-//! outlive a close unnoticed.
+//! (`tokio::spawn`, `spawn_local`, the spawns of `rings_runtime`), in tests too; the spawns of
+//! a task set, the node's here and the measurement's own, are the ones left. So no task of the
+//! node can outlive a close unnoticed.
 //!
 //! ```text
 //!   spawn(t)              : t runs until it ends or the node stops, whichever comes first;
@@ -163,3 +163,6 @@ where
         }
     }
 }
+
+#[cfg(all(test, rings_native))]
+mod test_tasks;

@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use rings_transport::connections::dummy_controlled;
 
+use crate::test_support::TestTask;
 use crate::tests::activity::record_activity;
 
 /// Base seed of the dummy connection identifiers; see [`test_seed`].
@@ -59,7 +60,7 @@ pub(super) struct ControlledNetwork {
     /// Whether the pump is suspended so the test can choose the delivery order.
     paused: Arc<AtomicBool>,
     /// The pump task, aborted when the network is dropped.
-    pump: tokio::task::JoinHandle<()>,
+    pump: TestTask<()>,
 }
 
 impl ControlledNetwork {
@@ -71,7 +72,7 @@ impl ControlledNetwork {
         dummy_controlled::set_seed(test_seed());
         let paused = Arc::new(AtomicBool::new(false));
         let pump_paused = Arc::clone(&paused);
-        let pump = tokio::spawn(async move {
+        let pump = TestTask::spawn(async move {
             loop {
                 if !pump_paused.load(Ordering::Acquire) && dummy_controlled::pending() > 0 {
                     // A target retired meanwhile is a legal outcome; the event is consumed.

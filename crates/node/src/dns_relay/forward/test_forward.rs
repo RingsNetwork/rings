@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
 use super::*;
+use crate::test_support::TestTask;
 
 /// A connected loopback pair: the dialing end and the accepted end.
 async fn pair() -> (TcpStream, TcpStream) {
@@ -21,7 +22,7 @@ async fn pair() -> (TcpStream, TcpStream) {
 async fn test_splice_carries_both_directions_and_each_end_of_stream() {
     let (mut client, client_side) = pair().await;
     let (upstream_side, mut upstream) = pair().await;
-    let spliced = tokio::spawn(splice(client_side, upstream_side, Duration::from_secs(60)));
+    let spliced = TestTask::spawn(splice(client_side, upstream_side, Duration::from_secs(60)));
     client.write_all(b"ping").await.unwrap();
     client.shutdown().await.unwrap();
     let mut received = Vec::new();

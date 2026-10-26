@@ -252,10 +252,14 @@ impl Provider {
     ///   (b) drain    no node task is live (the one-spawn law of `crate::tasks`)
     ///   (c) network  every connection is closed, and no new one is admitted (#1098)
     ///   (d) flush    the measurements are persisted
-    ///   (e) release  the last clone of the node drops, and with it every store
+    ///   (e) release  no node task is live again; the last clone of the node drops, and with
+    ///                it every store
     /// ```
     ///
-    /// Steps (c) and (d) are [`Processor::close`].
+    /// Steps (c) and (d) are [`Processor::close`]. A node task spawned after (b), during (c) or
+    /// (d) (by a callback of the closing network, say), starts with the stop already fired: it
+    /// ends at its first suspension point, or winds down within its bound. (e) drains again
+    /// before the release, so no such task holds the node into it.
     ///
     /// Post: `Ok` means every store the node was built over is released and its directory
     /// unlocked (the release law of `rings_core::storage::file`), so an open of those stores in
@@ -282,6 +286,7 @@ impl Provider {
         self.processor.await_listener_generations().await;
         tasks.drained().await;
         let closed = self.processor.close().await;
+        tasks.drained().await;
         let released = self.processor.stores_released();
         let Self {
             processor,

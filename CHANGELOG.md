@@ -12,7 +12,7 @@
   relay and onion pumps) held it past its close and its drop, so its stores stayed locked
   (`Error::StorageDirectoryLocked`, #1039) for the life of the process. Every task of the
   node layer now joins the node's task set, which the close stops and drains, and the crate's
-  `clippy.toml` forbids it every detached spawn outside tests. A relay whose fail-closed law
+  `clippy.toml` forbids it every detached spawn, in its tests too. A relay whose fail-closed law
   resets its local socket does so at the stop, where being dropped would close it cleanly. A
   node still shared when it is closed reports `Error::ProviderStillShared { released }`: it is
   stopped and its network closed, and `released` resolves once its last clone drops.
