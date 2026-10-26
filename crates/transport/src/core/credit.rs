@@ -320,6 +320,15 @@ impl ReceiveWindow {
         })
     }
 
+    /// The credit the sender holds unused, as the receiver counts it: frames advertised and not
+    /// yet arrived. A frame the receiver still holds, a release awaiting its batch, or an
+    /// advertisement the receiver defers is not in it. Credit still in transit to the sender,
+    /// and frames already sent on it that are still in flight, are: with the frames held, the
+    /// lane's outstanding liability, which the window bounds by `W` however long the round trip.
+    pub(crate) const fn unused(self) -> u64 {
+        self.advertised.saturating_sub(self.received)
+    }
+
     /// Frames admitted and not yet released.
     #[cfg(test)]
     pub(crate) const fn occupancy(self) -> u64 {

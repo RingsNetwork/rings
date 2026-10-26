@@ -15,6 +15,7 @@ use std::sync::MutexGuard;
 use std::time::Duration;
 
 use rings_transport::connections::dummy_controlled;
+use rings_transport::core::pool::ChannelLane;
 use tokio::sync::Notify;
 
 use crate::swarm::transport::PEER_LIVENESS_PERIOD_MS;
@@ -34,7 +35,7 @@ pub(crate) use delivery::ScheduledDeliveryClass;
 pub(crate) use observations::observe_inbound_capacity;
 pub(crate) use observations::observe_outbound_global_capacity;
 pub(crate) use observations::observe_outbound_peer_capacity;
-pub(crate) use observations::observe_reassembly_capacity;
+pub(crate) use observations::observe_reassembly_pending;
 pub(crate) use observations::record_barrier_control_blocked;
 pub(crate) use observations::record_barrier_control_completion;
 pub(crate) use observations::record_outbound_submission;
@@ -203,7 +204,13 @@ struct SimulationRuntimeState {
     reassembly_service_enabled: bool,
     delivery_cache: BTreeMap<u64, ScheduledDelivery>,
     delivery_order: BTreeSet<u64>,
-    non_control_delivery_order: BTreeSet<u64>,
+    /// The pending deliveries the lane law lets a schedule select (see
+    /// `delivery::refresh_delivery_cache`).
+    selectable_order: BTreeSet<u64>,
+    /// The selectable deliveries that are not control.
+    non_control_selectable_order: BTreeSet<u64>,
+    /// Each connection lane's pending messages, oldest first.
+    lane_queues: BTreeMap<(String, ChannelLane), BTreeSet<u64>>,
     unreported_deliveries: BTreeSet<u64>,
     last_inspected_delivery: Option<u64>,
     outbound_submission_ms: BTreeMap<uuid::Uuid, u64>,
@@ -230,7 +237,9 @@ impl SimulationRuntimeState {
             reassembly_service_enabled: false,
             delivery_cache: BTreeMap::new(),
             delivery_order: BTreeSet::new(),
-            non_control_delivery_order: BTreeSet::new(),
+            selectable_order: BTreeSet::new(),
+            non_control_selectable_order: BTreeSet::new(),
+            lane_queues: BTreeMap::new(),
             unreported_deliveries: BTreeSet::new(),
             last_inspected_delivery: None,
             outbound_submission_ms: BTreeMap::new(),
@@ -284,15 +293,15 @@ impl SimulationRuntimeState {
     }
 
     fn choose_delivery_sequence(&mut self) -> Result<u64, SimulationRuntimeError> {
-        let Some(max_sequence) = self.delivery_order.last().copied() else {
+        let Some(max_sequence) = self.selectable_order.last().copied() else {
             return Err(SimulationRuntimeError::EmptyDeliveryQueue);
         };
         self.schedule_rng_state = dummy_controlled::mix_seed(self.schedule_rng_state);
         let ticket = self.schedule_rng_state % max_sequence.saturating_add(1);
-        self.delivery_order
+        self.selectable_order
             .range(ticket..)
             .next()
-            .or_else(|| self.delivery_order.first())
+            .or_else(|| self.selectable_order.first())
             .copied()
             .ok_or(SimulationRuntimeError::EmptyDeliveryQueue)
     }
@@ -494,17 +503,17 @@ impl SimulationRuntimeGuard {
         verify_effect_boundary()?;
         with_runtime_mut(|runtime| {
             refresh_delivery_cache(runtime)?;
-            if runtime.delivery_order.is_empty() {
+            if runtime.selectable_order.is_empty() {
                 return Ok(None);
             }
             let sequence = match strategy {
-                DeliveryStrategy::Fifo => runtime.delivery_order.first().copied(),
-                DeliveryStrategy::Lifo => runtime.delivery_order.last().copied(),
+                DeliveryStrategy::Fifo => runtime.selectable_order.first().copied(),
+                DeliveryStrategy::Lifo => runtime.selectable_order.last().copied(),
                 DeliveryStrategy::Seeded => Some(runtime.choose_delivery_sequence()?),
                 DeliveryStrategy::AdversarialControlLast => runtime
-                    .non_control_delivery_order
+                    .non_control_selectable_order
                     .first()
-                    .or_else(|| runtime.delivery_order.first())
+                    .or_else(|| runtime.selectable_order.first())
                     .copied(),
             };
             let sequence = sequence.ok_or(SimulationRuntimeError::EmptyDeliveryQueue)?;
@@ -890,6 +899,7 @@ mod tests {
             bytes: 0,
             enqueued_virtual_ms: 0,
             deadline_virtual_ms: None,
+            lane: None,
         };
 
         assert!(matches!(

@@ -102,13 +102,29 @@ lane.
 - The core inbound mailbox makes an arrival wait rather than refuse it, while the arrival keeps
   its credit. Waiting arrivals are admitted in resource order
   (`fair_admission::ResourceOrderedQueue`): first come first served per exhausted resource (a
-  peer's budget, a lane's share, the shared pool) and per peer and lane. A frame within its
-  lane's reservation, such as DHT control, therefore never waits behind another lane's
-  borrower, and one peer at its budget never holds back another peer. The order is model
-  checked: no overtaking on an exhausted resource, stream order, no admissible arrival left
-  waiting, and every wait resolved. The order covers arrivals; a reassembled message is
-  re-charged at its full size on the actor, where it cannot wait, and is dropped if the
-  budgets cannot hold it (#932).
+  peer's budget, a lane's share, the shared pool) and per peer, lane and transport carrier. A
+  frame within its lane's reservation, such as DHT control, therefore never waits behind
+  another lane's borrower, and one peer at its budget never holds back another peer. The order
+  is model checked: no overtaking on an exhausted resource, stream order, no admissible arrival
+  left waiting, and every wait resolved.
+- A chunked message is charged once, at its first chunk `[0, n]` of `d₀` bytes, for the
+  `n·d₀` its buffer and its completed copy take (#932; load-bounds paper, Law 4). That charge
+  sits on the lane of the message's class and in the open-message table, by the connection
+  slot that delivered it: each slot has a floor of 256 KiB, and larger messages share a pool of
+  128 MiB in fair claims, so open messages hold at most 210 MiB of the 256 MiB mailbox and a
+  small message never waits behind another peer's large one. The charge waits as an arrival
+  like any frame's; the message's later chunks take nothing, and they wait only for their own
+  carrier's earlier frames, so they never wait behind capacity their own message holds. The
+  completed message leaves the table and carries its charge into dispatch: no reassembled
+  message is ever refused or dropped for capacity.
+- An open message must keep up a rate floor of 10 B/ms (`ρ`, 60 MB over the 100-minute
+  maximum TTL) over the time its sender holds unused credit on the carrier. Credit the receiver
+  holds back is not counted, so a throttled sender's clock pauses. A message that falls more
+  than one lane window behind is expired as the sender's failure and releases its charge: a
+  first chunk sent alone is expired within about 107 s, not at its TTL. The receiver cannot
+  tell a withholding sender from one whose scheduler is busy with higher-priority classes, so
+  a large message on a link that leaves its class less than `ρ` is expired too, and is the
+  sender's to send again.
 - Core's outbound scheduler serves only lanes that hold credit, and times a send only for the
   transport's acceptance, never for the receiver's consumption.
 - An inbound lane's progress depends only on local resources (`swarm::transport::egress`).

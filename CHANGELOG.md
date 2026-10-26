@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+- A chunked message is charged once, at its first chunk, and is never refused or dropped for
+  capacity (#932; load-bounds paper, Law 4 and Prop. 4). Before, each chunk took its own
+  mailbox charge and a separate reassembly budget, and the completed message was charged again
+  at its full size on the inbound actor, where it could not wait: under load the charge did not
+  fit and the message was dropped, after the sender had seen every chunk accepted. Now the
+  first chunk `[0, n]` of `d₀` bytes reserves the `n·d₀` its buffer and its completed copy take,
+  waiting for capacity like any arrival; the message's later chunks take nothing and wait only
+  for their own carrier's earlier frames, and the completed message carries the charge into
+  dispatch. A message opens only at its first chunk, which must claim fewer than
+  `max_message_bytes` before its last chunk (`(n − 1)·d₀`), and no later chunk may be longer
+  than the first: an honest sender, which cuts equal chunks and keeps a message's chunks
+  contiguous on its class lane, never meets either bound.
+  - The first chunk's charge sits on the lane of its carrier's class, where the completed
+    message is dispatched, and in a new open-message table under slot accounting (floor
+    256 KiB per slot, pool 128 MiB in fair claims, at most 210 MiB of the mailbox at three
+    successors): a small message never waits behind another peer's large one, and a slot's
+    next large message queues behind the claim already waiting.
+  - An open message expires, as the sender's failure, once it falls behind a rate floor of
+    10 B/ms over the time its sender holds unused credit, less one lane window: a first chunk
+    sent alone holds its reservation for about 107 s, not up to its 100-minute TTL. A
+    throttled sender's clock pauses. A large message on a link that leaves its class less than
+    10 B/ms is expired too.
+  - **Breaking (library API).** `ReassemblyLimits` loses `max_total_buffered_cost` and
+    `slot_overhead` and gains `rate_floor` and `grace_chunks`, and `MessageReassembler` takes
+    the charge type its messages hold. `LaneCreditView::peer_unused` reads the credit a peer
+    holds unused on a lane.
+    `Error::InboundMailboxCapacityExceeded` and `Error::InboundPeerCapacityExceeded`, which
+    only the retired re-charge produced, are removed. The dummy transport's
+    `QueuedDeliveryKind::Message` names the lane its frame travels on, and the simulation's
+    schedules deliver one lane's frames in order, as every real transport does.
+  - **Upgrade consequence.** None on the wire: a sender already sends a message's chunks in
+    order and of equal length.
+  - **Operator step.** None.
+
 ## 0.37.0
 
 - Every frame names its wire version (#1104), so a node of another release is refused by

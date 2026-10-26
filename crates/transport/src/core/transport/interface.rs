@@ -152,10 +152,10 @@ pub trait ConnectionInterface {
     /// for long keeps no connection, callback or channel alive.
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Self::Error>;
 
-    /// A read-only view of `lane`'s send credit on this connection generation (see
-    /// [`LaneCreditView`]): for a sender that shapes its
-    /// own emission to the receiver's release rate. It holds the connection weakly and reserves
-    /// nothing.
+    /// A read-only view of `lane`'s credit on this connection generation (see
+    /// [`LaneCreditView`]): for a sender that shapes its own emission to the receiver's release
+    /// rate, and for a receiver that reads the credit its peer holds unused. It holds the
+    /// connection weakly and reserves nothing.
     fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView;
 
     /// Return one coherent WebRTC/data-channel product-state observation.

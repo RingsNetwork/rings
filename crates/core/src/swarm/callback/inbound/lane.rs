@@ -65,6 +65,19 @@ impl InboundLane {
         }
     }
 
+    /// The lane of the class whose channel lane is `carrier` (one lane per class), or the
+    /// reassembly lane for no carrier: the lane a chunked message's first chunk is charged on,
+    /// so the completed message is dispatched on the lane its reservation sits in (#932).
+    pub(super) fn of_carrier(carrier: Option<ChannelLane>) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|lane| {
+                lane.class()
+                    .is_some_and(|class| Some(class.channel_lane()) == carrier)
+            })
+            .unwrap_or(Self::Reassembly)
+    }
+
     /// Whether a frame of this lane may have arrived on `carrier`, the transport lane whose
     /// credit it took (one lane per class): a lane of known class only on its class's channel
     /// lane, so the priority lane's credit carries DHT control alone. The reassembly lane's class is

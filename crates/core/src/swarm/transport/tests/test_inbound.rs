@@ -404,7 +404,7 @@ fn spawn_inbound_delivery(
 
 fn hold_saturated_application_capacity(
     callback: &SwarmTransportCallback,
-) -> Result<Vec<impl Drop>> {
+) -> Result<Vec<impl Sized>> {
     let lane_capacity = inbound_application_capacity_for_test();
     let peer_capacity = inbound_peer_capacity_for_test();
     let mut capacity_holds = Vec::with_capacity(lane_capacity);
