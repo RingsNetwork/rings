@@ -157,7 +157,21 @@ impl LoopNetwork {
 
     /// The route `g, r₀₂, h, r₁₁, g` to `h`'s registration of `service`.
     pub(super) fn route(&self, service: OnionServiceName) -> Result<OnionRoute> {
-        let hops = session_loop(self.hops.each_ref().map(LoopNode::route_hop));
+        self.route_over(service, self.route_hops())
+    }
+
+    /// The route hops `[g, r₀₂, h, r₁₁]` as the network's nodes register them.
+    pub(super) fn route_hops(&self) -> [OnionRouteHop; 4] {
+        self.hops.each_ref().map(LoopNode::route_hop)
+    }
+
+    /// The route `g, r₀₂, h, r₁₁, g` over `hops` to `h`'s registration of `service`.
+    pub(super) fn route_over(
+        &self,
+        service: OnionServiceName,
+        hops: [OnionRouteHop; 4],
+    ) -> Result<OnionRoute> {
+        let hops = session_loop(hops);
         let [_, _, h, _] = &self.hops;
         Ok(OnionRoute::new(
             service.clone(),

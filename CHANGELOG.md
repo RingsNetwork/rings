@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- An onion session that ends locally before its exit answers the open now reports why it
+  ended, no longer `OnionRouteError::ExitRefused` (#1118). The session driver sends its terminal
+  error to the opener: `LoopBuild` or a link send error for a loop that could not be built or
+  leave, `SessionFailed` for the liveness deadline, a lost reply or the exit's abort, and
+  `SessionFailed` for a driver dropped by its node's stop. `ExitRefused` now means only that
+  the exit answered with a refusal. The local HTTP proxy still answers `502` for every failure
+  to open, with no reason; its log line names the error. No operator step.
+
 - A closed node releases every store it was built over (#1085), so an embedder that stops a
   node and starts it again in one process, on the same stores, opens them. `Provider::close`
   now consumes the provider and runs the close law, each step once the one before has ended:
