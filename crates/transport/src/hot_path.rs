@@ -1,6 +1,7 @@
 //! Operation counters of the hot paths (load-bounds paper, Obligation "Admission complexity",
 //! #938), for the deterministic simulation only: the module exists with the `dummy` feature
-//! alone, so a production build counts nothing and pays nothing.
+//! alone, so a production build counts nothing and pays nothing. Not API: a test instrument of
+//! this workspace, hidden from the docs, and free to change without notice.
 //!
 //! Each hot path counts its events and the operations they cost, per thread, so a
 //! current-thread simulation reads its own counts while other tests run in parallel:

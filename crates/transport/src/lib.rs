@@ -17,6 +17,7 @@ pub mod core;
 pub mod delivery;
 pub mod error;
 #[cfg(feature = "dummy")]
+#[doc(hidden)]
 pub mod hot_path;
 pub mod ice_server;
 pub mod notifier;
