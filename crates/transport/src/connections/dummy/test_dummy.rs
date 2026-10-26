@@ -16,6 +16,7 @@ use super::DummyConnection;
 use super::DummyConnectionState;
 use super::DummySendTarget;
 use super::Event;
+use super::FrameCount;
 use super::CONNS;
 use crate::callback::InboundFrameAdmission;
 use crate::callback::InnerTransportCallback;
@@ -133,7 +134,7 @@ impl ConnectedReceiver {
             .map(Bytes::from)
             .expect("dummy transport frame must serialize");
         Self {
-            remote: Arc::new(DummyConnection::new(callback)),
+            remote: Arc::new(DummyConnection::new(callback, Arc::default())),
             connection_state: Arc::new(Mutex::new(DummyConnectionState {
                 webrtc: WebrtcConnectionState::Connected,
                 data_channel_open_override: None,
@@ -276,6 +277,7 @@ async fn test_queued_dummy_message_holds_its_place_in_the_receiver_window() {
         ChannelLane::default(),
         DummySendTarget::Deliver(Arc::clone(&remote)),
         guarded_test_permit(&connection_state, SendPermit::always()),
+        FrameCount::Payload(Arc::default()),
     )
     .expect("first dummy frame must enter the controlled queue");
     assert_eq!(controlled::pending(), 1);
@@ -318,6 +320,7 @@ async fn test_receiver_credit_refusal_does_not_fail_irrevocable_dummy_send() {
         ChannelLane::default(),
         DummySendTarget::Deliver(remote),
         permit,
+        FrameCount::Payload(Arc::default()),
     )
     .expect("the receiver's credit refusal must not fail the sender");
 
@@ -348,7 +351,7 @@ async fn test_oversized_dummy_frame_is_dropped_before_receiver_dispatch() {
         Notifier::default(),
         NodeReceiveLoad::new(),
     );
-    let remote = Arc::new(DummyConnection::new(callback));
+    let remote = Arc::new(DummyConnection::new(callback, Arc::default()));
     CONNS.insert(remote.rand_id.clone(), Arc::clone(&remote));
     let connection_state = Arc::new(Mutex::new(DummyConnectionState {
         webrtc: WebrtcConnectionState::Connected,
@@ -363,6 +366,7 @@ async fn test_oversized_dummy_frame_is_dropped_before_receiver_dispatch() {
         ChannelLane::default(),
         DummySendTarget::Deliver(Arc::clone(&remote)),
         guarded_test_permit(&connection_state, permit),
+        FrameCount::Payload(Arc::default()),
     )
     .expect("the local send may complete while the receiver drops an oversized frame");
 
@@ -392,7 +396,7 @@ async fn test_pending_dummy_close_fences_an_irrevocable_dispatch_synchronously()
         Notifier::default(),
         NodeReceiveLoad::new(),
     );
-    let connection = Arc::new(DummyConnection::new(callback));
+    let connection = Arc::new(DummyConnection::new(callback, Arc::default()));
     connection.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
     let sender = {
         let connection = Arc::clone(&connection);
@@ -449,14 +453,14 @@ async fn test_cancelling_pending_close_completes_physical_retirement() {
         Notifier::default(),
         NodeReceiveLoad::new(),
     );
-    let local = Arc::new(DummyConnection::new(local_callback));
+    let local = Arc::new(DummyConnection::new(local_callback, Arc::default()));
     let remote_callback = InnerTransportCallback::new(
         "remote-peer",
         Box::new(NoopCallback),
         Notifier::default(),
         NodeReceiveLoad::new(),
     );
-    let remote = Arc::new(DummyConnection::new(remote_callback));
+    let remote = Arc::new(DummyConnection::new(remote_callback, Arc::default()));
     local.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
     remote.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
     local.set_remote_rand_id(remote.rand_id.clone());
@@ -503,7 +507,7 @@ fn test_irrevocable_retirement_drop_outside_runtime_is_panic_free() {
             Notifier::default(),
             NodeReceiveLoad::new(),
         );
-        let connection = Arc::new(DummyConnection::new(callback));
+        let connection = Arc::new(DummyConnection::new(callback, Arc::default()));
         connection.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
         CONNS.insert(connection.rand_id.clone(), Arc::clone(&connection));
         let fence = connection.retirement_fence();
@@ -536,7 +540,7 @@ async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_l
         Notifier::default(),
         NodeReceiveLoad::new(),
     );
-    let local = Arc::new(DummyConnection::new(local_callback));
+    let local = Arc::new(DummyConnection::new(local_callback, Arc::default()));
     local.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
     let remote_callback = InnerTransportCallback::new(
         "remote-peer",
@@ -544,7 +548,7 @@ async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_l
         Notifier::default(),
         NodeReceiveLoad::new(),
     );
-    let remote = Arc::new(DummyConnection::new(remote_callback));
+    let remote = Arc::new(DummyConnection::new(remote_callback, Arc::default()));
     local.set_remote_rand_id(remote.rand_id.clone());
     remote.set_remote_rand_id(local.rand_id.clone());
     CONNS.insert(local.rand_id.clone(), Arc::clone(&local));

@@ -2,6 +2,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 
 use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
@@ -10,6 +11,7 @@ use rings_transport::core::pool::ChannelLane;
 
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
+use crate::message::LinkWindows;
 use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageKind;
@@ -111,11 +113,41 @@ pub(super) struct LogicalInbound {
     message_handler: MessageHandler,
 }
 
-/// The connection stage of the inbound pipeline for one connection: reassembly and admission
-/// gates in front of the logical stage.
+/// The logical stage as a connection keeps it: through its transport, held weakly.
+///
+/// Release law (#1093): nothing a connection owns holds its swarm transport strongly. The
+/// transport owns its connections, and each connection owns its callback and, through the
+/// callback's mailbox, its inbound actor; a strong reference from either would close a cycle
+/// that keeps a dropped swarm alive with everything it holds, its stores included. So the
+/// callback and the actor keep the logical stage weakly and bind it for one event at a time:
+///
+/// ```text
+///   ─▶ strong   ┈▷ weak
+///
+///   SwarmTransport ─▶ connection ─▶ callback ─▶ mailbox ─▶ inbound actor
+///         ▲                             ┊                        ┊
+///         └┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┴┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┘
+///                  both through InboundProcessor<WeakLogical>
+///
+///   one event:   InboundProcessor<WeakLogical> ─upgrade─▶ InboundProcessor<LogicalInbound>
+///                                                          ─▶ SwarmTransport, for its span
+/// ```
+///
+/// An upgrade yields the stage while the transport lives, and `None` once it is gone, which it
+/// then stays: an event that arrives after the transport is gone has nothing to be delivered to.
 #[derive(Clone)]
-pub(super) struct InboundProcessor {
-    logical: LogicalInbound,
+pub(crate) struct WeakLogical(Weak<SwarmTransport>);
+
+/// The connection stage of the inbound pipeline for one connection: reassembly and admission
+/// gates in front of the logical stage, reached through `L`.
+///
+/// What a connection keeps reaches it weakly (`InboundProcessor<WeakLogical>`, the release
+/// law of [`WeakLogical`]); handling one event binds it (`InboundProcessor<LogicalInbound>`,
+/// the default, which every stage that acts on a frame takes). Both forms share one set of
+/// per-connection state, so binding changes only how the logical stage is reached.
+#[derive(Clone)]
+pub(super) struct InboundProcessor<L = LogicalInbound> {
+    logical: L,
     reassembler: Arc<FuturesMutex<MessageReassembler>>,
     reassembly_clock: ReassemblyClock,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
@@ -129,6 +161,10 @@ pub(super) struct InboundProcessor {
     /// resident until its slot is needed for a new one (the residence law of
     /// `swarm::session_link`). It lives and dies with the connection, and holds no frame.
     session_link: Arc<Mutex<DelegationLessor>>,
+    /// The volatile replay windows of this connection's link-local transactions (#1081). They
+    /// live and die with the connection, so each window spans one link generation and is
+    /// released with it (durable-records, Law Window by classification).
+    link_windows: Arc<FuturesMutex<LinkWindows>>,
 }
 
 /// What the transport handed over with one frame and takes back when the frame is done: the
@@ -184,11 +220,19 @@ enum InboundGate {
     Refused,
 }
 
-/// The transport callback of one connection: its inbound pipeline and lifecycle handling.
-pub(crate) struct SwarmTransportCallback {
-    processor: InboundProcessor,
+/// The transport callback of one connection: its inbound pipeline and lifecycle handling,
+/// reaching the logical stage through `L`.
+///
+/// The transport keeps the callback in the connection it serves, so the callback it keeps
+/// reaches its transport weakly (`L = WeakLogical`, the default; the release law of
+/// [`WeakLogical`]) and acts on each event as the [`BoundCallback`] for that event.
+pub(crate) struct SwarmTransportCallback<L = WeakLogical> {
+    processor: InboundProcessor<L>,
     inbound: InboundMailbox,
 }
+
+/// The callback of one connection bound to its transport for the span of one event.
+type BoundCallback = SwarmTransportCallback<LogicalInbound>;
 
 pub(super) struct PreparedInboundFrame {
     payload: MessagePayload,

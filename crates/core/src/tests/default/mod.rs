@@ -66,6 +66,8 @@ mod test_session_link;
 mod test_stabilization;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_stabilization_failover;
+#[cfg(all(feature = "std", not(feature = "dummy")))]
+mod test_swarm_release;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_sync_storm;
 
@@ -262,6 +264,7 @@ fn fixture_builder(key: &SecretKey, ice_servers: &str) -> Result<SwarmBuilder> {
     .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
     .dht_virtual_nodes(0)
     .replay_storage(crate::tests::volatile_replay_storage())
+    .relay_replication(crate::tests::ungated_relay_replication())
     .origin_quota(fixture_origin_quota()?))
 }
 

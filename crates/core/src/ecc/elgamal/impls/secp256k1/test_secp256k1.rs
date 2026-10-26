@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use elliptic_curve::sec1::ToEncodedPoint;
+use elliptic_curve::sec1::ToSec1Point;
 use k256::ProjectivePoint as K256ProjectivePoint;
 use rand::RngCore;
 use rand::SeedableRng;
@@ -25,7 +25,7 @@ fn round_trip(payload: &[u8], key: &SecretKey, seed: u64) -> Vec<u8> {
 }
 
 fn affine_xy(point: Affine) -> ([u8; 32], [u8; 32]) {
-    let encoded = point.to_encoded_point(false);
+    let encoded = point.to_sec1_point(false);
     let bytes = encoded.as_bytes();
     let mut x = [0u8; 32];
     let mut y = [0u8; 32];

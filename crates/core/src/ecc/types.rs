@@ -36,35 +36,40 @@ impl PublicKey<33> {
         Self::from_u8(value)
     }
 
-    /// from raw [u8], the length can be 32, or 33
-    /// Odd flag can be "02" (odd), "03" (even) or "00" (unknown)
-    /// The format is <odd_flat (1 bytes), x_coordinate (32 bytes)>
-    /// For 32 bytes case, we mark the odd flas as 00 (unknown)
-    /// For 64 bytes case, we compress the public key into compressed public key
+    /// Build a 33-byte key from its 32-, 33- or 64-byte external form.
+    ///
+    /// ```text
+    /// 32 bytes  k        ↦ 0x00 ‖ k              an Ed25519 verifying key
+    /// 33 bytes  t ‖ x    ↦ t ‖ x                 already in the 33-byte form
+    /// 64 bytes  x ‖ y    ↦ (0x02 | y mod 2) ‖ x  SEC1 §2.3.3 point compression
+    /// ```
+    ///
+    /// The prefix `0x00` is the Ed25519 embedding (`From<ed25519_dalek::VerifyingKey>`), not a
+    /// curve point with an unknown y-parity: no SEC1 decoder accepts it. For `x ‖ y` on
+    /// secp256k1 or P-256 the result equals the library's `to_sec1_point(true)`, so it decodes to
+    /// `(x, y)` in any SEC1 consumer.
     pub fn from_u8(value: &[u8]) -> Result<PublicKey<33>> {
-        let mut s = value.to_vec();
-        let data: Vec<u8> = match s.len() {
-            32 => {
-                s.reverse();
-                s.push(0);
-                s.reverse();
-                Ok(s)
-            }
-            33 => Ok(s),
+        let (tag, x): (u8, &[u8]) = match value.len() {
+            32 => (ED25519_TAG, value),
+            33 => value
+                .split_first()
+                .map(|(tag, x)| (*tag, x))
+                .ok_or(Error::PublicKeyBadFormat)?,
             64 => {
-                let pk: [u8; 64] = value.try_into().map_err(|_| Error::PublicKeyBadFormat)?;
-                let mut x: Vec<u8> = pk.iter().take(32).copied().collect();
-                let y_last = pk.last().copied().ok_or(Error::PublicKeyBadFormat)?;
-                let y_odd = if y_last & 1 == 1 { 2u8 } else { 3u8 };
-                x.reverse();
-                x.push(y_odd);
-                x.reverse();
-                Ok(x)
+                let (x, y) = value
+                    .split_at_checked(32)
+                    .ok_or(Error::PublicKeyBadFormat)?;
+                let y_last = y.last().copied().ok_or(Error::PublicKeyBadFormat)?;
+                (sec1_compressed_tag(y_last), x)
             }
-            _ => Err(Error::PublicKeyBadFormat),
-        }?;
-        let pub_data: [u8; 33] = data.as_slice().try_into()?;
-        Ok(PublicKey(pub_data))
+            _ => return Err(Error::PublicKeyBadFormat),
+        };
+        let x: [u8; 32] = x.try_into().map_err(|_| Error::PublicKeyBadFormat)?;
+        let mut data = [0u8; 33];
+        data.iter_mut()
+            .zip(std::iter::once(tag).chain(x))
+            .for_each(|(slot, byte)| *slot = byte);
+        Ok(PublicKey(data))
     }
 
     /// convert pubkey to base58_string
@@ -77,6 +82,19 @@ impl PublicKey<33> {
         let v = hex::decode(value)?;
         Self::from_u8(v.as_slice())
     }
+}
+
+/// The prefix of the Ed25519 embedding `0x00 ‖ k`: no 33-byte SEC1 encoding starts with it, as
+/// the SEC1 identity `0x00` is a single byte.
+const ED25519_TAG: u8 = 0x00;
+
+/// The SEC1 §2.3.3 tag of a compressed point whose y-coordinate is even.
+const SEC1_TAG_EVEN_Y: u8 = 0x02;
+
+/// The SEC1 §2.3.3 tag of a compressed point whose y-coordinate ends in the byte `y_last`:
+/// `0x02` for an even `y`, `0x03` for an odd one (pure).
+const fn sec1_compressed_tag(y_last: u8) -> u8 {
+    SEC1_TAG_EVEN_Y | (y_last & 1)
 }
 
 impl<const SIZE: usize> PublicKey<SIZE> {

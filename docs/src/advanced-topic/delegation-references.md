@@ -22,8 +22,11 @@ carry more than one delegation: an account can re-authorize a new lifetime for i
 account can sign a delegation for a key it does not hold, because a delegation needs no proof of
 possession. `delegatee_did` therefore does not determine which delegator a message is attributed to;
 the content address does. A resolved frame is exactly the payload that would have travelled
-inline, so verification, origin attribution, and the transaction digest used for replay and
-fork evidence do not depend on how a slot was encoded.
+inline, so the verification verdict, origin attribution, and the transaction digest used for
+replay and fork evidence do not depend on how a slot was encoded. Only the work does: a
+referenced slot resolves from the lessor table, whose every entry was leased from a frame that
+verified in full, so its delegator's signature is not checked again; its expiry and the
+delegatee's signature are (#1089).
 
 Neither signature covers the delegation slot (both sign the transaction hash), so a forwarding hop
 re-encodes the origin slot for its own next link without touching the origin's signature.

@@ -56,12 +56,25 @@ Errors follow JSON-RPC 2.0:
   connection and handshake, `3xx` encoding, `5xx` DID, method and permission, `6xx` connect,
   send and DHT entries, `8xx` data, storage and configuration, `9xx` files, `10xx`
   serialization, `11xx` core, `15xx` extensions and runtime, `16xx` onion.
+* `210` is a handshake with a node of another wire version (see [Wire version](#wire-version)).
+  Its `data` names both: `{"ours": 1, "theirs": 2}`, with `theirs` null for a node from before
+  wire versioning. A client matches the code and the data, never the message.
+
+### Wire version
+
+Every frame a node sends, and so every offer and answer of a handshake, opens with the node's
+wire version, a number that goes up by one with every change of the wire that a node of the
+previous version would reject or misread. It is independent of the crate version. Two nodes of
+different wire versions never connect: each refuses the other's offer or answer before decoding
+it, with error `210` over JSON-RPC. A client learns a node's wire version before joining it
+from the `wire_version` of its public `nodeDid`, and its crate version from the `x-node-version`
+header of every API response.
 
 ## Methods
 
 | Method | Params | Result |
 |---|---|---|
-| [`nodeDid`](#nodedid) | — | `did` |
+| [`nodeDid`](#nodedid) | — | `did`, `wire_version` |
 | [`nodeInfo`](#nodeinfo) | — | `version`, `swarm` |
 | [`connectPeerViaHttp`](#connectpeerviahttp) | `url`, `api_token?` | `did` |
 | [`connectWithDid`](#connectwithdid) | `did` | — |
@@ -90,14 +103,18 @@ A field marked `?` may be omitted. A method whose result is `—` returns `{}` o
 The DID of this node. Public on the external listener.
 
 * Params: `{}`.
-* Result: `did`, the node's DID as a hex string.
+* Result:
+  * `did`: the node's DID as a hex string;
+  * `wire_version`: the node's [wire version](#wire-version); absent from a node before wire
+    versioning.
 
 ```json
 {"jsonrpc": "2.0", "id": 1, "method": "nodeDid", "params": {}}
 ```
 
 ```json
-{"jsonrpc": "2.0", "id": 1, "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0"}}
+{"jsonrpc": "2.0", "id": 1,
+ "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0", "wire_version": 1}}
 ```
 
 ### nodeInfo
@@ -116,7 +133,8 @@ The node's version and an inspection of its swarm.
 ### connectPeerViaHttp
 
 Connect to the peer behind a JSON-RPC endpoint by the HTTP handshake: this node calls the
-remote `nodeDid`, sends it an offer with `answerOffer`, and accepts the answer.
+remote `nodeDid`, sends it an offer with `answerOffer`, and accepts the answer. A peer whose
+`nodeDid` states another wire version, or none, is refused with error `210` before any offer.
 
 * Params:
   * `url`: the remote endpoint, normally its external listener;
@@ -168,7 +186,8 @@ passes it to its `answerOffer`.
 
 Answer an encoded offer. Public on the external listener.
 
-* Params: `offer`, as returned by `createOffer`.
+* Params: `offer`, as returned by `createOffer`. An offer of another wire version is refused
+  with error `210`.
 * Result: `answer`, the encoded answer. The offer prevails over this node's own pending overlay
   offer to the offering peer, which is released. A node of 0.34.2 or earlier returns that offer
   instead, as a counter-offer, when it prevails on the DID tie-break: the caller answers it with
@@ -255,8 +274,13 @@ The signed descriptors of the online-node registry.
   `node_type` (`Native`, `Browser` or `Ffi`), `network_id`, `storage_redundancy`,
   `dht_virtual_nodes`, `capabilities` (`{onion_relay, holds_relay_mail}`: the relay's process
   epoch or `null`, and whether the node keeps a relay store and so holds relay mail),
-  `endpoint_hint`, `started_at_ms`, `heartbeat_at_ms`, `expires_at_ms`, `version` and
-  `signature`.
+  `endpoint_hint`, `started_at_ms`, `heartbeat_at_ms`, `fresh_for_ms`, `expires_at_ms`,
+  `version` and `signature`. A descriptor is a signed lease (#918): `expires_at_ms` is the
+  lease end and `fresh_for_ms` the freshness window, both signed, and `heartbeat_at_ms` is when
+  the serving node last heard it (its registry element's dot), which is not signed. A descriptor
+  is live while the time is at most the lease end and at most `heartbeat_at_ms + fresh_for_ms`
+  plus the 3 s skew tolerance; a lease ending more than 10 minutes and 3 s ahead, or a window
+  over 10 minutes, is never live.
 
 ### lookupOnionExits
 
@@ -268,7 +292,7 @@ The signed onion-exit descriptors.
 * Result: `exits`, a list of descriptors with `did`, `public_key`, `delegatee_public_key`,
   `process_epoch`, `node_type`, `network_id`, `service`, `policy` (`{allowed_targets,
   denied_targets, max_sessions, max_bytes_per_minute}`), `started_at_ms`, `heartbeat_at_ms`,
-  `expires_at_ms`, `version` and `signature`.
+  `fresh_for_ms`, `expires_at_ms`, `version` and `signature`, read as in `lookupOnlineNodes`.
 
 ### peerMeasurement
 

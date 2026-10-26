@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
+use crate::message::handlers::HandlerContext;
 use crate::message::types::NotifyPredecessorSend;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
@@ -11,7 +12,12 @@ use crate::message::MessagePayload;
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &NotifyPredecessorSend) -> Result<()> {
+    async fn handle(
+        &self,
+        context: &HandlerContext<'_>,
+        msg: &NotifyPredecessorSend,
+    ) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])

@@ -314,9 +314,13 @@ pub struct OnlineNodeDescriptorInfo {
     pub endpoint_hint: Option<String>,
     /// Descriptor creation timestamp in Unix milliseconds.
     pub started_at_ms: u64,
-    /// Last heartbeat timestamp in Unix milliseconds.
+    /// When the serving node last heard the descriptor, in Unix milliseconds: the dot of its
+    /// registry element. Not signed.
     pub heartbeat_at_ms: u64,
-    /// Descriptor expiration timestamp in Unix milliseconds.
+    /// Signed freshness window in milliseconds: a reader lists the descriptor only while it was
+    /// heard within it.
+    pub fresh_for_ms: u64,
+    /// Signed lease end in Unix milliseconds.
     pub expires_at_ms: u64,
     /// Rings node version that produced the descriptor.
     pub version: String,
@@ -365,9 +369,13 @@ pub struct OnionExitDescriptorInfo {
     pub policy: OnionExitPolicyInfo,
     /// Descriptor creation timestamp in Unix milliseconds.
     pub started_at_ms: u64,
-    /// Last heartbeat timestamp in Unix milliseconds.
+    /// When the serving node last heard the descriptor, in Unix milliseconds: the dot of its
+    /// registry element. Not signed.
     pub heartbeat_at_ms: u64,
-    /// Descriptor expiration timestamp in Unix milliseconds.
+    /// Signed freshness window in milliseconds: a reader lists the descriptor only while it was
+    /// heard within it.
+    pub fresh_for_ms: u64,
+    /// Signed lease end in Unix milliseconds.
     pub expires_at_ms: u64,
     /// Rings node version that produced the descriptor.
     pub version: String,
@@ -567,4 +575,8 @@ pub struct NodeDidRequest {}
 pub struct NodeDidResponse {
     /// Decentralized identifier of the local node.
     pub did: String,
+    /// The local node's wire version (#1104), which a node joining it over HTTP must share;
+    /// absent from a node before wire versioning.
+    #[serde(default)]
+    pub wire_version: Option<u16>,
 }

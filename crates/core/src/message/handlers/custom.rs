@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
+use crate::message::handlers::HandlerContext;
 use crate::message::types::CustomMessage;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
@@ -40,7 +41,8 @@ pub(crate) fn custom_message_effects<'payload>(
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<CustomMessage> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, _: &CustomMessage) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, _: &CustomMessage) -> Result<()> {
+        let ctx = context.payload();
         let destination = self.destination_reachability(ctx.transaction.destination)?;
         self.run_effects(custom_message_effects(self.dht.did, ctx, destination))
             .await
@@ -97,14 +99,18 @@ mod tests {
 
         let (exhausted, message) = payload_through(&relay, &destination, HopBudget::EXHAUSTED)?;
         assert!(matches!(
-            handler.handle(&exhausted, &message).await,
+            handler
+                .handle(&HandlerContext::unbound_for_test(&exhausted), &message)
+                .await,
             Err(Error::RelayHopBudgetExhausted)
         ));
         assert_no_more_msg([&destination]).await;
 
         let last_forward = HopBudget::try_from(1)?;
         let (forwardable, message) = payload_through(&relay, &destination, last_forward)?;
-        handler.handle(&forwardable, &message).await?;
+        handler
+            .handle(&HandlerContext::unbound_for_test(&forwardable), &message)
+            .await?;
         let received = destination
             .listen_once()
             .await

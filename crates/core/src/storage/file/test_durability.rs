@@ -22,7 +22,13 @@
 //! The law: an authoritative plan leaves the record old or new at every crash point (never
 //! torn), and new (or removed) once the plan completes. A disposable plan, which skips the
 //! flushes, can tear a record; that case is asserted too, so the model discriminates.
+//!
+//! A batch (#916) is read per record, each record's effects independent of the others': its
+//! data is durable iff a push and then the barrier followed its write (the Apple reading, the
+//! weaker one: elsewhere the push alone is durable), and its rename iff a directory flush
+//! followed it.
 
+use super::batch::BatchStep;
 use super::PutStep;
 use super::RecordAuthority;
 use super::RemoveStep;
@@ -66,6 +72,25 @@ fn put_effects(steps: &[PutStep]) -> PutEffects {
                 PutStep::Rename => effects.renamed = true,
                 PutStep::SyncDirectory => effects.rename_durable = effects.renamed,
                 PutStep::Witness => effects.marked = true,
+            }
+            effects
+        })
+}
+
+/// The effects of the first `steps` of a batch plan on any one of its records (pure): a push
+/// makes the data durable only once the barrier follows it.
+fn batch_effects(steps: &[BatchStep]) -> PutEffects {
+    let mut pushed = false;
+    steps
+        .iter()
+        .fold(PutEffects::default(), |mut effects, step| {
+            match step {
+                BatchStep::WriteTemporaries => effects.data = true,
+                BatchStep::PushTemporaries => pushed = effects.data,
+                BatchStep::Barrier => effects.data_durable = pushed,
+                BatchStep::Renames => effects.renamed = true,
+                BatchStep::SyncDirectory => effects.rename_durable = effects.renamed,
+                BatchStep::Witness => effects.marked = true,
             }
             effects
         })
@@ -235,4 +260,70 @@ fn test_the_presence_model_rejects_a_misordered_plan() {
     let early = put_effects(&[PutStep::WriteTemporary, PutStep::Rename, PutStep::Witness]);
     assert!(!marker_names_a_record(early));
     assert!(removal_may_orphan_the_marker(&[RemoveStep::Remove]));
+}
+
+/// The batch plans themselves: dropping or reordering the barrier or a flush fails here first.
+#[test]
+fn test_batch_plans_barrier_before_the_renames() {
+    assert_eq!(RecordAuthority::Authoritative.batch_plan(), [
+        BatchStep::WriteTemporaries,
+        BatchStep::PushTemporaries,
+        BatchStep::Barrier,
+        BatchStep::Renames,
+        BatchStep::SyncDirectory,
+        BatchStep::Witness,
+    ]);
+    assert_eq!(RecordAuthority::DurableCache.batch_plan(), [
+        BatchStep::WriteTemporaries,
+        BatchStep::PushTemporaries,
+        BatchStep::Barrier,
+        BatchStep::Renames,
+        BatchStep::SyncDirectory,
+    ]);
+    assert_eq!(RecordAuthority::Disposable.batch_plan(), [
+        BatchStep::WriteTemporaries,
+        BatchStep::Renames,
+    ]);
+}
+
+/// Atomicity per record of a durable batch (#916): at every crash point each record of the
+/// batch is old or new, never torn, its marker names a record that survives, and every record
+/// is new once the plan completes.
+#[test]
+fn test_a_durable_batch_never_tears_a_record_at_any_crash_point() {
+    for authority in [
+        RecordAuthority::Authoritative,
+        RecordAuthority::Retained,
+        RecordAuthority::DurableCache,
+    ] {
+        let plan = authority.batch_plan();
+        for crash in 0..=plan.len() {
+            let effects = batch_effects(plan.get(..crash).unwrap_or_default());
+            let outcomes = put_outcomes(effects);
+            assert!(
+                outcomes
+                    .iter()
+                    .all(|outcome| matches!(outcome, Outcome::Old | Outcome::New)),
+                "{authority:?}: crash after {crash} steps: {outcomes:?}"
+            );
+            assert!(
+                marker_names_a_record(effects),
+                "{authority:?}: crash after {crash} steps"
+            );
+        }
+        assert_eq!(put_outcomes(batch_effects(plan)), [Outcome::New]);
+    }
+}
+
+/// The batch model discriminates: without the barrier a pushed record is not durable on Apple
+/// targets, so a crash after the flushed rename can tear it.
+#[test]
+fn test_a_batch_without_its_barrier_can_be_torn() {
+    let unbarriered = batch_effects(&[
+        BatchStep::WriteTemporaries,
+        BatchStep::PushTemporaries,
+        BatchStep::Renames,
+        BatchStep::SyncDirectory,
+    ]);
+    assert!(put_outcomes(unbarriered).contains(&Outcome::Torn));
 }

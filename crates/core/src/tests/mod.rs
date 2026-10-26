@@ -150,6 +150,31 @@ pub(crate) fn stamped_delta(
         .clone())
 }
 
+/// A removes-only data carrier of `count` removes of distinct values tagged `salt`, issued at
+/// `issued_at_ms`, live for an hour from now.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn removes_only_carrier(
+    did: Did,
+    count: usize,
+    issued_at_ms: u128,
+    salt: &str,
+) -> Result<Entry> {
+    let version = EntryVersion::new(issued_at_ms, Did::from(1u32), Did::from(2u32));
+    let mut entry = live_entry(did, Vec::new(), EntryKind::Data);
+    entry.crdt.tombstones = (0..count)
+        .map(|index| {
+            let index =
+                u32::try_from(index).map_err(|_| crate::error::Error::MessageSizeOverflow)?;
+            let value = Bytes::from(format!("{salt}-{index}"));
+            Ok(crate::dht::entry::EntryTombstone::of(&value, EntryDot {
+                version,
+                index,
+            }))
+        })
+        .collect::<Result<_>>()?;
+    Ok(entry)
+}
+
 /// A placement outside the affine replica set of `entry_key` under `redundancy`.
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(crate) fn non_affine_placement(entry_key: Did, redundancy: u16) -> Result<Did> {
@@ -172,6 +197,17 @@ pub(crate) fn non_affine_placement(entry_key: Did, redundancy: u16) -> Result<Di
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(crate) fn volatile_relay_storage() -> crate::dht::EntryStorage {
     Box::new(crate::storage::MemStorage::new())
+}
+
+/// Relay replication with the default `r` and no age gate: the named choice of a fixture whose
+/// nodes hold relay mail from their first moment, where production waits for the age gate
+/// (`Law (Age gate)`, #777).
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) fn ungated_relay_replication() -> crate::dht::RelayReplication {
+    crate::dht::RelayReplication {
+        age_gate_ms: 0,
+        ..crate::dht::RelayReplication::default()
+    }
 }
 
 /// An in-memory replay store: the named choice of a fixture whose replay windows need not
@@ -201,6 +237,36 @@ pub(crate) fn held_inbox_for(destination: Did, holder: &DelegateeKey) -> Result<
 }
 
 pub(crate) mod activity;
+
+/// The payload frames one node's transport dispatched since this value was taken.
+///
+/// A test that asserts how many frames it sent counts them here, not with the thread's
+/// `dummy_controlled::sent_count`. Every node of a test runs on the test's thread, so the
+/// thread's count also holds what a peer sends in answer, such as a probe offer, a storage
+/// report or a confirmation, whenever the peer's handler is polled before the assertion (#1034).
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) struct DispatchedFrames<'a> {
+    /// The node's transport.
+    transport: &'a SwarmTransport,
+    /// Its count when this value was taken.
+    before: usize,
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl<'a> DispatchedFrames<'a> {
+    /// Count the payload frames `transport` dispatches from now.
+    pub(crate) fn from_now(transport: &'a SwarmTransport) -> Self {
+        Self {
+            transport,
+            before: transport.dispatched_payload_frames_for_test(),
+        }
+    }
+
+    /// The payload frames dispatched since [`Self::from_now`].
+    pub(crate) fn count(&self) -> usize {
+        self.transport.dispatched_payload_frames_for_test() - self.before
+    }
+}
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub mod wasm;
 

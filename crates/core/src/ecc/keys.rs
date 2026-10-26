@@ -501,7 +501,7 @@ impl SigningSecretKey {
 fn secp256r1_public_key(secret_key: &SecretKey) -> Result<PublicKey<33>> {
     let sk_bytes: elliptic_curve::FieldBytes<p256::NistP256> = secret_key.into();
     let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
-    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let encoded = signing_key.verifying_key().to_sec1_point(false);
     let uncompressed = encoded
         .as_bytes()
         .get(1..)

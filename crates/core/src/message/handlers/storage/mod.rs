@@ -28,6 +28,8 @@ use crate::error::SendClass;
 use crate::message::effects::core_actor_steps;
 use crate::message::effects::yield_core_actor_step;
 use crate::message::effects::CoreEffect;
+use crate::message::handlers::relay_replica::replicate_taken_hold;
+use crate::message::handlers::HandlerContext;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
 use crate::message::types::RelayCarrierHeld;
@@ -39,6 +41,7 @@ use crate::message::types::SyncEntriesWithSuccessorReport;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
+use crate::message::Principal;
 use crate::swarm::transport::egress::Application;
 use crate::swarm::transport::egress::Discipline;
 use crate::swarm::transport::egress::Egress;
@@ -90,17 +93,18 @@ async fn reset_storage_relay_destination(
         .await
 }
 
-/// Repair the misses a remote lookup observed for `entry`; a handler runs it, so each repair is
-/// only queued.
+/// Repair the misses a remote lookup observed for `entry`, whose reply `introducer` delivered;
+/// a handler runs it, so each repair is only queued.
 async fn repair_observed_storage_misses(
     transport: Arc<SwarmTransport>,
     entry: Entry,
+    introducer: Principal,
     redundancy: u16,
 ) -> Result<()> {
     let misses = transport.take_storage_misses(entry.did, redundancy)?;
     let repair = transport
         .dht
-        .read_repair_entry(entry, &misses, redundancy)
+        .read_repair_entry(entry, introducer, &misses, redundancy)
         .await?;
     run_storage_repair_transport_effects(&transport, &transport.protocol_egress(), repair).await
 }
@@ -145,7 +149,7 @@ pub(crate) async fn handle_storage_fetch_act(
             let misses = evidence.misses;
             let repair = transport
                 .dht
-                .read_repair_entry(evidence.entry, &misses, redundancy)
+                .read_repair_entry(evidence.entry, Principal::Local, &misses, redundancy)
                 .await?;
             run_storage_repair_transport_effects(&transport, sender, repair).await?;
         }
@@ -239,20 +243,25 @@ pub(super) async fn handle_storage_store_act(
 }
 
 /// Apply or route `msg`. A relay hold from another node is answered to its writer: the holder
-/// acknowledges one it took (`RelayCarrierHeld`), and a target refuses one it does not take
-/// (`is_unplaced_hold`, `RelayCarrierRefused`). The writer keeps the hold until acknowledged,
-/// so an answer that is lost costs a resend, not the hold.
+/// replicates one it took to the other members of its key and acknowledges it
+/// (`RelayCarrierHeld`) once they all hold it, at once when they already do (`Law (Replicated
+/// hold)`, #777); a target refuses one it does not take (`is_unplaced_hold`,
+/// `RelayCarrierRefused`). The writer keeps the hold until acknowledged, so an answer that is
+/// lost costs a resend, not the hold.
 async fn handle_placed_entry_operation(
     handler: &MessageHandler,
-    ctx: &MessagePayload,
+    context: &HandlerContext<'_>,
     msg: &PlacedEntryOperation,
 ) -> Result<()> {
-    let result = place_entry_operation(handler, ctx, msg).await;
+    let ctx = context.payload();
+    let result = place_entry_operation(handler, context, msg).await;
     let is_hold = matches!(&msg.op, EntryOperation::Extend(entry) if entry.kind.is_relay_inbox());
     if is_hold && ctx.transaction.origin() != handler.dht.did {
         let hold = RelayHoldDigest::of(&msg.op)?;
         let answer = match &result {
-            Ok(()) => Some(Message::RelayCarrierHeld(RelayCarrierHeld { hold })),
+            Ok(()) => replicate_taken_hold(&handler.transport, &msg.op, ctx.transaction.origin())
+                .await?
+                .then_some(Message::RelayCarrierHeld(RelayCarrierHeld { hold })),
             Err(error) if is_unplaced_hold(error) => {
                 Some(Message::RelayCarrierRefused(RelayCarrierRefused { hold }))
             }
@@ -276,18 +285,37 @@ async fn handle_placed_entry_operation(
 /// Apply `msg` here when this node accepts its placement, or route it on.
 async fn place_entry_operation(
     handler: &MessageHandler,
-    ctx: &MessagePayload,
+    context: &HandlerContext<'_>,
     msg: &PlacedEntryOperation,
 ) -> Result<()> {
+    let ctx = context.payload();
     msg.validate_placement(handler.transport.storage_redundancy())?;
 
     let dht = &handler.dht;
-    match dht.operate_route(msg.placement, msg.op.kind())? {
+    // A recipient removes from the member it read its inbox from, which applies the removal as a
+    // member of the key; repair carries the tombstone to the other members (#777).
+    let route = match &msg.op {
+        EntryOperation::Tombstone(entry)
+            if entry.kind.is_relay_inbox() && dht.is_relay_member(msg.placement)? =>
+        {
+            OperateRoute::Owned
+        }
+        op => dht.operate_route(msg.placement, op.kind())?,
+    };
+    match route {
         OperateRoute::Owned => {
             let now_ms = get_epoch_ms();
-            let op = msg.op.clone().stamped(now_ms, dht.did)?;
-            dht.operate_storage_entry(now_ms, msg.placement, op, ctx.transaction.origin())
-                .await
+            let op = dht
+                .stamp_operation(msg.op.clone(), now_ms, Some(msg.placement))
+                .await?;
+            dht.operate_storage_entry(
+                now_ms,
+                msg.placement,
+                op,
+                ctx.transaction.origin(),
+                context.introducer(),
+            )
+            .await
         }
         // A relay carrier is sent to the holder its writer's view names, never routed toward
         // one: a holder that disagrees refuses it rather than pass it on (`dht::relay_holder`).
@@ -300,7 +328,7 @@ async fn place_entry_operation(
 
 /// Execute copy-only storage repair actions through `egress`, under its discipline: the Swarm
 /// storage API waits for each repair's admission, a handler only queues it.
-async fn run_storage_repair_transport_effects<D: Discipline>(
+pub(crate) async fn run_storage_repair_transport_effects<D: Discipline>(
     transport: &SwarmTransport,
     egress: &Egress<'_, D>,
     act: PeerRingAction,
@@ -390,6 +418,22 @@ pub(crate) async fn operate_entry(
     handle_storage_store_act(transport.clone(), action, attempts).await
 }
 
+/// Remove `removal`, the recipient's tombstone of elements of its inbox, at `member`, the member
+/// of its inbox key it read them from, in one attempt (`Attempts::Single`): the member applies it
+/// as a member of the key, and repair carries it to the other members (#777). At this node
+/// itself, when it is that member, it is applied here.
+pub(crate) async fn remove_relay_elements_at(
+    transport: &Arc<SwarmTransport>,
+    removal: Entry,
+    member: Did,
+) -> Result<()> {
+    let action = transport
+        .dht
+        .operate_relay_removal_at(EntryOperation::Tombstone(removal), member)
+        .await?;
+    handle_storage_store_act(transport.clone(), action, Attempts::Single).await
+}
+
 fn next_hop_for_sync_entries(
     handler: &MessageHandler,
     ctx: &MessagePayload,
@@ -434,7 +478,8 @@ async fn report_synced_entries(
 impl HandleMsg<SearchEntry> for MessageHandler {
     /// Look up the one placement `msg` interrogates: a value stored here is answered at once,
     /// otherwise the search is forwarded toward the placement's owner.
-    async fn handle(&self, ctx: &MessagePayload, msg: &SearchEntry) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &SearchEntry) -> Result<()> {
+        let ctx = context.payload();
         // Redundancy 1: the lookup covers `msg.placement` alone, the sender's other placements
         // are interrogated by their own searches.
         let action = self.dht.entry_lookup(msg.placement, 1).await?;
@@ -445,7 +490,8 @@ impl HandleMsg<SearchEntry> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<FoundEntry> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &FoundEntry) -> Result<()> {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &FoundEntry) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
@@ -464,16 +510,26 @@ impl HandleMsg<FoundEntry> for MessageHandler {
         )?;
         if let Some(data) = found_entry {
             cache_lookup_reply(&self.transport, msg.resource, msg.redundancy, data.clone()).await?;
-            repair_observed_storage_misses(self.transport.clone(), data.clone(), msg.redundancy)
-                .await?;
+            repair_observed_storage_misses(
+                self.transport.clone(),
+                data.clone(),
+                context.introducer(),
+                msg.redundancy,
+            )
+            .await?;
         } else if !msg.misses.is_empty() {
             if let Some(entry) = self
                 .dht
                 .local_cache_held(msg.resource, crate::utils::get_epoch_ms())
                 .await?
             {
-                repair_observed_storage_misses(self.transport.clone(), entry, msg.redundancy)
-                    .await?;
+                repair_observed_storage_misses(
+                    self.transport.clone(),
+                    entry,
+                    context.introducer(),
+                    msg.redundancy,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -483,8 +539,8 @@ impl HandleMsg<FoundEntry> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<PlacedEntryOperation> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &PlacedEntryOperation) -> Result<()> {
-        handle_placed_entry_operation(self, ctx, msg).await
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &PlacedEntryOperation) -> Result<()> {
+        handle_placed_entry_operation(self, context, msg).await
     }
 }
 
@@ -492,7 +548,12 @@ impl HandleMsg<PlacedEntryOperation> for MessageHandler {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
     // received remote sync entry request
-    async fn handle(&self, ctx: &MessagePayload, msg: &SyncEntriesWithSuccessor) -> Result<()> {
+    async fn handle(
+        &self,
+        context: &HandlerContext<'_>,
+        msg: &SyncEntriesWithSuccessor,
+    ) -> Result<()> {
+        let ctx = context.payload();
         if let Some(next) = next_hop_for_sync_entries(self, ctx, msg)? {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, Some(next))])
@@ -502,7 +563,7 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
         let sender = ctx.transaction.origin();
         let acks = self
             .transport
-            .persist_storage_sync_entries(msg, sender)
+            .persist_storage_sync_entries(msg, sender, context.introducer())
             .await?;
         if msg.purpose.permits_source_cleanup() {
             if let Err(e) =
@@ -520,9 +581,10 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
 impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
     async fn handle(
         &self,
-        ctx: &MessagePayload,
+        context: &HandlerContext<'_>,
         msg: &SyncEntriesWithSuccessorReport,
     ) -> Result<()> {
+        let ctx = context.payload();
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([CoreEffect::forward_payload(ctx, None)])

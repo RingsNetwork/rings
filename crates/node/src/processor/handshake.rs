@@ -10,6 +10,7 @@ use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
+use rings_core::message::PeerWireVersion;
 use rings_core::swarm::ConnectionAttempt;
 use rings_rpc::protos::rings_node::AcceptAnswerRequest;
 use rings_rpc::protos::rings_node::AnswerOfferRequest;
@@ -53,7 +54,7 @@ impl RemoteHandshake for rings_rpc::jsonrpc::Client {
         .await
         .map_err(Error::from)?
         .answer;
-        MessagePayload::from_encoded(&Encoded::from(reply)).map_err(|_| Error::DecodeError)
+        decode_handshake_payload(&Encoded::from(reply))
     }
 
     async fn accept_answer(&self, answer: &MessagePayload) -> Result<()> {
@@ -65,6 +66,23 @@ impl RemoteHandshake for rings_rpc::jsonrpc::Client {
         .map_err(Error::from)?;
         Ok(())
     }
+}
+
+/// Decode an offer or an answer from its HTTP handshake string. A frame of another wire version
+/// is refused as [`Error::IncompatibleWireVersion`] (#1104); any other failure is
+/// [`Error::DecodeError`].
+pub(crate) fn decode_handshake_payload(encoded: &Encoded) -> Result<MessagePayload> {
+    MessagePayload::from_encoded(encoded)
+        .map_err(|error| Error::from_core_or(error, |_| Error::DecodeError))
+}
+
+/// Admit the wire version an endpoint's `nodeDid` reported before any offer is created
+/// (#1104): `Ok` iff it is this node's, and otherwise [`Error::IncompatibleWireVersion`]. An
+/// endpoint that reports none is a node before wire versioning.
+pub(crate) fn admit_endpoint_wire_version(reported: Option<u16>) -> Result<()> {
+    PeerWireVersion::reported(reported)
+        .admit()
+        .map_err(Error::IncompatibleWireVersion)
 }
 
 /// How an HTTP handshake exchange ended without failing.
@@ -179,7 +197,9 @@ impl Processor {
         }
         let learned = async {
             let client = remote_rpc_client(endpoint, api_token).await?;
-            let answered = client.node_did(&NodeDidRequest {}).await?.did;
+            let node = client.node_did(&NodeDidRequest {}).await?;
+            admit_endpoint_wire_version(node.wire_version)?;
+            let answered = node.did;
             let actual =
                 Did::from_str(answered.as_str()).map_err(|_| Error::InvalidDid(answered))?;
             if let HandshakePeer::Pinned(expected) = peer {

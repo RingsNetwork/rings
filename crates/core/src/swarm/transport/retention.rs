@@ -51,8 +51,8 @@ use super::pending::ReservationVerdict;
 use super::pending::DEFAULT_PENDING_CONNECTION_CAPACITY;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
+use crate::dht::topology::edge_slots;
 use crate::dht::Did;
-use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DISCONNECTED_CONNECTION_GRACE_MS;
 use crate::error::Result;
 
@@ -65,29 +65,11 @@ use crate::error::Result;
 /// unreferenced.
 pub(crate) const UNREFERENCED_CONNECTION_GRACE_MS: i64 = DISCONNECTED_CONNECTION_GRACE_MS;
 
-/// Logical connections retained per topology reference slot.
-///
-/// Law: `total = RETAINED_CONNECTIONS_PER_REFERENCE_SLOT × (finger slots +
-/// successor capacity + 1 predecessor)`, where the finger slot count is
-/// [`DEFAULT_FINGER_TABLE_SIZE`], one slot per ring bit, the upper bound on the
-/// distinct fingers any peer can hold regardless of the locally configured
-/// table size. The first share is a bound: this node references at most that
-/// many peers. The second share is a heuristic, not a bound: Chord places no
-/// limit on how many peers may hold this node as a finger, so the share
-/// merely reserves room for the symmetric edges those peers keep open and
-/// for application-initiated direct connections. Excess in-degree is handled
-/// by the eviction order, not by the size. Pending handshakes count against
-/// the same total.
-const RETAINED_CONNECTIONS_PER_REFERENCE_SLOT: usize = 2;
-
 /// Lifecycle bounds derived from the successor-list capacity of the local DHT.
 pub(super) fn lifecycle_bounds(successor_capacity: usize) -> LifecycleBounds {
-    let reference_slots = DEFAULT_FINGER_TABLE_SIZE
-        .saturating_add(successor_capacity)
-        .saturating_add(1);
     LifecycleBounds::new(
         DEFAULT_PENDING_CONNECTION_CAPACITY,
-        reference_slots.saturating_mul(RETAINED_CONNECTIONS_PER_REFERENCE_SLOT),
+        edge_slots(successor_capacity),
     )
 }
 
@@ -254,6 +236,8 @@ impl SwarmTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dht::topology::RETAINED_CONNECTIONS_PER_REFERENCE_SLOT;
+    use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
     use crate::ecc::SecretKey;
 
     fn candidate(

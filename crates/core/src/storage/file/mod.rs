@@ -94,6 +94,7 @@ use serde::Serialize;
 use sha1::Digest;
 use sha1::Sha1;
 
+mod batch;
 mod lock;
 mod presence;
 
@@ -657,8 +658,13 @@ impl FileStore {
 
     /// Remove the record stored as `name` and forget it (the remove plan).
     fn retire(&self, name: &str) -> Result<()> {
+        self.retire_batch(&[name.to_owned()])
+    }
+
+    /// Remove the records stored as `names` by one remove plan.
+    fn retire_batch(&self, names: &[String]) -> Result<()> {
         let mut index = self.write_index()?;
-        self.remove_records(&mut index, &[name.to_owned()])
+        self.remove_records(&mut index, names)
     }
 
     /// Remove every record and every presence marker, those of missing records included (the
@@ -887,6 +893,37 @@ where V: Serialize + DeserializeOwned + Send + Sync
     fn record_name(&self, key: &str) -> String {
         file_name_for(key)
     }
+
+    /// Every record encoded first, each refused as a `put` refuses a value larger than the whole
+    /// budget, then stored by the batch plan (`batch`).
+    async fn put_batch(&self, records: &[(String, V)]) -> Result<()> {
+        let mut encoded = Vec::with_capacity(records.len());
+        for (key, value) in records {
+            let data = rings_codec::serialize(&(key, value)).map_err(Error::CodecSerialize)?;
+            let required = u64::try_from(data.len()).map_err(|_| Error::StorageCountOverflow)?;
+            if required > self.store.capacity {
+                return Err(Error::StorageValueExceedsCapacity {
+                    required,
+                    capacity: self.store.capacity,
+                });
+            }
+            encoded.push((file_name_for(key), data));
+        }
+        self.on_store(move |store| store.store_batch(encoded)).await
+    }
+
+    /// Every record removed by one remove plan: one unwitness flush and one directory flush for
+    /// the whole batch.
+    async fn remove_batch(&self, keys: &[String]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let names = keys
+            .iter()
+            .map(|key| file_name_for(key))
+            .collect::<Vec<_>>();
+        self.on_store(move |store| store.retire_batch(&names)).await
+    }
 }
 
 /// Whether `name` is a record name: 40 lower-case hex characters, the image of `file_name_for`
@@ -919,6 +956,8 @@ impl std::fmt::Debug for FileStorage {
     }
 }
 
+#[cfg(test)]
+mod test_batch;
 #[cfg(test)]
 mod test_durability;
 #[cfg(test)]

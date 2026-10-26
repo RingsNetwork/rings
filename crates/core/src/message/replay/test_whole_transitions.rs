@@ -4,12 +4,15 @@
 //! the next one cannot compute from a table without it, nor be overtaken on disk by it.
 
 use std::num::NonZeroU64;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use tokio::sync::Notify;
 
+use super::lease::TRANSACTION_SEQUENCE_LEASE;
 use super::test_storage::Hooked;
 use super::test_storage::StorageHooks;
+use super::Admission;
 use super::SequenceVerdict;
 use super::StreamKey;
 use super::TransactionDigest;
@@ -18,6 +21,7 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::MessageCategory;
+use crate::utils::get_epoch_ms;
 
 /// The digest of the transaction a test admits, one per `value`.
 fn digest(value: u8) -> TransactionDigest {
@@ -32,6 +36,17 @@ fn stream() -> StreamKey {
         Did::from(99_u32),
         MessageCategory::Application,
     )
+}
+
+/// A reservation of one whole lease, so that every reservation the tests make writes its
+/// stream's record (the laws of `lease`).
+fn lease() -> NonZeroU64 {
+    NonZeroU64::new(TRANSACTION_SEQUENCE_LEASE).unwrap_or(NonZeroU64::MIN)
+}
+
+/// The `index`-th whole-lease reservation of the stream.
+fn block(index: u64) -> RangeInclusive<u64> {
+    index * TRANSACTION_SEQUENCE_LEASE..=(index + 1) * TRANSACTION_SEQUENCE_LEASE - 1
 }
 
 /// Hooks that make every `put` announce itself and then wait at a gate the test opens, so a
@@ -64,13 +79,12 @@ async fn admit(
     value: u8,
 ) -> Result<SequenceVerdict> {
     replay
-        .admit_with_quota(
+        .admit_with_quota(Admission::for_test(
             stream(),
             sequence,
             digest(value),
-            MessageCategory::Application.into(),
-            0,
-        )
+            get_epoch_ms(),
+        ))
         .await
 }
 
@@ -131,7 +145,7 @@ async fn test_a_cancelled_reservation_completes_before_the_next_one() -> Result<
 
     let cancelled = tokio::spawn({
         let replay = Arc::clone(&replay);
-        async move { replay.reserve(stream(), NonZeroU64::MIN).await }
+        async move { replay.reserve(stream(), lease()).await }
     });
     storage.hooks.entered.notified().await;
     cancel(cancelled).await;
@@ -139,25 +153,25 @@ async fn test_a_cancelled_reservation_completes_before_the_next_one() -> Result<
 
     let next = tokio::spawn({
         let replay = Arc::clone(&replay);
-        async move { replay.reserve(stream(), NonZeroU64::MIN).await }
+        async move { replay.reserve(stream(), lease()).await }
     });
     storage.hooks.entered.notified().await;
     storage.hooks.release.notify_one();
     assert_eq!(
         next.await
             .map_err(|_| Error::TransactionReplayStateInvalid)??,
-        1..=1
+        block(1)
     );
 
     let restarted = TransactionReplay::new_shared(Box::new(Arc::clone(&storage)));
-    let resumed = tokio::spawn(async move { restarted.reserve(stream(), NonZeroU64::MIN).await });
+    let resumed = tokio::spawn(async move { restarted.reserve(stream(), lease()).await });
     storage.hooks.entered.notified().await;
     storage.hooks.release.notify_one();
     assert_eq!(
         resumed
             .await
             .map_err(|_| Error::TransactionReplayStateInvalid)??,
-        2..=2
+        block(2)
     );
     Ok(())
 }
@@ -171,7 +185,7 @@ async fn test_a_reservation_cancelled_while_waiting_for_the_lock_still_commits()
     let replay = TransactionReplay::new_shared(Box::new(Arc::clone(&storage)));
     let reserve = |replay: &Arc<TransactionReplay>| {
         let replay = Arc::clone(replay);
-        tokio::spawn(async move { replay.reserve(stream(), NonZeroU64::MIN).await })
+        tokio::spawn(async move { replay.reserve(stream(), lease()).await })
     };
 
     let holder = reserve(&replay);
@@ -186,7 +200,7 @@ async fn test_a_reservation_cancelled_while_waiting_for_the_lock_still_commits()
         holder
             .await
             .map_err(|_| Error::TransactionReplayStateInvalid)??,
-        0..=0
+        block(0)
     );
 
     // The cancelled transition still reaches its write (a hang guard bounds the wait).
@@ -204,7 +218,7 @@ async fn test_a_reservation_cancelled_while_waiting_for_the_lock_still_commits()
     assert_eq!(
         next.await
             .map_err(|_| Error::TransactionReplayStateInvalid)??,
-        2..=2
+        block(2)
     );
     Ok(())
 }

@@ -88,7 +88,7 @@ fn test_secp256r1_rejects_high_s_signature() -> Result<()> {
         SecretKey::try_from("2544acda37415a476d42312969926dc48e529867036cec71922d4177ea9c1038")?;
     let sk_bytes: FieldBytes<p256::NistP256> = (&sk).into();
     let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
-    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let encoded = signing_key.verifying_key().to_sec1_point(false);
     let pk = PublicKey::from_u8(
         encoded
             .as_bytes()
@@ -111,7 +111,7 @@ fn test_secp256r1_normalizes_high_s_signature() -> Result<()> {
         SecretKey::try_from("2544acda37415a476d42312969926dc48e529867036cec71922d4177ea9c1038")?;
     let sk_bytes: FieldBytes<p256::NistP256> = (&sk).into();
     let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
-    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let encoded = signing_key.verifying_key().to_sec1_point(false);
     let pk = PublicKey::from_u8(
         encoded
             .as_bytes()

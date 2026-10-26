@@ -124,6 +124,21 @@ pub trait Protocol {
         false
     }
 
+    /// Whether this protocol delegates its replay (#1081): it acts on each of its payloads at
+    /// most once, by its own replay key, across connections, link generations, envelopes and
+    /// restarts of this node (Obligation R of durable-records).
+    ///
+    /// Read once when the protocol is registered. For this namespace's traffic from the
+    /// authenticated neighbour that originated it, core then admits each transaction in a
+    /// volatile replay window of the link it arrived on, instead of its durable window, and
+    /// writes nothing; relayed or foreign-origin traffic keeps the durable window. `false`, the
+    /// default, delegates nothing.
+    ///
+    /// Delegation is trusted local configuration: a protocol that returns `true` must keep R.
+    fn delegates_replay(&self) -> bool {
+        false
+    }
+
     /// The event this protocol makes of `fact` about a link, or `None` when the protocol keeps
     /// no state about links. `link_fact : LinkFact ⇀ Event`.
     ///

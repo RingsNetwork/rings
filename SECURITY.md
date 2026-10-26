@@ -143,12 +143,23 @@ route.
   at most once while the store is retained; a damaged record disables only its stream.
   A completed replay write survives a process or system crash: the native store flushes the
   file and its directory (on unix), and the browser store commits each IndexedDB transaction
-  with `durability: "strict"` (#912). Exactly-once effects are not claimed.
+  with `durability: "strict"` (#912). Exactly-once effects are not claimed. In a browser the
+  replay guarantee lasts as long as the browser keeps the origin's storage: a private window
+  or ephemeral partitioned storage discards it when the session ends, which resets every
+  stream as an operator's removal of the replay store does, and a page cannot detect such a
+  context (#1036).
   [Details](docs/src/advanced-topic/transaction-replay.md).
 - **Rate limits.** After verification, the destination charges per-origin message and byte
   buckets keyed by the account DID, committed together with replay and before the application
   sees the message. Rotating keys or relays does not reset them, and a drop never disconnects
   the relay.
+- **Capacity by connection slot (#907).** An origin is a free key pair, so the replay receiver
+  table and the removal store are shared by connection slot, not by origin (load-bounds paper,
+  Law 1): an item is charged to the slot of the handshake-authenticated connection that
+  delivered it, or to this node, and admitted within that slot's floor, its fair claim of a
+  shared pool, or this node's share. However many origins or connections another party holds,
+  a slot below its floor is never refused. A replay stream leaves the table once it is spent, so
+  a refusal ends; a slot's items stay charged to it after its connection leaves.
 - **Application boundary.** Core never calls, awaits or consults application code (#935): the
   application cannot see, validate or veto a protocol message, nor send one, and no inbound
   lane waits for it. A slow application therefore costs only its own messages, never a peer's
@@ -197,7 +208,18 @@ route.
   lost acknowledgement or refusal costs a resend, never the mail; only the node a hold was sent to
   can acknowledge or refuse it, and at most 64 holds are kept, another being refused to its local
   sender. A holder takes a relocated carrier only for a key its own view makes it hold, from a node
-  that holds relay mail, and only elements that pass the witness. Values are stored in the clear.
+  that holds relay mail, and only elements that pass the witness; a keeper that cannot place a
+  carrier's key asks the key's owner for its holder, and a wrong answer moves nothing, as the
+  named node takes only a key its own view makes it hold. Values are stored in the clear.
+  Browser nodes hold relay mail too, but a browser can only claim that its storage outlives the
+  session, and a closed tab strands what it holds, so held mail is protected by redundancy
+  instead of by one holder's durability (#1036): every carrier is replicated down a chain to
+  the first r nodes after its key's owner that hold relay mail, 8 by default, and the writer is
+  acknowledged only once all of them hold it (#777). Held mail is lost only if every member
+  holding it is lost within one repair delay: seconds after a departure the members see, and up
+  to the 45 s liveness timeout after a silent one. A node takes custody only after 2 minutes
+  online, so members are the nodes that stay. Members trust each other's copies as holders do;
+  this replication guards against churn, not against a dishonest member.
   [Details](docs/src/advanced-topic/chord.md#data-topic-storage),
   [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
@@ -216,7 +238,11 @@ route.
   whose reference misses is dropped uncharged, never held, so a lane's frames reach admission
   in arrival order (#908). An origin delegation that expired in flight is not charged to the
   hop that carried it, and only when the rest of the frame verifies. An unrelated party
-  cannot populate a link's tables. [Details](docs/src/advanced-topic/delegation-references.md).
+  cannot populate a link's tables. A slot that resolves by reference is verified without its
+  delegator's signature: it resolves only against the receiver's lessor table, whose every entry
+  was leased from a frame that verified in full, so only its expiry and the delegatee's signature
+  remain to check (#1089). An inline slot is verified in full.
+  [Details](docs/src/advanced-topic/delegation-references.md).
 - **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
   tests in its crate.
 - **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures
@@ -253,14 +279,40 @@ route.
 
 ## Known Limitations
 
-- #916: durable replay writes cap a node near 50 transitions per second on macOS.
-- #918: registry tombstones are bounded by the heartbeat rate per registrant, not by count
-  ([bounds](docs/src/advanced-topic/chord.md#data-topic-storage)).
-- #920: storage byte-budget eviction can drop a removal before it is collected, resurrecting
-  the values it covered.
-- #921: data-topic tombstones are bounded by rate, not by count or bytes, and a forged removal
-  received by sync can hold a topic live for up to the horizon past the receiver's clock.
+- #918: a registry descriptor that another node re-appends after its registrant stopped stays
+  listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
+  registrant leaves the listing within its TTL.
+- #907 (rotation residual, load-bounds paper, Prop. 1): a party that rotates connections
+  through free slots leaves each slot charged with up to its floor, so a connection admitted
+  later into such a slot has only its fair claim of the pool until those items leave: removes
+  and control, storage and E2E replay streams within about 100 minutes, application replay
+  streams within 7 days. A connection that keeps its slot is never affected. Only a cost on
+  admission removes this (#1094, #780).
+- #920, #907: a node's store of uncollected removals refuses a connection slot past its floor of
+  128 and its fair claim of a pool of 16384, this node past 7168, and an ownership hand-off from
+  the range's previous owner past a custody share of 16384, which a Byzantine predecessor or
+  successor can fill (a non-goal). A node whose browser cannot
+  open IndexedDB keeps removals in memory, so each restart makes it a fresh replica.
+- #907: a new replay stream is refused past its slot's floor of 32 and fair claim of a pool of 3328, past
+  the inbox share of 768 for mail out of the relay inbox, or past this node's share of 1024 for
+  its own signaling, until a stream of that principal is spent: about 10 minutes after its last
+  default-lifetime transaction, and 7 days for application streams, whose mail a relay inbox may
+  still deliver. A flood of mail from fresh origins therefore delays mail from new
+  correspondents for up to that long; the mail stays held.
+- #921: a data topic holds at most 1024 uncollected tombstones and refuses past them, so any
+  writer, or a sync peer, can fill one topic's removal capacity at an owner and refuse further
+  removals of that topic there until those tombstones are collected, at most 100 minutes and
+  twice the clock-skew tolerance later; a data topic has no write authority, and a forged
+  removal received by sync can likewise hold a topic live for up to the horizon past the
+  receiver's clock.
 - #932: a reassembled message whose full-size mailbox charge does not fit is dropped.
+- #1057, #1070: a departure the members do not see (a crash, a dropped network, a suspended or
+  closed tab) is repaired only after the 45 s liveness timeout, so r = 8 meets its loss target
+  for browser sessions of a minute's median, not of 15 s, until a closing tab leaves gracefully
+  (#1057) and chain neighbours probe each other on a shorter timeout (#1070).
+- #1036: in a browser context with ephemeral storage, the replay windows reset at every
+  session end, undetectably: a receiver may admit an unexpired transaction once more per
+  session, and a sender's streams restart at sequence 0.
 - #1055: one origin runs one browser node at a time. A native store locks its directory, so a
   second daemon or FFI provider over it fails to open (#1039), but two browser tabs of one origin
   open the same IndexedDB stores and would interleave their writes to the replay and relay

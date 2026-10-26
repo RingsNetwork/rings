@@ -39,6 +39,7 @@ use tokio::net::TcpListener;
 use self::http_error::HttpError;
 use crate::native::api_auth::ApiListener;
 use crate::native::api_auth::ApiSecurity;
+use crate::native::api_auth::NODE_VERSION_HEADER;
 use crate::observability::OperatorSnapshot;
 use crate::processor::Processor;
 
@@ -211,6 +212,17 @@ fn secure_router(router: Router, policy: Arc<ApiSecurity>, listener: ApiListener
             enforce_api_security,
         ))
         .layer(cors)
+        .layer(axum::middleware::map_response(stamp_node_version))
+}
+
+/// Name this node's crate version on `response` ([`NODE_VERSION_HEADER`]), refusals included,
+/// so a client learns it before it joins (#1104).
+async fn stamp_node_version(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        NODE_VERSION_HEADER,
+        HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+    );
+    response
 }
 
 /// Apply the listener's authorization policy to one request.
@@ -740,6 +752,43 @@ mod security_tests {
                 .map(|(status, reply)| (*status, reply.pointer("/error/code"))),
             Some((StatusCode::OK, Some(&serde_json::Value::from(-32700))))
         );
+    }
+
+    /// A joining client learns both versions from the public `nodeDid` call alone (#1104): the
+    /// wire version in the reply, and the crate version in the `x-node-version` header, which a
+    /// refusal carries as well.
+    #[tokio::test]
+    async fn test_the_public_node_did_call_names_the_wire_and_crate_versions() {
+        let Some(security) = security() else {
+            return;
+        };
+        let router = external_router(Arc::new(prepare_processor().await), security);
+        let crate_version = HeaderValue::from_static(env!("CARGO_PKG_VERSION"));
+
+        let served = router
+            .clone()
+            .oneshot(jsonrpc_request(call("nodeDid")).expect("test request must build"))
+            .await;
+        assert!(matches!(
+            served,
+            Ok(response) if response.headers().get(NODE_VERSION_HEADER) == Some(&crate_version)
+        ));
+        let reply = json_reply(router.clone(), jsonrpc_request(call("nodeDid"))).await;
+        assert_eq!(
+            reply
+                .as_ref()
+                .and_then(|(_, reply)| reply.pointer("/result/wire_version")),
+            Some(&serde_json::Value::from(rings_core::message::WIRE_VERSION))
+        );
+
+        let refused = router
+            .oneshot(jsonrpc_request(call("nodeInfo")).expect("test request must build"))
+            .await;
+        assert!(matches!(
+            refused,
+            Ok(response) if response.status() == StatusCode::UNAUTHORIZED
+                && response.headers().get(NODE_VERSION_HEADER) == Some(&crate_version)
+        ));
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ use crate::dht::StorageSyncPurpose;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::handlers::HandlerContext;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
@@ -72,7 +73,9 @@ async fn test_sync_entries_report_handler_deletes_only_acked_keys() -> Result<()
         node.did(),
     )?;
 
-    handler.handle(&context, &report).await?;
+    handler
+        .handle(&HandlerContext::unbound_for_test(&context), &report)
+        .await?;
 
     assert_eq!(node.dht().storage.get(&acked_key.to_string()).await?, None);
     assert_eq!(
@@ -119,7 +122,9 @@ async fn test_sync_entries_report_handler_rejects_untracked_acks() -> Result<()>
         node.did(),
     )?;
 
-    let result = handler.handle(&context, &report).await;
+    let result = handler
+        .handle(&HandlerContext::unbound_for_test(&context), &report)
+        .await;
 
     assert!(matches!(
         result,
@@ -167,7 +172,9 @@ async fn test_sync_entries_report_handler_forwards_before_pending_capability_che
         sender.did(),
     )?;
 
-    handler.handle(&context, &report).await?;
+    handler
+        .handle(&HandlerContext::unbound_for_test(&context), &report)
+        .await?;
 
     let forwarded = next_payload_for_tx(&sender, request.transaction.tx_id).await?;
     match forwarded.transaction.data::<Message>()? {
@@ -335,7 +342,9 @@ async fn test_sync_entries_report_handler_rejects_wrong_physical_receiver() -> R
         sender.did(),
     )?;
 
-    let result = handler.handle(&context, &report).await;
+    let result = handler
+        .handle(&HandlerContext::unbound_for_test(&context), &report)
+        .await;
 
     assert!(matches!(
         result,
@@ -395,7 +404,9 @@ async fn test_sync_entries_report_handler_rejects_unproven_placement_receiver() 
         sender.did(),
     )?;
 
-    let result = handler.handle(&context, &report).await;
+    let result = handler
+        .handle(&HandlerContext::unbound_for_test(&context), &report)
+        .await;
 
     assert!(matches!(
         result,

@@ -10,7 +10,7 @@ use crate::chunk::ReassemblyRejection;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::Authentication;
-use crate::swarm::callback::logical::edge_relation;
+use crate::swarm::callback::logical::Arrival;
 
 impl InboundProcessor {
     pub(super) async fn handle_chunk(
@@ -40,21 +40,6 @@ impl InboundProcessor {
         self.record_expired_reassembly_failures(None, expired).await;
     }
 
-    pub(super) async fn has_pending_reassembly(&self) -> bool {
-        self.reassembler.lock().await.has_pending()
-    }
-
-    pub(super) async fn prepare_reassembly_for_close(&self) -> bool {
-        self.reassembler.lock().await.prepare_for_close()
-    }
-
-    pub(super) async fn discard_reassembly_after_close_timer_failure(&self) {
-        self.reassembler
-            .lock()
-            .await
-            .discard_after_close_timer_failure();
-    }
-
     async fn record_expired_reassembly_failures(
         &self,
         fallback_peer: Option<crate::dht::Did>,
@@ -80,6 +65,25 @@ impl InboundProcessor {
             self.record_receive_failure(Some(peer), Authentication::Authenticated)
                 .await;
         }
+    }
+}
+
+/// The reassembler's own state, which the inbound actor tends whether or not it holds the
+/// transport bound.
+impl<L> InboundProcessor<L> {
+    pub(super) async fn has_pending_reassembly(&self) -> bool {
+        self.reassembler.lock().await.has_pending()
+    }
+
+    pub(super) async fn prepare_reassembly_for_close(&self) -> bool {
+        self.reassembler.lock().await.prepare_for_close()
+    }
+
+    pub(super) async fn discard_reassembly_after_close_timer_failure(&self) {
+        self.reassembler
+            .lock()
+            .await
+            .discard_after_close_timer_failure();
     }
 }
 
@@ -179,10 +183,12 @@ async fn advance_chunk_event(
     // Chunk envelopes are transport framing. The verified original transaction is admitted here,
     // before it reserves or enters its logical lane, and therefore consumes one quota charge no
     // matter how many envelopes carried it.
-    let edge = edge_relation(event.peer, event.authentication, &payload);
+    let arrival = Arrival {
+        peer: event.peer,
+        authentication: event.authentication,
+    };
     processor
-        .logical
-        .admit_final_transaction(&payload, &message, lane, edge)
+        .admit_final_transaction(&payload, &message, lane, arrival)
         .await?;
     event.permit.try_transition(lane, reservation)?;
     let payload = processor

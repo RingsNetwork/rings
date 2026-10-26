@@ -676,7 +676,9 @@ impl SwarmTransport {
     }
 
     /// Announce a peer fact to the application inbox, inside the lifecycle boundary `_held`
-    /// whose transition (an activation or a retirement) `event` concludes. Never waits.
+    /// whose transition (an activation or a retirement) `event` concludes, and give the peer a
+    /// connection slot or free its slot (the slot law of `fair_admission::slot_roster`). Never
+    /// waits.
     ///
     /// Every peer fact is announced there, so for every peer the inbox reads its facts in the
     /// order they were decided: the boundary serializes the transitions, and the inbox is a
@@ -685,6 +687,11 @@ impl SwarmTransport {
     fn announce(&self, _held: &LifecycleHeld<'_>, event: SwarmEvent) {
         #[cfg(test)]
         crate::tests::activity::record_activity();
+        match event {
+            SwarmEvent::PeerAdmitted { peer } => self.dht.edges().arrive(peer),
+            SwarmEvent::PeerRetired { peer } => self.dht.edges().depart(peer),
+            SwarmEvent::MessageDropped { .. } => {}
+        }
         self.application.outlet.announce(event);
     }
 

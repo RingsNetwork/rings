@@ -11,6 +11,7 @@ use super::effects::yield_core_actor_step;
 use super::effects::CoreEffect;
 use super::effects::CoreEffectInterpreter;
 use super::MessagePayload;
+use super::Principal;
 use crate::dht::topology::TopologyRemoval;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -31,6 +32,10 @@ pub mod e2e;
 pub(crate) mod inbox;
 /// Handlers of relay custody: holder announcements and inbox fetches.
 mod relay_holder;
+/// Chain repair of relay carriers: one digest-set offer per chain neighbour and pass.
+pub(crate) mod relay_repair;
+/// Chain replication of relay holds: each member forwarding a hold to its next member.
+pub(crate) mod relay_replica;
 mod service_receipt;
 /// Operator and handler for DHT stabilization
 pub mod stabilization;
@@ -46,12 +51,50 @@ pub struct MessageHandler {
     dht: Arc<PeerRing>,
 }
 
+/// One payload as the logical stage hands it to a handler: the payload, and the principal that
+/// delivered it to this node (load-bounds paper, Law 1), which every table a handler grows is
+/// charged to.
+#[derive(Clone, Copy, Debug)]
+pub struct HandlerContext<'a> {
+    /// The payload.
+    payload: &'a MessagePayload,
+    /// The edge that delivered it, or this node for a payload out of its own stores.
+    introducer: Principal,
+}
+
+impl<'a> HandlerContext<'a> {
+    /// `payload`, delivered by `introducer`.
+    pub(crate) const fn new(payload: &'a MessagePayload, introducer: Principal) -> Self {
+        Self {
+            payload,
+            introducer,
+        }
+    }
+
+    /// The principal that delivered the payload: a node-local accounting index, meaningless
+    /// outside this node.
+    pub(crate) const fn introducer(&self) -> Principal {
+        self.introducer
+    }
+
+    /// The payload.
+    pub const fn payload(&self) -> &'a MessagePayload {
+        self.payload
+    }
+
+    /// Test builds: `payload` as delivered on no slot.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn unbound_for_test(payload: &'a MessagePayload) -> Self {
+        Self::new(payload, Principal::Unbound)
+    }
+}
+
 /// Generic trait for handle message ,inspired by Actor-Model.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait HandleMsg<T> {
     /// Message handler.
-    async fn handle(&self, ctx: &MessagePayload, msg: &T) -> Result<()>;
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &T) -> Result<()>;
 }
 
 impl MessageHandler {

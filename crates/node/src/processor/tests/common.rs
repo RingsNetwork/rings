@@ -255,7 +255,7 @@ pub(super) fn online_relay_descriptor_for_processor(
             capabilities,
             endpoint_hint: None,
             started_at_ms: now_ms,
-            heartbeat_at_ms: now_ms,
+            fresh_for_ms: 90_000,
             expires_at_ms: now_ms + 90_000,
             version: crate::util::build_version(),
         },

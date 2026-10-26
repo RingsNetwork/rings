@@ -7,6 +7,7 @@ pub use self::relay::OutboundPath;
 pub use self::relay::RelayPath;
 pub use self::relay::ReturnPath;
 pub use self::relay::SignalingPath;
+pub(crate) use self::verify::verify_message_under;
 pub use self::verify::DomainTag;
 pub use self::verify::MessageSigner;
 pub use self::verify::MessageVerification;

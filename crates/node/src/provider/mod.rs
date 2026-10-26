@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use rings_core::delegation::DelegationBuilder;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
+use rings_core::dht::RemovalStorage;
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::EvidenceCounters;
 use rings_core::measure::EvidenceDigest;
@@ -84,6 +85,26 @@ pub enum Signer {
     Sync(Box<dyn Fn(String) -> Vec<u8>>),
     /// Async signer
     Async(AsyncSigner),
+}
+
+/// The stores a provider is built over, each optional: an absent one takes the default its
+/// builder documents (an in-memory store, or none where the law admits no volatile one).
+#[derive(Default)]
+pub(crate) struct ProviderStores {
+    /// The DHT data store (element sides).
+    pub(crate) entry: Option<EntryStorage>,
+    /// The relay-inbox store.
+    pub(crate) relay: Option<EntryStorage>,
+    /// The store of the data namespace's remove sides (#920).
+    pub(crate) removals: Option<RemovalStorage>,
+    /// The peer measurement store.
+    pub(crate) measure: Option<MeasureStorage>,
+    /// The provisional-evidence store.
+    pub(crate) evidence: Option<EvidenceStorage>,
+    /// The onion entry-guard store.
+    pub(crate) guards: Option<OnionEntryGuardStorage>,
+    /// The transaction replay store.
+    pub(crate) replay: Option<ReplayStorage>,
 }
 
 #[allow(dead_code)]
@@ -218,16 +239,25 @@ impl Provider {
         self.processor.flush_measurements().await
     }
 
+    /// Close this node's network before it is dropped; see [`Processor::close`] (#1098).
+    pub async fn close(&self) -> Result<()> {
+        self.processor.close().await
+    }
+
     /// Create a provider instance with storage name
     pub(crate) async fn new_provider_with_storage_internal(
         config: ProcessorConfig,
-        entry_storage: Option<EntryStorage>,
-        relay_storage: Option<EntryStorage>,
-        measure_storage: Option<MeasureStorage>,
-        evidence_storage: Option<EvidenceStorage>,
-        onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
-        replay_storage: Option<ReplayStorage>,
+        stores: ProviderStores,
     ) -> Result<Provider> {
+        let ProviderStores {
+            entry: entry_storage,
+            relay: relay_storage,
+            removals: removal_storage,
+            measure: measure_storage,
+            evidence: evidence_storage,
+            guards: onion_entry_guard_storage,
+            replay: replay_storage,
+        } = stores;
         let entry_storage = entry_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let measure_storage = measure_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let evidence_storage = evidence_storage
@@ -258,6 +288,10 @@ impl Provider {
             Some(relay_storage) => processor_builder.relay_storage(relay_storage),
             None => processor_builder,
         };
+        let processor_builder = match removal_storage {
+            Some(removal_storage) => processor_builder.removal_storage(removal_storage),
+            None => processor_builder,
+        };
 
         let processor = Arc::new(processor_builder.build()?);
 
@@ -282,7 +316,6 @@ impl Provider {
     /// please check [rings_core::ecc]
     /// Signer should accept a String and returns bytes.
     /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_provider_internal(
         network_id: u32,
         ice_servers: String,
@@ -290,12 +323,7 @@ impl Provider {
         account: String,
         account_type: String,
         signer: Signer,
-        entry_storage: Option<EntryStorage>,
-        relay_storage: Option<EntryStorage>,
-        measure_storage: Option<MeasureStorage>,
-        evidence_storage: Option<EvidenceStorage>,
-        onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
-        replay_storage: Option<ReplayStorage>,
+        stores: ProviderStores,
     ) -> Result<Provider> {
         Self::new_provider_internal_with_config(
             network_id,
@@ -304,12 +332,7 @@ impl Provider {
             account,
             account_type,
             signer,
-            entry_storage,
-            relay_storage,
-            measure_storage,
-            evidence_storage,
-            onion_entry_guard_storage,
-            replay_storage,
+            stores,
             core::convert::identity,
         )
         .await
@@ -323,12 +346,7 @@ impl Provider {
         account: String,
         account_type: String,
         signer: Signer,
-        entry_storage: Option<EntryStorage>,
-        relay_storage: Option<EntryStorage>,
-        measure_storage: Option<MeasureStorage>,
-        evidence_storage: Option<EvidenceStorage>,
-        onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
-        replay_storage: Option<ReplayStorage>,
+        stores: ProviderStores,
         configure: impl FnOnce(ProcessorConfig) -> ProcessorConfig,
     ) -> Result<Provider> {
         let mut sk_builder = DelegationBuilder::new(account, account_type);
@@ -342,16 +360,7 @@ impl Provider {
         let config =
             ProcessorConfig::new(network_id, ice_servers, delegatee_key, stabilize_interval);
         let config = configure(config);
-        Self::new_provider_with_storage_internal(
-            config,
-            entry_storage,
-            relay_storage,
-            measure_storage,
-            evidence_storage,
-            onion_entry_guard_storage,
-            replay_storage,
-        )
-        .await
+        Self::new_provider_with_storage_internal(config, stores).await
     }
 
     /// Serve the swarm's application inbox with the extension [`Backend`] on a detached task,

@@ -19,8 +19,9 @@
 //! slot was encoded. Neither signature covers the delegation slot (both sign the transaction
 //! hash), so re-encoding a slot per link leaves the origin's signature intact.
 //!
-//! A frame is either a payload or a [`LinkControl`]; the two are told apart by a marker before
-//! any decoding. A control frame is unsigned: it is meaningful only on the authenticated edge it
+//! A frame is either a payload or a [`LinkControl`]; the two are told apart by the kind in the
+//! frame header (`frame`), read with the wire version before any decoding. A control frame is
+//! unsigned: it is meaningful only on the authenticated edge it
 //! arrives on, and a digest names a value rather than asserting one. The link is treated as a
 //! datagram link: control frames and payload frames may arrive in any order or not at all, and
 //! every control frame is idempotent, so a duplicate changes nothing: a stale `Known` never
@@ -33,24 +34,20 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::frame::frame_bytes;
+use super::frame::split_frame;
+use super::frame::FrameKind;
+use super::frame::FRAME_HEADER_LEN;
 use super::MessagePayload;
 use super::Transaction;
 use crate::delegation::Delegation;
 use crate::delegation::DelegationDigest;
+use crate::delegation::DelegatorAuthorization;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::protocols::MessageRelay;
 use crate::message::protocols::MessageVerification;
-
-/// Marker of a payload frame. A frame without it is refused before any decoding; there is no
-/// version behind the marker, because the protocol is not versioned before 1.0: every wire
-/// change is a total cutover, and the marker only tells a frame from foreign bytes and from the
-/// link-control marker.
-const PAYLOAD_FRAME_MARKER: &[u8] = b"RINGS-PAYLOAD\0";
-/// Marker of a link-control frame. Distinct from [`PAYLOAD_FRAME_MARKER`] in its first
-/// differing byte, so neither marker is a prefix of the other.
-const LINK_CONTROL_FRAME_MARKER: &[u8] = b"RINGS-LINK\0";
 
 /// The two delegation slots of a payload, as a product: `PerSlot<T> ≅ T × T`.
 ///
@@ -86,6 +83,17 @@ impl<T> PerSlot<T> {
     }
 }
 
+impl PerSlot<DelegatorAuthorization> {
+    /// Both slots verified in full: a frame that arrived on no link, whose delegations no lessor
+    /// table has seen.
+    pub(crate) const fn full_verification() -> Self {
+        Self {
+            origin: DelegatorAuthorization::Verify,
+            hop: DelegatorAuthorization::Verify,
+        }
+    }
+}
+
 impl<T: PartialEq> PerSlot<T> {
     /// Whether both slots hold the same value: the image of the diagonal `T → T × T`, as on a
     /// frame whose origin is its own hop.
@@ -117,6 +125,22 @@ pub(crate) enum SlotEncoding {
     Inline,
     /// The session was carried as its digest.
     Referenced,
+}
+
+impl SlotEncoding {
+    /// How a receiver treats the delegator authorization of a slot that travelled this way.
+    ///
+    /// Law (Leased authority): a referenced slot resolves only against the receiver's lessor
+    /// table of the link, and every entry of that table was leased by `admit_verified` from a
+    /// frame that verified, the delegator's signature over that exact delegation included. So a
+    /// referenced slot's delegator authorization is established, and only its expiry and the
+    /// delegatee's signature remain to check (#1089). An inline slot is verified in full.
+    pub(crate) const fn delegator_authorization(self) -> DelegatorAuthorization {
+        match self {
+            Self::Inline => DelegatorAuthorization::Verify,
+            Self::Referenced => DelegatorAuthorization::Established,
+        }
+    }
 }
 
 impl DelegationRef<'_> {
@@ -263,18 +287,17 @@ impl<'a> WirePayload<'a> {
         self.resolve(resolve_inline)
     }
 
-    /// The frame bytes: the payload marker, then the encoded body.
+    /// The frame bytes: the frame header of a payload (`frame`), then the encoded body.
     pub(crate) fn to_wire(&self) -> Result<Bytes> {
         let body = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
-        frame_bytes(PAYLOAD_FRAME_MARKER, body.as_slice())
+        frame_bytes(FrameKind::Payload, body.as_slice())
     }
 
     /// The exact length of [`Self::to_wire`], without allocating it.
     pub(crate) fn wire_size(&self) -> Result<usize> {
         let bytes = rings_codec::serialized_size(self).map_err(Error::CodecSerialize)?;
         let body = usize::try_from(bytes).map_err(|_| Error::MessageSizeOverflow)?;
-        PAYLOAD_FRAME_MARKER
-            .len()
+        FRAME_HEADER_LEN
             .checked_add(body)
             .ok_or(Error::MessageSizeOverflow)
     }
@@ -354,10 +377,11 @@ impl LinkControl {
         }
     }
 
-    /// The frame bytes: the control marker, then the encoded body.
+    /// The frame bytes: the frame header of a link-control frame (`frame`), then the encoded
+    /// body.
     pub(crate) fn to_wire(&self) -> Result<Bytes> {
         let body = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
-        frame_bytes(LINK_CONTROL_FRAME_MARKER, body.as_slice())
+        frame_bytes(FrameKind::LinkControl, body.as_slice())
     }
 }
 
@@ -370,39 +394,26 @@ pub(crate) enum LinkFrame {
 }
 
 impl LinkFrame {
-    /// Decode one frame by its marker.
+    /// Decode one frame by its header (the frame-header law of `frame`).
     ///
     /// ```text
-    ///   bytes ─┬─ PAYLOAD marker ──▶ Payload(decode body)
-    ///          ├─ LINK marker ─────▶ Control(decode body)
-    ///          └─ otherwise ───────▶ UnmarkedFrame
+    ///   bytes ─┬─ header of this version, payload ─────▶ Payload(decode body)
+    ///          ├─ header of this version, link control ─▶ Control(decode body)
+    ///          ├─ header of another version ───────────▶ IncompatibleWireVersion
+    ///          └─ otherwise ───────────────────────────▶ UnmarkedFrame
     /// ```
     pub(crate) fn from_wire(bytes: &[u8]) -> Result<Self> {
-        if let Some(body) = bytes.strip_prefix(PAYLOAD_FRAME_MARKER) {
-            return rings_codec::deserialize(body)
+        let (kind, body) = split_frame(bytes)?;
+        match kind {
+            FrameKind::Payload => rings_codec::deserialize(body)
                 .map(Box::new)
                 .map(Self::Payload)
-                .map_err(Error::CodecDeserialize);
-        }
-        if let Some(body) = bytes.strip_prefix(LINK_CONTROL_FRAME_MARKER) {
-            return rings_codec::deserialize(body)
+                .map_err(Error::CodecDeserialize),
+            FrameKind::LinkControl => rings_codec::deserialize(body)
                 .map(Self::Control)
-                .map_err(Error::CodecDeserialize);
+                .map_err(Error::CodecDeserialize),
         }
-        Err(Error::UnmarkedFrame)
     }
-}
-
-/// `marker || body`, with the length sum checked.
-fn frame_bytes(marker: &[u8], body: &[u8]) -> Result<Bytes> {
-    let capacity = marker
-        .len()
-        .checked_add(body.len())
-        .ok_or(Error::MessageSizeOverflow)?;
-    let mut wire = Vec::with_capacity(capacity);
-    wire.extend_from_slice(marker);
-    wire.extend_from_slice(body);
-    Ok(Bytes::from(wire))
 }
 
 /// Resolve a slot of a frame that travels outside any link: only an inline session resolves.
@@ -411,4 +422,17 @@ fn resolve_inline(delegation: DelegationRef<'_>) -> Result<Delegation> {
         DelegationRef::Inline(session) => Ok(session.into_owned()),
         DelegationRef::Digest(digest) => Err(Error::DelegationReferenceUnresolved(digest)),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn test_only_a_referenced_slot_carries_an_established_authorization() {
+    assert_eq!(
+        SlotEncoding::Inline.delegator_authorization(),
+        DelegatorAuthorization::Verify
+    );
+    assert_eq!(
+        SlotEncoding::Referenced.delegator_authorization(),
+        DelegatorAuthorization::Established
+    );
 }

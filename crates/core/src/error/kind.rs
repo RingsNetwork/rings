@@ -1,5 +1,4 @@
-use std::fmt::Display;
-use std::fmt::Formatter;
+use super::detached_work::DetachedWork;
 
 /// Errors collections in ring-core.
 #[derive(thiserror::Error, Debug)]
@@ -108,11 +107,14 @@ pub enum Error {
         retained_min: u64,
     },
 
-    /// A new replay stream would exceed the fail-closed stream table bound.
-    #[error("Transaction replay stream capacity {capacity} exceeded")]
+    /// A new replay stream would pass a bound of its table (load-bounds paper, Law 2): the
+    /// share of the edge that introduced it, the pool, or the local share; nothing changed.
+    #[error("Transaction replay stream of {introducer:?} refused: {refusal}")]
     TransactionReplayStreamCapacityExceeded {
-        /// Maximum sender streams or receiver streams retained by one runtime.
-        capacity: usize,
+        /// The principal that introduced the stream.
+        introducer: crate::message::Principal,
+        /// The bound it met.
+        refusal: crate::message::ShareRefusal,
     },
 
     /// A replay stream whose stored record does not restore refuses every transition until an
@@ -136,9 +138,10 @@ pub enum Error {
     TransactionReplayPersistence {
         /// Persistence operation that failed.
         operation: &'static str,
-        /// Storage failure retained as the source.
+        /// Storage failure retained as the source, shared by every transition of a failed
+        /// batch (#916).
         #[source]
-        source: Box<Error>,
+        source: std::sync::Arc<Error>,
     },
 
     /// Final-destination origin-quota admission failed.
@@ -153,9 +156,15 @@ pub enum Error {
     #[error(transparent)]
     ProvisionalEvidence(#[from] rings_measure::EvidenceError),
 
-    /// The frame carries neither the payload marker nor the link-control marker.
-    #[error("Frame carries no rings marker")]
+    /// The bytes are no Rings frame: they open with no frame header, or with the header of this
+    /// wire version and a kind it does not know.
+    #[error("Bytes carry no rings frame header")]
     UnmarkedFrame,
+
+    /// A frame of another wire version, refused before its body is decoded (the frame-header
+    /// law, #1104).
+    #[error("Incompatible wire version: {0}")]
+    IncompatibleWireVersion(crate::message::WireVersionMismatch),
 
     /// A payload that travels outside any link referenced a session instead of carrying it.
     #[error(
@@ -257,6 +266,27 @@ pub enum Error {
     #[error("Entry payload exceeds the per-payload size bound")]
     EntryPayloadExceedsMax,
 
+    /// A data carrier would hold more unstable removes than its bound (#921): a delta carrying
+    /// more is inadmissible, and a join or operation whose result would hold more is refused,
+    /// changing nothing.
+    #[error("Data carrier would hold {count} removes, past its bound of {bound}")]
+    EntryTombstonesExceedMax {
+        /// Removes the delta carries, or the result would hold.
+        count: usize,
+        /// The carrier's bound, `DATA_TOMBSTONE_MAX_LEN`.
+        bound: usize,
+    },
+
+    /// An owner's removal store would pass a bound for an unstable remove (#920, #907): the
+    /// share of the edge that delivered it, the pool, or the local share. Nothing changed.
+    #[error("Removal store refused a remove of {introducer:?}: {refusal}")]
+    RemovalCapacityExhausted {
+        /// The principal that delivered the transition raising it.
+        introducer: crate::message::Principal,
+        /// The bound it met.
+        refusal: crate::message::ShareRefusal,
+    },
+
     /// Relay inbox element is not addressed to the peer the inbox is kept for
     #[error("Relay inbox element is not addressed to the peer the inbox is kept for")]
     RelayMessageNotAddressedToInbox,
@@ -347,6 +377,10 @@ pub enum Error {
     /// The swarm stopped before the awaited answer arrived
     #[error("The swarm stopped before the awaited answer arrived")]
     SwarmStopped,
+
+    /// The swarm is closed: it opens no connection (see `Swarm::close`)
+    #[error("The swarm is closed and opens no connection")]
+    SwarmClosed,
 
     /// Affine rotation scalar must be greater than zero
     #[error("Affine rotation scalar must be greater than zero")]
@@ -953,23 +987,4 @@ pub enum Error {
     /// External Javascript error: {0}
     #[error("External Javascript error: {0}")]
     JsError(String),
-}
-
-/// Work the swarm runs detached from its caller and refuses when no runtime is current to
-/// carry it (see `swarm::detached`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DetachedWork {
-    /// A handshake negotiated in a protocol handler's context.
-    ProtocolHandshake,
-    /// A link-control send.
-    LinkControlSend,
-}
-
-impl Display for DetachedWork {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::ProtocolHandshake => "a protocol-context handshake",
-            Self::LinkControlSend => "a link-control send",
-        })
-    }
 }

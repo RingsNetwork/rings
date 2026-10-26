@@ -16,9 +16,11 @@ use crate::dht::entry::EntryVersion;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
+use crate::dht::StorageKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::handlers::HandlerContext;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
 use crate::message::ChordStorageInterface;
@@ -177,7 +179,7 @@ async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
     node1.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
     handler
-        .handle(&context, &FoundEntry {
+        .handle(&HandlerContext::unbound_for_test(&context), &FoundEntry {
             data: vec![],
             misses: vec![PlacementMiss::new(remote_placement, node2.did())],
             resource: entry.did,
@@ -187,7 +189,7 @@ async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
 
     let _pending_send = PendingSendGuard::new();
     handler
-        .handle(&context, &FoundEntry {
+        .handle(&HandlerContext::unbound_for_test(&context), &FoundEntry {
             data: vec![entry.clone()],
             misses: vec![],
             resource: entry.did,
@@ -234,7 +236,9 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
     )?;
 
     assert!(msg.validate_placement(2).is_err());
-    let result = handler.handle(&context, &msg).await;
+    let result = handler
+        .handle(&HandlerContext::unbound_for_test(&context), &msg)
+        .await;
 
     assert!(matches!(
         result,
@@ -384,7 +388,7 @@ async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
     node.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
     handler
-        .handle(&context, &FoundEntry {
+        .handle(&HandlerContext::unbound_for_test(&context), &FoundEntry {
             data: vec![],
             misses: vec![PlacementMiss::new(placement_key, node.did())],
             resource: entry.did,
@@ -392,7 +396,7 @@ async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
         })
         .await?;
     handler
-        .handle(&context, &FoundEntry {
+        .handle(&HandlerContext::unbound_for_test(&context), &FoundEntry {
             data: vec![entry.clone()],
             misses: vec![],
             resource: entry.did,
@@ -452,12 +456,16 @@ async fn test_found_empty_reply_repairs_misses_from_a_held_carrier_past_its_boun
     node.swarm.transport.start_storage_lookup(resource, 2)?;
 
     assert_eq!(node.swarm.storage_check_cache(resource).await, None);
-    handler.handle(&context, &found_empty).await?;
+    handler
+        .handle(&HandlerContext::unbound_for_test(&context), &found_empty)
+        .await?;
 
     let repaired = node
         .dht()
-        .storage
-        .get(&placement_key.to_string())
+        .live_storage_entry(
+            StorageKey::new(EntryKind::Data, placement_key),
+            get_epoch_ms(),
+        )
         .await?
         .ok_or_else(|| Error::InvalidMessage("the missed placement is repaired".to_string()))?;
     assert!(repaired.data.is_empty());
@@ -487,7 +495,7 @@ async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
     )?;
 
     let result = handler
-        .handle(&context, &FoundEntry {
+        .handle(&HandlerContext::unbound_for_test(&context), &FoundEntry {
             data: vec![first, second],
             misses: vec![],
             resource,
@@ -529,7 +537,7 @@ async fn test_found_entry_rejects_redundancy_outside_local_protocol_mode() -> Re
     node.swarm.transport.start_storage_lookup(resource, 2)?;
 
     let result = handler
-        .handle(&context, &FoundEntry {
+        .handle(&HandlerContext::unbound_for_test(&context), &FoundEntry {
             data: vec![entry],
             misses: vec![],
             resource,
@@ -569,7 +577,7 @@ async fn test_found_entry_rejects_response_without_active_lookup() -> Result<()>
     )?;
 
     let result = handler
-        .handle(&context, &FoundEntry {
+        .handle(&HandlerContext::unbound_for_test(&context), &FoundEntry {
             data: vec![entry],
             misses: vec![],
             resource,
@@ -611,7 +619,7 @@ async fn test_found_entry_rejects_resource_mismatch_without_cache_write() -> Res
     node.swarm.transport.start_storage_lookup(resource, 2)?;
 
     let result = handler
-        .handle(&context, &FoundEntry {
+        .handle(&HandlerContext::unbound_for_test(&context), &FoundEntry {
             data: vec![entry.clone()],
             misses: vec![],
             resource,
@@ -700,13 +708,18 @@ async fn test_storage_fetch_answers_are_stamped_after_every_earlier_mark() -> Re
         .transport
         .start_storage_lookup(entry.did, redundancy)?;
     assert!(!answered_since(first)?);
-    handler.handle(&context, &reply(vec![])).await?;
+    handler
+        .handle(&HandlerContext::unbound_for_test(&context), &reply(vec![]))
+        .await?;
     assert!(
         !answered_since(first)?,
         "a found-empty reply answers nothing"
     );
     handler
-        .handle(&context, &reply(vec![entry.clone()]))
+        .handle(
+            &HandlerContext::unbound_for_test(&context),
+            &reply(vec![entry.clone()]),
+        )
         .await?;
     assert!(answered_since(first)?);
 
@@ -732,7 +745,10 @@ async fn test_storage_fetch_answers_are_stamped_after_every_earlier_mark() -> Re
         .start_storage_lookup(entry.did, redundancy)?;
     assert!(!answered_since(second)?);
     handler
-        .handle(&context, &reply(vec![entry.clone()]))
+        .handle(
+            &HandlerContext::unbound_for_test(&context),
+            &reply(vec![entry.clone()]),
+        )
         .await?;
     assert!(answered_since(second)?);
     Ok(())
@@ -777,11 +793,21 @@ async fn test_a_reply_past_its_bound_is_no_answer_and_a_later_live_placement_is(
     node.swarm
         .transport
         .start_storage_lookup(live.did, redundancy)?;
-    handler.handle(&context, &reply(vec![past_bound])).await?;
+    handler
+        .handle(
+            &HandlerContext::unbound_for_test(&context),
+            &reply(vec![past_bound]),
+        )
+        .await?;
     assert!(!node.swarm.storage_fetch_answered_since(live.did, mark)?);
     assert_eq!(node.swarm.storage_check_cache(live.did).await, None);
 
-    handler.handle(&context, &reply(vec![live.clone()])).await?;
+    handler
+        .handle(
+            &HandlerContext::unbound_for_test(&context),
+            &reply(vec![live.clone()]),
+        )
+        .await?;
     assert!(node.swarm.storage_fetch_answered_since(live.did, mark)?);
     assert!(node.swarm.storage_check_cache(live.did).await.is_some());
     Ok(())
@@ -818,7 +844,7 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
     node.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
     handler
-        .handle(&context, &FoundEntry {
+        .handle(&HandlerContext::unbound_for_test(&context), &FoundEntry {
             data: vec![],
             misses: vec![PlacementMiss::new(placement_key, node.did())],
             resource: entry.did,
@@ -829,7 +855,7 @@ async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Resu
         .transport
         .expire_storage_lookup_observation(entry.did, 2)?;
     let result = handler
-        .handle(&context, &FoundEntry {
+        .handle(&HandlerContext::unbound_for_test(&context), &FoundEntry {
             data: vec![entry.clone()],
             misses: vec![],
             resource: entry.did,
@@ -884,7 +910,9 @@ async fn test_found_entry_replies_join_in_the_cache() -> Result<()> {
                 node.did(),
                 node.did(),
             )?;
-            handler.handle(&context, &found).await?;
+            handler
+                .handle(&HandlerContext::unbound_for_test(&context), &found)
+                .await?;
         }
         cached.push(node.swarm.storage_check_cache(resource).await);
     }

@@ -301,6 +301,7 @@ async fn build_processor(
     let builder = ProcessorBuilder::from_config(pc)?
         .storage(stores.data)
         .relay_storage(stores.relay)
+        .removal_storage(stores.removals)
         .onion_entry_guard_storage(stores.guards)
         .replay_storage(stores.replay)
         .measure(measure)

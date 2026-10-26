@@ -21,6 +21,7 @@ use crate::dht::Did;
 use crate::dht::StorageKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Principal;
 use crate::storage::MemStorage;
 use crate::tests::live_entry;
 use crate::utils::get_epoch_ms;
@@ -68,9 +69,19 @@ async fn test_storage_join_and_ack_digest_each_element_at_most_once() -> Result<
     let now_ms = get_epoch_ms();
     let carrier = carrier_with_a_remove(Did::from(10u32), now_ms)?;
 
-    let into_empty = digests_of(node.join_storage_entry(now_ms, placement_key, carrier.clone()));
+    let into_empty = digests_of(node.join_storage_entry(
+        now_ms,
+        placement_key,
+        carrier.clone(),
+        Principal::Local,
+    ));
     assert_eq!(into_empty.await?, DIGEST_BOUND_ELEMENTS);
-    let into_held = digests_of(node.join_storage_entry(now_ms, placement_key, carrier.clone()));
+    let into_held = digests_of(node.join_storage_entry(
+        now_ms,
+        placement_key,
+        carrier.clone(),
+        Principal::Local,
+    ));
     assert_eq!(into_held.await?, DIGEST_BOUND_ELEMENTS);
 
     let ack = SyncedEntryAck::new(placement_key, carrier);
@@ -113,7 +124,17 @@ async fn test_read_writes_back_a_projection_that_retired_elements() -> Result<()
         .await?
         .ok_or_else(|| Error::InvalidMessage("the remove holds the carrier".to_string()))?;
     assert!(read.data.is_empty());
-    assert_eq!(node.storage.get(&key.to_string()).await?, Some(read));
+    // The write-back factors the carrier (#920): no element side is left holding the retired
+    // payload, and the glued read is the projection.
+    let element_side = node.storage.get(&key.to_string()).await?;
+    assert!(
+        element_side.is_some_and(|side| side.data.is_empty() && side.crdt.tombstones.is_empty())
+    );
+    assert_eq!(
+        node.live_storage_entry(StorageKey::new(EntryKind::Data, key), now_ms)
+            .await?,
+        Some(read)
+    );
     Ok(())
 }
 

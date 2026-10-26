@@ -8,6 +8,8 @@ use rings_core::message::MessageSigner;
 use rings_dns_relay::ProxyProtocol;
 
 use super::*;
+use crate::descriptor::RegistryElement;
+use crate::descriptor::SignedDescriptor;
 use crate::dns_relay::descriptor::ServedPort;
 use crate::dns_relay::descriptor::ServedTxt;
 use crate::dns_relay::descriptor::ServiceDescriptorBody;
@@ -89,7 +91,7 @@ async fn test_a_descriptor_signed_for_another_did_does_not_speak_for_the_owner()
             network_id,
             ports: vec![MAIL_PORT],
             txt: vec![],
-            heartbeat_at_ms: now_ms,
+            fresh_for_ms: 90_000,
             expires_at_ms: now_ms + 90_000,
         },
         MessageSigner::new(&impostor_key, network_id),
@@ -126,16 +128,19 @@ fn test_an_expired_descriptor_announces_nothing() {
             network_id: 0,
             ports: vec![MAIL_PORT],
             txt: vec![],
-            heartbeat_at_ms: now_ms - 200_000,
+            fresh_for_ms: 90_000,
             expires_at_ms: now_ms - 110_000,
         },
         MessageSigner::new(&key, 0),
     )
-    .unwrap();
-    let elements = vec![expired.to_element().unwrap()];
-    assert_eq!(announcement_in(&elements, owner, now_ms, 0), None);
+    .unwrap()
+    .heard_at(now_ms - 200_000);
     assert_eq!(
-        announcement_in(&elements, owner, now_ms - 150_000, 0),
+        announcement_in(vec![expired.clone()], owner, now_ms, 0),
+        None
+    );
+    assert_eq!(
+        announcement_in(vec![expired], owner, now_ms - 150_000, 0),
         Some(mail()),
         "the same descriptor is valid while live"
     );

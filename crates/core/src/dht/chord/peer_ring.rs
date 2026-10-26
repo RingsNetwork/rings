@@ -37,6 +37,8 @@
 //! rounds, successor-list synchronization, and test hooks.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -44,19 +46,26 @@ use std::sync::OnceLock;
 
 use futures::lock::Mutex as FuturesMutex;
 
+use super::carrier_store::CarrierStore;
+use super::carrier_store::RemovalIndex;
+use super::carrier_store::RemovalStorage;
+use super::carrier_store::REMOVAL_SHARES;
 use super::PeerRingAction;
 use super::RemoteAction;
 use crate::consts::LOCAL_CACHE_CAPACITY;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryVersion;
 use crate::dht::finger::FingerApplyOutcome;
 use crate::dht::finger::FingerConvergenceStatus;
 use crate::dht::finger::FingerDeferOutcome;
 use crate::dht::finger::FingerRetireOutcome;
 use crate::dht::finger::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::relay_holder::RelayNeighborhood;
+use crate::dht::relay_holder::RelayReplication;
 use crate::dht::successor::SuccessorSeq;
 use crate::dht::topology;
+use crate::dht::topology::edge_slots;
 use crate::dht::topology::FindSuccessorStep;
 use crate::dht::topology::SuccessorRemoval;
 use crate::dht::topology::TopologyAction;
@@ -71,6 +80,8 @@ use crate::dht::FingerFixRequest;
 use crate::dht::FingerTable;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::SlotRoster;
+use crate::fair_admission::TableAccounting;
 use crate::lifecycle::epoch::Epoch;
 use crate::message::RelayHoldDigest;
 use crate::storage::KvStorageInterface;
@@ -80,6 +91,16 @@ use crate::utils::Instant;
 
 mod relay_custody;
 use relay_custody::KeptRelayHold;
+use relay_custody::RelayHolderHints;
+mod relay_repair;
+mod relay_replicas;
+use relay_replicas::NextHolder;
+use relay_replicas::PendingReplication;
+pub(crate) use relay_replicas::ReplicaAcknowledgement;
+pub(crate) use relay_replicas::ReplicationStep;
+
+/// The holds a holder replicates to the other members of their keys (see `relay_replicas`).
+type RelayReplications = BTreeMap<RelayHoldDigest, PendingReplication>;
 mod views;
 
 /// Storage accepted by [`PeerRing::new_with_storage`].
@@ -95,12 +116,25 @@ pub struct PeerRing {
     successor_seq: SuccessorSeq,
     /// Current predecessor learned through Chord notifications.
     predecessor: Arc<Mutex<Option<Did>>>,
-    /// Persistent replicated-entry storage of the data namespace: a cache of the overlay's
-    /// replicated topics, rebuildable from their replicas.
+    /// Persistent replicated-entry storage of the data namespace: the element sides of the
+    /// overlay's replicated topics, rebuildable from their replicas, which its budget may evict
+    /// (see `chord::carrier_store`).
     pub(crate) storage: EntryStorage,
-    /// Storage of the relay-inbox namespace: the only copy of the mail this node holds (a relay
-    /// carrier is never cached or replicated, and fetched by its recipient alone), so it must be
-    /// a `RecordAuthority::Retained` store (#1021). `None` until [`Self::with_relay_storage`]
+    /// The remove sides of the data namespace (#920): a `RecordAuthority::Retained` store, which
+    /// refuses and never evicts, given by [`Self::with_removal_storage`]; an in-memory one until
+    /// then, whose loss at a restart makes this node a fresh replica (removal-stability paper,
+    /// Section IV).
+    pub(crate) removal_storage: RemovalStorage,
+    /// The charge index of [`Self::removal_storage`](PeerRing#structfield.removal_storage).
+    removal_index: RemovalIndex,
+    /// The connection slots of this node, which every table under slot accounting charges
+    /// (load-bounds paper, Law 1); the transport gives an edge a slot as it admits the edge and
+    /// frees it as it retires the edge.
+    edges: Arc<SlotRoster>,
+    /// Storage of the relay-inbox namespace: this node's copy of the mail it holds as a member of
+    /// a carrier's key (a relay carrier is replicated to the members alone, #777, never cached,
+    /// and fetched by its recipient alone), so it must be a `RecordAuthority::Retained` store
+    /// (#1021). `None` until [`Self::with_relay_storage`]
     /// gives it one; without it the node takes custody of no relay carrier (Law 1 admits no
     /// volatile relay store): it declares that it holds no relay mail, so the holder law
     /// (`dht::relay_holder`) never names it, every relay write that reaches it anyway is refused
@@ -148,6 +182,26 @@ pub struct PeerRing {
     relay_neighborhood: Mutex<RelayNeighborhood>,
     /// The relay holds this node wrote and no holder acknowledged yet (see `relay_custody`).
     unacknowledged_relay_holds: Mutex<BTreeMap<RelayHoldDigest, KeptRelayHold>>,
+    /// The greatest version this node has stamped or forwarded through
+    /// [`Self::stamp_operation`]: the floor of its next stamp, so its own operations are
+    /// totally ordered in issue order (#1075).
+    pub(super) last_stamped: Mutex<Option<EntryVersion>>,
+    /// The queries asked of, and the holders named by, the owners of the relay keys kept here
+    /// that this view does not place (see `relay_custody`).
+    relay_holder_hints: Mutex<RelayHolderHints>,
+    /// The holds this node took as their key's holder and replicates (see `relay_replicas`).
+    relay_replications: Mutex<RelayReplications>,
+    /// How relay custody is replicated: `r` and the age gate (see `relay_replicas`).
+    relay_replication: RelayReplication,
+    /// The peers this node declared to that it holds relay mail, once its age gate opened.
+    relay_custody_declared: Mutex<BTreeSet<Did>>,
+    /// The first holder after this node past its successor list (see `relay_replicas`).
+    relay_next_holder: Mutex<NextHolder>,
+    /// Whether a chain neighbour was lost and the chain exchange has not run since (`Law
+    /// (Event-driven repair)`); the predicate the chain repair task guards on.
+    relay_chain_repair_due: AtomicBool,
+    /// Count of chain-neighbour losses, which wakes the chain repair task (`Law (Wake)`).
+    relay_chain_losses: Epoch,
 }
 
 /// Construction.
@@ -189,11 +243,15 @@ impl PeerRing {
         finger_table_size: usize,
         virtual_nodes: VirtualNodeConfig,
     ) -> Self {
+        let edges = Arc::new(SlotRoster::new(edge_slots(usize::from(succ_max))));
         Self {
             successor_seq: SuccessorSeq::new(did, succ_max),
             predecessor: Arc::new(Mutex::new(None)),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
+            removal_storage: Box::new(MemStorage::new()),
+            removal_index: RemovalIndex::new(TableAccounting::new(REMOVAL_SHARES)),
+            edges,
             relay_storage: None,
             cache: Box::new(MemStorage::bounded(LOCAL_CACHE_CAPACITY)),
             storage_virtual_node_config: virtual_nodes,
@@ -207,6 +265,14 @@ impl PeerRing {
             topology_epoch: Epoch::default(),
             relay_neighborhood: Mutex::new(RelayNeighborhood::default()),
             unacknowledged_relay_holds: Mutex::new(BTreeMap::new()),
+            last_stamped: Mutex::new(None),
+            relay_holder_hints: Mutex::new(RelayHolderHints::default()),
+            relay_replications: Mutex::new(BTreeMap::new()),
+            relay_replication: RelayReplication::default(),
+            relay_custody_declared: Mutex::new(BTreeSet::new()),
+            relay_next_holder: Mutex::new(NextHolder::default()),
+            relay_chain_repair_due: AtomicBool::new(false),
+            relay_chain_losses: Epoch::default(),
             did,
         }
     }
@@ -219,20 +285,57 @@ impl PeerRing {
         self
     }
 
+    /// This ring with `storage` as the store of the data namespace's remove sides (see
+    /// [`Self::removal_storage`](PeerRing#structfield.removal_storage)): a retained store, which
+    /// refuses and never evicts (#920).
+    pub fn with_removal_storage(mut self, storage: RemovalStorage) -> Self {
+        self.removal_storage = storage;
+        self
+    }
+
+    /// Whether this node's view names `node` as a previous owner of the placements it now owns:
+    /// its predecessor or one of its successors (load-bounds paper, Sec. V, the custody
+    /// principal `χ`).
+    pub(crate) fn names_previous_owner(&self, node: Did) -> Result<bool> {
+        Ok(*self.lock_predecessor_state()? == Some(node) || self.successor_seq.contains(&node)?)
+    }
+
+    /// The connection slots of this node (see [`Self::edges`](PeerRing#structfield.edges)).
+    pub(crate) fn edges(&self) -> &SlotRoster {
+        &self.edges
+    }
+
+    /// This ring replicating relay custody as `replication` says (#777).
+    pub fn with_relay_replication(mut self, replication: RelayReplication) -> Self {
+        let replication = RelayReplication {
+            replicas: replication.replicas.max(1),
+            ..replication
+        };
+        self.relay_replication = replication;
+        self.relay_neighborhood =
+            Mutex::new(RelayNeighborhood::with_replicas(replication.replicas));
+        self
+    }
+
     /// The store of the carriers of `kind`, if this node keeps one: data topics and relay
     /// inboxes live in separate stores of their own authority, as they live in separate
-    /// namespaces, and a node with no relay store keeps no relay carrier.
-    pub(crate) fn carrier_storage(&self, kind: EntryKind) -> Option<&EntryStorage> {
+    /// namespaces, and a node with no relay store keeps no relay carrier. The data store is
+    /// factored into element and remove sides.
+    pub(crate) fn carrier_storage(&self, kind: EntryKind) -> Option<CarrierStore<'_>> {
         match kind {
-            EntryKind::Data => Some(&self.storage),
-            EntryKind::RelayMessage => self.relay_storage.as_ref(),
+            EntryKind::Data => Some(CarrierStore::Factored {
+                elements: &self.storage,
+                removals: &self.removal_storage,
+                index: &self.removal_index,
+            }),
+            EntryKind::RelayMessage => self.relay_storage.as_ref().map(CarrierStore::Whole),
         }
     }
 
     /// The store a write of a carrier of `kind` goes to (the custody law of #1021).
     ///
     /// Post: `Err(RelayStorageUnavailable)` for a relay carrier on a node with no relay store.
-    pub(crate) fn carrier_store_for_write(&self, kind: EntryKind) -> Result<&EntryStorage> {
+    pub(crate) fn carrier_store_for_write(&self, kind: EntryKind) -> Result<CarrierStore<'_>> {
         self.carrier_storage(kind)
             .ok_or(Error::RelayStorageUnavailable)
     }
@@ -338,6 +441,7 @@ impl PeerRing {
         if next.state.successors != current.successors {
             self.lock_pending_successor_sync()?
                 .retain_current(&next.state.successors);
+            self.forget_next_relay_holder(None)?;
         }
         if !next.state.routes_equal(&current) {
             self.topology_epoch.advance();
@@ -465,6 +569,11 @@ impl PeerRing {
         did: Did,
         successor: SuccessorRemoval,
     ) -> Result<TopologyRemoval> {
+        // A chain neighbour vacates a slot of relay custody even when the topology does not
+        // reference it, so its loss makes the repair round due at once (`Law (Event-driven
+        // repair)`, #777).
+        let (previous, next) = self.relay_chain_neighbours()?;
+        let chain_neighbour = previous == Some(did) || next == Some(did);
         let (_, removal) = self.transition(|state, _| {
             let removal = TopologyRemoval::of(state, did);
             let event = TopologyEvent::Remove {
@@ -474,7 +583,16 @@ impl PeerRing {
             (self.step(state, event), removal)
         })?;
         self.forget_relay_custody(did)?;
-        Ok(removal)
+        if chain_neighbour {
+            self.relay_chain_repair_due
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.relay_chain_losses.advance();
+        }
+        Ok(if chain_neighbour {
+            TopologyRemoval::Referenced
+        } else {
+            removal
+        })
     }
 }
 

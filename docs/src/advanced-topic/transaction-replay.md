@@ -97,9 +97,15 @@ logical lane admission.
 
 ## Persistence and bounds
 
-The sender reserves and persists the next sequence before exposing a signature. A crash may leave
-a gap but cannot reuse a successfully reserved sequence. A reservation that would wrap `u64`
-fails closed.
+The sender never exposes a signature over a sequence its durable record does not cover. It
+persists a lease, not each sequence (#1043): a reservation that outruns the stream's lease writes
+a new one covering at least the next `TRANSACTION_SEQUENCE_LEASE` (64) sequences, and the
+reservations inside it are handed out from memory without a write. A stream reserving one sequence
+per transaction therefore writes once per 64 transactions. A restart resumes past the durable
+lease, so a crash may leave a gap, of at most 64 sequences for single reservations, but never
+reuses a sequence. The receiver takes the gap as one `Advance`: no transaction carries a skipped
+sequence, since none was signed. The laws, with their proof sketch over every crash point, are
+in `crates/core/src/message/replay/lease.rs`. A reservation that would wrap `u64` fails closed.
 
 One runtime serializes all writers to its allocator. Multiple devices or processes using the same
 account and destination must delegate signing to that one allocator; merely pointing independent
@@ -112,16 +118,32 @@ crash after persistence but before dispatch may lose the event. This is the deli
 persistence-before-dispatch boundary: it prevents duplicate dispatch but is not exactly-once
 execution because replay storage and application handlers do not share a transaction.
 
+Link-local transactions are the exception (#1081). A transaction is link-local when all three
+hold: it is Application traffic, it arrived on the authenticated connection of its own origin,
+and its namespace was registered in advance as delegating its replay (a protocol's
+`delegates_replay`, published with `Swarm::set_replay_delegation`). Core decides this from the
+envelope and the connection; it never calls the application. Such a transaction is admitted in a
+volatile window of its stream on that connection. The window is never written, and it is released
+with the connection, so it spans one link generation. Every other transaction, a relayed copy
+included, keeps the durable window. A namespace that declares delegated replay must act on each
+of its payloads at most once by its own replay key, across connections, generations, envelopes
+and restarts. The onion data plane does, with its replay store and process epoch, and it is the
+one namespace that declares it. Only the origin can present a link-local transaction again: its
+link is authenticated and encrypted, and the transaction names this node as its destination. So
+the durable window protected nothing there that the declaring namespace does not. The law is the
+*Link-local transactions* section of `papers/durable-records.tex`.
+
 Sender and receiver state are stored as one record per stream:
 
 ```text
-rings-core:transaction-replay:stream:sender:<hex key>    ->  (key, last reserved sequence)
-rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot window, relay custody)
+rings-core:transaction-replay:stream:sender:<hex key>    ->  (key, last leased sequence)
+rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot window, relay custody,
+                                                             introducer, spent instant)
 ```
 
 A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
-(3850 bytes: a 92-byte key, a 1066-byte window and a relay custody of up to 64 deliveries of 42
-bytes, with tag and length prefixes), so the cost of an admission does not grow with the number of
+(3873 bytes: a 92-byte key, a 1066-byte window, a relay custody of up to 64 deliveries of 42
+bytes and a 23-byte charge, with tag and length prefixes), so the cost of an admission does not grow with the number of
 streams retained. On load, every record must decode and
 sit under its own key, or the stream it is filed as fails closed (see [Bad records](#bad-records)).
 The native daemon opens the replay store as an authoritative file store (#909). On unix each write
@@ -141,39 +163,60 @@ commit. `"strict"` is each engine's strongest commit; whether it also flushes a 
 is the engine's choice. An IndexedDB transaction is atomic, so a crash leaves every record whole at
 its previous or its new value.
 
-One lock serializes all replay transitions and is held across each record write, so the store's
-write latency bounds the node-wide transition rate. Each transition runs detached from its caller
-on the runtime: lock, persist the stream's record, update the table, unlock. Cancelling a caller
-abandons only its wait, so a record write is never left in flight while the next transition of its
-stream runs, and a stale write can never land after a newer one. A cancelled caller's transition
-therefore commits, exactly as if the caller had dropped the verdict: an admission enters the window
-and is charged its quota though nobody dispatches it (a retransmission is then a `Replay`, and the
-message is lost, as for any drop after admission), and a reservation consumes its sequences (a gap
-the receiver accepts). A cancelled attempt is not shed from the queue: it still pays its flushed
-write.
+One lock serializes all replay transitions, but no record write runs under it: replay commits by
+group commit (#916). A transition locks, applies its effect to the in-memory tables, stages its
+stream's record into the open batch, unlocks, and waits until that batch is durable. One writer at a
+time writes the batches, in order, outside the lock. The transitions that run while one batch is
+written gather into the next, and one store batch writes all of them:
 
-With the flushed native store that bound is the
-flush latency. `test_durable_throughput_of_replay_admissions` (ignored by default; run it with
-`--ignored --nocapture`) measures it. On an Apple M1 Max SSD (APFS) it measured:
+- On the native store, every record goes to its own temporary file, and each file is `fsync`ed. One
+  `F_FULLFSYNC` barrier on Apple targets then makes them all durable together. After that come the
+  renames, and one directory flush covers all of them.
+- On IndexedDB, the batch is one strict read-write transaction.
+
+The laws, stated in `crates/core/src/message/replay/commit.rs` and in the Group commit section of
+`papers/durable-records.tex`:
+
+- **Release.** No result is returned before its batch is durable. That holds for a refusal too,
+  and for a reservation inside its lease that writes nothing.
+- **Atomicity.** Each record is whole at its previous or its new value after any crash.
+- **Order.** Each stream's durable values follow lock order.
+- **Fail closed.** A failed batch fails, and undoes, every pending transition: its own, and those of
+  the batch gathering on top of it. It is counted once as a persistence failure.
+- **Latency.** A transition waits for at most two batch writes: the one in flight, then its own.
+
+Each transition runs detached from its caller on the runtime, so cancelling a caller abandons only
+its wait, never a staged effect. A cancelled caller's transition therefore commits, exactly as if
+the caller had dropped the verdict: an admission enters the window and is charged its quota though
+nobody dispatches it (a retransmission is then a `Replay`, and the message is lost, as for any drop
+after admission), and a reservation consumes its sequences (a gap the receiver accepts). A crash
+after some records of a batch landed and before the batch was released is the same case.
+
+`test_durable_throughput_of_replay_admissions` (ignored by default; run it with
+`--release --ignored --nocapture`) measures both latency and throughput. One admission at a time
+pays a whole batch write. Admissions that run concurrently share batches, so the rate grows with
+the transitions in flight. One run on an Apple M1 Max SSD (APFS) measured:
 
 | Store | Admissions/s | p50 | p99 |
 |---|---|---|---|
-| authoritative file | 49–57 | ~17–18 ms | ~30–47 ms |
-| disposable file | ~4,500 | ~0.2 ms | ~0.4 ms |
-| memory | ~97,000 | ~10 µs | ~17 µs |
+| authoritative file, one at a time | 39 | ~24 ms | ~46 ms |
+| authoritative file, 64 in flight | 922 | | |
+| disposable file, one at a time | ~4,000 | ~0.2 ms | ~0.5 ms |
+| memory, one at a time | ~67,000 | ~11 µs | ~41 µs |
 
-The benchmark admits through the production path (`admit_with_quota`), so each figure includes
-the detached task every transition runs on.
-
-Sender reservations pay the same cost. The ceiling is far below the outbound lane rate, and group
-commit is tracked in #916.
+Before group commit the authoritative store sustained 49–57 admissions/s whatever the concurrency.
+The benchmark admits through the production path (`admit_with_quota`), so each figure includes the
+detached task every transition runs on. Sender reservations write once per lease of 64 sequences,
+so a node's replay writes are about one per admission, and they share the same batches.
 
 Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class
 stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each receiver stream
 has exactly 32 hot digest slots. A full store is at most `TRANSACTION_REPLAY_STORE_MAX_RECORDS`
-(32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,314,240 bytes, counting the relay
-custody once for the whole store, since it holds at most 64 deliveries). New streams fail
-closed at the bound; there is no LRU eviction or sender-controlled reset. The native daemon keeps
+(32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,691,072 bytes, counting the relay
+custody once for the whole store, since it holds at most 64 deliveries). The sender table holds
+this node's own streams, and a new one fails closed at the bound. The receiver table is shared by
+edge, as the next section describes. There is no LRU eviction or sender-controlled reset. The
+native daemon keeps
 the records in a dedicated 40 MiB authoritative file store, which evicts nothing: a write beyond its
 budget fails with `StorageBudgetExhausted`, and so does an open under a lowered budget. Browser
 providers keep them in a dedicated authoritative IndexedDB store with a row capacity of
@@ -190,6 +233,47 @@ Deleting or replacing the replay store deletes the guarantee for its streams. Th
 incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail
 closed on storage errors. Counters expose `Replay`, `Fork`, `Stale`, persistence failures,
 unrestorable records and the calls refused on their streams.
+
+## Receiver streams by connection slot
+
+An origin is a key pair, free to mint, so a bound per origin bounds nothing: before #907 anyone could
+fill the receiver table with one transaction from each of 16,384 fresh origins and refuse every new
+origin for good. The receiver table is now accounted by connection slot (the load-bounds paper,
+Law 2). A node has `R = 2(160 + s + 1)` slots, 328 at the default three successors; an admitted
+connection takes the least free slot and frees it when it is retired. A new stream is charged to
+its introducer:
+
+- the slot of the handshake-authenticated connection that delivered its first transaction;
+- the inbox, for mail out of this node's own relay inbox;
+- this node itself, for out-of-band connection signaling.
+
+Each slot has a floor of 32 new streams. Slots past their floors share a pool of 3328, each up to
+its fair claim `⌈3328 / n⌉`, where `n` counts the over-floor slots. The inbox has a share of 768
+and this node a share of 1024, so a flood of mail never refuses the node's own signaling. At the
+default three successors the table holds at most `328 x 32 + 3328 + 1024 + 768 = 15,616`
+streams, and 64 more per extra successor: the shares stay within the table's hard capacity of
+16,384 up to 15 successors, and past that the hard capacity refuses first. A new stream past its introducer's share fails with
+`TransactionReplayStreamCapacityExceeded`, naming the introducer and the bound. A party with many
+origins and `k` slots can be refused only on those `k` slots.
+
+A stream stays charged to its slot after its connection leaves, so rotating connections never
+grows the table past its bound. The cost is that a connection admitted into a slot inherits what
+the slot still holds: a party that rotates connections through free slots can leave a newcomer
+with only its fair claim until those streams are spent (the paper's rotation residual). A
+connection that keeps its slot is never affected.
+
+A stream leaves the table once it is spent: every transaction it admitted can no longer be
+delivered, by a clock up to `σ` behind.
+
+- A control, storage or E2E stream is spent `σ` after its last proof expires, about 10 minutes after
+  its last default-lifetime transaction.
+- An application stream is spent another `MAX_RELAY_INBOX_TTL_MS + σ` later (7 days), since its
+  mail may still arrive out of a relay inbox, judged as of its hold instant.
+
+The next admission retires every spent stream that holds no relay custody and removes its record.
+Forgetting a spent stream reopens no replay, so a refusal ends once a stream of the refused edge is
+spent. Each receiver record carries its introducer and spent instant, so a restart recovers the
+accounting.
 
 ## Bad records
 
@@ -275,7 +359,10 @@ without the current marker are rejected before deserialization. There is no dual
 negotiation, feature flag, downgrade path, or legacy fallback, and no version behind any of these
 names: the protocol is not versioned before 1.0. Mixed-version overlays are unsupported. Per-class
 streams (#898) are the next cutover: the store becomes one record per stream under
-`rings-core:transaction-replay:stream:`, and every node, seeds included, upgrades together.
+`rings-core:transaction-replay:stream:`, and every node, seeds included, upgrades together. Edge
+accounting (#907) changes the receiver record, which gains its charge: the operator removes the
+`transaction-replay` store while the node is stopped (the documented reset), since a record
+without a charge does not restore.
 
 ## Non-guarantees
 

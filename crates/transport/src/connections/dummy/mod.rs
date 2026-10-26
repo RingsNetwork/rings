@@ -206,6 +206,9 @@ pub struct DummyConnection {
     connection_state: Arc<Mutex<DummyConnectionState>>,
     accepting_events: Arc<AtomicBool>,
     retirement_runtime: tokio::runtime::Handle,
+    /// The payload frames of this connection's transport; see
+    /// [`DummyTransport::dispatched_payload_frames`].
+    dispatched: Arc<AtomicUsize>,
 }
 
 /// [DummyTransport] manages all the [DummyConnection] and
@@ -214,6 +217,9 @@ pub struct DummyTransport {
     pool: Pool<DummyConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
     receive_load: NodeReceiveLoad,
+    /// The payload frames every connection of this transport has dispatched; see
+    /// [`Self::dispatched_payload_frames`].
+    dispatched: Arc<AtomicUsize>,
 }
 
 impl DummyConnection {
@@ -221,7 +227,9 @@ impl DummyConnection {
         &self.rand_id
     }
 
-    fn new(callback: InnerTransportCallback) -> Self {
+    /// A connection that counts the payload frames it dispatches in `dispatched`, its transport's
+    /// count.
+    fn new(callback: InnerTransportCallback, dispatched: Arc<AtomicUsize>) -> Self {
         let rand_id = random(0, 10000000000).to_string();
         let retirement_runtime = tokio::runtime::Handle::current();
 
@@ -255,6 +263,7 @@ impl DummyConnection {
             })),
             accepting_events: Arc::new(AtomicBool::new(true)),
             retirement_runtime,
+            dispatched,
         }
     }
 
@@ -420,8 +429,30 @@ impl DummyTransport {
         Self {
             pool: Pool::new(),
             receive_load: NodeReceiveLoad::new(),
+            dispatched: Arc::default(),
         }
     }
+
+    /// Test hook: the payload frames this transport's connections have dispatched, over every
+    /// connection it has opened.
+    ///
+    /// Unlike [`controlled::sent_count`], which counts every node on the thread, this counts
+    /// only the frames this node sent, so a test can count its own sends while its peers
+    /// answer them.
+    pub fn dispatched_payload_frames(&self) -> usize {
+        self.dispatched.load(Ordering::Acquire)
+    }
+}
+
+/// What one dispatched frame counts toward: a payload frame counts toward its transport's
+/// [`DummyTransport::dispatched_payload_frames`] and its thread's [`controlled::sent_count`].
+/// A credit frame counts toward neither: a receiver's credit pump sends it on its own, so a
+/// test's counts never depend on when a peer advertises credit.
+enum FrameCount {
+    /// A payload frame, counted toward the transport that owns the counter.
+    Payload(Arc<AtomicUsize>),
+    /// A credit frame.
+    Credit,
 }
 
 enum DummySendTarget {
@@ -435,6 +466,7 @@ fn complete_irrevocable_send<F: FnOnce()>(
     lane: ChannelLane,
     target: DummySendTarget,
     permit: IrrevocableSendGuard<F>,
+    count: FrameCount,
 ) -> Result<DeliveryFuture> {
     commit_irrevocable_dispatch(connection_state, permit, || {
         match target {
@@ -447,7 +479,10 @@ fn complete_irrevocable_send<F: FnOnce()>(
             }
             DummySendTarget::Drop => {}
         }
-        SENT_COUNT.with(|count| count.set(count.get() + 1));
+        if let FrameCount::Payload(dispatched) = count {
+            dispatched.fetch_add(1, Ordering::AcqRel);
+            SENT_COUNT.with(|sent| sent.set(sent.get() + 1));
+        }
         Ok(())
     })?;
     if DELIVERY_FUTURE_PENDING.with(|pending| pending.get()) {
@@ -527,6 +562,10 @@ impl FrameSink for DummyConnection {
             send_gate.notified().await;
             set_parked(&SEND_MESSAGE_GATE_PARKED, false);
         }
+        let count = match frame {
+            TransportMessage::Custom(_) => FrameCount::Payload(Arc::clone(&self.dispatched)),
+            TransportMessage::Credit(_) => FrameCount::Credit,
+        };
         let data = rings_codec::serialize(&frame).map(Bytes::from)?;
         if !permit.allows() {
             return Err(Error::SendPermitRevoked);
@@ -569,6 +608,7 @@ impl FrameSink for DummyConnection {
                     lane,
                     target,
                     permit_retirement,
+                    count,
                 );
                 let _ = result_sender.send(result);
             });
@@ -582,6 +622,7 @@ impl FrameSink for DummyConnection {
             lane,
             target,
             permit_retirement,
+            count,
         )
     }
 }
@@ -671,7 +712,7 @@ impl TransportInterface for DummyTransport {
             Notifier::default(),
             self.receive_load.clone(),
         );
-        let conn = DummyConnection::new(inner_callback);
+        let conn = DummyConnection::new(inner_callback, Arc::clone(&self.dispatched));
 
         let connection = self.pool.safely_insert(cid, conn).await?;
         let conn = connection.upgrade()?;

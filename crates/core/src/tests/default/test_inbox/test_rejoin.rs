@@ -27,6 +27,7 @@ fn head_only_node(key: SecretKey) -> Result<Node> {
         .dht_succ_max(1)
         .dht_finger_table_size(0)
         .dht_virtual_nodes(0)
+        .relay_replication(crate::tests::ungated_relay_replication())
         .relay_storage(crate::tests::volatile_relay_storage()),
     );
     Ok(node)

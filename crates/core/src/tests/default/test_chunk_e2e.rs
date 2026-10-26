@@ -52,6 +52,7 @@ use crate::tests::default::wait_until_result;
 use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
 use crate::tests::multi_frame_storage_sync_entries;
+use crate::tests::DispatchedFrames;
 
 struct CountingMeasure {
     counters: Mutex<Vec<(crate::dht::Did, MeasurementEvent)>>,
@@ -335,6 +336,7 @@ async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_de
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let _pending_after_first_chunk = PendingAfterSentCountGuard::new(1);
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
@@ -353,7 +355,7 @@ async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_de
         )
         .await?;
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         1,
         "the first chunk is accepted before the route is withdrawn"
     );
@@ -361,7 +363,7 @@ async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_de
     node1.dht().remove(node2.did())?;
     await_tail_retired(&node1, node2.did()).await?;
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         1,
         "route cancellation must stop the spawned task before another chunk is dispatched"
     );
@@ -382,6 +384,7 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let _pending_after_first_chunk = PendingAfterSentCountGuard::new(1);
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
@@ -400,7 +403,7 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
         )
         .await?;
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         1,
         "the first chunk must be accepted before readiness is withdrawn"
     );
@@ -419,7 +422,7 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
     await_tail_retired(&node1, node2.did()).await?;
 
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         1,
         "a recovering transport must cancel the chunk tail before another admission"
     );
@@ -444,6 +447,7 @@ async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Resul
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let _pending_after_first_chunk = PendingAfterSentCountGuard::new(1);
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
@@ -461,7 +465,7 @@ async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Resul
             "test",
         )
         .await?;
-    assert_eq!(dummy_controlled::sent_count(), 1);
+    assert_eq!(dispatched.count(), 1);
 
     let (old, replacement) = node1
         .swarm
@@ -471,7 +475,7 @@ async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Resul
     await_tail_retired(&node1, node2.did()).await?;
 
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         1,
         "an old-generation send must not dispatch through the replacement admission"
     );
@@ -500,7 +504,7 @@ async fn test_send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Res
     wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
     wait_for_msgs([&node1, &node2]).await;
 
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let dispatch = PausedDispatchGuard::new();
     let swarm = Arc::clone(&node1.swarm);
     let peer = node2.did();
@@ -533,7 +537,7 @@ async fn test_send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Res
         "the old send must report generation revocation, got {result:?}"
     );
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         0,
         "a revoked generation must not cross the irreversible dispatch boundary"
     );
@@ -549,7 +553,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_its_route_disappears(
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
     let (node1, node2) = connect_nodes(node1, prepare_node(SecretKey::random()).await).await?;
 
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let dispatch = PausedDispatchGuard::new();
     let transport = Arc::clone(&node1.swarm.transport);
     let peer = node2.did();
@@ -571,7 +575,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_its_route_disappears(
         .expect("the storage sync task must not panic")?;
     assert_eq!(outcome, StorageSyncOutcome::Deferred);
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         0,
         "a revoked storage route must stop before dispatch"
     );
@@ -593,7 +597,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_transport_loses_readi
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
     let (node1, node2) = connect_nodes(node1, prepare_node(SecretKey::random()).await).await?;
 
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let dispatch = PausedDispatchGuard::new();
     let transport = Arc::clone(&node1.swarm.transport);
     let peer = node2.did();
@@ -618,7 +622,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_transport_loses_readi
         .expect("the storage sync task must not panic")?;
     assert_eq!(outcome, StorageSyncOutcome::Deferred);
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         0,
         "a non-ready transport must stop before dispatch"
     );
@@ -683,7 +687,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
 
     let _max_size = MaxMessageSizeGuard::new(8192);
     let _paused_delivery = PausedDeliveryGuard::new();
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     node1
         .swarm
         .transport
@@ -705,7 +709,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
         .await?
         .is_sent());
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         1,
         "detached storage send should admit exactly its first frame"
     );
@@ -723,7 +727,7 @@ async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery()
         .send_core_message_for_test(Message::ProbeRequest(test_probe_request(7)), node2.did())
         .await?;
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         2,
         "DHT control should not wait behind the bulk transfer's pending tail"
     );
@@ -821,7 +825,7 @@ async fn test_negotiated_size_too_small_errors_without_partial_send() {
 
     let big: Vec<u8> = vec![0xab; 10_000];
     // Count data-channel sends from here, to prove the failed send enqueues nothing.
-    dummy_controlled::reset_sent_count();
+    let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
     let err = node1
         .swarm
         .send_message(ApplicationData::custom(&big), node2.did())
@@ -832,7 +836,7 @@ async fn test_negotiated_size_too_small_errors_without_partial_send() {
         "expected PeerMaxMessageSizeTooSmall, got {err:?}"
     );
     assert_eq!(
-        dummy_controlled::sent_count(),
+        dispatched.count(),
         0,
         "no chunk (partial or otherwise) must be dispatched when framing rejects the size"
     );

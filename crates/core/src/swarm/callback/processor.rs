@@ -5,20 +5,25 @@ use futures::lock::Mutex as FuturesMutex;
 
 use super::inbound;
 use super::inbound::ReassemblyClock;
+use super::logical::Arrival;
 use super::pre_admission::PreAdmissionHold;
 use super::HeldInboundFrame;
 use super::InboundGate;
 use super::InboundLane;
 use super::InboundProcessor;
-use super::LogicalInbound;
 use super::PreparedInboundFrame;
+use super::WeakLogical;
 use crate::chunk::MessageReassembler;
+use crate::delegation::DelegatorAuthorization;
 use crate::dht::Did;
 use crate::measure::Authentication;
+use crate::message::LinkWindows;
 use crate::message::Message;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::message::PerSlot;
+use crate::message::ReplayWindow;
 use crate::swarm::session_link::DelegationLessor;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
@@ -43,28 +48,76 @@ fn log_inbound_verification_failure(
     );
 }
 
-impl InboundProcessor {
-    /// The connection stage of one connection over `transport`, judging reassembly timeouts by
-    /// `reassembly_clock`, with no connection attempt bound yet and empty holds.
-    pub(super) fn new(transport: Arc<SwarmTransport>, reassembly_clock: ReassemblyClock) -> Self {
+impl InboundProcessor<WeakLogical> {
+    /// The connection stage of one connection over `transport`, as the connection keeps it
+    /// (the release law of [`WeakLogical`]), judging reassembly timeouts by `reassembly_clock`,
+    /// with no connection attempt bound yet and empty holds.
+    pub(super) fn new(transport: &Arc<SwarmTransport>, reassembly_clock: ReassemblyClock) -> Self {
         let reassembler = MessageReassembler::with_limits_and_budget(
             transport.reassembly_limits(),
             transport.reassembly_budget(),
         );
         Self {
-            logical: LogicalInbound::new(transport),
+            logical: WeakLogical::new(transport),
             reassembler: Arc::new(FuturesMutex::new(reassembler)),
             reassembly_clock,
             pending_attempt: Arc::new(Mutex::new(None)),
             pre_admission: Arc::new(Mutex::new(PreAdmissionHold::new(inbound::peer_capacity()))),
             session_link: Arc::new(Mutex::new(DelegationLessor::new())),
+            link_windows: Arc::new(FuturesMutex::new(LinkWindows::new())),
         }
     }
 
-    /// The instant every link step is judged at: the inbound clock, so a test can drive lease
-    /// and delegation expiry deterministically.
-    pub(super) fn now_ms(&self) -> u128 {
-        self.reassembly_clock.now_ms()
+    /// This stage bound to its transport for one event: `None` once the transport is gone.
+    ///
+    /// ```text
+    ///   upgrade : Stage WeakLogical → Option (Stage LogicalInbound)
+    ///   upgrade = traverse WeakLogical::upgrade      the per-connection state is shared, not copied
+    /// ```
+    pub(super) fn upgrade(&self) -> Option<InboundProcessor> {
+        Some(InboundProcessor {
+            logical: self.logical.upgrade()?,
+            reassembler: Arc::clone(&self.reassembler),
+            reassembly_clock: self.reassembly_clock.clone(),
+            pending_attempt: Arc::clone(&self.pending_attempt),
+            pre_admission: Arc::clone(&self.pre_admission),
+            session_link: Arc::clone(&self.session_link),
+            link_windows: Arc::clone(&self.link_windows),
+        })
+    }
+}
+
+impl InboundProcessor {
+    /// Commit the replay and origin-quota admission of a transaction addressed to this node in
+    /// the window its classification selects (#1081; durable-records, Law Window by
+    /// classification): this connection's volatile window for a link-local transaction
+    /// (Application traffic of a namespace that delegated its replay, from the authenticated
+    /// neighbour that originated it), the durable window for every other transaction, whose new
+    /// streams are charged to the connection slot `arrival` names (#907). A link window is
+    /// volatile and spans one link generation, so it holds nothing to account.
+    pub(super) async fn admit_final_transaction(
+        &self,
+        payload: &MessagePayload,
+        message: &Message,
+        lane: InboundLane,
+        arrival: Arrival,
+    ) -> crate::error::Result<()> {
+        let class = lane
+            .class()
+            .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
+        let edge = arrival.edge_relation(payload);
+        match ReplayWindow::select(class, edge, || self.logical.delegates_replay(message)) {
+            ReplayWindow::Durable => {
+                self.logical
+                    .admit_final_transaction(payload, message, lane, arrival)
+                    .await
+            }
+            ReplayWindow::Link => {
+                self.logical
+                    .admit_link_transaction(&self.link_windows, payload, message, lane, edge)
+                    .await
+            }
+        }
     }
 
     /// The authentication of `peer` as of now: authenticated iff it is the peer of the
@@ -85,6 +138,29 @@ impl InboundProcessor {
     pub(super) async fn record_receive_failure_now(&self, peer: Option<Did>) {
         let authentication = self.authentication_of(peer);
         self.record_receive_failure(peer, authentication).await;
+    }
+
+    /// Charge `peer`, if it parsed, one receive failure under `authentication`.
+    pub(super) async fn record_receive_failure(
+        &self,
+        peer: Option<Did>,
+        authentication: Authentication,
+    ) {
+        if let Some(peer) = peer {
+            self.logical
+                .transport
+                .record_peer_message_receive_failed(peer, authentication)
+                .await;
+        }
+    }
+}
+
+/// A connection's own state, which either form of its stage reads alike.
+impl<L> InboundProcessor<L> {
+    /// The instant every link step is judged at: the inbound clock, so a test can drive lease
+    /// and delegation expiry deterministically.
+    pub(super) fn now_ms(&self) -> u128 {
+        self.reassembly_clock.now_ms()
     }
 
     /// The receiving end of this connection's delegation references.
@@ -125,19 +201,6 @@ impl InboundProcessor {
             .pending_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(attempt);
-    }
-
-    pub(super) async fn record_receive_failure(
-        &self,
-        peer: Option<Did>,
-        authentication: Authentication,
-    ) {
-        if let Some(peer) = peer {
-            self.logical
-                .transport
-                .record_peer_message_receive_failed(peer, authentication)
-                .await;
-        }
     }
 }
 
@@ -267,8 +330,9 @@ pub(super) fn prepare_resolved_frame(
     peer: Option<Did>,
     payload: MessagePayload,
     wire_bytes: usize,
+    authorization: PerSlot<DelegatorAuthorization>,
 ) -> crate::error::Result<PreparedInboundFrame> {
-    if !payload.verify_transaction_and_payload(network_id) {
+    if !payload.verify_transaction_and_payload_under(network_id, authorization) {
         log_inbound_verification_failure(peer, &payload, wire_bytes);
         return Err(crate::error::Error::InvalidMessage(
             "message verification failed or message expired".to_string(),
@@ -296,5 +360,12 @@ pub(crate) fn prepare_transport_frame_lane_for_test(
     bytes: &[u8],
 ) -> crate::error::Result<InboundLane> {
     let payload = MessagePayload::from_wire(bytes)?;
-    prepare_resolved_frame(network_id, None, payload, bytes.len()).map(|prepared| prepared.lane)
+    prepare_resolved_frame(
+        network_id,
+        None,
+        payload,
+        bytes.len(),
+        PerSlot::full_verification(),
+    )
+    .map(|prepared| prepared.lane)
 }

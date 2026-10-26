@@ -344,6 +344,48 @@ async fn test_processor_create_offer() {
     assert_eq!(conn_dids.first().unwrap().state, "Connected");
 }
 
+/// The close law at node level (#1098): closing a processor disconnects every peer it has,
+/// which then retires the connection, and the closed processor refuses a new one.
+///
+/// The peer's retirement is awaited on activity (the `PeerRetired` event its recorder reads);
+/// the hang guard only bounds a hang.
+#[tokio::test]
+async fn test_processor_close_disconnects_every_peer_and_refuses_new_ones() {
+    let _network_guard = network_test_guard().await;
+    let p1 = prepare_processor().await;
+    let p2 = prepare_processor().await;
+    let _recorder1 = ApplicationRecorder::attach(&p1);
+    let _recorder2 = ApplicationRecorder::attach(&p2);
+    let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
+    let answer = p2
+        .swarm
+        .answer_offer(offer)
+        .await
+        .unwrap()
+        .answer()
+        .expect("p2 holds no offer of its own, so it answers");
+    p1.swarm.accept_answer(answer).await.unwrap();
+    wait_processors_connected(&p1, &p2).await;
+
+    p1.close().await.unwrap();
+
+    assert!(!processor_has_admitted_peer(&p1, p2.did()));
+    assert!(matches!(
+        p1.swarm.create_offer(p2.did()).await,
+        Err(rings_core::error::Error::SwarmClosed)
+    ));
+    crate::tests::activity::probe_on_activity(
+        "the peer retired the closed processor",
+        PROCESSOR_TEST_HANG_GUARD,
+        || {
+            let retired = !processor_has_admitted_peer(&p2, p1.did());
+            async move { Ok(retired.then_some(())) }
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// Real-transport smoke test: custom messages cross an admitted webrtc-rs link both ways.
 ///
 /// Beyond [`test_processor_create_offer`], it checks what only the real transport can: that
