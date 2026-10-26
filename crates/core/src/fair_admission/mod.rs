@@ -23,6 +23,7 @@ pub use slot_accounting::Principal;
 pub use slot_accounting::ShareRefusal;
 pub(crate) use slot_accounting::Shares;
 pub(crate) use slot_accounting::SlotAccounting;
+pub(crate) use slot_accounting::SlotFloorUse;
 pub(crate) use slot_roster::SlotRoster;
 pub(crate) use slot_roster::TableAccounting;
 pub(crate) use wait_queue::acquire_fair;
