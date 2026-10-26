@@ -16,6 +16,8 @@ pub mod connections;
 pub mod core;
 pub mod delivery;
 pub mod error;
+#[cfg(feature = "dummy")]
+pub mod hot_path;
 pub mod ice_server;
 pub mod notifier;
 pub mod pool;

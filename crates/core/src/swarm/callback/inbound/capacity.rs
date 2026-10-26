@@ -186,7 +186,14 @@ impl InboundPeerCapacityState {
 /// `Peer(peer)`; a refusal by the node-wide budget names `Lane(lane)` and `Shared`, since a
 /// lane is refused only beyond its reservation. So a frame that fits its lane's reservation never
 /// waits behind a borrower of the shared pool, and no peer waits behind another peer's budget. A
-/// covered arrival ([`InboundCharge::Covered`]) draws on nothing and waits for its stream alone.
+/// first chunk also draws on `Floor(introducer)`, and on `OpenPool` beyond that floor.
+///
+/// A footprint depends on the ledger: `Lane(lane)` is the relief of `Shared`, whose release
+/// may let the reservation cover the arrival, and `Floor(introducer)` that of `OpenPool`. An
+/// arrival blocked only for lack of room there holds its reliefs, so a reservation and a floor
+/// are each served first come first served: a later, smaller frame does not pass an earlier one
+/// on them. An arrival blocked by its stream or its own peer's budget holds nothing. A covered
+/// arrival ([`InboundCharge::Covered`]) draws on nothing and waits for its stream alone.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum InboundResource {
     /// The arrivals of one peer on one lane through one transport carrier, admitted in arrival
@@ -202,6 +209,9 @@ pub(crate) enum InboundResource {
     /// The pool of the open-message table, which a first chunk beyond its slot's floor draws
     /// on in fair claims; a first chunk within its floor never waits for it.
     OpenPool,
+    /// One introducer's floor in the open-message table, which every first chunk it introduces
+    /// draws on; its release may bring a waiting first chunk within the floor.
+    Floor(Principal),
 }
 
 /// What one inbound arrival reserves on the mailbox ledger (load-bounds paper, Law 4, #932).
@@ -261,10 +271,10 @@ pub(crate) struct InboundRequest {
 
 /// A set of at most four inbound resources.
 pub(crate) type InboundResources =
-    std::iter::Flatten<std::array::IntoIter<Option<InboundResource>, 4>>;
+    std::iter::Flatten<std::array::IntoIter<Option<InboundResource>, 5>>;
 
 /// The inbound resources of `resources`.
-fn inbound_resources(resources: [Option<InboundResource>; 4]) -> InboundResources {
+fn inbound_resources(resources: [Option<InboundResource>; 5]) -> InboundResources {
     resources.into_iter().flatten()
 }
 
@@ -497,24 +507,52 @@ impl AdmissionLedger for Arc<InboundCapacity> {
 
     fn footprint(&self, request: &InboundRequest) -> InboundResources {
         let Some((lane, bytes)) = request.charge.reservation(request.lane) else {
-            return inbound_resources([None, None, None, None]);
+            return inbound_resources([None, None, None, None, None]);
         };
         let reserved = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .covers(lane, bytes);
+        let opening = request.charge.opening();
         // Within its slot's floor a first chunk is never refused by `O` (the floor guarantee).
-        let pooled = request
-            .charge
-            .opening()
-            .is_some_and(|(introducer, bytes)| !self.open().within_floor(introducer, bytes));
+        let pooled =
+            opening.is_some_and(|(introducer, bytes)| !self.open().within_floor(introducer, bytes));
         inbound_resources([
             Some(InboundResource::Peer(request.peer)),
             Some(InboundResource::Lane(lane)),
             (!reserved).then_some(InboundResource::Shared),
             pooled.then_some(InboundResource::OpenPool),
+            opening.map(|(introducer, _)| InboundResource::Floor(introducer)),
         ])
+    }
+
+    fn reliefs(&self, request: &InboundRequest) -> Vec<(InboundResource, Vec<InboundResource>)> {
+        let Some((lane, bytes)) = request.charge.reservation(request.lane) else {
+            return Vec::new();
+        };
+        // Every charge fits an idle reservation (the constant assertions above), so a lane
+        // whose reservation does not cover it now may.
+        let reserved = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .covers(lane, bytes);
+        let floor = request.charge.opening().filter(|(introducer, bytes)| {
+            let open = self.open();
+            !open.within_floor(*introducer, *bytes) && open.fits_floor(*introducer, *bytes)
+        });
+        [
+            (!reserved).then(|| (InboundResource::Lane(lane), vec![InboundResource::Shared])),
+            floor.map(|(introducer, _)| {
+                (InboundResource::Floor(introducer), vec![
+                    InboundResource::OpenPool,
+                ])
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn try_admit(
@@ -522,9 +560,13 @@ impl AdmissionLedger for Arc<InboundCapacity> {
         request: &InboundRequest,
     ) -> std::result::Result<InboundCapacityPermit, InboundResources> {
         self.try_reserve(request).map_err(|refusal| match refusal {
-            InboundRefusal::Peer => {
-                inbound_resources([Some(InboundResource::Peer(request.peer)), None, None, None])
-            }
+            InboundRefusal::Peer => inbound_resources([
+                Some(InboundResource::Peer(request.peer)),
+                None,
+                None,
+                None,
+                None,
+            ]),
             InboundRefusal::Mailbox => inbound_resources([
                 request
                     .charge
@@ -533,9 +575,10 @@ impl AdmissionLedger for Arc<InboundCapacity> {
                 Some(InboundResource::Shared),
                 None,
                 None,
+                None,
             ]),
             InboundRefusal::Open => {
-                inbound_resources([Some(InboundResource::OpenPool), None, None, None])
+                inbound_resources([Some(InboundResource::OpenPool), None, None, None, None])
             }
         })
     }
@@ -589,8 +632,27 @@ impl HeldCharge {
         if let Some(introducer) = self.open.take() {
             self.capacity.open().release(introducer, self.bytes);
             self.capacity.applied.bump();
-            self.capacity.waiters.serve(&self.capacity);
+            self.capacity.waiters.release(&self.capacity, [
+                InboundResource::OpenPool,
+                InboundResource::Floor(introducer),
+            ]);
         }
+    }
+
+    /// The resources this charge frees when it is released: its peer's budget, its lane's
+    /// share and the node-wide budget beyond the reservations, which a lane's release also
+    /// frees for the other lanes, and the open-message pool and its introducer's floor while it
+    /// holds a share of them.
+    fn freed(&self) -> impl Iterator<Item = InboundResource> {
+        [
+            Some(InboundResource::Peer(self.peer)),
+            Some(InboundResource::Lane(self.lane)),
+            Some(InboundResource::Shared),
+            self.open.map(|_| InboundResource::OpenPool),
+            self.open.map(InboundResource::Floor),
+        ]
+        .into_iter()
+        .flatten()
     }
 }
 
@@ -618,7 +680,7 @@ impl Drop for HeldCharge {
         }
         drop((state, peer_states));
         self.capacity.applied.bump();
-        self.capacity.waiters.serve(&self.capacity);
+        self.capacity.waiters.release(&self.capacity, self.freed());
         // Test builds: an inbound release is a state change that quiescence probes read.
         #[cfg(test)]
         crate::tests::activity::record_activity();
