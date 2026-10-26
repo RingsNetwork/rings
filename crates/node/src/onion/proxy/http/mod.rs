@@ -127,8 +127,9 @@ async fn handle_connect(
     Ok(())
 }
 
-/// The CONNECT answer for a session that opened or did not: a refusal, from the route or the
-/// exit, is `502` with no reason (#843 Q5), since the exit gives none.
+/// The CONNECT answer for a session that opened or did not: every failure to open is `502` with
+/// no reason (#843 Q5), whether the route or the exit refused or the session ended locally
+/// before the exit answered (#1118); the request's log line names which.
 const fn connect_status(opened: bool) -> &'static str {
     if opened {
         "200 Connection Established"

@@ -79,6 +79,10 @@ fn xor_in_place<'a, 'b>(
 ///
 /// HKDF-Expand is defined exactly for `N ≤ 255·|SHA-256|`, which is asserted at compile time, so
 /// its only error, `InvalidLength`, cannot occur and the result is discarded.
+///
+/// Each block's HMAC state is wiped on drop (sha2's `zeroize`). hkdf 0.13 does not wipe its
+/// previous block `T(i)`, a stack copy of the key or of its first half; that, HMAC's padded key
+/// block and SHA-256's message schedule are the residue SECURITY.md lists (#852).
 fn hkdf_expand<const N: usize>(kdf: &Hkdf<Sha256>, info: &[&[u8]]) -> Zeroizing<[u8; N]> {
     const { assert!(N <= 255 * 32) };
     let mut okm = Zeroizing::new([0_u8; N]);
@@ -89,8 +93,8 @@ fn hkdf_expand<const N: usize>(kdf: &Hkdf<Sha256>, info: &[&[u8]]) -> Zeroizing<
 /// `HKDF-Extract(salt, ikm₁ ‖ … ‖ ikmₙ)`, with the pseudorandom key the extract step returns
 /// wiped at once.
 ///
-/// The PRK is also held inside the returned `Hkdf`'s HMAC state, which hkdf 0.12 and hmac 0.12
-/// cannot wipe; that residue is #852.
+/// The PRK is also held inside the returned `Hkdf`'s HMAC state, as the `K ⊕ ipad` and
+/// `K ⊕ opad` chaining values; sha2's `zeroize` wipes them when the `Hkdf` drops (#852).
 fn hkdf_extract(salt: &[u8], ikm: &[&[u8]]) -> Hkdf<Sha256> {
     let mut extract = HkdfExtract::<Sha256>::new(Some(salt));
     ikm.iter().for_each(|part| extract.input_ikm(part));
