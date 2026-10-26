@@ -113,6 +113,7 @@ sample_message_body!(FoundEntry, |fixture| FoundEntry {
 sample_message_body!(PlacedEntryOperation, |fixture| PlacedEntryOperation {
     placement: fixture.did,
     op: EntryOperation::Overwrite(fixture.entry.clone()),
+    report: true,
 });
 sample_message_body!(SyncEntriesWithSuccessor, |fixture| {
     SyncEntriesWithSuccessor {
@@ -186,6 +187,11 @@ sample_message_body!(DeclareRelayCustody, |_fixture| DeclareRelayCustody {
 });
 sample_message_body!(RelayCarrierHeld, |fixture| RelayCarrierHeld {
     hold: RelayHoldDigest::of(&EntryOperation::Extend(fixture.entry.clone()))?,
+});
+sample_message_body!(EntryStoreReport, |fixture| EntryStoreReport {
+    operation: OperationDigest::of(&EntryOperation::Extend(fixture.entry.clone()))?,
+    placement: fixture.did,
+    outcome: StoreOutcome::Stored,
 });
 sample_message_body!(FindRelayHolder, |fixture| FindRelayHolder {
     key: fixture.did

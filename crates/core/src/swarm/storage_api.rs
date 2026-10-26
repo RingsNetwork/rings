@@ -16,6 +16,9 @@ use crate::error::Result;
 use crate::lifecycle::StopToken;
 use crate::message::handlers::storage::handle_storage_fetch_act;
 use crate::message::handlers::storage::operate_entry;
+use crate::message::handlers::storage::operate_entry_reported;
+pub use crate::swarm::transport::store_reports::StoreReceipt;
+pub use crate::swarm::transport::store_reports::StoreUnconfirmed;
 use crate::swarm::transport::Attempts;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
@@ -62,8 +65,9 @@ use crate::utils::get_epoch_ms;
 /// Read-your-writes is a session guarantee about the writer's own view, not evidence of
 /// replication: after `Ok` an owner may still refuse or lose the operation, and the writer
 /// reads it all the same. A caller therefore never takes its own read-back as a publication
-/// check (a registry's readiness, for one, #866); only another node's read witnesses that an
-/// owner holds the write.
+/// check (a registry's readiness, for one); only an owner's statement witnesses that it holds
+/// the write: another node's read, or the store report of an append made with
+/// [`ScopedStorage::storage_append_data_reported`] (#866).
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterface {
@@ -139,6 +143,28 @@ impl ScopedStorage<'_> {
         let operation = dht.stamp_operation(operation, get_epoch_ms(), None).await?;
         operate_entry(self.transport, operation.clone(), self.attempts()).await?;
         dht.local_cache_observe_write(operation).await
+    }
+
+    /// [`ChordStorageInterface::storage_append_data`] whose owners report it (#866): once it
+    /// returns `Ok`, this node reads its write as ever (read-your-writes), and the receipt
+    /// resolves once every remote placement's owner reported the element stored
+    /// (`message::types::store_report`). Unlike the writer's own read, the receipt witnesses
+    /// what the owners hold, and so what another node's read can reach. A placement this node
+    /// owns is stored once the append returns.
+    pub async fn storage_append_data_reported(
+        &self,
+        topic: &str,
+        data: Bytes,
+    ) -> Result<StoreReceipt> {
+        let entry: Entry = (topic.to_string(), data).try_into()?;
+        let dht = &self.transport.dht;
+        let operation = dht
+            .stamp_operation(EntryOperation::Extend(entry), get_epoch_ms(), None)
+            .await?;
+        let receipt =
+            operate_entry_reported(self.transport, operation.clone(), self.attempts()).await?;
+        dht.local_cache_observe_write(operation).await?;
+        Ok(receipt)
     }
 }
 

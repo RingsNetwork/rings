@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- A node learns when its registrations are stored at their owners (#866), from the owners
+  themselves, instead of polling the registry. A registration publish now asks each owner that
+  applies it for a store report. An `OperateEntry` carries `report`, and the owner of its
+  placement answers its origin with the new `EntryStoreReport` (`Stored` or `Refused`), routed
+  back like the other reports. A node that only forwards the operation reports nothing, so an
+  operation draws at most one report per placement it reaches, and one not asked draws none.
+  The origin keeps a bounded table of the operations it awaits. Each publish's `StoreReceipt`
+  resolves once every remote placement has reported it stored. A registration is ready once a
+  publish that began with an admitted edge has every report; one made alone reached no owner
+  (#855). `Processor::registrations_published` and `Provider::registrations_published` resolve
+  once every registration of the node is ready, and the browser onion e2e awaits them before
+  it reads the directory. Readiness names the owners of the publisher's view when it
+  published: in a topology still forming, a reader can reach another owner until a storage
+  repair or the next heartbeat carries the registration there. A registration asks for reports only until it is ready. A report
+  is an observation, not a trust claim: a lying owner shifts only its origin's signal, never a
+  reader's path.
+  - **Library API.** New: `ScopedStorage::storage_append_data_reported`,
+    `rings_core::swarm::storage_api::{StoreReceipt, StoreUnconfirmed}`,
+    `rings_core::message::{EntryStoreReport, OperationDigest, StoreOutcome}`, and the
+    `registrations_published` above. `PlacedEntryOperation` gains `report`.
+  - **Upgrade consequence.** Breaking on the wire, within wire version 2, which #934 opened for
+    this release: `OperateEntry` gains a field and `EntryStoreReport` is message 31. Nodes of
+    this release and of 0.37 do not connect, as for #934.
+  - **Operator step.** None beyond upgrading every node that must reach another.
+
 - A node publishes its registrations again at its first edge (#855), so a relay, exit or DNS
   relay service that starts listening before it joins the overlay is listed once it joins, not
   a heartbeat (30 s) later. Before, a registration published with no admitted edge settled only

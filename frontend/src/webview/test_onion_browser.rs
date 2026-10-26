@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use futures::channel::oneshot;
+use futures::future::join_all;
 use futures::future::try_join;
 use futures::future::try_join_all;
 use js_sys::Array;
@@ -35,6 +36,7 @@ use rings_node::provider::browser::ProviderListener;
 use rings_node::provider::Provider;
 use rings_test_support::activity::probe_on_activity;
 use rings_test_support::observer::activity_observer;
+use rings_test_support::with_hang_guard;
 use rings_webview::browser::BOOTSTRAP_MARKER;
 use rings_webview::GatewayHeader;
 use rings_webview::GatewayPrefix;
@@ -215,9 +217,8 @@ async fn browser_onion_loop() -> WebviewResult<BrowserOnionLoop> {
     .await?;
     // Production order (#855), as `frontend/src/node.rs` runs a node: every node listens before
     // it has an edge, so each first registration settles at its node alone, and its first
-    // admitted edge publishes it again. A registration publish has no completion signal (#866),
-    // so the client's directory is probed on every activity, under the registry guard of the
-    // publishers' heartbeat (#985).
+    // admitted edge publishes it again, under the registry guard of the publishers' heartbeat
+    // (#985).
     let publishers = [&guard, &exit].into_iter().chain(middle.iter());
     let heartbeat = publishers
         .clone()
@@ -250,6 +251,19 @@ async fn browser_onion_loop() -> WebviewResult<BrowserOnionLoop> {
         try_join(offerer.admits(answerer), answerer.admits(offerer)).await
     }))
     .await?;
+    // Each publisher's registrations are stored at their owners once the publish of its first
+    // edge is reported stored (#866): awaited, not polled. Those are the owners of the
+    // publisher's view as it published, at its first edge, while the chain was still forming;
+    // the client's read can reach another owner until a storage repair round or the next
+    // heartbeat carries the registration there. So the client's directory is then probed on
+    // activity, under the same guard.
+    let publishers = [&guard, &exit].into_iter().chain(middle.iter());
+    with_hang_guard(
+        "every publisher's registrations stored at their owners",
+        registry_hang_guard(heartbeat),
+        join_all(publishers.map(|node| node.provider.registrations_published())),
+    )
+    .await;
     poll_until(
         "the client directory to register the loop",
         registry_hang_guard(heartbeat),
@@ -574,10 +588,11 @@ where
 /// The hang guard of the directory phase: the publishers' registry heartbeat `I` beyond
 /// [`FLOW_HANG_GUARD`] (#985).
 ///
-/// The phase ends on an event, the client's read observing every publisher's registration, but
-/// the eventual law puts that event up to one heartbeat after a publisher's first edge. Only the
-/// writer reads its own writes (#984): another node reads a registration once it is stored at an
-/// owner its read reaches. A node listens before its edges, so its first heartbeat settles at
+/// The phase ends on events: each publisher's registrations reported stored by their owners
+/// (#866), then the client's read observing them. The eventual law puts the read up to one
+/// heartbeat after a publisher's first edge. Only the writer reads its own writes (#984):
+/// another node reads a registration once it is stored at an owner its read reaches, and the
+/// owners that reported may be those of the publisher's view before the chain settled. A node listens before its edges, so its first heartbeat settles at
 /// itself alone, and its first admitted edge publishes again at once (#855): `publish₁`, before
 /// the phase starts. One that lands at an owner which then loses the placement reaches the new
 /// owner in a storage repair round, or at the latest with the publisher's next heartbeat, which

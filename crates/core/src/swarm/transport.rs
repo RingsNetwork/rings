@@ -78,6 +78,7 @@ mod rerouting;
 mod retention;
 mod storage_lookup;
 mod storage_sync;
+pub(crate) mod store_reports;
 mod transaction_replay;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use storage_sync::StorageSyncBatch;
@@ -211,6 +212,8 @@ pub struct SwarmTransport {
     /// The reply marker of storage lookups; see [`StorageAnswerClock`].
     storage_answer_clock: StorageAnswerClock,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
+    /// The store reports this node awaits for the reported operations it sent (#866).
+    pub(crate) store_reports: self::store_reports::StoreReports,
     storage_repair_requested: AtomicBool,
     /// Test builds: the frames this node sent and received; see [`FrameLedger`].
     #[cfg(test)]
@@ -343,6 +346,7 @@ impl SwarmTransport {
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             storage_answer_clock: StorageAnswerClock::default(),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
+            store_reports: self::store_reports::StoreReports::default(),
             storage_repair_requested: AtomicBool::new(false),
             #[cfg(test)]
             frames: Arc::default(),

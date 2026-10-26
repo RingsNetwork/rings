@@ -36,6 +36,8 @@ mod test_config;
 mod test_dns_relay;
 #[cfg(feature = "dummy")]
 mod test_first_edge;
+#[cfg(feature = "dummy")]
+mod test_registration_published;
 // The gateway tests reach a real public network by design; the `dummy` build has none.
 #[cfg(all(rings_native, not(feature = "dummy")))]
 mod test_gateway;

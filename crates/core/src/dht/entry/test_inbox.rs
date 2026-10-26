@@ -105,6 +105,7 @@ fn test_relay_carrier_has_one_placement_whatever_the_redundancy() -> Result<()> 
     let hold = PlacedEntryOperation {
         placement: rotated,
         op: EntryOperation::Extend(inbox.clone()),
+        report: false,
     };
     assert!(hold.validate_placement(2).is_err());
 

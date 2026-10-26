@@ -51,7 +51,13 @@ async fn test_registration_daemon_treats_expected_stop_as_terminal() {
 
     tokio::time::timeout(
         Duration::from_millis(100),
-        processor.registration_task_daemon_with(&task, StopToken::never(), StopToken::never()),
+        // A task outside the processor's registrations: an index with no readiness latch.
+        processor.registration_task_daemon_with(
+            &task,
+            usize::MAX,
+            StopToken::never(),
+            StopToken::never(),
+        ),
     )
     .await
     .expect("RegistrationStopped should terminate the registration daemon");
@@ -65,6 +71,7 @@ async fn test_registration_daemon_stops_after_sibling_maintenance_exits() {
     let sibling_stop_source = StopSource::new();
     let daemon = processor.registration_task_daemon_with(
         &task,
+        usize::MAX,
         StopToken::never(),
         sibling_stop_source.token(),
     );
