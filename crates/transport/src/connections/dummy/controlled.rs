@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::Weak;
 use std::thread::LocalKey;
 
 use bytes::Bytes;
@@ -10,6 +11,7 @@ use super::ACTIVE_DELIVERY_GATE;
 use super::CLOSE_PENDING;
 use super::CONNS;
 use super::CONTROLLED;
+use super::CONTROLLED_LINKS;
 use super::CONTROLLED_RNG_STATE;
 use super::CONTROLLED_VIRTUAL_MS;
 use super::DELIVERY;
@@ -30,6 +32,7 @@ use super::SEND_MESSAGE_PENDING;
 use super::SEND_MESSAGE_PENDING_AFTER_SENT_COUNT;
 use super::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
 use super::WITHHELD_CREDIT;
+use crate::callback::link_credit::LANE_IDLE_PERIOD;
 use crate::core::pool::ChannelLane;
 use crate::core::transport::WebrtcConnectionState;
 
@@ -128,6 +131,7 @@ pub enum QueuedDeliveryKind {
 /// off clears this thread's queue.
 pub fn enable(on: bool) {
     CONTROLLED.with(|c| c.set(on));
+    CONTROLLED_LINKS.with(|links| links.borrow_mut().clear());
     if on {
         DELIVERY.with(|state| state.borrow_mut().reset());
     } else {
@@ -156,9 +160,29 @@ pub fn enable(on: bool) {
 pub fn set_seed(seed: u64) {
     CONTROLLED_RNG_STATE.with(|state| state.set(Some(seed)));
 }
-/// Set the virtual monotonic clock attached to subsequent queue admissions.
+/// Set the virtual monotonic clock attached to subsequent queue admissions, and run the idle
+/// check of every link this thread's scheduler created once for each [`LANE_IDLE_PERIOD`] the
+/// clock crossed, at most twice: two checks shrink every idle lane, the first clearing its
+/// activity and the second shrinking it. So the dummy reclaims idle pooled credit on the
+/// simulation's clock, as a WebRTC backend does on the wall clock, in creation order and
+/// deterministically (load-bounds paper, Law 3).
 pub fn set_virtual_time(now_ms: u64) {
-    CONTROLLED_VIRTUAL_MS.with(|time| time.set(now_ms));
+    let before = CONTROLLED_VIRTUAL_MS.with(|time| time.replace(now_ms));
+    let period = u64::try_from(LANE_IDLE_PERIOD.as_millis()).unwrap_or(u64::MAX);
+    let crossed = (now_ms / period).saturating_sub(before / period).min(2);
+    if crossed == 0 {
+        return;
+    }
+    let links = CONTROLLED_LINKS.with(|links| {
+        let mut links = links.borrow_mut();
+        links.retain(|link| link.strong_count() > 0);
+        links.clone()
+    });
+    for _ in 0..crossed {
+        links.iter().filter_map(Weak::upgrade).for_each(|link| {
+            link.idle_check();
+        });
+    }
 }
 
 /// Whether explicit controlled delivery is active on this test thread.

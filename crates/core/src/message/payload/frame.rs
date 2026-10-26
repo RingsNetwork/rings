@@ -19,11 +19,13 @@
 //! carries it as well, so two nodes of different wire versions never exchange a frame, and a
 //! connected overlay holds one wire version.
 //!
-//! Bump rule: [`WIRE_VERSION`] goes up by exactly one with every change that a node of the
-//! previous wire version would reject or misread: a frame, a message, a signature domain, a
-//! handshake rule. A change no peer can observe never bumps it, and the crate version moves
-//! independently. Every bump is a total cutover, as every wire change before 1.0 is: no build
-//! decodes the `rest` of another version, and nothing is negotiated.
+//! Bump rule: [`WIRE_VERSION`] goes up by exactly one per release, relative to the last
+//! released wire version, when the release changes anything a node of that version would
+//! reject or misread: a frame, a message, a transport signal, a signature domain, a handshake
+//! rule. Changes between two releases share the one bump; a change no peer can observe never
+//! bumps it, and the crate version moves independently. Every bump is a total cutover, as
+//! every wire change before 1.0 is: no build decodes the `rest` of another version, and
+//! nothing is negotiated.
 
 use std::fmt;
 
@@ -33,7 +35,7 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// The wire version of this build; see the bump rule.
-pub const WIRE_VERSION: u16 = 1;
+pub const WIRE_VERSION: u16 = 2;
 
 /// The opening of every frame, fixed forever (the frame-header law).
 const FRAME_MAGIC: &[u8] = b"RINGS\0";

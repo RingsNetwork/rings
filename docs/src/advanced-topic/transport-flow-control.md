@@ -46,7 +46,11 @@ What a node holds of received frames is bounded hard, whatever the number of con
 - **Floors and the pool.** A connection's lanes always hold their floors: 16 frames on the
   priority lane and one on each data lane. Beyond its floor, a data lane is lent credit from the
   node's frame pool (`NodeFramePool`, 256 frames, 16 MiB): the admission of a data lane's frame
-  is its demand, served first come, first served, up to the lane's window. With connection
+  is its demand, served first come, first served, up to the lane's window and within its edge's
+  fair claim, `⌈256 / n⌉` frames with `n` the edges holding or waiting for pooled credit. When an
+  edge below its share, `⌊256 / n⌋`, finds the pool full, every edge above its share is shrunk
+  to it. So a busy edge keeps at least `min(45, ⌊256 / n⌋)` pooled frames, its three data lanes'
+  whole windows while at most five edges are busy, however busy the others are. With connection
   admission keeping at most `2 × (160 + successors + 1)` connections (328 with the default 3
   successors), a node holds at most `328 × 19 + 256 = 6 488` frames, about 405 MiB of 64 KiB
   frames, against about 1.3 GiB before.

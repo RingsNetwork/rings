@@ -18,7 +18,8 @@
 //!   advertise : advertised ← released + floor + lent  once it exceeds advertised by a batch,
 //!               and never while a shrink is pending
 //!   lend(x)   : lent ← lent + x           at most W − floor − lent      (the node's pool)
-//!   shrink    : g ← g + 1, lent ← 0, send Shrink(min(released + floor, advertised), g)
+//!   shrink(l) : g ← g + 1, lent ← l < lent,
+//!               send Shrink(min(released + floor + l, advertised), g)   (idle: l = 0)
 //!   shrink(L′,g) at the sender: B = max(committed + reserved, L′), limit ← B,
 //!               reply Returned(B, g)
 //!   returned(B,g) at the receiver: advertised ← B, the shrink ends
@@ -489,26 +490,41 @@ impl ReceiveWindow {
         self.lent.max(liability.saturating_sub(window.floor))
     }
 
-    #[cfg(any(test, rings_transport_webrtc))]
+    #[cfg(any(test, feature = "dummy", rings_transport_webrtc))]
     /// The idle check: a lane that holds a share of the pool and admitted no frame since the
     /// last check is shrunk to its floor, in a new generation; returns the `Shrink` to send.
     pub(crate) fn idle_shrink(&mut self, window: CreditWindow) -> Option<LaneSignal> {
         let idle = !std::mem::replace(&mut self.active, false);
-        if !idle || self.lent == 0 || self.shrinking.is_some() {
+        if !idle {
+            return None;
+        }
+        self.shrink_to(window, 0)
+    }
+
+    /// Shrink the lane's share of the pool to `lent`, in a new generation; returns the `Shrink`
+    /// to send. Nothing while a shrink is pending, or when the share is no greater than `lent`.
+    pub(crate) fn shrink_to(&mut self, window: CreditWindow, lent: u64) -> Option<LaneSignal> {
+        if self.lent <= lent || self.shrinking.is_some() {
             return None;
         }
         self.generation = self.generation.saturating_add(1);
-        self.lent = 0;
+        self.lent = lent;
         // Never above the advertised credit, so the bound the sender returns is not either.
         let limit = self
             .released
             .saturating_add(window.floor)
+            .saturating_add(lent)
             .min(self.advertised);
         self.shrinking = Some(limit);
         Some(LaneSignal::Shrink {
             limit,
             generation: self.generation,
         })
+    }
+
+    /// The lane's share of the pool beyond its floor.
+    pub(crate) const fn lent(&self) -> u64 {
+        self.lent
     }
 
     /// Apply the sender's return of `bound` for `generation`: the shrink ends, and the lane

@@ -66,6 +66,13 @@ use crate::sync_utils::lock_recover;
 mod pool;
 mod view;
 
+/// `T_idle`, the period of a link's idle check: a data lane that holds a share of the node's
+/// pool and admitted no frame for it is shrunk to its floor (load-bounds paper, Law 3). On a
+/// link whose round trip exceeds it, a lane paused for one round trip is shrunk, and its next
+/// burst waits one round trip for pooled credit again; no frame is refused.
+#[cfg(any(feature = "dummy", rings_transport_webrtc))]
+pub(crate) const LANE_IDLE_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub use pool::NodeFramePool;
 pub use view::LaneCreditView;
 
@@ -364,7 +371,46 @@ impl LinkCredit {
             let after = state.receive[index].charge(CreditWindow::of(index));
             (mem::replace(&mut state.charged[index], after), after)
         };
-        self.pool.adjust(before, after);
+        self.pool.adjust(pool::edge_key(self), before, after);
+    }
+
+    /// Shrink this edge's pooled shares to `share` in all, the largest first: a claimant below
+    /// its share found the node's pool full (Law 3, rebalance). Each lane shrunk sends its
+    /// `Shrink`; the shares come back with the returns.
+    pub(super) fn shrink_to_share(&self, share: u64) {
+        let pumps = {
+            let mut state = self.lock();
+            if state.closed {
+                return;
+            }
+            let state = &mut *state;
+            let mut lanes = CreditIndex::ALL
+                .into_iter()
+                .map(|index| (state.receive[index].lent(), index))
+                .collect::<Vec<_>>();
+            lanes.sort_unstable_by_key(|(lent, _)| std::cmp::Reverse(*lent));
+            let mut excess = lanes
+                .iter()
+                .map(|(lent, _)| lent)
+                .sum::<u64>()
+                .saturating_sub(share);
+            let mut pumps = Vec::new();
+            for (lent, index) in lanes {
+                if excess == 0 {
+                    break;
+                }
+                let cut = lent.min(excess);
+                let window = CreditWindow::of(index);
+                let Some(shrink) = state.receive[index].shrink_to(window, lent - cut) else {
+                    continue;
+                };
+                excess -= cut;
+                state.outbox[index].queue(shrink);
+                pumps.extend(state.pump[index].take());
+            }
+            pumps
+        };
+        pumps.into_iter().for_each(Waker::wake);
     }
 
     /// Release one admitted frame of credit index `index`: advertise the credit it completes,
@@ -375,12 +421,10 @@ impl LinkCredit {
         self.advertise_due([index]);
     }
 
-    #[cfg(any(
-        all(test, any(feature = "dummy", feature = "native-webrtc")),
-        rings_transport_webrtc
-    ))]
-    /// The idle check, made every `LANE_IDLE_PERIOD` by its driver (`credit_pump`), or by a
-    /// test: every data lane that holds a share of the pool and admitted no
+    #[cfg(any(feature = "dummy", rings_transport_webrtc))]
+    /// The idle check, made every [`LANE_IDLE_PERIOD`] by its driver (`credit_pump` in a WebRTC
+    /// backend, the controlled scheduler's virtual clock in the dummy one), or by a test: every
+    /// data lane that holds a share of the pool and admitted no
     /// frame since the last check is shrunk to its floor (Law 3). Returns `false` once the
     /// connection is gone, which ends the driver.
     pub(crate) fn idle_check(&self) -> bool {
@@ -494,7 +538,7 @@ impl LinkCredit {
         };
         waiters.into_iter().for_each(|waiter| waiter.waker.wake());
         pump.into_iter().for_each(Waker::wake);
-        self.pool.forget(&Arc::downgrade(self));
+        self.pool.forget(self);
         CreditIndex::ALL
             .into_iter()
             .for_each(|index| self.settle(index));

@@ -52,6 +52,7 @@ use self::state::ControlledDeliveryEntry;
 use self::state::ACTIVE_DELIVERY_GATE;
 use self::state::CLOSE_PENDING;
 use self::state::CONTROLLED;
+use self::state::CONTROLLED_LINKS;
 use self::state::CONTROLLED_RNG_STATE;
 use self::state::CONTROLLED_VIRTUAL_MS;
 use self::state::DELIVERY;
@@ -272,8 +273,9 @@ impl DummyConnection {
     /// connection directly, the dummy link carrying signals without latency. A signal always
     /// answers a frame or a signal of the paired connection, so it has one to go to; once that
     /// connection is gone its ends are gone with it, and the signal has no one to reach. The
-    /// dummy link runs no idle check of its own: a test drives it by event
-    /// (`LinkCredit::idle_check`), so no wall-clock timer changes a deterministic schedule.
+    /// dummy link runs no wall-clock idle check: the controlled scheduler's virtual clock drives
+    /// it (`controlled::set_virtual_time`), and a test without one drives it by event
+    /// (`LinkCredit::idle_check`), so no timer changes a deterministic schedule.
     /// The pumps stop when this connection's callback is dropped. Post: `false` when a pump
     /// cannot be spawned.
     fn spawn_credit_pumps(self: &Arc<Self>) -> bool {
@@ -723,6 +725,10 @@ impl TransportInterface for DummyTransport {
             // Without its pumps the connection would advertise no credit after the first window.
             self.close_connection_if_current(&connection).await?;
             return Err(Error::CreditPumpUnavailable(cid.to_string()));
+        }
+        if CONTROLLED.with(std::cell::Cell::get) {
+            let link = Arc::downgrade(conn.callback.link_credit());
+            CONTROLLED_LINKS.with(|links| links.borrow_mut().push(link));
         }
         CONNS.insert(conn.rand_id.clone(), conn);
 

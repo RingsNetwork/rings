@@ -63,8 +63,9 @@ Errors follow JSON-RPC 2.0:
 ### Wire version
 
 Every frame a node sends, and so every offer and answer of a handshake, opens with the node's
-wire version, a number that goes up by one with every change of the wire that a node of the
-previous version would reject or misread. It is independent of the crate version. Two nodes of
+wire version, a number that goes up by one per release, relative to the last released wire
+version, when the release changes anything on the wire that a node of that version would reject
+or misread. It is independent of the crate version. Two nodes of
 different wire versions never connect: each refuses the other's offer or answer before decoding
 it, with error `210` over JSON-RPC. A client learns a node's wire version before joining it
 from the `wire_version` of its public `nodeDid`, and its crate version from the `x-node-version`
@@ -114,7 +115,7 @@ The DID of this node. Public on the external listener.
 
 ```json
 {"jsonrpc": "2.0", "id": 1,
- "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0", "wire_version": 1}}
+ "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0", "wire_version": 2}}
 ```
 
 ### nodeInfo

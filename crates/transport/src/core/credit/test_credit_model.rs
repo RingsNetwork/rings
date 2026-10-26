@@ -16,9 +16,10 @@
 //! may be abandoned before it is irrevocable (`Cancel`), and the receiver releases admitted
 //! frames at any time, advertising at once or deferring the advertisement to any later step. A
 //! pooled lane borrows from the pool whenever it wants and the pool has room (`Lend`), and is
-//! shrunk by its idle check whenever it holds a share (`IdleCheck`), each of which the sender
-//! answers with a return. A signal's send may fail, as it does while an outbound channel is
-//! closed; the pump queues the signal again and sends it later.
+//! shrunk by its idle check whenever it holds a share (`IdleCheck`), or by one frame when the
+//! pool rebalances (`Rebalance`), each of which the sender answers with a return. A signal's
+//! send may fail, as it does while an outbound channel is closed; the pump queues the signal
+//! again and sends it later.
 //!
 //! Properties, checked for several windows `(W, b)`:
 //!
@@ -107,6 +108,8 @@ enum LaneAction {
     Lend,
     /// The receiver's idle check.
     IdleCheck,
+    /// The pool rebalances: the lane's share is shrunk by one, short of the floor.
+    Rebalance,
     /// A return is delivered to the receiver, and kept in flight when `duplicate`.
     Return {
         /// The return delivered.
@@ -282,6 +285,9 @@ impl Model for LaneModel {
         if state.receiver.charge(self.window) > 0 && state.receiver.generation < MAX_SHRINKS {
             actions.push(LaneAction::IdleCheck);
         }
+        if state.receiver.lent() > 1 && state.receiver.generation < MAX_SHRINKS {
+            actions.push(LaneAction::Rebalance);
+        }
         actions.extend(state.failed.iter().copied().map(LaneAction::ResendCredit));
         for signal in state.credits.iter().copied() {
             actions.push(LaneAction::FailCredit(signal));
@@ -370,6 +376,12 @@ impl Model for LaneModel {
             }
             LaneAction::IdleCheck => {
                 if let Some(shrink) = state.receiver.idle_shrink(self.window) {
+                    state.credits.insert(shrink);
+                }
+            }
+            LaneAction::Rebalance => {
+                let lent = state.receiver.lent().saturating_sub(1);
+                if let Some(shrink) = state.receiver.shrink_to(self.window, lent) {
                     state.credits.insert(shrink);
                 }
             }

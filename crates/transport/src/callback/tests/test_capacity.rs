@@ -10,53 +10,77 @@ use crate::core::pool::ChannelLane;
 use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 use crate::core::transport::TransportMessage;
 
-/// Law 3 (pool): a data lane is lent beyond its floor from the node's pool, at most up to its
-/// cap `W`, and only from what is free; demands are served first come, first served, and a
-/// demand served in part keeps its place until the pool frees more, here when a connection
-/// closes and gives its share back.
+/// Law 3 (pool, rebalance) and Prop. 3(5): a data lane is lent within its edge's fair claim
+/// `⌈P_F / n⌉`, first come, first served; when an edge below its share `⌊P_F / n⌋` finds the
+/// pool full, every edge above its share is shrunk to it, and the returns pay the waiting edge,
+/// which ends at its claim with the pool full and no edge above its claim. A closed edge gives
+/// its share back.
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
 #[test]
-fn test_a_data_lane_is_lent_from_the_node_pool_up_to_its_cap() {
+fn test_the_pool_lends_within_fair_claims_and_rebalances_to_the_shares() {
+    use crate::core::credit::LaneSignal;
+
     let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
     let lane = ChannelLane::new(1);
-    let share = LANE_CREDIT_WINDOW - 1;
-    let pool = NodeFramePool::with_capacity(share + 4);
-    let (first, second) = (
+    let pool = NodeFramePool::with_capacity(40);
+    let (first, second, third) = (
         pooled_callback("first", pool.clone()),
         pooled_callback("second", pool.clone()),
+        pooled_callback("third", pool.clone()),
     );
-    let held = admit_window(&first, &custom, lane);
-    assert_eq!(pool.used(), share, "the first lane is lent up to its cap");
+    let admit = |callback: &InnerTransportCallback| match callback
+        .admit_inbound_frame(custom.clone(), lane)
+    {
+        InboundFrameAdmission::Admitted(frame) => frame,
+        _ => panic!("a frame within the credit is admitted"),
+    };
+    let held_by = |callback: &InnerTransportCallback| pool.held_by(callback.link_credit());
+    // Alone, then two: each is lent its lane's whole window, within its claim.
+    drop(admit_window(&first, &custom, lane));
+    drop(admit(&second));
+    assert_eq!((held_by(&first), held_by(&second)), (15, 15));
+
+    // A third edge's claim is ⌈40 / 3⌉ = 14, its share ⌊40 / 3⌋ = 13: lent the 10 free, it is
+    // below its share, so both others are shrunk to 13.
+    let third_frame = admit(&third);
+    assert_eq!(held_by(&third), 10);
     assert_eq!(
         take_due_signal(&first, lane),
-        Some(credit(LANE_CREDIT_WINDOW))
+        Some(LaneSignal::Shrink {
+            limit: 30,
+            generation: 1,
+        })
     );
-
-    let partial = match second.admit_inbound_frame(custom.clone(), lane) {
-        InboundFrameAdmission::Admitted(frame) => frame,
-        _ => panic!("the floor frame is admitted"),
-    };
-    assert_eq!(
-        pool.used(),
-        share + 4,
-        "the second lane is lent what is free"
-    );
-    assert_eq!(pool.waiting(), 1, "and its demand keeps its place");
-    assert_eq!(take_due_signal(&second, lane), Some(credit(1 + 4)));
-
-    first.link_credit().close();
-    drop(held);
-    assert_eq!(
-        pool.used(),
-        share,
-        "the closed lane's share went to the waiting demand"
-    );
-    assert_eq!(pool.waiting(), 0);
     assert_eq!(
         take_due_signal(&second, lane),
-        Some(credit(LANE_CREDIT_WINDOW))
+        Some(LaneSignal::Shrink {
+            limit: 15,
+            generation: 1,
+        })
     );
-    drop(partial);
+    // The returns give the excess back, and the waiting edge is paid up to its claim.
+    for (callback, bound) in [(&first, 30), (&second, 15)] {
+        callback.link_credit().apply(lane, LaneSignal::Returned {
+            bound,
+            generation: 1,
+        });
+    }
+    assert_eq!(
+        (held_by(&first), held_by(&second), held_by(&third)),
+        (13, 13, 14)
+    );
+    assert_eq!(pool.used(), 40);
+    assert_eq!(take_due_signal(&third, lane), Some(credit(1 + 14)));
+    assert_eq!(
+        pool.waiting(),
+        1,
+        "the third edge, at its claim, still wants one frame"
+    );
+
+    third.link_credit().close();
+    drop(third_frame);
+    assert_eq!(pool.used(), 26, "a closed edge gives its share back");
+    assert_eq!(pool.waiting(), 0);
 }
 
 /// Law 3 and Prop. 3(5): the priority lane's floor is its whole window, so it admits a full

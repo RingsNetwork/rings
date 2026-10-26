@@ -388,20 +388,27 @@ round trip.
 sender with queued frames always has its floor frame to send, or a frame the receiver holds,
 whose admission was the demand.  So no demand frame is needed.
 \item \emph{Pool.}  The receiver grants a data lane credit beyond its floor only from the
-node's frame pool, at most $W-g_\ell$ to one lane:
+node's frame pool, at most $W-g_\ell$ to one lane, and to one edge at most its fair claim of
+Law~\ref{law:edge}: with $p_e=\sum_\ell(\liab(e,\ell)-g_\ell)^+$ and $n\ge1$ the edges that hold
+pooled credit or wait for it,
 \begin{gather*}
-\textstyle\sum_{(e,\ell)}(\liab-g_\ell)^+\le\Pool_F,\\
+\textstyle p_e\le\lceil\Pool_F/n\rceil\ \text{when lent},\qquad\sum_e p_e\le\Pool_F,\\
 \textstyle\sum\liab\le B_F(s)=\Rg(s)\,(W+3)+\Pool_F .
 \end{gather*}
-\item Demands are served first come, first served, and a lane lent more advertises it at
-once.
+\item Demands are served first come, first served within the claims: a demand at its edge's
+claim waits without holding back a later one, and a lane lent more advertises it at once.
+\item \emph{Rebalance.}  While a demand of an edge holding less than its share
+$\lfloor\Pool_F/n\rfloor$ waits for a full pool, every edge holding more than its share is
+shrunk to it.  The shares fit the pool, $n\lfloor\Pool_F/n\rfloor\le\Pool_F$, as the claims need
+not; an edge at its share shrinks no other.
 \item \emph{Idle.}  A data lane that holds pooled credit and admitted no frame for
 $T_{\mathrm{idle}}$ is shrunk to its floor.
 \end{itemize}
 Parameters:
 \begin{itemize}[leftmargin=1.2em]
 \item $\Pool_F=256$ frames (16\,MiB, the soft limit it replaces);
-\item $T_{\mathrm{idle}}=1$\,s, on a tick the transport is driven by;
+\item $T_{\mathrm{idle}}=1$\,s, on a tick the transport is driven by: the wall clock in a
+backend, the virtual clock in the deterministic simulation;
 \item $B_F(3)=328\cdot19+256=6\,488$ frames, about 405\,MiB at 64\,KiB, and
 $B_F(s)=B_F(3)+38(s-3)$ frames.
 \end{itemize}
@@ -433,6 +440,10 @@ it;
 (progress);
 \item an idle lane holds at most its floor after $T_{\mathrm{idle}}$ plus one round trip, so it
 starves no active lane, and its first frame after the pause is sent at once;
+\item \emph{throughput}: an edge whose data lanes have frames queued holds, within one round
+trip of its demand, or two when the pool must be rebalanced first, at least
+$\min\bigl(3(W-1),\lfloor\Pool_F/n\rfloor\bigr)$ pooled frames besides its floors, $n\le\Rg(s)$ the
+edges holding or waiting for pooled credit, however busy the others are;
 \item control traffic never waits for the pool.
 \end{enumerate}
 \end{proposition}
@@ -444,10 +455,31 @@ what was committed, and a credit of an older generation is ignored.
 (3)~A blocked lane's last admission is a pending demand.  The pool refills as frames are
 released and idle lanes are shrunk, and service is first come, first served.
 (4)~The shrink frees the lane's pooled credit, and its floor stays.
-(5)~The priority lane's floor is its whole window, reserved per edge.
+(5)~A waiting edge below its share is lent from what is free; when nothing is, every edge above
+its share is shrunk to it, and the frames above the shares return within one round trip, which
+leaves the waiting edge its share, since $\sum_{e'\ne e}\min(p_{e'},\lfloor\Pool_F/n\rfloor)\le
+(n-1)\lfloor\Pool_F/n\rfloor\le\Pool_F-\lfloor\Pool_F/n\rfloor$.
+(6)~The priority lane's floor is its whole window, reserved per edge.
 These are the model-checking obligations of the implementation, over the credit model with
 shrink and return frames.
 \end{proof}
+
+The guarantee~(5) is the price of a hard bound: before \issue{934} every lane had $W$ frames
+per round trip whatever the others did.  Now $n$ busy edges share $\Pool_F$, so each keeps its
+whole window on all three data lanes while $n\le5$ ($3(W-1)=45\le\lfloor256/5\rfloor=51$), and
+the floors plus $\lfloor256/n\rfloor$ pooled frames per round trip beyond; past 256 busy edges,
+the floors alone.  Without the
+claim, six busy edges would hold the whole pool, and every other data lane would be held to its
+floor, one frame per round trip, for as long as they keep sending.
+
+\textbf{Why the model shrinks once.}  The model of Proposition~\ref{prop:frames} lets a lane be
+shrunk once per path, which keeps its state space finite.  One is enough: the transitions read
+a generation only to compare it with another, so a state of generation $g$ whose older
+signals have all been ignored or delivered is, renamed by $g\mapsto0$, a state the model
+reaches with no shrink; and a signal of an older generation is a no-op at either end.  So a
+second shrink starts from a state the first already covers, and one shrink with credits of the
+older generation still in flight, delivered, duplicated and reordered across it, covers them
+all.
 
 \textbf{Composition.}  Received frames and the mailbox are disjoint memories: a frame counts in
 $B_F$ until it is handed to the mailbox, which happens only once its mailbox charge, and for a
@@ -457,7 +489,7 @@ for $O$ holds its frame and its credit: backpressure, counted in $B_F$, whose po
 idle shrink returns.  The per-lane cap keeps Proposition~\ref{prop:noref}'s grace $Wd_0$ sound
 under pooled credit.
 
-This is a wire change: a total cutover, with no versioning before 1.0.
+This is a wire change: a total cutover, which wire version 2 names (\issue{1104}).
 
 \section{Reassembled messages (\issue{932})}\label{sec:reassembly}
 

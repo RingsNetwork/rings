@@ -29,12 +29,6 @@ use crate::error::Result;
 /// open, and the pause keeps a send that fails at once from spinning the pump.
 pub(crate) const CREDIT_RESEND_PAUSE: Duration = Duration::from_secs(1);
 
-/// `T_idle`, the period of a link's idle check: a data lane that holds a share of the node's
-/// pool and admitted no frame for it is shrunk to its floor (load-bounds paper, Law 3). On a
-/// link whose round trip exceeds it, a lane paused for one round trip is shrunk, and its next
-/// burst waits one round trip for pooled credit again; no frame is refused.
-pub(crate) const LANE_IDLE_PERIOD: Duration = Duration::from_secs(1);
-
 /// Send `signal` on `lane` of `connection`, once its data channels are open. A signal frame is
 /// never charged against credit, so the send never waits on the peer.
 async fn send_signal<C>(

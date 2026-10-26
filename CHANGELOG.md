@@ -43,13 +43,17 @@
   load-bounds paper, Law 3): about 405 MiB at the default 328 connections, against about
   1.3 GiB before. Each lane has a floor it is always granted, the priority lane its whole window
   of 16 frames and each data lane one frame; beyond it a data lane borrows from the node's frame
-  pool of 256 frames, first come, first served, up to its window. A data lane idle for 1 s is
-  shrunk to its floor and gives its share back. The priority lane never borrows, so control
+  pool of 256 frames, first come, first served, up to its window and within its edge's fair
+  claim of the pool; when an edge below its share finds the pool full, the edges above their
+  shares are shrunk to them. A data lane idle for 1 s is shrunk to its floor and gives its
+  share back. The priority lane never borrows, so control
   traffic never waits for other peers' load. This replaces the 16 MiB soft limit, which deferred
   advertisements but bounded no burst.
   - **Breaking (wire).** A total cutover: the credit frame becomes a per-lane signal,
     `Credit(limit, generation)`, `Shrink(limit, generation)` or `Returned(bound, generation)`,
-    so a node of an earlier release cannot exchange data with this one.
+    and the wire version goes to 2, so a node of 0.37 is refused by name (#1104). The bump rule
+    now reads per release: one bump for a release whose wire differs from the last released
+    wire version, shared by every change between the two.
   - **Breaking (library API).** `NodeReceiveLoad` is `NodeFramePool`.
   - **Upgrade consequence.** A fresh connection grants each data lane one frame until the
     receiver lends it more on its first frame, so the second frame of a connection's first burst
