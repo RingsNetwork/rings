@@ -332,9 +332,10 @@ impl LivenessModel {
                 ms(state.now).saturating_sub(state.clock.last_issued_ms) >= PEER_LIVENESS_PERIOD_MS
             }
             Discipline::ClockFromDeparture => {
-                state.unstarted.is_empty() && state.clock.due(ms(state.now))
+                state.unstarted.is_empty()
+                    && state.clock.due(ms(state.now), PEER_LIVENESS_PERIOD_MS)
             }
-            _ => state.clock.due(ms(state.now)),
+            _ => state.clock.due(ms(state.now), PEER_LIVENESS_PERIOD_MS),
         }
     }
 

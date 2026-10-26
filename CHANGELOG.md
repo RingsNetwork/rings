@@ -91,6 +91,17 @@
     order and of equal length.
   - **Operator step.** None.
 
+- Relay chain neighbours are probed every 2.5 s, and suspected for relay custody when a probe is
+  7.5 s unanswered (#1070), so a member that crashes, drops its network or is suspended is
+  replaced within about 10 s instead of after the 45 s liveness deadline. A suspect is no chain
+  member until it answers on time twice in a row, and both the suspicion and the clearing run
+  the chain exchange at once (#777), so a neighbour whose answers hover around 7.5 s changes the
+  chains at most twice per 12.5 s; suspicion evicts no peer, which still happens only at the 45 s
+  deadline. Each node
+  probes only its two chain neighbours this often, on the same probe clock as every peer: four
+  messages per 2.5 s, about 1.3 more a second, whatever `r`. No message changes; nodes of this
+  version and of an earlier one interoperate.
+
 ## 0.37.0
 
 - Every frame names its wire version (#1104), so a node of another release is refused by

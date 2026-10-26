@@ -1092,8 +1092,29 @@ periodic pass.
 \textbf{Departure classes.}  $T_d$ depends on how a member leaves.  A \emph{graceful} departure
 closes its connections, so its neighbours detect it at once: $T_d\approx0$, and
 $D_g=r\,\delta$, seconds.  A \emph{silent} one (a crash, a dropped network, a suspended tab)
-is detected only when its liveness check fails, after \texttt{PEER\_LIVENESS\_TIMEOUT\_MS} of
-45\,s: $D_s\approx45\,\mathrm{s}+r\,\delta$, about a minute.  With $\sigma$ the fraction of
+is detected only when a liveness probe goes unanswered; for any peer the deadline is
+\texttt{PEER\_LIVENESS\_TIMEOUT\_MS} of 45\,s, but a member's chain neighbours, the only nodes
+Law~\ref{law:eventrepair} needs to detect it, probe it faster (Law~\ref{law:chainliveness}).
+
+\begin{law}[Chain liveness]\label{law:chainliveness}
+A member probes $p_1(m)$ and $n_1(m)$ every $P_c=2.5$\,s, and suspects one whose probe is
+$\tau_c=7.5$\,s unanswered: a suspect is no candidate member of any chain until it gives
+$k=2$ on-time answers in a row (a late one starts the count again), which runs
+Law~\ref{law:eventrepair} at both changes.  Suspicion evicts nothing; eviction stays at the
+45\,s deadline.
+\end{law}
+
+A neighbour whose answers hover around $\tau_c$ so changes the chains at most twice per
+$\tau_c+k\,P_c=12.5$\,s: the late probe takes $\tau_c$, and the $k$ on-time probes that clear it
+are issued at least a period apart, the first no earlier than that late answer.  That is at most
+$0.16$ bundled exchanges a second, with the temporary member's copies, from one slow link,
+against $0.4$ without the count.
+
+So a silent loss of a member is detected within $T_d\le P_c+\tau_c=10$\,s and
+$D_s\approx10\,\mathrm{s}+r\,\delta$, while a slow but live member costs a chain shift and back,
+never a copy.  The probes cost each node four messages per $P_c$ (two probes and two answers it
+sends), about 1.3 more a second than the ordinary 15\,s probes of the same two peers, whatever
+$r$.  With $\sigma$ the fraction of
 departures that are silent and $\varepsilon_r(D)$ the probability that all $r$ members of a key
 are lost within one window $D$, a held message's loss over its retention is bounded, to first
 order, by the mixture
@@ -1103,13 +1124,10 @@ order, by the mixture
 since an element's window opens with the loss of its first member, whose class sets $D$ (a
 later member's class only shortens or lengthens the same window's repair).  By
 the table of \issue{777}, $r=8$ meets $10^{-3}$ for Weibull ($k=0.5$) sessions of median
-1\,min at $D=60$\,s, so for any $\sigma$; for a median of 15\,s it meets it only at $D=10$\,s,
-that is with $\sigma\approx0$, and a silent fraction at that median needs $r\approx14$.  Two
-levers move $\sigma$ and $D_s$ instead of $r$: a leave on \jsq{pagehide} (\issue{1057}) makes a
-closing tab's departure graceful, and a shorter liveness timeout between chain neighbours
-(\issue{1070}), which are only $p_1(m)$ and $n_1(m)$, bounds $D_s$; with them $r=8$ covers the
-15\,s median.  The laws hold for every $r$; these figures
-only choose its default.
+15\,s at $D=10$\,s, which is now $D_s$ as well as $D_g$, so for any $\sigma$; with the ordinary
+45\,s deadline alone it needed $r\approx14$ for a silent fraction at that median.  A leave on
+\jsq{pagehide} (\issue{1057}) moves a closing tab into the graceful class besides.  The laws hold
+for every $r$; these figures only choose its default.
 
 \begin{proposition}[Acknowledged copies survive]\label{prop:copies}
 In a window where the views agree on $\Mem_r$ (S4), an acknowledged element has $q(k)$ copies,

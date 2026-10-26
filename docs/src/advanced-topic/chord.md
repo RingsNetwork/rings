@@ -207,6 +207,13 @@ survives.
   outside the repair schedule's admission window, which guards bulk storage sync and not these
   two digest messages. So a lost member is replaced within its detection time plus `r` hops; the
   periodic pass is the backstop.
+- **Chain liveness.** A member probes its two chain neighbours every 2.5 s, on the same probe
+  clock as every peer, and suspects one whose probe is 7.5 s unanswered (#1070). A suspect is no
+  chain member until it answers on time twice in a row, and both the suspicion and the clearing
+  run the chain exchange at once; suspicion evicts nothing, eviction stays at the 45 s liveness
+  deadline. So a silent loss is detected within 10 s, and a slow but live neighbour costs a chain
+  shift and back, never a copy: a neighbour whose answers hover around 7.5 s changes the chains
+  at most twice per 12.5 s. The probes cost each node four messages per 2.5 s, whatever `r`.
 - **Who is a member.** A node decides membership and its rank on its own view: it is a member of
   `k` iff `k` lies in `(succ(p_r), succ(self)]`, `p_r` the `r`-th previous holder behind it. A
   copy is admitted only from its previous or its next member.

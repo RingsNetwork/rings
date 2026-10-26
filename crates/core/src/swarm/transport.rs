@@ -105,7 +105,11 @@ pub(crate) use self::inbound_tap::InboundTap;
 pub(crate) use self::liveness::IssuedProbe;
 use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::ProbePass;
+pub(crate) use self::liveness::ProbeScope;
 pub(crate) use self::liveness::ProbeWork;
+pub(crate) use self::liveness::CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::liveness::CHAIN_NEIGHBOUR_SUSPICION_MS;
 #[cfg(all(test, feature = "dummy"))]
 pub(crate) use self::liveness::PEER_LIVENESS_PERIOD_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

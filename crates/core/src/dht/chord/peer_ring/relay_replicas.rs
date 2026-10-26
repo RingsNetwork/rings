@@ -192,7 +192,7 @@ impl PeerRing {
                     .successors
                     .iter()
                     .copied()
-                    .find(|successor| neighborhood.holds(*successor)),
+                    .find(|successor| neighborhood.chains(*successor)),
             )
         })?;
         let next = match next {
@@ -395,6 +395,50 @@ impl PeerRing {
             .lock_relay_replications()?
             .get(&digest)
             .map(|pending| pending.hold.clone()))
+    }
+
+    /// Suspect `peer`, a chain neighbour whose probe went unanswered for the chain timeout
+    /// (#1070): the chain moves past it, and the change runs the chain exchange at once, as a
+    /// loss does (`Law (Event-driven repair)`). Nothing is evicted.
+    pub(crate) fn suspect_relay_chain_neighbour(&self, peer: Did) -> Result<()> {
+        if self.lock_relay_neighborhood()?.suspect(peer) {
+            self.forget_next_relay_holder(Some(peer))?;
+            self.relay_chain_changed();
+        }
+        Ok(())
+    }
+
+    /// Record `peer`'s probe answer, `on_time` within the chain timeout: a suspect cleared by
+    /// enough on-time answers in a row (`Law (Clearing)`) rejoins the chains it is a member of,
+    /// and the change runs the chain exchange at once, restoring its copies.
+    pub(crate) fn observe_chain_neighbour_answer(&self, peer: Did, on_time: bool) -> Result<()> {
+        if self
+            .lock_relay_neighborhood()?
+            .observe_answer(peer, on_time)
+        {
+            self.relay_chain_changed();
+        }
+        Ok(())
+    }
+
+    /// The chain changes recorded so far: losses, suspicions and clearings.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn relay_chain_changes_for_test(&self) -> u64 {
+        self.relay_chain_losses.current()
+    }
+
+    /// Whether `peer` is suspected for relay custody (#1070).
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn is_relay_suspected(&self, peer: Did) -> Result<bool> {
+        Ok(!self.lock_relay_neighborhood()?.chains(peer))
+    }
+
+    /// Record a change of this node's chains (a chain neighbour lost, suspected, or cleared)
+    /// for the chain repair task: it runs the exchange at once (`Law (Event-driven repair)`).
+    pub(crate) fn relay_chain_changed(&self) {
+        self.relay_chain_repair_due
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.relay_chain_losses.advance();
     }
 
     /// Register a listener for the next loss of a chain neighbour (`Law (Event-driven repair)`).
