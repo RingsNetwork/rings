@@ -75,7 +75,9 @@ impl LaneCreditView {
 
     /// The frames the peer may send on the lane now: the credit this end advertised and the
     /// peer has not used (see `ReceiveWindow::unused`), or `None` once the connection
-    /// generation is gone. A receiver judges by it whether a stalled lane is the peer's doing.
+    /// generation is gone. A receiver judges by it whether a stalled lane is the peer's doing;
+    /// it also counts credit in transit to the peer and frames in flight from it, at most one
+    /// window in all with the frames this end holds, which a judge must allow for.
     pub fn peer_unused(&self) -> Option<u64> {
         let link = self.link.upgrade()?;
         let state = link.lock();

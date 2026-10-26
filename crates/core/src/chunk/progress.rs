@@ -6,7 +6,10 @@
 //! `c` its sender holds unused on the carrier: advertised by this end and not yet used. Credit
 //! the receiver holds back (the frames that took it, a release awaiting its batch, an
 //! advertisement deferred at the node's soft limit) is not in `c`, so the clock pauses while the
-//! receiver throttles the sender. With `ρ` the rate floor, `d₀` the message's chunk length, `W`
+//! receiver throttles the sender. Read at the receiver, `c` also counts credit still in transit
+//! to the sender and frames already sent on it that are still in flight: with the frames the
+//! receiver holds, that is the lane's outstanding liability, at most one window `W`, however
+//! long the round trip. With `ρ` the rate floor, `d₀` the message's chunk length, `W`
 //! the lane window and `b` the bytes received:
 //!
 //! ```text
@@ -14,10 +17,10 @@
 //! stalled ⟺ b + W·d₀ < owed                   (b < ρ·τ̂ − W·d₀)
 //! ```
 //!
-//! Laws: `owed` is monotone and grows over an interval by no more than the sender could have
-//! sent at `ρ` with the credit it held, so a sender whose carrier delivers `ρ` while it holds
-//! credit is never stalled (Prop. 4); a sender that holds credit and sends nothing is stalled
-//! once `(W + 1)·d₀ < ρ·τ̂` (Prop. 5).
+//! Laws: `owed` is monotone and runs ahead of what a sender delivering `ρ` while it holds credit
+//! has delivered by at most the lane's outstanding liability, `W·d₀`, which the grace covers, so
+//! such a sender is never stalled, however long its round trip (Prop. 4); a sender that holds
+//! credit and sends nothing is stalled once `(W + 1)·d₀ < ρ·τ̂` (Prop. 5).
 
 /// The credit-time ledger of one open message (module documentation).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

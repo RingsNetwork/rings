@@ -468,6 +468,9 @@ arrival, $N$.  Its credit-time advances over $[t_k,t_{k+1})$ by
 the time its unused credit could have taken to send at $\rho$.  Credit the receiver holds back,
 by holding the frames that took it, batching its release, or deferring its advertisement at the
 node's soft limit, is not in $c_k$, so $\hat\tau$ pauses while the receiver throttles the sender.
+Read at the receiver, $c_k$ also counts credit still in transit to the sender, and frames the
+sender already spent it on that are still in flight; neither is the sender's doing, and the rate
+floor's grace covers both (Prop.~\ref{prop:noref}).
 Let $b$ be the message's bytes received.
 \end{definition}
 
@@ -513,9 +516,12 @@ bytes already reserved.
 
 Rate floor: over $[t_k,t_{k+1})$ the sender holds $c_k$ unused credits and a backlog (its
 message is contiguous on the carrier), so it delivers $\min(c_k d_0,\rho(t_{k+1}-t_k))$ in it,
-which is what $\hat\tau$ advanced, times $\rho$.  Of what it delivered, $b$ lacks only the
-frames the receiver still holds, at most $W$, which hold their credit.  So
-$b\ge\rho\hat\tau-W d_0$ throughout.
+which is what $\hat\tau$ advanced, times $\rho$, once its credit has reached it.  Between the two,
+$\rho\hat\tau$ runs ahead of $b$ only by the lane's outstanding liability: the frames the
+receiver still holds, the frames in flight to it, and the credit in transit to the sender, each
+counted in $c_k$ or missing from $b$.  That liability is at most $W$ frames, the lane window
+(Sec.~\ref{sec:frames}), however long the round trip.  So $b\ge\rho\hat\tau-W d_0$ throughout:
+the grace covers every outstanding credit, and a high-latency honest link is never expired.
 \end{proof}
 
 \begin{proposition}[Open messages]\label{prop:open}
