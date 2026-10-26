@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Three vendored webrtc-sctp tests no longer race the write loop (#1127). They slept 10 ms
+  after writing and then dropped or reordered packets they assumed were already on the test
+  `Bridge`'s queue; on a loaded runner `test_assoc_reliable_retransmission` found it empty and
+  panicked. They now wait until the packets they act on are queued, a count of the client
+  connection's completed sends, and the retransmission test runs until both messages are
+  acknowledged. The race is upstream's and not the batch patch's (#1090), so the fix is not part
+  of webrtc-rs/webrtc#941; `RINGS-PATCH.md` records it. Also, a connection that already holds a
+  slot no longer reads the tables' floor use on admission (#1094). No operator step.
+
 - A new connection takes the cleanest free slot, not the least free one (#1094; load-bounds
   paper, Def. 1 and Prop. 1, amended). A slot's floor use is its worst table's share of its
   floor still charged by live items, over the replay streams, the removal store and the open

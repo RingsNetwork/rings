@@ -690,9 +690,10 @@ impl SwarmTransport {
         #[cfg(test)]
         crate::tests::activity::record_activity();
         match event {
-            SwarmEvent::PeerAdmitted { peer } => {
+            SwarmEvent::PeerAdmitted { peer } if !self.dht.edges().holds(peer) => {
                 self.dht.edges().arrive(peer, &self.slot_floor_use())
             }
+            SwarmEvent::PeerAdmitted { .. } => {}
             SwarmEvent::PeerRetired { peer } => self.dht.edges().depart(peer),
             SwarmEvent::MessageDropped { .. } => {}
         }
