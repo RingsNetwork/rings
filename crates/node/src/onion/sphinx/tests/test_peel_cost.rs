@@ -36,6 +36,7 @@ use chacha20::cipher::StreamCipher;
 use chacha20::ChaCha20;
 use hkdf::HkdfExtract;
 use hmac::Hmac;
+use hmac::KeyInit;
 use hmac::Mac;
 use rand::rngs::StdRng;
 use rand::RngCore;
@@ -155,7 +156,8 @@ fn component_rows(
         (
             "MAC HMAC-SHA256 b ‖ β",
             microseconds_per_run(|| {
-                let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&[7_u8; 64]).expect("HMAC key");
+                let mut mac =
+                    <Hmac<Sha256> as KeyInit>::new_from_slice(&[7_u8; 64]).expect("HMAC key");
                 mac.update(&class.mac_label());
                 mac.update(black_box(routing.as_slice()));
                 black_box(mac.finalize());

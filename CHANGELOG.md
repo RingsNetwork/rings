@@ -10,6 +10,14 @@
   the exit answered with a refusal. The local HTTP proxy still answers `502` for every failure
   to open, with no reason; its log line names the error. No operator step.
 
+- The onion Sphinx key schedule wipes its HMAC states on drop (#852). rings-node moves to
+  hkdf 0.13, hmac 0.13 and sha2 0.11, with `zeroize`: sha2's block cores now wipe their chaining
+  values, so the PRK's HMAC state in every `Hkdf` and the MAC key's in every `Hmac` are wiped
+  with them. The derived bytes are unchanged, as the header and wire golden tests pin. Three
+  transient stack copies inside those crates remain unwiped; SECURITY.md lists them under Known
+  Limitations, beside the new assumption that a reader of process memory already holds the
+  node's delegatee key. No operator step.
+
 - A closed node releases every store it was built over (#1085), so an embedder that stops a
   node and starts it again in one process, on the same stores, opens them. `Provider::close`
   now consumes the provider and runs the close law, each step once the one before has ended:
