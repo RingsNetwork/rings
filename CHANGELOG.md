@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.38.0
 
 - A node learns when its registrations are stored at their owners (#866), from the owners
   themselves, instead of polling the registry. A registration publish now asks each owner that
