@@ -7,6 +7,8 @@ mod builder;
 /// The transport callback of a connection: its inbound pipeline and lifecycle handling.
 pub(crate) mod callback;
 mod detached;
+/// The admitted edges of a node, read and awaited (#855).
+pub mod edges;
 pub(crate) mod inbox;
 /// Non-blocking observation hooks for operator telemetry.
 pub mod observer;
@@ -55,6 +57,7 @@ use crate::message::ReplayWindow;
 use crate::swarm::application::ApplicationData;
 use crate::swarm::application::ApplicationInbox;
 use crate::swarm::application::SuccessorReport;
+use crate::swarm::edges::EdgesChanged;
 use crate::swarm::inbox::SwarmInboxDelivery;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
@@ -169,6 +172,17 @@ impl Swarm {
     /// Get DHT(Distributed Hash Table) of self.
     pub fn dht(&self) -> Arc<PeerRing> {
         self.dht.clone()
+    }
+
+    /// How many edges this node has admitted now: peers admitted and not retired
+    /// ([`edges`]).
+    pub fn admitted_edges(&self) -> usize {
+        self.dht.edges().count()
+    }
+
+    /// Resolves at the next admission or retirement of an edge after this call ([`edges`]).
+    pub fn edges_changed(&self) -> EdgesChanged {
+        EdgesChanged(self.dht.edges().changed())
     }
 
     /// The transport callback of a connection this swarm starts: its inbound pipeline and

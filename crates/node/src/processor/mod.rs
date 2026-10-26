@@ -84,6 +84,8 @@ use crate::registration::default_advertise_presence;
 use crate::registration::default_online_node_heartbeat_interval_secs;
 use crate::registration::default_online_node_ttl_secs;
 use crate::registration::default_online_node_type;
+use crate::registration::early_publish_armed;
+use crate::registration::republish_due;
 use crate::registration::validate_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
@@ -140,6 +142,16 @@ async fn sleep_registration_interval_with_stop(
         }
         futures::future::Either::Right(((), _)) => Ok(false),
     }
+}
+
+/// What starts a registration publish after the first: its heartbeat, or an early publish at
+/// its first admitted edge (#855).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegistrationTurn {
+    /// The heartbeat interval elapsed.
+    Heartbeat,
+    /// An armed registration saw an admitted edge (`registration::republish_due`).
+    Early,
 }
 
 /// Processor for rings-node rpc server.
@@ -431,11 +443,20 @@ impl Processor {
         stop: StopToken,
         sibling_stop: StopToken,
     ) {
+        let mut turn = RegistrationTurn::Heartbeat;
         loop {
             if stop.should_stop() || sibling_stop.should_stop() {
                 return;
             }
-            if let Err(error) = self.run_registration_once(task, stop.clone()).await {
+            let armed = early_publish_armed(
+                turn == RegistrationTurn::Heartbeat,
+                self.swarm.admitted_edges(),
+            );
+            let published = self.run_registration_once(task, stop.clone()).await;
+            // A publish is a state change tests probe for.
+            #[cfg(all(test, feature = "node"))]
+            crate::tests::activity::record_activity();
+            if let Err(error) = published {
                 if matches!(error, Error::RegistrationStopped) {
                     tracing::debug!(
                         "Stopping {} registration task after cooperative stop",
@@ -448,10 +469,12 @@ impl Processor {
             if stop.should_stop() || sibling_stop.should_stop() {
                 return;
             }
-            match sleep_registration_interval_with_stop(task.interval(), &stop, &sibling_stop).await
+            match self
+                .next_registration_turn(task.interval(), armed, &stop, &sibling_stop)
+                .await
             {
-                Ok(true) => {}
-                Ok(false) => return,
+                Ok(Some(next)) => turn = next,
+                Ok(None) => return,
                 Err(error) => {
                     tracing::warn!(
                         "Stopping {} registration task after timer error: {error:?}",
@@ -460,6 +483,43 @@ impl Processor {
                     return;
                 }
             }
+        }
+    }
+
+    /// The next turn of a registration daemon: its heartbeat after `interval`, or earlier, at
+    /// the first admitted edge of an `armed` registration (`registration::republish_due`, #855);
+    /// `None` once a stop is requested. Woken by the timer, an edge change or the stop, never by
+    /// polling.
+    async fn next_registration_turn(
+        &self,
+        interval: Duration,
+        armed: bool,
+        stop: &StopToken,
+        sibling_stop: &StopToken,
+    ) -> Result<Option<RegistrationTurn>> {
+        let heartbeat = sleep_registration_interval_with_stop(interval, stop, sibling_stop);
+        let first_edge = self.first_admitted_edge(armed);
+        futures::pin_mut!(heartbeat, first_edge);
+        match futures::future::select(heartbeat, first_edge).await {
+            futures::future::Either::Left((slept, _)) => {
+                Ok(slept?.then_some(RegistrationTurn::Heartbeat))
+            }
+            futures::future::Either::Right(((), _)) => Ok(Some(RegistrationTurn::Early)),
+        }
+    }
+
+    /// Resolves once an early publish is due for an `armed` registration, woken by the swarm's
+    /// edge changes (its edge-watch law); never for one not armed.
+    async fn first_admitted_edge(&self, armed: bool) {
+        if !armed {
+            return std::future::pending().await;
+        }
+        loop {
+            let changed = self.swarm.edges_changed();
+            if republish_due(armed, self.swarm.admitted_edges()) {
+                return;
+            }
+            changed.await;
         }
     }
 

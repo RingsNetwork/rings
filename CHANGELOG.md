@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- A node publishes its registrations again at its first edge (#855), so a relay, exit or DNS
+  relay service that starts listening before it joins the overlay is listed once it joins, not
+  a heartbeat (30 s) later. Before, a registration published with no admitted edge settled only
+  at the node itself. Nothing published it again before the next heartbeat; at most a later
+  storage repair pass carried that copy to an owner. Now a heartbeat that begins with no
+  admitted edge arms an early publish, and the first admitted edge fires it. The early publish
+  disarms it, so whatever the edges do, a registration publishes at most once between two
+  heartbeats beyond them. It is an ordinary heartbeat of the #918 lease: it re-appends the same
+  bytes under a fresh dot, so the descriptor bound, the freshness window and the lease end are
+  unchanged. `frontend/src/node.rs` already listens before it connects, and the browser onion
+  e2e now does the same.
+  - **Library API.** `Swarm::admitted_edges` and `Swarm::edges_changed`, with
+    `rings_core::swarm::edges::EdgesChanged`, are new and additive: the number of admitted
+    edges, and the event of its change.
+  - **Upgrade consequence.** None: the wire format is unchanged.
+  - **Operator step.** None.
+
 - Three vendored webrtc-sctp tests no longer race the write loop (#1127). They slept 10 ms
   after writing and then dropped or reordered packets they assumed were already on the test
   `Bridge`'s queue; on a loaded runner `test_assoc_reliable_retransmission` found it empty and
