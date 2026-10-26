@@ -51,26 +51,24 @@ use crate::sync_utils::lock_recover;
 /// data-channel ceiling, the node-wide budget the transport held before per-lane credit.
 pub(crate) const NODE_FRAME_POOL: u64 = 256;
 
-/// The identity of an edge in the pool: its link's address, stable while the link lives.
-pub(super) type EdgeKey = usize;
-
-/// The key of `link`.
-pub(super) fn edge_key(link: &LinkCredit) -> EdgeKey {
-    std::ptr::from_ref(link) as EdgeKey
-}
+/// The identity of an edge in the pool: a number the pool gives each link it serves, once, in
+/// increasing order, so no two links, alive or gone, ever share one.
+pub(super) type EdgeKey = u64;
 
 /// One lane waiting for the pool.
 struct Demand {
     /// Its connection, held weakly: a demand keeps no connection alive.
     link: Weak<LinkCredit>,
+    /// Its edge.
+    edge: EdgeKey,
     /// The lane.
     index: CreditIndex,
 }
 
 impl Demand {
     /// The key of the demand's edge.
-    fn edge(&self) -> EdgeKey {
-        self.link.as_ptr() as EdgeKey
+    const fn edge(&self) -> EdgeKey {
+        self.edge
     }
 
     /// Whether this is the demand of `index` of the edge `edge`.
@@ -97,6 +95,8 @@ struct PoolState {
     edges: BTreeMap<EdgeKey, EdgeShare>,
     /// The lanes waiting for the pool, in arrival order.
     demands: VecDeque<Demand>,
+    /// The key the next link registered gets.
+    next_edge: EdgeKey,
 }
 
 impl PoolState {
@@ -160,7 +160,30 @@ impl NodeFramePool {
             capacity,
             edges: BTreeMap::new(),
             demands: VecDeque::new(),
+            next_edge: 0,
         })))
+    }
+
+    /// Register a link: the key of its edge, never given to another.
+    pub(super) fn register(&self) -> EdgeKey {
+        let mut state = self.lock();
+        let edge = state.next_edge;
+        state.next_edge = edge.saturating_add(1);
+        edge
+    }
+
+    /// The link of the edge `edge` is gone: whatever the pool still counts for it, lent or
+    /// draining, and every demand of it leave the pool, which serves what that frees. Total:
+    /// called on every path a link ends by (its drop), so no edge outlives its link.
+    pub(super) fn release(&self, edge: EdgeKey) {
+        {
+            let mut state = self.lock();
+            if let Some(share) = state.edges.remove(&edge) {
+                state.used = state.used.saturating_sub(share.held);
+            }
+            state.demands.retain(|demand| demand.edge != edge);
+        }
+        self.serve();
     }
 
     /// The state, for one transition.
@@ -183,12 +206,13 @@ impl NodeFramePool {
 
     /// Queue the demand of `index` of `link`, unless it waits already, and serve.
     pub(super) fn demand(&self, link: &Arc<LinkCredit>, index: CreditIndex) {
-        let edge = edge_key(link);
+        let edge = link.edge();
         {
             let mut state = self.lock();
             if !state.demands.iter().any(|demand| demand.is_of(edge, index)) {
                 state.demands.push_back(Demand {
                     link: Arc::downgrade(link),
+                    edge,
                     index,
                 });
             }
@@ -205,15 +229,14 @@ impl NodeFramePool {
     fn serve(&self) {
         let mut position = 0;
         loop {
-            let Some((link, index)) = self
+            let Some((link, edge, index)) = self
                 .lock()
                 .demands
                 .get(position)
-                .map(|demand| (demand.link.clone(), demand.index))
+                .map(|demand| (demand.link.clone(), demand.edge, demand.index))
             else {
                 return;
             };
-            let edge = link.as_ptr() as EdgeKey;
             let want = link.upgrade().map_or(0, |link| link.want(index));
             let (lent, starved) = {
                 let mut state = self.lock();
@@ -267,10 +290,10 @@ impl NodeFramePool {
         }
     }
 
-    /// Forget every demand of `link`, which is gone.
+    /// Forget every demand of `link`, which closed.
     pub(super) fn forget(&self, link: &LinkCredit) {
-        let edge = edge_key(link);
-        self.lock().demands.retain(|demand| demand.edge() != edge);
+        let edge = link.edge();
+        self.lock().demands.retain(|demand| demand.edge != edge);
     }
 
     /// `Σ p_e`, for tests.
@@ -282,7 +305,13 @@ impl NodeFramePool {
     /// `p_e` of `link`, for tests.
     #[cfg(all(test, any(feature = "dummy", feature = "native-webrtc")))]
     pub(crate) fn held_by(&self, link: &LinkCredit) -> u64 {
-        self.lock().held(edge_key(link))
+        self.lock().held(link.edge())
+    }
+
+    /// The edges holding pooled credit, for tests.
+    #[cfg(all(test, any(feature = "dummy", feature = "native-webrtc")))]
+    pub(crate) fn edges(&self) -> usize {
+        self.lock().edges.len()
     }
 
     /// The lanes waiting for the pool, for tests.

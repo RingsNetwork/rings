@@ -189,6 +189,8 @@ pub(crate) struct LinkCredit {
     pub(super) peer: Arc<str>,
     /// The node's frame pool, which every change of a data lane's charge is reported to.
     pool: NodeFramePool,
+    /// This link's edge in the pool.
+    edge: pool::EdgeKey,
     /// All lanes, under one lock.
     state: Mutex<LinkCreditState>,
 }
@@ -200,6 +202,7 @@ impl LinkCredit {
     pub(crate) fn new(peer: Arc<str>, pool: NodeFramePool) -> Self {
         Self {
             peer,
+            edge: pool.register(),
             pool,
             state: Mutex::new(LinkCreditState {
                 send: PerLane::from_fn(|index| SendCredit::new(CreditWindow::of(index))),
@@ -213,6 +216,11 @@ impl LinkCredit {
                 closed: false,
             }),
         }
+    }
+
+    /// This link's edge in the node's pool.
+    pub(super) const fn edge(&self) -> pool::EdgeKey {
+        self.edge
     }
 
     /// The state, for one transition.
@@ -371,7 +379,7 @@ impl LinkCredit {
             let after = state.receive[index].charge(CreditWindow::of(index));
             (mem::replace(&mut state.charged[index], after), after)
         };
-        self.pool.adjust(pool::edge_key(self), before, after);
+        self.pool.adjust(self.edge, before, after);
     }
 
     /// Shrink this edge's pooled shares to `share` in all, the largest first: a claimant below
@@ -559,6 +567,14 @@ impl LinkCredit {
             *slot = window.occupancy();
         }
         occupancy
+    }
+}
+
+/// A link ends by its drop, closed or not: whatever the node's pool still counts for its edge
+/// leaves the pool, so a link dropped without `close` holds no share, and no demand, after it.
+impl Drop for LinkCredit {
+    fn drop(&mut self) {
+        self.pool.release(self.edge);
     }
 }
 

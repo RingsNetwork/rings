@@ -83,6 +83,39 @@ fn test_the_pool_lends_within_fair_claims_and_rebalances_to_the_shares() {
     assert_eq!(pool.waiting(), 0);
 }
 
+/// A link that ends without `close` leaves the pool as it found it: its drop releases whatever
+/// the pool counts for its edge and its waiting demands, and a later link never shares its
+/// edge, since edges are keyed by a number the pool never gives twice.
+#[cfg(any(feature = "dummy", feature = "native-webrtc"))]
+#[test]
+fn test_a_link_dropped_without_close_leaves_the_pool_unchanged() {
+    let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
+    let lane = ChannelLane::new(1);
+    let pool = NodeFramePool::with_capacity(20);
+    let (lender, waiter) = (
+        pooled_callback("lender", pool.clone()),
+        pooled_callback("waiter", pool.clone()),
+    );
+    drop(admit_window(&lender, &custom, lane));
+    let waiting = match waiter.admit_inbound_frame(custom.clone(), lane) {
+        InboundFrameAdmission::Admitted(frame) => frame,
+        _ => panic!("the floor frame is admitted"),
+    };
+    assert_eq!((pool.used(), pool.edges()), (20, 2));
+    assert_eq!(pool.waiting(), 1);
+    drop(waiting);
+    drop(waiter);
+    assert_eq!(pool.waiting(), 0, "the dropped link's demand left the pool");
+    assert_eq!(pool.used(), 15, "and so did its share");
+    drop(lender);
+    assert_eq!((pool.used(), pool.edges(), pool.waiting()), (0, 0, 0));
+
+    let fresh = pooled_callback("fresh", pool.clone());
+    drop(admit_window(&fresh, &custom, lane));
+    assert_eq!(pool.held_by(fresh.link_credit()), 15);
+    assert_eq!((pool.used(), pool.edges()), (15, 1));
+}
+
 /// Law 3 and Prop. 3(5): the priority lane's floor is its whole window, so it admits a full
 /// window and advertises at once with the pool empty, while a data lane is held to its floor.
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
