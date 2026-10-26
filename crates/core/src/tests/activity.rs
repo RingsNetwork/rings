@@ -63,7 +63,8 @@ pub(crate) struct SwarmSample {
     pub(crate) frames: FrameSample,
     /// Whether it has work in flight: a frame being sent or not yet handed off to the inbound
     /// actor, an admitted inbound message not yet handled, an outbound transfer not yet
-    /// completed, or a handshake.
+    /// completed, or a handshake. An open chunked message is not work in flight: its buffer
+    /// waits for its peer's next chunk, not for this node.
     pub(crate) busy: bool,
 }
 
@@ -86,7 +87,7 @@ pub(crate) fn sample_swarm(swarm: &Swarm) -> SwarmSample {
     let frames = swarm.transport.frames_for_test().sample();
     let busy = outbound
         || frames.busy()
-        || swarm.transport.inbound_admitted_count_for_test() > 0
+        || swarm.transport.inbound_live_events_for_test() > 0
         || swarm
             .transport
             .pending_connection_count()

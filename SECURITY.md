@@ -305,7 +305,6 @@ route.
   twice the clock-skew tolerance later; a data topic has no write authority, and a forged
   removal received by sync can likewise hold a topic live for up to the horizon past the
   receiver's clock.
-- #932: a reassembled message whose full-size mailbox charge does not fit is dropped.
 - #1057, #1070: a departure the members do not see (a crash, a dropped network, a suspended or
   closed tab) is repaired only after the 45 s liveness timeout, so r = 8 meets its loss target
   for browser sessions of a minute's median, not of 15 s, until a closing tab leaves gracefully

@@ -1,23 +1,3 @@
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-
-/// Atomically add `amount` when the resulting reservation stays within `limit`.
-pub(crate) fn try_reserve_atomic(counter: &AtomicUsize, amount: usize, limit: usize) -> bool {
-    let mut current = counter.load(Ordering::Acquire);
-    loop {
-        let Some(next) = current.checked_add(amount) else {
-            return false;
-        };
-        if next > limit {
-            return false;
-        }
-        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return true,
-            Err(observed) => current = observed,
-        }
-    }
-}
-
 pub(crate) fn fair_reservation_fits<const N: usize>(
     admitted_by_class: &[usize; N],
     admitted: usize,

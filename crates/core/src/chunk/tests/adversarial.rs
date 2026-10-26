@@ -40,37 +40,35 @@ fn test_expired_partial_messages_are_evicted() {
     assert_eq!(r.pending_count(), 1, "only the fresh partial remains");
 }
 
+/// A close whose timer cannot run drops every open message with its charge.
 #[test]
-fn test_close_timer_failure_releases_retained_reassembly_budget() {
-    let limits = small_limits();
-    let budget = Arc::new(ReassemblyBudget::new(limits));
-    let mut reassembler = MessageReassembler::with_limits_and_budget(limits, Arc::clone(&budget));
+fn test_close_timer_failure_drops_every_open_message_with_its_charge() {
+    let charge = Arc::new(());
+    let mut reassembler = MessageReassembler::<Arc<()>>::with_limits(small_limits());
     let now = get_epoch_ms();
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(
-            Chunk {
-                chunk: [0, 2],
-                data: Bytes::from_static(b"retained"),
-                meta: ChunkMeta {
-                    id: Uuid::new_v4(),
-                    ts_ms: now,
-                    ttl_ms: 100,
-                },
-            },
-            now,
-        ),
-        ReassemblyOutcome::Incomplete
-    ));
-    let retained_cost = reassembler.buffered_cost;
-    assert!(retained_cost > 0);
-    assert_eq!(budget.buffered_cost.load(Ordering::Acquire), retained_cost);
+    let first = Chunk {
+        chunk: [0, 2],
+        data: Bytes::from_static(b"retained"),
+        meta: ChunkMeta {
+            id: Uuid::new_v4(),
+            ts_ms: now,
+            ttl_ms: 100,
+        },
+    };
+    let (outcome, _) =
+        reassembler.handle_charged_at(first, Arc::clone(&charge), (now, |_| 0), true, None);
+    assert!(matches!(outcome, ReassemblyOutcome::Incomplete));
+    assert_eq!(
+        Arc::strong_count(&charge),
+        2,
+        "the open message holds its charge"
+    );
     assert!(reassembler.prepare_for_close());
 
     reassembler.discard_after_close_timer_failure();
 
     assert_eq!(reassembler.pending_count(), 0);
-    assert_eq!(reassembler.buffered_cost, 0);
-    assert_eq!(budget.buffered_cost.load(Ordering::Acquire), 0);
+    assert_eq!(Arc::strong_count(&charge), 1, "the charge is released");
 }
 
 #[test]
@@ -395,286 +393,6 @@ fn test_metadata_mismatch_terminates_one_in_flight_uuid_once() {
 }
 
 #[test]
-fn test_local_capacity_rejection_prevents_peer_attribution_at_expiry() {
-    let limits = ReassemblyLimits {
-        max_pending_messages: 2,
-        max_chunk_data_len: 10,
-        max_message_bytes: 20,
-        max_chunks_per_message: 2,
-        max_total_buffered_cost: 10,
-        slot_overhead: 0,
-        max_completed_ids: 1,
-    };
-    let mut reassembler = MessageReassembler::with_limits(limits);
-    let now = get_epoch_ms();
-    let ttl_ms = 100;
-    let first = Chunk {
-        chunk: [0, 2],
-        data: Bytes::from_static(b"123456"),
-        meta: ChunkMeta {
-            id: Uuid::new_v4(),
-            ts_ms: now,
-            ttl_ms,
-        },
-    };
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(first.clone(), now),
-        ReassemblyOutcome::Incomplete
-    ));
-    let capacity_rejected = Chunk {
-        chunk: [1, 2],
-        data: Bytes::from_static(b"abcdef"),
-        ..first
-    };
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(capacity_rejected, now),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    assert_eq!(
-        reassembler.remove_expired_at(now.saturating_add(ttl_ms as u128)),
-        0,
-        "local capacity loss must not become peer failure at expiry"
-    );
-}
-
-#[test]
-fn test_pending_full_before_first_retained_chunk_is_not_peer_failure() {
-    let mut limits = small_limits();
-    limits.max_pending_messages = 1;
-    let mut reassembler = MessageReassembler::with_limits(limits);
-    let now = get_epoch_ms();
-    let ttl_ms = 100;
-    let partial = |id, position, data| Chunk {
-        chunk: [position, 2],
-        data,
-        meta: ChunkMeta {
-            id,
-            ts_ms: now,
-            ttl_ms,
-        },
-    };
-    let occupying_id = Uuid::new_v4();
-    assert!(matches!(
-        reassembler
-            .handle_retained_outcome_at(partial(occupying_id, 0, Bytes::from_static(b"a")), now,),
-        ReassemblyOutcome::Incomplete
-    ));
-    let affected_id = Uuid::new_v4();
-    assert!(matches!(
-        reassembler
-            .handle_retained_outcome_at(partial(affected_id, 0, Bytes::from_static(b"b0")), now,),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    reassembler.remove(occupying_id);
-    assert!(matches!(
-        reassembler
-            .handle_retained_outcome_at(partial(affected_id, 1, Bytes::from_static(b"b1")), now,),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    assert_eq!(
-        reassembler.remove_expired_at(now.saturating_add(ttl_ms as u128)),
-        0
-    );
-}
-
-#[test]
-fn test_output_capacity_failure_then_partial_replay_is_not_peer_failure() {
-    let limits = ReassemblyLimits {
-        max_pending_messages: 2,
-        max_chunk_data_len: 3,
-        max_message_bytes: 6,
-        max_chunks_per_message: 2,
-        max_total_buffered_cost: 9,
-        slot_overhead: 0,
-        max_completed_ids: 2,
-    };
-    let mut reassembler = MessageReassembler::with_limits(limits);
-    let now = get_epoch_ms();
-    let ttl_ms = 100;
-    let id = Uuid::new_v4();
-    let part = |position, data| Chunk {
-        chunk: [position, 2],
-        data,
-        meta: ChunkMeta {
-            id,
-            ts_ms: now,
-            ttl_ms,
-        },
-    };
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(part(0, Bytes::from_static(b"one")), now,),
-        ReassemblyOutcome::Incomplete
-    ));
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(part(1, Bytes::from_static(b"two")), now,),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(part(0, Bytes::from_static(b"one")), now,),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    assert_eq!(
-        reassembler.remove_expired_at(now.saturating_add(ttl_ms as u128)),
-        0
-    );
-}
-
-#[test]
-fn test_capacity_rejection_for_another_id_does_not_hide_real_expiry() {
-    let mut limits = small_limits();
-    limits.max_pending_messages = 1;
-    let mut reassembler = MessageReassembler::with_limits(limits);
-    let now = get_epoch_ms();
-    let ttl_ms = 100;
-    let pending = Chunk {
-        chunk: [0, 2],
-        data: Bytes::from_static(b"retained"),
-        meta: ChunkMeta {
-            id: Uuid::new_v4(),
-            ts_ms: now,
-            ttl_ms,
-        },
-    };
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(pending, now),
-        ReassemblyOutcome::Incomplete
-    ));
-    let rejected = Chunk {
-        chunk: [0, 2],
-        data: Bytes::from_static(b"local"),
-        meta: ChunkMeta {
-            id: Uuid::new_v4(),
-            ts_ms: now,
-            ttl_ms,
-        },
-    };
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(rejected, now),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    assert_eq!(
-        reassembler.remove_expired_at(now.saturating_add(ttl_ms as u128)),
-        1,
-        "capacity history for another id must not suppress genuine peer expiry"
-    );
-}
-
-#[test]
-fn test_saturated_capacity_history_blocks_new_pending_state_until_stale() {
-    let mut limits = small_limits();
-    limits.max_pending_messages = 1;
-    limits.max_completed_ids = 1;
-    let mut reassembler = MessageReassembler::with_limits(limits);
-    let now = get_epoch_ms();
-    let ttl_ms = 100;
-    let partial = |id| Chunk {
-        chunk: [0, 2],
-        data: Bytes::from_static(b"partial"),
-        meta: ChunkMeta {
-            id,
-            ts_ms: now,
-            ttl_ms,
-        },
-    };
-    let occupying_id = Uuid::new_v4();
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(partial(occupying_id), now),
-        ReassemblyOutcome::Incomplete
-    ));
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(partial(Uuid::new_v4()), now),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(partial(Uuid::new_v4()), now),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    reassembler.remove(occupying_id);
-
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(partial(Uuid::new_v4()), now),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    assert_eq!(reassembler.pending_count(), 0);
-
-    let expiry = now.saturating_add(ttl_ms as u128);
-    let fresh = Chunk {
-        chunk: [0, 2],
-        data: Bytes::from_static(b"fresh"),
-        meta: ChunkMeta {
-            id: Uuid::new_v4(),
-            ts_ms: expiry,
-            ttl_ms,
-        },
-    };
-    assert!(matches!(
-        reassembler.handle_retained_outcome_at(fresh, expiry),
-        ReassemblyOutcome::Incomplete
-    ));
-}
-
-#[test]
-fn test_global_budget_rejected_id_stays_blocked_then_recovers_at_expiry() {
-    let limits = ReassemblyLimits {
-        max_pending_messages: 2,
-        max_chunk_data_len: 6,
-        max_message_bytes: 6,
-        max_chunks_per_message: 2,
-        max_total_buffered_cost: 6,
-        slot_overhead: 0,
-        max_completed_ids: 2,
-    };
-    let budget = Arc::new(ReassemblyBudget::new(limits));
-    let mut occupying = MessageReassembler::with_limits_and_budget(limits, Arc::clone(&budget));
-    let mut affected = MessageReassembler::with_limits_and_budget(limits, budget);
-    let now = get_epoch_ms();
-    let ttl_ms = 100;
-    let occupying_id = Uuid::new_v4();
-    assert!(matches!(
-        occupying.handle_retained_outcome_at(
-            Chunk {
-                chunk: [0, 2],
-                data: Bytes::from_static(b"occupy"),
-                meta: ChunkMeta {
-                    id: occupying_id,
-                    ts_ms: now,
-                    ttl_ms,
-                },
-            },
-            now,
-        ),
-        ReassemblyOutcome::Incomplete
-    ));
-
-    let affected_id = Uuid::new_v4();
-    let affected_part = |position, ts_ms| Chunk {
-        chunk: [position, 2],
-        data: Bytes::from_static(b"one"),
-        meta: ChunkMeta {
-            id: affected_id,
-            ts_ms,
-            ttl_ms,
-        },
-    };
-    assert!(matches!(
-        affected.handle_retained_outcome_at(affected_part(0, now), now),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    occupying.remove(occupying_id);
-    assert!(matches!(
-        affected.handle_retained_outcome_at(affected_part(1, now), now),
-        ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
-    ));
-    assert_eq!(affected.pending_count(), 0);
-
-    let expiry = now.saturating_add(ttl_ms as u128);
-    assert!(matches!(
-        affected.handle_retained_outcome_at(affected_part(0, expiry), expiry),
-        ReassemblyOutcome::Incomplete
-    ));
-}
-
-#[test]
 fn test_pending_messages_are_capped() {
     let limits = small_limits();
     let mut r = MessageReassembler::with_limits(limits);
@@ -693,9 +411,9 @@ fn test_pending_messages_are_capped() {
 fn test_round_trip_reordered_with_duplicates() {
     let data: Bytes = "abcdefghij".repeat(500).into();
     let mut chunks = chunks_of(&data, 64);
-    // reorder + inject duplicates mid-stream (not after the final chunk, which would just
-    // start a fresh, TTL-evicted pending entry — a late retransmit, not a reassembly bug).
-    chunks.reverse();
+    // Reorder after the first chunk, which opens the message, and inject duplicates mid-stream
+    // (not after the final chunk, which a tombstone would drop as a late retransmit).
+    chunks[1..].reverse();
     let dup = chunks[chunks.len() / 2].clone();
     chunks.insert(1, dup.clone());
     chunks.insert(chunks.len() / 3, dup);
@@ -722,7 +440,6 @@ fn test_total_over_slot_cap_is_rejected() {
     });
     assert!(out.is_none());
     assert_eq!(r.pending_count(), 0);
-    assert_eq!(r.buffered_cost, 0);
 }
 
 /// Two chunks sharing an id/total but from different transmissions (different `ts_ms`/`ttl_ms`)

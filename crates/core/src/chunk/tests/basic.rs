@@ -11,7 +11,6 @@ fn test_constrained_reassembly_limits_are_smaller_than_production() {
         constrained.max_chunks_per_message,
         production.max_chunks_per_message
     );
-    assert!(constrained.max_total_buffered_cost < production.max_total_buffered_cost);
     assert!(constrained.max_completed_ids < production.max_completed_ids);
     assert_eq!(
         constrained.max_chunk_data_len,
@@ -180,17 +179,58 @@ fn test_reassembles_in_order() {
     assert_eq!(r.pending_count(), 0, "completed message is forgotten");
 }
 
+/// Once its first chunk opened a message, the later chunks may arrive in any order.
 #[test]
-fn test_reassembles_out_of_order() {
+fn test_reassembles_out_of_order_after_the_first_chunk() {
     let data: Bytes = "helloworld".repeat(64).into();
     let mut chunks = chunks_of(&data, 32);
-    chunks.reverse();
+    chunks[1..].reverse();
     let mut r = MessageReassembler::new();
     let mut out = None;
     for c in chunks {
         out = r.handle(c).or(out);
     }
     assert_eq!(out.unwrap(), data);
+}
+
+/// Only the first chunk, charged for the whole message, opens it: a later chunk of a message no
+/// first chunk opened is invalid, and so is a chunk longer than its message's first.
+#[test]
+fn test_a_message_opens_only_at_its_first_chunk_and_never_outgrows_it() {
+    let data: Bytes = "helloworld".repeat(8).into();
+    let chunks = chunks_of(&data, 32);
+    let now = get_epoch_ms();
+    let mut r = MessageReassembler::new();
+    assert!(matches!(
+        r.handle_retained_outcome_at(chunks[1].clone(), now),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
+    ));
+    assert_eq!(r.pending_count(), 0);
+
+    let mut r = MessageReassembler::new();
+    let meta = ChunkMeta::default();
+    let chunk = |position, length| Chunk {
+        chunk: [position, 3],
+        data: vec![0u8; length].into(),
+        meta,
+    };
+    assert!(matches!(
+        r.handle_retained_outcome_at(chunk(0, 8), now),
+        ReassemblyOutcome::Incomplete
+    ));
+    assert!(matches!(
+        r.handle_retained_outcome_at(chunk(1, 8), now),
+        ReassemblyOutcome::Incomplete
+    ));
+    assert!(matches!(
+        r.handle_retained_outcome_at(chunk(2, 9), now),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
+    ));
+    // The invalid chunk failed its message: what follows of it is a replay.
+    assert!(matches!(
+        r.handle_retained_outcome_at(chunk(2, 8), now),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Replay)
+    ));
 }
 
 #[test]
@@ -306,11 +346,15 @@ fn test_malformed_chunks_are_dropped() {
 #[test]
 fn test_reassembly_outcome_distinguishes_invalid_and_replayed_chunks() {
     let mut reassembler = MessageReassembler::new();
-    let invalid = reassembler.handle_retained_outcome(Chunk {
-        chunk: [0, 0],
-        data: Bytes::from_static(b"invalid"),
-        meta: ChunkMeta::default(),
-    });
+    let now = get_epoch_ms();
+    let invalid = reassembler.handle_retained_outcome_at(
+        Chunk {
+            chunk: [0, 0],
+            data: Bytes::from_static(b"invalid"),
+            meta: ChunkMeta::default(),
+        },
+        now,
+    );
     assert!(matches!(
         invalid,
         ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
@@ -322,11 +366,11 @@ fn test_reassembly_outcome_distinguishes_invalid_and_replayed_chunks() {
         meta: ChunkMeta::default(),
     };
     assert!(matches!(
-        reassembler.handle_retained_outcome(first.clone()),
+        reassembler.handle_retained_outcome_at(first.clone(), now),
         ReassemblyOutcome::Incomplete
     ));
     assert!(matches!(
-        reassembler.handle_retained_outcome(first.clone()),
+        reassembler.handle_retained_outcome_at(first.clone(), now),
         ReassemblyOutcome::Rejected(ReassemblyRejection::Replay)
     ));
 
@@ -335,7 +379,7 @@ fn test_reassembly_outcome_distinguishes_invalid_and_replayed_chunks() {
         ..first
     };
     assert!(matches!(
-        reassembler.handle_retained_outcome(conflicting),
+        reassembler.handle_retained_outcome_at(conflicting, now),
         ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
     ));
 }
@@ -397,189 +441,87 @@ fn test_oversize_chunk_data_is_rejected() {
     });
     assert!(out.is_none());
     assert_eq!(r.pending_count(), 0);
-    assert_eq!(r.buffered_cost, 0);
 }
 
-#[test]
-fn test_buffered_cost_returns_to_zero_after_completion() {
-    let data: Bytes = "helloworld".repeat(100).into();
-    let mut r = MessageReassembler::new();
-    for c in Chunk::stream(data.clone(), 32) {
-        r.handle(c);
+/// A charge that counts its own drops, standing for the mailbox reservation a first chunk brings.
+struct CountedCharge(Arc<AtomicUsize>);
+
+impl Drop for CountedCharge {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
     }
-    assert_eq!(r.pending_count(), 0);
-    assert_eq!(r.buffered_cost, 0, "completing a message frees its budget");
 }
 
-/// A single id advertising a huge `total` and streaming distinct positions cannot grow without
-/// bound: the per-message byte cap stops it.
+/// One charge per message (load-bounds paper, Law 4): the first chunk's charge is held while its
+/// message is open and handed on with the completed message; a later chunk's charge is dropped at
+/// once; an expired message drops its charge.
 #[test]
-fn test_per_message_byte_cap_bounds_one_id() {
+fn test_the_first_chunk_charge_is_held_and_handed_on_with_its_message() {
+    let now = get_epoch_ms();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let charge = || CountedCharge(Arc::clone(&drops));
+    let dropped = || drops.load(Ordering::Acquire);
+    let mut r = MessageReassembler::<CountedCharge>::with_limits(ReassemblyLimits::production());
+    let chunks = chunks_of(&"helloworld".repeat(8).into(), 32);
+    assert_eq!(chunks.len(), 3);
+
+    assert!(matches!(
+        r.handle_charged_at(chunks[0].clone(), charge(), (now, |_| 0), true, None)
+            .0,
+        ReassemblyOutcome::Incomplete
+    ));
+    assert_eq!(dropped(), 0, "the first chunk's charge is held");
+    assert!(matches!(
+        r.handle_charged_at(chunks[1].clone(), charge(), (now, |_| 0), true, None)
+            .0,
+        ReassemblyOutcome::Incomplete
+    ));
+    assert_eq!(dropped(), 1, "a later chunk's charge is dropped at once");
+    let ReassemblyOutcome::Complete(message) = r
+        .handle_charged_at(chunks[2].clone(), charge(), (now, |_| 0), true, None)
+        .0
+    else {
+        panic!("the third chunk completes the message");
+    };
+    assert_eq!(dropped(), 2, "the message's charge leaves with it");
+    let (_, message_charge) = message.into_parts();
+    drop(message_charge);
+    assert_eq!(dropped(), 3);
+
+    let ttl_ms = u128::from(chunks[0].meta.ttl_ms);
+    let expiring = chunks_of(&"helloworld".repeat(8).into(), 32);
+    r.handle_charged_at(expiring[0].clone(), charge(), (now, |_| 0), true, None);
+    assert_eq!(dropped(), 3);
+    assert_eq!(r.remove_expired_at(expiring[0].meta.ts_ms + ttl_ms), 1);
+    assert_eq!(dropped(), 4, "an expired message drops its charge");
+}
+
+/// The per-message bound: a first chunk `[0, n]` of `d₀` bytes opens a message only while
+/// `(n − 1)·d₀ < max_message_bytes`, so an honest message of at most that many bytes always
+/// opens, while a forged `total` that would pass it is invalid.
+#[test]
+fn test_the_message_bound_is_judged_at_the_first_chunk() {
     let limits = small_limits();
-    let mut r = MessageReassembler::with_limits(limits);
-    let meta = ChunkMeta::default();
-    let data: Bytes = vec![0u8; limits.max_chunk_data_len].into();
-    // Within the slot cap, but its data far exceeds the per-message byte cap so it never fills.
-    let total = limits.max_chunks_per_message;
-
-    let mut accepted = 0usize;
-    for position in 0..50 {
-        let before = r.pending.get(&meta.id).map(|p| p.slots.len()).unwrap_or(0);
-        r.handle(Chunk {
-            meta,
-            chunk: [position, total],
-            data: data.clone(),
-        });
-        let after = r.pending.get(&meta.id).map(|p| p.slots.len()).unwrap_or(0);
-        if after > before {
-            accepted += 1;
-        }
-    }
-
-    let pending = r.pending.get(&meta.id).expect("still pending");
-    assert!(
-        pending.data_bytes <= limits.max_message_bytes,
-        "per-message buffered data must stay within the cap"
-    );
-    assert!(
-        accepted < 50,
-        "the cap must reject some chunks, got {accepted}"
-    );
-    assert_eq!(
-        r.buffered_cost,
-        pending.cost(limits.slot_overhead),
-        "accounting stays exact"
-    );
-}
-
-/// Spreading the flood across many ids is bounded too: the global buffered-cost ceiling caps
-/// total memory regardless of how many ids are used.
-#[test]
-fn test_global_cost_cap_bounds_total() {
-    let limits = small_limits();
-    let mut r = MessageReassembler::with_limits(limits);
-    // Each id contributes one slot of `max_chunk_data_len` data; keep them all pending.
-    for _ in 0..(limits.max_pending_messages * 4) {
-        r.handle(Chunk {
-            chunk: [0, 2],
-            data: vec![0u8; limits.max_chunk_data_len].into(),
-            meta: ChunkMeta::default(),
-        });
-    }
-    assert!(
-        r.buffered_cost <= limits.max_total_buffered_cost,
-        "global buffered cost {} exceeded cap {}",
-        r.buffered_cost,
-        limits.max_total_buffered_cost
-    );
-}
-
-#[test]
-fn test_shared_budget_bounds_multiple_peer_reassemblers() {
-    let mut limits = small_limits();
-    limits.max_total_buffered_cost = 96;
-    let budget = Arc::new(ReassemblyBudget::new(limits));
-    let mut first = MessageReassembler::with_limits_and_budget(limits, budget.clone());
-    let mut second = MessageReassembler::with_limits_and_budget(limits, budget);
-
-    for _ in 0..4 {
-        first.handle(Chunk {
-            chunk: [0, 2],
-            data: vec![0_u8; limits.max_chunk_data_len].into(),
-            meta: ChunkMeta::default(),
-        });
-    }
-    second.handle(Chunk {
-        chunk: [0, 2],
-        data: vec![0_u8; limits.max_chunk_data_len].into(),
+    let now = get_epoch_ms();
+    let first = |total| Chunk {
+        chunk: [0, total],
+        data: vec![0u8; limits.max_chunk_data_len].into(),
         meta: ChunkMeta::default(),
-    });
-    assert_eq!(first.pending_count(), 4);
-    assert_eq!(second.pending_count(), 0);
-
-    drop(first);
-    second.handle(Chunk {
-        chunk: [0, 2],
-        data: vec![0_u8; limits.max_chunk_data_len].into(),
-        meta: ChunkMeta::default(),
-    });
-    assert_eq!(second.pending_count(), 1);
-}
-
-#[test]
-fn test_peer_budget_preserves_shared_capacity_for_another_peer() {
-    let mut limits = small_limits();
-    limits.max_message_bytes = 32;
-    limits.max_chunks_per_message = 2;
-    limits.max_total_buffered_cost = 96;
-    let budget = Arc::new(ReassemblyBudget::new(limits));
-    let mut first = MessageReassembler::with_limits_and_budget(limits, budget.clone());
-    let mut second = MessageReassembler::with_limits_and_budget(limits, budget);
-
-    for _ in 0..4 {
-        first.handle(Chunk {
-            chunk: [0, 2],
-            data: vec![0_u8; limits.max_chunk_data_len].into(),
-            meta: ChunkMeta::default(),
-        });
-    }
-    assert_eq!(first.pending_count(), 2);
-    assert_eq!(
-        first.buffered_cost,
-        limits.max_peer_buffered_cost(),
-        "one peer must stop at its pending-cost allowance"
-    );
-
-    assert_eq!(
-        second
-            .handle(Chunk {
-                chunk: [0, 1],
-                data: Bytes::from_static(b"ok"),
-                meta: ChunkMeta::default(),
-            })
-            .as_deref(),
-        Some(b"ok".as_slice()),
-        "another peer must still be able to complete a small reassembly"
-    );
-}
-
-#[test]
-fn test_completed_output_keeps_shared_budget_until_released() {
-    let mut limits = small_limits();
-    limits.slot_overhead = 0;
-    limits.max_total_buffered_cost = 6;
-    let budget = Arc::new(ReassemblyBudget::new(limits));
-    let mut first = MessageReassembler::with_limits_and_budget(limits, budget.clone());
-    let mut second = MessageReassembler::with_limits_and_budget(limits, budget.clone());
-
-    let retained = first
-        .handle_retained(Chunk {
-            chunk: [0, 1],
-            data: Bytes::from_static(b"one"),
-            meta: ChunkMeta::default(),
-        })
-        .expect("first output must fit its buffered and contiguous copies");
-    assert_eq!(budget.buffered_cost.load(Ordering::Acquire), 3);
-    assert!(
-        second
-            .handle_retained(Chunk {
-                chunk: [0, 1],
-                data: Bytes::from_static(b"two"),
-                meta: ChunkMeta::default(),
-            })
-            .is_none(),
-        "second output copy must not reuse retained output capacity"
-    );
-
-    drop(retained);
-    assert_eq!(budget.buffered_cost.load(Ordering::Acquire), 0);
-    assert!(second
-        .handle_retained(Chunk {
-            chunk: [0, 1],
-            data: Bytes::from_static(b"two"),
-            meta: ChunkMeta::default(),
-        })
-        .is_some());
+    };
+    let d0 = limits.max_chunk_data_len;
+    // The largest honest message, `max_message_bytes`, needs `⌈max / d₀⌉` chunks.
+    let honest = limits.max_message_bytes.div_ceil(d0);
+    assert!((honest - 1) * d0 < limits.max_message_bytes);
+    let mut r = MessageReassembler::with_limits(limits);
+    assert!(matches!(
+        r.handle_retained_outcome_at(first(honest), now),
+        ReassemblyOutcome::Incomplete
+    ));
+    assert!(matches!(
+        r.handle_retained_outcome_at(first(honest + 1), now),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
+    ));
+    assert_eq!(r.pending_count(), 1);
 }
 
 #[test]
@@ -615,7 +557,7 @@ fn test_a_chunk_that_changes_lanes_is_refused_and_the_message_keeps_its_carrier(
     };
     let handle = |reassembler: &mut MessageReassembler, chunk, carrier| {
         reassembler
-            .handle_retained_at_with_attribution(chunk, now, true, Some(carrier))
+            .handle_charged_at(chunk, (), (now, |_| 0), true, Some(carrier))
             .0
     };
     assert!(matches!(
@@ -623,7 +565,7 @@ fn test_a_chunk_that_changes_lanes_is_refused_and_the_message_keeps_its_carrier(
         ReassemblyOutcome::Incomplete
     ));
     assert!(matches!(
-        handle(&mut reassembler, chunk(1, b"second"), other),
+        handle(&mut reassembler, chunk(1, b"other"), other),
         ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
     ));
 
@@ -632,7 +574,7 @@ fn test_a_chunk_that_changes_lanes_is_refused_and_the_message_keeps_its_carrier(
         handle(&mut reassembler, chunk(0, b"first"), data),
         ReassemblyOutcome::Incomplete
     ));
-    match handle(&mut reassembler, chunk(1, b"second"), data) {
+    match handle(&mut reassembler, chunk(1, b"last"), data) {
         ReassemblyOutcome::Complete(message) => assert_eq!(message.carrier(), Some(data)),
         _ => panic!("the message completes on its own lane"),
     }

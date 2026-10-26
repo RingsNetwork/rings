@@ -42,8 +42,8 @@ pub(crate) struct ProductionCapacityObservations {
     inbound_peer_bytes: CapacityMetric,
     inbound_node_transfers: CapacityMetric,
     inbound_node_bytes: CapacityMetric,
-    reassembly_node_bytes: CapacityMetric,
-    reassembly_peer_bytes: CapacityMetric,
+    /// Messages open in one connection's reassembler, against its id cap; their bytes are the
+    /// inbound bytes their first chunks were charged (#932).
     reassembly_pending_messages: CapacityMetric,
     /// Frames a receiving transport refused (malformed, oversized, or beyond its credit).
     rejected_frames: usize,
@@ -76,8 +76,6 @@ impl ProductionCapacityObservations {
             ("inbound_peer_bytes", self.inbound_peer_bytes),
             ("inbound_node_transfers", self.inbound_node_transfers),
             ("inbound_node_bytes", self.inbound_node_bytes),
-            ("reassembly_node_bytes", self.reassembly_node_bytes),
-            ("reassembly_peer_bytes", self.reassembly_peer_bytes),
             (
                 "reassembly_pending_messages",
                 self.reassembly_pending_messages,
@@ -299,25 +297,12 @@ pub(crate) fn observe_inbound_capacity(
     });
 }
 
-/// Observe node, peer, and pending-message production reassembly peaks.
-pub(crate) fn observe_reassembly_capacity(
-    node_bytes: usize,
-    node_limit: usize,
-    peer_bytes: usize,
-    peer_limit: usize,
-    pending_messages: usize,
-    pending_limit: usize,
-) {
+/// Observe the peak of messages open in one reassembler against its id cap.
+pub(crate) fn observe_reassembly_pending(pending_messages: usize, pending_limit: usize) {
     RUNTIME.with(|runtime| {
         if let Some(runtime) = runtime.borrow_mut().as_mut() {
-            let observations = &mut runtime.capacity_observations;
-            observations
-                .reassembly_node_bytes
-                .observe(node_bytes, node_limit);
-            observations
-                .reassembly_peer_bytes
-                .observe(peer_bytes, peer_limit);
-            observations
+            runtime
+                .capacity_observations
                 .reassembly_pending_messages
                 .observe(pending_messages, pending_limit);
         }

@@ -30,6 +30,7 @@ use super::SEND_MESSAGE_PENDING;
 use super::SEND_MESSAGE_PENDING_AFTER_SENT_COUNT;
 use super::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
 use super::WITHHELD_CREDIT;
+use crate::core::pool::ChannelLane;
 use crate::core::transport::WebrtcConnectionState;
 
 /// Atomic observation of the current thread's controlled delivery queue.
@@ -117,8 +118,10 @@ pub enum QueuedDeliveryKind {
     DataChannelOpen,
     /// The data channel closed.
     DataChannelClose,
-    /// One exact callback payload, before core decoding and dispatch.
-    Message(Bytes),
+    /// One exact callback payload, before core decoding and dispatch, and the lane it travels
+    /// on: a schedule that keeps the transport's lane law delivers one lane's messages in
+    /// their enqueue order.
+    Message(Bytes, ChannelLane),
 }
 
 /// Turn the controlled scheduler on/off for the current thread. Turning it

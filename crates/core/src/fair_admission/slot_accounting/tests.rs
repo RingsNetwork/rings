@@ -82,6 +82,17 @@ fn recomputed(state: &SlotAccounting) -> (usize, usize) {
         })
 }
 
+/// Whether `items` items of `principal` are admitted one by one, each charged before the next
+/// is judged: the definition [`SlotAccounting::admit_items`] states in closed form.
+fn admitted_one_by_one(state: &SlotAccounting, principal: Principal, items: usize) -> bool {
+    let mut next = state.clone();
+    (0..items).all(|_| {
+        let admitted = next.admit(principal).is_ok();
+        next.hold(principal, 1);
+        admitted
+    })
+}
+
 /// Check every law on one reachable state.
 fn check(state: &SlotAccounting) {
     let held = state.expiry.values().sum::<usize>();
@@ -97,6 +108,18 @@ fn check(state: &SlotAccounting) {
         "{state:?}"
     );
     for principal in principals() {
+        // A transition of several items is admitted whole iff each is, in order; and a slot
+        // within its floor is never refused, however many items it adds.
+        for items in 0..=3 {
+            assert_eq!(
+                state.admit_items(principal, items).is_ok(),
+                admitted_one_by_one(state, principal, items),
+                "{principal:?} ×{items} {state:?}"
+            );
+            if state.within_floor(principal, items) {
+                assert_eq!(state.admit_items(principal, items), Ok(()), "{state:?}");
+            }
+        }
         let verdict = state.admit(principal);
         // Isolation: a slot below its floor is always admitted.
         if matches!(principal, Principal::Slot(_)) && state.held(principal) < SMALL.floor {

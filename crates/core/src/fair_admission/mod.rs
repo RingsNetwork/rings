@@ -14,7 +14,6 @@ mod wait_queue;
 
 pub(crate) use capacity::admissible_capacity;
 pub(crate) use capacity::retained_wire_bytes;
-pub(crate) use capacity::try_reserve_atomic;
 pub(crate) use capacity::CountedReservationRejection;
 pub(crate) use capacity::CountedReservedCapacity;
 pub(crate) use capacity::ReservedCapacity;
