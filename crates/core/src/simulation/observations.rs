@@ -12,14 +12,6 @@ pub(crate) enum ProductionTraceObservation {
     YieldActor { node_did: String },
 }
 
-/// When a control delivery the reassembly barrier blocked completed, against its deadline: a
-/// completion past the deadline is a starvation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct ControlCompletionWitness {
-    pub(crate) observed_virtual_ms: u64,
-    pub(crate) deadline_virtual_ms: u64,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
 struct CapacityMetric {
     peak: usize,
@@ -117,30 +109,11 @@ pub(crate) fn record_protection_violation(layer: ProtectionLayer) {
     });
 }
 
-/// Record that the production inbound barrier blocked a control lane.
-pub(crate) fn record_barrier_control_blocked() {
+/// Record that the production reassembly barrier held a control frame back.
+pub(crate) fn record_control_waited_for_reassembly() {
     RUNTIME.with(|runtime| {
         if let Some(runtime) = runtime.borrow_mut().as_mut() {
-            runtime.observations.record_barrier_blocked();
-        }
-    });
-}
-
-/// Record when a blocked control delivery completed, against its deadline. Combined with a
-/// real production barrier block, a completion past the deadline violates
-/// `BarrierControlExemption`; one within it records nothing.
-pub(crate) fn record_barrier_control_completion(
-    observed_virtual_ms: u64,
-    deadline_virtual_ms: u64,
-) {
-    RUNTIME.with(|runtime| {
-        if let Some(runtime) = runtime.borrow_mut().as_mut() {
-            runtime
-                .observations
-                .record_barrier_control_completion(ControlCompletionWitness {
-                    observed_virtual_ms,
-                    deadline_virtual_ms,
-                });
+            runtime.observations.record_control_waited_for_reassembly();
         }
     });
 }

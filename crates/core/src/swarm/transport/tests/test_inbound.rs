@@ -339,11 +339,12 @@ fn noop_control_message(did: Did) -> Message {
     })
 }
 
-/// Deliver `wire` to `local` as chunks of 32 bytes, each signed by `session`: every chunk but
-/// the last in turn. Returns the last chunk's frame, undelivered, and the number of chunks.
+/// Deliver `wire` to `local` as chunks of 32 bytes on `carrier`, each signed by `session`:
+/// every chunk but the last in turn. Returns the last chunk's frame, undelivered, and the number
+/// of chunks.
 async fn deliver_leading_chunks(
     callback: &SwarmTransportCallback,
-    cid: &str,
+    (cid, carrier): (&str, Option<ChannelLane>),
     session: &DelegateeKey,
     local: Did,
     wire: Bytes,
@@ -354,27 +355,32 @@ async fn deliver_leading_chunks(
     assert!(!chunks.is_empty(), "the message spans several chunks");
     for chunk in chunks {
         callback
-            .on_admitted_message_for_test(cid, &local_wire(Message::Chunk(chunk), session, local)?)
+            .on_carried_message_for_test(
+                cid,
+                &local_wire(Message::Chunk(chunk), session, local)?,
+                carrier,
+            )
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     }
     Ok((local_wire(Message::Chunk(last), session, local)?, count))
 }
 
-/// Deliver `message`, signed by `session` and addressed to `local`, as chunks of 32 bytes:
-/// every chunk but the last in turn, then the last on its own task, whose delivery completes
-/// the message. Returns that delivery and the number of chunks.
+/// Deliver `message`, signed by `session` and addressed to `local`, as chunks of 32 bytes on
+/// `carrier`: every chunk but the last in turn, then the last on its own task, whose delivery
+/// completes the message. Returns that delivery and the number of chunks.
 async fn deliver_chunked(
     callback: &Arc<SwarmTransportCallback>,
-    cid: &str,
+    (cid, carrier): (&str, Option<ChannelLane>),
     session: &DelegateeKey,
     local: Did,
     message: Message,
 ) -> Result<(tokio::task::JoinHandle<Result<()>>, usize)> {
     let wire = local_wire(message, session, local)?;
-    let (last, count) = deliver_leading_chunks(callback, cid, session, local, wire).await?;
+    let (last, count) =
+        deliver_leading_chunks(callback, (cid, carrier), session, local, wire).await?;
     Ok((
-        spawn_inbound_delivery(Arc::clone(callback), cid.to_string(), last),
+        spawn_carried_delivery(Arc::clone(callback), cid.to_string(), last, carrier),
         count,
     ))
 }
@@ -394,9 +400,20 @@ fn spawn_inbound_delivery(
     cid: String,
     frame: bytes::Bytes,
 ) -> tokio::task::JoinHandle<Result<()>> {
+    spawn_carried_delivery(callback, cid, frame, None)
+}
+
+/// Deliver `frame` from `cid` on its own task, as if it arrived on the transport lane
+/// `carrier`.
+fn spawn_carried_delivery(
+    callback: Arc<SwarmTransportCallback>,
+    cid: String,
+    frame: bytes::Bytes,
+    carrier: Option<ChannelLane>,
+) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
         callback
-            .on_admitted_message_for_test(&cid, &frame)
+            .on_carried_message_for_test(&cid, &frame, carrier)
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     })

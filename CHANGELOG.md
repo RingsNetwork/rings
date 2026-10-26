@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- The inbound reassembly barrier orders each message category alone (#927; load-bounds paper,
+  Sec. "The reassembly barrier", Def. "Per-category barrier", Prop. "Order per category").
+  A frame now waits only for earlier unfinished reassembly of its own category, judged by the
+  carrier its chunks took. Before, a data frame waited for every earlier reassembly, whatever
+  its category, and a control frame waited for none: the control exemption.
+  - This fixes a reordering. A peer advertising a small `max-message-size` (#1130) makes its
+    control messages arrive chunked. A control frame released from the pre-admission hold after
+    such a message could run before it.
+  - Behaviour change: a storage, E2E or application frame no longer waits behind another
+    category's reassembly. Order is guaranteed per category only; no protocol relies on order
+    across categories, which travel on separate data channels.
+  - The hand-off barrier that held the other data lanes behind a reassembled message is
+    removed.
+  - The test-only `BarrierControlExemption` ablation and its witness are replaced by a
+    per-category witness in the sync storm.
+
+  No operator step.
+
 - The hot paths of admission no longer scale with the number of waiters, edges or queued
   items (#938; load-bounds paper, Sec. "Hot paths", Def. "Resource order", Obligation
   "Admission complexity"). A `ResourceOrderedQueue` event visits only the waiters its freed

@@ -14,9 +14,18 @@ use crate::error::Error;
 use crate::error::Result;
 
 pub(super) enum InboundCommand {
-    Pending { sequence: u64, lane: InboundLane },
+    /// The sequence of an event of `lane` ordered in `category` (`swarm::callback::inbound`'s
+    /// per-category barrier), reserved before the event is ready.
+    Pending {
+        sequence: u64,
+        lane: InboundLane,
+        category: InboundLane,
+    },
     Ready(Box<InboundEvent>),
-    Cancel { sequence: u64, lane: InboundLane },
+    Cancel {
+        sequence: u64,
+        lane: InboundLane,
+    },
 }
 
 pub(super) struct InboundSender {
@@ -32,13 +41,21 @@ impl InboundSender {
         }
     }
 
-    pub(super) fn reserve(&mut self, lane: InboundLane) -> Result<InboundTicket> {
+    pub(super) fn reserve(
+        &mut self,
+        lane: InboundLane,
+        category: InboundLane,
+    ) -> Result<InboundTicket> {
         let sequence = self.next_sequence;
         let next_sequence = sequence
             .checked_add(1)
             .ok_or(Error::InboundActorInvariantViolation)?;
         self.sender
-            .unbounded_send(InboundCommand::Pending { sequence, lane })
+            .unbounded_send(InboundCommand::Pending {
+                sequence,
+                lane,
+                category,
+            })
             .map_err(|_| Error::InboundMailboxClosed)?;
 
         self.next_sequence = next_sequence;

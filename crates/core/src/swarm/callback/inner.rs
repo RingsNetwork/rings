@@ -94,9 +94,21 @@ impl SwarmTransportCallback {
         cid: &str,
         msg: &[u8],
     ) -> Result<(), TransportCallbackError> {
+        self.on_carried_message_for_test(cid, msg, None).await
+    }
+
+    /// [`Self::on_admitted_message_for_test`], as if the frame arrived on the transport lane
+    /// `carrier`, whose category orders it (load-bounds paper, Def. "Per-category barrier").
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn on_carried_message_for_test(
+        &self,
+        cid: &str,
+        msg: &[u8],
+        carrier: Option<rings_transport::core::pool::ChannelLane>,
+    ) -> Result<(), TransportCallbackError> {
         on_bound!(
             self,
-            submit_inbound_message(cid, Bytes::copy_from_slice(msg), None, None)
+            submit_inbound_message(cid, Bytes::copy_from_slice(msg), None, carrier)
         )
     }
 }

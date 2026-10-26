@@ -19,7 +19,7 @@ async fn exercise_pressure_suite(
         .expect("class-reservation pressure artifact must be writable");
     exercise_bounded_control_burst(runtime, nodes, kind).await;
     dummy_controlled::set_max_message_size(CHUNK_MESSAGE_SIZE);
-    exercise_barrier_control_exemption(runtime, nodes, kind, driver).await;
+    exercise_reassembly_barrier_per_category(runtime, nodes, kind, driver).await;
     exercise_per_entry_yield(runtime, nodes, kind).await;
     driver.observe_production_handlers(runtime);
     let pressure_virtual_ms = u64::try_from(

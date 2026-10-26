@@ -246,12 +246,13 @@ async fn wait_for_optional_class(runtime: &SimulationRuntimeGuard, class: Schedu
     }
 }
 
-/// Hold the barrier with a reassembly backlog toward a peer, and probe that peer through the
-/// production stabilizer behind it: the probe is blocked by the barrier unless the exemption
-/// admits it, delivered within one hand-over either way, and answered, so the healthy peer is
-/// kept and no repair follows (before #924 the barrier starved the probe past its deadline,
-/// a false disconnect whose repair refed the storm).
-pub(super) async fn exercise_barrier_control_exemption(
+/// Hold an application reassembly backlog toward a peer, and probe that peer through the
+/// production stabilizer behind it: the reassembly barrier orders each category alone, so the
+/// probe is not held back by another category's reassembly, is delivered at once and answered,
+/// and the healthy peer is kept with no repair following (load-bounds paper, Prop. "Order per
+/// category", #927; before #924 a barrier that held control starved the probe into a false
+/// disconnect whose repair refed the storm).
+pub(super) async fn exercise_reassembly_barrier_per_category(
     runtime: &SimulationRuntimeGuard,
     nodes: &[Node],
     kind: ScenarioTopology,
@@ -266,30 +267,15 @@ pub(super) async fn exercise_barrier_control_exemption(
         .repair_entries_observed()
         .expect("repair observation must remain available");
     let control = issue_stabilizer_probe(runtime, nodes, sender, receiver, driver).await;
-    let deadline = control
-        .deadline_virtual_ms
-        .expect("control pressure must carry an explicit deadline");
     let mut control_delivery = runtime.deliver(&control).boxed_local();
-    let blocked_control = !crate::simulation::protection_profile().barrier_control_exemption();
-    let control_complete =
-        wait_for_control_barrier_verdict(runtime, control_delivery.as_mut(), blocked_control).await;
+    await_control_past_the_backlog(runtime, control_delivery.as_mut()).await;
     driver.observe_dispatch(&control);
-    driver.observe_barrier(&control, blocked_control);
+    driver.observe_barrier(&control, false);
     persist_runtime_artifact("barrier-control-verdict", runtime)
         .expect("barrier verdict artifact must be writable");
-    if !control_complete && blocked_control {
-        await_one_handover(runtime, control_delivery.as_mut(), &reassembly, deadline).await;
-    }
-    let control_complete = control_complete || blocked_control;
     drain_started_reassembly(runtime, &mut reassembly_deliveries).await;
     for delivery in &reassembly {
         driver.observe_delivery(runtime, delivery);
-    }
-    if !control_complete {
-        assert!(control_delivery
-            .as_mut()
-            .await
-            .expect("blocked control delivery must resume after reassembly service"));
     }
     driver.observe_delivery(runtime, &control);
     driver.observe_production_handlers(runtime);
@@ -448,40 +434,31 @@ async fn start_barrier_backlog<'a>(
     (reassembly_deliveries, reassembly)
 }
 
-pub(super) async fn wait_for_control_barrier_verdict<F>(
+/// Poll `control_delivery` while the reassembly backlog is held, until it completes: a control
+/// frame behind another category's reassembly is dispatched at once, and the production barrier
+/// never records holding control back.
+async fn await_control_past_the_backlog<F>(
     runtime: &SimulationRuntimeGuard,
     mut control_delivery: Pin<&mut F>,
-    blocked_control: bool,
-) -> bool
-where
+) where
     F: Future<Output = Result<bool, crate::simulation::SimulationRuntimeError>> + ?Sized,
 {
     for _ in 0..128 {
-        match futures::poll!(control_delivery.as_mut()) {
-            std::task::Poll::Ready(result) => {
-                assert!(
-                    !blocked_control,
-                    "a barrier without the exemption unexpectedly admitted control"
-                );
-                assert!(result.expect("enabled control delivery must remain stable"));
-                return true;
-            }
-            std::task::Poll::Pending => {}
+        if let std::task::Poll::Ready(result) = futures::poll!(control_delivery.as_mut()) {
+            assert!(result.expect("control delivery must remain stable"));
+            return;
         }
-        let observed = runtime
+        let waited = runtime
             .protection_observations()
             .expect("barrier observation must remain visible")
-            .barrier_control_blocked();
-        if observed {
-            assert!(
-                blocked_control,
-                "enabled control reached a forbidden barrier block"
-            );
-            return false;
-        }
+            .control_waited_for_reassembly();
+        assert!(
+            !waited,
+            "control waited behind another category's reassembly"
+        );
         tokio::task::yield_now().await;
     }
-    panic!("control event produced neither delivery nor a production barrier verdict");
+    panic!("control behind another category's reassembly was not delivered");
 }
 
 pub(super) type ControlledDelivery<'a> =
@@ -561,63 +538,6 @@ pub(super) async fn drain_started_reassembly(
             .expect("reassembly service must advance deterministically");
         settle_one_poll().await;
     }
-}
-
-/// Witness of the reassembly barrier's bound under per-lane credit dispatch (#924, #927).
-///
-/// Law: a transport lane hands its frames to core one at a time, so a control frame the barrier
-/// blocks waits behind the one reassembly frame being handed over, never behind the lane's
-/// whole backlog. It therefore completes within that frame's service cost, which fits the
-/// control deadline: the barrier delays control but cannot starve it.
-///
-/// Post: the control delivery is complete and its completion recorded against the deadline,
-/// so a starvation would surface as a `BarrierControlExemption` violation.
-pub(super) async fn await_one_handover<F>(
-    runtime: &SimulationRuntimeGuard,
-    control_delivery: Pin<&mut F>,
-    reassembly: &[ScheduledDelivery],
-    deadline: u64,
-) where
-    F: Future<Output = Result<bool, crate::simulation::SimulationRuntimeError>> + ?Sized,
-{
-    let blocked_at = u64::try_from(runtime.elapsed_ms().expect("elapsed time must fit"))
-        .expect("pressure time must fit u64");
-    let handover = reassembly
-        .iter()
-        .map(|delivery| crate::simulation::reassembly_frame_service_ms(delivery.bytes))
-        .max()
-        .expect("a blocked control frame waits behind a reassembly frame");
-    assert!(
-        blocked_at.saturating_add(handover) < deadline,
-        "one reassembly hand-over must fit the control deadline"
-    );
-    runtime
-        .advance(std::time::Duration::from_millis(handover))
-        .await
-        .expect("one hand-over must advance deterministically");
-    // Tokio time is paused and auto-advances only while every task waits on a timer, so the
-    // control completing with the clock still here is the witness that it waited on the
-    // hand-over alone: a wait behind further service (another frame of the backlog) moves the
-    // clock and fails below. The timeout is a hang guard, not a pace.
-    let handed_over_at = tokio::time::Instant::now();
-    let delivered = tokio::time::timeout(std::time::Duration::from_secs(60), control_delivery)
-        .await
-        .expect("blocked control must complete once its hand-over is done, not starve")
-        .expect("blocked control delivery must remain stable");
-    assert!(
-        delivered,
-        "blocked control must complete once its hand-over is done"
-    );
-    assert_eq!(
-        tokio::time::Instant::now(),
-        handed_over_at,
-        "blocked control must complete with no time past its one hand-over"
-    );
-    let observed = u64::try_from(runtime.elapsed_ms().expect("elapsed time must fit"))
-        .expect("pressure time must fit u64");
-    // The completion is the barrier's witness: past the deadline it records the starvation the
-    // exemption protects against, which every caller rules out.
-    crate::simulation::record_barrier_control_completion(observed, deadline);
 }
 
 async fn wait_for_class_while_sending<F, T, E>(
