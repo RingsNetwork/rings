@@ -25,8 +25,10 @@ use crate::message::PreviousRelayHolder;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
+use crate::swarm::transport::CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS;
 use crate::utils::get_epoch_ms;
 use crate::utils::try_sleep;
+use crate::utils::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Observable completion state for one bounded storage repair pass.
@@ -75,6 +77,10 @@ impl StorageRepairDeferReason {
         }
     }
 }
+
+/// The chain task's probe period, `CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS` as its monotonic clock
+/// counts it.
+const CHAIN_PROBE_PERIOD_MS: u64 = CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS.unsigned_abs();
 
 impl Stabilizer {
     async fn handle_storage_repair_action(
@@ -323,24 +329,40 @@ impl Stabilizer {
         Ok(())
     }
 
-    /// Run the chain exchange at once on every loss of a chain neighbour, until `stop` (`Law
-    /// (Event-driven repair)`, #777): resume the holds whose next member was lost and offer one
-    /// digest set to each new chain neighbour, without waiting for the maintenance schedule's
-    /// repair window, which guards bulk storage sync and not these two messages. The periodic
-    /// repair pass remains the backstop.
+    /// Run the chain exchange at once on every change of this node's chains, until `stop` (`Law
+    /// (Event-driven repair)`, #777): a chain neighbour lost, suspected or cleared. It resumes
+    /// the holds whose next member changed and offers one digest set to each chain neighbour,
+    /// without waiting for the maintenance schedule's repair window, which guards bulk storage
+    /// sync and not these two messages. The periodic repair pass remains the backstop. Every
+    /// `CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS` it also probes the chain neighbours and suspects one
+    /// that has not answered (#1070), which is such a change.
     ///
     /// `Law (Wake)`: the listener is registered before the due flag is checked, so no loss is
     /// missed; `stop` is observed between waits of at most `STABILIZATION_STOP_POLL_INTERVAL`.
     ///
-    /// Bound: exchanges per second ≤ chain-neighbour losses per second. Each exchange is run by
-    /// taking the due flag, which only a loss sets, and losses that arrive before it is taken
-    /// share one exchange. It cannot amplify itself: an exchange sends digest offers, copies and
-    /// forwards and removes no peer, while a loss is a topology removal on a closed connection
-    /// or a failed liveness check, which no exchange causes.
+    /// Bound: exchanges per second ≤ chain changes per second (losses, suspicions, clearings).
+    /// Each exchange is run by taking the due flag, which only a change sets, and changes that
+    /// arrive before it is taken share one exchange. It cannot amplify itself: an exchange sends
+    /// digest offers, copies and forwards, removes no peer and probes none, while a change is a
+    /// topology removal, an unanswered probe, or an answer, which no exchange causes.
     pub(crate) async fn repair_relay_chain_on_loss(&self, stop: &StopToken) {
+        let origin = Instant::now();
+        let mut next_probe_ms: u64 = 0;
         loop {
             if stop.should_stop() {
                 return;
+            }
+            let elapsed_ms = u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+            if elapsed_ms >= next_probe_ms {
+                next_probe_ms = elapsed_ms.saturating_add(CHAIN_PROBE_PERIOD_MS);
+                if let Err(error) = self.probe_relay_chain_neighbours().await {
+                    tracing::warn!(
+                        target: "rings_core::dht::stabilization",
+                        local = %self.dht.did,
+                        error = ?error,
+                        "STABILIZATION relay chain neighbour probe failed; probed again next period"
+                    );
+                }
             }
             let loss = self.dht.listen_relay_chain_loss();
             if self.dht.take_relay_chain_repair_due() {

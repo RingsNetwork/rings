@@ -19,6 +19,15 @@
   - **Upgrade consequence.** None: the wire format is unchanged.
   - **Operator step.** None.
 
+- Three vendored webrtc-sctp tests no longer race the write loop (#1127). They slept 10 ms
+  after writing and then dropped or reordered packets they assumed were already on the test
+  `Bridge`'s queue; on a loaded runner `test_assoc_reliable_retransmission` found it empty and
+  panicked. They now wait until the packets they act on are queued, a count of the client
+  connection's completed sends, and the retransmission test runs until both messages are
+  acknowledged. The race is upstream's and not the batch patch's (#1090), so the fix is not part
+  of webrtc-rs/webrtc#941; `RINGS-PATCH.md` records it. Also, a connection that already holds a
+  slot no longer reads the tables' floor use on admission (#1094). No operator step.
+
 - A new connection takes the cleanest free slot, not the least free one (#1094; load-bounds
   paper, Def. 1 and Prop. 1, amended). A slot's floor use is its worst table's share of its
   floor still charged by live items, over the replay streams, the removal store and the open
@@ -128,6 +137,17 @@
   - **Upgrade consequence.** None on the wire: a sender already sends a message's chunks in
     order and of equal length.
   - **Operator step.** None.
+
+- Relay chain neighbours are probed every 2.5 s, and suspected for relay custody when a probe is
+  7.5 s unanswered (#1070), so a member that crashes, drops its network or is suspended is
+  replaced within about 10 s instead of after the 45 s liveness deadline. A suspect is no chain
+  member until it answers on time twice in a row, and both the suspicion and the clearing run
+  the chain exchange at once (#777), so a neighbour whose answers hover around 7.5 s changes the
+  chains at most twice per 12.5 s; suspicion evicts no peer, which still happens only at the 45 s
+  deadline. Each node
+  probes only its two chain neighbours this often, on the same probe clock as every peer: four
+  messages per 2.5 s, about 1.3 more a second, whatever `r`. No message changes; nodes of this
+  version and of an earlier one interoperate.
 
 ## 0.37.0
 

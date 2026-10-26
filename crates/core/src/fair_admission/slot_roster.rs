@@ -153,6 +153,12 @@ impl SlotRoster {
         }
     }
 
+    /// Whether `edge` holds a slot: an arrival of such an edge keeps it, so its caller need not
+    /// read the tables' floor use.
+    pub(crate) fn holds(&self, edge: Did) -> bool {
+        self.table().held.contains_key(&edge)
+    }
+
     /// Free the slot of `edge`, if it holds one; `edge` is no longer a current edge.
     pub(crate) fn depart(&self, edge: Did) {
         {
@@ -255,7 +261,8 @@ mod tests {
     }
 
     /// Among clean slots the least is given first, a departure frees its slot for the next
-    /// arrival, a repeated arrival keeps its slot, and an edge with no slot free is unbound.
+    /// arrival, a repeated arrival keeps its slot, an edge with no slot free is unbound, and
+    /// `holds` reads exactly the edges with a slot.
     #[test]
     fn test_slots_are_given_least_first_among_clean_and_reused() {
         let roster = SlotRoster::new(2);
@@ -268,8 +275,10 @@ mod tests {
         assert_eq!(roster.principal_of(Some(b)), Principal::Slot(1));
         roster.arrive(c, &clean);
         assert_eq!(roster.principal_of(Some(c)), Principal::Unbound);
+        assert!(roster.holds(a) && !roster.holds(c));
         roster.depart(a);
         assert_eq!(roster.principal_of(Some(a)), Principal::Unbound);
+        assert!(!roster.holds(a));
         roster.arrive(c, &clean);
         assert_eq!(roster.principal_of(Some(c)), Principal::Slot(0));
         assert_eq!(roster.principal_of(None), Principal::Unbound);
