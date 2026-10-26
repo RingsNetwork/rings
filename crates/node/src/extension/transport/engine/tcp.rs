@@ -8,7 +8,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::message::REORDER_DEADLINE;
-use rings_runtime::Spawner;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -42,7 +41,7 @@ impl TransportSessions {
         peer: Did,
         service: String,
     ) {
-        let Ok(spawner) = Spawner::current() else {
+        let Ok(spawner) = scope.tasks().spawner() else {
             tracing::error!("transport listen on {local_addr} requires a runtime");
             return;
         };

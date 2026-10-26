@@ -90,7 +90,6 @@ use rand::RngCore;
 use rings_core::dht::Did;
 use rings_core::swarm::LaneCreditView;
 use rings_runtime::sleep;
-use rings_runtime::Spawner;
 use web_time::Instant;
 
 use super::OnionLink;
@@ -207,7 +206,7 @@ impl OnionLinkSender {
     ///
     /// No runtime to spawn the emitter on, or a poisoned lock.
     pub(crate) fn open(&self, scope: Scope, link: OnionLink) -> Result<()> {
-        let spawner = Spawner::current()?;
+        let spawner = scope.tasks().spawner()?;
         let now_us = self.now_us();
         if let Some(epoch) = lock(&self.state)?.open(link.peer, now_us) {
             spawner.spawn(emit(self.clone(), link.peer, epoch, scope));

@@ -1,0 +1,15 @@
+# The one-spawn law of `src/tasks.rs` (#1085): every task of the node layer joins a task set,
+# the node's (`NodeTasks`) or one its owner awaits (`rings_runtime::TaskSet`), so a close can
+# stop it and await its end. No spawn here may detach a task. Test builds are exempt
+# (`src/lib.rs`), and the binary owns its tasks through `JoinSet`.
+disallowed-methods = [
+    { path = "tokio::task::spawn", reason = "spawn through `NodeTasks` (src/tasks.rs) so a close awaits the task (#1085)" },
+    { path = "tokio::task::spawn_local", reason = "spawn through `NodeTasks` (src/tasks.rs) so a close awaits the task (#1085)" },
+    { path = "tokio::runtime::Handle::spawn", reason = "spawn through `NodeTasks` (src/tasks.rs) so a close awaits the task (#1085)" },
+    { path = "tokio::runtime::Runtime::spawn", reason = "spawn through `NodeTasks` (src/tasks.rs) so a close awaits the task (#1085)" },
+    { path = "wasm_bindgen_futures::spawn_local", reason = "spawn through `NodeTasks` (src/tasks.rs) so a close awaits the task (#1085)" },
+    { path = "rings_runtime::spawn_detached", reason = "spawn through `NodeTasks` (src/tasks.rs) so a close awaits the task (#1085)" },
+    { path = "rings_runtime::run_detached", reason = "spawn through `NodeTasks` (src/tasks.rs) so a close awaits the task (#1085)" },
+    { path = "rings_runtime::Spawner::spawn", reason = "spawn through `NodeTasks` (src/tasks.rs) or a `TaskSet` so a close awaits the task (#1085)" },
+    { path = "rings_runtime::Spawner::run_detached", reason = "spawn through `NodeTasks` (src/tasks.rs) or a `TaskSet` so a close awaits the task (#1085)" },
+]

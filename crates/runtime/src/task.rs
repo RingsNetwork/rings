@@ -42,7 +42,7 @@ use crate::bound::MaybeSend;
 pub struct RuntimeUnavailable;
 
 /// A future that [`spawn_detached`] could not schedule, returned unpolled.
-pub struct Unscheduled<F>(F);
+pub struct Unscheduled<F>(pub(crate) F);
 
 impl<F> Unscheduled<F> {
     /// Recover the future; it has never been polled.

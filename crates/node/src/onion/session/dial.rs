@@ -47,7 +47,6 @@ use futures::SinkExt;
 use futures::StreamExt;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::sleep;
-use rings_runtime::Spawner;
 use zeroize::Zeroizing;
 
 use super::client::keep_alive_at;
@@ -75,6 +74,8 @@ use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
+#[cfg(rings_native)]
+use crate::tasks::NodeTasks;
 
 /// Longest wait for `h`'s answer to an open: longer than the longest world open at `h` (30 s,
 /// rounded to its 250 ms quantum) plus a loop round trip, so a refusal arrives as a refusal and
@@ -131,6 +132,9 @@ pub(crate) struct OnionClientStream {
     /// The session's witness, which the driver writes; only native streams have a reader.
     #[cfg(rings_native)]
     witness: OnionSessionWitness,
+    /// The tasks of the node the session was opened on, which its native pump joins (#1085).
+    #[cfg(rings_native)]
+    tasks: NodeTasks,
 }
 
 impl OnionClientStream {
@@ -138,6 +142,12 @@ impl OnionClientStream {
     #[cfg(rings_native)]
     pub(crate) fn witness(&self) -> OnionSessionWitness {
         self.witness.clone()
+    }
+
+    /// The tasks of the node the session was opened on.
+    #[cfg(rings_native)]
+    pub(crate) fn tasks(&self) -> &NodeTasks {
+        &self.tasks
     }
 
     /// Split into the sending and the receiving halves.
@@ -174,6 +184,7 @@ impl OnionClientStream {
                 commands,
                 events: delivered,
                 witness: OnionSessionWitness::default(),
+                tasks: NodeTasks::new(),
             },
             OnionTestDriver {
                 events,
@@ -286,7 +297,8 @@ pub(crate) async fn open(
     };
     #[cfg(rings_native)]
     let witness = driver.witness.clone();
-    Spawner::current()?.spawn(driver.run(received, events, opened));
+    let tasks = driver.scope.tasks().clone();
+    tasks.spawn(driver.run(received, events, opened))?;
     let timeout = sleep(ONION_SESSION_OPEN_TIMEOUT).fuse();
     futures::pin_mut!(timeout);
     match futures::future::select(&mut open_result, timeout).await {
@@ -295,6 +307,8 @@ pub(crate) async fn open(
             events: delivered,
             #[cfg(rings_native)]
             witness,
+            #[cfg(rings_native)]
+            tasks,
         }),
         Either::Left((Ok(false) | Err(_), _)) => {
             Err(Error::OnionRouteError(OnionRouteError::ExitRefused))

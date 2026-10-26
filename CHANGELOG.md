@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- A closed node releases every store it was built over (#1085), so an embedder that stops a
+  node and starts it again in one process, on the same stores, opens them. `Provider::close`
+  now consumes the provider and runs the close law, each step once the one before has ended:
+  (a) every task of the node is told to stop, and every listener generation ends; (b) no task
+  of the node is live; (c) every connection is closed (#1098); (d) the measurements are
+  persisted; (e) the last clone of the node drops, and with it every store, whose release the
+  close awaits. Before, the node's own tasks (its application service, extension workers,
+  relay and onion pumps) held it past its close and its drop, so its stores stayed locked
+  (`Error::StorageDirectoryLocked`, #1039) for the life of the process. Every task of the
+  node layer now joins the node's task set, which the close stops and drains, and the crate's
+  `clippy.toml` forbids it every detached spawn outside tests. A relay whose fail-closed law
+  resets its local socket does so at the stop, where being dropped would close it cleanly. A
+  node still shared when it is closed reports `Error::ProviderStillShared { released }`: it is
+  stopped and its network closed, and `released` resolves once its last clone drops.
+  `rings_node_provider_destroy` closes its provider this way, so a provider created again on
+  the same `storage_path` opens its stores; the C ABI is unchanged. No step waits on a timer:
+  the close's latency is bounded by the timeouts of the work it awaits (a send of a relay
+  winding down, a handshake or a payload send the core detached, a replay flush).
+  - **Library API.** Breaking: 0.37's `Provider::close(&self)` becomes `Provider::close(self)`.
+    `Processor::close` keeps `&self` and is steps (c) and (d) only. New, additive:
+    `Error::ProviderStillShared` (code `1506`), `rings_node::release::StoresReleased`,
+    `NodeStores::released`, `ProcessorBuilder::stores_released`,
+    `rings_core::storage::file::StoreRelease` with `FileStorage::released`, and
+    `rings_runtime::TaskSet` with `Joined` and `Drained`. `Provider::set_backend` serves the
+    application until the node is closed.
+  - **Upgrade consequence.** None on the wire. A caller of `close` gives up its provider; a
+    caller still holding a clone gets `ProviderStillShared` and awaits `released`.
+  - **Operator step.** None.
+
 ## 0.37.0
 
 - Every frame names its wire version (#1104), so a node of another release is refused by

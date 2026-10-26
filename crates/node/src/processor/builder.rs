@@ -26,6 +26,8 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) origin_quota: OriginQuotaConfig,
     pub(in crate::processor) onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
     pub(in crate::processor) measure: Option<Arc<PeriodicMeasure>>,
+    /// The release witnesses of the file stores the processor is built over (#1085).
+    pub(in crate::processor) stores_released: StoresReleased,
     pub(in crate::processor) stabilize_interval: Duration,
     pub(in crate::processor) online_node_heartbeat_interval: Duration,
     pub(in crate::processor) online_node_ttl: Duration,
@@ -69,6 +71,7 @@ impl ProcessorBuilder {
             origin_quota: config.origin_quota,
             onion_entry_guard_storage: None,
             measure: None,
+            stores_released: StoresReleased::default(),
             stabilize_interval: config.stabilize_interval,
             online_node_heartbeat_interval: config.online_node_heartbeat_interval,
             online_node_ttl: config.online_node_ttl,
@@ -171,6 +174,14 @@ impl ProcessorBuilder {
     /// Set the measure for the processor.
     pub fn measure(mut self, implement: PeriodicMeasure) -> Self {
         self.measure = Some(Arc::new(implement));
+        self
+    }
+
+    /// Name the release witnesses of the file stores this processor is built over, which
+    /// [`Provider::close`](crate::provider::Provider::close) awaits (#1085). A store given to the
+    /// builder without its witness is not awaited by a close.
+    pub fn stores_released(mut self, released: StoresReleased) -> Self {
+        self.stores_released = released;
         self
     }
 
@@ -328,6 +339,8 @@ impl ProcessorBuilder {
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
             measure,
+            stores_released: self.stores_released,
+            tasks: NodeTasks::new(),
             listener_lifecycle_lock: Arc::new(futures::lock::Mutex::new(())),
             onion_role: self.onion_role,
             onion_idle_floor: self.onion_idle_floor,

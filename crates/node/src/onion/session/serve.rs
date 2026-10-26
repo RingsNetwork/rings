@@ -74,7 +74,6 @@ use rings_core::utils::get_epoch_ms;
 use rings_runtime::sleep;
 use rings_runtime::MaybeSend;
 use rings_runtime::MaybeSendSync;
-use rings_runtime::Spawner;
 
 use super::exit::reply_to_unheld;
 use super::exit::seal;
@@ -334,14 +333,14 @@ impl<W: OnionWorld> OnionInterpretation for OnionExitSessions<W> {
                     return Ok(());
                 };
                 let (inbound, received) = mpsc::channel(ONION_EXIT_SESSION_INBOUND);
-                Spawner::current()?.spawn(drive(
+                scope.tasks().spawn(drive(
                     Arc::clone(&self.shared),
                     scope.clone(),
                     arguments,
                     lease,
                     received,
                     received_at_ms,
-                ));
+                ))?;
                 sessions
                     .live
                     .insert(arguments.session, OnionExitSessionHandle {

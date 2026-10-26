@@ -4,6 +4,7 @@
 #![cfg_attr(
     test,
     allow(
+        clippy::disallowed_methods,
         clippy::expect_used,
         clippy::indexing_slicing,
         clippy::panic,
@@ -37,6 +38,7 @@ pub mod prelude;
 pub mod processor;
 pub mod provider;
 pub mod registration;
+pub mod release;
 // Documented by its own module docs; an outer doc would make rustdoc resolve the module's
 // intra-doc links in this scope instead of its own.
 pub mod remote_endpoint;
@@ -44,6 +46,7 @@ mod rpc_dto;
 mod rpc_impl;
 pub mod seed;
 mod sync_lock;
+mod tasks;
 #[cfg(all(test, rings_native))]
 mod test_support;
 #[cfg(test)]

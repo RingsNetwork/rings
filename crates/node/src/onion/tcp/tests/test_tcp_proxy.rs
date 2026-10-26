@@ -160,3 +160,26 @@ async fn test_a_witnessed_relay_keeps_a_whole_stream_unfailed() {
     assert_eq!(driver.next_is_fin().await, None);
     assert_eq!(witness.condition(), OnionSessionCondition::Live);
 }
+
+/// Law (fail closed at the stop, #1085): the node's stop ends a live pump as failed, since its
+/// bytes did not end with the session's `fin`. Once the node's tasks have drained, the witness
+/// reads `Failed` and the local socket's peer reads a reset, never the orderly end a dropped
+/// pump would leave.
+#[tokio::test]
+async fn test_the_nodes_stop_resets_a_live_local_socket() {
+    let (local, mut peer) = socket_pair().await;
+    let (stream, _driver) = OnionClientStream::driven_by_test();
+    let tasks = stream.tasks().clone();
+    let witness = NativeOnionOpenStream::new(stream).relay_witnessed(local);
+    assert_eq!(witness.condition(), OnionSessionCondition::Live);
+
+    tasks.stop();
+    tasks.drained().await;
+
+    assert_eq!(witness.condition(), OnionSessionCondition::Failed);
+    let end = peer.read(&mut [0_u8; 1]).await;
+    assert_eq!(
+        end.map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::ConnectionReset)
+    );
+}
