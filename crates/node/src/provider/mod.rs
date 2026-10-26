@@ -242,6 +242,12 @@ impl Provider {
         self.processor.flush_measurements().await
     }
 
+    /// Resolves once every registration of this node is stored at its owners, as they reported
+    /// it ([`Processor::registrations_published`], #866).
+    pub async fn registrations_published(&self) {
+        self.processor.registrations_published().await
+    }
+
     /// Close this node and release every store it holds, so that the stores can be opened
     /// again in this process: an in-process re-init (#1085).
     ///

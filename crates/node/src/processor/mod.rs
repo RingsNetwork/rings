@@ -89,6 +89,7 @@ use crate::registration::republish_due;
 use crate::registration::validate_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
+use crate::registration::RegistrationReadiness;
 use crate::registration::RegistrationTask;
 use crate::release::StoresReleased;
 use crate::tasks::NodeTasks;
@@ -100,6 +101,7 @@ mod config;
 /// Handshakes: by DID over the overlay, and over a peer's HTTP endpoint.
 pub(crate) mod handshake;
 mod messaging;
+mod registration_daemon;
 
 pub use builder::ProcessorBuilder;
 #[cfg(feature = "node")]
@@ -117,41 +119,6 @@ const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: u32 = 40;
 /// Whether the fetch-cache read numbered `attempt` (from 0) is a DHT fetch's last one.
 const fn is_final_lookup_poll(attempt: u32) -> bool {
     attempt.saturating_add(1) >= DHT_LOOKUP_CACHE_POLL_ATTEMPTS
-}
-
-async fn sleep_registration_interval_with_stop(
-    interval: Duration,
-    stop: &StopToken,
-    sibling_stop: &StopToken,
-) -> Result<bool> {
-    use futures::future::select;
-    use futures::pin_mut;
-
-    let stopped = async {
-        let own_stop = stop.stopped();
-        let maintenance_stop = sibling_stop.stopped();
-        pin_mut!(own_stop, maintenance_stop);
-        let _ = select(own_stop, maintenance_stop).await;
-    };
-    let interval_elapsed = sleep(interval);
-    pin_mut!(stopped, interval_elapsed);
-    match select(interval_elapsed, stopped).await {
-        futures::future::Either::Left((result, _)) => {
-            result?;
-            Ok(true)
-        }
-        futures::future::Either::Right(((), _)) => Ok(false),
-    }
-}
-
-/// What starts a registration publish after the first: its heartbeat, or an early publish at
-/// its first admitted edge (#855).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RegistrationTurn {
-    /// The heartbeat interval elapsed.
-    Heartbeat,
-    /// An armed registration saw an admitted edge (`registration::republish_due`).
-    Early,
 }
 
 /// Processor for rings-node rpc server.
@@ -183,6 +150,8 @@ pub struct Processor {
     /// The cover floor of this node's idle onion links (#880).
     onion_idle_floor: OnionIdleFloor,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
+    /// Whether each registration task is stored at its owners (#866), in task order.
+    registration_readiness: Arc<RegistrationReadiness>,
     /// Process-local bounded recorder backing the authenticated operator surface.
     observability: Arc<Observability>,
 }
@@ -426,108 +395,6 @@ impl Processor {
         target: OnionProxyTarget,
     ) -> Result<OnionProxyRoute> {
         directory::build_onion_proxy_route(self, proxy, target).await
-    }
-
-    async fn run_registration_once(
-        &self,
-        task: &dyn RegistrationTask,
-        stop: StopToken,
-    ) -> Result<()> {
-        let context = RegistrationContext::new_with_stop(self, stop);
-        task.register_once(&context).await
-    }
-
-    async fn registration_task_daemon_with(
-        &self,
-        task: &dyn RegistrationTask,
-        stop: StopToken,
-        sibling_stop: StopToken,
-    ) {
-        let mut turn = RegistrationTurn::Heartbeat;
-        loop {
-            if stop.should_stop() || sibling_stop.should_stop() {
-                return;
-            }
-            let armed = early_publish_armed(
-                turn == RegistrationTurn::Heartbeat,
-                self.swarm.admitted_edges(),
-            );
-            let published = self.run_registration_once(task, stop.clone()).await;
-            // A publish is a state change tests probe for.
-            #[cfg(all(test, feature = "node"))]
-            crate::tests::activity::record_activity();
-            if let Err(error) = published {
-                if matches!(error, Error::RegistrationStopped) {
-                    tracing::debug!(
-                        "Stopping {} registration task after cooperative stop",
-                        task.name()
-                    );
-                    return;
-                }
-                tracing::warn!("Failed to run {} registration task: {error:?}", task.name());
-            }
-            if stop.should_stop() || sibling_stop.should_stop() {
-                return;
-            }
-            match self
-                .next_registration_turn(task.interval(), armed, &stop, &sibling_stop)
-                .await
-            {
-                Ok(Some(next)) => turn = next,
-                Ok(None) => return,
-                Err(error) => {
-                    tracing::warn!(
-                        "Stopping {} registration task after timer error: {error:?}",
-                        task.name()
-                    );
-                    return;
-                }
-            }
-        }
-    }
-
-    /// The next turn of a registration daemon: its heartbeat after `interval`, or earlier, at
-    /// the first admitted edge of an `armed` registration (`registration::republish_due`, #855);
-    /// `None` once a stop is requested. Woken by the timer, an edge change or the stop, never by
-    /// polling.
-    async fn next_registration_turn(
-        &self,
-        interval: Duration,
-        armed: bool,
-        stop: &StopToken,
-        sibling_stop: &StopToken,
-    ) -> Result<Option<RegistrationTurn>> {
-        let heartbeat = sleep_registration_interval_with_stop(interval, stop, sibling_stop);
-        let first_edge = self.first_admitted_edge(armed);
-        futures::pin_mut!(heartbeat, first_edge);
-        match futures::future::select(heartbeat, first_edge).await {
-            futures::future::Either::Left((slept, _)) => {
-                Ok(slept?.then_some(RegistrationTurn::Heartbeat))
-            }
-            futures::future::Either::Right(((), _)) => Ok(Some(RegistrationTurn::Early)),
-        }
-    }
-
-    /// Resolves once an early publish is due for an `armed` registration, woken by the swarm's
-    /// edge changes (its edge-watch law); never for one not armed.
-    async fn first_admitted_edge(&self, armed: bool) {
-        if !armed {
-            return std::future::pending().await;
-        }
-        loop {
-            let changed = self.swarm.edges_changed();
-            if republish_due(armed, self.swarm.admitted_edges()) {
-                return;
-            }
-            changed.await;
-        }
-    }
-
-    async fn registration_daemons_with(&self, stop: StopToken, sibling_stop: StopToken) {
-        join_all(self.registration_tasks.iter().map(|task| {
-            self.registration_task_daemon_with(task.as_ref(), stop.clone(), sibling_stop.clone())
-        }))
-        .await;
     }
 
     /// Run stabilization and node registration tasks until this future is dropped or aborted.

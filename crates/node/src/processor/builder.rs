@@ -344,6 +344,7 @@ impl ProcessorBuilder {
             listener_lifecycle_lock: Arc::new(futures::lock::Mutex::new(())),
             onion_role: self.onion_role,
             onion_idle_floor: self.onion_idle_floor,
+            registration_readiness: Arc::new(RegistrationReadiness::new(registration_tasks.len())),
             registration_tasks,
             observability,
         })

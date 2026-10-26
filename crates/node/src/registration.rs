@@ -25,6 +25,8 @@
 //! boundedness law and the ghost bound hold as stated.
 
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -38,6 +40,7 @@ use rings_core::lifecycle::StopToken;
 use rings_core::message::ChordStorageInterface;
 use rings_core::message::MessageSigner;
 use rings_core::message::ScopedStorage;
+use rings_core::swarm::storage_api::StoreReceipt;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
 
@@ -217,6 +220,9 @@ pub(crate) fn validate_schedule(
 pub(crate) struct RegistrationContext<'a> {
     processor: &'a Processor,
     stop: StopToken,
+    /// When set, every append asks its owners for a store report (#866), and its receipt is
+    /// kept here for the daemon.
+    receipts: Option<Mutex<Vec<StoreReceipt>>>,
 }
 
 impl<'a> RegistrationContext<'a> {
@@ -225,7 +231,27 @@ impl<'a> RegistrationContext<'a> {
     }
 
     pub(crate) const fn new_with_stop(processor: &'a Processor, stop: StopToken) -> Self {
-        Self { processor, stop }
+        Self {
+            processor,
+            stop,
+            receipts: None,
+        }
+    }
+
+    /// This context with every append asking its owners for a store report (#866).
+    pub(crate) fn reporting(mut self) -> Self {
+        self.receipts = Some(Mutex::new(Vec::new()));
+        self
+    }
+
+    /// The receipts of the reported appends made through this context, or `None` when it was
+    /// not reporting.
+    pub(crate) fn into_receipts(self) -> Option<Vec<StoreReceipt>> {
+        self.receipts.map(|receipts| {
+            receipts
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+        })
     }
 
     /// Return whether the owning registration daemon has requested shutdown.
@@ -288,12 +314,26 @@ impl<'a> RegistrationContext<'a> {
         self.processor.swarm.scoped_storage(self.stop.clone())
     }
 
-    /// Append `data` to `topic`, stopping cooperatively with the registration.
+    /// Append `data` to `topic`, stopping cooperatively with the registration; a reporting
+    /// context keeps the append's store receipt.
     pub(crate) async fn append_data(&self, topic: &str, data: Bytes) -> Result<()> {
-        self.storage()
-            .storage_append_data(topic, data)
+        let Some(receipts) = &self.receipts else {
+            return self
+                .storage()
+                .storage_append_data(topic, data)
+                .await
+                .map_err(stoppable_storage_error);
+        };
+        let receipt = self
+            .storage()
+            .storage_append_data_reported(topic, data)
             .await
-            .map_err(stoppable_storage_error)
+            .map_err(stoppable_storage_error)?;
+        receipts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(receipt);
+        Ok(())
     }
 }
 
@@ -583,6 +623,10 @@ impl RegistrationTask for OnlineNodeRegistration {
         self.publish_descriptor(context).await.map(|_| ())
     }
 }
+
+mod readiness;
+
+pub(crate) use readiness::RegistrationReadiness;
 
 #[cfg(test)]
 mod test_first_edge;
