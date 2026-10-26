@@ -1,44 +1,71 @@
-//! Ordering barrier between completed reassembly and logical-data lanes.
+//! The reassembly barrier, per message category (load-bounds paper, Def. "Per-category
+//! barrier", #927).
+//!
+//! A reassembled message keeps its final chunk's sequence and enters the lane of its category,
+//! which the lane-mismatch refusal holds to the category of the carrier its chunks took. So a
+//! frame of a category waits only for the unfinished reassembly of that category:
+//!
+//! ```text
+//!   dispatch(lane, f) ⟺ ¬∃ u ∈ unfinished: seq(u) < seq(f) ∧ category(u) ∈ { lane, ⊤ }
+//! ```
+//!
+//! where `⊤` is a chunk on no carrier, which only a test hands in and which orders every lane.
+//! Law (order per category): the messages of one category are processed in sequence order,
+//! whole or chunked; no order is kept across categories, and no protocol relies on one.
 
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use super::InboundLane;
 
-pub(super) struct ReassemblyHandoffBarrier {
-    pub(super) sequence: u64,
-    started: Arc<AtomicBool>,
+/// The reassembly events ticketed and not yet completed, by category.
+#[derive(Default)]
+pub(super) struct UnfinishedReassembly {
+    /// Each unfinished event's category, by sequence.
+    category: BTreeMap<u64, InboundLane>,
+    /// The unfinished events of each category, in sequence order; the reassembly lane's are
+    /// those of no carrier (`⊤`).
+    by_category: BTreeMap<InboundLane, BTreeSet<u64>>,
 }
 
-impl ReassemblyHandoffBarrier {
-    pub(super) fn new(sequence: u64) -> Self {
-        Self {
-            sequence,
-            started: Arc::new(AtomicBool::new(false)),
+impl UnfinishedReassembly {
+    /// The reassembly event `sequence` of `category` was ticketed.
+    pub(super) fn begin(&mut self, sequence: u64, category: InboundLane) {
+        self.category.insert(sequence, category);
+        self.by_category
+            .entry(category)
+            .or_default()
+            .insert(sequence);
+    }
+
+    /// The reassembly event `sequence` completed, handing its message, if any, to its lane, or
+    /// was cancelled.
+    pub(super) fn end(&mut self, sequence: u64) {
+        let Some(category) = self.category.remove(&sequence) else {
+            return;
+        };
+        if let Some(sequences) = self.by_category.get_mut(&category) {
+            sequences.remove(&sequence);
+            if sequences.is_empty() {
+                self.by_category.remove(&category);
+            }
         }
     }
 
-    pub(super) fn start_marker(&self) -> Arc<AtomicBool> {
-        self.started.clone()
+    /// Whether the front `sequence` of `lane` waits for an earlier unfinished reassembly of its
+    /// category, or of no carrier (pure).
+    pub(super) fn blocks(&self, lane: InboundLane, sequence: u64) -> bool {
+        [lane, InboundLane::Reassembly].iter().any(|category| {
+            self.by_category
+                .get(category)
+                .and_then(BTreeSet::first)
+                .is_some_and(|earliest| *earliest < sequence)
+        })
     }
 
-    pub(super) fn has_started(&self) -> bool {
-        self.started.load(Ordering::Acquire)
+    /// Forget every unfinished event: the actor's queues are discarded at close.
+    pub(super) fn clear(&mut self) {
+        self.category.clear();
+        self.by_category.clear();
     }
-
-    /// The reassembly lane itself waits for the hand-off to start; logical
-    /// data lanes are ordered against it by the actor's reassembly barrier
-    /// sequence, which already includes this barrier.
-    pub(super) fn blocks(&self, lane: InboundLane) -> bool {
-        lane == InboundLane::Reassembly
-    }
-}
-
-pub(super) fn lane_waits_for_reassembly(lane: InboundLane) -> bool {
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    if !crate::simulation::protection_profile().barrier_control_exemption() {
-        return true;
-    }
-    lane.is_logical_data()
 }

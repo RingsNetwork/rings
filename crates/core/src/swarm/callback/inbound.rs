@@ -15,8 +15,6 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -53,8 +51,7 @@ mod reassembly;
 mod reassembly_clock;
 mod ticket;
 
-use self::barrier::lane_waits_for_reassembly;
-use self::barrier::ReassemblyHandoffBarrier;
+use self::barrier::UnfinishedReassembly;
 use self::capacity::memory_reservation;
 pub(super) use self::capacity::HeldCharge;
 pub(crate) use self::capacity::InboundCapacity;
@@ -303,7 +300,7 @@ impl InboundMailbox {
         .introducer(processor.logical.transport.dht.edges());
         let charge = arrival_charge(&prepared.message, bytes.len(), (carrier, introducer));
         let permit = self.capacity.acquire((peer, lane, carrier), charge).await?;
-        let ticket = self.reserve_ticket(lane)?;
+        let ticket = self.reserve_ticket(lane, lane.category(carrier))?;
         let PreparedInboundFrame {
             payload,
             message,
@@ -348,11 +345,12 @@ impl InboundMailbox {
         Ok(())
     }
 
-    fn reserve_ticket(&self, lane: InboundLane) -> Result<InboundTicket> {
+    /// Reserve the next sequence on `lane`, for an event ordered in `category`.
+    fn reserve_ticket(&self, lane: InboundLane, category: InboundLane) -> Result<InboundTicket> {
         self.sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .reserve(lane)
+            .reserve(lane, category)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -388,7 +386,7 @@ impl InboundMailbox {
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn hold_application_admission_for_test(&self) -> Result<impl Drop> {
-        self.reserve_ticket(InboundLane::Application)
+        self.reserve_ticket(InboundLane::Application, InboundLane::Application)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -506,7 +504,8 @@ struct InboundActor {
     queues: InboundQueues,
     active: FuturesUnordered<InboundTaskFuture>,
     active_lanes: [Option<u64>; INBOUND_LANE_COUNT],
-    reassembly_handoff_barrier: Option<ReassemblyHandoffBarrier>,
+    /// The reassembly events not yet completed, which order the later frames of their category.
+    unfinished: UnfinishedReassembly,
     reassembly_clock: ReassemblyClock,
     next_reassembly_cleanup: Instant,
     input_closed: bool,
@@ -526,7 +525,7 @@ impl InboundActor {
             queues: InboundQueues::new(),
             active: FuturesUnordered::new(),
             active_lanes: [None; INBOUND_LANE_COUNT],
-            reassembly_handoff_barrier: None,
+            unfinished: UnfinishedReassembly::default(),
             reassembly_clock,
             next_reassembly_cleanup: Instant::now() + REASSEMBLY_CLEANUP_INTERVAL,
             input_closed: false,
@@ -540,7 +539,6 @@ impl InboundActor {
             if cleanup_due && !self.cleanup_expired_reassembly().await {
                 return;
             }
-            self.release_started_reassembly_handoff();
             self.drain_available();
             if self.input_closed {
                 self.finish_reassembly_after_close().await;
@@ -587,8 +585,10 @@ impl InboundActor {
         }
     }
 
+    /// Start the front event of every idle lane that may run: a lane of a category waits only
+    /// for earlier unfinished reassembly of that category (load-bounds paper, Def.
+    /// "Per-category barrier", #927).
     fn dispatch_runnable(&mut self) {
-        let reassembly_barrier = self.reassembly_barrier_sequence();
         for (lane, active_lane) in InboundLane::ALL
             .into_iter()
             .zip(self.active_lanes.iter_mut())
@@ -599,55 +599,20 @@ impl InboundActor {
             let Some(sequence) = self.queues.front_sequence(lane) else {
                 continue;
             };
-            if self
-                .reassembly_handoff_barrier
-                .as_ref()
-                .is_some_and(|barrier| barrier.blocks(lane))
-            {
-                continue;
-            }
-            // The nested class is unknown until reassembly completes. Preserve data-plane order
-            // across that handoff, while keeping control traffic independent for liveness.
-            let waits_for_reassembly = lane_waits_for_reassembly(lane)
-                && reassembly_barrier.is_some_and(|barrier| sequence > barrier);
-            if waits_for_reassembly {
+            if lane != InboundLane::Reassembly && self.unfinished.blocks(lane, sequence) {
                 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
                 if lane == InboundLane::from_class(crate::message::MessageCategory::DhtControl) {
-                    crate::simulation::record_barrier_control_blocked();
+                    crate::simulation::record_control_waited_for_reassembly();
                 }
                 continue;
             }
             let Some(event) = self.queues.pop(lane) else {
                 continue;
             };
-            let handoff_started = self
-                .reassembly_handoff_barrier
-                .as_ref()
-                .filter(|barrier| barrier.sequence == sequence)
-                .map(ReassemblyHandoffBarrier::start_marker);
             *active_lane = Some(sequence);
-            self.active.push(Box::pin(process_event(
-                self.processor.clone(),
-                event,
-                handoff_started.clone(),
-            )));
-            if handoff_started.is_some() {
-                break;
-            }
+            self.active
+                .push(Box::pin(process_event(self.processor.clone(), event)));
         }
-    }
-
-    fn reassembly_barrier_sequence(&self) -> Option<u64> {
-        [
-            *inbound_lane_entry!(&self.active_lanes, InboundLane::Reassembly),
-            self.queues.front_sequence(InboundLane::Reassembly),
-            self.reassembly_handoff_barrier
-                .as_ref()
-                .map(|barrier| barrier.sequence),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
     }
 
     async fn wait_for_input(&mut self) -> bool {
@@ -702,7 +667,7 @@ impl InboundActor {
         self.queues = InboundQueues::new();
         self.active = FuturesUnordered::new();
         self.active_lanes = [None; INBOUND_LANE_COUNT];
-        self.reassembly_handoff_barrier = None;
+        self.unfinished.clear();
         if !self.processor.prepare_reassembly_for_close().await {
             return;
         }
@@ -733,9 +698,23 @@ impl InboundActor {
 
     fn handle_command(&mut self, command: InboundCommand) {
         match command {
-            InboundCommand::Pending { sequence, lane } => self.queues.push_pending(sequence, lane),
+            InboundCommand::Pending {
+                sequence,
+                lane,
+                category,
+            } => {
+                if lane == InboundLane::Reassembly {
+                    self.unfinished.begin(sequence, category);
+                }
+                self.queues.push_pending(sequence, lane);
+            }
             InboundCommand::Ready(event) => self.queues.push_ready(*event),
-            InboundCommand::Cancel { sequence, lane } => self.queues.cancel(sequence, lane),
+            InboundCommand::Cancel { sequence, lane } => {
+                if lane == InboundLane::Reassembly {
+                    self.unfinished.end(sequence);
+                }
+                self.queues.cancel(sequence, lane);
+            }
         }
     }
 
@@ -748,23 +727,13 @@ impl InboundActor {
                 "inbound actor completed a non-active sequence"
             );
         }
-        if let Some(next) = completion.next {
-            if next.lane().is_logical_data() {
-                debug_assert!(self.reassembly_handoff_barrier.is_none());
-                self.reassembly_handoff_barrier =
-                    Some(ReassemblyHandoffBarrier::new(next.sequence));
-            }
-            self.queues.push_ready(next);
+        // A reassembly event leaves the barrier in the step that hands its message, if any, to
+        // its category's lane, at its own sequence: ahead of every later frame of the category.
+        if completion.lane == InboundLane::Reassembly {
+            self.unfinished.end(completion.sequence);
         }
-    }
-
-    fn release_started_reassembly_handoff(&mut self) {
-        if self
-            .reassembly_handoff_barrier
-            .as_ref()
-            .is_some_and(ReassemblyHandoffBarrier::has_started)
-        {
-            self.reassembly_handoff_barrier = None;
+        if let Some(next) = completion.next {
+            self.queues.push_ready(next);
         }
     }
 }
@@ -803,11 +772,7 @@ fn arrival_charge(
 async fn process_event(
     processor: InboundProcessor<WeakLogical>,
     event: InboundEvent,
-    handoff_started: Option<Arc<AtomicBool>>,
 ) -> InboundTaskCompletion {
-    if let Some(started) = handoff_started {
-        started.store(true, Ordering::Release);
-    }
     let lane = event.lane();
     let sequence = event.sequence;
     // The event binds the transport for its span; one whose transport is gone is dropped with
