@@ -463,14 +463,20 @@ impl SwarmTransport {
         }
     }
 
-    /// This node's relay chain neighbours, the peers probed on the chain period (#1070): none
-    /// while it holds no relay mail, since it is then no member of any chain.
+    /// The peers probed on the chain period (#1070): this node's relay chain neighbours and the
+    /// neighbours it suspects, which the chains skip but whose on-time answers must come on the
+    /// chain period to clear them as `Law (Clearing)` states; none while it holds no relay mail,
+    /// since it is then no member of any chain.
     fn chain_neighbour_set(&self) -> Result<BTreeSet<Did>> {
         if !self.dht.holds_relay_mail() {
             return Ok(BTreeSet::new());
         }
         let (previous, next) = self.dht.relay_chain_neighbours()?;
-        Ok(previous.into_iter().chain(next).collect())
+        Ok(previous
+            .into_iter()
+            .chain(next)
+            .chain(self.dht.relay_suspects()?)
+            .collect())
     }
 
     /// Open the probe pass of `scope` at `now_ms`, with what it must do. `None` while another

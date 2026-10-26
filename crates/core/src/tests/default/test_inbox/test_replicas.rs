@@ -20,6 +20,9 @@ use crate::lifecycle::StopSource;
 use crate::message::Message;
 use crate::message::ProbeRequest;
 use crate::swarm::application::ApplicationData;
+use crate::swarm::transport::ProbeScope;
+use crate::swarm::transport::ProbeWork;
+use crate::swarm::transport::CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS;
 use crate::swarm::transport::CHAIN_NEIGHBOUR_SUSPICION_MS;
 use crate::tests::default::gen_pure_dht;
 use crate::tests::default::prepare_node;
@@ -416,5 +419,33 @@ async fn test_a_flapping_chain_neighbour_changes_the_chains_once() -> Result<()>
     answer_on_time(&node1, node3.did())?;
     assert!(!node1.dht().is_relay_suspected(node3.did())?);
     assert_eq!(node1.dht().relay_chain_changes_for_test() - before, 2);
+    Ok(())
+}
+
+/// A suspect stays on the chain period (`Law (Clearing)`): the chains skip it, but the chain
+/// probe pass still issues its probe a chain period after the last, so the on-time answers that
+/// clear it come on the schedule the clearing bound counts.
+#[tokio::test]
+async fn test_a_suspect_is_still_probed_on_the_chain_period() -> Result<()> {
+    let (node1, node3, node4) = settled_ring().await?;
+    let late = suspect_by_a_late_probe(&node1, node3.did()).await?;
+    answer(&node1, node3.did(), late)?;
+    assert!(node1.dht().is_relay_suspected(node3.did())?);
+    let (previous, next) = node1.dht().relay_chain_neighbours()?;
+    assert!(previous != Some(node3.did()) && next == Some(node4.did()));
+
+    let transport = &node1.swarm.transport;
+    transport
+        .restart_peer_liveness_period_for_test(node3.did(), CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS)?;
+    let pass = transport
+        .liveness_probe_pass(get_epoch_ms_i64(), ProbeScope::ChainNeighbours)?
+        .ok_or_else(|| crate::error::Error::InvalidMessage("probe pass busy".to_string()))?;
+    assert!(
+        pass.work().iter().any(|work| matches!(
+            work,
+            ProbeWork::Issue(attempt) if attempt.peer() == node3.did()
+        )),
+        "the suspect's probe is due on the chain period"
+    );
     Ok(())
 }

@@ -409,6 +409,11 @@ impl RelayNeighborhood {
         }
     }
 
+    /// The suspected chain neighbours, which stay on the chain period until cleared (#1070).
+    pub(crate) fn suspects(&self) -> impl Iterator<Item = Did> + '_ {
+        self.suspected.keys().copied()
+    }
+
     /// Record `peer`'s answer to its probe, `on_time` when it came within the chain timeout
     /// (`Law (Clearing)`): a suspect is cleared by [`CHAIN_NEIGHBOUR_CLEARING_ANSWERS`] on-time
     /// answers in a row, and a late answer starts the count again. Returns whether the

@@ -427,6 +427,12 @@ impl PeerRing {
         self.relay_chain_losses.current()
     }
 
+    /// The peers this node suspects for relay custody (#1070): probed on the chain period until
+    /// their on-time answers clear them, so `Law (Clearing)` runs on the schedule it states.
+    pub(crate) fn relay_suspects(&self) -> Result<Vec<Did>> {
+        Ok(self.lock_relay_neighborhood()?.suspects().collect())
+    }
+
     /// Whether `peer` is suspected for relay custody (#1070).
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn is_relay_suspected(&self, peer: Did) -> Result<bool> {
