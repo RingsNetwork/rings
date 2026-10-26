@@ -74,6 +74,13 @@ pub(crate) const CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS: i64 = 2_500;
 /// and evicts nothing.
 pub(crate) const CHAIN_NEIGHBOUR_SUSPICION_MS: i64 = 7_500;
 
+// The chain bounds, checked at compile time: a chain neighbour's silent loss is detected within
+// `P_c + τ_c = 10 s`, the period is below the suspicion timeout, and suspicion comes before
+// eviction.
+const _: () = assert!(CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS + CHAIN_NEIGHBOUR_SUSPICION_MS == 10_000);
+const _: () = assert!(CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS < CHAIN_NEIGHBOUR_SUSPICION_MS);
+const _: () = assert!(CHAIN_NEIGHBOUR_SUSPICION_MS < PEER_LIVENESS_TIMEOUT_MS);
+
 /// Which peers a probe pass probes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProbeScope {
@@ -824,18 +831,6 @@ mod tests {
             !clock.suspected(PEER_LIVENESS_TIMEOUT_MS),
             "an answer clears the suspicion"
         );
-    }
-
-    /// The chain bounds: detection within ten seconds, the probe period below the suspicion
-    /// timeout, and suspicion before eviction.
-    #[test]
-    fn test_the_chain_bounds_detect_a_silent_loss_within_ten_seconds() {
-        assert_eq!(
-            CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS + CHAIN_NEIGHBOUR_SUSPICION_MS,
-            10_000
-        );
-        assert!(CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS < CHAIN_NEIGHBOUR_SUSPICION_MS);
-        assert!(CHAIN_NEIGHBOUR_SUSPICION_MS < PEER_LIVENESS_TIMEOUT_MS);
     }
 
     #[test]
