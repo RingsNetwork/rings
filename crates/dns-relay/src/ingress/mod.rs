@@ -35,10 +35,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use socket2::Domain;
-use socket2::Protocol;
-use socket2::Socket;
-use socket2::Type;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -51,13 +47,12 @@ use crate::capability::Forward;
 use crate::owner::Owner;
 use crate::proxy::proxy_v2_header;
 use crate::registry::AddressRegistry;
+use crate::socket::listen_tcp;
 
 /// Default bound on the connections the relay carries at once.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 4_096;
 /// Default bound on the connections the relay carries at once to one owner.
 pub const DEFAULT_MAX_CONNECTIONS_PER_OWNER: usize = 64;
-/// Connections a listener's kernel queue holds before the ingress accepts them.
-const LISTEN_BACKLOG: i32 = 1_024;
 /// First pause after a failed accept; it doubles on each further failure.
 const ACCEPT_BACKOFF_FIRST: Duration = Duration::from_millis(10);
 /// Longest pause after a failed accept.
@@ -266,7 +261,8 @@ where
             .iter()
             .map(|port| {
                 let address = SocketAddrV6::new(self.listen, port.get(), 0, 0);
-                bind_v6_only(address).map_err(|source| IngressError { address, source })
+                listen_tcp(SocketAddr::V6(address))
+                    .map_err(|source| IngressError { address, source })
             })
             .collect()
     }
@@ -365,18 +361,6 @@ where
         let proxy = announcement.serves(port.get())?;
         Some(Route { owner, port, proxy })
     }
-}
-
-/// A listener on `address`, IPv6 only, with the address reusable as Tokio's own listeners make
-/// it.
-fn bind_v6_only(address: SocketAddrV6) -> std::io::Result<TcpListener> {
-    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
-    socket.set_only_v6(true)?;
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&SocketAddr::V6(address).into())?;
-    socket.listen(LISTEN_BACKLOG)?;
-    TcpListener::from_std(std::net::TcpListener::from(socket))
 }
 
 #[cfg(test)]

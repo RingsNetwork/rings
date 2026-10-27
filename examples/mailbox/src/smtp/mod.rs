@@ -1,6 +1,7 @@
-//! The SMTP shell: the receiver for the mailbox's own address, and submission for its user.
+//! The SMTP shell: the receiver for the mailbox's own address, submission for its user, and the
+//! mail gateway's receiver.
 //!
-//! Both run the same [`Session`] over a socket and differ in their [`Role`] and in where a
+//! All run the same [`Session`] over a socket and differ in their [`Role`] and in where a
 //! committed transaction goes:
 //!
 //! - the receiver accepts mail for `me@<did>.<zone>` and files it in the INBOX, with a
@@ -8,20 +9,26 @@
 //!   relay port served with `proxy_protocol: v2`, it reads the client from the PROXY header
 //!   ([`proxy`]) first, as the TCP peer is then its own node;
 //! - submission accepts mail for anyone and hands it to the outbound queue, which delivers it
-//!   to the recipients' mail exchangers.
+//!   to the recipients' mail exchangers;
+//! - the gateway ([`crate::gateway`]) looks every recipient up in the DHT and writes the mail,
+//!   traced as the receiver traces it, to each recipient's mail topic.
 //!
 //! A reply to a transaction is sent only after the transaction is committed, so a `250`
-//! means the message is on disk. A client silent for [`SESSION_TIMEOUT`] is told `421` and
-//! disconnected (RFC 5321 §4.5.3.2.7).
+//! means the message is on disk, or, from the gateway, that its write has left the node. A
+//! client silent for [`SESSION_TIMEOUT`] is told `421` and disconnected (RFC 5321 §4.5.3.2.7).
+//! A listener with a certificate offers `STARTTLS` (RFC 3207); every byte the client sent after
+//! the command, before the handshake, is discarded (§5), and the session starts afresh under TLS.
 
 pub mod proxy;
 mod session;
+pub mod tls;
 
 use std::net::SocketAddr;
 use std::slice::Iter;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use session::Lookup;
 pub use session::Next;
 pub use session::Reply;
 pub use session::Role;
@@ -30,12 +37,17 @@ pub use session::Transaction;
 use smtp_proto::request::receiver::DataReceiver;
 use smtp_proto::request::receiver::RequestReceiver;
 use thiserror::Error;
+use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+use tokio_rustls::TlsAcceptor;
 
+use crate::gateway::Gateway;
+use crate::gateway::GatewayError;
 use crate::outbound::Outbound;
 use crate::outbound::OutboundError;
 use crate::serve::serve_each;
@@ -53,7 +65,7 @@ const READ_CHUNK: usize = 16 * 1024;
 /// Why a connection ended abnormally.
 #[derive(Debug, Error)]
 pub enum ConnectionError {
-    /// The socket failed.
+    /// The socket, or the TLS handshake, failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
     /// The PROXY header the port expects did not come.
@@ -70,6 +82,28 @@ pub enum CommitError {
     /// The outbound queue did not take it.
     #[error(transparent)]
     Outbound(#[from] OutboundError),
+    /// The gateway did not write it.
+    #[error(transparent)]
+    Gateway(#[from] GatewayError),
+}
+
+impl CommitError {
+    /// The reply to a transaction that failed so: `552` for a message the gateway cannot carry,
+    /// `451` for every other failure, which a later attempt may not meet.
+    fn reply(&self) -> Reply {
+        match self {
+            Self::Gateway(error) if error.is_too_large() => Reply {
+                code: 552,
+                status: "5.3.4",
+                lines: vec!["Message too big for a mail gateway".to_owned()],
+            },
+            Self::Store(_) | Self::Outbound(_) | Self::Gateway(_) => Reply {
+                code: 451,
+                status: "4.3.0",
+                lines: vec!["Local error, try again later".to_owned()],
+            },
+        }
+    }
 }
 
 /// Where committed transactions go.
@@ -79,9 +113,21 @@ pub enum Sink {
     Inbox(Arc<Store>),
     /// Queued for delivery onward.
     Outbound(Arc<Outbound>),
+    /// Written to each recipient's mail topic in the DHT.
+    Gateway(Arc<Gateway>),
 }
 
 impl Sink {
+    /// What this sink's directory says of `address`, which a [`Role::Directory`] session asked
+    /// about. Only the gateway serves that role; the inbox and the outbound queue serve roles
+    /// that decide in the session, and refuse what they would be asked.
+    async fn lookup(&self, address: &str) -> Lookup {
+        match self {
+            Self::Gateway(gateway) => gateway.lookup(address).await,
+            Self::Inbox(_) | Self::Outbound(_) => Lookup::Refused,
+        }
+    }
+
     /// Commit `transaction` from `client`, received by `host`; return the reply to send.
     async fn commit(
         &self,
@@ -94,11 +140,7 @@ impl Sink {
             Ok(()) => ok,
             Err(error) => {
                 tracing::warn!("smtp: transaction not committed: {error}");
-                Reply {
-                    code: 451,
-                    status: "4.3.0",
-                    lines: vec!["Local error, try again later".to_owned()],
-                }
+                error.reply()
             }
         }
     }
@@ -123,6 +165,10 @@ impl Sink {
                     from, to, message, ..
                 } = &transaction;
                 outbound.enqueue(from, to, message).await?;
+            }
+            Self::Gateway(gateway) => {
+                let message = with_trace(host, client, &transaction);
+                gateway.deliver(&transaction.to, &message).await?;
             }
         }
         Ok(())
@@ -152,8 +198,9 @@ pub fn with_trace(host: &str, client: SocketAddr, transaction: &Transaction) -> 
     message
 }
 
-/// One SMTP listener: its role, its name, its size bound, where it commits, and whether its
-/// clients' connections start with a PROXY header.
+/// One SMTP listener: its role, its name, its size bound, where it commits, whether its
+/// clients' connections start with a PROXY header, and the certificate it offers `STARTTLS`
+/// with, if any.
 #[derive(Clone)]
 pub struct SmtpService {
     /// The role every session plays.
@@ -166,6 +213,16 @@ pub struct SmtpService {
     pub sink: Sink,
     /// Whether every connection starts with a PROXY protocol v2 header ([`proxy`]).
     pub proxy_protocol: bool,
+    /// The TLS server `STARTTLS` hands a connection to; without one it is not offered.
+    pub tls: Option<TlsAcceptor>,
+}
+
+/// How a conversation over one stream ended.
+enum Ending {
+    /// The client quit, fell silent, or closed the connection.
+    Closed,
+    /// The session answered `STARTTLS`: the stream is to be handed to TLS.
+    StartTls,
 }
 
 impl SmtpService {
@@ -184,7 +241,7 @@ impl SmtpService {
     }
 
     /// Run one session on `stream`, from `peer`, until the client quits, falls silent, or the
-    /// connection ends.
+    /// connection ends; under TLS from the point the client asks for it.
     async fn connection(
         &self,
         mut stream: TcpStream,
@@ -196,29 +253,55 @@ impl SmtpService {
             peer
         };
         let session = Session::new(self.role.clone(), &self.host, self.max_size, MAX_RECIPIENTS);
-        stream.write_all(&session.greeting().encode()).await?;
-        let mut conversation = Conversation {
-            session,
-            client,
-            requests: RequestReceiver::default(),
-            body: None,
+        let session = match self.tls {
+            Some(_) => session.offering_starttls(),
+            None => session,
         };
+        stream.write_all(&session.greeting().encode()).await?;
+        let mut conversation = Conversation::new(session, client);
+        match (
+            self.converse(&mut stream, &mut conversation).await?,
+            &self.tls,
+        ) {
+            (Ending::StartTls, Some(acceptor)) => {
+                let mut stream = acceptor.accept(stream).await?;
+                conversation.secured();
+                self.converse(&mut stream, &mut conversation).await?;
+                Ok(())
+            }
+            (Ending::StartTls | Ending::Closed, _) => Ok(()),
+        }
+    }
+
+    /// Converse over `stream` until the conversation ends there.
+    async fn converse<S>(
+        &self,
+        stream: &mut S,
+        conversation: &mut Conversation,
+    ) -> Result<Ending, ConnectionError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
         let mut chunk = vec![0u8; READ_CHUNK];
         loop {
             let Ok(read) = timeout(SESSION_TIMEOUT, stream.read(&mut chunk)).await else {
                 let closing = conversation.session.timed_out().encode();
                 stream.write_all(&closing).await?;
                 stream.shutdown().await?;
-                return Ok(());
+                return Ok(Ending::Closed);
             };
             let read = read?;
             if read == 0 {
-                return Ok(());
+                return Ok(Ending::Closed);
             }
             let mut bytes = chunk.get(..read).unwrap_or_default().iter();
-            if conversation.ingest(self, &mut bytes, &mut stream).await? {
-                stream.shutdown().await?;
-                return Ok(());
+            match conversation.ingest(self, &mut bytes, stream).await? {
+                Turn::Continue => {}
+                Turn::Close => {
+                    stream.shutdown().await?;
+                    return Ok(Ending::Closed);
+                }
+                Turn::StartTls => return Ok(Ending::StartTls),
             }
         }
     }
@@ -232,6 +315,16 @@ struct Body {
     oversize: bool,
 }
 
+/// What a conversation does after taking the bytes of one read.
+enum Turn {
+    /// Read on.
+    Continue,
+    /// The session is over.
+    Close,
+    /// Hand the stream to TLS; the rest of the read is discarded.
+    StartTls,
+}
+
 /// One connection's session and the parsers it reads with.
 struct Conversation {
     session: Session,
@@ -241,14 +334,35 @@ struct Conversation {
 }
 
 impl Conversation {
-    /// Take `bytes`, answering on `stream` every command and body they complete; return whether
-    /// the session is over.
-    async fn ingest(
+    /// The conversation of `session` with `client`, before any byte is read.
+    fn new(session: Session, client: SocketAddr) -> Self {
+        Self {
+            session,
+            client,
+            requests: RequestReceiver::default(),
+            body: None,
+        }
+    }
+
+    /// The TLS handshake completed: the session starts afresh, and so do the parsers, which
+    /// hold nothing read before it.
+    fn secured(&mut self) {
+        self.session.secured();
+        self.requests = RequestReceiver::default();
+        self.body = None;
+    }
+
+    /// Take `bytes`, answering on `stream` every command and body they complete; return what
+    /// the conversation does next.
+    async fn ingest<S>(
         &mut self,
         service: &SmtpService,
         bytes: &mut Iter<'_, u8>,
-        stream: &mut TcpStream,
-    ) -> std::io::Result<bool> {
+        stream: &mut S,
+    ) -> std::io::Result<Turn>
+    where
+        S: AsyncWrite + Unpin,
+    {
         while !bytes.as_slice().is_empty() {
             if let Some(body) = self.body.as_mut() {
                 let complete = body.receiver.ingest(bytes, &mut body.bytes);
@@ -280,11 +394,20 @@ impl Conversation {
                 }
                 Next::Close(reply) => {
                     stream.write_all(&reply.encode()).await?;
-                    return Ok(true);
+                    return Ok(Turn::Close);
+                }
+                Next::Lookup(address) => {
+                    let lookup = service.sink.lookup(&address).await;
+                    let reply = self.session.admit(address, lookup);
+                    stream.write_all(&reply.encode()).await?;
+                }
+                Next::StartTls(reply) => {
+                    stream.write_all(&reply.encode()).await?;
+                    return Ok(Turn::StartTls);
                 }
             }
         }
-        Ok(false)
+        Ok(Turn::Continue)
     }
 
     /// The reply to a body read to its end: the commit's, or a refusal.

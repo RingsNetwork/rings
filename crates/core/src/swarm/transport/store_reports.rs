@@ -1,13 +1,21 @@
 //! The store reports a node awaits for the reported operations it sent (#866): per operation,
-//! by its digest, the placements whose owners have not reported yet, and the receipt its caller
-//! holds.
+//! by its digest, the placements whose owners have not reported yet, the quorum their reports
+//! must meet, and the receipt its caller holds.
 //!
 //! ```text
-//!   expect(d, P)           pending[d] ← P, and a receipt for d   (P = ∅: resolved Ok at once)
-//!   report(d, p, Stored)   P ← P − {p};  P = ∅ ⟹ the receipt resolves Ok and d leaves
-//!   report(d, p, Refused)  the receipt resolves Refused(p) and d leaves
-//!   drop(receipt)          d leaves at the next expect that finds the table full
+//!   expect(d, P, q)   pending[d] ← (P, q), and a receipt for d   (P = ∅: resolved Ok at once)
+//!   report(d, p, o)   P ← P − {p};  o decides q ∨ P = ∅ ⟹ the receipt resolves o, d leaves
+//!                     (o = Stored: Ok;  o = Refused: Refused(p))
+//!   drop(receipt)     d leaves at the next expect that finds the table full
+//!
+//!   o decides q   Stored  Refused   Ok ⟺           resolved at
+//!   q = Every       ·        ✓      ∀p. stored(p)   the first refusal, or the last store
+//!   q = Any         ✓        ·      ∃p. stored(p)   the first store, or the last refusal
 //! ```
+//!
+//! Law (duality): `Any` is `Every` with the two outcomes exchanged, `∃p. s(p) = ¬∀p. ¬s(p)`, so
+//! each receipt resolves at the first report that decides its quorum and with that report's
+//! outcome, or with the last report's when none decides it.
 //!
 //! Law (bounded): at most [`MAX_PENDING_STORE_REPORTS`] operations are pending. An `expect`
 //! that finds the table full first drops the operations whose receipts are gone, and if it is
@@ -38,10 +46,33 @@ use crate::message::StoreOutcome;
 /// The most reported operations a node awaits at once (the bounded law).
 pub(crate) const MAX_PENDING_STORE_REPORTS: usize = 1024;
 
-/// Why a [`StoreReceipt`] resolved without every placement reporting the operation stored.
+/// The reports that resolve a [`StoreReceipt`] stored, over the remote placements it awaits
+/// (the module laws).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoreQuorum {
+    /// Every placement reported the operation stored; the first refusal resolves it refused.
+    Every,
+    /// One placement reported the operation stored; it resolves refused once every placement
+    /// refused it.
+    Any,
+}
+
+impl StoreQuorum {
+    /// Whether one report of `outcome` decides a receipt under this quorum: a refusal decides
+    /// [`Self::Every`], a store [`Self::Any`].
+    pub(crate) const fn decided_by(self, outcome: StoreOutcome) -> bool {
+        matches!(
+            (self, outcome),
+            (Self::Every, StoreOutcome::Refused) | (Self::Any, StoreOutcome::Stored)
+        )
+    }
+}
+
+/// Why a [`StoreReceipt`] resolved without its quorum reporting the operation stored.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreUnconfirmed {
-    /// The owner of `placement` refused the operation.
+    /// The owner of `placement` refused the operation: under [`StoreQuorum::Every`] the first
+    /// refusal, under [`StoreQuorum::Any`] the last, every placement having refused.
     Refused {
         /// The placement refused.
         placement: Did,
@@ -49,13 +80,13 @@ pub enum StoreUnconfirmed {
     /// The node was awaiting as many reported operations as it may, so it tracked none for
     /// this one (the bounded law).
     Untracked,
-    /// The node stopped awaiting the operation before every placement reported.
+    /// The node stopped awaiting the operation before its quorum reported.
     Abandoned,
 }
 
-/// Resolves once every remote placement of a reported operation has reported it stored, or with
-/// why it will not (the module laws). A report that is lost leaves it pending; a caller bounds
-/// the wait or publishes again.
+/// Resolves once the reports of a reported operation's remote placements meet its
+/// [`StoreQuorum`], or with why they will not (the module laws). A report that is lost leaves
+/// it pending; a caller bounds the wait or publishes again.
 #[derive(Debug)]
 pub struct StoreReceipt(oneshot::Receiver<Result<(), StoreUnconfirmed>>);
 
@@ -78,10 +109,12 @@ impl Future for StoreReceipt {
     }
 }
 
-/// One operation awaited: the placements not reported yet, and its receipt's sender.
+/// One operation awaited: the placements not reported yet, the quorum their reports must meet,
+/// and its receipt's sender.
 #[derive(Debug)]
 struct Pending {
     awaiting: BTreeSet<Did>,
+    quorum: StoreQuorum,
     done: oneshot::Sender<Result<(), StoreUnconfirmed>>,
 }
 
@@ -99,12 +132,13 @@ impl StoreReports {
     }
 
     /// Await the reports of `operation` from the owners of `awaiting`, its remote placements:
-    /// the receipt resolves once they all reported it stored (the module laws). Called before
+    /// the receipt resolves once their reports decide `quorum` (the module laws). Called before
     /// the operation is sent, so no report can precede it.
     pub(crate) fn expect(
         &self,
         operation: OperationDigest,
         awaiting: BTreeSet<Did>,
+        quorum: StoreQuorum,
     ) -> StoreReceipt {
         if awaiting.is_empty() {
             return StoreReceipt::stored();
@@ -118,7 +152,11 @@ impl StoreReports {
             if pending.len() >= MAX_PENDING_STORE_REPORTS && !pending.contains_key(&operation) {
                 Some(done)
             } else {
-                pending.insert(operation, Pending { awaiting, done });
+                pending.insert(operation, Pending {
+                    awaiting,
+                    quorum,
+                    done,
+                });
                 None
             }
         };
@@ -135,17 +173,15 @@ impl StoreReports {
             let Some(awaited) = pending.get_mut(&operation) else {
                 return;
             };
-            if !awaited.awaiting.contains(&placement) {
+            if !awaited.awaiting.remove(&placement) {
                 return;
             }
+            let decided = awaited.quorum.decided_by(outcome) || awaited.awaiting.is_empty();
             let resolution = match outcome {
-                StoreOutcome::Stored => {
-                    awaited.awaiting.remove(&placement);
-                    awaited.awaiting.is_empty().then_some(Ok(()))
-                }
-                StoreOutcome::Refused => Some(Err(StoreUnconfirmed::Refused { placement })),
+                StoreOutcome::Stored => Ok(()),
+                StoreOutcome::Refused => Err(StoreUnconfirmed::Refused { placement }),
             };
-            resolution.and_then(|resolution| {
+            decided.then_some(resolution).and_then(|resolution| {
                 pending
                     .remove(&operation)
                     .map(|awaited| (awaited.done, resolution))

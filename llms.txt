@@ -44,7 +44,7 @@ This file follows https://llmstxt.org/. It is for agents that evaluate Rings, bu
 - `crates/codec`: the serde wire codec. `crates/derive`: proc macros, including `wasm_export`.
 - `crates/measure`: pure local peer credit and reliability algorithms. `crates/network-policy`: the public-network admission policy for egress targets. `crates/gateway`: the native TUN gateway that carries selected TCP destinations over onion loops (vendored netlink under `vendor/`). `crates/webview`: onion-backed WebView gateway primitives.
 - `frontend/`: the Yew/Wasm web app and Chrome MV3 extension, its own Cargo workspace; TypeScript glue in `extension-assets/` and `scripts/` is compiled, never checked in as JavaScript.
-- `examples/`: `native` and `relay` (workspace members), `dweb` (its own Yew workspace), `ffi` (Python, Swift, Kotlin wrappers and tests), `proof-demo`.
+- `examples/`: `mailbox` (SMTP in, IMAP out, through a DNS relay or a mail gateway, and the mail gateway `rings-mail-gateway`), `native` and `relay` (workspace members), `dweb` (its own Yew workspace), `ffi` (Python, Swift, Kotlin wrappers and tests), `proof-demo`.
 - `docs/`: the mdBook (`book.toml`, `src/`, `theme/`). `papers/`: the whitepaper.
 
 ## Build and test
