@@ -1272,7 +1272,7 @@ it is the only one that closes a safety gap reachable without a crash.  \issue{1
 \issue{1022} follow the batch; \issue{777} implements Law~\ref{law:redundant} by
 Section~\ref{sec:replicated}.
 
-\textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}: PR~5 changes the
+\textbf{Operator steps}: PR~5 changes the
 receiver record, so an old record does not decode and fails its stream closed; the operator
 removes the \texttt{transaction-replay} store (native directory, browser database
 \texttt{<storage name>/transaction-replay}) while the node is stopped, accepting the reset of
