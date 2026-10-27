@@ -22,10 +22,35 @@ pub(super) struct MessageFixture {
     beneficiary: DelegateeKey,
 }
 
+/// The instant the fixture's sessions were delegated.
+const FIXTURE_DELEGATED_AT_MS: u128 = 1_700_000_000_000;
+/// The lifetime of the fixture's sessions.
+const FIXTURE_SESSION_TTL_MS: u64 = 86_400_000;
+
+/// The fixture session of the account key `account` over the delegatee key `delegatee`, both
+/// the scalar of their 64-digit hex form.
+fn fixture_session(account: &str, delegatee: &str) -> Result<DelegateeKey> {
+    DelegateeKey::from_test_keys(
+        &SecretKey::try_from(account)?,
+        SecretKey::try_from(delegatee)?,
+        FIXTURE_DELEGATED_AT_MS,
+        FIXTURE_SESSION_TTL_MS,
+    )
+}
+
 impl MessageFixture {
+    /// The fixture: fixed keys, so every body but the parts a signature stamps with the clock
+    /// is the same in every run; under a simulation runtime's clock, all of it is (the wire
+    /// golden vectors, #1107).
     pub(super) fn new() -> Result<Self> {
-        let provider = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-        let beneficiary = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+        let provider = fixture_session(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000000000000000002",
+        )?;
+        let beneficiary = fixture_session(
+            "0000000000000000000000000000000000000000000000000000000000000003",
+            "0000000000000000000000000000000000000000000000000000000000000004",
+        )?;
         let did = provider.delegator_did();
         Ok(Self {
             did,
@@ -144,7 +169,7 @@ sample_message_body!(E2eStreamFrame, |fixture| E2eStreamFrame {
     sender_public_key: fixture.public_key,
     sequence: 0,
     is_final: true,
-    ciphertext: Vec::new(),
+    ciphertext: vec![(fixture.public_key, fixture.public_key)],
 });
 sample_message_body!(QueryForTopoInfoSend, |fixture| QueryForTopoInfoSend {
     did: fixture.did,
@@ -212,7 +237,7 @@ fn sample_probe_offer(fixture: &MessageFixture) -> Result<(ProbeOffer, Provision
     let tx_id = uuid::Uuid::nil();
     let request_body = ProbeRequest {
         epoch: ProvisionalEpoch { slot: 1 },
-        nonce: rand::random::<[u8; 32]>(),
+        nonce: [7; 32],
     };
     let request = Transaction::new(
         fixture.provider.delegator_did(),
