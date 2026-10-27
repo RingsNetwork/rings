@@ -24,6 +24,7 @@ pub mod dns_relay;
 pub mod error;
 pub mod extension;
 pub mod logging;
+pub mod mail;
 pub mod measure;
 #[cfg(all(feature = "node", not(target_family = "wasm")))]
 /// Native-node configuration, CLI, and runtime adapters.
@@ -37,6 +38,7 @@ pub mod prelude;
 pub mod processor;
 pub mod provider;
 pub mod registration;
+pub mod release;
 // Documented by its own module docs; an outer doc would make rustdoc resolve the module's
 // intra-doc links in this scope instead of its own.
 pub mod remote_endpoint;
@@ -44,6 +46,7 @@ mod rpc_dto;
 mod rpc_impl;
 pub mod seed;
 mod sync_lock;
+mod tasks;
 #[cfg(all(test, rings_native))]
 mod test_support;
 #[cfg(test)]

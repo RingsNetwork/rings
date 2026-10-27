@@ -126,6 +126,18 @@ const fn within_margin(end_ms: u128, now_ms: u128) -> bool {
     end_ms <= now_ms.saturating_add(LEASE_MARGIN_MS)
 }
 
+/// The signing horizon of a delegation that expires at `expires_at_ms`: `e − Δ`, the first
+/// instant from which the sender (`DelegationLessee::encode`) refuses every frame that carries it.
+///
+/// Law (horizon): `now ≥ signing_horizon_ms(e) ⇔ within_margin(e, now)` at every instant. A
+/// node's own delegation fills the hop slot of every frame it sends, so from its horizon on the
+/// node is mute: no origin send, relay or stabilization leaves it, and it stays so, since its
+/// delegation is fixed for the life of the process. The process shell acts on this instant
+/// (#1063); this module only states it.
+pub const fn signing_horizon_ms(expires_at_ms: u128) -> u128 {
+    expires_at_ms.saturating_sub(LEASE_MARGIN_MS)
+}
+
 /// Whether `now_ms` is past the grace `G` after `end_ms`.
 const fn past_grace(end_ms: u128, now_ms: u128) -> bool {
     now_ms > end_ms.saturating_add(LEASE_GRACE_MS)

@@ -94,15 +94,17 @@ pub async fn run_onion_http_proxy(
         let (stream, peer_addr) = listener.accept().await.map_err(|error| {
             Error::OnionProxyIoError(format!("accept HTTP proxy connection: {error}"))
         })?;
+        let tasks = processor.tasks().clone();
         let processor = processor.clone();
         let onion = onion.clone();
         let options = options.clone();
-        tokio::spawn(async move {
+        // A node task: the node's close ends a request still opening its session (#1085).
+        tasks.spawn(async move {
             let _permit = permit;
             if let Err(error) = handle_connect(stream, processor, onion, options).await {
                 tracing::warn!("onion HTTP proxy request from {peer_addr} failed: {error:?}");
             }
-        });
+        })?;
     }
 }
 
@@ -125,8 +127,9 @@ async fn handle_connect(
     Ok(())
 }
 
-/// The CONNECT answer for a session that opened or did not: a refusal, from the route or the
-/// exit, is `502` with no reason (#843 Q5), since the exit gives none.
+/// The CONNECT answer for a session that opened or did not: every failure to open is `502` with
+/// no reason (#843 Q5), whether the route or the exit refused or the session ended locally
+/// before the exit answered (#1118); the request's log line names which.
 const fn connect_status(opened: bool) -> &'static str {
     if opened {
         "200 Connection Established"

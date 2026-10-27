@@ -11,7 +11,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rings_core::ecc::SecretKey;
-use rings_core::lifecycle::StopToken;
 #[cfg(feature = "dummy")]
 use rings_core::swarm::SuccessorLookup;
 
@@ -58,14 +57,10 @@ impl ProbeNode {
     async fn new(key: SecretKey) -> Self {
         let processor = Arc::new(prepare_processor_with_identity_key(key).await);
         let evidence = Arc::new(ReachabilityEvidence::default());
-        // Served exactly as `rings run` serves it, recording activity on every fact.
-        let service = Provider::from_processor(processor.clone())
-            .application_service(
-                Some(Arc::new(ActiveEvidence(evidence.clone()))),
-                StopToken::never(),
-            )
+        // Served by the extension backend as a node task, recording activity on every fact.
+        Provider::from_processor(processor.clone())
+            .serve_application(Some(Arc::new(ActiveEvidence(evidence.clone()))))
             .expect("the probe node's inbox is unclaimed");
-        tokio::spawn(service);
         Self {
             processor,
             evidence,

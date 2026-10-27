@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 
 use super::super::*;
 use crate::onion::exit_accounting::OnionExitAccounting;
+use crate::test_support::TestTask;
 
 /// The request a normalized call becomes.
 fn wire(call: OnionHttpsCall) -> OnionHttpsRequest {
@@ -175,7 +176,7 @@ fn test_outcome_round_trips() {
 async fn test_native_fetch_times_out_stalled_response() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    let server = TestTask::spawn(async move {
         let (_stream, _) = listener.accept().await.unwrap();
         std::future::pending::<()>().await;
     });
@@ -210,7 +211,7 @@ async fn test_native_fetch_times_out_stalled_response() {
 async fn test_native_fetch_reads_a_chunked_body_whole() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    let server = TestTask::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = [0_u8; 1024];
         let _ = stream.read(&mut request).await.unwrap();
@@ -277,7 +278,7 @@ async fn test_native_fetch_uses_validated_url_authority_instead_of_caller_host()
     let address = listener.local_addr().unwrap();
     let expected_host = format!("allowed.example:{}", address.port());
     let expected_host_for_server = expected_host.clone();
-    let server = tokio::spawn(async move {
+    let server = TestTask::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = Vec::new();
         let mut chunk = [0_u8; 1024];
@@ -406,12 +407,12 @@ async fn test_concurrent_fetches_share_one_byte_budget() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let body = vec![b'b'; 3_000];
-    let server = tokio::spawn(async move {
+    let server = TestTask::spawn(async move {
         let mut served = Vec::new();
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let body = body.clone();
-            served.push(tokio::spawn(async move {
+            served.push(TestTask::spawn(async move {
                 let mut request = [0_u8; 1024];
                 let _ = stream.read(&mut request).await;
                 let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());

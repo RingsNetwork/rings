@@ -61,6 +61,7 @@ use crate::extension::ext::Envelope;
 use crate::extension::ext::LinkFact;
 use crate::extension::ext::Route;
 use crate::sync_lock::lock;
+use crate::tasks::NodeTasks;
 
 /// Envelopes one namespace may hold before further ones are dropped.
 const NAMESPACE_QUEUE_CAPACITY: usize = 256;
@@ -231,16 +232,24 @@ impl NamespaceQueues {
     /// Queue the encoded envelope `bytes` from `from` for its namespace's worker, starting the
     /// worker on first use; drop it, counted, when it is refused, telling the namespace of a drop
     /// from an admitted peer ([`LinkFact::Dropped`]). Never waits.
-    pub(super) fn submit(&mut self, from: Did, bytes: &[u8]) {
-        let Ok(envelope) = Envelope::decode(bytes) else {
+    ///
+    /// The envelope is read in place: its payload is a slice of `bytes`, and its namespace is
+    /// copied only when the namespace's queue is first made.
+    pub(super) fn submit(&mut self, from: Did, bytes: &Bytes) {
+        let Ok(envelope) = Envelope::view(bytes) else {
             self.drops.record(DispatchDrop::Undecodable);
             return;
         };
-        let Some(route) = self.core.route(envelope.namespace.as_str()) else {
+        let Some(route) = self.core.route(envelope.namespace) else {
             self.drops.record(DispatchDrop::Unregistered);
             return;
         };
-        let queue = queue_of(&mut self.queues, &self.stop, envelope.namespace);
+        let queue = queue_of(
+            &mut self.queues,
+            self.core.tasks(),
+            &self.stop,
+            envelope.namespace,
+        );
         let weight = bytes.len();
         if !queue.held.admits(weight) {
             self.drops.record(DispatchDrop::QueueFull);
@@ -254,7 +263,7 @@ impl NamespaceQueues {
         let queued = Queued::Envelope {
             route,
             from,
-            payload: envelope.payload,
+            payload: bytes.slice_ref(envelope.payload),
             weight,
         };
         if queue.sender.unbounded_send(queued).is_err() {
@@ -268,7 +277,7 @@ impl NamespaceQueues {
     /// waits and never refuses for room.
     pub(super) fn submit_link_fact(&mut self, fact: LinkFact) {
         for (namespace, route) in self.core.routes() {
-            let queue = queue_of(&mut self.queues, &self.stop, namespace);
+            let queue = queue_of(&mut self.queues, self.core.tasks(), &self.stop, &namespace);
             match fact {
                 LinkFact::Admitted(_) | LinkFact::Retired(_) => queue.tell(route, fact),
                 LinkFact::Dropped(peer) => queue.tell_dropped(route, peer),
@@ -297,22 +306,24 @@ impl NamespaceQueue {
     }
 }
 
-/// The queue of `namespace` in `queues`, starting its worker, which ends once `stop` is
-/// requested, on first use.
+/// The queue of `namespace` in `queues`, starting its worker as a node task of `tasks`, which
+/// ends once `stop` is requested or the node stops, on first use.
 fn queue_of<'queues>(
     queues: &'queues mut HashMap<String, NamespaceQueue>,
+    tasks: &NodeTasks,
     stop: &StopToken,
-    namespace: String,
+    namespace: &str,
 ) -> &'queues NamespaceQueue {
-    queues
-        .entry(namespace)
-        .or_insert_with(|| spawn_worker(stop.clone()))
+    if !queues.contains_key(namespace) {
+        queues.insert(namespace.to_owned(), spawn_worker(tasks, stop.clone()));
+    }
+    &queues[namespace]
 }
 
-/// Start the worker of one namespace: it dispatches its envelopes in order until its queue is
-/// dropped or `stop` is requested. Without a runtime to run it, the queue is returned closed,
-/// so every envelope is dropped and counted.
-fn spawn_worker(stop: StopToken) -> NamespaceQueue {
+/// Start the worker of one namespace as a node task of `tasks`: it dispatches its envelopes in
+/// order until its queue is dropped, `stop` is requested, or the node stops. Without a runtime
+/// to run it, the queue is returned closed, so every envelope is dropped and counted.
+fn spawn_worker(tasks: &NodeTasks, stop: StopToken) -> NamespaceQueue {
     let (sender, receiver) = mpsc::unbounded::<Queued>();
     let held = Arc::new(Held::default());
     let drain = drain(receiver, Arc::clone(&held));
@@ -325,7 +336,7 @@ fn spawn_worker(stop: StopToken) -> NamespaceQueue {
             () = drain => {},
         }
     };
-    if rings_runtime::spawn_detached(worker).is_err() {
+    if tasks.spawn(worker).is_err() {
         tracing::error!("no runtime to run a namespace dispatch worker");
     }
     NamespaceQueue { sender, held }

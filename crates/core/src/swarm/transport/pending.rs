@@ -37,9 +37,11 @@ use crate::dht::FingerFixRequest;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::SlotFloorUse;
 use crate::lifecycle::epoch::Epoch;
 use crate::swarm::application::SwarmEvent;
 use crate::swarm::callback::SwarmTransportCallback;
+use crate::utils::get_epoch_ms;
 use crate::utils::get_epoch_ms_i64;
 
 /// Maximum number of peers that may be handshaking before a data channel opens.
@@ -688,11 +690,25 @@ impl SwarmTransport {
         #[cfg(test)]
         crate::tests::activity::record_activity();
         match event {
-            SwarmEvent::PeerAdmitted { peer } => self.dht.edges().arrive(peer),
+            SwarmEvent::PeerAdmitted { peer } if !self.dht.edges().holds(peer) => {
+                self.dht.edges().arrive(peer, &self.slot_floor_use())
+            }
+            SwarmEvent::PeerAdmitted { .. } => {}
             SwarmEvent::PeerRetired { peer } => self.dht.edges().depart(peer),
             SwarmEvent::MessageDropped { .. } => {}
         }
         self.application.outlet.announce(event);
+    }
+
+    /// The floor use of every slot now, over every table under slot accounting: the receiver's
+    /// replay streams, the removal store and the open messages (load-bounds paper, Def. 1). Each
+    /// table is read in its own pure step, and none is held while the roster is.
+    fn slot_floor_use(&self) -> SlotFloorUse {
+        let now_ms = get_epoch_ms();
+        self.transaction_replay
+            .floor_use_at(now_ms)
+            .join(self.dht.removal_floor_use_at(now_ms))
+            .join(self.inbound_capacity.open_floor_use_at(now_ms))
     }
 
     /// Announce that a live application message from `peer` was dropped for want of room in the

@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! open(route, f, t, b, W):  ς ← uniform;  ā = ς ‖ SHA-256(t);  spawn the driver
-//!                           await the first event: Opened ⇒ the stream, Refused | timeout ⇒ error
+//!                           await the open's answer: Opened ⇒ the stream, Refused ⇒ ExitRefused,
+//!                           the driver's own end first ⇒ its error, timeout ⇒ error
 //!
 //! driver:  send data(0, T, ε);  control(Refill)                                   (awaited)
 //!          loop select
@@ -47,7 +48,6 @@ use futures::SinkExt;
 use futures::StreamExt;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::sleep;
-use rings_runtime::Spawner;
 use zeroize::Zeroizing;
 
 use super::client::keep_alive_at;
@@ -75,6 +75,8 @@ use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
+#[cfg(rings_native)]
+use crate::tasks::NodeTasks;
 
 /// Longest wait for `h`'s answer to an open: longer than the longest world open at `h` (30 s,
 /// rounded to its 250 ms quantum) plus a loop round trip, so a refusal arrives as a refusal and
@@ -131,6 +133,9 @@ pub(crate) struct OnionClientStream {
     /// The session's witness, which the driver writes; only native streams have a reader.
     #[cfg(rings_native)]
     witness: OnionSessionWitness,
+    /// The tasks of the node the session was opened on, which its native pump joins (#1085).
+    #[cfg(rings_native)]
+    tasks: NodeTasks,
 }
 
 impl OnionClientStream {
@@ -138,6 +143,12 @@ impl OnionClientStream {
     #[cfg(rings_native)]
     pub(crate) fn witness(&self) -> OnionSessionWitness {
         self.witness.clone()
+    }
+
+    /// The tasks of the node the session was opened on.
+    #[cfg(rings_native)]
+    pub(crate) fn tasks(&self) -> &NodeTasks {
+        &self.tasks
     }
 
     /// Split into the sending and the receiving halves.
@@ -174,6 +185,7 @@ impl OnionClientStream {
                 commands,
                 events: delivered,
                 witness: OnionSessionWitness::default(),
+                tasks: NodeTasks::new(),
             },
             OnionTestDriver {
                 events,
@@ -251,8 +263,11 @@ impl OnionStreamReceiver {
 ///
 /// # Errors
 ///
-/// [`OnionRouteError::ExitRefused`] if `h` refused the target or the session failed before it
-/// opened, and [`Error::OnionProxyRequestTimedOut`] if `h` did not answer in time.
+/// [`OnionRouteError::ExitRefused`] only if `h` answered the open with a refusal; the error the
+/// driver ended with if the session ended locally before `h` answered (a loop that could not be
+/// built or leave, the liveness deadline, a lost reply, `h`'s abort), or
+/// [`OnionRouteError::SessionFailed`] if the driver was dropped without an end (its node
+/// stopped); and [`Error::OnionProxyRequestTimedOut`] if `h` did not answer in time.
 pub(crate) async fn open(
     loops: OnionLoopClient,
     scope: Scope,
@@ -286,19 +301,24 @@ pub(crate) async fn open(
     };
     #[cfg(rings_native)]
     let witness = driver.witness.clone();
-    Spawner::current()?.spawn(driver.run(received, events, opened));
+    let tasks = driver.scope.tasks().clone();
+    tasks.spawn(driver.run(received, events, opened))?;
     let timeout = sleep(ONION_SESSION_OPEN_TIMEOUT).fuse();
     futures::pin_mut!(timeout);
     match futures::future::select(&mut open_result, timeout).await {
-        Either::Left((Ok(true), _)) => Ok(OnionClientStream {
+        Either::Left((Ok(Ok(true)), _)) => Ok(OnionClientStream {
             commands,
             events: delivered,
             #[cfg(rings_native)]
             witness,
+            #[cfg(rings_native)]
+            tasks,
         }),
-        Either::Left((Ok(false) | Err(_), _)) => {
+        Either::Left((Ok(Ok(false)), _)) => {
             Err(Error::OnionRouteError(OnionRouteError::ExitRefused))
         }
+        Either::Left((Ok(Err(ended)), _)) => Err(ended),
+        Either::Left((Err(_), _)) => Err(Error::OnionRouteError(OnionRouteError::SessionFailed)),
         Either::Right(_) => Err(Error::OnionProxyRequestTimedOut),
     }
 }
@@ -333,6 +353,10 @@ struct OnionSessionDriver {
     witness: OnionSessionWitness,
 }
 
+/// The opener's half of the open's answer: `Ok(true)` once `h` opened the session, `Ok(false)`
+/// once `h` refused it, or the error the session ended with before `h` answered.
+type OnionOpenAnswer = futures::channel::oneshot::Sender<Result<bool>>;
+
 /// What the driver does after one reply.
 enum OnionReplyFlow {
     /// Keep driving.
@@ -344,22 +368,40 @@ enum OnionReplyFlow {
 }
 
 impl OnionSessionDriver {
-    /// The driver's loop (see the module diagram).
+    /// Drive the session, then answer the opener if `h` never did: a session that ends before
+    /// `h` answers its open reports why it ended, never a refusal, which only `h` gives (#1118).
+    /// An end without an error before the answer is `h`'s abort: a failed session.
     async fn run(
         mut self,
+        commands: mpsc::Receiver<OnionStreamCommand>,
+        events: mpsc::Sender<OnionStreamEvent>,
+        opened: OnionOpenAnswer,
+    ) {
+        let mut opened = Some(opened);
+        let ended = self.drive(commands, events, &mut opened).await;
+        if let Some(opened) = opened {
+            let why = ended
+                .err()
+                .unwrap_or(Error::OnionRouteError(OnionRouteError::SessionFailed));
+            let _ = opened.send(Err(why));
+        }
+    }
+
+    /// The driver's loop (see the module diagram): `Ok` once the session is over, or the error
+    /// it failed with.
+    async fn drive(
+        &mut self,
         mut commands: mpsc::Receiver<OnionStreamCommand>,
         mut events: mpsc::Sender<OnionStreamEvent>,
-        opened: futures::channel::oneshot::Sender<bool>,
-    ) {
+        opened: &mut Option<OnionOpenAnswer>,
+    ) -> Result<()> {
         let (sink, mut replies) = mpsc::channel::<OnionReply>(ONION_SURB_POOL_CAPACITY);
-        let mut opened = Some(opened);
-        let started = match self.machine.data(Bytes::new()) {
-            Ok(frame) => self.send(&frame, &sink).await.is_ok(),
-            Err(_) => false,
-        };
-        if !started || self.control(OnionControlStep::Refill, &sink).is_err() {
-            return;
-        }
+        let frame = self
+            .machine
+            .data(Bytes::new())
+            .map_err(|_| Error::InvalidData)?;
+        self.send(&frame, &sink).await?;
+        self.control(OnionControlStep::Refill, &sink)?;
         let mut tick = Box::pin(sleep(self.tick_after(get_epoch_ms())).fuse());
         loop {
             let (step, control) = futures::select! {
@@ -373,13 +415,13 @@ impl OnionSessionDriver {
                         if !(self.fin_sent && self.world_ended) {
                             self.abort(&sink);
                         }
-                        return;
+                        return Ok(());
                     }
                 },
                 reply = replies.next() => match reply {
-                    Some(reply) => match self.on_reply(reply, &mut events, &mut opened).await {
+                    Some(reply) => match self.on_reply(reply, &mut events, opened).await {
                         OnionReplyFlow::Continue => (Ok(()), Some(OnionControlStep::Refill)),
-                        OnionReplyFlow::Stop => return,
+                        OnionReplyFlow::Stop => return Ok(()),
                         OnionReplyFlow::Fail => (
                             Err(Error::OnionRouteError(OnionRouteError::SessionFailed)),
                             None,
@@ -401,12 +443,12 @@ impl OnionSessionDriver {
                 Some(control) => self.control(control, &sink),
                 None => Ok(()),
             });
-            if controlled.is_err() {
+            if let Err(error) = controlled {
                 // Fail closed: `h` learns of it by our `abort`, the user by `Failed`.
                 self.abort(&sink);
                 self.witness_failure();
                 let _ = events.send(OnionStreamEvent::Failed).await;
-                return;
+                return Err(error);
             }
         }
     }
@@ -417,7 +459,7 @@ impl OnionSessionDriver {
         &mut self,
         reply: OnionReply,
         events: &mut mpsc::Sender<OnionStreamEvent>,
-        opened: &mut Option<futures::channel::oneshot::Sender<bool>>,
+        opened: &mut Option<OnionOpenAnswer>,
     ) -> OnionReplyFlow {
         self.credit.replied(reply.received_at_ms);
         let Ok(released) = self.machine.reply(reply.received_at_ms, reply.frame) else {
@@ -428,13 +470,13 @@ impl OnionSessionDriver {
             let forwarded = match event {
                 OnionClientEvent::Opened => {
                     if let Some(opened) = opened.take() {
-                        let _ = opened.send(true);
+                        let _ = opened.send(Ok(true));
                     }
                     Ok(())
                 }
                 OnionClientEvent::Refused => {
                     if let Some(opened) = opened.take() {
-                        let _ = opened.send(false);
+                        let _ = opened.send(Ok(false));
                     }
                     return OnionReplyFlow::Stop;
                 }

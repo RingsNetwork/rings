@@ -110,11 +110,13 @@ pub enum OnionRouteError {
     /// key failure of negligible probability).
     #[error("could not build an onion loop: {0}")]
     LoopBuild(String),
-    /// The exit refused to open the session, or the session ended before it opened; the exit
-    /// gives no reason (#834 D2′).
+    /// The exit answered the session's open with a refusal; the exit gives no reason (#834 D2′).
+    /// A session that ends locally before the exit answers reports its own error instead
+    /// (#1118).
     #[error("the onion exit refused the session")]
     ExitRefused,
-    /// A session failed closed: a gap in its sequence, or its loops could not leave.
+    /// A session failed closed: a gap in its sequence, its liveness deadline, a lost reply, or
+    /// the exit's abort, whether before or after the exit answered its open.
     #[error("the onion session failed closed")]
     SessionFailed,
     /// An exit-reported failure reached the local route client.

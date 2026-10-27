@@ -65,8 +65,10 @@ use crate::delegation::DelegateeKey;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::spent_at;
 use crate::message::DomainTag;
 use crate::message::Message;
+use crate::message::MessageCategory;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
 use crate::message::MessageVerification;
@@ -360,6 +362,17 @@ impl InboxElement {
     /// The transaction of the held payload, which names the element across passes.
     pub(crate) fn tx_id(&self) -> uuid::Uuid {
         self.held.payload.transaction.tx_id
+    }
+
+    /// The instant from which no carrier delivers this element's transaction again (pure): its
+    /// [`spent_at`] by the widest delivery horizon, `ι(Application)`.
+    ///
+    /// Law: no copy of the element, under any hold, is deliverable from this instant on (the law
+    /// of [`HeldMessage::is_retired_at`], `t < ts + ttl + H_I`), and it is no earlier than the
+    /// instant its relay custody entry expires, whatever the transaction's class.
+    pub(crate) fn spent_at_ms(&self) -> u128 {
+        let proof = &self.held.payload.transaction.verification;
+        spent_at(MessageCategory::Application, proof.ts_ms, proof.ttl_ms)
     }
 
     /// Whether the recipient may deliver this element at `now_ms`: never past the relay element

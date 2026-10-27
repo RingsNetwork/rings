@@ -14,7 +14,8 @@ cargo test -p rings-relay-example
 ```
 
 `rings-mailbox-example` is the DNS relay's mailbox, `me@<did>.<zone>`: SMTP in, IMAP out,
-tested behind the relay's DNS and ingress. `rings-native-example` includes the example extension protocol and a direct
+tested behind the relay's DNS and ingress; it also receives at `<did>@<domain>` through mail
+gateways, and holds the mail gateway, tested over a stand-in DHT. `rings-native-example` includes the example extension protocol and a direct
 ElGamal E2E stream round trip. `rings-relay-example` includes deterministic
 local TCP/UDP echo tests in addition to overlay relay tests.
 

@@ -39,7 +39,13 @@
 //!
 //! Every transition costs `O(log |T|)`: the aggregates `Σo` and the count of claimants are kept
 //! incrementally, by re-weighing the one principal a transition touches.
+//!
+//! **Floor use** (paper, Def. 1, #1094). What an edge admitted into slot `κ` would inherit of
+//! the table's floor is `min(u_t(κ), f) / f`, with `u_t` counting only the items still live at
+//! `t` ([`SlotAccounting::floor_use_at`]); over every table, a slot's floor use is its worst
+//! table's ([`SlotFloorUse::join`]), and an edge takes the free slot of least floor use.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
@@ -61,6 +67,83 @@ pub enum Principal {
     /// production connection is bound to its handshake and holds a slot while admitted, so only
     /// a delivery racing its edge's retirement is one; it has no floor, only its fair claim.
     Unbound,
+}
+
+/// The part of a slot's floor that its items use, `min(u, f) / f`, ordered as that fraction:
+/// what an edge admitted into the slot would inherit of the floor (paper, Def. 1).
+///
+/// The order is exact (cross-multiplied), so two uses are equal iff their fractions are; a
+/// table with no floor has nothing to inherit, and its use is [`FloorUse::CLEAN`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FloorUse {
+    /// `min(u, f)`.
+    used: usize,
+    /// `f`, at least 1.
+    floor: usize,
+}
+
+impl FloorUse {
+    /// `0`: a slot whose floor is untouched.
+    pub(crate) const CLEAN: Self = Self { used: 0, floor: 1 };
+
+    /// `min(used, floor) / floor`, or [`Self::CLEAN`] for a table with no floor.
+    const fn of(used: usize, floor: usize) -> Self {
+        match floor {
+            0 => Self::CLEAN,
+            _ => Self {
+                used: if used < floor { used } else { floor },
+                floor,
+            },
+        }
+    }
+}
+
+impl Ord for FloorUse {
+    /// `a/b ≤ c/d ⇔ a·d ≤ c·b` for `b, d > 0`, exact in `u128`.
+    fn cmp(&self, other: &Self) -> Ordering {
+        let scaled = |part: &Self, by: &Self| (part.used as u128) * (by.floor as u128);
+        scaled(self, other).cmp(&scaled(other, self))
+    }
+}
+
+impl PartialOrd for FloorUse {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for FloorUse {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for FloorUse {}
+
+/// The floor use of every slot over one or more tables: a slot absent is clean.
+///
+/// Laws: [`Self::join`] is pointwise `max`, so it is associative, commutative and idempotent,
+/// with the empty map ([`Self::default`]) as its identity: the tables combine in any order into
+/// each slot's worst table (paper, Def. 1).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SlotFloorUse(BTreeMap<u16, FloorUse>);
+
+impl SlotFloorUse {
+    /// The worst of `self` and `other`, slot by slot.
+    pub(crate) fn join(mut self, other: Self) -> Self {
+        for (slot, floor_use) in other.0 {
+            self.0
+                .entry(slot)
+                .and_modify(|held| *held = (*held).max(floor_use))
+                .or_insert(floor_use);
+        }
+        self
+    }
+
+    /// The floor use of `slot`: [`FloorUse::CLEAN`] if no table charges it.
+    pub(crate) fn of(&self, slot: u16) -> FloorUse {
+        self.0.get(&slot).copied().unwrap_or(FloorUse::CLEAN)
+    }
 }
 
 /// The shares of one table: the floor per slot, the pool, the local share and the dedicated
@@ -181,7 +264,11 @@ impl SlotAccounting {
     /// `o(π)`, the pool items of `principal` (pure); none for a principal with a share of its
     /// own.
     fn pool_items(&self, principal: Principal) -> usize {
-        let held = self.held(principal);
+        self.pool_items_at(principal, self.held(principal))
+    }
+
+    /// The pool items of `principal` were it to hold `held` items (pure).
+    fn pool_items_at(&self, principal: Principal, held: usize) -> usize {
         match principal {
             Principal::Slot(_) => held.saturating_sub(self.shares.floor),
             Principal::Unbound => held,
@@ -202,26 +289,50 @@ impl SlotAccounting {
 
     /// Whether one more item introduced by `principal` is admitted (the admission law; pure).
     pub(crate) fn admit(&self, principal: Principal) -> Result<(), ShareRefusal> {
+        self.admit_items(principal, 1)
+    }
+
+    /// Whether `items` more items introduced by `principal` are admitted together: each of them
+    /// in order, so the transition is admitted whole or refused whole (pure).
+    ///
+    /// With `o' = o(π)` after the items, `Δ = o' − o(π)` of them fall to the pool, and
+    ///
+    /// ```text
+    /// admit(π, k) ⟺ u(π) + k ≤ S            (a share of its own)
+    ///             ∨ Δ = 0                    (within the slot's floor)
+    ///             ∨ Σo + Δ ≤ P ∧ o(π) + Δ ≤ ⌈P / n⌉
+    /// admit(π, 1) = the admission law, item by item
+    /// ```
+    ///
+    /// `n` counts `π` from its first pool item on, so it is the same for each of the `Δ`.
+    pub(crate) fn admit_items(
+        &self,
+        principal: Principal,
+        items: usize,
+    ) -> Result<(), ShareRefusal> {
         let held = self.held(principal);
         if let Some(share) = self.shares.reserved(principal) {
-            return match held < share {
+            return match held.saturating_add(items) <= share {
                 true => Ok(()),
                 false => Err(ShareRefusal::ReservedShare { held, share }),
             };
         }
-        if matches!(principal, Principal::Slot(_)) && held < self.shares.floor {
+        let claimed = self.pool_items(principal);
+        let overflow = self
+            .pool_items_at(principal, held.saturating_add(items))
+            .saturating_sub(claimed);
+        if overflow == 0 {
             return Ok(());
         }
-        if self.pool_held >= self.shares.pool {
+        if self.pool_held.saturating_add(overflow) > self.shares.pool {
             return Err(ShareRefusal::PoolFull {
                 held: self.pool_held,
                 pool: self.shares.pool,
             });
         }
-        let claimed = self.pool_items(principal);
         let claimants = self.claimants + usize::from(claimed == 0);
         let claim = self.shares.pool.div_ceil(claimants.max(1));
-        match claimed < claim {
+        match claimed.saturating_add(overflow) <= claim {
             true => Ok(()),
             false => Err(ShareRefusal::FairClaim {
                 held: claimed,
@@ -230,14 +341,47 @@ impl SlotAccounting {
         }
     }
 
+    /// Whether `items` more items of slot `principal` stay within its floor, which nothing
+    /// refuses (pure); a principal that is not a slot has no floor.
+    pub(crate) fn within_floor(&self, principal: Principal, items: usize) -> bool {
+        matches!(principal, Principal::Slot(_))
+            && self.held(principal).saturating_add(items) <= self.shares.floor
+    }
+
+    /// Whether `items` items of slot `principal` fit its floor once it holds nothing: whether
+    /// a release of its items may bring them within it (pure).
+    pub(crate) fn fits_floor(&self, principal: Principal, items: usize) -> bool {
+        matches!(principal, Principal::Slot(_)) && items <= self.shares.floor
+    }
+
     /// Charge `principal` one item that leaves at `until_ms`.
     ///
     /// Pre: [`Self::admit`] admitted it, or it is restored from a store whose items the
     /// admission law put there.
     pub(crate) fn charge(&mut self, principal: Principal, until_ms: u128) {
+        self.hold(principal, 1);
+        *self.expiry.entry((until_ms, principal)).or_default() += 1;
+    }
+
+    /// Charge `principal` `items` items that leave only by [`Self::release`]: a table whose
+    /// items leave when their holder drops them, not at an instant.
+    ///
+    /// Pre: [`Self::admit_items`] admitted them.
+    pub(crate) fn hold(&mut self, principal: Principal, items: usize) {
         self.reweigh(principal, |accounting| {
-            *accounting.held.entry(principal).or_default() += 1;
-            *accounting.expiry.entry((until_ms, principal)).or_default() += 1;
+            *accounting.held.entry(principal).or_default() += items;
+        });
+    }
+
+    /// Forget `items` items of `principal` that [`Self::hold`] charged.
+    pub(crate) fn release(&mut self, principal: Principal, items: usize) {
+        self.reweigh(principal, |accounting| {
+            if let Some(held) = accounting.held.get_mut(&principal) {
+                *held = held.saturating_sub(items);
+                if *held == 0 {
+                    accounting.held.remove(&principal);
+                }
+            }
         });
     }
 
@@ -250,14 +394,36 @@ impl SlotAccounting {
         if *count == 0 {
             self.expiry.remove(&(until_ms, principal));
         }
-        self.reweigh(principal, |accounting| {
-            if let Some(held) = accounting.held.get_mut(&principal) {
-                *held = held.saturating_sub(1);
-                if *held == 0 {
-                    accounting.held.remove(&principal);
+        self.release(principal, 1);
+    }
+
+    /// The floor use of every charged slot at `now_ms` (paper, Def. 1): its items still live at
+    /// `now_ms`, so an item at or past its instant, which the table's next admission retires
+    /// ([`Self::advance`]), is not counted. Pure; `O(slots charged + items past their instant)`.
+    pub(crate) fn floor_use_at(&self, now_ms: u128) -> SlotFloorUse {
+        let mut live: BTreeMap<u16, usize> = self
+            .held
+            .iter()
+            .filter_map(|(principal, held)| match principal {
+                Principal::Slot(slot) => Some((*slot, *held)),
+                _ => None,
+            })
+            .collect();
+        self.expiry
+            .iter()
+            .take_while(|((until_ms, _), _)| *until_ms <= now_ms)
+            .for_each(|((_, principal), items)| {
+                if let Principal::Slot(slot) = principal {
+                    if let Some(held) = live.get_mut(slot) {
+                        *held = held.saturating_sub(*items);
+                    }
                 }
-            }
-        });
+            });
+        SlotFloorUse(
+            live.into_iter()
+                .map(|(slot, held)| (slot, FloorUse::of(held, self.shares.floor)))
+                .collect(),
+        )
     }
 
     /// Forget every item whose instant is at or before `now_ms`.

@@ -6,23 +6,25 @@
 //! ```text
 //!   send side    reserve(lane) ─▶ CreditReservation ─bind(send)─▶ settled on drop:
 //!                committed iff the send crossed its irrevocable boundary, else returned
-//!                grant(credit)  ─▶ wake the senders waiting on that lane
-//!   receive side admit(lane)   ─▶ CreditPermit ─drop─▶ release ─▶ outbox[lane] ⊔= limit
-//!                next_credit(lane) ◀── the lane's credit pump sends its outbox as a Credit frame
-//!   node         admit/release count the bytes in NodeReceiveLoad; above its soft limit a
-//!                release defers the lane's advertisement until the load falls below it
+//!                apply(Credit) ─▶ wake the senders waiting on that lane
+//!                apply(Shrink) ─▶ outbox[lane] ← Returned(B, g)
+//!   receive side admit(lane)   ─▶ CreditPermit ─drop─▶ release ─▶ outbox[lane] ⊔= Credit(A, g)
+//!                admit(data lane) ─▶ demand on the node's pool ─▶ lend ─▶ advertise
+//!                idle_check ─▶ outbox[lane] ← Shrink(L′, g)        apply(Returned) ─▶ advertise
+//!                next_signal(lane) ◀── the lane's pump sends its outbox, one signal a frame
+//!   node         every change of a data lane's charge is reported to the NodeFramePool
 //! ```
 //!
-//! The outbox holds, per lane, the greatest credit not yet sent, so it is itself a join of
-//! `(ℕ, max)`: credits released faster than the pump sends them coalesce into one frame. Each
-//! lane has its own pump (see `credit_pump`), so a credit held up behind one lane's channel
-//! delays no other lane. A sender that finds no credit waits, and that wait is logged at `warn`,
-//! once per wait, as backpressure; a frame beyond the advertised credit is a protocol violation
-//! of the peer.
+//! The outbox holds, per lane, the signals not yet sent: the greatest credit of the current
+//! generation, a join of `(ℕ, max)`, so credits released faster than the pump sends them
+//! coalesce into one frame; and the latest shrink and return. Each lane has its own pump (see
+//! `credit_pump`), so a signal held up behind one lane's channel delays no other lane. A sender
+//! that finds no credit waits, and that wait is logged at `warn`, once per wait, as
+//! backpressure; a frame beyond the advertised credit is a protocol violation of the peer.
 //!
 //! Lock law: every transition takes the lock once, never across a suspension point, and wakes
-//! the tasks it unblocked after committing its state. The node's load is locked on its own, never
-//! together with a link's lock, and never across a suspension point either.
+//! the tasks it unblocked after committing its state. The node's pool is locked on its own,
+//! never together with a link's lock, and never across a suspension point either.
 
 #[cfg(rings_transport_backend)]
 use std::future::poll_fn;
@@ -31,10 +33,10 @@ use std::future::Future;
 #[cfg(not(rings_transport_backend))]
 use std::marker::PhantomData;
 use std::mem;
-use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+#[cfg(rings_transport_backend)]
 use std::sync::Weak;
 #[cfg(rings_transport_backend)]
 use std::task::Context;
@@ -46,6 +48,7 @@ use crate::core::credit::credit_index;
 use crate::core::credit::CreditIndex;
 use crate::core::credit::CreditViolation;
 use crate::core::credit::CreditWindow;
+use crate::core::credit::LaneSignal;
 use crate::core::credit::PerLane;
 use crate::core::credit::ReceiveWindow;
 use crate::core::credit::SendCredit;
@@ -60,114 +63,69 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::sync_utils::lock_recover;
 
+mod pool;
 mod view;
 
+/// `T_idle`, the period of a link's idle check: a data lane that holds a share of the node's
+/// pool and admitted no frame for it is shrunk to its floor (load-bounds paper, Law 3). On a
+/// link whose round trip exceeds it, a lane paused for one round trip is shrunk, and its next
+/// burst waits one round trip for pooled credit again; no frame is refused.
+#[cfg(any(feature = "dummy", rings_transport_webrtc))]
+pub(crate) const LANE_IDLE_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
+
+pub use pool::NodeFramePool;
 pub use view::LaneCreditView;
 
-/// The bytes of received frames a node holds above which its lanes defer their credit
-/// advertisements: 16 MiB, the node-wide frame budget the transport held before per-lane credit.
-pub(crate) const NODE_RECEIVE_SOFT_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
-
-/// The bytes of frames a node's connections have admitted and not yet released, and the links
-/// whose credit advertisements wait for that load to fall below the node's soft limit
-/// (`NODE_RECEIVE_SOFT_LIMIT_BYTES`, 16 MiB): one per transport, shared by its connections.
-///
-/// Law (soft bound). Above the limit no lane but [`ChannelLane::PRIORITY`] advertises new
-/// credit, so the frames a node holds exceed the limit by at most the credit already advertised
-/// and the priority lane's window per connection; the hard bound remains the windows themselves,
-/// [`INBOUND_PEER_FRAME_CAPACITY`](crate::callback::INBOUND_PEER_FRAME_CAPACITY) per connection:
-/// at the protocol's connection cap (core's connection admission: `2 × (160 + successors + 1)`,
-/// 328 by default) about 1.3 GiB in the worst case (#934).
-/// Deferring narrows what senders may send next, never what they were granted, so no honest
-/// frame is refused; and the priority lane never waits for the node's load, so a peer's control
-/// traffic (and with it the liveness of every link) never depends on how much other peers make
-/// this node hold. Law (progress): a deferred link is
-/// woken by the release that brings the load below the limit, and the decision to defer is
-/// taken under the same lock as its registration, so no such release is missed.
-///
-/// Clone law: clones name the same node.
-#[derive(Clone)]
-pub struct NodeReceiveLoad(Arc<Mutex<NodeLoadState>>);
-
-/// What [`NodeReceiveLoad`] keeps under its lock.
-struct NodeLoadState {
-    /// Bytes admitted and not yet released, across the node's connections.
-    held: u64,
-    /// The bytes above which advertisements are deferred.
-    limit: u64,
-    /// The links that deferred an advertisement since the load last fell below the limit.
-    deferred: Vec<Weak<LinkCredit>>,
+/// The signals of one lane not yet sent by its pump.
+#[derive(Clone, Copy, Debug, Default)]
+struct SignalOutbox {
+    /// The greatest credit of the newest generation queued, `(limit, generation)`.
+    credit: Option<(u64, u64)>,
+    /// The latest shrink, `(limit, generation)`.
+    shrink: Option<(u64, u64)>,
+    /// The latest return, `(bound, generation)`.
+    returned: Option<(u64, u64)>,
 }
 
-/// What a release may do about its lane's advertisement.
-enum LoadVerdict {
-    /// The node is below its limit: advertise, and wake the links that deferred theirs.
-    Open(Vec<Weak<LinkCredit>>),
-    /// The node is at or above its limit: the link is registered to be woken.
-    Deferred,
-}
-
-impl NodeReceiveLoad {
-    /// A node holding nothing, with the production limit.
-    pub fn new() -> Self {
-        Self::with_limit(NODE_RECEIVE_SOFT_LIMIT_BYTES)
-    }
-
-    /// A node holding nothing whose advertisements are deferred above `limit` bytes.
-    pub(crate) fn with_limit(limit: u64) -> Self {
-        Self(Arc::new(Mutex::new(NodeLoadState {
-            held: 0,
-            limit,
-            deferred: Vec::new(),
-        })))
-    }
-
-    /// The state, for one transition.
-    fn lock(&self) -> MutexGuard<'_, NodeLoadState> {
-        lock_recover(&self.0)
-    }
-
-    /// Count `bytes` admitted.
-    fn admit(&self, bytes: u64) {
-        let mut state = self.lock();
-        state.held = state.held.saturating_add(bytes);
-    }
-
-    /// Count `bytes` released by `link`, and judge whether its lane may advertise now; a link
-    /// that may not is registered to be woken.
-    fn release(&self, bytes: u64, link: &Arc<LinkCredit>) -> LoadVerdict {
-        let mut state = self.lock();
-        state.held = state.held.saturating_sub(bytes);
-        if state.held < state.limit {
-            return LoadVerdict::Open(mem::take(&mut state.deferred));
+impl SignalOutbox {
+    /// Queue `signal`: a credit joins the queued one of its generation and replaces one of an
+    /// older generation, and a shrink or return replaces an older one. Idempotent, commutative
+    /// and associative per kind, so signals queued faster than the pump sends them coalesce.
+    fn queue(&mut self, signal: LaneSignal) {
+        let newer = |queued: Option<(u64, u64)>, (value, generation): (u64, u64)| match queued {
+            Some((queued, at)) if at > generation || (at == generation && queued >= value) => {
+                Some((queued, at))
+            }
+            _ => Some((value, generation)),
+        };
+        match signal {
+            LaneSignal::Credit { limit, generation } => {
+                self.credit = newer(self.credit, (limit, generation));
+            }
+            LaneSignal::Shrink { limit, generation } => {
+                self.shrink = newer(self.shrink, (limit, generation));
+                // A credit of an older generation is ignored by its sender: drop it.
+                self.credit = self.credit.filter(|(_, at)| *at >= generation);
+            }
+            LaneSignal::Returned { bound, generation } => {
+                self.returned = newer(self.returned, (bound, generation));
+            }
         }
-        if !state
-            .deferred
-            .iter()
-            .any(|deferred| ptr::eq(deferred.as_ptr(), Arc::as_ptr(link)))
-        {
-            state.deferred.push(Arc::downgrade(link));
+    }
+
+    #[cfg(rings_transport_backend)]
+    /// Take one signal to send: a return first, then a shrink, then a credit.
+    fn take(&mut self) -> Option<LaneSignal> {
+        if let Some((bound, generation)) = self.returned.take() {
+            return Some(LaneSignal::Returned { bound, generation });
         }
-        LoadVerdict::Deferred
+        if let Some((limit, generation)) = self.shrink.take() {
+            return Some(LaneSignal::Shrink { limit, generation });
+        }
+        self.credit
+            .take()
+            .map(|(limit, generation)| LaneSignal::Credit { limit, generation })
     }
-
-    /// The bytes held, for tests.
-    #[cfg(all(test, any(feature = "dummy", feature = "native-webrtc")))]
-    pub(crate) fn held(&self) -> u64 {
-        self.lock().held
-    }
-}
-
-impl Default for NodeReceiveLoad {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-/// Queue `credit` in a lane's `outbox`: `outbox ⊔= credit` in `(ℕ, max)` lifted to `Option`,
-/// with `None` the bottom. Idempotent, commutative and associative, so credits queued faster
-/// than the pump sends them coalesce into their greatest.
-fn join_outbox(outbox: &mut Option<u64>, credit: u64) {
-    *outbox = Some(outbox.map_or(credit, |queued| queued.max(credit)));
 }
 
 /// One sender waiting for a lane's credit: its waker, under the identity of its wait, so the
@@ -191,12 +149,30 @@ struct LinkCreditState {
     next_waiter: u64,
     /// The receiving end of each lane.
     receive: PerLane<ReceiveWindow>,
-    /// The greatest credit not yet sent, per lane.
-    outbox: PerLane<Option<u64>>,
+    /// The signals not yet sent, per lane.
+    outbox: PerLane<SignalOutbox>,
+    /// What the node's pool counts for each lane: its charge as last reported.
+    charged: PerLane<u64>,
+    /// Whether each lane's demand waits in the node's pool, so a later admission needs no
+    /// other until the pool serves it.
+    demanding: PerLane<bool>,
     /// Each lane's credit pump, while it waits for the lane's outbox.
     pump: PerLane<Option<Waker>>,
     /// Whether the connection is gone: waiting senders fail and the pump stops.
     closed: bool,
+}
+
+impl LinkCreditState {
+    /// Advertise the credit the releases of the lane of `index` have completed, queuing it for
+    /// the lane's pump, whose waker it returns; nothing on a closed link.
+    fn advertise_locked(&mut self, index: CreditIndex) -> Option<Waker> {
+        if self.closed {
+            return None;
+        }
+        let (limit, generation) = self.receive[index].advertise(CreditWindow::of(index))?;
+        self.outbox[index].queue(LaneSignal::Credit { limit, generation });
+        self.pump[index].take()
+    }
 }
 
 #[cfg(rings_transport_backend)]
@@ -227,35 +203,47 @@ impl LinkCreditState {
 pub(crate) struct LinkCredit {
     /// The peer, for logs.
     pub(super) peer: Arc<str>,
-    /// The node's receive load, which every admission and release counts.
-    load: NodeReceiveLoad,
+    /// The node's frame pool, which every change of a data lane's charge is reported to.
+    pool: NodeFramePool,
+    /// This link's edge in the pool.
+    edge: pool::EdgeKey,
     /// All lanes, under one lock.
     state: Mutex<LinkCreditState>,
 }
 
 impl LinkCredit {
-    /// The credit of a fresh connection generation with `peer`: every lane granted the
-    /// production window ([`CreditWindow::PRODUCTION`]), its receive load counted in the node's
-    /// `load`.
-    pub(crate) fn new(peer: Arc<str>, load: NodeReceiveLoad) -> Self {
+    /// The credit of a fresh connection generation with `peer`: every lane granted its floor,
+    /// the priority lane its whole window ([`CreditWindow::of`]), its data lanes lent beyond
+    /// that from the node's `pool`.
+    pub(crate) fn new(peer: Arc<str>, pool: NodeFramePool) -> Self {
         Self {
             peer,
-            load,
+            edge: pool.register(),
+            pool,
             state: Mutex::new(LinkCreditState {
-                send: PerLane::from_fn(|_| SendCredit::new(CreditWindow::PRODUCTION)),
+                send: PerLane::from_fn(|index| SendCredit::new(CreditWindow::of(index))),
                 send_waiters: PerLane::default(),
                 #[cfg(rings_transport_backend)]
                 next_waiter: 0,
-                receive: PerLane::from_fn(|_| ReceiveWindow::new(CreditWindow::PRODUCTION)),
+                receive: PerLane::from_fn(|index| ReceiveWindow::new(CreditWindow::of(index))),
                 outbox: PerLane::default(),
+                charged: PerLane::default(),
+                demanding: PerLane::default(),
                 pump: PerLane::default(),
                 closed: false,
             }),
         }
     }
 
+    /// This link's edge in the node's pool.
+    pub(super) const fn edge(&self) -> pool::EdgeKey {
+        self.edge
+    }
+
     /// The state, for one transition.
     fn lock(&self) -> MutexGuard<'_, LinkCreditState> {
+        #[cfg(feature = "dummy")]
+        crate::hot_path::lock_taken();
         lock_recover(&self.state)
     }
 
@@ -324,52 +312,204 @@ impl LinkCredit {
         waiters.into_iter().for_each(|waiter| waiter.waker.wake());
     }
 
-    /// Apply a credit the peer advertised for `lane`: `limit ← max(limit, credit)`.
-    pub(crate) fn grant(&self, lane: ChannelLane, credit: u64) {
+    /// Apply a signal the peer sent on `lane`: a credit raises the lane's send limit and wakes
+    /// its senders; a shrink sets it to the bound it returns, queued for the pump; a return ends
+    /// the lane's pending shrink, which may advertise again.
+    pub(crate) fn apply(&self, lane: ChannelLane, signal: LaneSignal) {
         let index = credit_index(lane);
-        self.lock().send[index].grant(credit);
-        self.wake_senders(index);
+        match signal {
+            LaneSignal::Credit { limit, generation } => {
+                self.lock().send[index].grant(limit, generation);
+                self.wake_senders(index);
+            }
+            LaneSignal::Shrink { limit, generation } => {
+                let pump = {
+                    let mut state = self.lock();
+                    let Some(bound) = state.send[index].shrink(limit, generation) else {
+                        return;
+                    };
+                    state.outbox[index].queue(LaneSignal::Returned { bound, generation });
+                    state.pump[index].take()
+                };
+                pump.into_iter().for_each(Waker::wake);
+                self.wake_senders(index);
+            }
+            LaneSignal::Returned { bound, generation } => {
+                if self.lock().receive[index].returned(bound, generation) {
+                    self.settle(index);
+                    self.advertise_due([index]);
+                }
+            }
+        }
     }
 
-    /// Admit one arriving frame of `lane`.
+    /// Admit one arriving frame of `lane`: a data lane's admission is also its demand on the
+    /// node's pool (Law 3), queued once until the pool serves it, so an admission takes the
+    /// pool's lock only to queue a new demand (load-bounds paper, Obligation "Admission
+    /// complexity").
     ///
     /// Post: `Ok` holds the frame's place in the window until the permit drops; `Err` is a
     /// frame beyond the advertised credit, which the window does not count.
     pub(crate) fn admit(
         self: &Arc<Self>,
         lane: ChannelLane,
-        bytes: usize,
     ) -> std::result::Result<CreditPermit, CreditViolation> {
         let index = credit_index(lane);
-        self.lock().receive[index].admit()?;
-        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-        self.load.admit(bytes);
+        #[cfg(feature = "dummy")]
+        let locks = crate::hot_path::locks();
+        let wants = {
+            let mut state = self.lock();
+            let state = &mut *state;
+            let receive = &mut state.receive[index];
+            receive.admit()?;
+            let wants = receive.want(CreditWindow::of(index)) > 0;
+            wants && !mem::replace(&mut state.demanding[index], wants)
+        };
+        if wants {
+            self.pool.demand(self, index);
+        }
+        #[cfg(feature = "dummy")]
+        crate::hot_path::record(
+            crate::hot_path::HotPath::FrameAdmission,
+            crate::hot_path::locks().saturating_sub(locks),
+        );
         Ok(CreditPermit {
             link: Arc::clone(self),
             index,
-            bytes,
         })
     }
 
-    /// Release one admitted frame of credit index `index`, of `bytes`: advertise the credit it
-    /// completes, unless the node is at its soft limit, which defers the advertisement until
-    /// the load falls (the priority lane's excepted); a release that brings it below the limit
-    /// wakes the deferred links.
-    ///
-    /// The release is counted before the load is judged, so a link registered as deferred has
-    /// counted every release the wake must advertise.
-    fn release(self: &Arc<Self>, index: CreditIndex, bytes: u64) {
-        self.lock().receive[index].release();
-        match self.load.release(bytes, self) {
-            LoadVerdict::Open(deferred) => {
-                self.advertise_due(CreditIndex::ALL);
-                deferred
-                    .iter()
-                    .filter_map(Weak::upgrade)
-                    .for_each(|link| link.advertise_due(CreditIndex::ALL));
-            }
-            LoadVerdict::Deferred => self.advertise_due([credit_index(ChannelLane::PRIORITY)]),
+    /// The share of the pool the lane of `index` may still borrow.
+    pub(super) fn want(&self, index: CreditIndex) -> u64 {
+        let state = self.lock();
+        match state.closed {
+            true => 0,
+            false => state.receive[index].want(CreditWindow::of(index)),
         }
+    }
+
+    /// The pool served the demand of the lane of `index`: the lane's next admission that wants
+    /// more queues a new one.
+    pub(super) fn served(&self, index: CreditIndex) {
+        self.lock().demanding[index] = false;
+    }
+
+    /// Take `share` of the pool for the lane of `index`, which the pool counted already: the
+    /// lane keeps what it wants of it, gives the rest back, and advertises the credit it grants.
+    pub(super) fn lend(&self, index: CreditIndex, share: u64) {
+        {
+            let mut state = self.lock();
+            if !state.closed {
+                state.receive[index].lend(CreditWindow::of(index), share);
+            }
+            state.charged[index] = state.charged[index].saturating_add(share);
+        }
+        self.settle(index);
+        self.advertise_due([index]);
+    }
+
+    /// Report the charge of the lane of `index` to the node's pool, if it changed.
+    fn settle(&self, index: CreditIndex) {
+        let (before, after) = {
+            let mut state = self.lock();
+            let after = state.receive[index].charge(CreditWindow::of(index));
+            (mem::replace(&mut state.charged[index], after), after)
+        };
+        self.pool.adjust(self.edge, before, after);
+    }
+
+    /// Shrink this edge's pooled shares to `share` in all, the largest first: a claimant below
+    /// its share found the node's pool full (Law 3, rebalance). Each lane shrunk sends its
+    /// `Shrink`; the shares come back with the returns.
+    pub(super) fn shrink_to_share(&self, share: u64) {
+        let pumps = {
+            let mut state = self.lock();
+            if state.closed {
+                return;
+            }
+            let state = &mut *state;
+            let mut lanes = CreditIndex::ALL
+                .into_iter()
+                .map(|index| (state.receive[index].lent(), index))
+                .collect::<Vec<_>>();
+            lanes.sort_unstable_by_key(|(lent, _)| std::cmp::Reverse(*lent));
+            let mut excess = lanes
+                .iter()
+                .map(|(lent, _)| lent)
+                .sum::<u64>()
+                .saturating_sub(share);
+            let mut pumps = Vec::new();
+            for (lent, index) in lanes {
+                if excess == 0 {
+                    break;
+                }
+                let cut = lent.min(excess);
+                let window = CreditWindow::of(index);
+                let Some(shrink) = state.receive[index].shrink_to(window, lent - cut) else {
+                    continue;
+                };
+                excess -= cut;
+                state.outbox[index].queue(shrink);
+                pumps.extend(state.pump[index].take());
+            }
+            pumps
+        };
+        pumps.into_iter().for_each(Waker::wake);
+    }
+
+    /// Release one admitted frame of credit index `index`: advertise the credit it completes,
+    /// and report the lane's charge, which a lane draining after a shrink gives back.
+    fn release(&self, index: CreditIndex) {
+        #[cfg(feature = "dummy")]
+        let locks = crate::hot_path::locks();
+        // One transition: the release, the charge it changes, and the credit it completes.
+        let (charge, pump) = {
+            let mut state = self.lock();
+            let state = &mut *state;
+            let window = CreditWindow::of(index);
+            state.receive[index].release();
+            let after = state.receive[index].charge(window);
+            let before = mem::replace(&mut state.charged[index], after);
+            let pump = state.advertise_locked(index);
+            ((before, after), pump)
+        };
+        self.pool.adjust(self.edge, charge.0, charge.1);
+        pump.into_iter().for_each(Waker::wake);
+        #[cfg(feature = "dummy")]
+        crate::hot_path::record(
+            crate::hot_path::HotPath::FrameRelease,
+            crate::hot_path::locks().saturating_sub(locks),
+        );
+    }
+
+    #[cfg(any(feature = "dummy", rings_transport_webrtc))]
+    /// The idle check, made every [`LANE_IDLE_PERIOD`] by its driver (`credit_pump` in a WebRTC
+    /// backend, the controlled scheduler's virtual clock in the dummy one), or by a test: every
+    /// data lane that holds a share of the pool and admitted no
+    /// frame since the last check is shrunk to its floor (Law 3). Returns `false` once the
+    /// connection is gone, which ends the driver.
+    pub(crate) fn idle_check(&self) -> bool {
+        let pumps = {
+            let mut state = self.lock();
+            if state.closed {
+                return false;
+            }
+            let state = &mut *state;
+            let mut pumps = Vec::new();
+            for index in CreditIndex::ALL {
+                let Some(shrink) = state.receive[index].idle_shrink(CreditWindow::of(index)) else {
+                    continue;
+                };
+                state.outbox[index].queue(shrink);
+                pumps.extend(state.pump[index].take());
+            }
+            pumps
+        };
+        pumps.into_iter().for_each(Waker::wake);
+        CreditIndex::ALL
+            .into_iter()
+            .for_each(|index| self.settle(index));
+        true
     }
 
     /// Advertise the credit of every lane of `indices` that its releases have completed,
@@ -381,29 +521,27 @@ impl LinkCredit {
                 return;
             }
             let state = &mut *state;
-            let mut pumps = Vec::new();
-            for index in indices {
-                let Some(limit) = state.receive[index].advertise(CreditWindow::PRODUCTION) else {
-                    continue;
-                };
-                join_outbox(&mut state.outbox[index], limit);
-                pumps.extend(state.pump[index].take());
-            }
-            pumps
+            indices
+                .into_iter()
+                .filter_map(|index| state.advertise_locked(index))
+                .collect::<Vec<_>>()
         };
         pumps.into_iter().for_each(Waker::wake);
     }
 
     #[cfg(rings_transport_backend)]
-    /// Wait for a credit to advertise on the lane of `index`, and take it.
+    /// Wait for a signal to send on the lane of `index`, and take it.
     ///
-    /// Post: `Some` with the greatest credit not yet sent; `None` once the connection is gone
-    /// and nothing is left to send on the lane.
-    pub(crate) fn next_credit(&self, index: CreditIndex) -> impl Future<Output = Option<u64>> + '_ {
+    /// Post: `Some` with the next signal of the lane's outbox; `None` once the connection is
+    /// gone and nothing is left to send on the lane.
+    pub(crate) fn next_signal(
+        &self,
+        index: CreditIndex,
+    ) -> impl Future<Output = Option<LaneSignal>> + '_ {
         poll_fn(move |context| {
             let mut state = self.lock();
-            if let Some(credit) = state.outbox[index].take() {
-                return Poll::Ready(Some(credit));
+            if let Some(signal) = state.outbox[index].take() {
+                return Poll::Ready(Some(signal));
             }
             if state.closed {
                 return Poll::Ready(None);
@@ -414,26 +552,32 @@ impl LinkCredit {
     }
 
     #[cfg(rings_transport_webrtc)]
-    /// Queue `credit` on the lane of `index` again after its send failed: `outbox ⊔= credit`,
-    /// idempotent as every credit is. Post: `false`, queuing nothing, once the connection is
-    /// gone, when no send can succeed.
-    pub(crate) fn requeue(&self, index: CreditIndex, credit: u64) -> bool {
+    /// Queue `signal` on the lane of `index` again after its send failed, idempotent as every
+    /// signal is. Post: `false`, queuing nothing, once the connection is gone, when no send can
+    /// succeed.
+    pub(crate) fn requeue(&self, index: CreditIndex, signal: LaneSignal) -> bool {
         let mut state = self.lock();
         if state.closed {
             return false;
         }
-        join_outbox(&mut state.outbox[index], credit);
+        state.outbox[index].queue(signal);
         true
     }
 
     /// Mark the connection gone: waiting senders fail, and the pump stops once the outbox is
-    /// empty. The frames still admitted keep counting in the node's load until they are
-    /// released.
-    pub(crate) fn close(&self) {
+    /// empty. No frame arrives any more, so each lane counts only the frames it still holds,
+    /// and gives the rest of its charge back to the node's pool; the frames held count until
+    /// they are released.
+    pub(crate) fn close(self: &Arc<Self>) {
         tracing::debug!(peer = %self.peer, "link credit closed: waiting senders fail");
         let (waiters, pump) = {
             let mut state = self.lock();
             state.closed = true;
+            // No frame arrives any more: every lane counts only the frames it holds.
+            state
+                .receive
+                .iter_mut()
+                .for_each(|(_, receive)| receive.close());
             let waiters = state
                 .send_waiters
                 .iter_mut()
@@ -448,6 +592,10 @@ impl LinkCredit {
         };
         waiters.into_iter().for_each(|waiter| waiter.waker.wake());
         pump.into_iter().for_each(Waker::wake);
+        self.pool.forget(self);
+        CreditIndex::ALL
+            .into_iter()
+            .for_each(|index| self.settle(index));
     }
 
     /// The waits registered on `lane`'s credit.
@@ -465,6 +613,14 @@ impl LinkCredit {
             *slot = window.occupancy();
         }
         occupancy
+    }
+}
+
+/// A link ends by its drop, closed or not: whatever the node's pool still counts for its edge
+/// leaves the pool, so a link dropped without `close` holds no share, and no demand, after it.
+impl Drop for LinkCredit {
+    fn drop(&mut self) {
+        self.pool.release(self.edge);
     }
 }
 
@@ -570,15 +726,13 @@ impl Drop for CreditReservation {
     }
 }
 
-/// One admitted frame's place in its lane's window and in its node's receive load: dropping it
-/// releases both, which may advertise more credit to the peer.
+/// One admitted frame's place in its lane's window: dropping it releases the place, which may
+/// advertise more credit to the peer.
 pub(crate) struct CreditPermit {
     /// The connection the window belongs to.
     link: Arc<LinkCredit>,
     /// The credit index of the lane.
     index: CreditIndex,
-    /// The frame's bytes, as counted in the node's load.
-    bytes: u64,
 }
 
 impl CreditPermit {
@@ -596,6 +750,6 @@ impl CreditPermit {
 
 impl Drop for CreditPermit {
     fn drop(&mut self) {
-        self.link.release(self.index, self.bytes);
+        self.link.release(self.index);
     }
 }

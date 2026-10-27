@@ -6,14 +6,9 @@ use futures::future::Either;
 use super::*;
 use crate::swarm::application::ApplicationData;
 
-/// Each single-layer ablation at N=10 exposes exactly the proposition its layer protects, except
-/// the layers per-lane credit subsumes.
+/// Each single-layer ablation at N=10 exposes exactly the proposition its layer protects.
 #[tokio::test(start_paused = true)]
-async fn test_n10_single_ablation_matrix_exposes_each_unsubsumed_proposition() {
-    // Each single-layer ablation exposes exactly its proposition, except the barrier control
-    // exemption: per-lane credit dispatch bounds the barrier's wait to one hand-over, so
-    // without the exemption control is delayed but never starved, and nothing is violated
-    // (#927).
+async fn test_n10_single_ablation_matrix_exposes_each_proposition() {
     let cases = [
         (
             ProtectionProfile::without_class_reservations(),
@@ -22,10 +17,6 @@ async fn test_n10_single_ablation_matrix_exposes_each_unsubsumed_proposition() {
         (
             ProtectionProfile::without_bounded_control_burst(),
             BTreeSet::from([ProtectionLayer::BoundedControlBurst]),
-        ),
-        (
-            ProtectionProfile::without_barrier_control_exemption(),
-            BTreeSet::new(),
         ),
         (
             ProtectionProfile::without_per_entry_yield(),
@@ -212,7 +203,6 @@ fn parse_profile(value: &str) -> ProtectionProfile {
         "all-enabled" => ProtectionProfile::ALL_ENABLED,
         "no-class-reservations" => ProtectionProfile::without_class_reservations(),
         "no-bounded-control-burst" => ProtectionProfile::without_bounded_control_burst(),
-        "no-barrier-control-exemption" => ProtectionProfile::without_barrier_control_exemption(),
         "no-per-entry-yield" => ProtectionProfile::without_per_entry_yield(),
         "legacy-all-disabled" => ProtectionProfile::LEGACY_ALL_DISABLED,
         _ => panic!("unsupported SYNC_STORM_PROFILE {value}"),
@@ -233,28 +223,32 @@ fn parse_strategy(value: &str) -> DeliveryStrategy {
 #[ignore = "explicit PR sync-storm size matrix"]
 async fn test_pr_ring_and_hotspot_size_matrix() {
     for count in [10, 25, 50] {
-        assert_and_report_enabled(
-            run_scenario(
+        for (topology, base) in [
+            (ScenarioTopology::Ring, 700),
+            (ScenarioTopology::Hotspot, 800),
+        ] {
+            let scenario = run_scenario(
                 count,
-                ScenarioTopology::Ring,
-                700 + count as u64,
+                topology,
+                base + count as u64,
                 ProtectionProfile::ALL_ENABLED,
                 DeliveryStrategy::Fifo,
-            )
-            .await,
-        );
-        assert_and_report_enabled(
-            run_scenario(
-                count,
-                ScenarioTopology::Hotspot,
-                800 + count as u64,
-                ProtectionProfile::ALL_ENABLED,
-                DeliveryStrategy::Fifo,
-            )
-            .await,
-        );
+            );
+            // At the largest size, every hot path also stays within its regression bound
+            // (#938).
+            match count {
+                PR_MATRIX_LARGEST => {
+                    let counts = super::hot_paths::hot_path_counts(scenario).await;
+                    super::hot_paths::assert_hot_path_bounds(count, &counts);
+                }
+                _ => assert_and_report_enabled(scenario.await),
+            }
+        }
     }
 }
+
+/// The PR matrix's largest node count, at which the hot paths' bounds are asserted.
+const PR_MATRIX_LARGEST: usize = 50;
 
 #[tokio::test(start_paused = true)]
 #[ignore = "nightly extended N=50 seed matrix"]
@@ -275,7 +269,7 @@ async fn test_nightly_extended_seed_matrix() {
     }
 }
 
-fn assert_and_report_enabled(outcome: ScenarioOutcome) {
+pub(super) fn assert_and_report_enabled(outcome: ScenarioOutcome) {
     println!("{}", outcome.diagnostic());
     assert_enabled_outcome(&outcome);
 }

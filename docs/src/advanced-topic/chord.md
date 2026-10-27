@@ -99,7 +99,9 @@ another node's read shows that an owner holds the write.
   100 minutes after its dot was issued (the element horizon `H`, the longest retention one write
   may request), and its topic's retention bound, the latest bound any write joined into the
   topic requested (a plain write, such as `publishMessageToTopic` or `registerService`,
-  requests 10 minutes). Writing the value again issues a fresh dot and a fresh bound and is what
+  requests 10 minutes; an extend, `storage_extend` in core, requests the lifetime its writer
+  names, up to `H`, for several elements in one write, as the [mail gateway](../mail-gateway.md)
+  does). Writing the value again issues a fresh dot and a fresh bound and is what
   keeps it: a sole writer rewrites each value within 10 minutes, and every writer within `H`,
   even while other writes keep the topic alive. The online-node, onion-exit and DNS-relay
   registries re-append their descriptor every heartbeat (30 s by default): a signed 10-minute
@@ -207,14 +209,22 @@ survives.
   outside the repair schedule's admission window, which guards bulk storage sync and not these
   two digest messages. So a lost member is replaced within its detection time plus `r` hops; the
   periodic pass is the backstop.
+- **Chain liveness.** A member probes its two chain neighbours every 2.5 s, on the same probe
+  clock as every peer, and suspects one whose probe is 7.5 s unanswered (#1070). A suspect is no
+  chain member until it answers on time twice in a row, and both the suspicion and the clearing
+  run the chain exchange at once; suspicion evicts nothing, eviction stays at the 45 s liveness
+  deadline. So a silent loss is detected within 10 s, and a slow but live neighbour costs a chain
+  shift and back, never a copy: a neighbour whose answers hover around 7.5 s changes the chains
+  at most twice per 12.5 s. The probes cost each node four messages per 2.5 s, whatever `r`.
 - **Who is a member.** A node decides membership and its rank on its own view: it is a member of
   `k` iff `k` lies in `(succ(p_r), succ(self)]`, `p_r` the `r`-th previous holder behind it. A
   copy is admitted only from its previous or its next member.
 - **Fetch and removal.** A recipient that holds relay mail reads its inbox from its own store;
   one that does not fetches it from its members, the holder first and then down the chain to
   the next it can reach (`FetchRelayInbox`, answered only to the recipient itself), and removes what it
-  delivered at the member it read it from. Only the holder's report restricts relay custody; a
-  lagging member's copy may miss an element that still exists (#1059).
+  delivered at the member it read it from. No report restricts relay custody: a lagging
+  member's copy, or a new holder's before its hand-off lands, may miss an element that still
+  exists (#1059).
 
 A view covers the node's predecessor, the node, and its successor list. A holder also needs the
 keys owned on the storage-less runs behind it, whose owners lie behind its predecessor: every node

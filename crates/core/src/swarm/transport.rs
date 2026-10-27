@@ -36,7 +36,6 @@ use rings_transport::delivery::DeliveryFuture;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
 use self::storage_sync::StorageSyncAckMap;
-use crate::chunk::ReassemblyBudget;
 use crate::chunk::ReassemblyLimits;
 use crate::delegation::DelegateeKey;
 use crate::delegation::Delegation;
@@ -79,6 +78,7 @@ mod rerouting;
 mod retention;
 mod storage_lookup;
 mod storage_sync;
+pub(crate) mod store_reports;
 mod transaction_replay;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use storage_sync::StorageSyncBatch;
@@ -106,7 +106,11 @@ pub(crate) use self::inbound_tap::InboundTap;
 pub(crate) use self::liveness::IssuedProbe;
 use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::ProbePass;
+pub(crate) use self::liveness::ProbeScope;
 pub(crate) use self::liveness::ProbeWork;
+pub(crate) use self::liveness::CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::liveness::CHAIN_NEIGHBOUR_SUSPICION_MS;
 #[cfg(all(test, feature = "dummy"))]
 pub(crate) use self::liveness::PEER_LIVENESS_PERIOD_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -194,7 +198,6 @@ pub struct SwarmTransport {
     storage_redundancy: u16,
     dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
-    reassembly_budget: Arc<ReassemblyBudget>,
     inbound_capacity: Arc<InboundCapacity>,
     connection_lifecycle: ConnectionLifecycleBoundary,
     /// Core's side of the application boundary (#935).
@@ -209,6 +212,8 @@ pub struct SwarmTransport {
     /// The reply marker of storage lookups; see [`StorageAnswerClock`].
     storage_answer_clock: StorageAnswerClock,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
+    /// The store reports this node awaits for the reported operations it sent (#866).
+    pub(crate) store_reports: self::store_reports::StoreReports,
     storage_repair_requested: AtomicBool,
     /// Test builds: the frames this node sent and received; see [`FrameLedger`].
     #[cfg(test)]
@@ -218,6 +223,8 @@ pub struct SwarmTransport {
     inbound_tap: InboundTap,
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
     outbound_schedulers: OutboundSchedulers,
+    /// The node's watcher of every detached send's first-frame admission.
+    admission_watcher: payload_send::AdmissionWatcher,
     measured_disconnects: Mutex<MeasuredDisconnectMap>,
     measure: Option<MeasureImpl>,
     transaction_replay: Arc<TransactionReplay>,
@@ -328,7 +335,6 @@ impl SwarmTransport {
             storage_redundancy: settings.storage_redundancy,
             dht_virtual_nodes: settings.dht_virtual_nodes,
             reassembly_limits: settings.reassembly_limits,
-            reassembly_budget: Arc::new(ReassemblyBudget::new(settings.reassembly_limits)),
             inbound_capacity: Arc::new(InboundCapacity::new()),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             application: ApplicationPort::new(),
@@ -342,6 +348,7 @@ impl SwarmTransport {
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             storage_answer_clock: StorageAnswerClock::default(),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
+            store_reports: self::store_reports::StoreReports::default(),
             storage_repair_requested: AtomicBool::new(false),
             #[cfg(test)]
             frames: Arc::default(),
@@ -349,6 +356,7 @@ impl SwarmTransport {
             inbound_tap: InboundTap::default(),
             storage_repair_cursor: Mutex::new(None),
             outbound_schedulers: OutboundSchedulers::new(measure.clone()),
+            admission_watcher: payload_send::AdmissionWatcher::default(),
             measured_disconnects: Mutex::new(BTreeMap::new()),
             measure,
             transaction_replay,
@@ -476,10 +484,6 @@ impl SwarmTransport {
         self.reassembly_limits
     }
 
-    pub(crate) fn reassembly_budget(&self) -> Arc<ReassemblyBudget> {
-        self.reassembly_budget.clone()
-    }
-
     pub(crate) fn inbound_capacity(&self) -> Arc<InboundCapacity> {
         self.inbound_capacity.clone()
     }
@@ -496,9 +500,10 @@ impl SwarmTransport {
         &self.inbound_tap
     }
 
+    /// Test builds: the inbound events admitted and not yet handled.
     #[cfg(test)]
-    pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
-        self.inbound_capacity.admitted_count_for_test()
+    pub(crate) fn inbound_live_events_for_test(&self) -> usize {
+        self.inbound_capacity.live_events_for_test()
     }
 
     /// Core's side of the application boundary: the inbox it writes, the lookups it answers

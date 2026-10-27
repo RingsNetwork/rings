@@ -399,7 +399,8 @@ pub(crate) struct DelegationArgs {
     #[arg(
         long,
         default_value = "2592000",
-        help = "The ttl of delegation file in seconds"
+        help = "The ttl of delegation file in seconds; a node using it exits 25 s before it \
+                ends, when it can send nothing more"
     )]
     pub ttl: u64,
 }

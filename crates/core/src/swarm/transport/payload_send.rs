@@ -41,13 +41,13 @@ use crate::lifecycle::StopToken;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::MessagePayload;
-use crate::swarm::detached::run_detached_or_inline;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
 use crate::utils::sleep;
 
 mod first_frame;
 mod submission;
+mod watcher;
 
 use first_frame::first_frame_deadline;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -55,6 +55,7 @@ pub(crate) use first_frame::hold_first_frame_deadlines_for_test;
 use submission::EnqueuedDetached;
 use submission::SubmittedTransfer;
 use submission::TransferReceipt;
+pub(crate) use watcher::AdmissionWatcher;
 
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
 
@@ -649,20 +650,23 @@ impl SwarmTransport {
             return Ok(());
         };
         let local = self.dht.did;
-        // An abandoned watch would leave the transfer waiting for credit with no deadline, so
-        // it runs inline when no runtime can take it.
-        run_detached_or_inline(Box::pin(async move {
-            if let Err(error) = enqueued.await_admission(deadline).await {
-                tracing::warn!(
-                    local = %local,
-                    peer = %did,
-                    error = ?error,
-                    "transport backpressure: a queued protocol payload was dropped before its \
-                     first frame was admitted"
-                );
-            }
-        }))
-        .await;
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        rings_transport::hot_path::record(rings_transport::hot_path::HotPath::ProtocolSend, 0);
+        // The node's watcher watches the admission; an abandoned watch would leave the transfer
+        // waiting for credit with no deadline, so it runs inline when no runtime can take it.
+        self.admission_watcher
+            .watch(Box::pin(async move {
+                if let Err(error) = enqueued.await_admission(deadline).await {
+                    tracing::warn!(
+                        local = %local,
+                        peer = %did,
+                        error = ?error,
+                        "transport backpressure: a queued protocol payload was dropped before its \
+                         first frame was admitted"
+                    );
+                }
+            }))
+            .await;
         Ok(())
     }
 

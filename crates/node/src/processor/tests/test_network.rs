@@ -4,6 +4,7 @@ use super::common::*;
 use super::*;
 #[cfg(feature = "dummy")]
 use crate::consts::DATA_REDUNDANT;
+use crate::test_support::TestTask;
 
 const LISTENER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -104,7 +105,7 @@ async fn test_listener_generation_queues_cancelled_starts_and_restarts() {
     let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
     let first_processor = processor.clone();
     let first_token = first_stop.token();
-    let first = tokio::spawn(async move {
+    let first = TestTask::spawn(async move {
         first_processor
             .listen_with_started(first_token, move || {
                 let _sent = first_started_tx.send(());
@@ -133,7 +134,7 @@ async fn test_listener_generation_queues_cancelled_starts_and_restarts() {
     queued_stop.request_stop();
     assert!(futures::poll!(queued.as_mut()).is_pending());
     assert!(!queued_started.load(std::sync::atomic::Ordering::SeqCst));
-    let queued = tokio::spawn(queued);
+    let queued = TestTask::spawn(queued);
 
     first_stop.request_stop();
     tokio::time::timeout(LISTENER_STOP_TIMEOUT, first)
@@ -222,9 +223,9 @@ async fn test_provider_wrappers_share_listener_lifecycle_lock() {
     assert!(futures::poll!(cloned.as_mut()).is_pending());
     assert!(futures::poll!(independent.as_mut()).is_pending());
 
-    let active = tokio::spawn(active);
-    let cloned = tokio::spawn(cloned);
-    let independent = tokio::spawn(independent);
+    let active = TestTask::spawn(active);
+    let cloned = TestTask::spawn(cloned);
+    let independent = TestTask::spawn(independent);
 
     active_stop.request_stop();
     tokio::time::timeout(LISTENER_STOP_TIMEOUT, active)

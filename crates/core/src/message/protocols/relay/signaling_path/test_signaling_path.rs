@@ -92,17 +92,46 @@ fn test_path_is_bounded_by_the_hop_budget() -> Result<()> {
     Ok(())
 }
 
-/// Law (Bound) on the wire: a serialized path of 65 hops does not decode.
+/// The hops of `path` in their wire form, 20 canonical bytes each.
+fn wire_hops(path: &[Did]) -> Vec<[u8; 20]> {
+    path.iter()
+        .map(|hop| ethereum_types::H160::from(*hop).to_fixed_bytes())
+        .collect()
+}
+
+/// The encoding (#952): a path of `n` hops is the varint of `n` and each hop's 20 canonical
+/// bytes, and it decodes back to the same hops.
+#[test]
+fn test_a_path_encodes_each_hop_as_its_20_bytes() -> Result<()> {
+    for n in [0, 1, 2, u32::from(MAX_RELAY_HOPS)] {
+        let hops = (0..n).map(|hop| did(hop + 7)).collect::<Vec<_>>();
+        let path = RelayPath::try_from(hops.clone())?;
+        let encoded = rings_codec::serialize(&path).map_err(Error::CodecSerialize)?;
+        let mut expected = rings_codec::serialize(&n).map_err(Error::CodecSerialize)?;
+        expected.extend(wire_hops(&hops).concat());
+        assert_eq!(encoded, expected, "{n} hops");
+        let decoded: RelayPath =
+            rings_codec::deserialize(&encoded).map_err(Error::CodecDeserialize)?;
+        assert_eq!(decoded, path);
+    }
+    Ok(())
+}
+
+/// Law (Bound) and Law (Distinct) on the wire: 65 hops, or a repeated hop, do not decode.
 #[test]
 fn test_wire_path_above_the_bound_does_not_decode() -> Result<()> {
     let at_bound = (0..u32::from(MAX_RELAY_HOPS)).map(did).collect::<Vec<_>>();
-    let encoded = rings_codec::serialize(&at_bound).map_err(Error::CodecSerialize)?;
+    let encoded = rings_codec::serialize(&wire_hops(&at_bound)).map_err(Error::CodecSerialize)?;
     let decoded: RelayPath = rings_codec::deserialize(&encoded).map_err(Error::CodecDeserialize)?;
     assert_eq!(decoded.hops(), at_bound);
 
     let mut over = at_bound;
     over.push(did(1_000));
-    let encoded = rings_codec::serialize(&over).map_err(Error::CodecSerialize)?;
+    let encoded = rings_codec::serialize(&wire_hops(&over)).map_err(Error::CodecSerialize)?;
+    assert!(rings_codec::deserialize::<RelayPath>(&encoded).is_err());
+
+    let repeated = wire_hops(&[did(2), did(3), did(2)]);
+    let encoded = rings_codec::serialize(&repeated).map_err(Error::CodecSerialize)?;
     assert!(rings_codec::deserialize::<RelayPath>(&encoded).is_err());
     Ok(())
 }

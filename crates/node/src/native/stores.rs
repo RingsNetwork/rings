@@ -31,6 +31,7 @@ use crate::measure::MeasureStorage;
 use crate::native::config::StorageConfig;
 use crate::native::config::DEFAULT_STORAGE_CAPACITY;
 use crate::onion::OnionEntryGuardStorage;
+use crate::release::StoresReleased;
 
 /// Byte budget of the onion entry-guard store.
 pub const ONION_ENTRY_GUARD_STORAGE_CAPACITY: u32 = 64 * 1024;
@@ -98,6 +99,11 @@ pub struct NodeStores {
     pub guards: OnionEntryGuardStorage,
     /// The transaction replay store (authoritative).
     pub replay: ReplayStorage,
+    /// The release witnesses of the seven stores above: a node built over them hands them to
+    /// its builder ([`ProcessorBuilder::stores_released`]), so its close awaits them (#1085).
+    ///
+    /// [`ProcessorBuilder::stores_released`]: crate::processor::ProcessorBuilder::stores_released
+    pub released: StoresReleased,
 }
 
 /// Open the file store at `path` under `capacity` bytes with `authority`.
@@ -112,63 +118,70 @@ impl NodeStores {
     /// the others beside them (module docs).
     pub async fn open(data: &StorageConfig, measure: &StorageConfig) -> Result<Self> {
         let beside_data = |dir| sibling_storage_path(&data.path, dir);
+        let data_store = open_file(
+            data.path.clone(),
+            data.capacity,
+            RecordAuthority::Disposable,
+        )
+        .await?;
+        let relay = open_file(
+            beside_data(RELAY_INBOX_STORAGE_DIR),
+            RELAY_INBOX_STORAGE_CAPACITY,
+            RecordAuthority::Retained,
+        )
+        .await?;
+        let removals = open_file(
+            beside_data(DHT_REMOVAL_STORAGE_DIR),
+            DHT_REMOVAL_STORAGE_CAPACITY,
+            RecordAuthority::Retained,
+        )
+        .await?;
+        let measure_store = open_file(
+            measure.path.clone(),
+            measure.capacity,
+            RecordAuthority::Disposable,
+        )
+        .await?;
+        let evidence = open_file(
+            sibling_storage_path(&measure.path, PROVISIONAL_EVIDENCE_STORAGE_DIR),
+            measure.capacity,
+            RecordAuthority::Disposable,
+        )
+        .await?;
+        let guards = open_file(
+            beside_data(ONION_ENTRY_GUARD_STORAGE_DIR),
+            ONION_ENTRY_GUARD_STORAGE_CAPACITY,
+            RecordAuthority::DurableCache,
+        )
+        .await?;
+        let replay = open_file(
+            beside_data(TRANSACTION_REPLAY_STORAGE_DIR),
+            TRANSACTION_REPLAY_STORAGE_CAPACITY,
+            RecordAuthority::Authoritative,
+        )
+        .await?;
+        // Taken before each store is boxed behind its trait, which hides the witness.
+        let released = StoresReleased::of(
+            [
+                &data_store,
+                &relay,
+                &removals,
+                &measure_store,
+                &evidence,
+                &guards,
+                &replay,
+            ]
+            .map(FileStorage::released),
+        );
         Ok(Self {
-            data: Box::new(
-                open_file(
-                    data.path.clone(),
-                    data.capacity,
-                    RecordAuthority::Disposable,
-                )
-                .await?,
-            ),
-            relay: Box::new(
-                open_file(
-                    beside_data(RELAY_INBOX_STORAGE_DIR),
-                    RELAY_INBOX_STORAGE_CAPACITY,
-                    RecordAuthority::Retained,
-                )
-                .await?,
-            ),
-            removals: Box::new(
-                open_file(
-                    beside_data(DHT_REMOVAL_STORAGE_DIR),
-                    DHT_REMOVAL_STORAGE_CAPACITY,
-                    RecordAuthority::Retained,
-                )
-                .await?,
-            ),
-            measure: Box::new(
-                open_file(
-                    measure.path.clone(),
-                    measure.capacity,
-                    RecordAuthority::Disposable,
-                )
-                .await?,
-            ),
-            evidence: Box::new(
-                open_file(
-                    sibling_storage_path(&measure.path, PROVISIONAL_EVIDENCE_STORAGE_DIR),
-                    measure.capacity,
-                    RecordAuthority::Disposable,
-                )
-                .await?,
-            ),
-            guards: Box::new(
-                open_file(
-                    beside_data(ONION_ENTRY_GUARD_STORAGE_DIR),
-                    ONION_ENTRY_GUARD_STORAGE_CAPACITY,
-                    RecordAuthority::DurableCache,
-                )
-                .await?,
-            ),
-            replay: Box::new(
-                open_file(
-                    beside_data(TRANSACTION_REPLAY_STORAGE_DIR),
-                    TRANSACTION_REPLAY_STORAGE_CAPACITY,
-                    RecordAuthority::Authoritative,
-                )
-                .await?,
-            ),
+            data: Box::new(data_store),
+            relay: Box::new(relay),
+            removals: Box::new(removals),
+            measure: Box::new(measure_store),
+            evidence: Box::new(evidence),
+            guards: Box::new(guards),
+            replay: Box::new(replay),
+            released,
         })
     }
 

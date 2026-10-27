@@ -27,7 +27,9 @@ use crate::dht::PeerRing;
 use crate::dht::PlacementLookup;
 use crate::error::Result;
 use crate::message::types::Message;
+use crate::message::types::OperationDigest;
 use crate::message::types::SearchEntry;
+use crate::message::types::StoreOutcome;
 use crate::message::Principal;
 use crate::swarm::transport::Placement;
 use crate::swarm::transport::Route;
@@ -122,16 +124,31 @@ impl Placement for OperatePlacement {
         )
     }
 
+    /// Apply the operation here, the owner its placement reached after a deferral, and, for a
+    /// reported one, take its report here: no owner elsewhere will (`operate_entry_reported`).
     async fn settle(&self, transport: &Arc<SwarmTransport>, (): ()) -> Result<()> {
         let dht = &transport.dht;
         let op = self.0.op.clone();
-        dht.operate_storage_entry(
-            get_epoch_ms(),
-            self.0.placement,
-            op,
-            dht.did,
-            Principal::Local,
-        )
-        .await
+        let applied = dht
+            .operate_storage_entry(
+                get_epoch_ms(),
+                self.0.placement,
+                op,
+                dht.did,
+                Principal::Local,
+            )
+            .await;
+        if self.0.report {
+            let outcome = match applied {
+                Ok(()) => StoreOutcome::Stored,
+                Err(_) => StoreOutcome::Refused,
+            };
+            transport.store_reports.report(
+                OperationDigest::of(&self.0.op)?,
+                self.0.placement,
+                outcome,
+            );
+        }
+        applied
     }
 }
