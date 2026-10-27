@@ -15,7 +15,6 @@ use rings_core::consts::MAX_TTL_MS;
 use rings_core::dht::entry::Entry;
 use rings_core::dht::entry::EntryKind;
 use rings_core::ecc::SecretKey;
-use rings_core::message::MessageSigner;
 use rings_core::storage::MemStorage;
 use rings_core::utils::get_epoch_ms;
 
@@ -32,7 +31,6 @@ use crate::error::Result;
 use crate::mail::descriptor::descriptor_topic;
 use crate::mail::descriptor::MailRecipient;
 use crate::mail::envelope::seal;
-use crate::mail::envelope::MailChunk;
 use crate::mail::envelope::MailElement;
 use crate::mail::envelope::SealedMail;
 use crate::mail::gateway::MailDrop;
@@ -143,21 +141,19 @@ async fn opt_in(
 }
 
 /// The recipient of `processor`, its inbox and records empty.
-async fn mem_recipient(processor: &Arc<Processor>) -> MemRecipient {
+fn mem_recipient(processor: &Arc<Processor>) -> MemRecipient {
     Recipient::start(
         Arc::clone(processor),
         KvInbox::new(MemStorage::new()),
         MemStorage::new(),
         DEFAULT_MAIL_POLL_INTERVAL,
     )
-    .await
     .unwrap()
 }
 
-/// [`MESSAGE`] sealed for `target` by the gateway `gateway`.
-fn sealed_by(gateway: &Processor, target: &MailRecipient) -> SealedMail {
-    let signer = MessageSigner::new(gateway.delegatee_key(), gateway.swarm.network_id());
-    seal(MESSAGE, target, signer, get_epoch_ms(), &mut OsRng).unwrap()
+/// [`MESSAGE`] sealed for `target`.
+fn sealed_for(target: &MailRecipient) -> SealedMail {
+    seal(MESSAGE, target, &mut OsRng).unwrap()
 }
 
 /// The messages `recipient`'s inbox holds.
@@ -194,7 +190,7 @@ async fn test_a_mail_through_the_gateway_is_opened_by_its_recipient_within_its_l
     })
     .await?;
 
-    let recipient = mem_recipient(&recipient_node).await;
+    let recipient = mem_recipient(&recipient_node);
     assert_eq!(
         recipient.poll().await.unwrap(),
         PollReport {
@@ -232,27 +228,22 @@ async fn test_a_forged_chunk_on_the_topic_is_ignored() -> Result<()> {
     let nodes = [gateway_node.as_ref(), recipient_node.as_ref()];
     let gateway = MailGateway::new(Arc::clone(&gateway_node));
     let target = opt_in(&gateway, nodes, &recipient_node).await?;
-    let sealed = sealed_by(&gateway_node, &target);
+    let sealed = sealed_for(&target);
     let topic = mail_topic(target.did);
     gateway_node
         .swarm
         .storage_extend(&topic, sealed.elements.clone(), MAX_TTL_MS)
         .await?;
-    let forged = MailElement::Chunk(MailChunk {
-        mail_id: sealed.mail_id,
-        index: 0,
-        count: 1,
-        slice: Bytes::from_static(b"forged"),
-    })
-    .encode()
-    .unwrap();
+    let forged = MailElement::Chunk(Bytes::from_static(b"forged"))
+        .encode()
+        .unwrap();
     gateway_node
         .storage_append_data(&topic, forged.clone())
         .await?;
     let written = [sealed.elements, vec![forged]].concat();
     await_owners_holding(nodes, &topic, holds_all(&written)).await?;
 
-    let recipient = mem_recipient(&recipient_node).await;
+    let recipient = mem_recipient(&recipient_node);
     let report = recipient.poll().await.unwrap();
     assert_eq!(report, PollReport {
         filed: 1,
@@ -268,7 +259,7 @@ async fn test_a_missing_chunk_on_the_topic_discards_the_mail() -> Result<()> {
     let nodes = [gateway_node.as_ref(), recipient_node.as_ref()];
     let gateway = MailGateway::new(Arc::clone(&gateway_node));
     let target = opt_in(&gateway, nodes, &recipient_node).await?;
-    let mut sealed = sealed_by(&gateway_node, &target);
+    let mut sealed = sealed_for(&target);
     sealed.elements.pop();
     let topic = mail_topic(target.did);
     gateway_node
@@ -277,7 +268,7 @@ async fn test_a_missing_chunk_on_the_topic_discards_the_mail() -> Result<()> {
         .await?;
     await_owners_holding(nodes, &topic, holds_all(&sealed.elements)).await?;
 
-    let recipient = mem_recipient(&recipient_node).await;
+    let recipient = mem_recipient(&recipient_node);
     let report = recipient.poll().await.unwrap();
     assert_eq!(report, PollReport {
         incomplete: 1,
@@ -310,11 +301,10 @@ async fn test_a_mail_not_fetched_within_its_lifetime_is_gone() -> Result<()> {
         .map(|dot| dot.version.logical_time_ms)
         .min()
         .expect("the written mail has dots");
-    let keys = [recipient_node.delegatee_key().clone()];
-    let network_id = recipient_node.swarm.network_id();
+    let key = recipient_node.delegatee_key();
     let opened_at = |now_ms: u128| {
         let elements = entry.clone().retired_at(now_ms).data;
-        open_mail(&elements, target.did, &keys, network_id, now_ms, |_| true)
+        open_mail(&elements, target.did, key, |_| true)
     };
     let last_instant = issued_at + u128::from(MAX_TTL_MS) - 1;
     assert!(matches!(

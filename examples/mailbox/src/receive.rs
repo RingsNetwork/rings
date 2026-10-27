@@ -2,7 +2,7 @@
 //! every mail it opens in the INBOX.
 //!
 //! ```text
-//!   <dir>/recipient/   the recipient's records: opened mail, filed Message-IDs, retired keys
+//!   <dir>/recipient/   the recipient's records: opened mail ids and filed Message-IDs
 //!   mail topic ─poll─▶ open ─▶ INBOX
 //! ```
 //!
@@ -46,7 +46,7 @@ impl MailInbox for StoreInbox {
 }
 
 /// The recipient filing `processor`'s mail in `store`, its records under `records`: kept
-/// across restarts and never evicted, since they hold the retired keys mail still opens with.
+/// across restarts and never evicted, so a restart neither opens nor files a mail twice.
 pub async fn recipient(
     processor: Arc<Processor>,
     store: Arc<Store>,
@@ -65,5 +65,4 @@ pub async fn recipient(
         records,
         DEFAULT_MAIL_POLL_INTERVAL,
     )
-    .await
 }

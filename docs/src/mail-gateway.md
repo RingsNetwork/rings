@@ -30,13 +30,13 @@ per recipient.
 
 A node takes mail only while it publishes a mail descriptor `μ(d)` on its topic
 `mail_descriptor:<did>`. The descriptor is a signed registry lease, like the DNS relay's service
-descriptor (#918), re-published on every heartbeat. It carries:
+descriptor (#918), re-published on every heartbeat. Its signature carries the delegation that
+authorizes the node's session key.
 
-* the delegatee's secp256k1 public key `ek`, which mail is sealed to;
-* in its signature, the delegation that authorizes that key.
-
-A wallet account (EIP-191, BIP-137) cannot decrypt with its account key, so the descriptor names
-the session key instead. A reader takes the descriptor only if `ek` is the key that signed it.
+Mail is sealed to that session key, the delegatee's secp256k1 public key `ek`, because a wallet
+account (EIP-191, BIP-137) cannot decrypt with its account key. The descriptor carries no copy
+of `ek`. The gateway recovers it from the descriptor's signature, so `ek` is always the key that
+signed it.
 
 In Rust, a node opts in through its builder:
 
@@ -51,16 +51,20 @@ let processor = ProcessorBuilder::from_config(&config)?
 
 The schedule obeys the registry timing law. The heartbeat interval must be below the TTL and
 below 300 seconds, and the TTL at most 600 seconds. A node that stops taking mail stops its
-heartbeat. Gateways then refuse its address within the TTL.
+heartbeat. Within the TTL, gateways then defer mail to it with `451`, and senders retry until
+it is back.
 
 ## The gateway
 
 | Command | Rule |
 |---|---|
-| `RCPT TO:<l@any domain>` | `250` if `l` is a DID with a live descriptor; `550` otherwise; `451` if the DHT cannot tell |
+| `RCPT TO:<l@any domain>` | `250` if `l` is a DID with a live descriptor, which the session keeps for DATA; `451` if it has none or the DHT cannot tell; `550` if `l` is not a DID |
 | `DATA m` | for each distinct recipient DID, concurrently: seal the traced message, write it; `250` once an owner of every write reported holding it |
 | | `552` above 32 chunks (`SIZE` advertises the bound, about 1 MiB); `451` if every owner of a write refused it, no owner reported within 60 seconds, or a write failed |
 
+* A DID with no live descriptor gets `451`, not `550`. A gateway that keeps nothing cannot tell
+  a recipient that is away from one that never took mail. The sender's retries reach a
+  recipient that comes back, and only a local part that is not a DID is refused.
 * `250` means that an owner reported storing the mail (a store report, #866). One owner is
   enough, since a recipient's fetch can then reach the mail. Waiting for every owner would let
   one slow or refusing owner turn a held mail into a retry. Read-your-writes (#948, #982)
@@ -92,8 +96,8 @@ It listens on `[::]:25` by default (`--smtp`). Point the MX of each domain at `-
 topic(d)   = "mail:" ‖ d                              EntryKind::Data
 c          = AeadCiphertext(m)                         ElGamal-wrapped ChaCha20-Poly1305 key,
                                                        aad = "rings-node:mail:" ‖ d
-chunk_i    = (mail_id, i, n, slice_i(c))               each element ≤ ENTRY_PAYLOAD_MAX_BYTES
-manifest   = (d, mail_id = H(c), [H(chunk_i)], sig_gateway)
+chunk_i    = slice_i(c)                                each element ≤ ENTRY_PAYLOAD_MAX_BYTES
+manifest   = (mail_id = H(c), [H(chunk_0) … H(chunk_{n−1})])
 write      = Extend(topic(d), [manifest, chunk_0 … chunk_{n−1}], lifetime = MAX_TTL_MS)
 ```
 
@@ -104,8 +108,10 @@ A plain append would request the default 10 minutes and need one message per ele
 
 Laws the recipient keeps:
 
-* **Integrity.** It takes a chunk only if the chunk element's digest is listed in a manifest
-  whose gateway signature verifies. A forged chunk that names a known `mail_id` is never read.
+* **Integrity.** It reads a chunk only through a manifest that lists the chunk element's
+  digest, in that manifest's order. A forged chunk, or a manifest listing one, never alters a
+  mail. The manifest is not signed: gateways are interchangeable, and the content address
+  below already fixes what a manifest can claim.
 * **All or nothing.** The AEAD tag covers the whole of `c`. A missing or altered chunk discards
   the whole mail, and the next poll tries it again.
 * **Content address.** It ignores a manifest whose chunks do not concatenate to the preimage of
@@ -128,10 +134,11 @@ The recipient library (`rings_node::mail::recipient`) builds for native and brow
   in a browser. It files mail into any `MailInbox` (`KvInbox` over a key-value store, or the
   mailbox example's INBOX).
 * **At least once.** It files a mail before it records it, so a crash between the two files the
-  mail again on restart. A mail is never lost to the recipient, at worst filed twice.
-* **Key rotation.** When the node starts under a new delegatee key, the recipient retires the
-  old one and keeps it for at least 100 minutes, so mail sealed to the old key still opens. The records
-  hold these secrets, as the node's configuration holds its current one.
+  mail again on restart. A crash never loses a mail; at worst it files it twice.
+* **One key.** Mail opens only under the node's current delegatee key. Mail sealed to a key the
+  node no longer holds is lost, like mail not fetched within its lifetime. A browser node takes
+  a new key at every load, so mail that a gateway accepted under the old key, within the
+  descriptor's freshness window around a reload, never opens.
 
 ```rust
 use rings_node::mail::recipient::KvInbox;
@@ -139,7 +146,7 @@ use rings_node::mail::recipient::Recipient;
 use rings_node::mail::recipient::DEFAULT_MAIL_POLL_INTERVAL;
 
 let inbox = KvInbox::new(mail_store);
-let recipient = Recipient::start(processor, inbox, records, DEFAULT_MAIL_POLL_INTERVAL).await?;
+let recipient = Recipient::start(processor, inbox, records, DEFAULT_MAIL_POLL_INTERVAL)?;
 recipient.run(stop).await; // or `recipient.poll().await?` on a schedule of your own
 ```
 

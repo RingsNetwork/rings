@@ -1,9 +1,8 @@
-//! The pure laws of mail: addressing, the descriptor's key binding, the envelope's sizes, the
+//! The pure laws of mail: addressing, the descriptor's key, the envelope's sizes, the
 //! opening of a topic, and the gateway's verdict on a written mail.
 
 use std::future::pending;
 use std::future::ready;
-use std::slice::from_ref;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -24,11 +23,9 @@ use super::descriptor::MailDescriptor;
 use super::descriptor::MailDescriptorBody;
 use super::descriptor::MailRecipient;
 use super::envelope::seal;
-use super::envelope::MailChunk;
 use super::envelope::MailDigest;
 use super::envelope::MailElement;
 use super::envelope::MailManifest;
-use super::envelope::ManifestBody;
 use super::envelope::SealError;
 use super::envelope::SealedMail;
 use super::envelope::MAIL_CHUNKS_MAX;
@@ -41,12 +38,10 @@ use super::gateway::MailGatewayError;
 use super::open::open_mail;
 use super::open::OpenedMail;
 use super::open::Opening;
-use super::recipient::rotation;
 use super::recipient::RecipientRecord;
 use super::recipient::MESSAGE_ID_RETENTION_MS;
 use super::recipient::OPENED_RETENTION_MS;
 use super::registration::MailOffer;
-use crate::descriptor::sign_descriptor_body;
 use crate::descriptor::SignedDescriptor;
 
 /// The overlay every fixture is signed for.
@@ -68,22 +63,14 @@ fn recipient_of(key: &DelegateeKey) -> MailRecipient {
     }
 }
 
-/// `message` sealed for `recipient` by `gateway`.
-fn sealed(message: &[u8], recipient: &DelegateeKey, gateway: &DelegateeKey) -> SealedMail {
-    let signer = MessageSigner::new(gateway, NETWORK);
-    seal(
-        message,
-        &recipient_of(recipient),
-        signer,
-        get_epoch_ms(),
-        &mut OsRng,
-    )
-    .unwrap()
+/// `message` sealed for `recipient`.
+fn sealed(message: &[u8], recipient: &DelegateeKey) -> SealedMail {
+    seal(message, &recipient_of(recipient), &mut OsRng).unwrap()
 }
 
-/// What `elements` open to for `recipient` under `keys`, nothing skipped.
-fn opened(elements: &[Bytes], recipient: Did, keys: &[DelegateeKey]) -> Vec<Opening> {
-    open_mail(elements, recipient, keys, NETWORK, get_epoch_ms(), |_| true)
+/// What `elements` open to for `recipient` under `key`, nothing skipped.
+fn opened(elements: &[Bytes], recipient: Did, key: &DelegateeKey) -> Vec<Opening> {
+    open_mail(elements, recipient, key, |_| true)
 }
 
 /// The messages among `openings`.
@@ -121,45 +108,34 @@ fn test_addressed_did_reads_the_canonical_did_in_any_case_and_domain() {
     }
 }
 
+/// The key law: mail to a descriptor is sealed to the key its signature recovers to, the
+/// signing delegatee's; a descriptor altered after signing, read in another overlay or read for
+/// another DID gives no key.
 #[test]
-fn test_a_descriptor_takes_the_signing_delegatee_key_only() {
+fn test_a_descriptor_seals_mail_to_the_key_that_signed_it() {
     let key = key();
-    let signer = MessageSigner::new(&key, NETWORK);
     let now_ms = get_epoch_ms();
-    let body = |encryption_key| MailDescriptorBody {
+    let body = MailDescriptorBody {
         did: key.delegator_did(),
         public_key: key.delegation().delegator_verification_pubkey().unwrap(),
         network_id: NETWORK,
-        encryption_key,
         fresh_for_ms: 90_000,
         expires_at_ms: now_ms + 90_000,
     };
-    let honest = MailDescriptor::new_signed(body(key.delegatee_public_key()), signer.by_ref())
+    let descriptor = MailDescriptor::new_signed(body, MessageSigner::new(&key, NETWORK))
         .unwrap()
         .heard_at(now_ms);
-    assert!(honest.encrypts_to_signer());
+    let did = key.delegator_did();
+    let live = |descriptor: &MailDescriptor, did, network| {
+        MailDescriptor::live_recipient([descriptor.clone()], did, now_ms, network)
+    };
+    assert_eq!(live(&descriptor, did, NETWORK), Some(recipient_of(&key)));
+    let mut altered = descriptor.clone();
+    altered.body.fresh_for_ms -= 1;
+    assert_eq!(live(&altered, did, NETWORK), None);
+    assert_eq!(live(&descriptor, did, NETWORK + 1), None);
     assert_eq!(
-        MailDescriptor::latest_live_for([honest.clone()], key.delegator_did(), now_ms, NETWORK)
-            .map(|descriptor| descriptor.recipient()),
-        Some(recipient_of(&key))
-    );
-
-    let other = SecretKey::random().pubkey();
-    assert!(
-        MailDescriptor::new_signed(body(other), signer.by_ref()).is_err(),
-        "signing refuses a key other than the signer's"
-    );
-    // Signed past that check, the descriptor verifies but binds no key it is signed with.
-    let unbound: MailDescriptor =
-        sign_descriptor_body(body(other), signer.by_ref(), "mismatch").unwrap();
-    let unbound = unbound.heard_at(now_ms);
-    assert!(!unbound.encrypts_to_signer());
-    assert_eq!(
-        MailDescriptor::latest_live_for([unbound], key.delegator_did(), now_ms, NETWORK),
-        None
-    );
-    assert_eq!(
-        MailDescriptor::latest_live_for([honest], Did::from(7u32), now_ms, NETWORK),
+        live(&descriptor, Did::from(7u32), NETWORK),
         None,
         "a descriptor speaks only for its own DID"
     );
@@ -177,19 +153,14 @@ fn test_the_default_mail_offer_satisfies_the_timing_law() {
 
 #[test]
 fn test_the_widest_chunk_element_is_one_entry_payload() {
-    let chunk = MailElement::Chunk(MailChunk {
-        mail_id: MailDigest::of(b"c"),
-        index: u8::MAX,
-        count: u8::MAX,
-        slice: Bytes::from(vec![0xff; MAIL_CHUNK_SLICE_MAX]),
-    });
+    let chunk = MailElement::Chunk(Bytes::from(vec![0xff; MAIL_CHUNK_SLICE_MAX]));
     assert_eq!(chunk.encode().unwrap().len(), ENTRY_PAYLOAD_MAX_BYTES);
 }
 
 #[test]
 fn test_the_largest_message_seals_into_the_most_chunks() {
-    let (recipient, gateway) = (key(), key());
-    let largest = sealed(&vec![b'x'; MAIL_MESSAGE_MAX], &recipient, &gateway);
+    let recipient = key();
+    let largest = sealed(&vec![b'x'; MAIL_MESSAGE_MAX], &recipient);
     assert_eq!(largest.elements.len(), 1 + MAIL_CHUNKS_MAX);
     assert!(largest
         .elements
@@ -200,18 +171,15 @@ fn test_the_largest_message_seals_into_the_most_chunks() {
         .iter()
         .skip(1)
         .map(|element| match MailElement::decode(element).unwrap() {
-            MailElement::Chunk(chunk) => chunk.slice.len(),
+            MailElement::Chunk(slice) => slice.len(),
             MailElement::Manifest(_) => panic!("only the first element is the manifest"),
         })
         .sum::<usize>();
     assert_eq!(ciphertext, MAIL_CIPHERTEXT_MAX);
 
-    let signer = MessageSigner::new(&gateway, NETWORK);
     let too_large = seal(
         &vec![b'x'; MAIL_MESSAGE_MAX + 1],
         &recipient_of(&recipient),
-        signer,
-        get_epoch_ms(),
         &mut OsRng,
     );
     assert!(matches!(
@@ -222,71 +190,65 @@ fn test_the_largest_message_seals_into_the_most_chunks() {
 
 #[test]
 fn test_a_sealed_mail_opens_only_for_its_recipient() {
-    let (recipient, gateway) = (key(), key());
-    let mail = sealed(MESSAGE, &recipient, &gateway);
+    let recipient = key();
+    let mail = sealed(MESSAGE, &recipient);
     let did = recipient.delegator_did();
-    assert_eq!(opened(&mail.elements, did, from_ref(&recipient)), vec![
+    assert_eq!(opened(&mail.elements, did, &recipient), vec![
         Opening::Opened(OpenedMail {
             mail_id: mail.mail_id,
-            gateway: gateway.delegator_did(),
             message: MESSAGE.to_vec(),
         })
     ]);
     // Law (round trip): the elements' order is immaterial.
     let reversed = mail.elements.iter().rev().cloned().collect::<Vec<_>>();
+    assert_eq!(messages(&opened(&reversed, did, &recipient)), vec![MESSAGE]);
     assert_eq!(
-        messages(&opened(&reversed, did, from_ref(&recipient))),
-        vec![MESSAGE]
-    );
-    assert_eq!(
-        opened(&mail.elements, did, &[key()]),
+        opened(&mail.elements, did, &key()),
         vec![Opening::Unreadable {
             mail_id: mail.mail_id
         }],
         "another key opens nothing"
     );
-    assert!(
-        opened(&mail.elements, key().delegator_did(), &[recipient]).is_empty(),
-        "another DID takes no manifest sealed for this one"
+    assert_eq!(
+        opened(&mail.elements, key().delegator_did(), &recipient),
+        vec![Opening::Unreadable {
+            mail_id: mail.mail_id
+        }],
+        "the associated data binds the DID: under another, even its key opens nothing"
     );
 }
 
+/// The integrity law: a chunk no manifest lists is never read, and in place of a listed one it
+/// completes nothing.
 #[test]
-fn test_a_forged_chunk_naming_the_mail_id_is_ignored() {
-    let (recipient, gateway) = (key(), key());
-    let mail = sealed(MESSAGE, &recipient, &gateway);
-    let forged = MailElement::Chunk(MailChunk {
-        mail_id: mail.mail_id,
-        index: 0,
-        count: 1,
-        slice: Bytes::from_static(b"forged"),
-    })
-    .encode()
-    .unwrap();
+fn test_a_forged_chunk_is_ignored() {
+    let recipient = key();
+    let mail = sealed(MESSAGE, &recipient);
+    let forged = MailElement::Chunk(Bytes::from_static(b"forged"))
+        .encode()
+        .unwrap();
     let did = recipient.delegator_did();
     let with_forged = std::iter::once(forged.clone())
         .chain(mail.elements.iter().cloned())
         .collect::<Vec<_>>();
-    assert_eq!(
-        messages(&opened(&with_forged, did, from_ref(&recipient))),
-        vec![MESSAGE]
-    );
+    assert_eq!(messages(&opened(&with_forged, did, &recipient)), vec![
+        MESSAGE
+    ]);
     // In place of the genuine chunk, the forged one completes nothing.
     let [manifest, ..] = mail.elements.as_slice() else {
         panic!("a sealed mail has a manifest");
     };
-    assert_eq!(
-        opened(&[manifest.clone(), forged], did, &[recipient]),
-        vec![Opening::Incomplete {
+    assert_eq!(opened(&[manifest.clone(), forged], did, &recipient), vec![
+        Opening::Incomplete {
             mail_id: mail.mail_id
-        }]
-    );
+        }
+    ]);
 }
 
 #[test]
 fn test_a_missing_chunk_discards_the_mail() {
-    let (recipient, gateway) = (key(), key());
-    let mail = sealed(&vec![b'x'; 3 * MAIL_CHUNK_SLICE_MAX], &recipient, &gateway);
+    let recipient = key();
+    let mail = sealed(&vec![b'x'; 3 * MAIL_CHUNK_SLICE_MAX], &recipient);
     assert_eq!(mail.elements.len(), 1 + 4);
     let did = recipient.delegator_did();
     for missing in 1..mail.elements.len() {
@@ -298,7 +260,7 @@ fn test_a_missing_chunk_discards_the_mail() {
             .map(|(_, element)| element.clone())
             .collect::<Vec<_>>();
         assert_eq!(
-            opened(&elements, did, from_ref(&recipient)),
+            opened(&elements, did, &recipient),
             vec![Opening::Incomplete {
                 mail_id: mail.mail_id
             }],
@@ -307,32 +269,21 @@ fn test_a_missing_chunk_discards_the_mail() {
     }
 }
 
-/// Law (content address): a manifest a forger signs for the genuine mail id, over chunks that
+/// Law (content address): a manifest anyone writes for the genuine mail id, over chunks that
 /// do not concatenate to its preimage, is ignored, so it can neither replace the genuine mail
 /// nor mark it unreadable while its chunks are missing.
 #[test]
 fn test_a_forged_manifest_never_hides_the_genuine_mail() {
-    let (recipient, gateway, forger) = (key(), key(), key());
-    let mail = sealed(MESSAGE, &recipient, &gateway);
+    let recipient = key();
+    let mail = sealed(MESSAGE, &recipient);
     let did = recipient.delegator_did();
-    let forged_chunk = MailElement::Chunk(MailChunk {
+    let forged_chunk = MailElement::Chunk(Bytes::from_static(b"forged"))
+        .encode()
+        .unwrap();
+    let forged_manifest = MailManifest {
         mail_id: mail.mail_id,
-        index: 0,
-        count: 1,
-        slice: Bytes::from_static(b"forged"),
-    })
-    .encode()
-    .unwrap();
-    let forged_manifest = MailManifest::new_signed(
-        ManifestBody {
-            recipient: did,
-            mail_id: mail.mail_id,
-            chunks: vec![MailDigest::of(&forged_chunk)],
-        },
-        MessageSigner::new(&forger, NETWORK),
-        get_epoch_ms(),
-    )
-    .unwrap();
+        chunks: vec![MailDigest::of(&forged_chunk)],
+    };
     let forgery = vec![
         MailElement::Manifest(forged_manifest).encode().unwrap(),
         forged_chunk,
@@ -341,16 +292,11 @@ fn test_a_forged_manifest_never_hides_the_genuine_mail() {
         [forgery.clone(), mail.elements.clone()].concat(),
         [mail.elements.clone(), forgery.clone()].concat(),
     ] {
-        assert_eq!(
-            messages(&opened(&elements, did, from_ref(&recipient))),
-            vec![MESSAGE]
-        );
+        assert_eq!(messages(&opened(&elements, did, &recipient)), vec![MESSAGE]);
     }
     let genuine_manifest = mail.elements.first().cloned().unwrap();
     assert_eq!(
-        opened(&[forgery, vec![genuine_manifest]].concat(), did, &[
-            recipient
-        ]),
+        opened(&[forgery, vec![genuine_manifest]].concat(), did, &recipient),
         vec![Opening::Incomplete {
             mail_id: mail.mail_id
         }]
@@ -358,29 +304,9 @@ fn test_a_forged_manifest_never_hides_the_genuine_mail() {
 }
 
 #[test]
-fn test_a_retired_key_still_opens_mail_sealed_to_it() {
-    let account = SecretKey::random();
-    let retired = DelegateeKey::new_with_seckey(&account).unwrap();
-    let current = DelegateeKey::new_with_seckey(&account).unwrap();
-    assert_eq!(retired.delegator_did(), current.delegator_did());
-    let mail = sealed(MESSAGE, &retired, &key());
-    let did = current.delegator_did();
-    assert_eq!(
-        messages(&opened(&mail.elements, did, &[current.clone(), retired])),
-        vec![MESSAGE]
-    );
-    assert_eq!(opened(&mail.elements, did, &[current]), vec![
-        Opening::Unreadable {
-            mail_id: mail.mail_id
-        }
-    ]);
-}
-
-#[test]
 fn test_message_id_is_read_from_the_header_only() {
     let mail = |message: &[u8]| OpenedMail {
         mail_id: MailDigest::of(message),
-        gateway: Did::from(1u32),
         message: message.to_vec(),
     };
     for (message, expected) in [
@@ -405,72 +331,35 @@ fn test_message_id_is_read_from_the_header_only() {
 
 #[test]
 fn test_records_outlive_their_retention_exactly() {
-    let key = key();
     for (record, retention) in [
         (
             RecipientRecord::Opened { at_ms: 1_000 },
-            Some(OPENED_RETENTION_MS),
+            OPENED_RETENTION_MS,
         ),
         (
             RecipientRecord::Filed { at_ms: 1_000 },
-            Some(MESSAGE_ID_RETENTION_MS),
-        ),
-        (
-            RecipientRecord::Key {
-                key: key.clone(),
-                retired_at_ms: Some(1_000),
-            },
-            Some(OPENED_RETENTION_MS),
-        ),
-        (
-            RecipientRecord::Key {
-                key: key.clone(),
-                retired_at_ms: None,
-            },
-            None,
+            MESSAGE_ID_RETENTION_MS,
         ),
     ] {
-        match retention {
-            Some(retention) => {
-                assert!(!record.outlived_at(1_000 + retention - 1), "{record:?}");
-                assert!(record.outlived_at(1_000 + retention), "{record:?}");
-            }
-            None => assert!(
-                !record.outlived_at(u128::MAX),
-                "the current key never retires"
-            ),
-        }
+        assert!(!record.outlived_at(1_000 + retention - 1), "{record:?}");
+        assert!(record.outlived_at(1_000 + retention), "{record:?}");
     }
 }
 
+/// The one-key law: mail sealed to another delegatee key of the recipient's account, one a
+/// browser node held before its last load, does not open under the current key.
 #[test]
-fn test_a_start_under_a_new_key_retires_the_stored_one() {
+fn test_mail_sealed_to_a_key_the_recipient_no_longer_holds_never_opens() {
     let account = SecretKey::random();
-    let old = DelegateeKey::new_with_seckey(&account).unwrap();
-    let new = DelegateeKey::new_with_seckey(&account).unwrap();
-    let record = |key: &DelegateeKey, retired_at_ms| {
-        (
-            format!("key-{}", key.delegation().delegatee_did()),
-            RecipientRecord::Key {
-                key: key.clone(),
-                retired_at_ms,
-            },
-        )
-    };
-    assert_eq!(rotation(&[], &old, 5), vec![record(&old, None)]);
+    let before = DelegateeKey::new_with_seckey(&account).unwrap();
+    let current = DelegateeKey::new_with_seckey(&account).unwrap();
+    assert_eq!(before.delegator_did(), current.delegator_did());
+    let mail = sealed(MESSAGE, &before);
     assert_eq!(
-        rotation(&[record(&old, None)], &old, 5),
-        vec![],
-        "a restart under the same key writes nothing"
-    );
-    assert_eq!(rotation(&[record(&old, None)], &new, 5), vec![
-        record(&old, Some(5)),
-        record(&new, None)
-    ]);
-    assert_eq!(
-        rotation(&[record(&old, Some(3)), record(&new, None)], &new, 5),
-        vec![],
-        "a retired key keeps its retirement instant"
+        opened(&mail.elements, current.delegator_did(), &current),
+        vec![Opening::Unreadable {
+            mail_id: mail.mail_id
+        }]
     );
 }
 

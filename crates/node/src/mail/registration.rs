@@ -98,8 +98,8 @@ impl MailRegistration {
         }
     }
 
-    /// This recipient's signed descriptor under the lease `terms`: its delegatee's key, signed
-    /// by that delegatee.
+    /// This recipient's signed descriptor under the lease `terms`, signed by its delegatee,
+    /// whose key mail is sealed to.
     pub(crate) fn descriptor_at(
         &self,
         context: &RegistrationContext<'_>,
@@ -109,7 +109,6 @@ impl MailRegistration {
             did: context.did(),
             public_key: context.delegator_verification_pubkey()?,
             network_id: context.network_id(),
-            encryption_key: context.delegatee_key().delegatee_public_key(),
             fresh_for_ms: terms.fresh_for_ms,
             expires_at_ms: terms.expires_at_ms,
         };

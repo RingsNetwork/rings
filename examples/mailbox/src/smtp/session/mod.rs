@@ -14,11 +14,13 @@
 //! Two decisions take a fact only the shell can learn, so the session asks for it:
 //!
 //! - a recipient of [`Role::Directory`] is looked up by the shell ([`Next::Lookup`]), which
-//!   answers with [`Session::admit`];
+//!   answers with [`Session::admit`]; the session keeps what the directory said with the
+//!   recipient, so DATA commits it without asking again;
 //! - `STARTTLS`, when the session offers it, is answered with [`Next::StartTls`]; the shell runs
 //!   the handshake and reports it with [`Session::secured`], which starts the session afresh
 //!   (RFC 3207 §4.2).
 
+use rings_node::mail::descriptor::MailRecipient;
 use smtp_proto::Request;
 
 /// A reply: its code, enhanced status, and text lines.
@@ -74,7 +76,7 @@ pub enum Role {
     /// Submission from the mailbox's own user: any recipient, to be delivered onward.
     Submission,
     /// Final delivery for every recipient a directory outside the session admits: the mail
-    /// gateway (#1117), whose shell looks each one up in the DHT.
+    /// gateway (#1117), whose shell looks each one up in the DHT once, at RCPT.
     Directory,
 }
 
@@ -97,23 +99,25 @@ impl Role {
 /// What a directory says of a recipient: the answer to [`Next::Lookup`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Lookup {
-    /// The recipient takes mail here.
-    Admitted,
+    /// The recipient takes mail here, where its mail goes: kept with it for DATA.
+    Admitted(MailRecipient),
     /// No such recipient: `550`.
     Refused,
+    /// The recipient takes no mail now, whether it is away or never took any, which a directory
+    /// that keeps nothing cannot tell apart: `451`, so the client tries again later.
+    Offline,
     /// The directory could not tell: `451`, so the client tries again later.
     Unavailable,
 }
 
-impl From<bool> for Lookup {
-    /// A role's own decision: admitted or refused.
-    fn from(accepted: bool) -> Self {
-        if accepted {
-            Self::Admitted
-        } else {
-            Self::Refused
-        }
-    }
+/// A recipient the session accepted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Recipient {
+    /// The address RCPT named.
+    pub address: String,
+    /// Where the directory said its mail goes ([`Role::Directory`]); `None` for a role that
+    /// decides by itself.
+    pub mailbox: Option<MailRecipient>,
 }
 
 /// Whether the session offers `STARTTLS`, and whether TLS is up.
@@ -142,7 +146,7 @@ pub struct Transaction {
     /// The reverse path, empty for a bounce.
     pub from: String,
     /// The accepted recipients.
-    pub to: Vec<String>,
+    pub to: Vec<Recipient>,
     /// The message, dot-unstuffed, without the terminating `.`.
     pub message: Vec<u8>,
 }
@@ -164,7 +168,7 @@ enum Phase {
         /// The reverse path.
         from: String,
         /// The recipients accepted so far.
-        to: Vec<String>,
+        to: Vec<Recipient>,
     },
     /// The message body is being read.
     Data {
@@ -173,7 +177,7 @@ enum Phase {
         /// The reverse path.
         from: String,
         /// The recipients.
-        to: Vec<String>,
+        to: Vec<Recipient>,
     },
 }
 
@@ -409,30 +413,47 @@ impl Session {
     /// Answer RCPT TO `address`: by the role's own decision, or by asking the shell's directory
     /// when a transaction is open to take the recipient.
     fn rcpt(&mut self, address: String) -> Next {
+        if !self.in_transaction() {
+            return Next::Reply(send_mail_first());
+        }
         match self.role.accepts(&address) {
-            Some(accepted) => Next::Reply(self.admit(address, Lookup::from(accepted))),
-            None if self.in_transaction() => Next::Lookup(address),
-            None => Next::Reply(send_mail_first()),
+            Some(true) => Next::Reply(self.accept(Recipient {
+                address,
+                mailbox: None,
+            })),
+            Some(false) => Next::Reply(no_such_mailbox()),
+            None => Next::Lookup(address),
         }
     }
 
     /// Answer RCPT TO `address`, which the directory found as `lookup`.
     pub fn admit(&mut self, address: String, lookup: Lookup) -> Reply {
+        if !self.in_transaction() {
+            return send_mail_first();
+        }
+        match lookup {
+            Lookup::Admitted(mailbox) => self.accept(Recipient {
+                address,
+                mailbox: Some(mailbox),
+            }),
+            Lookup::Refused => no_such_mailbox(),
+            Lookup::Offline => Reply::line(451, "4.2.1", "Mailbox not online, try again later"),
+            Lookup::Unavailable => {
+                Reply::line(451, "4.4.3", "Directory unavailable, try again later")
+            }
+        }
+    }
+
+    /// Add `recipient` to the open transaction, unless it holds as many as the session takes.
+    fn accept(&mut self, recipient: Recipient) -> Reply {
         let max_recipients = self.max_recipients;
         let Phase::Transaction { to, .. } = &mut self.phase else {
             return send_mail_first();
         };
-        match lookup {
-            Lookup::Refused => return Reply::line(550, "5.1.1", "No such mailbox here"),
-            Lookup::Unavailable => {
-                return Reply::line(451, "4.4.3", "Directory unavailable, try again later");
-            }
-            Lookup::Admitted => {}
-        }
         if to.len() >= max_recipients {
             return Reply::line(452, "4.5.3", "Too many recipients");
         }
-        to.push(address);
+        to.push(recipient);
         Reply::line(250, "2.1.5", "OK")
     }
 
@@ -459,6 +480,11 @@ impl Session {
 /// The reply to RCPT outside a transaction.
 fn send_mail_first() -> Reply {
     Reply::line(503, "5.5.1", "Send MAIL first")
+}
+
+/// The reply to RCPT for a recipient not taken here.
+fn no_such_mailbox() -> Reply {
+    Reply::line(550, "5.1.1", "No such mailbox here")
 }
 
 #[cfg(test)]

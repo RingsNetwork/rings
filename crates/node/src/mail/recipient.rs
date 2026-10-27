@@ -1,11 +1,10 @@
-//! The recipient's side: its reads of its mail topic, the keys it opens mail with, and what it
-//! remembers. It builds for native and browser nodes alike: its records and its inbox are any
+//! The recipient's side: its reads of its mail topic, and what it remembers. It builds for native and browser nodes alike: its records and its inbox are any
 //! key-value store (a file store natively, IndexedDB in a browser) and any [`MailInbox`].
 //!
 //! ```text
 //!   poll(t):  E = fetch(mail_topic(d))                      the elements live at t
 //!             R = records ∖ { r | outlived(r, t) }           retention
-//!             for o ∈ open(E, d, keyring(R), fresh = ¬opened_R):
+//!             for o ∈ open(E, d, k, fresh = ¬opened_R):     k = the node's delegatee key
 //!               Incomplete             ─▶ nothing           tried again on the next poll
 //!               Unreadable             ─▶ opened(id)
 //!               Opened(m) ∧ filed_R(k) ─▶ opened(id)        k = H(Message-ID), or id without one
@@ -19,17 +18,15 @@
 //! - **No removal.** It never writes its mail topic: every element retires at its horizon, and
 //!   a data carrier's remove budget (`DATA_TOMBSTONE_MAX_LEN`) is never spent on mail.
 //! - **At least once.** A mail is filed before it is remembered, so a crash between the two
-//!   files it again after a restart: a mail is never lost to the recipient, at worst filed twice.
+//!   files it again after a restart: a crash never loses a mail, at worst it is filed twice.
 //! - **Deduplication.** Encryption is randomized, so a resent mail is a new ciphertext: mail
 //!   with a `Message-ID` already filed is not filed again.
 //! - **Retention.** An opened id is kept `H + σ` ([`OPENED_RETENTION_MS`]), after which no copy
-//!   of its mail is served; a `Message-ID` is kept [`MESSAGE_ID_RETENTION_MS`]; a retired key is
-//!   kept `H + σ` after its retirement, so mail sealed to it before a rotation still opens.
-//! - **Rotation.** When the recipient starts under a delegatee key other than the one it stored
-//!   as current, it retires the stored one at that instant.
-//!
-//! The records hold the delegatee secrets the keyring opens mail with, as the node's own
-//! configuration holds its current one.
+//!   of its mail is served; a `Message-ID` is kept [`MESSAGE_ID_RETENTION_MS`].
+//! - **One key.** Mail opens only under the node's current delegatee key. Mail sealed to a key
+//!   the node no longer holds is lost, as mail not fetched within its lifetime is: a browser
+//!   node takes a new key at every load, so mail a gateway accepted under the old one, within the
+//!   descriptor's freshness window around a reload, never opens.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -38,7 +35,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rings_core::consts::MAX_TTL_MS;
 use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
-use rings_core::delegation::DelegateeKey;
 use rings_core::dht::entry::Entry;
 use rings_core::lifecycle::StopToken;
 use rings_core::storage::KvStorageInterface;
@@ -53,7 +49,6 @@ use super::mail_topic;
 use super::open::open_mail;
 use super::open::OpenedMail;
 use super::open::Opening;
-use crate::prelude::rings_core::dht::Did;
 use crate::processor::sleep_unless_stopped;
 use crate::processor::Processor;
 
@@ -61,7 +56,7 @@ use crate::processor::Processor;
 pub const DEFAULT_MAIL_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// The longest interval between two polls, `H / 2` (the schedule law).
 pub const MAX_MAIL_POLL_INTERVAL: Duration = Duration::from_millis(MAX_TTL_MS / 2);
-/// How long an opened mail id, and a retired key, is kept: `H + σ`, after which no owner on a
+/// How long an opened mail id is kept: `H + σ`, after which no owner on a
 /// clock within the skew tolerance serves an element of a mail written before.
 pub const OPENED_RETENTION_MS: u128 = MAX_TTL_MS as u128 + TS_OFFSET_TOLERANCE_MS;
 /// How long a filed `Message-ID` is kept: five days, the longest a sender retries a message
@@ -83,8 +78,6 @@ pub trait MailInbox: MaybeSendSync {
 /// A mail as a [`KvInbox`] keeps it.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct StoredMail {
-    /// The gateway that wrote it.
-    pub gateway: Did,
     /// The message.
     pub message: Vec<u8>,
     /// When it was filed, in milliseconds since Unix epoch.
@@ -117,7 +110,6 @@ where K: KvStorageInterface<StoredMail> + MaybeSendSync
 
     async fn file(&self, mail: &OpenedMail) -> Result<(), Self::Error> {
         let stored = StoredMail {
-            gateway: mail.gateway,
             message: mail.message.clone(),
             filed_at_ms: get_epoch_ms(),
         };
@@ -140,30 +132,14 @@ pub enum RecipientRecord {
         /// When.
         at_ms: u128,
     },
-    /// A delegatee key: the current one (`retired_at_ms = None`) or one retired then.
-    Key {
-        /// The key, secret included.
-        key: DelegateeKey,
-        /// When it was retired, if it was.
-        retired_at_ms: Option<u128>,
-    },
 }
 
 impl RecipientRecord {
-    /// Whether this record has outlived its retention at `now_ms` (the retention law); the
-    /// current key never does.
+    /// Whether this record has outlived its retention at `now_ms` (the retention law).
     pub fn outlived_at(&self, now_ms: u128) -> bool {
         let (since, retention) = match self {
             Self::Opened { at_ms } => (*at_ms, OPENED_RETENTION_MS),
             Self::Filed { at_ms } => (*at_ms, MESSAGE_ID_RETENTION_MS),
-            Self::Key {
-                retired_at_ms: Some(at_ms),
-                ..
-            } => (*at_ms, OPENED_RETENTION_MS),
-            Self::Key {
-                retired_at_ms: None,
-                ..
-            } => return false,
         };
         now_ms >= since.saturating_add(retention)
     }
@@ -176,69 +152,16 @@ enum RecordName {
     Opened(MailDigest),
     /// A deduplication key's [`RecipientRecord::Filed`].
     Filed(MailDigest),
-    /// A delegatee's [`RecipientRecord::Key`], by the delegatee's DID.
-    Key(Did),
 }
 
 impl std::fmt::Display for RecordName {
-    /// `opened-<hex>`, `filed-<hex>` or `key-<did>`.
+    /// `opened-<hex>` or `filed-<hex>`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Opened(mail_id) => write!(f, "opened-{mail_id}"),
             Self::Filed(key) => write!(f, "filed-{key}"),
-            Self::Key(delegatee) => write!(f, "key-{delegatee}"),
         }
     }
-}
-
-/// The records a recipient starting at `now_ms` under `current` writes (the rotation law): every
-/// stored current key that is not `current` retired now, and `current` as current.
-pub(super) fn rotation(
-    stored: &[(String, RecipientRecord)],
-    current: &DelegateeKey,
-    now_ms: u128,
-) -> Vec<(String, RecipientRecord)> {
-    let current_delegatee = current.delegation().delegatee_did();
-    let retired = stored.iter().filter_map(|(_, record)| match record {
-        RecipientRecord::Key {
-            key,
-            retired_at_ms: None,
-        } if key.delegation().delegatee_did() != current_delegatee => Some((
-            RecordName::Key(key.delegation().delegatee_did()).to_string(),
-            RecipientRecord::Key {
-                key: key.clone(),
-                retired_at_ms: Some(now_ms),
-            },
-        )),
-        _ => None,
-    });
-    let current_record = (
-        RecordName::Key(current_delegatee).to_string(),
-        RecipientRecord::Key {
-            key: current.clone(),
-            retired_at_ms: None,
-        },
-    );
-    let stored_as_current = stored.contains(&current_record);
-    retired
-        .chain((!stored_as_current).then_some(current_record))
-        .collect()
-}
-
-/// The keys a recipient under `current` opens mail with: `current`, then every retired key of
-/// `records`.
-fn keyring(
-    records: &BTreeMap<String, RecipientRecord>,
-    current: &DelegateeKey,
-) -> Vec<DelegateeKey> {
-    let retired = records.values().filter_map(|record| match record {
-        RecipientRecord::Key {
-            key,
-            retired_at_ms: Some(_),
-        } => Some(key.clone()),
-        _ => None,
-    });
-    std::iter::once(current.clone()).chain(retired).collect()
 }
 
 /// The key a mail is deduplicated by: `H(Message-ID)`, or its own id without one.
@@ -255,9 +178,9 @@ pub struct PollReport {
     pub filed: usize,
     /// Mail opened whose `Message-ID` was filed before.
     pub duplicates: usize,
-    /// Mail no key opens.
+    /// Mail the node's key does not open.
     pub unreadable: usize,
-    /// Mail a verified manifest lists a missing chunk of.
+    /// Mail a manifest lists a missing chunk of.
     pub incomplete: usize,
 }
 
@@ -300,9 +223,9 @@ where
     I: MailInbox,
     K: KvStorageInterface<RecipientRecord> + MaybeSendSync,
 {
-    /// Start the recipient of `processor`'s DID, polling every `interval`: apply the rotation
-    /// law to `records`.
-    pub async fn start(
+    /// The recipient of `processor`'s DID, filing into `inbox`, remembering in `records`, and
+    /// polling every `interval`, which the schedule law bounds.
+    pub fn start(
         processor: Arc<Processor>,
         inbox: I,
         records: K,
@@ -310,13 +233,6 @@ where
     ) -> Result<Self, RecipientError<I::Error>> {
         if interval > MAX_MAIL_POLL_INTERVAL {
             return Err(RecipientError::PollInterval { interval });
-        }
-        let stored = records.get_all().await.map_err(RecipientError::Records)?;
-        for (name, record) in rotation(&stored, processor.delegatee_key(), get_epoch_ms()) {
-            records
-                .put(&name, &record)
-                .await
-                .map_err(RecipientError::Records)?;
         }
         Ok(Self {
             processor,
@@ -345,11 +261,9 @@ where
         let Some(entry) = entry else {
             return Ok(PollReport::default());
         };
-        let keys = keyring(&records, self.processor.delegatee_key());
         let fresh =
             |mail_id: &MailDigest| !records.contains_key(&RecordName::Opened(*mail_id).to_string());
-        let network_id = self.processor.swarm.network_id();
-        let openings = open_mail(&entry.data, did, &keys, network_id, now_ms, fresh);
+        let openings = open_mail(&entry.data, did, self.processor.delegatee_key(), fresh);
         let mut report = PollReport::default();
         for opening in openings {
             let mail_id = opening.mail_id();

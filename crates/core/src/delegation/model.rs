@@ -134,6 +134,21 @@ impl Delegation {
         at_ms: u128,
         authorization: DelegatorAuthorization,
     ) -> Result<()> {
+        self.signer_under(msg, sig, at_ms, authorization).map(drop)
+    }
+
+    /// The delegatee key that signed `msg` with `sig` at `at_ms` under `authorization`: the key
+    /// `sig` recovers to, once [`Self::verify_under`]'s checks pass, recovered once.
+    ///
+    /// Law: `verify_under(m, s, t, a) = signer_under(m, s, t, a).map(drop)`, and `Ok(k)` implies
+    /// `Did::from(k.address()) = self.delegatee_did`.
+    pub(crate) fn signer_under(
+        &self,
+        msg: &[u8],
+        sig: impl AsRef<[u8]>,
+        at_ms: u128,
+        authorization: DelegatorAuthorization,
+    ) -> Result<PublicKey<33>> {
         match authorization {
             DelegatorAuthorization::Verify => self.verify_delegator_authorization_at(at_ms)?,
             DelegatorAuthorization::Established if self.is_expired_at(at_ms) => {
@@ -141,10 +156,10 @@ impl Delegation {
             }
             DelegatorAuthorization::Established => {}
         }
-        if !signers::secp256k1::verify(msg, &self.delegatee_did, sig) {
-            return Err(Error::VerifySignatureFailed);
-        }
-        Ok(())
+        signers::secp256k1::recover(msg, sig)
+            .ok()
+            .filter(|key| Did::from(key.address()) == self.delegatee_did)
+            .ok_or(Error::VerifySignatureFailed)
     }
 
     /// Get the legacy secp256k1-compatible delegator public key.

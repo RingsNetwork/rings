@@ -4,13 +4,17 @@
 //!   recipient(d)  = μ(d).recipient()   μ(d) = the newest descriptor on descriptor_topic(d)
 //!                                             that is signed for d, binds its key, verifies
 //!                                             and is live
-//!                 = ⊥                  no such descriptor                       (RCPT: 550)
+//!                 = ⊥                  no such descriptor                       (RCPT: 451)
 //!   deliver(d, m) = Extend(mail_topic(d), seal(m, ek(μ(d))), lifetime = MAX_TTL_MS),
 //!                   reported under StoreQuorum::Any:
 //!                 = Ok    at the first owner's Stored report                    (DATA: 250)
 //!                 = Err   once every owner refused, or no report within W       (DATA: 451)
 //!                                                          W = MAIL_STORE_REPORT_WAIT
 //! ```
+//!
+//! A DID with no live descriptor is `451`, not `550`: a gateway that keeps nothing cannot tell
+//! a recipient that is away from one that never took mail, and the sender's retries reach one
+//! that comes back.
 //!
 //! The gateway keeps nothing: each RCPT is one fetch, each DATA one reported write. `deliver`
 //! returning `Ok` means an owner reported holding the mail (#866), so a recipient's fetch can
@@ -32,7 +36,6 @@ use rand::rngs::OsRng;
 use rings_core::consts::MAX_TTL_MS;
 use rings_core::dht::entry::Entry;
 use rings_core::lifecycle::StopSource;
-use rings_core::message::MessageSigner;
 use rings_core::swarm::storage_api::StoreQuorum;
 use rings_core::swarm::storage_api::StoreUnconfirmed;
 use rings_core::utils::get_epoch_ms;
@@ -112,7 +115,7 @@ pub enum MailGatewayError {
 #[cfg_attr(rings_native, async_trait)]
 pub trait MailDrop: MaybeSendSync {
     /// Where mail to `did` goes and the key it is sealed to, if `did` has a live mail
-    /// descriptor: the RCPT rule.
+    /// descriptor: the RCPT rule, which looks it up once per RCPT.
     async fn recipient(&self, did: Did) -> Result<Option<MailRecipient>, MailGatewayError>;
 
     /// Seal `message` for `recipient`, write it to the recipient's mail topic as one delta that
@@ -150,11 +153,9 @@ impl MailDrop for MailGateway {
             .map_err(|source| MailGatewayError::Fetch { did, source })?;
         let now_ms = get_epoch_ms();
         let network_id = self.processor.swarm.network_id();
-        Ok(entry
-            .and_then(|entry| {
-                MailDescriptor::latest_live_for(heard_descriptors(&entry), did, now_ms, network_id)
-            })
-            .map(|descriptor| descriptor.recipient()))
+        Ok(entry.and_then(|entry| {
+            MailDescriptor::live_recipient(heard_descriptors(&entry), did, now_ms, network_id)
+        }))
     }
 
     async fn deliver(
@@ -162,12 +163,7 @@ impl MailDrop for MailGateway {
         recipient: &MailRecipient,
         message: &[u8],
     ) -> Result<MailDigest, MailGatewayError> {
-        let signer = MessageSigner::new(
-            self.processor.delegatee_key(),
-            self.processor.swarm.network_id(),
-        );
-        let SealedMail { mail_id, elements } =
-            seal(message, recipient, signer, get_epoch_ms(), &mut OsRng)?;
+        let SealedMail { mail_id, elements } = seal(message, recipient, &mut OsRng)?;
         let did = recipient.did;
         let deadline = StopSource::new();
         let stop = deadline.token();

@@ -1,5 +1,6 @@
 //! The mail gateway's SMTP front over a stand-in DHT, on the loopback: RCPT is admitted only for
-//! a DID with a live descriptor (550 otherwise), a mail is sealed, written once per DID, and
+//! a DID with a live descriptor (451 for a DID without one, 550 for a local part that is no
+//! DID), a mail is sealed, written once per DID, and
 //! opens into its recipient's INBOX with the trace a receiver adds, a mail too large for one
 //! DHT write is refused with 552, one no owner confirms is deferred with 451, and a client may
 //! run the whole session under STARTTLS.
@@ -49,14 +50,9 @@ use rings_node::mail::recipient::MailInbox;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::rings_core::message::MessageSigner;
 use rings_node::prelude::rings_core::swarm::storage_api::StoreUnconfirmed;
-use rings_node::prelude::rings_core::utils::get_epoch_ms;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-
-/// The overlay the stand-in signs manifests for.
-const NETWORK: u32 = 1;
 
 /// The verdict on a write that no owner confirms, for its recipient.
 type Unconfirmed = fn(Did) -> MailGatewayError;
@@ -64,7 +60,6 @@ type Unconfirmed = fn(Did) -> MailGatewayError;
 /// A DHT in memory: the live descriptors' recipients, every recipient's mail topic, and the
 /// verdict on each write when no owner confirms it.
 struct StandIn {
-    gateway: DelegateeKey,
     recipients: BTreeMap<Did, MailRecipient>,
     topics: Mutex<BTreeMap<Did, Vec<Bytes>>>,
     unconfirmed: Option<Unconfirmed>,
@@ -90,7 +85,6 @@ impl StandIn {
             })
             .collect();
         Arc::new(Self {
-            gateway: delegatee(),
             recipients,
             topics: Mutex::new(BTreeMap::new()),
             unconfirmed,
@@ -119,8 +113,7 @@ impl MailDrop for StandIn {
         recipient: &MailRecipient,
         message: &[u8],
     ) -> Result<MailDigest, MailGatewayError> {
-        let signer = MessageSigner::new(&self.gateway, NETWORK);
-        let sealed = seal(message, recipient, signer, get_epoch_ms(), &mut OsRng)?;
+        let sealed = seal(message, recipient, &mut OsRng)?;
         self.topics
             .lock()
             .unwrap()
@@ -157,8 +150,10 @@ async fn greeted(address: SocketAddr) -> (Client, Vec<String>) {
     (client, ehlo)
 }
 
+/// RCPT: `451` for a DID without a live descriptor, which a gateway that keeps nothing cannot
+/// tell from one that is away, `550` only for a local part that is no DID.
 #[tokio::test]
-async fn test_rcpt_for_a_did_without_a_live_descriptor_is_refused_with_550() {
+async fn test_rcpt_defers_a_did_without_a_live_descriptor_and_refuses_a_non_did() {
     let recipient = delegatee();
     let address = gateway(StandIn::with(&[&recipient]), None).await;
     let (mut client, _) = greeted(address).await;
@@ -168,7 +163,7 @@ async fn test_rcpt_for_a_did_without_a_live_descriptor_is_refused_with_550() {
         client
             .smtp(&format!("RCPT TO:<{stranger}@p2p.rings.rs>"))
             .await,
-        550
+        451
     );
     assert_eq!(
         client.smtp("RCPT TO:<me@p2p.rings.rs>").await,
@@ -216,14 +211,7 @@ async fn test_a_mail_through_the_gateway_opens_into_its_recipient_inbox() {
     assert_eq!(client.smtp("QUIT").await, 221);
 
     let elements = dht.topic(did);
-    let openings = open_mail(
-        &elements,
-        did,
-        &[recipient],
-        NETWORK,
-        get_epoch_ms(),
-        |_| true,
-    );
+    let openings = open_mail(&elements, did, &recipient, |_| true);
     let [Opening::Opened(mail)] = openings.as_slice() else {
         panic!("one mail opens: {openings:?}");
     };
@@ -332,14 +320,7 @@ async fn test_a_session_under_starttls_delivers_through_the_gateway() {
     })
     .await
     .unwrap();
-    let openings = open_mail(
-        &dht.topic(did),
-        did,
-        &[recipient],
-        NETWORK,
-        get_epoch_ms(),
-        |_| true,
-    );
+    let openings = open_mail(&dht.topic(did), did, &recipient, |_| true);
     assert!(matches!(
         openings.as_slice(),
         [Opening::Opened(mail)] if mail.message_id().as_deref() == Some("<secured@test>")

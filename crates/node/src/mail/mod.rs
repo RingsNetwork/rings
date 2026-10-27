@@ -13,16 +13,19 @@
 //! ```
 //!
 //! - [`address`]: the DID a mail address names.
-//! - [`descriptor`]: the signed mail descriptor `μ(d)`, carrying the delegatee's encryption key.
+//! - [`descriptor`]: the signed mail descriptor `μ(d)`, whose signature gives the key mail is
+//!   sealed to.
 //! - [`registration`]: the heartbeat that keeps `μ(d)` in the DHT under the registry lease.
-//! - [`envelope`]: a mail as DHT elements: a signed manifest and its chunks (pure).
+//! - [`envelope`]: a mail as DHT elements: a manifest and its chunks (pure).
 //! - [`open`]: the recipient's opening of those elements (pure).
 //! - [`gateway`]: the gateway's DHT side: the RCPT lookup and the write.
-//! - [`recipient`]: the recipient's poll, its keyring and the records it keeps.
+//! - [`recipient`]: the recipient's poll and the records it keeps.
 //!
 //! Storage semantics: a mail is one `Extend` of every element with lifetime
 //! [`MAX_TTL_MS`](rings_core::consts::MAX_TTL_MS), so it lives `H` (100 minutes) after the
-//! write and is then lost if its recipient has not fetched it. The gateway's `250` means that
+//! write and is then lost if its recipient has not fetched it. A mail is lost too when it is
+//! sealed to a delegatee key its recipient no longer holds: a browser node takes a new key at
+//! every load (`recipient`'s one-key law). The gateway's `250` means that
 //! an owner reported holding the mail (#866); a read-back would be the writer's own cache
 //! (#948, #982), not an owner's statement. The recipient never removes: each element retires at
 //! its horizon.
