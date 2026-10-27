@@ -258,7 +258,7 @@ fn append_mobile_landing(css: &mut String) {
                 ".landing-hero::before",
                 &[("background", "linear-gradient(180deg, rgba(251, 244, 230, 0.96) 0%, rgba(251, 244, 230, 0.9) 48%, rgba(251, 244, 230, 0.38) 100%)")][..],
             ),
-            (".landing-hero h2", &[("font-size", "2.55rem")][..]),
+            (".landing-hero h1", &[("font-size", "2.55rem")][..]),
             (".landing-lede", &[("font-size", "1rem")][..]),
             (".landing-section", &[("padding", "32px 0")][..]),
             (
@@ -309,6 +309,6 @@ fn append_small_breakpoint(css: &mut String) {
             &[("grid-template-columns", "1fr")][..],
         ),
         (".landing-feature-illustration", &[("height", "208px")][..]),
-        (".landing-hero h2", &[("font-size", "2.05rem")][..]),
+        (".landing-hero h1", &[("font-size", "2.05rem")][..]),
     ]);
 }
