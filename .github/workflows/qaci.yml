@@ -75,7 +75,8 @@ jobs:
         run: cargo deny --locked check -A unmatched-source advisories licenses bans sources
 
   # The book ships with the site (deploy-pages.yml renders it under `/docs/`); a chapter listed
-  # in SUMMARY.md without a file, or a malformed summary, fails the build, so gate it here.
+  # in SUMMARY.md without a file, or a malformed summary, fails the build, so gate it here, and
+  # finish it as the deploy does, so a page finish_site.py cannot read fails here too.
   docs_book:
     name: Build documentation book
     timeout-minutes: 10
@@ -89,7 +90,10 @@ jobs:
           tool: mdbook@${{ env.MDBOOK_VERSION }}
 
       - name: Build documentation book
-        run: mdbook build docs
+        run: mdbook build docs --dest-dir target/site/docs
+
+      - name: Finish the book as the deploy does
+        run: python3 frontend/scripts/finish_site.py target/site
 
   miri_core:
     name: Miri core invariants

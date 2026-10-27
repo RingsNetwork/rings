@@ -142,6 +142,9 @@ async function testYewReplacesStaticDocument(
     await page.locator("#landing-title").waitFor({ state: "visible" });
     assertEqual(await page.locator("#static-project-introduction").count(), 0, "Yew must replace the static shell");
     assertEqual(await page.locator("#landing-title").count(), 1, "the mounted app must expose one landing title");
+    // Search engines render the app, so the mounted page keeps the static document's single h1.
+    assertEqual(await page.locator("h1").count(), 1, "the mounted app must expose one h1");
+    assertEqual(await page.locator("h1#landing-title").count(), 1, "the mounted app's h1 must be the landing title");
     assertEqual(
       await page.locator(".landing-kicker").innerText(),
       projectCopy.name,
