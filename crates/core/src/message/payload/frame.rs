@@ -36,7 +36,10 @@
 //! fails: the change moved the wire.
 //! If the last release already shipped [`WIRE_VERSION`], add one to it; if the version is
 //! already this release's, keep it. Then set the pinned pair to that version and the hash the
-//! failure reports, in the same commit. A change that moves no golden byte never fails it.
+//! failure reports, in the same commit. A change that moves no golden byte never fails it. If
+//! only `format/registry` moved, and only because the tracer or the lockfile changed (the
+//! registry is serde reflection's rendering of the formats, not wire bytes), re-pin the hash
+//! without bumping [`WIRE_VERSION`].
 
 use std::fmt;
 
