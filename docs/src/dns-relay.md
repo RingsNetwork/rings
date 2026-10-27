@@ -145,3 +145,6 @@ so its `Received` headers name the sending server), submission on `127.0.0.1:158
 `127.0.0.1:1143`, with user `me` and the password it writes to `~/.rings/mailbox/password`. Point
 a mail client at the last two. The example ends no TLS; expose IMAP through a relay only behind
 a service that does.
+
+The same mailbox can instead receive at `<did>@<domain>` through mail gateways, which needs no
+relay and no served port: see [Mail Gateway](mail-gateway.md).

@@ -1,6 +1,6 @@
 [package]
 name = "rings-mailbox-example"
-description = "A mailbox served at me@<did>.<zone> through a Rings DNS relay: SMTP in, IMAP out."
+description = "A Rings mailbox (SMTP in, IMAP out) served through a DNS relay or a mail gateway, and the mail gateway."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,11 +15,16 @@ workspace = true
 name = "rings-mailbox"
 path = "src/main.rs"
 
+[[bin]]
+name = "rings-mail-gateway"
+path = "src/bin/rings-mail-gateway.rs"
+
 [dependencies]
 async-trait = { workspace = true }
 base64 = "0.22.1"
 chrono = { version = "0.4.23", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.0.14", features = ["derive"] }
+futures = "0.3.21"
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
 imap-next = { version = "0.3.4", features = ["ext_id", "ext_namespace"] }
 mail-parser = "0.11.9"
@@ -27,6 +32,7 @@ mail-parser = "0.11.9"
 nom = { version = "7.1.3", default-features = false, features = ["alloc"] }
 ppp = "2.3.0"
 rand = { version = "0.8.5", features = ["getrandom"] }
+rings-node = { workspace = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1"
 smtp-proto = "0.2.5"
@@ -37,7 +43,9 @@ tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.15", features = ["env-filter"] }
 
 [dev-dependencies]
+bytes = "1.2.1"
 hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 hickory-server = { version = "0.26.3", default-features = false }
+rcgen = "0.13.2"
 rings-dns-relay = { workspace = true }
 tempfile = "3"

@@ -8,6 +8,8 @@ use crate::consts::DATA_REDUNDANT;
 use crate::dns_relay::ServiceOffer;
 #[cfg(rings_native)]
 use crate::dns_relay::ServiceRegistration;
+use crate::mail::registration::MailOffer;
+use crate::mail::registration::MailRegistration;
 use crate::prelude::rings_core::dht::RelayReplication;
 
 /// ProcessorBuilder is used to initialize a [Processor] instance.
@@ -45,6 +47,8 @@ pub struct ProcessorBuilder {
     /// The heartbeat announcing this node's services through DNS relays (#1049), if any.
     #[cfg(rings_native)]
     pub(in crate::processor) service_registration: Option<Arc<dyn RegistrationTask>>,
+    /// The heartbeat of this node's mail descriptor (#1117), if it takes mail.
+    pub(in crate::processor) mail_registration: Option<Arc<dyn RegistrationTask>>,
 }
 
 impl ProcessorBuilder {
@@ -87,6 +91,7 @@ impl ProcessorBuilder {
             observer: None,
             #[cfg(rings_native)]
             service_registration: None,
+            mail_registration: None,
         })
     }
 
@@ -96,6 +101,14 @@ impl ProcessorBuilder {
     pub fn announce_services(mut self, offer: ServiceOffer) -> Self {
         let did = self.delegatee_key.delegator_did();
         self.service_registration = Some(Arc::new(ServiceRegistration::new(did, offer)));
+        self
+    }
+
+    /// Take mail at `did@domain` through mail gateways (#1117): the processor publishes this
+    /// node's mail descriptor, which names its delegatee key, on every heartbeat of `offer`.
+    pub fn receive_mail(mut self, offer: MailOffer) -> Self {
+        let did = self.delegatee_key.delegator_did();
+        self.mail_registration = Some(Arc::new(MailRegistration::new(did, offer)));
         self
     }
 
@@ -274,6 +287,7 @@ impl ProcessorBuilder {
         }
         #[cfg(rings_native)]
         registration_tasks.extend(self.service_registration);
+        registration_tasks.extend(self.mail_registration);
 
         // One recorder is shared between core protocol hooks and node-level snapshot assembly.
         let observability = Arc::new(crate::observability::Observability::new());

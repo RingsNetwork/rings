@@ -8,8 +8,16 @@
 //! ```
 //!
 //! `step` answers every command; the shell reads the message body after a `354` and reports it
-//! with [`Session::data`], which yields the transaction to commit. Committing (to the store or
-//! the outbound queue) is the shell's effect; the session only decides.
+//! with [`Session::data`], which yields the transaction to commit. Committing (to the store, the
+//! outbound queue or the DHT) is the shell's effect; the session only decides.
+//!
+//! Two decisions take a fact only the shell can learn, so the session asks for it:
+//!
+//! - a recipient of [`Role::Directory`] is looked up by the shell ([`Next::Lookup`]), which
+//!   answers with [`Session::admit`];
+//! - `STARTTLS`, when the session offers it, is answered with [`Next::StartTls`]; the shell runs
+//!   the handshake and reports it with [`Session::secured`], which starts the session afresh
+//!   (RFC 3207 §4.2).
 
 use smtp_proto::Request;
 
@@ -65,22 +73,58 @@ pub enum Role {
     },
     /// Submission from the mailbox's own user: any recipient, to be delivered onward.
     Submission,
+    /// Final delivery for every recipient a directory outside the session admits: the mail
+    /// gateway (#1117), whose shell looks each one up in the DHT.
+    Directory,
 }
 
 impl Role {
-    /// Whether this role accepts mail for `address`.
-    pub fn accepts(&self, address: &str) -> bool {
+    /// Whether this role accepts mail for `address`, or `None` when a directory outside the
+    /// session decides ([`Role::Directory`]).
+    pub fn accepts(&self, address: &str) -> Option<bool> {
         match self {
-            Self::Submission => address.contains('@'),
-            Self::Inbound { local, label } => {
-                address
-                    .rsplit_once('@')
-                    .is_some_and(|(address_local, domain)| {
-                        address_local.eq_ignore_ascii_case(local) && is_owner_domain(domain, label)
-                    })
-            }
+            Self::Submission => Some(address.contains('@')),
+            Self::Inbound { local, label } => Some(address.rsplit_once('@').is_some_and(
+                |(address_local, domain)| {
+                    address_local.eq_ignore_ascii_case(local) && is_owner_domain(domain, label)
+                },
+            )),
+            Self::Directory => None,
         }
     }
+}
+
+/// What a directory says of a recipient: the answer to [`Next::Lookup`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Lookup {
+    /// The recipient takes mail here.
+    Admitted,
+    /// No such recipient: `550`.
+    Refused,
+    /// The directory could not tell: `451`, so the client tries again later.
+    Unavailable,
+}
+
+impl From<bool> for Lookup {
+    /// A role's own decision: admitted or refused.
+    fn from(accepted: bool) -> Self {
+        if accepted {
+            Self::Admitted
+        } else {
+            Self::Refused
+        }
+    }
+}
+
+/// Whether the session offers `STARTTLS`, and whether TLS is up.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Tls {
+    /// No certificate: `STARTTLS` is not offered.
+    Unavailable,
+    /// Offered, not yet begun.
+    Offered,
+    /// The connection runs over TLS.
+    Active,
 }
 
 /// Whether `domain` is `label.<zone>` for some zone.
@@ -142,6 +186,11 @@ pub enum Next {
     ReadData(Reply),
     /// Send the reply and close the connection.
     Close(Reply),
+    /// Look the recipient up in the directory and answer RCPT with [`Session::admit`].
+    Lookup(String),
+    /// Send the reply (`220`), discard every byte read after the command (RFC 3207 §5), run the
+    /// TLS handshake and report it with [`Session::secured`].
+    StartTls(Reply),
 }
 
 /// One SMTP session.
@@ -151,6 +200,7 @@ pub struct Session {
     host: String,
     max_size: usize,
     max_recipients: usize,
+    tls: Tls,
     phase: Phase,
 }
 
@@ -168,8 +218,24 @@ impl Session {
             host: host.into(),
             max_size,
             max_recipients,
+            tls: Tls::Unavailable,
             phase: Phase::Fresh,
         }
+    }
+
+    /// This session, offering `STARTTLS`: its shell holds a certificate.
+    pub fn offering_starttls(self) -> Self {
+        Self {
+            tls: Tls::Offered,
+            ..self
+        }
+    }
+
+    /// The TLS handshake the shell began on [`Next::StartTls`] has completed: the session starts
+    /// afresh, the client to greet again, and offers `STARTTLS` no more (RFC 3207 §4.2).
+    pub fn secured(&mut self) {
+        self.tls = Tls::Active;
+        self.phase = Phase::Fresh;
     }
 
     /// The greeting the server sends on connect.
@@ -201,8 +267,8 @@ impl Session {
                 "Cannot verify, will attempt delivery",
             )),
             Request::Quit => Next::Close(Reply::line(221, "2.0.0", "Bye")),
-            Request::StartTls
-            | Request::Auth { .. }
+            Request::StartTls => self.start_tls(),
+            Request::Auth { .. }
             | Request::Bdat { .. }
             | Request::Expn { .. }
             | Request::Help { .. }
@@ -281,17 +347,41 @@ impl Session {
         if !extended {
             return Next::Reply(Reply::line(250, "", greeting));
         }
+        let starttls = (self.tls == Tls::Offered).then(|| "STARTTLS".to_owned());
         Next::Reply(Reply {
             code: 250,
             status: "",
-            lines: vec![
+            lines: [
                 greeting,
                 format!("SIZE {}", self.max_size),
                 "8BITMIME".to_owned(),
                 "PIPELINING".to_owned(),
                 "ENHANCEDSTATUSCODES".to_owned(),
-            ],
+            ]
+            .into_iter()
+            .chain(starttls)
+            .collect(),
         })
+    }
+
+    /// Answer STARTTLS: begin TLS when it is offered and the client has greeted, with no
+    /// transaction open.
+    fn start_tls(&self) -> Next {
+        match (self.tls, &self.phase) {
+            (Tls::Unavailable, _) => {
+                Next::Reply(Reply::line(502, "5.5.1", "Command not implemented"))
+            }
+            (Tls::Active, _) => Next::Reply(Reply::line(503, "5.5.1", "TLS already active")),
+            (Tls::Offered, Phase::Ready { .. }) => {
+                Next::StartTls(Reply::line(220, "2.0.0", "Ready to start TLS"))
+            }
+            (Tls::Offered, Phase::Fresh) => {
+                Next::Reply(Reply::line(503, "5.5.1", "Send EHLO first"))
+            }
+            (Tls::Offered, Phase::Transaction { .. } | Phase::Data { .. }) => {
+                Next::Reply(Reply::line(503, "5.5.1", "Bad sequence of commands"))
+            }
+        }
     }
 
     /// Answer MAIL FROM `from`, declaring `size` bytes (0 when undeclared).
@@ -316,21 +406,39 @@ impl Session {
         Next::Reply(Reply::line(250, "2.1.0", "OK"))
     }
 
-    /// Answer RCPT TO `address`.
+    /// Answer RCPT TO `address`: by the role's own decision, or by asking the shell's directory
+    /// when a transaction is open to take the recipient.
     fn rcpt(&mut self, address: String) -> Next {
-        let accepts = self.role.accepts(&address);
+        match self.role.accepts(&address) {
+            Some(accepted) => Next::Reply(self.admit(address, Lookup::from(accepted))),
+            None if self.in_transaction() => Next::Lookup(address),
+            None => Next::Reply(send_mail_first()),
+        }
+    }
+
+    /// Answer RCPT TO `address`, which the directory found as `lookup`.
+    pub fn admit(&mut self, address: String, lookup: Lookup) -> Reply {
         let max_recipients = self.max_recipients;
         let Phase::Transaction { to, .. } = &mut self.phase else {
-            return Next::Reply(Reply::line(503, "5.5.1", "Send MAIL first"));
+            return send_mail_first();
         };
-        if !accepts {
-            return Next::Reply(Reply::line(550, "5.1.1", "No such mailbox here"));
+        match lookup {
+            Lookup::Refused => return Reply::line(550, "5.1.1", "No such mailbox here"),
+            Lookup::Unavailable => {
+                return Reply::line(451, "4.4.3", "Directory unavailable, try again later");
+            }
+            Lookup::Admitted => {}
         }
         if to.len() >= max_recipients {
-            return Next::Reply(Reply::line(452, "4.5.3", "Too many recipients"));
+            return Reply::line(452, "4.5.3", "Too many recipients");
         }
         to.push(address);
-        Next::Reply(Reply::line(250, "2.1.5", "OK"))
+        Reply::line(250, "2.1.5", "OK")
+    }
+
+    /// Whether a transaction is open: MAIL was accepted and DATA not yet begun.
+    fn in_transaction(&self) -> bool {
+        matches!(self.phase, Phase::Transaction { .. })
     }
 
     /// Answer DATA.
@@ -346,6 +454,11 @@ impl Session {
             }
         }
     }
+}
+
+/// The reply to RCPT outside a transaction.
+fn send_mail_first() -> Reply {
+    Reply::line(503, "5.5.1", "Send MAIL first")
 }
 
 #[cfg(test)]
