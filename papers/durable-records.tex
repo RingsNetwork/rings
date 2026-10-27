@@ -19,6 +19,7 @@
 \newtheorem{invariant}{Invariant}
 \newtheorem{proposition}{Proposition}
 \newtheorem{obligation}{Obligation}
+\newtheorem{remark}{Remark}
 
 \newcommand{\Nm}{\mathcal{N}}
 \newcommand{\Vl}{\mathcal{V}}
@@ -650,6 +651,22 @@ whose element left the carrier without a take is held at most until its $x$.
 The $\Defer$ arm refuses a new entry at the bound, judged after the transition expired the
 spent entries; an entry leaves only as Law~\ref{law:evidence} states, the latest at $x$.
 \end{proof}
+
+\begin{remark}[Custody stall]\label{rem:stall}
+Law~\ref{law:evidence} buys at-least-once with liveness.  Call an entry \emph{lost} when its
+element was admitted, not taken (the application did not take it, or a crash came first),
+and its carrier is gone at all $r$ members without a take, as when a chain churns out without
+a hand-off.  A lost entry stays until $x\le t_{\mathrm{adm}}+\mathit{ttl}+H_I+2\epsilon$.  With
+$k$ lost entries custody admits $64-k$ others, and at $k=64$ the $\Defer$ arm refuses every new
+relay delivery to the node, from every origin, until the earliest of them is spent: a stall of
+at most $\max x-t$, about $\mathit{ttl}+7$\,d.  Flooding an inbox makes the first condition
+cheap, not the second, so no single party forces it.  The bound frees itself at $x$; the
+operator's reset (removing the replay store) ends it at once, at the cost of the replay
+guarantee.  Freeing a lost entry earlier needs evidence of removal stronger than one read:
+unanimous absence at the members of an agreeing chain is a candidate, but a writer resends a
+hold until it is acknowledged, so absence there does not yet exclude a later arrival
+(\issue{1139}).
+\end{remark}
 
 \begin{proposition}[At least once across restart]\label{prop:atleastonce}
 Let the carrier satisfy $(\Durable,\Retained)$ (\issue{1021}).  In every history with any

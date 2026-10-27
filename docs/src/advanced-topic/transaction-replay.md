@@ -281,6 +281,15 @@ takes its mail, or once its transaction is spent and no carrier can deliver it a
 that reads no carrier, or a carrier without the element, removes nothing: the read may come from a
 holder that a membership change just named, before its hand-off landed, and dropping custody on
 its word would refuse the hand-off's redelivery after a restart as a replay (#1059).
+
+The cost is liveness. An entry whose mail was admitted, not taken, and then lost at every member of
+its chain (a chain that churned out without a hand-off) stays until its transaction is spent, up to
+the proof's lifetime plus 7 days after its admission. The bound of 64 entries is shared by the whole
+store, so with 64 such entries every new relay delivery to the node, from every origin, waits
+(`RelayCustodyFull`, the pass ends and the mail stays stored) until the earliest of them is spent.
+A relay inbox that stays undelivered while mail is held for the node points to this stall. It ends
+by itself at that instant; removing the `transaction-replay` store ends it at once, at the cost of
+the replay guarantee (see [Bad records](#bad-records) for that reset).
 Forgetting a spent stream reopens no replay, so a refusal ends once a stream of the refused edge is
 spent. Each receiver record carries its introducer and spent instant, so a restart recovers the
 accounting.

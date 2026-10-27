@@ -25,7 +25,10 @@
 //!
 //! Law (bounded): the table holds the consumed elements of the last read, and the untaken ones,
 //! each of which is in relay custody until it is spent (the custody law), so at most the stored
-//! carrier and `RELAY_CUSTODY_CAPACITY` entries.
+//! carrier and `RELAY_CUSTODY_CAPACITY` entries. An untaken element is forgotten at the
+//! Application horizon (`InboxElement::spent_at_ms`), and its custody entry expires at its
+//! class horizon; the witness admits only custom messages, of class Application, into a relay
+//! inbox, so the two instants are equal and no untaken element outlives its custody entry.
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;

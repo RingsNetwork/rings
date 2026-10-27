@@ -39,6 +39,14 @@
 //! at the bound, after the transition expired the spent entries. An element lost without a take
 //! (a holder that dropped it) holds its entry at most until it is spent.
 //!
+//! **Remark (custody stall).** The removal law trades liveness for at least once: an entry whose
+//! element was admitted, not taken, and lost at every member of its chain stays until `x`, at
+//! most `ttl + MAX_RELAY_INBOX_TTL_MS + 2σ` after its admission. With `k` such entries custody
+//! admits `RELAY_CUSTODY_CAPACITY − k` others; at `k = RELAY_CUSTODY_CAPACITY` every new relay
+//! delivery to this node, from every origin, is deferred until the earliest is spent. The bound
+//! frees itself at `x`; removing the replay store ends the stall at once, at the cost of the
+//! replay guarantee.
+//!
 //! The live path observes `W_s` alone and is unchanged. Mail below the window is refused as the
 //! live path refuses it: no bounded receiver state can tell it from a re-hold of a transaction
 //! already dispatched live.
@@ -50,6 +58,7 @@ use serde::Serialize;
 
 use super::commit::Ledger;
 use super::Admission;
+use super::ReplayInstant;
 use super::ReplayTable;
 use super::StreamKey;
 use super::TransactionDigest;
@@ -109,6 +118,19 @@ impl TransactionReplay {
         admission: Admission,
     ) -> Result<RelayAdmission> {
         let clock = super::replay_clock(self.started_at);
+        self.admit_relayed_at(admission, clock).await
+    }
+
+    /// The relay admission transition at the instant `clock` reads under the lock (the law of
+    /// `admit_at`): retire what is spent, judge the custody bound on what is left, then admit.
+    pub(super) async fn admit_relayed_at<C>(
+        self: &std::sync::Arc<Self>,
+        admission: Admission,
+        clock: C,
+    ) -> Result<RelayAdmission>
+    where
+        C: FnOnce() -> ReplayInstant + rings_runtime::MaybeSend + 'static,
+    {
         let key = admission.key;
         let delivery = RelayDelivery {
             sequence: admission.sequence,
@@ -133,7 +155,7 @@ impl TransactionReplay {
                 });
             }
             replay
-                .admit_in(ledger, admission, move || now, Some(delivery))
+                .admit_in(ledger, admission, now, Some(delivery))
                 .map(|_| RelayAdmission::Admitted)
         })
         .await

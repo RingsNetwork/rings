@@ -7,6 +7,7 @@ use std::sync::Arc;
 use super::Admission;
 use super::RelayAdmission;
 use super::RelayDelivery;
+use super::ReplayInstant;
 use super::ReplayRecord;
 use super::StreamKey;
 use super::TransactionDigest;
@@ -16,6 +17,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::replay::custody::RELAY_CUSTODY_CAPACITY;
 use crate::message::MessageCategory;
+use crate::message::OriginQuotaInstant;
 use crate::storage::MemStorage;
 use crate::utils::get_epoch_ms;
 
@@ -148,6 +150,46 @@ async fn test_custody_is_bounded_over_the_whole_store() -> Result<()> {
     replay.release_relayed(stream(0), delivery(0)).await?;
     assert_eq!(
         admit(&replay, beyond, delivery(1)).await?,
+        RelayAdmission::Admitted
+    );
+    Ok(())
+}
+
+/// The cost of removal only by evidence (durable-records, Remark Custody stall): entries whose
+/// elements are lost without a take still fill the custody bound, so every new relay delivery
+/// is deferred until the earliest of them is spent; at that instant the bound frees itself,
+/// with no release and no carrier read.
+#[tokio::test]
+async fn test_lost_entries_defer_relay_delivery_until_they_are_spent() -> Result<()> {
+    /// The instant every lost entry is spent at.
+    const SPENT_AT_MS: u128 = 1_000;
+    let storage = Arc::new(MemStorage::new());
+    let replay = run(&storage);
+    let admit_at = |key: StreamKey, delivery: RelayDelivery, wall_ms: u128| {
+        let admission = Admission {
+            spent_at_ms: delivery.spent_at_ms,
+            ..Admission::for_test(key, delivery.sequence, delivery.digest, wall_ms)
+        };
+        replay.admit_relayed_at(admission, move || ReplayInstant {
+            quota: OriginQuotaInstant::ZERO,
+            wall_ms,
+        })
+    };
+    let lost = RelayDelivery {
+        spent_at_ms: SPENT_AT_MS,
+        ..delivery(0)
+    };
+    for origin in 0..RELAY_CUSTODY_CAPACITY {
+        let origin = u32::try_from(origin).map_err(|_| Error::InvalidCapacity)?;
+        admit_at(stream(origin), lost, 0).await?;
+    }
+    let beyond = stream(u32::MAX);
+    assert!(matches!(
+        admit_at(beyond, delivery(0), SPENT_AT_MS - 1).await,
+        Err(Error::RelayCustodyFull { .. })
+    ));
+    assert_eq!(
+        admit_at(beyond, delivery(0), SPENT_AT_MS).await?,
         RelayAdmission::Admitted
     );
     Ok(())

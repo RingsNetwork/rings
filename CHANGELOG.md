@@ -14,7 +14,11 @@
   stream's custody has expired by the time the stream is retired, so a stream in custody is no
   longer kept past its spent instant. Mail lost by a holder without a take keeps its custody
   entry until it is spent, at most the inbox retention after its proof expired; custody stays
-  bounded by `RELAY_INBOX_MAX_LEN`.
+  bounded by `RELAY_INBOX_MAX_LEN`. The cost is liveness: with 64 such entries, all of mail
+  admitted, untaken and lost at every member of its chain, every new relay delivery to the node
+  waits until the earliest is spent, about the proof's lifetime plus 7 days. It ends by itself
+  then, or at once when the operator removes the `transaction-replay` store. Freeing a lost
+  entry earlier needs stronger evidence of removal than one read (#1139).
   - **Library API.** `TRANSACTION_REPLAY_RECORD_MAX_BYTES` is now 5089 and
     `TRANSACTION_REPLAY_STORE_MAX_BYTES` 28,692,288; the native store's 40 MiB budget still
     covers it.
