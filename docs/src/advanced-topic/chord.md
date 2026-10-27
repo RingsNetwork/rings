@@ -99,7 +99,9 @@ another node's read shows that an owner holds the write.
   100 minutes after its dot was issued (the element horizon `H`, the longest retention one write
   may request), and its topic's retention bound, the latest bound any write joined into the
   topic requested (a plain write, such as `publishMessageToTopic` or `registerService`,
-  requests 10 minutes). Writing the value again issues a fresh dot and a fresh bound and is what
+  requests 10 minutes; an extend, `storage_extend` in core, requests the lifetime its writer
+  names, up to `H`, for several elements in one write, as the [mail gateway](../mail-gateway.md)
+  does). Writing the value again issues a fresh dot and a fresh bound and is what
   keeps it: a sole writer rewrites each value within 10 minutes, and every writer within `H`,
   even while other writes keep the topic alive. The online-node, onion-exit and DNS-relay
   registries re-append their descriptor every heartbeat (30 s by default): a signed 10-minute

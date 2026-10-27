@@ -10,6 +10,7 @@
 - [Operator Observability](operator-observability.md)
 - [Native Gateway](native-gateway.md)
 - [DNS Relay](dns-relay.md)
+- [Mail Gateway](mail-gateway.md)
 
 # Wasm Node (WebAssembly for Browsers)
 

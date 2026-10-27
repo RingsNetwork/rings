@@ -158,6 +158,7 @@ pub async fn start(
             max_size: config.max_message_size,
             sink: Sink::Inbox(Arc::clone(&store)),
             proxy_protocol: config.receiver_proxy_protocol,
+            tls: None,
         }
         .serve(smtp),
     );
@@ -168,6 +169,7 @@ pub async fn start(
             max_size: config.max_message_size,
             sink: Sink::Outbound(Arc::clone(&outbound)),
             proxy_protocol: false,
+            tls: None,
         }
         .serve(submission),
     );
