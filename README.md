@@ -43,9 +43,9 @@ datachannels, with no application server in the data path.
 ## Status
 
 Pre-1.0, with a public overlay at the seed `node.rings.rs`. Until 1.0 the wire protocol is
-not versioned, so a release that changes it is a network-wide upgrade (marked in the
-[CHANGELOG](./CHANGELOG.md)). 1.0 freezes the protocol once connectivity and churn
-handling are stable; DRanking ships as 2.0. See [ROADMAP.md](./ROADMAP.md).
+not versioned, so a release that changes it is a network-wide upgrade. 1.0 freezes the
+protocol once connectivity and churn handling are stable; DRanking ships as 2.0. See
+[ROADMAP.md](./ROADMAP.md).
 
 The overlay authenticates and, after a handshake, encrypts; the privacy layer hides who
 talks to whom. Making identities scarce for open membership is planned
