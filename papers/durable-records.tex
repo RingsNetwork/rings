@@ -19,6 +19,7 @@
 \newtheorem{invariant}{Invariant}
 \newtheorem{proposition}{Proposition}
 \newtheorem{obligation}{Obligation}
+\newtheorem{remark}{Remark}
 
 \newcommand{\Nm}{\mathcal{N}}
 \newcommand{\Vl}{\mathcal{V}}
@@ -586,11 +587,19 @@ loses the queue but not $\W_s$, so the redelivery observes $\mathsf{Replay}$ and
 retired (\issue{936}).  The fact that is lost is ``$h$ was admitted for $e$ and not taken''.
 
 \begin{definition}[Custody set]\label{def:custody}
-The custody set of stream $s$ is $\K_s\subseteq\mathbb{N}\times\mathrm{Digest}$: the relay
-deliveries of $s$ admitted and not yet taken.  The receiver record of $s$ is the pair
-$(\W_s,\K_s)$, one record under the existing key, so one write commits both atomically (A
-on both platforms).
+The custody set of stream $s$ is $\K_s\subseteq\mathbb{N}\times\mathrm{Digest}\times
+\mathbb{N}$: the relay deliveries $(q,h,x)$ of $s$ admitted and not yet taken, where
+$x=\mathit{ts}+\mathit{ttl}+\iota+\epsilon$ is the instant the transaction is spent (the
+load-bounds horizon: $\epsilon$ the clock tolerance, $\iota=H_I+\epsilon$ for application
+mail, $H_I$ the relay hold horizon).  Every component is a
+function of the transaction, so its admission and its release name the same entry.  The
+receiver record of $s$ is the pair $(\W_s,\K_s)$, one record under the existing key, so one
+write commits both atomically (A on both platforms).
 \end{definition}
+
+Since a hold satisfies $\mathit{hold}\le\mathit{ts}+\mathit{ttl}$ and is delivered only while
+$t<\mathit{hold}+H_I$, no carrier offers $e$ at any $t\ge x$, by a clock up to $\epsilon$ behind:
+from $x$ on, the entry protects nothing.
 
 Placing $\K_s$ in the receiver record, and not in the application or a separate store, is
 forced by two constraints: core never consults the application (the layering law), and a
@@ -598,32 +607,66 @@ second record could not be committed atomically with $\W_s$, which would reopen 
 between admission and its custody.
 
 \begin{law}[Custody]\label{law:custody}
-A drain pass first restricts custody to the carrier,
-$\K_s\leftarrow\K_s\cap\{(q,h):(s,q,h)\in\stored(d)\}$ (written only if it changed), then
-offers each element $e=(s,q,h)$ it has not handed over in this process by
-the first arm that applies:
+Every replay transition at $t$ first expires the spent entries,
+$\K_s\leftarrow\{(q,h,x)\in\K_s:t<x\}$ (written only if it changed).  A drain pass offers
+each element $e=(s,q,h)$ it has not handed over in this process, with spent instant $x$,
+by the first arm that applies:
 \begin{enumerate}[leftmargin=1.5em]
-\item $(q,h)\in\K_s$: $\Requeue$;
+\item $(q,h,x)\in\K_s$: $\Requeue$;
 \item $|\bigcup_s\K_s|=\mathtt{RELAY\_INBOX\_MAX\_LEN}$: $\Defer$;
 \item $\obs(\W_s,q,h)=(\W_s',v)$ with $v$ permitting dispatch: commit
-$(\W_s',\K_s\cup\{(q,h)\})$, then queue;
+$(\W_s',\K_s\cup\{(q,h,x)\})$, then queue;
 \item otherwise: $\Retire$,
 \end{enumerate}
 where $\Requeue$ queues the message again without touching $\W_s$, and every queueing
 reserves room first ($\Defer$ when there is none, as today).  When the application takes a
-message of $e$, core commits $(\W_s,\K_s\setminus\{(q,h)\})$, the \emph{release}; the
+message of $e$, core commits $(\W_s,\K_s\setminus\{(q,h,x)\})$, the \emph{release}; the
 element is retired from the carrier only after its release committed.  The live path is
 unchanged: it observes $\W_s$ alone.
 \end{law}
 
+\begin{law}[Removal only by evidence]\label{law:evidence}
+An entry leaves $\K_s$ only by its release, which follows a take, or by its expiry at $x$,
+after which no carrier offers its element: never by its absence from a carrier read.
+\end{law}
+
+A read is one member's view, and the holder a membership change just named may report no
+carrier, or an old one, until the hand-off lands.  An earlier revision restricted custody to
+that read, $\K_s\leftarrow\K_s\cap\stored(d)$; then an admission, a read of such a holder, a
+crash before the take and the hand-off's redelivery observe $\mathsf{Replay}$ with
+$(q,h)\notin\K_s$ and retire untaken mail (\issue{1059}).  Absence is no evidence of removal,
+so Law~\ref{law:evidence} admits none.  The in-process handed-over set follows the same law:
+an untaken element is forgotten only at $x$, since forgetting it on a lagging read would offer
+it twice; a taken one absent from a read is forgotten, its redelivery being a
+$\mathsf{Replay}$ that is retired.  A stream's charge is spent at the maximum of its
+admissions' instants, so $x$ is never later than its stream's, and a spent stream holds no
+custody once its entries expired.
+
 \begin{lemma}[Bounded custody]\label{lem:bound}
 $|\bigcup_s\K_s|\le\mathtt{RELAY\_INBOX\_MAX\_LEN}$ ($64$), so a receiver record grows by
-at most $64$ entries of $8+32$ bytes over the whole store.
+at most $64$ entries of a sequence, a digest and an instant over the whole store; an entry
+whose element left the carrier without a take is held at most until its $x$.
 \end{lemma}
 \begin{proof}
-The $\Defer$ arm refuses a new entry at the bound, and the restriction step keeps only
-entries of elements still stored, of which a carrier holds at most $64$.
+The $\Defer$ arm refuses a new entry at the bound, judged after the transition expired the
+spent entries; an entry leaves only as Law~\ref{law:evidence} states, the latest at $x$.
 \end{proof}
+
+\begin{remark}[Custody stall]\label{rem:stall}
+Law~\ref{law:evidence} buys at-least-once with liveness.  Call an entry \emph{lost} when its
+element was admitted, not taken (the application did not take it, or a crash came first),
+and its carrier is gone at all $r$ members without a take, as when a chain churns out without
+a hand-off.  A lost entry stays until $x\le t_{\mathrm{adm}}+\mathit{ttl}+H_I+2\epsilon$.  With
+$k$ lost entries custody admits $64-k$ others, and at $k=64$ the $\Defer$ arm refuses every new
+relay delivery to the node, from every origin, until the earliest of them is spent: a stall of
+at most $\max x-t$, about $\mathit{ttl}+7$\,d.  Flooding an inbox makes the first condition
+cheap, not the second, so no single party forces it.  The bound frees itself at $x$; the
+operator's reset (removing the replay store) ends it at once, at the cost of the replay
+guarantee.  Freeing a lost entry earlier needs evidence of removal stronger than one read:
+unanimous absence at the members of an agreeing chain is a candidate, but a writer resends a
+hold until it is acknowledged, so absence there does not yet exclude a later arrival
+(\issue{1139}).
+\end{remark}
 
 \begin{proposition}[At least once across restart]\label{prop:atleastonce}
 Let the carrier satisfy $(\Durable,\Retained)$ (\issue{1021}).  In every history with any
@@ -636,8 +679,8 @@ The drain retires $e$ in two arms.  After a release: the release follows a take,
 In the last arm of Law~\ref{law:custody}: $(q,h)\notin\K_s$ and $\obs$ refuses.  If $\obs$
 is $\mathsf{Replay}$, $h$ is in $\W_s$, so it was admitted earlier either live (dispatched
 to the application, case (ii)) or by a relay delivery, which entered $\K_s$ in the same
-commit and left it only by a release (case (i)) or by the restriction step, which requires
-$e\notin\stored(d)$.  $\mathsf{Fork}$ and $\mathsf{Stale}$ are refusals of the live path,
+commit and left it only by a release (case (i)) or by its expiry at $x$
+(Law~\ref{law:evidence}), after which no carrier offers $e$.  $\mathsf{Fork}$ and $\mathsf{Stale}$ are refusals of the live path,
 case (ii).  A crash cannot separate the admission from its custody entry, nor a release
 from its effect, because each is one record write under D.  Case (iii) is the retention
 law of \#913.
@@ -759,7 +802,7 @@ is a transition that committed and whose caller dropped the result: an admission
 $\W_s$ and not dispatched (its retransmission is a replay, and the message is lost, as for
 any drop after admission); a lease extension covers sequences nobody was issued, so
 $\mathit{issued}\le\hat L\le D$ holds with $D$ the last write; a custody entry names a
-delivery still in the carrier, which the next pass requeues or the restriction drops, and a
+delivery still in the carrier, which the next pass requeues until its release or expiry, and a
 landed release retires early only what the application already took (the duplicate window
 of Law~\ref{law:custody}).
 \end{proposition}
@@ -1167,8 +1210,9 @@ $\mathsf{Stale}$ below it) and retired, case (ii) of Proposition~\ref{prop:atlea
 after a replay reset (Law~\ref{law:ownclaim}), where its retention bounds it.  A recipient
 without a relay store fetches from $h_0$ and then down the chain; an element is the same
 holder-signed bytes at every member, so the drain's handed-over set and $\K_s$ deduplicate
-copies, and Law~\ref{law:custody} is unchanged.  Only $h_0$'s report restricts custody: a
-lagging member's copy may miss an element that still exists (\issue{1059}).
+copies, and Law~\ref{law:custody} is unchanged.  No report restricts custody
+(Law~\ref{law:evidence}): a lagging member's copy, or a new holder's before its hand-off, may
+miss an element that still exists (\issue{1059}).
 
 \textbf{Store capacity.}  A node keeps about $r$ times the carriers it kept as a sole holder,
 so the relay store's budget scales with $r$: a browser's from 1024 rows to $1024\,r$, a native
