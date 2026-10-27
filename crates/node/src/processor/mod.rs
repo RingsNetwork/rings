@@ -100,6 +100,7 @@ mod builder;
 mod config;
 /// Handshakes: by DID over the overlay, and over a peer's HTTP endpoint.
 pub(crate) mod handshake;
+mod horizon;
 mod messaging;
 mod registration_daemon;
 
@@ -110,6 +111,9 @@ pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
 pub(crate) use handshake::HandshakeFailure;
 pub(crate) use handshake::HandshakePeer;
+pub use horizon::DelegationHorizon;
+pub use horizon::SigningState;
+pub use horizon::SIGNING_HORIZON_LEAD_MS;
 
 /// The pause between two reads of the fetch cache while a DHT fetch waits for its reply.
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -173,6 +177,13 @@ impl Processor {
 
     pub(crate) fn delegatee_key(&self) -> &DelegateeKey {
         &self.delegatee_key
+    }
+
+    /// The signing horizon of this node's own delegation: from it on, the node can send
+    /// nothing until it restarts with a fresh delegation (#1063). A native daemon ends there; a
+    /// browser or FFI embedder reads it here, or as `overlay_ready = false`, and acts itself.
+    pub fn signing_horizon(&self) -> DelegationHorizon {
+        DelegationHorizon::of(&self.delegatee_key.delegation())
     }
 
     /// The stop and the task set of this node (`crate::tasks`).
@@ -767,7 +778,9 @@ impl Processor {
                 has_admitted_peer,
                 has_successor,
                 has_predecessor,
-                overlay_ready: has_admitted_peer && has_successor,
+                overlay_ready: has_admitted_peer
+                    && has_successor
+                    && self.signing_horizon().signs_at(generated_at_ms),
             },
         })
     }

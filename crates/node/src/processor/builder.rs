@@ -237,10 +237,12 @@ impl ProcessorBuilder {
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
         self.validate()?;
-        self.delegatee_key
-            .delegation()
+        let delegation = self.delegatee_key.delegation();
+        delegation
             .verify_delegator_authorization()
             .map_err(|e| Error::VerifyError(e.to_string()))?;
+        // A process that could not send its first frame is refused, not started mute (#1063).
+        DelegationHorizon::of(&delegation).admitted_at(get_epoch_ms())?;
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let onion_entry_guard_storage = self

@@ -2,6 +2,25 @@
 
 ## 0.38.0
 
+- A node no longer outlives its own delegation (#1063). Every frame it sends carries its
+  delegation, so from the delegation's signing horizon, `Δ` (25 s) before it expires, nothing
+  leaves the node, and only a restart with a fresh delegatee key lets it send again. Until now
+  it ran on mute and kept answering its local API, and no supervisor noticed: three
+  `docker/cluster` nodes stayed dark for two days.
+  - **Core** reports the instant as `rings_core::swarm::signing_horizon_ms(e)`. A test checks it
+    against the sender's margin.
+  - **Processor:** `ProcessorBuilder::build` refuses a delegatee key already at or past its
+    horizon with the new `Error::DelegationHorizonReached` (code 1003), instead of starting a
+    node that is mute from its first frame. `Processor::signing_horizon` gives embedders the
+    horizon, and `health.overlay_ready` is `false` from the horizon on.
+  - **`rings run`** warns once the horizon is less than a day away, and exits non-zero at it with
+    that error, so `Restart=always` or `--restart unless-stopped` restarts it.
+  - **Operator step.** A node now runs at most the delegation's `--ttl` (default 30 days) less
+    25 s. Run nodes under a supervisor that restarts them and mints a fresh delegatee key
+    (`rings new-delegation`) before the restart; the `docker/cluster` launcher already mints new
+    keys at every start, so run it with `--restart unless-stopped`. A restart with an expired key
+    fails at startup with the same error.
+
 - A node learns when its registrations are stored at their owners (#866), from the owners
   themselves, instead of polling the registry. A registration publish now asks each owner that
   applies it for a store report. An `OperateEntry` carries `report`, and the owner of its

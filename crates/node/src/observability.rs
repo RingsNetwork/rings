@@ -210,7 +210,9 @@ pub struct HealthSnapshot {
     pub has_successor: bool,
     /// Whether the local DHT currently has a predecessor.
     pub has_predecessor: bool,
-    /// Conservative participation signal: an admitted peer and successor are both present.
+    /// Conservative participation signal: an admitted peer and a successor are both present,
+    /// and the node's own delegation is before its signing horizon, so its frames still leave
+    /// (#1063).
     pub overlay_ready: bool,
 }
 
