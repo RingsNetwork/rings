@@ -24,6 +24,8 @@ pub use builder::SwarmBuilder;
 /// The read-only view of one lane's send credit that [`Swarm::application_credit`] returns: the
 /// transport's type, re-exported so an application reads it through core alone.
 pub use rings_transport::core::transport::LaneCreditView;
+/// The instant from which a node can sign no frame with its own delegation (#1063).
+pub use session_link::signing_horizon_ms;
 
 use self::callback::SwarmTransportCallback;
 use crate::dht::Chord;

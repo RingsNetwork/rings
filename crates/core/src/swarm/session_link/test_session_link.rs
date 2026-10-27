@@ -5,6 +5,8 @@
 use std::collections::BTreeMap;
 
 use super::past_grace;
+use super::signing_horizon_ms;
+use super::within_margin;
 use super::Confirmation;
 use super::DelegationLessee;
 use super::DelegationLessor;
@@ -846,4 +848,27 @@ fn test_an_honest_reference_never_misses_under_loss_reordering_and_pressure() ->
         assert!(walk(seed, offset_ms)? > 0, "no late frame resolved");
     }
     Ok(())
+}
+
+/// Law (horizon, #1063): `now ≥ signing_horizon_ms(e)` exactly when the sender's margin refuses
+/// a frame carrying a delegation that expires at `e`, for expiries below, at and past the margin
+/// and every instant around each horizon.
+#[test]
+fn test_signing_horizon_is_where_the_margin_refuses() {
+    let margin = LEASE_MARGIN_MS;
+    for expires_at_ms in [0, 1, margin - 1, margin, margin + 1, 3 * margin, u128::MAX] {
+        let horizon = signing_horizon_ms(expires_at_ms);
+        for now_ms in [
+            0,
+            horizon.saturating_sub(1),
+            horizon,
+            horizon.saturating_add(1),
+        ] {
+            assert_eq!(
+                now_ms >= horizon,
+                within_margin(expires_at_ms, now_ms),
+                "e = {expires_at_ms}, now = {now_ms}"
+            );
+        }
+    }
 }

@@ -43,11 +43,13 @@ use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api_with_gateway;
 use rings_node::native::gateway::NativeGatewayRunner;
+use rings_node::native::horizon::signing_horizon;
 use rings_node::native::stores::NodeStores;
 use rings_node::onion::proxy::http::run_onion_http_proxy;
 use rings_node::onion::proxy::http::OnionHttpProxyOptions;
 use rings_node::onion::OnionExitTarget;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
+use rings_node::prelude::rings_core::utils::get_epoch_ms;
 use rings_node::prelude::StopSource;
 use rings_node::prelude::StopToken;
 use rings_node::processor::Processor;
@@ -137,6 +139,10 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
 
     let mut tasks = JoinSet::new();
     tasks.spawn(serve_application(application, stop.token()));
+    // The node can send nothing from its delegation's signing horizon on: end there, so the
+    // supervisor restarts it with a fresh delegatee key instead of leaving it mute (#1063).
+    let horizon = processor.signing_horizon();
+    tasks.spawn(async move { Err(signing_horizon(horizon, get_epoch_ms).await.into()) });
     let processor_task = spawn_processor(processor.clone(), stop.token());
     spawn_apis(
         &mut tasks,

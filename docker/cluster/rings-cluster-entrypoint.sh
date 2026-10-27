@@ -542,6 +542,9 @@ esac
 log "cluster ready; private key values were not printed. delegatee keys are stored under $CLUSTER_DIR/keys"
 log "node logs are under $CLUSTER_DIR/logs"
 
+# A node exits on its own at its delegation's signing horizon, 25 s before its key's
+# RINGS_SESSION_TTL_SECONDS run out, since it can send nothing after (#1063). Exiting with its
+# status ends the container, and `--restart unless-stopped` starts it again with fresh keys.
 while true; do
     for i in $(seq 0 $((NODE_COUNT - 1))); do
         pid="${pids[$i]}"

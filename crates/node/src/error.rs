@@ -291,6 +291,19 @@ pub enum Error {
     /// Cryptographic verification failed.
     #[error("verify error: {0}")]
     VerifyError(String) = 1002,
+    /// The node's own delegation is past its signing horizon (#1063): it expires at
+    /// `expires_at_ms`, and every frame that carries it is refused from `horizon_ms` on, so the
+    /// node can send nothing until it restarts with a fresh delegatee key.
+    #[error(
+        "the node's delegation reached its signing horizon at {horizon_ms} ms (it expires at \
+         {expires_at_ms} ms): the node can send nothing; restart it with a fresh delegatee key"
+    )]
+    DelegationHorizonReached {
+        /// The delegation's expiry, in Unix epoch milliseconds.
+        expires_at_ms: u128,
+        /// The first instant at which no frame leaves, in Unix epoch milliseconds.
+        horizon_ms: u128,
+    } = 1003,
     /// A rings-core operation returned an error.
     #[error("Core error: {0}")]
     CoreError(#[from] rings_core::error::Error) = 1102,

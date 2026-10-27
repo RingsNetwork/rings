@@ -74,6 +74,7 @@ Useful environment variables:
 - `RINGS_BASE_INTERNAL_PORT`: first loopback JSON-RPC port; default `50000`
 - `RINGS_BASE_EXTERNAL_PORT`: first externally bound JSON-RPC port; default `51000`
 - `RINGS_CLUSTER_DIR`: config, logs, storage, and delegatee key directory; default `/var/lib/rings-cluster`
+- `RINGS_SESSION_TTL_SECONDS`: lifetime of each node's delegatee key, minted at every container start, which bounds how long the container runs (see Process lifetime below); default `2592000` (30 days)
 - `RINGS_ICE_SERVERS`: ICE server list passed to every node; set it to an empty string to run without ICE servers
 - `RINGS_RUNTIME`: Tokio runtime flavor for each node process; default `current-thread`
 - `RINGS_LOG_LEVEL`: optional node log level override; when unset, the `rings` CLI default is `error`
@@ -87,6 +88,13 @@ Useful environment variables:
 - `RINGS_ONION_EXIT_DENY_TARGETS`: comma-separated exit target deny-list; default empty
 
 The reserved `https` onion service is handled by the native TCP exit runtime. Native nodes advertising the default services publish both `tcp` and `https`, which lets WorkBench build HTTPS onion proxy routes against the Docker cluster. Every route is a loop through four distinct relays besides the client (guard, relay, exit, relay, back to the guard). A client outside the cluster, such as WorkBench, therefore needs `RINGS_NODE_COUNT` of at least `4`; a cluster node acting as the client never selects itself, so it needs at least `5`.
+
+Process lifetime: every container start mints a fresh delegatee key per node, valid for
+`RINGS_SESSION_TTL_SECONDS` (default 30 days). A node can send nothing from 25 s before its key
+expires, so it exits there with a non-zero status, and the launcher then exits with that status
+too (#1063). Run long-lived clusters with `--restart unless-stopped` instead of `--rm`: the
+restart mints new keys and the nodes come back. Without a restart policy the container stops,
+rather than staying up with mute nodes.
 
 Topology modes:
 
