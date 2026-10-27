@@ -2,7 +2,7 @@
 name = "rings-node"
 default-run = "rings"
 description = """
-Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
+Rings is a browser-native, structured peer-to-peer network: browser tabs and native daemons find each other by DID and talk over WebRTC, routed by a Chord DHT.
 """
 readme = "README.md"
 keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
@@ -12,6 +12,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true

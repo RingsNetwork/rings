@@ -17,6 +17,7 @@ edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["RND <dev@rings.rs>"]
 repository = "https://github.com/RingsNetwork/rings"
+homepage = "https://rings.rs"
 
 [workspace.dependencies]
 async-trait = "0.1.77"
