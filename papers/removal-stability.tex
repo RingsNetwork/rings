@@ -582,7 +582,7 @@ PR~2 precedes PR~3.  Once PR~3 lands, today's heartbeats would hit $\Tmax$ with 
 registrants per topic, and their removes would be refused.  PR~4 needs PR~3, because the
 removal store's budget is sized by $W_\Rm$.  PR~1 is independent.
 
-\textbf{Operator steps}, in the CHANGELOG under \texttt{Unreleased}.  PR~2 changes the
+\textbf{Operator steps}.  PR~2 changes the
 descriptor encoding, so old descriptors no longer decode.  Readers skip them, and they
 retire within $H$; this needs no step.  PR~4 adds the removal store (native directory and
 browser database \texttt{dht-removals} beside the data store) and needs no step either.  A
