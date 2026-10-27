@@ -145,6 +145,7 @@ async fn test_inbox_mail_never_draws_on_the_local_share() -> Result<()> {
         let key = stream(origin, class);
         Admission {
             introducer: Principal::Inbox,
+            spent_at_ms: u128::MAX,
             ..Admission::for_test(key, 0, TransactionDigest::new([1; 32]), 0)
         }
     };
@@ -164,10 +165,11 @@ async fn test_inbox_mail_never_draws_on_the_local_share() -> Result<()> {
     Ok(())
 }
 
-/// A stream held in relay custody is never retired, spent or not: its delivery is still to be
-/// taken, and its custody lives in its record.
+/// A stream held in relay custody is retired only once spent, with its custody: its entry is
+/// spent no later than the stream, so both go at the stream's spent instant, and the record of
+/// the stream is removed.
 #[tokio::test]
-async fn test_a_stream_in_custody_is_not_retired() -> Result<()> {
+async fn test_a_stream_in_custody_is_retired_only_with_its_custody() -> Result<()> {
     let storage = Arc::new(MemStorage::new());
     let replay = runtime(&storage);
     let key = stream(10, MessageCategory::Application);
@@ -177,14 +179,18 @@ async fn test_a_stream_in_custody_is_not_retired() -> Result<()> {
         ..Admission::for_test(key, 0, TransactionDigest::new([1; 32]), 0)
     };
     replay.admit_relayed(admission).await?;
+    let class = MessageCategory::Application;
     open(
         &replay,
-        stream(11, MessageCategory::Application),
+        stream(11, class),
         Principal::Slot(0),
-        SPENT_AT_MS,
+        SPENT_AT_MS - 1,
     )
     .await?;
     assert_eq!(storage.count().await?, 2);
+    open(&replay, stream(12, class), Principal::Slot(1), SPENT_AT_MS).await?;
+    // Both earlier streams were spent: the one in custody retired with its entry.
+    assert_eq!(storage.count().await?, 1);
     Ok(())
 }
 
