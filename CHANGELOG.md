@@ -21,6 +21,30 @@
     keys at every start, so run it with `--restart unless-stopped`. A restart with an expired key
     fails at startup with the same error.
 
+- Mail to `did@domain` through mail gateways (#1117), for any node, a browser node included: a
+  gateway is a stateless SMTP receiver that seals each mail to its recipient's delegatee key
+  and writes it to the data topic `mail:<did>`, where the recipient fetches and opens it within
+  its 100-minute lifetime. `rings_node::mail` holds what both ends share: the signed mail
+  descriptor a recipient publishes under the registry lease (`ProcessorBuilder::receive_mail`),
+  the envelope (a gateway-signed manifest and at most 32 chunks of an ElGamal-wrapped
+  ChaCha20-Poly1305 ciphertext, about 1 MiB a mail), the gateway's lookup and write
+  (`MailGateway`), and the recipient library, which builds for native and browser nodes. The
+  gateway answers DATA `250` at the first owner's store report (#866) for each recipient, and
+  `451` once every owner refused or none reported within `MAIL_STORE_REPORT_WAIT`, 60 seconds.
+  For this a store receipt resolves under a `StoreQuorum`: `Every`, the registrations'
+  receipt as before, or `Any`, stored at the first owner's `Stored` report and refused only
+  once every owner refused. `ScopedStorage::storage_extend_reported` is the reported extend,
+  and `Processor::storage_extend_reported` wraps it. The mailbox example gains the gateway,
+  `rings-mail-gateway` (with STARTTLS), and receives through gateways with `--rings-config`.
+  See the Mail Gateway chapter.
+  - **Breaking (library API).** `ChordStorageInterface` gains `storage_extend(topic, data,
+    lifetime_ms)`: several elements appended as one delta under a retention bound the writer
+    names, which an owner admits up to `EntryKind::Data.max_lifetime_ms()` as every write.
+    An implementor of the trait outside this repository adds the method.
+  - **Upgrade consequence.** None on the wire: owners already admit an `Extend` that carries
+    its origin's bound, as every forwarded one does, and already answer a reported operation.
+  - **Operator step.** None.
+
 - A node learns when its registrations are stored at their owners (#866), from the owners
   themselves, instead of polling the registry. A registration publish now asks each owner that
   applies it for a store report. An `OperateEntry` carries `report`, and the owner of its
@@ -233,6 +257,19 @@
   probes only its two chain neighbours this often, on the same probe clock as every peer: four
   messages per 2.5 s, about 1.3 more a second, whatever `r`. No message changes; nodes of this
   version and of an earlier one interoperate.
+
+- A DNS relay with the default `dns_listen` starts on Linux (#1115). DNS bound each address with
+  the system's defaults, and on Linux (`net.ipv6.bindv6only = 0`) those make `[::]:53`
+  dual-stack: it held IPv4 port 53 too, the following `0.0.0.0:53` failed with `EADDRINUSE`, and
+  `rings run` exited with "DNS relay stopped". Every DNS socket on an IPv6 address is now IPv6
+  only, as the ingress listeners already were, so the default's two wildcards are two sockets on
+  every system. `DnsRelay::run` now binds every socket before it serves any, as it documents, so
+  a relay that cannot bind one has answered nothing.
+  - **Upgrade consequence.** A `dns_listen` address that is IPv6 no longer receives IPv4 on
+    Linux: a relay that listed only `[::]:53` lists an IPv4 address too, as the default does.
+  - **Operator step.** On a host whose local stub resolver holds port 53 on loopback, such as
+    `systemd-resolved`, the IPv4 wildcard cannot bind: list the host's own addresses in
+    `dns_listen`, as the DNS Relay chapter shows.
 
 ## 0.37.0
 

@@ -59,6 +59,7 @@ bound.
 - `proxy`: the PROXY protocol v2 header a forward sends first.
 - `server`: the DNS shell over `hickory-server`.
 - `ingress`: the TCP shell, routing by destination, with two-step [`Admission`].
+- `socket`: the listening sockets of DNS and the ingress, IPv6 only on an IPv6 address.
 - `config` and `relay`: the configuration and the [`DnsRelay`] that opens and runs it.
 
 ## Operating a relay
@@ -71,3 +72,6 @@ bound.
    IPv6 only, so a host service on the same port's IPv4 wildcard keeps every IPv4 connection,
    and an IPv6 host service keeps its connections when it listens on the host's own address:
    the kernel prefers the exact address to the relay's wildcard listener.
+4. DNS listens on `[::]:53` and `0.0.0.0:53` by default, the IPv6 one IPv6 only. Where a local
+   stub resolver holds port 53 on loopback, as `systemd-resolved` does, the IPv4 wildcard cannot
+   bind: list the host's own addresses in `dns_listen` instead.

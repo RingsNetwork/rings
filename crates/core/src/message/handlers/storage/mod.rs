@@ -50,6 +50,7 @@ use crate::swarm::transport::egress::Application;
 use crate::swarm::transport::egress::Discipline;
 use crate::swarm::transport::egress::Egress;
 use crate::swarm::transport::reroute;
+use crate::swarm::transport::store_reports::StoreQuorum;
 use crate::swarm::transport::store_reports::StoreReceipt;
 use crate::swarm::transport::Attempts;
 use crate::swarm::transport::Route;
@@ -471,27 +472,35 @@ pub(crate) async fn operate_entry(
 }
 
 /// [`operate_entry`] whose remote placements ask their owners for a store report
-/// (`message::types::store_report`, #866): the receipt resolves once every one reported the
-/// operation stored, or with why it will not (`swarm::transport::store_reports`).
+/// (`message::types::store_report`, #866): the receipt resolves once their reports decide
+/// `quorum`, or with why they will not (`swarm::transport::store_reports`).
 ///
 /// The reports are awaited before the operation leaves, so none can precede the receipt. A
 /// placement settled here after a deferral reports itself (`OperatePlacement::settle`), and one
-/// settled here at once is not awaited.
+/// settled here at once is not awaited: it is stored, since a refusal here fails the operation,
+/// so it decides [`StoreQuorum::Any`] at once.
 pub(crate) async fn operate_entry_reported(
     transport: &Arc<SwarmTransport>,
     operation: EntryOperation,
     attempts: Attempts,
+    quorum: StoreQuorum,
 ) -> Result<StoreReceipt> {
+    let redundancy = transport.storage_redundancy();
+    let placed = usize::from(operation.kind().replication(redundancy));
     let action = transport
         .dht
-        .entry_operate_reported(operation, transport.storage_redundancy())
+        .entry_operate_reported(operation, redundancy)
         .await?;
     let mut placements = BTreeSet::new();
     let mut digest = None;
     collect_reported_placements(&action, &mut digest, &mut placements)?;
+    // The operation's placements are `placed` distinct rotations of its key
+    // (`Did::rotate_affine`), each one settled here or among the remote `placements`; one
+    // settled here is stored.
+    let decided_here = placed > placements.len() && quorum.decided_by(StoreOutcome::Stored);
     let receipt = match digest {
-        Some(digest) => transport.store_reports.expect(digest, placements),
-        None => StoreReceipt::stored(),
+        Some(digest) if !decided_here => transport.store_reports.expect(digest, placements, quorum),
+        _ => StoreReceipt::stored(),
     };
     handle_storage_store_act(transport.clone(), action, attempts).await?;
     Ok(receipt)

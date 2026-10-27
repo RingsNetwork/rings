@@ -36,6 +36,7 @@ use crate::message::MessageHandler;
 use crate::message::MessageVerificationExt;
 use crate::message::OperationDigest;
 use crate::message::StoreOutcome;
+use crate::swarm::storage_api::StoreQuorum;
 #[cfg(feature = "dummy")]
 use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
 #[cfg(feature = "dummy")]
@@ -587,11 +588,11 @@ async fn test_an_owner_reports_a_reported_operation_once_and_an_unreported_one_n
     let reported: Entry = ("reported".to_string(), "b".to_string()).try_into()?;
     let reported_op = EntryOperation::Overwrite(reported.clone());
     let digest = OperationDigest::of(&reported_op)?;
-    let receipt = node1
-        .swarm
-        .transport
-        .store_reports
-        .expect(digest, BTreeSet::from([reported.did]));
+    let receipt = node1.swarm.transport.store_reports.expect(
+        digest,
+        BTreeSet::from([reported.did]),
+        StoreQuorum::Every,
+    );
 
     for (placement, op, report) in [
         (
