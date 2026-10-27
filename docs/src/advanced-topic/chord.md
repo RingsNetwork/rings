@@ -222,8 +222,9 @@ survives.
 - **Fetch and removal.** A recipient that holds relay mail reads its inbox from its own store;
   one that does not fetches it from its members, the holder first and then down the chain to
   the next it can reach (`FetchRelayInbox`, answered only to the recipient itself), and removes what it
-  delivered at the member it read it from. Only the holder's report restricts relay custody; a
-  lagging member's copy may miss an element that still exists (#1059).
+  delivered at the member it read it from. No report restricts relay custody: a lagging
+  member's copy, or a new holder's before its hand-off lands, may miss an element that still
+  exists (#1059).
 
 A view covers the node's predecessor, the node, and its successor list. A holder also needs the
 keys owned on the storage-less runs behind it, whose owners lie behind its predecessor: every node

@@ -6,21 +6,29 @@
 //! volatile application inbox. Without more state, a restart between the admission and the take
 //! loses the queue but not `W_s`, so the redelivery observes `Replay` and is retired: the mail is
 //! lost. The custody set `K_s` keeps that fact durable, inside the receiver record of `s`, so one
-//! record write commits `W_s` and `K_s` together:
+//! record write commits `W_s` and `K_s` together. Each entry carries the instant `x` its
+//! transaction is spent ([`spent_at`](super::spent_at)), after which no carrier delivers it:
 //!
 //! ```text
-//! pass start:  K_s ← K_s ∩ stored(d)                            (written only if it changed)
-//! offer e:     (q, h) ∈ K_s              ▶ Requeue: queue again, W_s untouched
+//! transition:  K_s ← { (q, h, x) ∈ K_s | now < x }               (written only if it changed)
+//! offer e:     (q, h, x) ∈ K_s           ▶ Requeue: queue again, W_s untouched
 //!              |⋃ K| = RELAY_INBOX_MAX_LEN ▶ Defer: e and later elements wait
-//!              observe(W_s, q, h) admits ▶ commit (W_s′, K_s ∪ {(q, h)}), then queue
+//!              observe(W_s, q, h) admits ▶ commit (W_s′, K_s ∪ {(q, h, x)}), then queue
 //!              otherwise                  ▶ Retire, as the live path would drop h
-//! take:        commit (W_s, K_s ∖ {(q, h)})  (the release), then e may be retired
+//! take:        commit (W_s, K_s ∖ {(q, h, x)})  (the release), then e may be retired
 //! ```
+//!
+//! **Law (removal only by evidence).** An entry leaves `K_s` only by its release, which follows
+//! the take, or by its expiry, after which no carrier can offer its element (Lemma 2): never by
+//! its absence from a carrier report. A report is a holder's view, which may lag behind a
+//! membership change or a hand-off not yet landed, so absence is no evidence of removal; an
+//! entry restricted by it would turn a redelivery of untaken mail into a `Replay` (#1059).
 //!
 //! **Law (at least once across restart).** With the carrier durable (#1021), an element leaves
 //! the carrier only once the application took it, once the live path would drop its transaction
 //! too, or once its retention bound elapsed: a crash cannot separate an admission from its
-//! custody entry, nor a release from its effect, since each is one record write.
+//! custody entry, nor a release from its effect, since each is one record write, and its entry
+//! stays until the release or until no carrier can offer the element.
 //!
 //! **Law (duplicate window).** The application receives a message of one element twice only if
 //! a crash falls after its take and before its release committed; the release is issued on the
@@ -28,7 +36,16 @@
 //! which is the application's key to deduplicate by.
 //!
 //! **Law (bounded custody).** `|⋃_s K_s| ≤ RELAY_INBOX_MAX_LEN`: the defer arm refuses a new entry
-//! at the bound, and the restriction keeps only entries of elements still stored.
+//! at the bound, after the transition expired the spent entries. An element lost without a take
+//! (a holder that dropped it) holds its entry at most until it is spent.
+//!
+//! **Remark (custody stall).** The removal law trades liveness for at least once: an entry whose
+//! element was admitted, not taken, and lost at every member of its chain stays until `x`, at
+//! most `ttl + MAX_RELAY_INBOX_TTL_MS + 2σ` after its admission. With `k` such entries custody
+//! admits `RELAY_CUSTODY_CAPACITY − k` others; at `k = RELAY_CUSTODY_CAPACITY` every new relay
+//! delivery to this node, from every origin, is deferred until the earliest is spent. The bound
+//! frees itself at `x`; removing the replay store ends the stall at once, at the cost of the
+//! replay guarantee.
 //!
 //! The live path observes `W_s` alone and is unchanged. Mail below the window is refused as the
 //! live path refuses it: no bounded receiver state can tell it from a re-hold of a transaction
@@ -41,6 +58,7 @@ use serde::Serialize;
 
 use super::commit::Ledger;
 use super::Admission;
+use super::ReplayInstant;
 use super::ReplayTable;
 use super::StreamKey;
 use super::TransactionDigest;
@@ -52,13 +70,27 @@ use crate::error::Result;
 /// Most relay deliveries in custody over the whole store: one per element a relay inbox holds.
 pub(crate) const RELAY_CUSTODY_CAPACITY: usize = RELAY_INBOX_MAX_LEN;
 
-/// One relay delivery in custody: the sequence and digest of the transaction it admitted.
+/// One relay delivery in custody: the sequence and digest of the transaction it admitted, and
+/// the instant that transaction is spent.
+///
+/// Law: every field is a function of the transaction, so its admission and its release name the
+/// same delivery.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub(crate) struct RelayDelivery {
     /// The transaction's sequence in its stream.
     pub(crate) sequence: u64,
     /// The transaction's digest.
     pub(crate) digest: TransactionDigest,
+    /// The instant the transaction is spent ([`spent_at`](super::spent_at)): from then on no
+    /// carrier delivers it, so its entry may expire.
+    pub(crate) spent_at_ms: u128,
+}
+
+impl RelayDelivery {
+    /// Whether this delivery is spent at `now_ms`, `now ≥ x` (pure).
+    pub(super) const fn is_spent_at(&self, now_ms: u128) -> bool {
+        now_ms >= self.spent_at_ms
+    }
 }
 
 /// The relay deliveries of one receiver stream in custody.
@@ -86,12 +118,28 @@ impl TransactionReplay {
         admission: Admission,
     ) -> Result<RelayAdmission> {
         let clock = super::replay_clock(self.started_at);
+        self.admit_relayed_at(admission, clock).await
+    }
+
+    /// The relay admission transition at the instant `clock` reads under the lock (the law of
+    /// `admit_at`): retire what is spent, judge the custody bound on what is left, then admit.
+    pub(super) async fn admit_relayed_at<C>(
+        self: &std::sync::Arc<Self>,
+        admission: Admission,
+        clock: C,
+    ) -> Result<RelayAdmission>
+    where
+        C: FnOnce() -> ReplayInstant + rings_runtime::MaybeSend + 'static,
+    {
         let key = admission.key;
         let delivery = RelayDelivery {
             sequence: admission.sequence,
             digest: admission.digest,
+            spent_at_ms: admission.spent_at_ms,
         };
         self.commit(move |replay, ledger| {
+            let now = clock();
+            ledger.retire_spent(now.wall_ms)?;
             replay.refuse_unavailable(ledger.store, ReplayTable::Receiver, key)?;
             let custody = &ledger.store.tables.custody;
             if custody
@@ -107,7 +155,7 @@ impl TransactionReplay {
                 });
             }
             replay
-                .admit_in(ledger, admission, clock, Some(delivery))
+                .admit_in(ledger, admission, now, Some(delivery))
                 .map(|_| RelayAdmission::Admitted)
         })
         .await
@@ -133,34 +181,31 @@ impl TransactionReplay {
         })
         .await
     }
+}
 
-    /// Restrict custody to the deliveries of `stored`, the relay elements still in the carrier
-    /// (the restriction step): one record write per stream whose custody changed.
-    pub(crate) async fn restrict_custody(
-        self: &std::sync::Arc<Self>,
-        stored: BTreeSet<(StreamKey, RelayDelivery)>,
-    ) -> Result<()> {
-        self.commit(move |_, ledger| {
-            let shrunk = ledger
-                .store
-                .tables
-                .custody
+/// Expire every relay delivery spent at `now_ms` from custody (the removal law): one staged
+/// record per stream whose custody changed.
+///
+/// Post: no entry of custody is spent at `now_ms`; an entry not spent is kept.
+pub(super) fn expire_custody(ledger: &mut Ledger<'_>, now_ms: u128) -> Result<()> {
+    let expired = ledger
+        .store
+        .tables
+        .custody
+        .iter()
+        .filter(|(_, custody)| custody.iter().any(|delivery| delivery.is_spent_at(now_ms)))
+        .map(|(key, custody)| {
+            let kept = custody
                 .iter()
-                .filter_map(|(key, custody)| {
-                    let kept = custody
-                        .iter()
-                        .filter(|delivery| stored.contains(&(*key, **delivery)))
-                        .copied()
-                        .collect::<RelayCustody>();
-                    (kept.len() < custody.len()).then_some((*key, kept))
-                })
-                .collect::<Vec<_>>();
-            shrunk
-                .into_iter()
-                .try_for_each(|(key, kept)| rewrite_custody(ledger, key, kept))
+                .filter(|delivery| !delivery.is_spent_at(now_ms))
+                .copied()
+                .collect::<RelayCustody>();
+            (*key, kept)
         })
-        .await
-    }
+        .collect::<Vec<_>>();
+    expired
+        .into_iter()
+        .try_for_each(|(key, kept)| rewrite_custody(ledger, key, kept))
 }
 
 /// Stage stream `key`'s receiver record with `custody`, and adopt it on the speculative state.
