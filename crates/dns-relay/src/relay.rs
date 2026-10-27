@@ -36,6 +36,8 @@ use crate::recall::Recall;
 use crate::registry::duration_ms;
 use crate::registry::AddressRegistry;
 use crate::server::DnsAuthority;
+use crate::socket::bind_udp;
+use crate::socket::listen_tcp;
 use crate::state::StateError;
 use crate::zone::Zone;
 use crate::zone::ZoneError;
@@ -173,25 +175,37 @@ where
     }
 
     /// Bind every socket, then serve DNS and the ingress until `stop` completes.
+    ///
+    /// Every socket is bound before any is served, and served before `stop` is first polled: a
+    /// relay that cannot bind one returns its error having answered nothing.
     pub async fn run(self, stop: impl Future<Output = ()>) -> Result<(), DnsRelayError> {
+        let dns = self
+            .dns_listen
+            .iter()
+            .map(|address| bind_dns(*address))
+            .collect::<Result<Vec<_>, _>>()?;
+        let listeners = self.ingress.bind()?;
         let mut server = Server::new(self.authority);
-        for address in &self.dns_listen {
-            let bind_error = |source| DnsRelayError::DnsBind {
-                address: *address,
-                source,
-            };
-            let udp = UdpSocket::bind(address).await.map_err(bind_error)?;
-            let tcp = TcpListener::bind(address).await.map_err(bind_error)?;
+        for (udp, tcp) in dns {
             server.register_socket(udp);
             server.register_listener(tcp, DNS_TCP_TIMEOUT, DNS_TCP_RESPONSE_BUFFER);
         }
-        let listeners = self.ingress.bind()?;
         let mut ingress = self.ingress.serve(listeners);
         stop.await;
         ingress.abort_all();
         server.shutdown_gracefully().await?;
         Ok(())
     }
+}
+
+/// DNS's UDP socket and TCP listener on `address`; on an IPv6 address both are IPv6 only, so
+/// the default `[::]:53` and `0.0.0.0:53` bind together.
+fn bind_dns(address: SocketAddr) -> Result<(UdpSocket, TcpListener), DnsRelayError> {
+    let bind_error = |source| DnsRelayError::DnsBind { address, source };
+    Ok((
+        bind_udp(address).map_err(bind_error)?,
+        listen_tcp(address).map_err(bind_error)?,
+    ))
 }
 
 /// The ingress ports `ports` names: at least one, none of them 0.

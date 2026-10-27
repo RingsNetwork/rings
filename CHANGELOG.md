@@ -215,6 +215,19 @@
   messages per 2.5 s, about 1.3 more a second, whatever `r`. No message changes; nodes of this
   version and of an earlier one interoperate.
 
+- A DNS relay with the default `dns_listen` starts on Linux (#1115). DNS bound each address with
+  the system's defaults, and on Linux (`net.ipv6.bindv6only = 0`) those make `[::]:53`
+  dual-stack: it held IPv4 port 53 too, the following `0.0.0.0:53` failed with `EADDRINUSE`, and
+  `rings run` exited with "DNS relay stopped". Every DNS socket on an IPv6 address is now IPv6
+  only, as the ingress listeners already were, so the default's two wildcards are two sockets on
+  every system. `DnsRelay::run` now binds every socket before it serves any, as it documents, so
+  a relay that cannot bind one has answered nothing.
+  - **Upgrade consequence.** A `dns_listen` address that is IPv6 no longer receives IPv4 on
+    Linux: a relay that listed only `[::]:53` lists an IPv4 address too, as the default does.
+  - **Operator step.** On a host whose local stub resolver holds port 53 on loopback, such as
+    `systemd-resolved`, the IPv4 wildcard cannot bind: list the host's own addresses in
+    `dns_listen`, as the DNS Relay chapter shows.
+
 ## 0.37.0
 
 - Every frame names its wire version (#1104), so a node of another release is refused by
