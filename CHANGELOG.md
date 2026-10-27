@@ -2,6 +2,20 @@
 
 ## 0.38.0
 
+- The recorded path of connect signaling encodes each hop as its DID's 20 canonical bytes
+  (#952), where a `Did` alone serializes in its 42-character string form, so a hop costs 20
+  bytes on the wire instead of 43. The widest path an honest carrier records is a return over a
+  full hop budget of 64 relays, whose hops now cost 1280 bytes instead of 2752. So
+  `MAX_PAYLOAD_ENVELOPE_OVERHEAD` drops from 3692 to 2220, still witnessed with equality, and
+  a whole payload up to 1472 bytes larger than before is sent unchunked. Only the path's hops
+  change; every other DID of the carrier, `next_hop` and `destination` in the relay header
+  included, keeps its form.
+  - **Library API.** `RelayPath` keeps its type and its decoding checks (`Law (Bound)`, `Law
+    (Distinct)`); only its serialized form changes. `MAX_PAYLOAD_ENVELOPE_OVERHEAD` is 2220.
+  - **Upgrade consequence.** Breaking on the wire, within wire version 2, which #934 opened
+    for this release: a signaling path in the old form does not decode.
+  - **Operator step.** None beyond upgrading every node that must reach another.
+
 - A node learns when its registrations are stored at their owners (#866), from the owners
   themselves, instead of polling the registry. A registration publish now asks each owner that
   applies it for a store report. An `OperateEntry` carries `report`, and the owner of its

@@ -38,9 +38,16 @@
 //!
 //! The path is outside every signature, as the rest of the carrier is. A relay that forges or
 //! truncates it can only misdeliver this one reply, which equals dropping it.
+//!
+//! Encoding (#952): a hop is its DID's 20 canonical bytes, where a `Did` alone serializes in its
+//! 42-character string form, so a hop costs 20 bytes on the wire instead of 43. Only the path's
+//! hops take this form; every other DID of the carrier keeps its own.
 
+use ethereum_types::H160;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
 
 use crate::consts::MAX_RELAY_HOPS;
 use crate::dht::Did;
@@ -48,10 +55,35 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// A sequence of pairwise-distinct relay DIDs bounded by [`MAX_RELAY_HOPS`] (`Law (Bound)`,
-/// `Law (Distinct)`).
-#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, Eq)]
-#[serde(try_from = "Vec<Did>", into = "Vec<Did>")]
+/// `Law (Distinct)`), each encoded as its 20 canonical bytes (module docs, #952).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RelayPath(Vec<Did>);
+
+/// The wire form of one hop: the DID's 20 canonical bytes.
+type WireHop = [u8; 20];
+
+impl Serialize for RelayPath {
+    /// The hops in order, each as its 20 canonical bytes.
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_seq(
+            self.0
+                .iter()
+                .map(|hop| -> WireHop { H160::from(*hop).to_fixed_bytes() }),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for RelayPath {
+    /// Decode the hops from their 20 canonical bytes, then admit them as any path is admitted
+    /// (`Law (Bound)`, `Law (Distinct)`).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let hops = Vec::<WireHop>::deserialize(deserializer)?
+            .into_iter()
+            .map(|bytes| Did::from(H160::from(bytes)))
+            .collect::<Vec<_>>();
+        Self::try_from(hops).map_err(serde::de::Error::custom)
+    }
+}
 
 impl RelayPath {
     /// The relays in order, the most recent last.
