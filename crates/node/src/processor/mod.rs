@@ -27,6 +27,8 @@ use rings_core::message::OriginQuotaConfig;
 use rings_core::message::OriginQuotaCounters;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::MemStorage;
+use rings_core::swarm::storage_api::StoreQuorum;
+use rings_core::swarm::storage_api::StoreReceipt;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_core::utils::get_epoch_ms;
@@ -110,6 +112,7 @@ pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
 pub(crate) use handshake::HandshakeFailure;
 pub(crate) use handshake::HandshakePeer;
+pub(crate) use registration_daemon::sleep_unless_stopped;
 
 /// The pause between two reads of the fetch cache while a DHT fetch waits for its reply.
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -589,6 +592,27 @@ impl Processor {
     pub async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         self.swarm
             .storage_append_data(topic, data)
+            .await
+            .map_err(Error::EntryError)
+    }
+
+    /// Append the elements `data` to the data topic `topic` as one delta, requesting the
+    /// retention bound `now + lifetime_ms`, whose owners report it (core's
+    /// [`storage_extend_reported`](rings_core::swarm::storage_api::ScopedStorage::storage_extend_reported)):
+    /// the receipt resolves once their reports decide `quorum`.
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents, its rerouting waits ending at `stop`.
+    pub async fn storage_extend_reported(
+        &self,
+        topic: &str,
+        data: Vec<Bytes>,
+        lifetime_ms: u64,
+        quorum: StoreQuorum,
+        stop: &StopToken,
+    ) -> Result<StoreReceipt> {
+        self.swarm
+            .scoped_storage(stop.clone())
+            .storage_extend_reported(topic, data, lifetime_ms, quorum)
             .await
             .map_err(Error::EntryError)
     }

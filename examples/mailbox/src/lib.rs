@@ -11,9 +11,12 @@
 )]
 
 mod files;
+pub mod gateway;
 pub mod imap;
 pub mod mailbox;
+pub mod node;
 pub mod outbound;
+pub mod receive;
 mod serve;
 pub mod smtp;
 pub mod store;

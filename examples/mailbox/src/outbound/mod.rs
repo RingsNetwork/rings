@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use client::deliver;
 pub use client::Delivery;
 pub use client::SendError;
 pub use exchangers::exchange_hosts;

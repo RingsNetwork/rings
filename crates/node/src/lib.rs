@@ -24,6 +24,7 @@ pub mod dns_relay;
 pub mod error;
 pub mod extension;
 pub mod logging;
+pub mod mail;
 pub mod measure;
 #[cfg(all(feature = "node", not(target_family = "wasm")))]
 /// Native-node configuration, CLI, and runtime adapters.
