@@ -1,8 +1,7 @@
 //! The custody law (#936): a relay delivery enters custody with its admission, is queued again
-//! after a restart instead of refused as a replay, leaves custody on its release, and custody is
-//! bounded and follows the carrier.
+//! after a restart instead of refused as a replay, leaves custody on its release or once spent,
+//! never otherwise, and custody is bounded.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::Admission;
@@ -30,11 +29,21 @@ fn stream(origin: u32) -> StreamKey {
     )
 }
 
-/// The relay delivery of sequence `sequence`, whose digest repeats `sequence`'s low byte.
+/// The relay delivery of sequence `sequence`, whose digest repeats `sequence`'s low byte, and
+/// which is never spent.
 fn delivery(sequence: u64) -> RelayDelivery {
     RelayDelivery {
         sequence,
         digest: TransactionDigest::new([sequence.to_le_bytes()[0]; 32]),
+        spent_at_ms: u128::MAX,
+    }
+}
+
+/// `delivery`, spent since the epoch's first instant.
+fn spent(delivery: RelayDelivery) -> RelayDelivery {
+    RelayDelivery {
+        spent_at_ms: 1,
+        ..delivery
     }
 }
 
@@ -49,7 +58,10 @@ async fn admit(
     key: StreamKey,
     delivery: RelayDelivery,
 ) -> Result<RelayAdmission> {
-    let admission = Admission::for_test(key, delivery.sequence, delivery.digest, get_epoch_ms());
+    let admission = Admission {
+        spent_at_ms: delivery.spent_at_ms,
+        ..Admission::for_test(key, delivery.sequence, delivery.digest, get_epoch_ms())
+    };
     replay.admit_relayed(admission).await
 }
 
@@ -95,8 +107,8 @@ async fn test_a_relay_admission_follows_the_window() -> Result<()> {
         RelayAdmission::Admitted
     );
     let fork = RelayDelivery {
-        sequence: 5,
         digest: TransactionDigest::new([0xaa; 32]),
+        ..delivery(5)
     };
     assert!(matches!(
         admit(&replay, stream(1), fork).await,
@@ -141,26 +153,27 @@ async fn test_custody_is_bounded_over_the_whole_store() -> Result<()> {
     Ok(())
 }
 
-/// The restriction keeps only the deliveries of elements still stored, durably: a delivery
-/// whose element left the carrier is no longer in custody after a restart.
+/// An entry leaves custody once its transaction is spent, durably, and no sooner: the next
+/// transition expires it, so its redelivery after a restart is a replay, while an entry not yet
+/// spent stays in custody across the same transitions and restart.
 #[tokio::test]
-async fn test_custody_follows_the_carrier_across_a_restart() -> Result<()> {
+async fn test_custody_expires_a_delivery_only_once_spent() -> Result<()> {
     let storage = Arc::new(MemStorage::new());
     let replay = run(&storage);
-    admit(&replay, stream(1), delivery(0)).await?;
     admit(&replay, stream(1), delivery(1)).await?;
-    replay
-        .restrict_custody(BTreeSet::from([(stream(1), delivery(1))]))
-        .await?;
+    admit(&replay, stream(1), spent(delivery(0))).await?;
+    admit(&replay, stream(1), delivery(2)).await?;
 
     let restarted = run(&storage);
     assert!(matches!(
-        admit(&restarted, stream(1), delivery(0)).await,
+        admit(&restarted, stream(1), spent(delivery(0))).await,
         Err(Error::TransactionReplay { .. })
     ));
-    assert_eq!(
-        admit(&restarted, stream(1), delivery(1)).await?,
-        RelayAdmission::InCustody
-    );
+    for sequence in [1, 2] {
+        assert_eq!(
+            admit(&restarted, stream(1), delivery(sequence)).await?,
+            RelayAdmission::InCustody
+        );
+    }
     Ok(())
 }

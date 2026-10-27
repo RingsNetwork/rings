@@ -142,7 +142,7 @@ rings-core:transaction-replay:stream:receiver:<hex key>  ->  (key, 32-slot windo
 ```
 
 A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RECORD_MAX_BYTES`
-(3873 bytes: a 92-byte key, a 1066-byte window, a relay custody of up to 64 deliveries of 42
+(5089 bytes: a 92-byte key, a 1066-byte window, a relay custody of up to 64 deliveries of 61
 bytes and a 23-byte charge, with tag and length prefixes), so the cost of an admission does not grow with the number of
 streams retained. On load, every record must decode and
 sit under its own key, or the stream it is filed as fails closed (see [Bad records](#bad-records)).
@@ -212,7 +212,7 @@ so a node's replay writes are about one per admission, and they share the same b
 Each table retains at most `TRANSACTION_REPLAY_STREAM_CAPACITY` = 4 x 4096 streams: every class
 stream of 4096 account-destination pairs, or more pairs that use fewer classes. Each receiver stream
 has exactly 32 hot digest slots. A full store is at most `TRANSACTION_REPLAY_STORE_MAX_RECORDS`
-(32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,691,072 bytes, counting the relay
+(32,768) records and `TRANSACTION_REPLAY_STORE_MAX_BYTES` (28,692,288 bytes, counting the relay
 custody once for the whole store, since it holds at most 64 deliveries). The sender table holds
 this node's own streams, and a new one fails closed at the bound. The receiver table is shared by
 edge, as the next section describes. There is no LRU eviction or sender-controlled reset. The
@@ -272,7 +272,15 @@ delivered, by a clock up to `σ` behind.
 - An application stream is spent another `MAX_RELAY_INBOX_TTL_MS + σ` later (7 days), since its
   mail may still arrive out of a relay inbox, judged as of its hold instant.
 
-The next admission retires every spent stream that holds no relay custody and removes its record.
+The next admission expires every relay custody entry whose transaction is spent, then retires every
+spent stream and removes its record. A custody entry is spent no later than its stream, so a spent
+stream holds no custody by then.
+
+A relay custody entry (sequence, digest, spent instant) leaves custody only when the application
+takes its mail, or once its transaction is spent and no carrier can deliver it again. A drain pass
+that reads no carrier, or a carrier without the element, removes nothing: the read may come from a
+holder that a membership change just named, before its hand-off landed, and dropping custody on
+its word would refuse the hand-off's redelivery after a restart as a replay (#1059).
 Forgetting a spent stream reopens no replay, so a refusal ends once a stream of the refused edge is
 spent. Each receiver record carries its introducer and spent instant, so a restart recovers the
 accounting.

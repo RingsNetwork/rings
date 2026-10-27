@@ -47,9 +47,9 @@
 //! - a lease extension covers sequences nobody was returned, so `issued ≤ leased ≤ D` holds
 //!   with `D` the last write (the lease law of `lease`, which reads `returned ≤ D`);
 //! - a custody entry names a delivery still in the carrier, which the next pass requeues
-//!   (`InCustody`) or the restriction step drops; a landed release only retires early what the
-//!   application already took (the duplicate-window law of `custody`). A window and its custody
-//!   stay one record, so the custody law holds unchanged.
+//!   (`InCustody`) until its release or its expiry; a landed release only retires early what
+//!   the application already took (the duplicate-window law of `custody`). A window and its
+//!   custody stay one record, so the custody law holds unchanged.
 //!
 //! [`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]: super::TRANSACTION_REPLAY_STORE_MAX_RECORDS
 //! [`TRANSACTION_REPLAY_STORE_MAX_BYTES`]: super::TRANSACTION_REPLAY_STORE_MAX_BYTES
@@ -59,6 +59,7 @@ use std::sync::Arc;
 
 use futures::channel::oneshot;
 
+use super::custody::expire_custody;
 use super::custody::RelayCustody;
 use super::lease::SenderLease;
 use super::store::record_key;
@@ -208,9 +209,15 @@ impl<'a> Ledger<'a> {
         self.undo.push(Undo::Charge(key, previous));
     }
 
-    /// Retire every receiver stream spent at `now_ms` that holds no custody (Lemma 2): forget
-    /// its window and its charge, and stage the removal of its record.
+    /// Expire the relay deliveries spent at `now_ms` from custody (the removal law of
+    /// `custody`), then retire every receiver stream spent at `now_ms` (Lemma 2): forget its
+    /// window and its charge, and stage the removal of its record.
+    ///
+    /// Law: an entry is spent no later than its stream, `x ≤ max(spent_at)`, since its
+    /// admission entered `x` into the stream's charge; so a spent stream holds no custody once
+    /// its entries expired, and no undelivered entry is forgotten with its stream.
     pub(super) fn retire_spent(&mut self, now_ms: u128) -> Result<()> {
+        expire_custody(self, now_ms)?;
         for key in self.store.tables.spent_streams(now_ms) {
             let window = self.store.tables.receiver.remove(&key);
             self.undo.push(Undo::Receiver(key, window.map(Box::new)));

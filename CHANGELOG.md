@@ -2,6 +2,29 @@
 
 ## 0.38.0
 
+- Relay custody leaves only by evidence of removal (#1059; durable-records, Law Removal only by
+  evidence). A drain pass used to shrink a receiver's relay custody to the carrier it had just
+  read, and to nothing when it read none. A holder that a membership change had just named could
+  report no carrier before its hand-off landed; a restart before the take then refused the
+  hand-off's redelivery as a replay, and the untaken mail was lost. A custody entry now carries
+  the instant its transaction is spent, and leaves custody only by its release after the take, or
+  once spent, when no carrier can deliver it again. No carrier read changes custody. The set of
+  elements handed over in this process follows the same law: an untaken element is forgotten
+  only once spent, so a lagging read no longer lets a later pass hand it over twice. A spent
+  stream's custody has expired by the time the stream is retired, so a stream in custody is no
+  longer kept past its spent instant. Mail lost by a holder without a take keeps its custody
+  entry until it is spent, at most the inbox retention after its proof expired; custody stays
+  bounded by `RELAY_INBOX_MAX_LEN`.
+  - **Library API.** `TRANSACTION_REPLAY_RECORD_MAX_BYTES` is now 5089 and
+    `TRANSACTION_REPLAY_STORE_MAX_BYTES` 28,692,288; the native store's 40 MiB budget still
+    covers it.
+  - **Upgrade consequence.** A receiver replay record that holds relay custody does not restore
+    under this build (no protocol versioning before 1.0): its stream fails closed. No wire
+    change.
+  - **Operator step.** Stop the node and remove the `transaction-replay` store, the documented
+    reset of the replay guarantee (browser: the IndexedDB store
+    `<storage name>/transaction-replay`), then start it.
+
 - A node learns when its registrations are stored at their owners (#866), from the owners
   themselves, instead of polling the registry. A registration publish now asks each owner that
   applies it for a store report. An `OperateEntry` carries `report`, and the owner of its
