@@ -4,6 +4,8 @@
 
 - The wire-version bump rule (#1104) is enforced by golden vectors (#1107). A core test pins
   `WIRE_VERSION` together with the hash of:
+  - the serde format of every type the frames reach, traced with every variant of every enum,
+    so a variant inserted or a field changed where no sample reaches still moves it;
   - one canonical frame per `Message` and link-control variant, built from fixed keys at a
     fixed instant;
   - the recorded signaling path, both ways;
@@ -14,7 +16,8 @@
   signing domain, enters the goldens without a list to maintain. A change that moves any of
   these bytes fails CI until the same commit bumps `WIRE_VERSION` by the rule and pins the new
   hash; the procedure is documented with the rule in `rings_core::message`'s frame module. It
-  pins wire version 2, which this release ships. No operator step.
+  pins wire version 2, which this release ships. rings-node's own formats get a sibling test
+  (#1141). No operator step.
 
 - A node learns when its registrations are stored at their owners (#866), from the owners
   themselves, instead of polling the registry. A registration publish now asks each owner that

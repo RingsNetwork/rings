@@ -169,7 +169,7 @@ sample_message_body!(E2eStreamFrame, |fixture| E2eStreamFrame {
     sender_public_key: fixture.public_key,
     sequence: 0,
     is_final: true,
-    ciphertext: Vec::new(),
+    ciphertext: vec![(fixture.public_key, fixture.public_key)],
 });
 sample_message_body!(QueryForTopoInfoSend, |fixture| QueryForTopoInfoSend {
     did: fixture.did,
