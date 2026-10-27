@@ -26,6 +26,14 @@
 //! bumps it, and the crate version moves independently. Every bump is a total cutover, as
 //! every wire change before 1.0 is: no build decodes the `rest` of another version, and
 //! nothing is negotiated.
+//!
+//! Enforcement (#1107): golden vectors pin [`WIRE_VERSION`] together with the hash of one
+//! canonical frame per message and link-control variant, the recorded signaling path, the
+//! transcript of every signing domain tag, and the handshake offer string
+//! (`test_wire_goldens`). Bump procedure, when that test fails: the change moved the wire.
+//! If the last release already shipped [`WIRE_VERSION`], add one to it; if the version is
+//! already this release's, keep it. Then set the pinned pair to that version and the hash the
+//! failure reports, in the same commit. A change that moves no golden byte never fails it.
 
 use std::fmt;
 
