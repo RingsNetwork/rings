@@ -33,13 +33,12 @@
 //!   law of `message::replay`). A crash after a take and before its release delivers that
 //!   message once more, with the same transaction id. An element held again between the read
 //!   and its tombstone is delivered by the next pass.
-//! - **Custody follows the carrier.** Each pass over the carrier of the key's holder (this
-//!   node's own store, or the holder's report) first restricts relay custody, and the set of
-//!   elements handed over in this process, to the elements still stored, so custody never
-//!   outlives the mail it keeps, and a pass that finds custody full ends and leaves the rest
-//!   for a later pass. A pass over the report of another member of the key (#777), read when
-//!   the holder is out of reach, restricts neither: that member may lag behind the holder, and
-//!   an element missing from its copy is not gone (#1059).
+//! - **Custody leaves only by evidence (#1059).** No carrier read restricts relay custody: a
+//!   report, even the holder's, may lag behind a membership change or a hand-off not yet
+//!   landed, so an element missing from it is not gone. An entry leaves custody by its release
+//!   or once its transaction is spent (the removal law of `message::replay`), and an element
+//!   handed over in this process is forgotten while untaken only once spent; a pass that finds
+//!   custody full ends and leaves the rest for a later pass.
 //! - **Removal at the source.** A pass removes the elements it is done with at the member it
 //!   read them from, which applies the removal as a member of the key; repair carries the
 //!   tombstone to the other members (`Law (Chain repair)`). An element a lagging member
@@ -180,10 +179,11 @@ impl SwarmInboxDelivery {
             Ok(LocalDelivered::Handled) => Offered::Retire,
             Ok(LocalDelivered::Queued(taken)) => {
                 let released = self.release_on_take(element, taken);
-                self.transport
-                    .application()
-                    .relay_in_flight
-                    .queued(tx_id, released);
+                self.transport.application().relay_in_flight.queued(
+                    tx_id,
+                    released,
+                    element.spent_at_ms(),
+                );
                 Offered::Keep
             }
             Ok(LocalDelivered::Deferred) => Offered::EndPass,
@@ -227,11 +227,10 @@ impl SwarmInboxDelivery {
 
     /// Drain the inbox `member` reported, iff `member` is a member of this node's inbox key under
     /// this node's own view (`Law (Agreement)` of `dht::relay_holder`, `Law (Members)`), and the
-    /// carrier is this node's inbox and passes admission, as a hand-off's would. Only the
-    /// holder's report restricts custody (the module's laws).
+    /// carrier is this node's inbox and passes admission, as a hand-off's would.
     ///
     /// Post: a report from any other node, or of any other carrier, is refused and drains
-    /// nothing; custody is left as it is until a pass sees the holder's carrier.
+    /// nothing; no report changes custody (the module's laws).
     pub(crate) async fn deliver_fetched(&self, member: Did, inbox: Option<Entry>) -> Result<()> {
         let local = self.transport.dht.did;
         let key = inbox_key(local);
@@ -245,27 +244,24 @@ impl SwarmInboxDelivery {
                 "relay inbox report from {member}, which does not hold this inbox"
             )));
         }
-        let restricts = members.first() == Some(&member);
         let inbox = match inbox {
-            Some(entry) if entry.kind.is_relay_inbox() && entry.did == key => Some(
-                entry
-                    .validate_admissible_at(get_epoch_ms(), self.transport.network_id)?
-                    .into_entry(),
-            ),
+            Some(entry) if entry.kind.is_relay_inbox() && entry.did == key => entry
+                .validate_admissible_at(get_epoch_ms(), self.transport.network_id)?
+                .into_entry(),
             Some(_) => {
                 return Err(Error::InvalidMessage(format!(
                     "relay inbox report from {member} carries another carrier"
                 )));
             }
-            None => None,
+            None => return Ok(()),
         };
-        self.drain(inbox, member, restricts).await
+        self.drain(inbox, member).await
     }
 
     /// One pass over the inbox `inbox`, read from `source` (this node's own store, or a member of
-    /// the key that reported it), as the module laws say: custody and the handed-over set are
-    /// restricted to it iff `restricts`, `source` being the key's holder. A pass that finds
-    /// another running leaves the elements to the next.
+    /// the key that reported it), as the module laws say: the handed-over set forgets the
+    /// consumed elements it lacks and the spent ones, and custody is left to its own laws. A pass
+    /// that finds another running leaves the elements to the next.
     ///
     /// Post: the elements were taken in order until one found no room, no reader or a local
     /// failure; every element core is done with was tombstoned at the holder by one removal.
@@ -273,31 +269,14 @@ impl SwarmInboxDelivery {
     /// A removal refused before acceptance (`SingleAttemptRefused`, a detached `Cancelled`
     /// included) ends the drain with that error: the element stays at its holder and is taken
     /// again on the next drain. No element is lost, and none is tombstoned twice.
-    async fn drain(&self, inbox: Option<Entry>, source: Did, restricts: bool) -> Result<()> {
+    async fn drain(&self, inbox: Entry, source: Did) -> Result<()> {
         let Some(_pass) = self.transport.application().relay_drain.try_lock() else {
             return Ok(());
         };
         let now_ms = get_epoch_ms();
-        let Some(inbox) = inbox else {
-            // No carrier at the holder (expired, never held, or no holder to keep one): nothing
-            // is stored, so custody restricts to nothing (the custody law's first step).
-            if restricts {
-                return self.transport.restrict_relay_custody([]).await;
-            }
-            return Ok(());
-        };
         let stored = inbox.stored_inbox_elements();
         let relay = &self.transport.application().relay_in_flight;
-        if restricts {
-            self.transport
-                .restrict_relay_custody(
-                    stored
-                        .iter()
-                        .map(|element| &element.held.payload.transaction),
-                )
-                .await?;
-            relay.retain(&stored.iter().map(InboxElement::tx_id).collect());
-        }
+        relay.retain(&stored.iter().map(InboxElement::tx_id).collect(), now_ms);
         let delivery = LocalDelivery::new(self.transport.clone());
         let mut retired: Vec<EntryDot> = Vec::new();
         let mut spent = BTreeSet::new();
@@ -326,25 +305,26 @@ impl SwarmInboxDelivery {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl InboxDelivery for SwarmInboxDelivery {
     /// Post: the inbox was drained from local storage when this node holds its own inbox key,
-    /// fetched from the members its view names otherwise, the holder first
-    /// (`dht::relay_holder`, `Law (Members)`), and drained as nothing when its view names the
-    /// key's owner and no member, so custody follows a carrier that cannot exist. A view that
-    /// cannot place the key leaves custody as it is.
+    /// and fetched from the members its view names otherwise, the holder first
+    /// (`dht::relay_holder`, `Law (Members)`); a view that names no member, or cannot place the
+    /// key, drains nothing. No pass restricts custody (the module's laws).
     async fn deliver_inbox(&self) -> Result<()> {
         let local = self.transport.dht.did;
         match self.transport.dht.relay_members(inbox_key(local))? {
             RelayMembers::Members(members) if members.first() == Some(&local) => {
                 let key = StorageKey::inbox_of(local);
-                let inbox = self
+                match self
                     .transport
                     .dht
                     .live_storage_entry(key, get_epoch_ms())
-                    .await?;
-                self.drain(inbox, local, true).await
+                    .await?
+                {
+                    Some(inbox) => self.drain(inbox, local).await,
+                    None => Ok(()),
+                }
             }
             RelayMembers::Members(members) => self.fetch(&members).await,
-            RelayMembers::Unheld => self.drain(None, local, true).await,
-            RelayMembers::Unknown => Ok(()),
+            RelayMembers::Unheld | RelayMembers::Unknown => Ok(()),
         }
     }
 }
