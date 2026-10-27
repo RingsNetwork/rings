@@ -59,6 +59,14 @@ On the host:
    `A`/`AAAA` record pointing at the relay host.
 3. Let the node bind port 53 and the ingress ports (on Linux, `CAP_NET_BIND_SERVICE`).
 
+DNS listens on every `dns_listen` address over UDP and TCP, and on an IPv6 address IPv6 only, so
+the default's two wildcards are two sockets on every system, even where IPv6 sockets are
+dual-stack by default, as on Linux. A host running a local stub resolver, such as
+`systemd-resolved` (the default on Debian and Ubuntu), already holds port 53 on `127.0.0.53` and
+`127.0.0.54`, and the IPv4 wildcard cannot bind beside it. Such a host lists its own addresses
+instead: `dns_listen: ["[::]:53", "192.0.2.1:53"]`, with the IPv4 address the nameserver's `A`
+record reaches (behind a provider's NAT, the host's private address).
+
 The ingress listens IPv6 only, so a host service on the same port's IPv4 wildcard, such as an
 `sshd` on `0.0.0.0:22`, keeps every IPv4 connection. An IPv6 host service on one of the ingress
 ports keeps its connections when it listens on the host's own address (`ListenAddress
