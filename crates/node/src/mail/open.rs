@@ -2,27 +2,26 @@
 //!
 //! ```text
 //!   by_digest  = { H(e) ↦ e | e ∈ elements }
-//!   manifests  = { M | e ∈ elements decodes to M ∧ M verifies for d }
-//!   open(M)    = Incomplete             some H(chunk_i) of M names no element that is chunk i of
-//!                                       M's mail
-//!              | ⊥ (forged)             H(slice_0 ‖ … ‖ slice_{n−1}) ≠ M.mail_id
-//!              | Unreadable             no key of the keyring opens c
+//!   manifests  = { M | e ∈ elements decodes to M ∧ 1 ≤ |M.chunks| ≤ N_max }
+//!   open(M)    = Incomplete             some H(chunk_i) of M names no chunk element
+//!              | ⊥ (forged)             H(chunk_0 ‖ … ‖ chunk_{n−1}) ≠ M.mail_id
+//!              | Unreadable             the recipient's key does not open c
 //!              | Opened(m)
 //!   opening(x) = max { open(M) | M ∈ manifests, M.mail_id = x }
 //!                under Incomplete < Unreadable < Opened
 //! ```
 //!
 //! Laws:
-//! - **Integrity.** A chunk is taken only if its element's digest is listed in a verified
-//!   manifest, so a forged chunk naming a known `mail_id` is never read.
+//! - **Integrity.** A chunk is read only through a manifest that lists its element's digest, in
+//!   that manifest's order, and the mail opens only if the listed chunks concatenate to the
+//!   preimage of its `mail_id`: a forged chunk, or a manifest listing one, never alters a mail.
 //! - **All or nothing.** The AEAD tag covers all of `c`: a missing chunk leaves the mail
 //!   `Incomplete`, and an altered one is a different element, so its digest is not listed.
 //! - **Content address.** A manifest whose chunks do not concatenate to `H⁻¹(mail_id)` is
 //!   forged and ignored: no forger can make a mail `Unreadable` and so stop it being retried.
 //! - **Join.** The outcome per `mail_id` is the maximum over its manifests, so the result does
 //!   not depend on the order of elements, and a forged manifest never hides a genuine one.
-//! - **Round trip.** `seal(m, (d, ek))` opens to `Opened(m)` under any keyring holding `ek`'s
-//!   secret.
+//! - **Round trip.** `seal(m, (d, ek))` opens to `Opened(m)` under `ek`'s secret.
 
 use std::collections::BTreeMap;
 
@@ -41,8 +40,6 @@ use super::envelope::MailManifest;
 pub struct OpenedMail {
     /// `H(c)` of the ciphertext it was opened from.
     pub mail_id: MailDigest,
-    /// The gateway that signed its manifest.
-    pub gateway: Did,
     /// The message, as the gateway received it with its trace headers.
     pub message: Vec<u8>,
 }
@@ -58,14 +55,14 @@ impl OpenedMail {
 /// What one mail id in a topic opens to.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Opening {
-    /// A verified manifest lists a chunk the topic does not hold: the mail is not filed, and is
+    /// A manifest lists a chunk the topic does not hold: the mail is not filed, and is
     /// tried again on the next read.
     Incomplete {
         /// The mail's id.
         mail_id: MailDigest,
     },
-    /// The whole ciphertext is present but no key opens it: it is remembered and not tried
-    /// again.
+    /// The whole ciphertext is present but the key does not open it: it is remembered and not
+    /// tried again.
     Unreadable {
         /// The mail's id.
         mail_id: MailDigest,
@@ -102,15 +99,13 @@ impl Opening {
     }
 }
 
-/// Open the mail in `elements` for `recipient`, read in overlay `network_id` at `now_ms`, with
-/// the secrets of `keys`, skipping every mail id `fresh` rejects: one outcome per mail id with a
-/// verified manifest (the laws of this module).
+/// Open the mail in `elements` for `recipient` with the secret of `key`, skipping every mail id
+/// `fresh` rejects: one outcome per mail id with a well-formed manifest whose chunks are not
+/// forged (the laws of this module).
 pub fn open_mail(
     elements: &[Bytes],
     recipient: Did,
-    keys: &[DelegateeKey],
-    network_id: u32,
-    now_ms: u128,
+    key: &DelegateeKey,
     fresh: impl Fn(&MailDigest) -> bool,
 ) -> Vec<Opening> {
     let by_digest = elements
@@ -125,10 +120,10 @@ pub fn open_mail(
         });
     let mut outcomes = BTreeMap::<MailDigest, Opening>::new();
     for manifest in manifests {
-        if !fresh(&manifest.body.mail_id) || !manifest.verifies_for(recipient, network_id, now_ms) {
+        if !fresh(&manifest.mail_id) || !manifest.is_well_formed() {
             continue;
         }
-        let Some(outcome) = open_manifest(&manifest, &by_digest, recipient, keys) else {
+        let Some(outcome) = open_manifest(&manifest, &by_digest, recipient, key) else {
             continue;
         };
         let joined = match outcomes.remove(&outcome.mail_id()) {
@@ -140,15 +135,15 @@ pub fn open_mail(
     outcomes.into_values().collect()
 }
 
-/// What the verified `manifest` opens to over the elements `by_digest`, or `None` when it is
+/// What the well-formed `manifest` opens to over the elements `by_digest`, or `None` when it is
 /// forged (the content-address law).
 fn open_manifest(
     manifest: &MailManifest,
     by_digest: &BTreeMap<MailDigest, &Bytes>,
     recipient: Did,
-    keys: &[DelegateeKey],
+    key: &DelegateeKey,
 ) -> Option<Opening> {
-    let mail_id = manifest.body.mail_id;
+    let mail_id = manifest.mail_id;
     let Some(ciphertext) = assemble(manifest, by_digest) else {
         return Some(Opening::Incomplete { mail_id });
     };
@@ -158,40 +153,27 @@ fn open_manifest(
     let aad = mail_aad(recipient);
     let message = rings_codec::deserialize::<AeadCiphertext>(&ciphertext)
         .ok()
-        .and_then(|sealed| {
-            keys.iter()
-                .find_map(|key| key.decrypt_elgamal_aead(&sealed, &aad).ok())
-        });
+        .and_then(|sealed| key.decrypt_elgamal_aead(&sealed, &aad).ok());
     Some(match message {
-        Some(message) => Opening::Opened(OpenedMail {
-            mail_id,
-            gateway: manifest.gateway(),
-            message,
-        }),
+        Some(message) => Opening::Opened(OpenedMail { mail_id, message }),
         None => Opening::Unreadable { mail_id },
     })
 }
 
-/// The ciphertext the chunks `manifest` lists concatenate to, or `None` when one is missing or
-/// is not that position's chunk of that mail.
+/// The ciphertext the chunks `manifest` lists concatenate to, in its order, or `None` when one
+/// is missing or is not a chunk element.
 fn assemble(manifest: &MailManifest, by_digest: &BTreeMap<MailDigest, &Bytes>) -> Option<Vec<u8>> {
-    let count = manifest.body.chunks.len();
-    manifest.body.chunks.iter().enumerate().try_fold(
-        Vec::new(),
-        |mut ciphertext, (index, digest)| {
-            let element = by_digest.get(digest)?;
-            let MailElement::Chunk(chunk) = MailElement::decode(element).ok()? else {
+    manifest
+        .chunks
+        .iter()
+        .try_fold(Vec::new(), |mut ciphertext, digest| {
+            let MailElement::Chunk(slice) = MailElement::decode(by_digest.get(digest)?).ok()?
+            else {
                 return None;
             };
-            let in_place = chunk.mail_id == manifest.body.mail_id
-                && usize::from(chunk.index) == index
-                && usize::from(chunk.count) == count;
-            in_place.then(|| {
-                ciphertext.extend_from_slice(&chunk.slice);
-                ciphertext
-            })
-        },
-    )
+            ciphertext.extend_from_slice(&slice);
+            Some(ciphertext)
+        })
 }
 
 /// The value of the first header field `name` (lower case) of `message`, unfolded (RFC 5322

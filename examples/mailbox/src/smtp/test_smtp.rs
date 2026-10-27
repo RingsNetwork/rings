@@ -5,7 +5,10 @@ fn test_the_trace_names_the_client_by_address_literal() {
     let transaction = Transaction {
         client: "mx.example".to_owned(),
         from: "a@example.com".to_owned(),
-        to: vec!["me@o1.rings.rs".to_owned()],
+        to: vec![Recipient {
+            address: "me@o1.rings.rs".to_owned(),
+            mailbox: None,
+        }],
         message: b"Subject: hi\r\n\r\nbody".to_vec(),
     };
     for (client, literal) in [

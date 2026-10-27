@@ -1,18 +1,17 @@
 //! The mail descriptor `μ(d)`: a recipient's opt-in to mail, and the key mail is sealed to.
 //!
 //! ```text
-//!   μ(d) = (d, pk, network, ek, freshness, lease end, sig)      heard at the dot of its element
+//!   μ(d) = (d, pk, network, freshness, lease end, sig)          heard at the dot of its element
 //!   sig  = the delegatee's signature, carrying the delegation that authorizes it
-//!   ek   = the delegatee's secp256k1 public key            (DelegateeKey::delegatee_public_key)
+//!   ek   = recover(sig)                    the delegatee's secp256k1 public key, mail's key
 //! ```
 //!
 //! The service descriptor of the DNS relay carries the account key, which a wallet account
-//! (EIP-191, BIP-137) cannot decrypt with; the mail descriptor carries the delegatee's key and,
-//! in its signature, the delegation that authorizes it.
+//! (EIP-191, BIP-137) cannot decrypt with; mail is sealed to the delegatee's key instead.
 //!
-//! Law (key binding): a reader takes `μ(d)` only if `ek` is the key of the session that signed
-//! it, `address(ek) = sig.delegation.delegatee_did`; with the signature, that proves the holder
-//! of `ek`'s secret published `μ(d)` for `d`. A descriptor naming any other key is never live.
+//! Law (key): `ek` is the key the signature recovers to (`MessageVerification::signer_key_at`),
+//! so it is the key of the session that signed `μ(d)`, whose holder therefore published `μ(d)`
+//! for `d`. The descriptor carries no copy of `ek` that could name another key.
 //!
 //! A recipient publishes `μ(d)` on its own [`descriptor_topic`], under the registry lease (#918,
 //! the lease law of `descriptor`), so a gateway finds it with one fetch, and the newest live
@@ -28,6 +27,7 @@ use rings_core::error::Result;
 use rings_core::message::DomainTag;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
+use rings_core::message::SigningDomain;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -49,7 +49,7 @@ pub fn descriptor_topic(did: Did) -> String {
 }
 
 /// Where a gateway writes a recipient's mail, and the key it seals it to: what a live
-/// [`MailDescriptor`] says.
+/// [`MailDescriptor`] and its signature say.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MailRecipient {
     /// The recipient's DID, whose [`mail_topic`](super::mail_topic) the mail is written to.
@@ -67,8 +67,6 @@ pub struct MailDescriptorBody {
     pub public_key: VerificationPublicKey,
     /// Network identifier.
     pub network_id: u32,
-    /// The delegatee's secp256k1 public key, `ek`: mail is sealed to it.
-    pub encryption_key: PublicKey<33>,
     /// Freshness window `T` in milliseconds (see the lease law of `descriptor`).
     pub fresh_for_ms: u64,
     /// Lease end `ℓ` in milliseconds since Unix epoch.
@@ -117,7 +115,7 @@ impl SignedDescriptorBody for MailDescriptorBody {
 pub struct MailDescriptor {
     /// The signed fields.
     pub body: MailDescriptorBody,
-    /// Signature covering `body`, by the delegatee whose key `body.encryption_key` is.
+    /// Signature covering `body`, by the delegatee whose key mail is sealed to.
     pub signature: MessageVerification,
     /// When the reader last heard this descriptor, in milliseconds since Unix epoch: the dot of
     /// its element. Not signed and not encoded (see the lease law of `descriptor`); `0` until
@@ -128,18 +126,10 @@ pub struct MailDescriptor {
 
 impl MailDescriptor {
     /// Create and sign a descriptor.
-    ///
-    /// Pre: `body.encryption_key` is the signer's delegatee key; otherwise no reader takes the
-    /// descriptor (the key-binding law), so signing refuses it.
     pub fn new_signed(
         body: MailDescriptorBody,
         signer: MessageSigner<&DelegateeKey>,
     ) -> Result<Self> {
-        if body.encryption_key != signer.delegatee_public_key() {
-            return Err(Error::InvalidMessage(
-                "mail descriptor names a key other than the signer's delegatee key".to_string(),
-            ));
-        }
         sign_descriptor_body(
             body,
             signer,
@@ -147,38 +137,38 @@ impl MailDescriptor {
         )
     }
 
-    /// Whether `ek` is the key of the session that signed this descriptor (the key-binding
-    /// law).
-    pub fn encrypts_to_signer(&self) -> bool {
-        Did::from(self.body.encryption_key.address()) == self.signature.delegation.delegatee_did()
+    /// The key mail to this descriptor's recipient is sealed to, `ek`: the key its signature
+    /// recovers to under the overlay `network_id` at `now_ms` (the key law), if it verifies.
+    pub fn encryption_key_at(&self, network_id: u32, now_ms: u128) -> Option<PublicKey<33>> {
+        let domain = SigningDomain::new(MAIL_DESCRIPTOR_DOMAIN_TAG, network_id);
+        let data = self.body.signing_data().ok()?;
+        self.signature.signer_key_at(domain, &data, now_ms)
     }
 
-    /// Where mail to this descriptor's recipient goes, and the key it is sealed to.
-    pub fn recipient(&self) -> MailRecipient {
-        MailRecipient {
-            did: self.body.did,
-            encryption_key: self.body.encryption_key,
-        }
-    }
-
-    /// The newest descriptor among `descriptors` that is signed for `did`, binds its key, verifies
-    /// under the overlay `network_id` and is live at `now_ms`.
-    pub fn latest_live_for(
+    /// Where mail to `did` goes and the key it is sealed to: the newest descriptor among
+    /// `descriptors` that is signed for `did`, verifies under the overlay `network_id` and is
+    /// live at `now_ms`, with its key.
+    pub fn live_recipient(
         descriptors: impl IntoIterator<Item = Self>,
         did: Did,
         now_ms: u128,
         network_id: u32,
-    ) -> Option<Self> {
-        latest_valid_by_did(
+    ) -> Option<MailRecipient> {
+        let descriptor = latest_valid_by_did(
             descriptors
                 .into_iter()
-                .filter(|descriptor| descriptor.body.did == did && descriptor.encrypts_to_signer()),
+                .filter(|descriptor| descriptor.body.did == did),
             now_ms,
             network_id,
             false,
         )
         .into_iter()
-        .next()
+        .next()?;
+        let encryption_key = descriptor.encryption_key_at(network_id, now_ms)?;
+        Some(MailRecipient {
+            did,
+            encryption_key,
+        })
     }
 }
 

@@ -40,9 +40,10 @@ example also holds the mail gateway, `rings-mail-gateway`.
   the node's mail topic, and files every mail it opens in the INBOX
   (`rings_node::mail::recipient`).
 - **Gateway.** `rings-mail-gateway` runs a node of its own and an SMTP receiver for every
-  domain whose MX names it: RCPT is admitted only for a DID with a live mail descriptor (`550`
-  otherwise), and DATA seals the traced message to each recipient's delegatee key and writes it
-  to the recipient's topic. It answers `250` once an owner of each write reports storing it,
+  domain whose MX names it. RCPT is admitted only for a DID with a live mail descriptor: `451`
+  for a DID without one, which may come back, and `550` for a local part that is no DID. DATA
+  seals the traced message to each recipient's delegatee key, found at RCPT, and writes it to
+  the recipient's topic. It answers `250` once an owner of each write reports storing it,
   and `451` when no owner does within 60 seconds (`552` above 32 chunks, about 1 MiB). It keeps
   nothing, and it offers STARTTLS with its own certificate (`--tls-cert`, `--tls-key`).
 
@@ -114,7 +115,8 @@ relay's authority and ingress in front of the mailbox on the loopback: a mail se
 `me@o1.rings.rs`, delivers to the owner's address, and the message lands in the INBOX with a
 `Received` header naming the server, read from the PROXY header. The hop over the Rings overlay
 between relay and owner is tested in `rings-node` over its in-memory transport. `test_gateway`
-drives the gateway over a stand-in DHT: `550` for a DID with no live descriptor, a mail sealed
-once per DID and opened into its recipient's INBOX with its trace, `552` above the mail bound,
-`451` for a mail no owner confirms, and a session under STARTTLS. The DHT side, the descriptor's lookup, the write and the
-recipient's poll over the overlay, is tested in `rings-node` (`processor::tests::test_mail`).
+drives the gateway over a stand-in DHT: `451` for a DID with no live descriptor and `550` for
+a non-DID, a mail sealed once per DID and opened into its recipient's INBOX with its trace,
+`552` above the mail bound, `451` for a mail no owner confirms, and a session under STARTTLS.
+The DHT side, the descriptor's lookup, the write and the recipient's poll over the overlay, is
+tested in `rings-node` (`processor::tests::test_mail`).

@@ -1,3 +1,5 @@
+use rings_node::prelude::rings_core::dht::Did;
+use rings_node::prelude::rings_core::ecc::SecretKey;
 use smtp_proto::MailFrom;
 use smtp_proto::RcptTo;
 
@@ -127,7 +129,10 @@ fn test_a_transaction_runs_greeting_to_data() {
         Some(Transaction {
             client: "client".to_owned(),
             from: "a@b".to_owned(),
-            to: vec![format!("me@{LABEL}.rings.rs")],
+            to: vec![Recipient {
+                address: format!("me@{LABEL}.rings.rs"),
+                mailbox: None,
+            }],
             message: b"Subject: hi\r\n\r\nbody".to_vec(),
         })
     );
@@ -189,8 +194,15 @@ fn test_replies_encode_every_line_with_its_status() {
     assert!(text.ends_with("250 ENHANCEDSTATUSCODES\r\n"), "{text}");
 }
 
+/// A directory session asks its shell about each recipient, answers by the directory's word,
+/// and keeps where an admitted recipient's mail goes for DATA.
 #[test]
 fn test_a_directory_session_asks_its_shell_about_each_recipient() {
+    let mailbox = |did: u32| MailRecipient {
+        did: Did::from(did),
+        encryption_key: SecretKey::random().pubkey(),
+    };
+    let (d, e) = (mailbox(1), mailbox(2));
     let mut session = Session::new(Role::Directory, "gw.test", 100, 2);
     session.step(ehlo());
     assert_eq!(
@@ -202,22 +214,32 @@ fn test_a_directory_session_asks_its_shell_about_each_recipient() {
     assert_eq!(session.step(rcpt("d@a")), Next::Lookup("d@a".to_owned()));
     for (lookup, reply) in [
         (Lookup::Refused, 550),
+        (Lookup::Offline, 451),
         (Lookup::Unavailable, 451),
-        (Lookup::Admitted, 250),
+        (Lookup::Admitted(d), 250),
     ] {
         assert_eq!(session.admit("d@a".to_owned(), lookup).code, reply);
     }
-    assert_eq!(session.admit("e@a".to_owned(), Lookup::Admitted).code, 250);
     assert_eq!(
-        session.admit("f@a".to_owned(), Lookup::Admitted).code,
+        session.admit("e@a".to_owned(), Lookup::Admitted(e)).code,
+        250
+    );
+    assert_eq!(
+        session
+            .admit("f@a".to_owned(), Lookup::Admitted(mailbox(3)))
+            .code,
         452,
         "the recipient bound holds for admitted recipients"
     );
     assert!(matches!(session.step(Request::Data), Next::ReadData(_)));
     let (transaction, _) = session.data(b"body".to_vec());
+    let admitted = |address: &str, mailbox| Recipient {
+        address: address.to_owned(),
+        mailbox: Some(mailbox),
+    };
     assert_eq!(
         transaction.map(|transaction| transaction.to),
-        Some(vec!["d@a".to_owned(), "e@a".to_owned()])
+        Some(vec![admitted("d@a", d), admitted("e@a", e)])
     );
 }
 

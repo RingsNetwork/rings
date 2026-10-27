@@ -1,16 +1,19 @@
-//! A mail as DHT elements: a signed manifest and the chunks of one ciphertext (pure).
+//! A mail as DHT elements: a manifest and the chunks of one ciphertext (pure).
 //!
 //! ```text
 //!   c          = AeadCiphertext(m) to ek, aad = "rings-node:mail:" ‖ d      (encoded)
-//!   chunk_i    = (mail_id, i, n, slice_i(c))           each element ≤ ENTRY_PAYLOAD_MAX_BYTES
-//!   manifest   = (d, mail_id = H(c), [H(chunk_0) … H(chunk_{n−1})], sig_gateway)
+//!   chunk_i    = slice_i(c)                             each element ≤ ENTRY_PAYLOAD_MAX_BYTES
+//!   manifest   = (mail_id = H(c), [H(chunk_0) … H(chunk_{n−1})])
 //!   seal(m)    = [manifest, chunk_0, …, chunk_{n−1}]   n ≤ N_max, else TooLarge
 //! ```
 //!
 //! `H` is SHA-256 over bytes as they are carried: `H(c)` over the encoded ciphertext and
 //! `H(chunk_i)` over the chunk's element, so a reader checks a chunk before decoding it. The
-//! AEAD tag covers the whole of `c`, and its associated data binds the recipient, so a mail
-//! opens only whole and only for the DID it was sealed for.
+//! manifest's ordered digests fix which chunks make the mail and in which order, and `mail_id`
+//! names their concatenation, so neither needs a signature: any writer can append a manifest,
+//! but one whose chunks do not concatenate to `H⁻¹(mail_id)` is ignored (`open`). The AEAD tag
+//! covers the whole of `c`, and its associated data binds the recipient, so a mail opens only
+//! whole and only for the DID it was sealed for.
 //!
 //! Sizes (`N_max = 32`, about 1 MiB a mail; a topic keeps `ENTRY_DATA_MAX_LEN = 1024`
 //! elements, so 32 mails of the largest size fit one lifetime):
@@ -24,14 +27,8 @@
 use bytes::Bytes;
 use rand::RngCore;
 use rings_core::consts::ENTRY_PAYLOAD_MAX_BYTES;
-use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
-use rings_core::domain_tag;
 use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
-use rings_core::message::DomainTag;
-use rings_core::message::MessageSigner;
-use rings_core::message::MessageVerification;
-use rings_core::message::SigningDomain;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -42,11 +39,10 @@ use super::descriptor::MailRecipient;
 
 /// The most chunks one mail is cut into, `N_max`.
 pub const MAIL_CHUNKS_MAX: usize = 32;
-/// Bytes a chunk element adds to its slice: the element's variant tag (1), the mail id (32),
-/// the index and the count (1 each), and the varint length of a slice of `2¹⁴` to `2²¹` bytes
-/// (3), `1 + 32 + 1 + 1 + 3 = 38`; witnessed with equality by
+/// Bytes a chunk element adds to its slice: the element's variant tag (1) and the varint
+/// length of a slice of `2¹⁴` to `2²¹` bytes (3), `1 + 3 = 4`; witnessed with equality by
 /// `test_the_widest_chunk_element_is_one_entry_payload`.
-pub const MAIL_CHUNK_ELEMENT_OVERHEAD: usize = 38;
+pub const MAIL_CHUNK_ELEMENT_OVERHEAD: usize = 4;
 /// The largest slice of a ciphertext one chunk carries: its element is then exactly
 /// `ENTRY_PAYLOAD_MAX_BYTES`.
 pub const MAIL_CHUNK_SLICE_MAX: usize = ENTRY_PAYLOAD_MAX_BYTES - MAIL_CHUNK_ELEMENT_OVERHEAD;
@@ -62,13 +58,8 @@ pub const MAIL_SEAL_OVERHEAD: usize = 241;
 /// The largest message one mail carries: its ciphertext is then exactly
 /// [`MAIL_CIPHERTEXT_MAX`].
 pub const MAIL_MESSAGE_MAX: usize = MAIL_CIPHERTEXT_MAX - MAIL_SEAL_OVERHEAD;
-/// Message family of the manifest signature.
-const MAIL_MANIFEST_DOMAIN_TAG: DomainTag = domain_tag!("rings-node:mail-manifest");
 /// The prefix of the AEAD associated data, which binds the recipient's DID.
 const MAIL_AAD_PREFIX: &str = "rings-node:mail:";
-
-/// The ciphertext `MAIL_CHUNKS_MAX` indexes fit in a chunk's one-byte index and count.
-const _: () = assert!(MAIL_CHUNKS_MAX <= u8::MAX as usize);
 
 /// A SHA-256 digest, `H(x)`: the id of a ciphertext (`mail_id = H(c)`) or the name of a chunk
 /// element (`H(chunk_i)`).
@@ -89,73 +80,20 @@ impl std::fmt::Display for MailDigest {
     }
 }
 
-/// One slice of a mail's ciphertext.
+/// A manifest: which chunks make one mail, in order.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct MailChunk {
-    /// `H(c)` of the ciphertext this chunk is a slice of.
-    pub mail_id: MailDigest,
-    /// The slice's position, `i`.
-    pub index: u8,
-    /// The ciphertext's number of chunks, `n`.
-    pub count: u8,
-    /// `slice_i(c)`.
-    pub slice: Bytes,
-}
-
-/// The fields of a manifest its gateway signs.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct ManifestBody {
-    /// The DID the mail is sealed for.
-    pub recipient: Did,
+pub struct MailManifest {
     /// `H(c)`.
     pub mail_id: MailDigest,
     /// `H(chunk_i)` of every chunk, in order; `n` is its length.
     pub chunks: Vec<MailDigest>,
 }
 
-impl ManifestBody {
-    /// The bytes the signature covers.
-    fn signing_data(&self) -> Result<Vec<u8>, rings_codec::Error> {
-        rings_codec::serialize(self)
-    }
-}
-
-/// A manifest: which chunks make one mail, signed by the gateway that wrote it.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct MailManifest {
-    /// The signed fields.
-    pub body: ManifestBody,
-    /// The gateway's signature over `body`.
-    pub signature: MessageVerification,
-}
-
 impl MailManifest {
-    /// Sign `body` as the gateway `signer` at `now_ms`.
-    pub fn new_signed(
-        body: ManifestBody,
-        signer: MessageSigner<&DelegateeKey>,
-        now_ms: u128,
-    ) -> Result<Self, SealError> {
-        let signature = signer.sign_at(MAIL_MANIFEST_DOMAIN_TAG, &body.signing_data()?, now_ms)?;
-        Ok(Self { body, signature })
-    }
-
-    /// Whether a reader in overlay `network_id` at `now_ms` takes this manifest for
-    /// `recipient`: it names `recipient`, at least one and at most [`MAIL_CHUNKS_MAX`] chunks,
-    /// and its gateway's signature verifies.
-    pub fn verifies_for(&self, recipient: Did, network_id: u32, now_ms: u128) -> bool {
-        let names = (1..=MAIL_CHUNKS_MAX).contains(&self.body.chunks.len());
-        self.body.recipient == recipient
-            && names
-            && self.body.signing_data().is_ok_and(|data| {
-                let domain = SigningDomain::new(MAIL_MANIFEST_DOMAIN_TAG, network_id);
-                self.signature.verify_at(domain, &data, now_ms)
-            })
-    }
-
-    /// The gateway that signed this manifest: its account DID.
-    pub fn gateway(&self) -> Did {
-        self.signature.delegation.delegator_did()
+    /// Whether a reader takes this manifest: it lists at least one and at most
+    /// [`MAIL_CHUNKS_MAX`] chunks.
+    pub fn is_well_formed(&self) -> bool {
+        (1..=MAIL_CHUNKS_MAX).contains(&self.chunks.len())
     }
 }
 
@@ -164,8 +102,8 @@ impl MailManifest {
 pub enum MailElement {
     /// A mail's manifest.
     Manifest(MailManifest),
-    /// A slice of a mail's ciphertext.
-    Chunk(MailChunk),
+    /// A slice of a mail's ciphertext, `slice_i(c)`.
+    Chunk(Bytes),
 }
 
 impl MailElement {
@@ -194,7 +132,7 @@ pub enum SealError {
         /// The chunks it needs.
         chunks: usize,
     },
-    /// Encryption or the manifest signature failed.
+    /// Encryption failed.
     #[error("cannot seal the mail: {0}")]
     Crypto(#[from] rings_core::error::Error),
     /// An element could not be encoded.
@@ -211,8 +149,7 @@ pub struct SealedMail {
     pub elements: Vec<Bytes>,
 }
 
-/// Seal `message` for `recipient`, signed by the gateway `signer` at `now_ms`, with ephemerals
-/// from `rng`.
+/// Seal `message` for `recipient`, with ephemerals from `rng`.
 ///
 /// Post: `Ok(s)` has `1 + n` elements with `1 ≤ n ≤ MAIL_CHUNKS_MAX`, each at most
 /// `ENTRY_PAYLOAD_MAX_BYTES`, and opens to `message` for the holder of
@@ -222,8 +159,6 @@ pub struct SealedMail {
 pub fn seal(
     message: &[u8],
     recipient: &MailRecipient,
-    signer: MessageSigner<&DelegateeKey>,
-    now_ms: u128,
     rng: &mut impl RngCore,
 ) -> Result<SealedMail, SealError> {
     let sealed = encrypt_aead_with_rng(
@@ -235,33 +170,21 @@ pub fn seal(
     let ciphertext = rings_codec::serialize(&sealed)?;
     let slices = ciphertext.chunks(MAIL_CHUNK_SLICE_MAX);
     let chunks = slices.len();
-    let count = u8::try_from(chunks)
-        .ok()
-        .filter(|_| chunks <= MAIL_CHUNKS_MAX)
-        .ok_or(SealError::TooLarge { chunks })?;
-    let mail_id = MailDigest::of(&ciphertext);
+    if chunks > MAIL_CHUNKS_MAX {
+        return Err(SealError::TooLarge { chunks });
+    }
     let chunk_elements = slices
-        .zip(0u8..)
-        .map(|(slice, index)| {
-            MailElement::Chunk(MailChunk {
-                mail_id,
-                index,
-                count,
-                slice: Bytes::copy_from_slice(slice),
-            })
-            .encode()
-        })
+        .map(|slice| MailElement::Chunk(Bytes::copy_from_slice(slice)).encode())
         .collect::<Result<Vec<_>, _>>()?;
-    let body = ManifestBody {
-        recipient: recipient.did,
+    let mail_id = MailDigest::of(&ciphertext);
+    let manifest = MailElement::Manifest(MailManifest {
         mail_id,
         chunks: chunk_elements
             .iter()
             .map(|element| MailDigest::of(element))
             .collect(),
-    };
-    let manifest =
-        MailElement::Manifest(MailManifest::new_signed(body, signer, now_ms)?).encode()?;
+    })
+    .encode()?;
     Ok(SealedMail {
         mail_id,
         elements: std::iter::once(manifest).chain(chunk_elements).collect(),

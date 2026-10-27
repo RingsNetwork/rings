@@ -28,8 +28,11 @@ use std::slice::Iter;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rings_node::mail::envelope::SealError;
+use rings_node::mail::gateway::MailGatewayError;
 pub use session::Lookup;
 pub use session::Next;
+pub use session::Recipient;
 pub use session::Reply;
 pub use session::Role;
 pub use session::Session;
@@ -47,7 +50,6 @@ use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 
 use crate::gateway::Gateway;
-use crate::gateway::GatewayError;
 use crate::outbound::Outbound;
 use crate::outbound::OutboundError;
 use crate::serve::serve_each;
@@ -84,7 +86,7 @@ pub enum CommitError {
     Outbound(#[from] OutboundError),
     /// The gateway did not write it.
     #[error(transparent)]
-    Gateway(#[from] GatewayError),
+    Gateway(#[from] MailGatewayError),
 }
 
 impl CommitError {
@@ -92,7 +94,7 @@ impl CommitError {
     /// `451` for every other failure, which a later attempt may not meet.
     fn reply(&self) -> Reply {
         match self {
-            Self::Gateway(error) if error.is_too_large() => Reply {
+            Self::Gateway(MailGatewayError::Seal(SealError::TooLarge { .. })) => Reply {
                 code: 552,
                 status: "5.3.4",
                 lines: vec!["Message too big for a mail gateway".to_owned()],
@@ -164,7 +166,11 @@ impl Sink {
                 let Transaction {
                     from, to, message, ..
                 } = &transaction;
-                outbound.enqueue(from, to, message).await?;
+                let to = to
+                    .iter()
+                    .map(|recipient| recipient.address.clone())
+                    .collect::<Vec<_>>();
+                outbound.enqueue(from, &to, message).await?;
             }
             Self::Gateway(gateway) => {
                 let message = with_trace(host, client, &transaction);
