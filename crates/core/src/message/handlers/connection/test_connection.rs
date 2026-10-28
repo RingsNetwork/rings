@@ -1,6 +1,7 @@
 //! Tests of the connection handlers: relayed connects, crossing topologies and successor hints.
 use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::time::timeout;
+use tracing_test::traced_test;
 
 use super::connect_successor_hint;
 use crate::dht::TopoInfo;
@@ -8,9 +9,16 @@ use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::handlers::HandlerContext;
+use crate::message::types::ConnectNodeSend;
 use crate::message::types::Message;
 use crate::message::types::QueryFor;
 use crate::message::types::QueryForTopoInfoReport;
+use crate::message::HandleMsg;
+use crate::message::MessageHandler;
+use crate::message::PayloadSender;
+use crate::message::Principal;
+use crate::message::SignalingPath;
 use crate::tests::activity::activity_after;
 use crate::tests::activity::activity_mark;
 use crate::tests::default::assert_no_more_msg;
@@ -144,6 +152,53 @@ fn test_connect_successor_hint_skips_requester_self_report() -> Result<()> {
 
     assert_eq!(dht.successors().list()?, vec![requester, next, tail]);
     assert_eq!(connect_successor_hint(&dht, requester, requester)?, next);
+    Ok(())
+}
+
+/// A refused offer is the slot's answer, not a failure (#1152): an offer from a peer this node
+/// is already admitted to is refused with `AlreadyConnected` before its description is read,
+/// and the handler logs it once, at debug, and returns `Ok`, so no WARN reports it and no
+/// caller logs it at ERROR.
+#[traced_test]
+#[tokio::test]
+async fn test_a_refused_offer_is_logged_once_at_debug_and_answered() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_msgs([&node1, &node2]).await;
+    let offer = ConnectNodeSend {
+        sdp: serde_json::to_string("never read: the slot refuses first")
+            .map_err(|_| Error::SerializeToString)?,
+        dht_protocol_mode: node2.swarm.dht_protocol_mode(),
+        relay_custody: node2.swarm.transport.dht.relay_custody(),
+    };
+    let mut request = node2
+        .swarm
+        .transport
+        .protocol_egress()
+        .originate(
+            Message::ConnectNodeSend(offer.clone()),
+            node1.did(),
+            Some(node1.did()),
+        )
+        .await?;
+    request.relay = request.relay.with_signaling_path(SignalingPath::outbound());
+
+    MessageHandler::new(node1.swarm.transport.clone())
+        .handle(&HandlerContext::new(&request, Principal::Local), &offer)
+        .await?;
+
+    assert!(!logs_contain("CONNECT_NODE offer answer failed"));
+    logs_assert(|lines: &[&str]| {
+        let refusals = lines
+            .iter()
+            .filter(|line| line.contains("a handshake with the peer holds the slot"))
+            .collect::<Vec<_>>();
+        match refusals.as_slice() {
+            [refusal] if refusal.contains("DEBUG") => Ok(()),
+            _ => Err(format!("expected one debug refusal, logged {refusals:?}")),
+        }
+    });
     Ok(())
 }
 
