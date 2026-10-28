@@ -5,6 +5,10 @@
 //! produce owner store reports. No test needs an external STUN server or a second browser
 //! process. Two providers sharing one storage name model tabs holding distinct delegatee keys
 //! for the same DID.
+//!
+//! Law: with a live recipient task, a poll after delivery is a processing barrier; its own
+//! counters do not identify which poll processed the mail. Assertions inspect the resulting
+//! inbox, notifications, and retained records instead.
 
 use std::collections::BTreeMap;
 
@@ -183,6 +187,16 @@ async fn recipient_records(storage_name: &str) -> BTreeMap<String, RecipientReco
     records.into_iter().collect()
 }
 
+/// Snapshot shared filing records. Law: a duplicate preserves their keys and timestamps,
+/// while opening records may grow as other ciphertexts or delegatee keys are observed.
+async fn filed_records(storage_name: &str) -> BTreeMap<String, RecipientRecord> {
+    recipient_records(storage_name)
+        .await
+        .into_iter()
+        .filter(|(_, record)| matches!(record, RecipientRecord::Filed { .. }))
+        .collect()
+}
+
 /// Close the node while its listener and mail poller are live; both must finish before return.
 async fn close_listening_provider(provider: Provider, listener: ProviderListener) {
     provider.close().await.unwrap();
@@ -323,13 +337,16 @@ async fn test_mail_startup_notification_restart_deduplication_and_removal() {
             assert!(before
                 .iter()
                 .all(|(name, record)| after.get(name) == Some(record)));
+            let filed_before_resend = filed_records(&storage_name).await;
+            assert_eq!(filed_before_resend.len(), 1);
             gateway(&provider)
                 .deliver(&current_recipient, MESSAGE)
                 .await
                 .unwrap();
-            assert_eq!(provider.poll_mail_for_test().await.unwrap().duplicates, 1);
+            provider.poll_mail_for_test().await.unwrap();
             assert_single_message(&provider, &identifier).await;
             notifications.assert_empty();
+            assert_eq!(filed_records(&storage_name).await, filed_before_resend);
 
             JsFuture::from(provider.remove_mail(identifier.clone()))
                 .await
@@ -343,9 +360,10 @@ async fn test_mail_startup_notification_restart_deduplication_and_removal() {
                 .deliver(&current_recipient, MESSAGE)
                 .await
                 .unwrap();
-            assert_eq!(provider.poll_mail_for_test().await.unwrap().duplicates, 1);
+            provider.poll_mail_for_test().await.unwrap();
             assert!(listed_mail(&provider).await.is_empty());
             notifications.assert_empty();
+            assert_eq!(filed_records(&storage_name).await, filed_before_resend);
             provider.close().await.unwrap();
         },
     )
@@ -386,13 +404,19 @@ async fn test_mail_two_tabs_scope_unreadable_records_and_share_filed_records() {
                 .await
                 .unwrap()
                 .to_string();
-            assert_eq!(first.poll_mail_for_test().await.unwrap().unreadable, 1);
+            first.poll_mail_for_test().await.unwrap();
             assert!(listed_mail(&first).await.is_empty());
+            first_notifications.assert_empty();
+            let unreadable_records = recipient_records(&storage_name).await;
+            assert!(unreadable_records
+                .values()
+                .any(|record| matches!(record, RecipientRecord::Opened { .. })));
+            assert!(filed_records(&storage_name).await.is_empty());
 
             let mut second_notifications = MailNotifications::new();
             let second = Provider::new_browser_provider_with_mail(
                 second_config,
-                storage_name,
+                storage_name.clone(),
                 BrowserMailOptions::default(),
                 Some(second_notifications.function()),
             )
@@ -402,14 +426,19 @@ async fn test_mail_two_tabs_scope_unreadable_records_and_share_filed_records() {
             second.poll_mail_for_test().await.unwrap();
             assert_single_message(&first, &identifier).await;
             assert_single_message(&second, &identifier).await;
+            first_notifications.assert_empty();
+            second_notifications.assert_empty();
+            let filed_before_resend = filed_records(&storage_name).await;
+            assert_eq!(filed_before_resend.len(), 1);
             gateway(&first)
                 .deliver(&first_recipient, MESSAGE)
                 .await
                 .unwrap();
-            assert_eq!(first.poll_mail_for_test().await.unwrap().duplicates, 1);
+            first.poll_mail_for_test().await.unwrap();
             assert_single_message(&first, &identifier).await;
             first_notifications.assert_empty();
             second_notifications.assert_empty();
+            assert_eq!(filed_records(&storage_name).await, filed_before_resend);
             first.close().await.unwrap();
             second.close().await.unwrap();
         },
@@ -428,24 +457,37 @@ async fn test_mail_throwing_callback_preserves_filing_and_deduplication() {
             let recipient = recipient_of(&config);
             let storage_name = storage_name();
             let identifier = seed_pending_mail(config.clone(), storage_name.clone()).await;
+            let notifications = Array::new();
+            let callback = Function::new_with_args(
+                "id",
+                "this.push(id); throw new Error('mail callback failed');",
+            )
+            .bind0(&notifications);
             let provider = Provider::new_browser_provider_with_mail(
                 config,
-                storage_name,
+                storage_name.clone(),
                 BrowserMailOptions::default(),
-                Some(Function::new_no_args(
-                    "throw new Error('mail callback failed');",
-                )),
+                Some(callback),
             )
             .await
             .unwrap();
             provider.poll_mail_for_test().await.unwrap();
             assert_single_message(&provider, &identifier).await;
+            assert_eq!(notifications.length(), 1);
+            assert_eq!(
+                notifications.get(0).as_string().as_deref(),
+                Some(identifier.as_str())
+            );
+            let filed_before_resend = filed_records(&storage_name).await;
+            assert_eq!(filed_before_resend.len(), 1);
             gateway(&provider)
                 .deliver(&recipient, MESSAGE)
                 .await
                 .unwrap();
-            assert_eq!(provider.poll_mail_for_test().await.unwrap().duplicates, 1);
+            provider.poll_mail_for_test().await.unwrap();
             assert_single_message(&provider, &identifier).await;
+            assert_eq!(notifications.length(), 1);
+            assert_eq!(filed_records(&storage_name).await, filed_before_resend);
             provider.close().await.unwrap();
         },
     )
