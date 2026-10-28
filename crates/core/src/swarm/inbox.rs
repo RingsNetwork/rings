@@ -229,20 +229,14 @@ impl SwarmInboxDelivery {
     /// this node's own view (`Law (Agreement)` of `dht::relay_holder`, `Law (Members)`), and the
     /// carrier is this node's inbox and passes admission, as a hand-off's would.
     ///
-    /// Post: a report from any other node, or of any other carrier, is refused and drains
-    /// nothing; no report changes custody (the module's laws).
+    /// Post: a report from any other node is refused as a view refusal
+    /// (`RelayInboxReportFromNonMember`, #1151), one of any other carrier as invalid; either
+    /// drains nothing, and no report changes custody (the module's laws).
     pub(crate) async fn deliver_fetched(&self, member: Did, inbox: Option<Entry>) -> Result<()> {
         let local = self.transport.dht.did;
         let key = inbox_key(local);
-        let RelayMembers::Members(members) = self.transport.dht.relay_members(key)? else {
-            return Err(Error::InvalidMessage(format!(
-                "relay inbox report from {member}, which this view places no member of"
-            )));
-        };
-        if member == local || !members.contains(&member) {
-            return Err(Error::InvalidMessage(format!(
-                "relay inbox report from {member}, which does not hold this inbox"
-            )));
+        if member == local || !self.transport.dht.relay_members(key)?.contains(member) {
+            return Err(Error::RelayInboxReportFromNonMember(member));
         }
         let inbox = match inbox {
             Some(entry) if entry.kind.is_relay_inbox() && entry.did == key => entry

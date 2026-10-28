@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use tracing_test::traced_test;
+
 use super::*;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -7,6 +9,7 @@ use crate::dht::RelayCustody;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::message::ConnectNodeSend;
+use crate::message::FetchRelayInbox;
 use crate::message::PeerWireVersion;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::WireVersionMismatch;
@@ -55,6 +58,37 @@ async fn test_a_link_frame_of_another_wire_version_is_refused_before_decoding() 
         }))) if *version == theirs
     ));
     assert_eq!(recorder.observed(), 0);
+    Ok(())
+}
+
+/// A view refusal is the protocol's answer, not a fault (#1151): a `FetchRelayInbox` reaching a
+/// node that keeps no relay store, so its view makes it no member of the recipient's inbox key,
+/// is refused with `RelayCarrierNotHeldHere`, logged once at debug and nowhere at error, and the
+/// transport is told the frame was handled.
+#[traced_test]
+#[tokio::test]
+async fn test_a_view_refusal_is_logged_once_at_debug_and_answered() -> Result<()> {
+    let transport = default_transport()?;
+    let pending = pending_peer(&transport).await?;
+    pending.admit(&transport).await?;
+    let fetch = local_wire(
+        Message::FetchRelayInbox(FetchRelayInbox),
+        &pending.session,
+        transport.dht.did,
+    )?;
+
+    pending.receive(&fetch).await?;
+
+    logs_assert(|lines: &[&str]| {
+        let refusals = lines
+            .iter()
+            .filter(|line| line.contains("RelayCarrierNotHeldHere"))
+            .collect::<Vec<_>>();
+        match refusals.as_slice() {
+            [refusal] if refusal.contains("DEBUG") => Ok(()),
+            _ => Err(format!("expected one debug refusal, logged {refusals:?}")),
+        }
+    });
     Ok(())
 }
 
