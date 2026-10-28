@@ -5,7 +5,7 @@
 //!
 //! ```text
 //!   send_message_with_permit(payload) ─▶ send_custom ─open─▶ credit ─▶ send_frame(Custom)
-//!   credit pump ─next_credit─────────────▶ send_credit ─open─────────▶ send_frame(Credit)
+//!   credit pump ─next_signal─────────────▶ send_signal ─open─────────▶ send_frame(Signal)
 //! ```
 //!
 //! The public send API takes a custom payload, so a credit frame leaves this end only from its

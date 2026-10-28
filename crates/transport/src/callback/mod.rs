@@ -22,7 +22,7 @@ pub use inner::InnerTransportCallback;
 use invalid_report::INVALID_FRAME_REPORT_BACKLOG_CAPACITY;
 #[cfg(all(test, not(target_family = "wasm")))]
 use invalid_report::INVALID_FRAME_REPORT_QUANTUM;
-pub use link_credit::NodeReceiveLoad;
+pub use link_credit::NodeFramePool;
 
 #[cfg(test)]
 mod tests;

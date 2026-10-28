@@ -45,6 +45,7 @@ use rings_runtime::sleep;
 use rings_runtime::Abandoned;
 use rings_runtime::RuntimeUnavailable;
 use rings_runtime::Spawner;
+use rings_runtime::TaskSet;
 use rings_runtime::TimerError;
 
 // Legacy `PeriodicMeasure/counters/...` values intentionally remain unread:
@@ -211,6 +212,10 @@ struct MeasureState {
     clock: Arc<dyn MeasureClock>,
     /// The executor captured at construction, which owns persistence and flush work.
     spawner: Spawner,
+    /// The measurement's own tasks, its persistence worker and flushes, spawned on `spawner`.
+    /// Not the node's tasks: they run until the measurement's owner drops it, after the node's
+    /// tasks have drained, and a close awaits them through its stores' release (#1085).
+    tasks: TaskSet,
     /// Never sent on, only dropped: fields drop in declaration order, so this one drops after
     /// both stores, and its receiver's `Canceled` is the event that the stores are released.
     _released: oneshot::Sender<Infallible>,
@@ -386,12 +391,14 @@ impl PeriodicMeasure {
             persistence_lock: AsyncMutex::new(()),
             clock,
             spawner,
+            tasks: TaskSet::new(),
             _released: released_signal,
         });
         let (mut persistence_wake, receiver) = mpsc::channel(PERSISTENCE_WAKE_CAPACITY);
-        state
-            .spawner
-            .spawn(run_persistence_worker(state.clone(), receiver));
+        drop(state.tasks.spawn_with(
+            &state.spawner,
+            run_persistence_worker(state.clone(), receiver),
+        ));
         if dirty {
             let _ = persistence_wake.try_send(());
         }
@@ -454,10 +461,11 @@ impl PeriodicMeasure {
     /// waiting for it (a timed-out [`Self::flush_with_timeout`]).
     fn start_flush(&self) -> impl std::future::Future<Output = Result<(), MeasureRuntimeError>> {
         let state = Arc::clone(&self.state);
-        let flush = self
-            .state
-            .spawner
-            .run_detached(async move { flush_state(&state).await });
+        let flush =
+            self.state.tasks.spawn_with(
+                &self.state.spawner,
+                async move { flush_state(&state).await },
+            );
         async move {
             match flush.await {
                 Ok(result) => result,

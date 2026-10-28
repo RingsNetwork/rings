@@ -9,7 +9,10 @@
 #
 # The site is one Pages artifact: Trunk owns `frontend/dist` (it clears the directory on every
 # build), so the book is rendered into it afterwards, the repository's `llms.txt` is copied to
-# the site root beside it, and the SPA fallback is added last.
+# the site root beside it, and the SPA fallback is added. Last, `finish_site.py` readies it for
+# search engines: a canonical address and a description of its own for each chapter, noindex
+# on the 404 pages, and `sitemap.xml`. After the deploy, `indexnow.py` tells Bing and the other
+# IndexNow engines that the sitemap's pages are new.
 #
 # Routing: the shell is hash-routed (`#node`, `#webview`, …), which static hosting serves
 # unchanged. The Onion WebView gateway is path-routed (`/webview`, `/webview/…`) and is answered
@@ -89,6 +92,9 @@ jobs:
       - name: Add the SPA fallback for path-routed WebView URLs
         run: cp frontend/dist/index.html frontend/dist/404.html
 
+      - name: Finish the site for search engines
+        run: python3 frontend/scripts/finish_site.py frontend/dist
+
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
@@ -112,3 +118,10 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      # The script and the key's file; a refusal from IndexNow is no reason to fail the deploy.
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Tell IndexNow the pages are new
+        continue-on-error: true
+        run: python3 frontend/scripts/indexnow.py

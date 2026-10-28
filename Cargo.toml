@@ -12,35 +12,40 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.37.0"
+version = "0.38.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["RND <dev@rings.rs>"]
 repository = "https://github.com/RingsNetwork/rings"
+homepage = "https://rings.rs"
 
 [workspace.dependencies]
 async-trait = "0.1.77"
 js-sys = "0.3.98"
 jsonrpc-core = "18.0.0"
-rings-aez = { path = "crates/aez", version = "0.37.0" }
-rings-codec = { path = "crates/codec", version = "0.37.0" }
-rings-core = { path = "crates/core", version = "0.37.0", default-features = false }
-rings-derive = { path = "crates/derive", version = "0.37.0", default-features = false }
-rings-dns-relay = { path = "crates/dns-relay", version = "0.37.0" }
-rings-gateway = { path = "crates/gateway", version = "0.37.0" }
-rings-measure = { path = "crates/measure", version = "0.37.0" }
-rings-network-policy = { path = "crates/network-policy", version = "0.37.0" }
-rings-node = { path = "crates/node", version = "0.37.0" }
-rings-rpc = { path = "crates/rpc", version = "0.37.0", default-features = false }
-rings-runtime = { path = "crates/runtime", version = "0.37.0", default-features = false }
+rings-aez = { path = "crates/aez", version = "0.38.0" }
+rings-codec = { path = "crates/codec", version = "0.38.0" }
+rings-core = { path = "crates/core", version = "0.38.0", default-features = false }
+rings-derive = { path = "crates/derive", version = "0.38.0", default-features = false }
+rings-dns-relay = { path = "crates/dns-relay", version = "0.38.0" }
+rings-gateway = { path = "crates/gateway", version = "0.38.0" }
+rings-measure = { path = "crates/measure", version = "0.38.0" }
+rings-network-policy = { path = "crates/network-policy", version = "0.38.0" }
+rings-node = { path = "crates/node", version = "0.38.0" }
+rings-rpc = { path = "crates/rpc", version = "0.38.0", default-features = false }
+rings-runtime = { path = "crates/runtime", version = "0.38.0", default-features = false }
 rings-test-support = { path = "crates/test-support" }
-rings-transport = { path = "crates/transport", version = "0.37.0" }
+rings-transport = { path = "crates/transport", version = "0.38.0" }
 serde-wasm-bindgen = "0.6.5"
 wasm-bindgen = "0.2.121"
 wasm-bindgen-futures = "0.4.71"
 wasm-bindgen-macro-support = "0.2.121"
 wasm-bindgen-test = "0.3.71"
-webrtc = { version = "0.17.1" }
+# Pinned with `webrtc-sctp` (`crates/transport`, #1146): webrtc 0.17.2 sets
+# `association::Config::mtu`, which only webrtc-sctp 0.17.2 has, so with webrtc-sctp held at
+# 0.17.1 a fresh resolve that picks webrtc 0.17.2 fails to compile. Drop both pins with the
+# vendored webrtc-sctp patch, at #1071.
+webrtc = { version = "=0.17.1" }
 zeroize = "1.8.1"
 
 [workspace.lints.rust]

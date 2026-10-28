@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 use super::wire;
 use super::InboundFrameAdmission;
 use super::InnerTransportCallback;
-use super::NodeReceiveLoad;
+use super::NodeFramePool;
 use crate::core::callback::AdmittedInboundMessage;
 use crate::core::callback::TransportCallback;
 use crate::core::pool::ChannelLane;
@@ -72,7 +72,7 @@ async fn test_a_drainer_ended_mid_dispatch_gives_its_lane_up() {
             seen,
         }),
         Notifier::default(),
-        NodeReceiveLoad::new(),
+        NodeFramePool::new(),
     ));
     let lane = ChannelLane::new(1);
     dispatch(&callback, PANICKING, lane);

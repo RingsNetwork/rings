@@ -1,6 +1,6 @@
 //! The one boundary at which the swarm hands a task to the runtime to run on its own: the
 //! inbound actor, the pre-admission drain, every link-control send, a protocol-context
-//! handshake, and the first-frame watch of a queued send go through it.
+//! handshake, and the node's watcher of queued sends' first frames go through it.
 //! Scheduling itself is [`rings_runtime::spawn_detached`]: native needs a current tokio
 //! runtime; the browser always has one.
 //!
@@ -28,8 +28,9 @@ pub(crate) fn spawn_detached(task: DetachedTask) -> Result<(), DetachedTask> {
 ///
 /// Law: this is for a task whose omission would leave state this end has claimed, or would
 /// charge a peer for this end's inaction: a claimed pre-admission drain, a release of frames
-/// held for a session the link just learned, the first-frame watch of a queued protocol
-/// transfer (abandoned, the transfer would wait for credit with no deadline). A task that is
+/// held for a session the link just learned. The first-frame watch of a queued protocol
+/// transfer keeps the same law through the node's admission watcher, which runs a watch inline
+/// when no runtime can take it. A task that is
 /// merely a convenience, repeated by the next cause (a link-control send), goes through
 /// [`spawn_detached`] and is refused when no runtime is current, never run inline.
 pub(crate) async fn run_detached_or_inline(task: DetachedTask) {

@@ -200,6 +200,7 @@ async fn test_a_hold_whose_refusal_is_lost_is_still_placed() -> Result<()> {
             Message::OperateEntry(PlacedEntryOperation {
                 placement: inbox_key(offline),
                 op: hold.clone(),
+                report: false,
             }),
             node1.did(),
         )

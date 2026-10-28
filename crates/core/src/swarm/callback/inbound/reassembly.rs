@@ -1,7 +1,7 @@
 use rings_transport::core::pool::ChannelLane;
 
 use super::finish_completion;
-use super::memory_reservation;
+use super::HeldCharge;
 use super::InboundEvent;
 use super::InboundLane;
 use super::InboundProcessor;
@@ -13,30 +13,46 @@ use crate::measure::Authentication;
 use crate::swarm::callback::logical::Arrival;
 
 impl InboundProcessor {
+    /// Apply `chunk`, which brought `charge`, to this connection's reassembler: a first chunk's
+    /// charge is held with its message, any other chunk's is dropped (#932).
     pub(super) async fn handle_chunk(
         &self,
-        peer: Option<crate::dht::Did>,
-        authentication: Authentication,
+        (peer, authentication): (Option<crate::dht::Did>, Authentication),
         chunk: crate::chunk::Chunk,
+        charge: Option<HeldCharge>,
         carrier: Option<ChannelLane>,
-    ) -> ReassemblyOutcome {
+    ) -> ReassemblyOutcome<Option<HeldCharge>> {
         let now_ms = self.reassembly_clock.now_ms();
-        let (outcome, expired) = self
-            .reassembler
-            .lock()
-            .await
-            .handle_retained_at_with_attribution(
-                chunk,
-                now_ms,
-                matches!(authentication, Authentication::Authenticated),
-                carrier,
-            );
+        let credit = self.carrier_credit();
+        let (outcome, expired) = self.reassembler.lock().await.handle_charged_at(
+            chunk,
+            charge,
+            (now_ms, credit),
+            matches!(authentication, Authentication::Authenticated),
+            carrier,
+        );
         self.record_expired_reassembly_failures(peer, expired).await;
         outcome
     }
 
+    /// The credit this connection's peer holds unused on each carrier, for the rate floor of
+    /// its open messages (load-bounds paper, Def. 7): read before the reassembler is locked, so
+    /// no transport lock is taken under it; none before a connection attempt is bound.
+    fn carrier_credit(&self) -> impl Fn(Option<ChannelLane>) -> u64 {
+        let credit = self
+            .pending_attempt()
+            .map(|attempt| self.logical.transport.peer_unused_credit(attempt))
+            .unwrap_or_default();
+        move |carrier| {
+            carrier
+                .and_then(|lane| credit.get(usize::from(lane.index())).copied())
+                .unwrap_or(0)
+        }
+    }
+
     pub(super) async fn remove_expired_reassembly_at(&self, now_ms: u128) {
-        let expired = self.reassembler.lock().await.remove_expired_at(now_ms);
+        let credit = self.carrier_credit();
+        let expired = self.reassembler.lock().await.sweep_at(now_ms, credit);
         self.record_expired_reassembly_failures(None, expired).await;
     }
 
@@ -126,8 +142,16 @@ async fn advance_chunk_event(
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     let transaction_id = event.payload.transaction.tx_id;
     let chunk = take_prepared_chunk(&mut event.prepared_message)?;
+    // The chunk's charge moves into the reassembler: a first chunk's is the whole message's,
+    // any other chunk's is covered and holds nothing.
+    let charge = event.permit.take();
     let outcome = processor
-        .handle_chunk(event.peer, event.authentication, chunk, event.carrier)
+        .handle_chunk(
+            (event.peer, event.authentication),
+            chunk,
+            charge,
+            event.carrier,
+        )
         .await;
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     if matches!(
@@ -136,10 +160,9 @@ async fn advance_chunk_event(
     ) {
         crate::simulation::record_reassembly_advance(transaction_id);
     }
-    let bytes: crate::chunk::RetainedReassembly = match outcome {
-        ReassemblyOutcome::Complete(bytes) => bytes,
+    let retained = match outcome {
+        ReassemblyOutcome::Complete(retained) => retained,
         ReassemblyOutcome::Incomplete
-        | ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
         | ReassemblyOutcome::Rejected(ReassemblyRejection::Replay) => {
             return Ok(None);
         }
@@ -150,8 +173,11 @@ async fn advance_chunk_event(
             return Err(Error::InvalidChunkMessage);
         }
     };
-    let reservation = memory_reservation(bytes.as_ref().len());
-    event.permit.try_transition(event.lane, reservation)?;
+    // The completed message moves onto the event with the charge its first chunk took for it: a
+    // move, not a new charge, so no completed message is refused for capacity (Prop. 4).
+    let carrier = retained.carrier();
+    let (bytes, charge) = retained.into_parts();
+    event.permit.restore(charge);
     let payload = processor
         .decode_verified_payload(event.peer, event.authentication, bytes.as_ref())
         .await?;
@@ -174,7 +200,7 @@ async fn advance_chunk_event(
     let lane = InboundLane::from_kind(kind);
     // Every chunk took credit on the lane they arrived on, which must be the lane of the
     // message they carry (one lane per class).
-    if !lane.admits_carrier(bytes.carrier()) {
+    if !lane.admits_carrier(carrier) {
         processor
             .record_receive_failure(event.peer, event.authentication)
             .await;
@@ -190,7 +216,6 @@ async fn advance_chunk_event(
     processor
         .admit_final_transaction(&payload, &message, lane, arrival)
         .await?;
-    event.permit.try_transition(lane, reservation)?;
     let payload = processor
         .accept_verified_logical_message(event.peer, event.authentication, payload)
         .await?;

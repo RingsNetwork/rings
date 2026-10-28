@@ -17,8 +17,16 @@
 //! Ghost bound (removal-stability paper, Prop. 10): a registrant that stops at `t_s` is listed
 //! until at most `t_s + T + σ` while nobody re-appends its bytes, and until at most its signed
 //! lease end `ℓ ≤ t_s + Λ` against any writer or syncer.
+//!
+//! Trigger (#855): a registration publishes at every heartbeat, and once more at its node's
+//! first admitted edge after a heartbeat that began with none (`republish_due`). Such a
+//! heartbeat settled at the node alone, and the early publish routes the same lease through the
+//! edge to the registry's owners. It is a heartbeat of the lease like any other, so the
+//! boundedness law and the ghost bound hold as stated.
 
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -32,6 +40,7 @@ use rings_core::lifecycle::StopToken;
 use rings_core::message::ChordStorageInterface;
 use rings_core::message::MessageSigner;
 use rings_core::message::ScopedStorage;
+use rings_core::swarm::storage_api::StoreReceipt;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
 
@@ -97,6 +106,35 @@ pub(crate) const fn default_advertise_presence() -> bool {
 /// one included (`2I < Λ`).
 pub(crate) fn registry_refresh_bound() -> Duration {
     registry_lease() / 2
+}
+
+/// Whether the publish after one that began with `edges_at_start` admitted edges may come
+/// before its heartbeat (#855): only after a heartbeat that began with none, which settled at
+/// this node alone and reached no registry owner. An early publish arms nothing.
+///
+/// ```text
+///   armed(heartbeat, e₀) = heartbeat ∧ e₀ = 0
+/// ```
+pub(crate) const fn early_publish_armed(heartbeat: bool, edges_at_start: usize) -> bool {
+    heartbeat && edges_at_start == 0
+}
+
+/// Whether an armed registration publishes now, before its heartbeat (#855): it has an admitted
+/// edge, through which a publish reaches the registry's owners. A first registration made before
+/// the node joined the overlay is thus published again at its first edge, not one heartbeat
+/// later.
+///
+/// Law (first edge): only a heartbeat arms the trigger and the early publish disarms it, so
+/// under any sequence of admissions and retirements a registration publishes at most once
+/// between two heartbeats beyond them. An early publish is an ordinary heartbeat of the lease
+/// (the heartbeat law of [`DhtRegistrationPublisher`]): it raises the dots of the same bytes, so
+/// the boundedness law, the freshness window `T` and the lease end `ℓ` are unchanged.
+///
+/// ```text
+///   republish_due(armed, e) = armed ∧ e ≥ 1
+/// ```
+pub(crate) const fn republish_due(armed: bool, admitted_edges: usize) -> bool {
+    armed && admitted_edges > 0
 }
 
 /// Validate a registry's scheduling when the switch `advertise_setting` enables it: the
@@ -182,6 +220,9 @@ pub(crate) fn validate_schedule(
 pub(crate) struct RegistrationContext<'a> {
     processor: &'a Processor,
     stop: StopToken,
+    /// When set, every append asks its owners for a store report (#866), and its receipt is
+    /// kept here for the daemon.
+    receipts: Option<Mutex<Vec<StoreReceipt>>>,
 }
 
 impl<'a> RegistrationContext<'a> {
@@ -190,7 +231,27 @@ impl<'a> RegistrationContext<'a> {
     }
 
     pub(crate) const fn new_with_stop(processor: &'a Processor, stop: StopToken) -> Self {
-        Self { processor, stop }
+        Self {
+            processor,
+            stop,
+            receipts: None,
+        }
+    }
+
+    /// This context with every append asking its owners for a store report (#866).
+    pub(crate) fn reporting(mut self) -> Self {
+        self.receipts = Some(Mutex::new(Vec::new()));
+        self
+    }
+
+    /// The receipts of the reported appends made through this context, or `None` when it was
+    /// not reporting.
+    pub(crate) fn into_receipts(self) -> Option<Vec<StoreReceipt>> {
+        self.receipts.map(|receipts| {
+            receipts
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+        })
     }
 
     /// Return whether the owning registration daemon has requested shutdown.
@@ -253,12 +314,26 @@ impl<'a> RegistrationContext<'a> {
         self.processor.swarm.scoped_storage(self.stop.clone())
     }
 
-    /// Append `data` to `topic`, stopping cooperatively with the registration.
+    /// Append `data` to `topic`, stopping cooperatively with the registration; a reporting
+    /// context keeps the append's store receipt.
     pub(crate) async fn append_data(&self, topic: &str, data: Bytes) -> Result<()> {
-        self.storage()
-            .storage_append_data(topic, data)
+        let Some(receipts) = &self.receipts else {
+            return self
+                .storage()
+                .storage_append_data(topic, data)
+                .await
+                .map_err(stoppable_storage_error);
+        };
+        let receipt = self
+            .storage()
+            .storage_append_data_reported(topic, data)
             .await
-            .map_err(stoppable_storage_error)
+            .map_err(stoppable_storage_error)?;
+        receipts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(receipt);
+        Ok(())
     }
 }
 
@@ -548,3 +623,10 @@ impl RegistrationTask for OnlineNodeRegistration {
         self.publish_descriptor(context).await.map(|_| ())
     }
 }
+
+mod readiness;
+
+pub(crate) use readiness::RegistrationReadiness;
+
+#[cfg(test)]
+mod test_first_edge;

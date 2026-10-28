@@ -1,0 +1,6 @@
+# rings.rs: search engines and AI crawlers alike are welcome to all of it.
+# For language models: https://rings.rs/llms.txt
+User-agent: *
+Allow: /
+
+Sitemap: https://rings.rs/sitemap.xml

@@ -30,9 +30,9 @@ pub struct ChannelLane(u8);
 pub const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
 impl ChannelLane {
-    /// The priority lane, exempt from the soft bound of
-    /// [`NodeReceiveLoad`](crate::callback::NodeReceiveLoad). Its window still bounds what it
-    /// holds.
+    /// The priority lane, whose floor is its whole window: it never borrows from the
+    /// [`NodeFramePool`](crate::callback::NodeFramePool), so control traffic never waits for
+    /// another peer's load (load-bounds paper, Prop. 3(5)).
     pub const PRIORITY: Self = Self(0);
 
     /// Name lane `index`.

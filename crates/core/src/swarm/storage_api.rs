@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryOperation;
 use crate::dht::ChordStorageCache;
 use crate::dht::Did;
@@ -16,6 +17,10 @@ use crate::error::Result;
 use crate::lifecycle::StopToken;
 use crate::message::handlers::storage::handle_storage_fetch_act;
 use crate::message::handlers::storage::operate_entry;
+use crate::message::handlers::storage::operate_entry_reported;
+pub use crate::swarm::transport::store_reports::StoreQuorum;
+pub use crate::swarm::transport::store_reports::StoreReceipt;
+pub use crate::swarm::transport::store_reports::StoreUnconfirmed;
 use crate::swarm::transport::Attempts;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
@@ -26,10 +31,10 @@ use crate::utils::get_epoch_ms;
 /// Element lifetime: every element of a data topic expires at the earlier of its dot's issue time
 /// plus the element horizon `H = EntryKind::Data.max_lifetime_ms()` and its topic's retention
 /// bound, the latest bound any write joined into the topic requested (a plain write requests
-/// `EntryKind::Data.default_lifetime_ms()`); writing the value again issues a fresh dot and a
-/// fresh bound. A removal covers every earlier dot of its value, and is collected `H + σ` after
-/// the dot it covers, with `σ = TS_OFFSET_TOLERANCE_MS`. The laws are stated in the `retention`
-/// module of `dht::entry`.
+/// `EntryKind::Data.default_lifetime_ms()`, [`Self::storage_extend`] the lifetime its caller
+/// names); writing the value again issues a fresh dot and a fresh bound. A removal covers every
+/// earlier dot of its value, and is collected `H + σ` after the dot it covers, with
+/// `σ = TS_OFFSET_TOLERANCE_MS`. The laws are stated in the `retention` module of `dht::entry`.
 ///
 /// Every remote placement of these operations is rerouted (`reroute`, #859): a send refused
 /// before backend acceptance is retried from topology recomputed after a topology, link or
@@ -62,8 +67,10 @@ use crate::utils::get_epoch_ms;
 /// Read-your-writes is a session guarantee about the writer's own view, not evidence of
 /// replication: after `Ok` an owner may still refuse or lose the operation, and the writer
 /// reads it all the same. A caller therefore never takes its own read-back as a publication
-/// check (a registry's readiness, for one, #866); only another node's read witnesses that an
-/// owner holds the write.
+/// check (a registry's readiness, for one); only an owner's statement witnesses that it holds
+/// the write: another node's read, or the store reports of a write made with
+/// [`ScopedStorage::storage_append_data_reported`] or [`ScopedStorage::storage_extend_reported`]
+/// (#866).
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterface {
@@ -75,6 +82,16 @@ pub trait ChordStorageInterface {
     /// Append the element `data`, as its bytes, to a Data kind entry. The element expires as
     /// the trait documentation states unless it is appended again.
     async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()>;
+    /// Append the elements `data` to the Data kind entry of `topic` as one delta, requesting
+    /// the retention bound `t + lifetime_ms` at the operation boundary `t`.
+    ///
+    /// The delta is one `Extend`: its elements share one version (dots `(v, 0) … (v, n − 1)`),
+    /// so one message per placement carries them all. The topic's bound joins by `max`, so it
+    /// is at least `t + lifetime_ms`, and each element lives until at least
+    /// `t + min(H, lifetime_ms)` unless removed, capped or evicted, as the trait documentation
+    /// states. An owner admits the bound only up to `t + EntryKind::Data.max_lifetime_ms() + σ`,
+    /// as it admits every write, so a longer lifetime is refused, not shortened.
+    async fn storage_extend(&self, topic: &str, data: Vec<Bytes>, lifetime_ms: u64) -> Result<()>;
     /// Tombstone the observed element `data` in a Data kind entry: the removal covers every dot
     /// of `data` the storage owner holds or has held under a later one.
     async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()>;
@@ -132,14 +149,85 @@ impl ScopedStorage<'_> {
     /// observe it in this node's cache: the read-your-writes law of
     /// [`ChordStorageInterface`].
     ///
-    /// The operation is stamped once, here: stamping is idempotent, so the owners apply and the
-    /// cache observes the same dots. An `Err` observes nothing.
-    async fn operate_observed(&self, operation: EntryOperation) -> Result<()> {
+    /// The operation is stamped once, here, at the operation boundary `now_ms`: stamping is
+    /// idempotent, so the owners apply and the cache observes the same dots. An `Err` observes
+    /// nothing.
+    async fn operate_observed(&self, operation: EntryOperation, now_ms: u128) -> Result<()> {
         let dht = &self.transport.dht;
-        let operation = dht.stamp_operation(operation, get_epoch_ms(), None).await?;
+        let operation = dht.stamp_operation(operation, now_ms, None).await?;
         operate_entry(self.transport, operation.clone(), self.attempts()).await?;
         dht.local_cache_observe_write(operation).await
     }
+
+    /// [`Self::operate_observed`] whose remote placements ask their owners for a store report
+    /// (#866): the receipt resolves once their reports decide `quorum`
+    /// (`swarm::transport::store_reports`).
+    async fn operate_observed_reported(
+        &self,
+        operation: EntryOperation,
+        now_ms: u128,
+        quorum: StoreQuorum,
+    ) -> Result<StoreReceipt> {
+        let dht = &self.transport.dht;
+        let operation = dht.stamp_operation(operation, now_ms, None).await?;
+        let receipt =
+            operate_entry_reported(self.transport, operation.clone(), self.attempts(), quorum)
+                .await?;
+        dht.local_cache_observe_write(operation).await?;
+        Ok(receipt)
+    }
+
+    /// [`ChordStorageInterface::storage_append_data`] whose owners report it (#866): once it
+    /// returns `Ok`, this node reads its write as ever (read-your-writes), and the receipt
+    /// resolves once every remote placement's owner reported the element stored
+    /// ([`StoreQuorum::Every`], `message::types::store_report`). Unlike the writer's own read,
+    /// the receipt witnesses what the owners hold, and so what another node's read can reach. A
+    /// placement this node owns is stored once the append returns.
+    pub async fn storage_append_data_reported(
+        &self,
+        topic: &str,
+        data: Bytes,
+    ) -> Result<StoreReceipt> {
+        let entry: Entry = (topic.to_string(), data).try_into()?;
+        self.operate_observed_reported(
+            EntryOperation::Extend(entry),
+            get_epoch_ms(),
+            StoreQuorum::Every,
+        )
+        .await
+    }
+
+    /// [`ChordStorageInterface::storage_extend`] whose owners report it (#866), as
+    /// [`Self::storage_append_data_reported`] is, its receipt resolving once the reports decide
+    /// `quorum`. Under [`StoreQuorum::Any`], a placement this node owns decides it once the
+    /// extend returns.
+    pub async fn storage_extend_reported(
+        &self,
+        topic: &str,
+        data: Vec<Bytes>,
+        lifetime_ms: u64,
+        quorum: StoreQuorum,
+    ) -> Result<StoreReceipt> {
+        let now_ms = get_epoch_ms();
+        let operation = bounded_extend(topic, data, lifetime_ms, now_ms)?;
+        self.operate_observed_reported(operation, now_ms, quorum)
+            .await
+    }
+}
+
+/// The `Extend` of the elements `data` to the data entry of `topic` that requests the retention
+/// bound `now_ms + lifetime_ms`: the operation of [`ChordStorageInterface::storage_extend`],
+/// stamped at the same `now_ms`.
+fn bounded_extend(
+    topic: &str,
+    data: Vec<Bytes>,
+    lifetime_ms: u64,
+    now_ms: u128,
+) -> Result<EntryOperation> {
+    Ok(EntryOperation::Extend(Entry {
+        expires_at_ms: Some(now_ms.saturating_add(u128::from(lifetime_ms))),
+        ..Entry::new(Entry::gen_did(topic)?, data, EntryKind::Data)
+    }))
 }
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -183,18 +271,26 @@ impl ChordStorageInterface for ScopedStorage<'_> {
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types
     async fn storage_store(&self, entry: Entry) -> Result<()> {
-        self.operate_observed(EntryOperation::Overwrite(entry))
+        self.operate_observed(EntryOperation::Overwrite(entry), get_epoch_ms())
             .await
     }
 
     async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        self.operate_observed(EntryOperation::Extend(entry)).await
+        self.operate_observed(EntryOperation::Extend(entry), get_epoch_ms())
+            .await
+    }
+
+    /// The bound and the delta's version are stamped from one clock reading `t`.
+    async fn storage_extend(&self, topic: &str, data: Vec<Bytes>, lifetime_ms: u64) -> Result<()> {
+        let now_ms = get_epoch_ms();
+        let operation = bounded_extend(topic, data, lifetime_ms, now_ms)?;
+        self.operate_observed(operation, now_ms).await
     }
 
     async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        self.operate_observed(EntryOperation::Tombstone(entry))
+        self.operate_observed(EntryOperation::Tombstone(entry), get_epoch_ms())
             .await
     }
 }
@@ -220,6 +316,13 @@ impl ChordStorageInterface for Swarm {
     async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         self.scoped_storage(StopToken::never())
             .storage_append_data(topic, data)
+            .await
+    }
+
+    /// [`ScopedStorage::storage_extend`] under a stop that never fires.
+    async fn storage_extend(&self, topic: &str, data: Vec<Bytes>, lifetime_ms: u64) -> Result<()> {
+        self.scoped_storage(StopToken::never())
+            .storage_extend(topic, data, lifetime_ms)
             .await
     }
 

@@ -102,7 +102,7 @@ fn append_hero(css: &mut String, theme: Theme) {
             ("text-transform", "uppercase"),
         ],
     );
-    rule(css, ".landing-hero h2", &[
+    rule(css, ".landing-hero h1", &[
         ("max-width", "820px"),
         ("margin", "0"),
         ("color", theme.ink),

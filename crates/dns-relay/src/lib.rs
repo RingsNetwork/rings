@@ -26,6 +26,7 @@ mod recall;
 mod registry;
 mod relay;
 mod server;
+mod socket;
 mod state;
 mod zone;
 

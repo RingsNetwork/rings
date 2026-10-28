@@ -231,6 +231,22 @@ impl MessageVerification {
         self.verify_under(domain, data, at_ms, DelegatorAuthorization::Verify)
     }
 
+    /// The delegatee public key that made this signature over `data` under `domain`, when it
+    /// verifies as of `at_ms`: the key the signature recovers to, so a reader learns the
+    /// signer's key from the signature alone.
+    ///
+    /// Law: `signer_key_at(d, m, t) = Some(k)` iff `verify_at(d, m, t)`, and then
+    /// `Did::from(k.address()) = self.delegation.delegatee_did()`: both run one crate-private
+    /// path, `signer_under`, which recovers the key once.
+    pub fn signer_key_at(
+        &self,
+        domain: SigningDomain,
+        data: &[u8],
+        at_ms: u128,
+    ) -> Option<PublicKey<33>> {
+        self.signer_under(domain, data, at_ms, DelegatorAuthorization::Verify)
+    }
+
     /// [`Self::verify_at`] with the delegation's delegator authorization treated as
     /// `authorization` says (see [`DelegatorAuthorization`]).
     pub(crate) fn verify_under(
@@ -240,14 +256,26 @@ impl MessageVerification {
         at_ms: u128,
         authorization: DelegatorAuthorization,
     ) -> bool {
-        let msg = domain.transcript(data, self.ts_ms, self.ttl_ms);
+        self.signer_under(domain, data, at_ms, authorization)
+            .is_some()
+    }
 
+    /// The delegatee key that signed `data` under `domain`, judged at `at_ms` under
+    /// `authorization` (`Delegation::signer_under`); a failure is logged and is `None`.
+    fn signer_under(
+        &self,
+        domain: SigningDomain,
+        data: &[u8],
+        at_ms: u128,
+        authorization: DelegatorAuthorization,
+    ) -> Option<PublicKey<33>> {
+        let msg = domain.transcript(data, self.ts_ms, self.ttl_ms);
         self.delegation
-            .verify_under(&msg, &self.sig, at_ms, authorization)
+            .signer_under(&msg, &self.sig, at_ms, authorization)
             .map_err(|e| {
                 tracing::warn!("MessageVerification verify failed: {:?}", e);
             })
-            .is_ok()
+            .ok()
     }
 
     /// Return whether the verification timestamp is outside its accepted lifetime.
@@ -442,6 +470,21 @@ mod tests {
 
         assert!(proof.is_expired());
         assert!(!proof.verify_live(fixture_domain(), &[]));
+        Ok(())
+    }
+
+    /// The signer-key law: a verifying signature recovers to its delegatee's key, and one that
+    /// does not verify, here under another overlay, recovers to nothing.
+    #[test]
+    fn test_signer_key_is_the_delegatee_key_of_a_verifying_signature() -> Result<()> {
+        let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+        let proof = fixture_signer(&delegatee_key).sign(FIXTURE_TAG, b"data")?;
+        let now_ms = get_epoch_ms();
+
+        let key = proof.signer_key_at(fixture_domain(), b"data", now_ms);
+        assert_eq!(key, Some(delegatee_key.delegatee_public_key()));
+        let other_overlay = SigningDomain::new(FIXTURE_TAG, NETWORK_ID + 1);
+        assert_eq!(proof.signer_key_at(other_overlay, b"data", now_ms), None);
         Ok(())
     }
 

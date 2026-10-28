@@ -21,6 +21,11 @@ REQUIRED_LINKS = {
     "https://rings.rs/llms.txt",
 }
 REQUIRED_PROJECT_CONTENT = {"name", "tagline", "introduction"}
+ORGANIZATION_ID = "https://rings.rs/#organization"
+ORGANIZATION_PROFILES = {"https://github.com/RingsNetwork", "https://x.com/RingsNetworkio"}
+# The most characters search engines show of a title and of a description before cutting them.
+TITLE_LIMIT = 60
+DESCRIPTION_LIMIT = 160
 VOID_ELEMENTS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
 
@@ -39,6 +44,7 @@ class Inspection:
     project_content_markers: list[str] = field(default_factory=list)
     static_text: list[str] = field(default_factory=list)
     static_links: set[str] = field(default_factory=set)
+    title: list[str] = field(default_factory=list)
     description: str | None = None
     canonical: str | None = None
     json_ld: list[str] = field(default_factory=list)
@@ -52,6 +58,7 @@ class InitialHtmlParser(HTMLParser):
         self.inspection = Inspection()
         self._seen_executable_script = False
         self._json_ld_buffer: list[str] | None = None
+        self._in_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._handle_start(tag, attrs, self_closing=False)
@@ -61,6 +68,8 @@ class InitialHtmlParser(HTMLParser):
 
     def _handle_start(self, tag: str, attrs: list[tuple[str, str | None]], self_closing: bool) -> None:
         attributes = dict(attrs)
+        if tag == "title":
+            self._in_title = True
         if tag == "script":
             if attributes.get("type") == "application/ld+json":
                 self._json_ld_buffer = []
@@ -94,6 +103,8 @@ class InitialHtmlParser(HTMLParser):
                 self.inspection.static_links.add(href)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
         if tag == "script" and self._json_ld_buffer is not None:
             self.inspection.json_ld.append("".join(self._json_ld_buffer))
             self._json_ld_buffer = None
@@ -103,6 +114,8 @@ class InitialHtmlParser(HTMLParser):
                 self.inspection.static_root_before_scripts = True
 
     def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.inspection.title.append(data)
         if self._json_ld_buffer is not None:
             self._json_ld_buffer.append(data)
         elif self.inspection.static_depth > 0:
@@ -139,8 +152,18 @@ def validate(inspection: Inspection) -> list[str]:
         errors.append(f"static project content lacks canonical copy marker: {missing_marker}")
     for required_link in sorted(REQUIRED_LINKS - inspection.static_links):
         errors.append(f"static project content lacks required link: {required_link}")
+    title = " ".join("".join(inspection.title).split())
+    if not title:
+        errors.append("document lacks a title")
+    elif len(title) > TITLE_LIMIT:
+        errors.append(f"title is {len(title)} characters, past the {TITLE_LIMIT} search engines show")
     if not inspection.description:
         errors.append("document lacks a meta description")
+    elif len(inspection.description) > DESCRIPTION_LIMIT:
+        errors.append(
+            f"meta description is {len(inspection.description)} characters, "
+            f"past the {DESCRIPTION_LIMIT} search engines show"
+        )
     if inspection.canonical != CANONICAL_URL:
         errors.append(f"document canonical URL must be {CANONICAL_URL}")
     errors.extend(validate_structured_data(inspection.json_ld))
@@ -173,6 +196,29 @@ def validate_structured_data(documents: list[str]) -> list[str]:
         errors.append(f"SoftwareSourceCode JSON-LD URL must be {CANONICAL_URL}")
     if source.get("codeRepository") != REPOSITORY_URL:
         errors.append(f"SoftwareSourceCode codeRepository must be {REPOSITORY_URL}")
+    errors.extend(validate_organization(records, source))
+    return errors
+
+
+def validate_organization(records: list[Any], source: dict[str, Any]) -> list[str]:
+    """Validate that one Organization node, named by id, carries the project's accounts."""
+
+    nodes = [record for record in records if isinstance(record, dict)]
+    for record in records:
+        if isinstance(record, dict) and isinstance(record.get("@graph"), list):
+            nodes.extend(node for node in record["@graph"] if isinstance(node, dict))
+    organizations = [
+        node for node in nodes if node.get("@type") == "Organization" and node.get("@id") == ORGANIZATION_ID
+    ]
+    errors: list[str] = []
+    if not any("sameAs" in organization for organization in organizations):
+        errors.append(f"JSON-LD lacks the Organization {ORGANIZATION_ID} with its sameAs accounts")
+    for organization in organizations:
+        if "sameAs" in organization and not ORGANIZATION_PROFILES <= set(organization["sameAs"]):
+            errors.append(f"Organization sameAs must include {sorted(ORGANIZATION_PROFILES)}")
+    publisher = source.get("publisher")
+    if not isinstance(publisher, dict) or publisher.get("@id") != ORGANIZATION_ID:
+        errors.append(f"SoftwareSourceCode publisher must name {ORGANIZATION_ID}")
     return errors
 
 

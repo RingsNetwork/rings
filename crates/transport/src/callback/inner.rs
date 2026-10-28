@@ -4,7 +4,7 @@
 //! channel never waits on the protocol:
 //!
 //! ```text
-//!   raw ─decode─▶ Credit(c)  ─▶ LinkCredit::grant(c)                  (applied at once)
+//!   raw ─decode─▶ Signal(s)  ─▶ LinkCredit::apply(s)                  (applied at once)
 //!            └──▶ Custom(p)  ─admit(lane)─▶ lane FIFO ─drainer─▶ on_admitted_message
 //!            └──▶ invalid    ─▶ reported to the callback
 //! ```
@@ -40,7 +40,7 @@ use super::link_credit::LaneCreditReservation;
 #[cfg(rings_transport_backend)]
 use super::link_credit::LaneCreditView;
 use super::link_credit::LinkCredit;
-use super::link_credit::NodeReceiveLoad;
+use super::link_credit::NodeFramePool;
 use super::AdmittedInboundFrame;
 use super::InboundFrameAdmission;
 use crate::core::callback::AdmittedInboundMessage;
@@ -179,18 +179,18 @@ macro_rules! define_shared_inbound_frame_paths {
 }
 
 impl InnerTransportCallback {
-    /// Bind a callback to one connection identifier, with the production credit window, its
-    /// receive load counted in the node's `load` (one per transport, shared by its
-    /// connections).
+    /// Bind a callback to one connection identifier, with the production credit windows, its
+    /// data lanes lent beyond their floors from the node's `pool` (one per transport, shared by
+    /// its connections).
     pub fn new(
         cid: &str,
         callback: BoxedTransportCallback,
         data_channel_state_notifier: Notifier,
-        load: NodeReceiveLoad,
+        pool: NodeFramePool,
     ) -> Self {
         let cid: Arc<str> = Arc::from(cid);
         Self {
-            link_credit: Arc::new(LinkCredit::new(Arc::clone(&cid), load)),
+            link_credit: Arc::new(LinkCredit::new(Arc::clone(&cid), pool)),
             cid,
             callback,
             data_channel_state_notifier,
@@ -299,13 +299,13 @@ impl InnerTransportCallback {
             });
         }
         let payload = match borrowed {
-            BorrowedTransportMessage::Credit(credit) => {
-                self.link_credit.grant(lane, credit);
+            BorrowedTransportMessage::Signal(signal) => {
+                self.link_credit.apply(lane, signal);
                 return InboundFrameAdmission::Credit;
             }
             BorrowedTransportMessage::Custom(payload) => payload,
         };
-        let permit = match self.link_credit.admit(lane, raw.len()) {
+        let permit = match self.link_credit.admit(lane) {
             Ok(permit) => permit,
             Err(violation) => {
                 return InboundFrameAdmission::CreditExceeded {

@@ -23,6 +23,10 @@ communication layer minimizes leakage; the privacy layer provides privacy.**
   tag. `network_id` separates overlays; it is not a secret.
 - Honest peers run the protocol, refresh descriptors, and take part in stabilization and
   replication.
+- A party that can read a node's process memory, freed memory included, already holds the
+  node's long-lived delegatee key. Wiping derived key material once it is spent is defence in
+  depth against later reads, not a boundary; what is not wiped is listed under Known
+  Limitations (#852).
 
 ## Fault Model
 
@@ -216,10 +220,11 @@ route.
   instead of by one holder's durability (#1036): every carrier is replicated down a chain to
   the first r nodes after its key's owner that hold relay mail, 8 by default, and the writer is
   acknowledged only once all of them hold it (#777). Held mail is lost only if every member
-  holding it is lost within one repair delay: seconds after a departure the members see, and up
-  to the 45 s liveness timeout after a silent one. A node takes custody only after 2 minutes
-  online, so members are the nodes that stay. Members trust each other's copies as holders do;
-  this replication guards against churn, not against a dishonest member.
+  holding it is lost within one repair delay: seconds after a departure the members see, and
+  about 10 s after a silent one, which its chain neighbours detect by a 2.5 s probe left
+  unanswered for 7.5 s (#1070); that suspicion evicts no peer. A node takes custody only after
+  2 minutes online, so members are the nodes that stay. Members trust each other's copies as
+  holders do; this replication guards against churn, not against a dishonest member.
   [Details](docs/src/advanced-topic/chord.md#data-topic-storage),
   [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox).
 - **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
@@ -279,15 +284,26 @@ route.
 
 ## Known Limitations
 
+- #852: the onion Sphinx key schedule (HKDF-SHA256, HMAC-SHA256) wipes its HMAC states on drop,
+  the PRK's in every `Hkdf` and the MAC key's in every `Hmac`, and the keys it returns. Three
+  transient stack copies inside the hkdf 0.13, hmac 0.13 and sha2 0.11 crates are not wiped,
+  and are overwritten by later calls: (a) the padded key block `K ⊕ opad` that HMAC's key setup
+  leaves, equivalent to `K` (the PRK, or the MAC key); (b) HKDF-Expand's previous output block
+  `T(i)`, which is a derived key or its first half; (c) SHA-256's message schedule, whose first
+  16 words are the block `K ⊕ ipad` or `K ⊕ opad`. (c) survives any HMAC above an unmodified
+  SHA-256, so an in-tree HMAC/HKDF would remove only (a) and (b).
 - #918: a registry descriptor that another node re-appends after its registrant stopped stays
   listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
   registrant leaves the listing within its TTL.
-- #907 (rotation residual, load-bounds paper, Prop. 1): a party that rotates connections
-  through free slots leaves each slot charged with up to its floor, so a connection admitted
-  later into such a slot has only its fair claim of the pool until those items leave: removes
-  and control, storage and E2E replay streams within about 100 minutes, application replay
-  streams within 7 days. A connection that keeps its slot is never affected. Only a cost on
-  admission removes this (#1094, #780).
+- #907, #1094 (rotation residual, load-bounds paper, Prop. 1): a party that rotates
+  connections through free slots leaves each slot charged with up to its floor. A new
+  connection takes the cleanest free slot, so it inherits charges only once every free slot is
+  charged: that takes `R − c` admissions within the life of the charged items, about 100
+  minutes for removes and control, storage and E2E replay streams and 7 days for application
+  replay streams. Such a connection then has only its fair claim of the pool until those items
+  leave. A connection that keeps its slot is never affected. An admission rate limit cannot
+  bound this without deferring honest churn, so only position randomization (#780) or a cost
+  on identity removes it.
 - #920, #907: a node's store of uncollected removals refuses a connection slot past its floor of
   128 and its fair claim of a pool of 16384, this node past 7168, and an ownership hand-off from
   the range's previous owner past a custody share of 16384, which a Byzantine predecessor or
@@ -305,11 +321,8 @@ route.
   twice the clock-skew tolerance later; a data topic has no write authority, and a forged
   removal received by sync can likewise hold a topic live for up to the horizon past the
   receiver's clock.
-- #932: a reassembled message whose full-size mailbox charge does not fit is dropped.
-- #1057, #1070: a departure the members do not see (a crash, a dropped network, a suspended or
-  closed tab) is repaired only after the 45 s liveness timeout, so r = 8 meets its loss target
-  for browser sessions of a minute's median, not of 15 s, until a closing tab leaves gracefully
-  (#1057) and chain neighbours probe each other on a shorter timeout (#1070).
+- #1057: a closing tab leaves silently, so its chain neighbours detect it by an unanswered
+  probe, within 10 s (#1070), rather than at once, until it leaves gracefully on `pagehide`.
 - #1036: in a browser context with ephemeral storage, the replay windows reset at every
   session end, undetectably: a receiver may admit an unexpired transaction once more per
   session, and a sender's streams restart at sequence 0.

@@ -66,12 +66,12 @@ Lookup correlation identifiers and mailbox identifiers are never exported.
 | --- | --- | --- |
 | `messages` | counters | Successful sent, received, forwarded, and stored operations plus aggregate failures during this process. A send or forward succeeds when its next hop accepts the logical transfer. |
 | `recent_messages` | bounded records | Oldest-first completion records for the last 32 message operations. `message_class` is a protocol variant, not an application-controlled topic. |
-| `session_key` | gauges and counters | Active delegation validity, creation, expiry, and remaining time. Runtime rotation is currently unsupported and its counters remain zero; a replacement delegation is loaded on restart. |
+| `session_key` | gauges and counters | Active delegation validity, creation, expiry, and remaining time. Runtime rotation is currently unsupported and its counters remain zero; a replacement delegation is loaded on restart. A native daemon exits 25 s before `expires_at_ms`, when no frame can leave any more (see [Delegations and keys](cli.md#delegations-and-keys)). |
 | `mailboxes` | gauges and counter | Live relay-inbox carriers and held messages retained by this node, plus successful offline-message holds during this process. |
 | `dht_lookups` | counters, gauge, histogram | Successor and storage lookup rounds observed locally, split into success, explicit failure, and 30-second timeout, with bounded in-flight state and cumulative latency buckets. |
 | `peer_ratings` | bounded records | Up to 32 DID-sorted local assessments with recent send/receive evidence and local byte-credit score inputs. Use `listPeerMeasurements` for the paginated complete set. These are advisory local assessments, not network-wide reputation. |
 | `health.process_api_healthy` | gauge | The authenticated handler answered and assembled its dependencies. |
-| `health.overlay_ready` | gauge | Conservative overlay readiness: at least one admitted peer and one DHT successor are present. It is deliberately distinct from process/API health. |
+| `health.overlay_ready` | gauge | Conservative overlay readiness: at least one admitted peer and one DHT successor are present, and the node's own delegation is more than 25 s from its expiry, so its frames still leave. It is deliberately distinct from process/API health. |
 
 `counter_scope` is `node_local_process_lifetime`, and `process_started_at_ms` makes resets explicit.
 Use deltas or rates over cumulative counters because every process restart resets them. Mailbox

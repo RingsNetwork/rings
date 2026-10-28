@@ -116,6 +116,7 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::fair_admission::Principal;
+use crate::fair_admission::SlotFloorUse;
 use crate::fair_admission::TableAccounting;
 use crate::message::quota::quota_admission_error;
 use crate::message::quota::OriginQuotaCounterState;
@@ -570,6 +571,12 @@ impl TransactionReplay {
         self.counters.snapshot()
     }
 
+    /// The floor use of every slot in the receiver table at `now_ms` (load-bounds paper,
+    /// Def. 1).
+    pub(crate) fn floor_use_at(&self, now_ms: u128) -> SlotFloorUse {
+        self.accounting.floor_use_at(now_ms)
+    }
+
     /// Current aggregate origin-quota rejection counters.
     pub(crate) fn quota_counters(&self) -> OriginQuotaCounters {
         self.quota_counters.snapshot()
@@ -739,16 +746,22 @@ impl TransactionReplay {
     where
         C: FnOnce() -> ReplayInstant + rings_runtime::MaybeSend + 'static,
     {
-        self.commit(move |replay, ledger| replay.admit_in(ledger, admission, clock, None))
-            .await
+        self.commit(move |replay, ledger| {
+            let now = clock();
+            ledger.retire_spent(now.wall_ms)?;
+            replay.admit_in(ledger, admission, now, None)
+        })
+        .await
     }
 
     /// The admission transition on the speculative state (load-bounds paper, Law 2). A
     /// `relayed` delivery enters the stream's custody in the same record (the custody law of
     /// `custody`); a live one leaves the custody as it is.
     ///
+    /// Pre: the transition read the clock as `now` and retired what is spent at `now.wall_ms`
+    /// ([`Ledger::retire_spent`]), once.
+    ///
     /// ```text
-    /// now := clock();  retire every stream spent at now.wall
     /// s ∉ table ── table full ─────────────────────▶ Err(StreamCapacityExceeded { λ/π, TableFull })
     ///          └── accounting refuses π ───────────▶ Err(StreamCapacityExceeded { π, refusal })
     /// observe(window(s)) ── Replay/Fork/Stale ─────▶ Err(…)
@@ -756,16 +769,13 @@ impl TransactionReplay {
     /// window(s) := next;  custody(s) += relayed;  charge(s) := (π(s), max(spent_at))
     /// stage record(s) ──▶ Ok(verdict)
     /// ```
-    fn admit_in<C>(
+    fn admit_in(
         &self,
         ledger: &mut Ledger<'_>,
         admission: Admission,
-        clock: C,
+        now: ReplayInstant,
         relayed: Option<RelayDelivery>,
-    ) -> Result<SequenceVerdict>
-    where
-        C: FnOnce() -> ReplayInstant,
-    {
+    ) -> Result<SequenceVerdict> {
         let Admission {
             key,
             sequence,
@@ -775,8 +785,6 @@ impl TransactionReplay {
             introducer,
             spent_at_ms,
         } = admission;
-        let now = clock();
-        ledger.retire_spent(now.wall_ms)?;
         self.refuse_unavailable(ledger.store, ReplayTable::Receiver, key)?;
         let previous = ledger.store.tables.receiver.get(&key);
         if previous.is_none() {

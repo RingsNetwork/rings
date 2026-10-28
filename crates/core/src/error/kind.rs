@@ -608,13 +608,6 @@ pub enum Error {
     #[error("Cancelled detached outbound admission published success")]
     CancelledDetachedAdmissionPublishedSuccess,
 
-    /// The inbound actor has admitted its maximum number of messages.
-    #[error("Inbound mailbox capacity {capacity} exceeded")]
-    InboundMailboxCapacityExceeded {
-        /// Maximum queued and executing inbound messages.
-        capacity: usize,
-    },
-
     /// The inbound actor cannot retain another message within its byte budget.
     #[error(
         "Inbound message of {requested_bytes} bytes exceeds the {capacity_bytes}-byte mailbox budget"
@@ -624,15 +617,6 @@ pub enum Error {
         requested_bytes: usize,
         /// Total mailbox byte capacity.
         capacity_bytes: usize,
-    },
-
-    /// One peer has exhausted its inbound message count allowance.
-    #[error("Inbound peer {peer:?} capacity {capacity} exceeded")]
-    InboundPeerCapacityExceeded {
-        /// Peer associated with the inbound connection, when its DID parsed successfully.
-        peer: Option<crate::dht::Did>,
-        /// Maximum queued and executing messages retained for one peer.
-        capacity: usize,
     },
 
     /// One peer has exhausted its inbound retained-memory allowance.

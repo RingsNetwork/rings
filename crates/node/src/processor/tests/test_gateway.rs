@@ -17,7 +17,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rings_core::lifecycle::StopToken;
 #[cfg(target_os = "linux")]
 use rings_gateway::bindings::NativePacketIo;
 #[cfg(target_os = "linux")]
@@ -45,6 +44,7 @@ use super::common::*;
 use super::*;
 use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::NativeOnionGatewayConnector;
+use crate::test_support::TestTask;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::AdmissionActivity;
 use crate::tests::exit_descriptor::ExitDescriptorFixture;
@@ -116,14 +116,11 @@ async fn connect_gateway_edge(first: &Processor, second: &Processor, label: &str
     .unwrap_or_else(|error| panic!("gateway WebRTC edge {label} did not connect: {error:?}"));
 }
 
-/// Serve `provider`'s application inbox with the extension backend on a detached task, with
+/// Serve `provider`'s application inbox with the extension backend as a node task, with
 /// [`AdmissionActivity`] observing it, so an edge awaited by [`connect_gateway_edge`] wakes its
 /// probe on every admission and retirement.
 fn serve_observing_admissions(provider: &Provider) -> Result<()> {
-    let service =
-        provider.application_service(Some(Arc::new(AdmissionActivity)), StopToken::never())?;
-    rings_runtime::spawn_detached(service)
-        .map_err(|_| Error::ExtensionError("no runtime to serve the application inbox".to_owned()))
+    provider.serve_application(Some(Arc::new(AdmissionActivity)))
 }
 
 /// Relays of the gateway fixture besides the exit: an onion loop over one symbol has
@@ -484,7 +481,7 @@ async fn captured_tcp_reaches_public_http_only_through_onion_loop() -> Result<()
     let (egress_tx, mut egress_rx) = mpsc::channel(32);
     let stop = Arc::new(AtomicBool::new(false));
     let task_stop = Arc::clone(&stop);
-    let task = tokio::spawn(async move {
+    let task = TestTask::spawn(async move {
         let mut device = ChannelPacketIo {
             ingress: ingress_rx,
             egress: egress_tx,
@@ -582,7 +579,7 @@ async fn real_linux_tun_tcp_reaches_public_http_through_onion_loop() -> Result<(
     let status = runtime.status_handle();
     let stop = Arc::new(AtomicBool::new(false));
     let task_stop = Arc::clone(&stop);
-    let mut task = tokio::spawn(async move {
+    let mut task = TestTask::spawn(async move {
         let result = runtime
             .run(&mut device, || task_stop.load(Ordering::Acquire))
             .await;

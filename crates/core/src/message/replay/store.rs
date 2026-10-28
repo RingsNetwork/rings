@@ -94,10 +94,11 @@ const U64_MAX_BYTES: usize = 10;
 const SEQUENCE_STATE_MAX_BYTES: usize = U64_MAX_BYTES + TRANSACTION_REPLAY_WINDOW * (1 + 32);
 /// Largest encoded sender stream: the variant tag, the key and the leased bound.
 const SENDER_STREAM_MAX_BYTES: usize = 1 + STREAM_KEY_MAX_BYTES + U64_MAX_BYTES;
-/// Largest canonical encoding of one relay delivery in custody: its sequence and its digest.
-const RELAY_DELIVERY_MAX_BYTES: usize = U64_MAX_BYTES + 32;
 /// Largest canonical encoding of a `u128` varint.
 const U128_MAX_BYTES: usize = 19;
+/// Largest canonical encoding of one relay delivery in custody: its sequence, its digest and
+/// its spent instant.
+const RELAY_DELIVERY_MAX_BYTES: usize = U64_MAX_BYTES + 32 + U128_MAX_BYTES;
 /// Largest canonical encoding of a `u16` varint.
 const U16_MAX_BYTES: usize = 3;
 /// Largest canonical encoding of a [`StreamCharge`]: the principal's tag and slot, then the
@@ -258,14 +259,13 @@ impl ReplayTables {
         previous
     }
 
-    /// The receiver streams spent at `now_ms` that hold no relay custody (pure): forgetting one
-    /// reopens no replay (Lemma 2), while a stream in custody keeps its delivery to retire.
+    /// The receiver streams spent at `now_ms` (pure): forgetting one reopens no replay
+    /// (Lemma 2).
     pub(super) fn spent_streams(&self, now_ms: u128) -> Vec<StreamKey> {
         self.spent
             .iter()
             .take_while(|(spent_at_ms, _)| *spent_at_ms <= now_ms)
             .map(|(_, key)| *key)
-            .filter(|key| !self.custody.contains_key(key))
             .collect()
     }
 
@@ -629,6 +629,7 @@ mod tests {
             .map(|slot| RelayDelivery {
                 sequence: u64::MAX - u64::try_from(slot).unwrap_or_default(),
                 digest: TransactionDigest::new([0xff; 32]),
+                spent_at_ms: u128::MAX,
             })
             .collect()
     }
@@ -669,8 +670,8 @@ mod tests {
             TRANSACTION_REPLAY_STORE_MAX_BYTES
         );
         // The figures the replay documentation states.
-        assert_eq!(TRANSACTION_REPLAY_RECORD_MAX_BYTES, 3_873);
-        assert_eq!(TRANSACTION_REPLAY_STORE_MAX_BYTES, 28_691_072);
+        assert_eq!(TRANSACTION_REPLAY_RECORD_MAX_BYTES, 5_089);
+        assert_eq!(TRANSACTION_REPLAY_STORE_MAX_BYTES, 28_692_288);
         Ok(())
     }
 

@@ -29,6 +29,7 @@ use crate::message::ProbeOffer;
 use crate::message::ProbeRequest;
 
 mod relay_holder;
+mod store_report;
 
 pub use relay_holder::AnnounceRelayHolder;
 pub use relay_holder::DeclareRelayCustody;
@@ -44,6 +45,9 @@ pub use relay_holder::RelayHoldDigest;
 pub use relay_holder::RelayHolderFound;
 pub use relay_holder::RelayInboxReport;
 pub use relay_holder::ReplicateRelayHold;
+pub use store_report::EntryStoreReport;
+pub use store_report::OperationDigest;
+pub use store_report::StoreOutcome;
 
 /// DHT protocol mode that must match before two peers join the same DHT.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Eq, PartialEq)]
@@ -428,6 +432,8 @@ macro_rules! with_message_variants {
             29 => RelayCarrierDigests(RelayCarrierDigests): Storage, NoStorageRoute,
             /// A chain neighbour asking for the carriers it lacks.
             30 => RelayCarriersWanted(RelayCarriersWanted): Storage, NoStorageRoute,
+            /// The owner's report of a reported entry operation, to its origin (#866).
+            31 => EntryStoreReport(EntryStoreReport): Storage, NoStorageRoute,
         }
     };
 }

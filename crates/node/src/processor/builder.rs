@@ -8,6 +8,8 @@ use crate::consts::DATA_REDUNDANT;
 use crate::dns_relay::ServiceOffer;
 #[cfg(rings_native)]
 use crate::dns_relay::ServiceRegistration;
+use crate::mail::registration::MailOffer;
+use crate::mail::registration::MailRegistration;
 use crate::prelude::rings_core::dht::RelayReplication;
 
 /// ProcessorBuilder is used to initialize a [Processor] instance.
@@ -26,6 +28,8 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) origin_quota: OriginQuotaConfig,
     pub(in crate::processor) onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
     pub(in crate::processor) measure: Option<Arc<PeriodicMeasure>>,
+    /// The release witnesses of the file stores the processor is built over (#1085).
+    pub(in crate::processor) stores_released: StoresReleased,
     pub(in crate::processor) stabilize_interval: Duration,
     pub(in crate::processor) online_node_heartbeat_interval: Duration,
     pub(in crate::processor) online_node_ttl: Duration,
@@ -43,6 +47,8 @@ pub struct ProcessorBuilder {
     /// The heartbeat announcing this node's services through DNS relays (#1049), if any.
     #[cfg(rings_native)]
     pub(in crate::processor) service_registration: Option<Arc<dyn RegistrationTask>>,
+    /// The heartbeat of this node's mail descriptor (#1117), if it takes mail.
+    pub(in crate::processor) mail_registration: Option<Arc<dyn RegistrationTask>>,
 }
 
 impl ProcessorBuilder {
@@ -69,6 +75,7 @@ impl ProcessorBuilder {
             origin_quota: config.origin_quota,
             onion_entry_guard_storage: None,
             measure: None,
+            stores_released: StoresReleased::default(),
             stabilize_interval: config.stabilize_interval,
             online_node_heartbeat_interval: config.online_node_heartbeat_interval,
             online_node_ttl: config.online_node_ttl,
@@ -84,6 +91,7 @@ impl ProcessorBuilder {
             observer: None,
             #[cfg(rings_native)]
             service_registration: None,
+            mail_registration: None,
         })
     }
 
@@ -93,6 +101,14 @@ impl ProcessorBuilder {
     pub fn announce_services(mut self, offer: ServiceOffer) -> Self {
         let did = self.delegatee_key.delegator_did();
         self.service_registration = Some(Arc::new(ServiceRegistration::new(did, offer)));
+        self
+    }
+
+    /// Take mail at `did@domain` through mail gateways (#1117): the processor publishes this
+    /// node's mail descriptor, which names its delegatee key, on every heartbeat of `offer`.
+    pub fn receive_mail(mut self, offer: MailOffer) -> Self {
+        let did = self.delegatee_key.delegator_did();
+        self.mail_registration = Some(Arc::new(MailRegistration::new(did, offer)));
         self
     }
 
@@ -174,6 +190,14 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Name the release witnesses of the file stores this processor is built over, which
+    /// [`Provider::close`](crate::provider::Provider::close) awaits (#1085). A store given to the
+    /// builder without its witness is not awaited by a close.
+    pub fn stores_released(mut self, released: StoresReleased) -> Self {
+        self.stores_released = released;
+        self
+    }
+
     /// Set the number of DHT finger-table slots for the processor's swarm.
     pub fn dht_finger_table_size(mut self, size: usize) -> Self {
         self.dht_finger_table_size = size;
@@ -226,10 +250,12 @@ impl ProcessorBuilder {
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
         self.validate()?;
-        self.delegatee_key
-            .delegation()
+        let delegation = self.delegatee_key.delegation();
+        delegation
             .verify_delegator_authorization()
             .map_err(|e| Error::VerifyError(e.to_string()))?;
+        // A process that could not send its first frame is refused, not started mute (#1063).
+        DelegationHorizon::of(&delegation).admitted_at(get_epoch_ms())?;
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let onion_entry_guard_storage = self
@@ -263,6 +289,7 @@ impl ProcessorBuilder {
         }
         #[cfg(rings_native)]
         registration_tasks.extend(self.service_registration);
+        registration_tasks.extend(self.mail_registration);
 
         // One recorder is shared between core protocol hooks and node-level snapshot assembly.
         let observability = Arc::new(crate::observability::Observability::new());
@@ -328,9 +355,12 @@ impl ProcessorBuilder {
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
             measure,
+            stores_released: self.stores_released,
+            tasks: NodeTasks::new(),
             listener_lifecycle_lock: Arc::new(futures::lock::Mutex::new(())),
             onion_role: self.onion_role,
             onion_idle_floor: self.onion_idle_floor,
+            registration_readiness: Arc::new(RegistrationReadiness::new(registration_tasks.len())),
             registration_tasks,
             observability,
         })

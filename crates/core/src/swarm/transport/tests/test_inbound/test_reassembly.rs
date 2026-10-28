@@ -1,11 +1,11 @@
-//! Reassembled messages through the inbound path: one logical receive each, order kept
-//! without blocking control, and the lane shape verified before the lane transition.
+//! Reassembled messages through the inbound path: one logical receive each, order kept within
+//! their category alone, and the lane shape verified before the lane transition.
 
 use super::deliver_chunked;
 use super::deliver_leading_chunks;
 use super::hold_saturated_application_capacity;
 use super::noop_control_message;
-use super::spawn_inbound_delivery;
+use super::spawn_carried_delivery;
 use crate::chunk::Chunk;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -13,6 +13,7 @@ use crate::error::Result;
 use crate::measure::MeasurementEvent;
 use crate::message::FoundEntry;
 use crate::message::Message;
+use crate::message::MessageCategory;
 use crate::swarm::callback::InboundLane;
 use crate::swarm::transport::tests::default_transport;
 use crate::swarm::transport::tests::failed_receive_count;
@@ -44,7 +45,7 @@ async fn test_chunk_reassembly_records_one_exact_logical_receive() -> Result<()>
 
     let (last, _chunks) = deliver_leading_chunks(
         &pending.callback,
-        &peer.to_string(),
+        (&peer.to_string(), None),
         &pending.session,
         transport.dht.did,
         logical_payload.to_wire()?,
@@ -79,7 +80,7 @@ async fn test_reassembled_undecodable_message_records_one_failure_only() -> Resu
 
     let (last, _chunks) = deliver_leading_chunks(
         &pending.callback,
-        &pending.peer.to_string(),
+        (&pending.peer.to_string(), None),
         &pending.session,
         transport.dht.did,
         undecodable.to_wire()?,
@@ -93,20 +94,31 @@ async fn test_reassembled_undecodable_message_records_one_failure_only() -> Resu
     Ok(())
 }
 
-/// A reassembled message is handed to its logical lane in arrival order: while the hand-off
+/// A reassembled message is handed to its category's lane in arrival order, and orders that
+/// category alone (load-bounds paper, Prop. "Order per category", #927): while its hand-off
 /// cannot start, because an earlier application delivery occupies the held application lane, a
-/// later storage frame waits behind it and a control frame does not.
+/// later application frame waits behind it, and a later storage frame and a control frame,
+/// each on its own carrier, do not.
 #[tokio::test]
-async fn test_reassembly_handoff_preserves_data_order_without_blocking_control() -> Result<()> {
+async fn test_a_reassembled_message_orders_its_own_category_only() -> Result<()> {
     let transport = default_transport()?;
     let (application, lane_hold) =
         ApplicationRecorder::attach_holding_application_lane(&transport)?;
     let peer = unbound_peer(&transport, &SecretKey::random())?;
     let local = transport.dht.did;
     let cid = peer.peer.to_string();
+    let carrier = |class: MessageCategory| Some(class.channel_lane());
+    let carried = |frame, class| {
+        spawn_carried_delivery(
+            Arc::clone(&peer.callback),
+            cid.clone(),
+            frame,
+            carrier(class),
+        )
+    };
 
     let blocker = peer.custom_message_wire(&transport, b"holds-the-application-lane")?;
-    let blocker_delivery = spawn_inbound_delivery(Arc::clone(&peer.callback), cid.clone(), blocker);
+    let blocker_delivery = carried(blocker, MessageCategory::Application);
     assert_eq!(
         application.next_tapped_custom().await?,
         b"holds-the-application-lane".to_vec()
@@ -114,7 +126,7 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
 
     let (final_delivery, chunks) = deliver_chunked(
         &peer.callback,
-        &cid,
+        (&cid, carrier(MessageCategory::Application)),
         &peer.session,
         local,
         Message::custom(b"reassembled-first")?,
@@ -127,7 +139,9 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
         ));
     }
 
-    let later = local_wire(
+    let after = peer.custom_message_wire(&transport, b"after-the-reassembled")?;
+    let after_delivery = carried(after, MessageCategory::Application);
+    let storage = local_wire(
         Message::FoundEntry(FoundEntry {
             data: Vec::new(),
             misses: Vec::new(),
@@ -137,13 +151,23 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
         &peer.session,
         local,
     )?;
-    let later_delivery = spawn_inbound_delivery(Arc::clone(&peer.callback), cid.clone(), later);
-
+    let storage_result = carried(storage, MessageCategory::Storage)
+        .await
+        .map_err(|_| Error::InvalidMessage("storage task panicked".to_string()))?;
+    assert!(
+        storage_result.is_err(),
+        "unsolicited storage response must fail"
+    );
     let control = local_wire(noop_control_message(local), &peer.session, local)?;
-    spawn_inbound_delivery(Arc::clone(&peer.callback), cid, control)
+    carried(control, MessageCategory::DhtControl)
         .await
         .map_err(|_| Error::InvalidMessage("control lane task panicked".to_string()))??;
-    // Only the control frame entered the logical stage behind the held hand-off.
+    // The storage and control frames entered the logical stage past the held hand-off; the
+    // later application frame did not.
+    assert!(matches!(
+        application.next_tapped().await?,
+        Message::FoundEntry(_)
+    ));
     assert!(matches!(
         application.next_tapped().await?,
         Message::FindSuccessorReport(_)
@@ -151,31 +175,28 @@ async fn test_reassembly_handoff_preserves_data_order_without_blocking_control()
     assert!(application.drain_tapped()?.is_empty());
 
     drop(lane_hold);
-    blocker_delivery
-        .await
-        .map_err(|_| Error::InvalidMessage("blocker task panicked".to_string()))??;
-    final_delivery
-        .await
-        .map_err(|_| Error::InvalidMessage("final chunk task panicked".to_string()))??;
-    let later_result = later_delivery
-        .await
-        .map_err(|_| Error::InvalidMessage("later storage task panicked".to_string()))?;
-    assert!(
-        later_result.is_err(),
-        "unsolicited storage response must fail"
-    );
+    for (delivery, task) in [
+        (blocker_delivery, "blocker"),
+        (final_delivery, "final chunk"),
+        (after_delivery, "later application"),
+    ] {
+        delivery
+            .await
+            .map_err(|_| Error::InvalidMessage(format!("{task} task panicked")))??;
+    }
     assert_eq!(
         application.next_tapped_custom().await?,
         b"reassembled-first".to_vec()
     );
-    assert!(matches!(
-        application.next_tapped().await?,
-        Message::FoundEntry(_)
-    ));
-    application.wait_for_inbounds_at_least(2).await;
+    assert_eq!(
+        application.next_tapped_custom().await?,
+        b"after-the-reassembled".to_vec()
+    );
+    application.wait_for_inbounds_at_least(3).await;
     assert_eq!(application.inbound_custom_data(), vec![
         b"holds-the-application-lane".to_vec(),
         b"reassembled-first".to_vec(),
+        b"after-the-reassembled".to_vec(),
     ]);
     Ok(())
 }
@@ -287,7 +308,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
     );
     let (final_frame, _chunks) = deliver_leading_chunks(
         &peer.callback,
-        &peer.peer.to_string(),
+        (&peer.peer.to_string(), None),
         &peer.session,
         transport.dht.did,
         tampered.to_wire()?,

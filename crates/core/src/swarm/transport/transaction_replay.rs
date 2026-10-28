@@ -153,23 +153,16 @@ impl SwarmTransport {
         self.transaction_replay.release_relayed(key, delivery).await
     }
 
-    /// Restrict relay custody to the transactions of the elements still in the inbox carrier.
-    pub(crate) async fn restrict_relay_custody<'a>(
-        &self,
-        stored: impl IntoIterator<Item = &'a Transaction>,
-    ) -> Result<()> {
-        let stored = stored
-            .into_iter()
-            .map(|transaction| self.relay_delivery(transaction))
-            .collect::<Result<_>>()?;
-        self.transaction_replay.restrict_custody(stored).await
-    }
-
     /// The stream and the custody identity of `transaction` (pure).
+    ///
+    /// Law: equal to the delivery [`Self::admission`] enters into custody, field by field.
     fn relay_delivery(&self, transaction: &Transaction) -> Result<(StreamKey, RelayDelivery)> {
-        Ok((transaction.stream_key(self.network_id)?, RelayDelivery {
+        let key = transaction.stream_key(self.network_id)?;
+        let proof = &transaction.verification;
+        Ok((key, RelayDelivery {
             sequence: transaction.sequence,
             digest: transaction.digest()?,
+            spent_at_ms: spent_at(key.class, proof.ts_ms, proof.ttl_ms),
         }))
     }
 }

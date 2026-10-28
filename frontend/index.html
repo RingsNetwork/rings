@@ -3,16 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Rings - A P2P network for the sovereign age</title>
+    <!-- The title and description are what search engines show: what Rings is, in the words it
+         is searched by, within the 60 and 160 characters they show (check_static_index.py). -->
+    <title>Rings Network — a browser-native peer-to-peer network</title>
     <link data-trunk rel="copy-dir" href="assets" />
     <link data-trunk rel="copy-file" href="rings-webview-service-worker.js" />
     <link data-trunk rel="css" href="static-shell.css" />
-    <link rel="icon" type="image/svg+xml" href="assets/icons/favicon.svg" />
+    <!-- At the site's root, where crawlers and browsers look for them, and absolute, so the
+         404.html copy of this shell finds them at any depth. The IndexNow key proves that the
+         pings deploy-pages.yml sends after each deploy are the site's own. -->
+    <link data-trunk rel="copy-file" href="robots.txt" />
+    <link data-trunk rel="copy-file" href="assets/icons/favicon.ico" />
+    <link data-trunk rel="copy-file" href="assets/icons/apple-touch-icon.png" />
+    <link data-trunk rel="copy-file" href="a4a8138b2642f6725793bb0e87ca5057.txt" />
+    <link rel="icon" type="image/svg+xml" href="/assets/icons/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="robots" content="max-image-preview:large" />
     <meta name="theme-color" content="#020c10" />
     <!-- Link previews (Open Graph, Twitter cards). Crawlers do not run the app, so the shell is
          described once, as the landing page; every hash route shares the card. The URLs are
          absolute because a preview is fetched from the sharing site, not from this origin. -->
-    <meta name="description" content="Rings is a browser-native, structured peer-to-peer network: browser tabs and native daemons join one overlay, find each other by DID, and talk over direct WebRTC datachannels routed by a Chord DHT." />
+    <meta name="description" content="Rings is a browser-native, structured peer-to-peer network: browser tabs and native daemons find each other by DID and talk over WebRTC, routed by a Chord DHT." />
     <link rel="canonical" href="https://rings.rs/" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Rings Network" />
@@ -44,9 +56,36 @@
         "isAccessibleForFree": true,
         "publisher": {
           "@type": "Organization",
+          "@id": "https://rings.rs/#organization",
           "name": "Rings Network",
           "url": "https://rings.rs/"
         }
+      }
+    </script>
+    <!-- Who makes Rings, and the site: one node each, named by id, so search engines and
+         language models know the site, the code and the accounts on GitHub and X as one. -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://rings.rs/#organization",
+            "name": "Rings Network",
+            "alternateName": "Rings",
+            "url": "https://rings.rs/",
+            "logo": "https://rings.rs/assets/icons/rings.svg",
+            "sameAs": ["https://github.com/RingsNetwork", "https://x.com/RingsNetworkio"]
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://rings.rs/#website",
+            "name": "Rings Network",
+            "url": "https://rings.rs/",
+            "inLanguage": "en",
+            "publisher": { "@id": "https://rings.rs/#organization" }
+          }
+        ]
       }
     </script>
   </head>

@@ -41,6 +41,7 @@ use crate::extension::Extensions;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 use crate::sync_lock::lock;
+use crate::test_support::TestTask;
 
 struct OrderedProtocol;
 
@@ -280,7 +281,7 @@ async fn test_committed_transitions_execute_effects_in_commit_order() -> Result<
     let from = extensions.core().did();
 
     let first_extensions = extensions.clone();
-    let first = tokio::spawn(async move {
+    let first = TestTask::spawn(async move {
         first_extensions
             .core()
             .dispatch(
@@ -293,7 +294,7 @@ async fn test_committed_transitions_execute_effects_in_commit_order() -> Result<
     gate_wait.notified().await;
 
     let second_extensions = extensions.clone();
-    let second = tokio::spawn(async move {
+    let second = TestTask::spawn(async move {
         second_extensions
             .core()
             .dispatch(
@@ -402,7 +403,7 @@ async fn test_returned_feedback_precedes_a_waiting_transition() -> Result<()> {
     let first_open = open.clone();
 
     let first_extensions = extensions.clone();
-    let first = tokio::spawn(async move {
+    let first = TestTask::spawn(async move {
         first_extensions
             .core()
             .dispatch(from, Envelope::new(TCP, first_open))
@@ -412,7 +413,7 @@ async fn test_returned_feedback_precedes_a_waiting_transition() -> Result<()> {
     decoded.notified().await;
 
     let second_extensions = extensions.clone();
-    let second = tokio::spawn(async move {
+    let second = TestTask::spawn(async move {
         second_extensions
             .core()
             .dispatch(from, Envelope::new(TCP, open))
@@ -565,7 +566,7 @@ async fn test_terminal_relay_control_effect_does_not_await_overlay_send() -> Res
     ));
     let peer: Did = SecretKey::random().address().into();
     let core = extensions.core();
-    let application = tokio::spawn(async move {
+    let application = TestTask::spawn(async move {
         let effect_scope = EffectScope::new(Scope::new(core, TCP.to_string()));
         interpreter
             .run(&effect_scope, RelayEffect::SendClose {

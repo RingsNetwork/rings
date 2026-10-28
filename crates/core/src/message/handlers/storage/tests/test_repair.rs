@@ -226,6 +226,7 @@ async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()
     let msg = PlacedEntryOperation {
         placement: invalid_placement,
         op: EntryOperation::Overwrite(entry.clone()),
+        report: false,
     };
     let sender_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let context = MessagePayload::new_send(
@@ -285,6 +286,7 @@ async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() 
                     Message::OperateEntry(PlacedEntryOperation {
                         placement,
                         op: EntryOperation::Overwrite(remote_entry),
+                        ..
                     }) if placement == replica && remote_entry.did == entry.did
                 ))
         },

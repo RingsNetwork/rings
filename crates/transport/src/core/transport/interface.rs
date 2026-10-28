@@ -10,6 +10,7 @@ use super::SendPermit;
 use super::WebrtcConnectionState;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::credit::LaneSignal;
 use crate::core::pool::ChannelLane;
 use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
@@ -19,20 +20,21 @@ use crate::delivery::SendCreditWait;
 ///
 /// Variant order is wire format: `Custom` keeps index 0, so a custom frame encodes as before.
 ///
-/// Law (only the pump advertises). The enum is private to the crate and the public send API
-/// takes a custom payload, so a `Credit` frame leaves this end only from its own credit pump:
-/// every limit the peer holds was advertised by this end's receive window.
+/// Law (only the pump signals). The enum is private to the crate and the public send API
+/// takes a custom payload, so a `Signal` frame leaves this end only from its own pump: every
+/// limit the peer holds was advertised by this end's receive window, and every shrink and
+/// return was made by its credit algebra.
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub(crate) enum TransportMessage {
     /// A custom message sent by an external invoker and handled by the
     /// `on_admitted_message` callback. Since 0.18 this stores [`Bytes`]
     /// instead of `Vec<u8>` without changing its wire encoding.
     Custom(Bytes),
-    /// The cumulative credit of the lane the frame travels on: the receiving end may send that
-    /// lane's frames with index below it (see [`crate::core::credit`]). The transport applies it
-    /// on arrival; it is never dispatched to the callback, never charged against credit itself,
-    /// and idempotent, so it may be duplicated or reordered.
-    Credit(u64),
+    /// A credit signal of the lane the frame travels on: a credit, a shrink or a return (see
+    /// [`crate::core::credit`]). The transport applies it on arrival; it is never dispatched to
+    /// the callback, never charged against credit itself, and idempotent per generation, so it
+    /// may be duplicated or reordered.
+    Signal(LaneSignal),
 }
 
 /// [`TransportMessage`] decoded without copying a custom payload.
@@ -40,8 +42,8 @@ pub(crate) enum TransportMessage {
 pub(crate) enum BorrowedTransportMessage<'a> {
     /// See [`TransportMessage::Custom`].
     Custom(#[serde(borrow)] &'a [u8]),
-    /// See [`TransportMessage::Credit`].
-    Credit(u64),
+    /// See [`TransportMessage::Signal`].
+    Signal(LaneSignal),
 }
 
 /// The wire frame a send of the custom `payload` puts on the data channel, for callers that
@@ -152,10 +154,10 @@ pub trait ConnectionInterface {
     /// for long keeps no connection, callback or channel alive.
     fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<Self::Error>;
 
-    /// A read-only view of `lane`'s send credit on this connection generation (see
-    /// [`LaneCreditView`]): for a sender that shapes its
-    /// own emission to the receiver's release rate. It holds the connection weakly and reserves
-    /// nothing.
+    /// A read-only view of `lane`'s credit on this connection generation (see
+    /// [`LaneCreditView`]): for a sender that shapes its own emission to the receiver's release
+    /// rate, and for a receiver that reads the credit its peer holds unused. It holds the
+    /// connection weakly and reserves nothing.
     fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView;
 
     /// Return one coherent WebRTC/data-channel product-state observation.

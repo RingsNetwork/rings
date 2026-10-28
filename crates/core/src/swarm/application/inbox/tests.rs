@@ -322,3 +322,118 @@ fn test_delivery_reports_whether_a_message_was_queued_discarded_or_dropped() {
     );
     assert_eq!(outlet.deliver(message(1)), Delivered::Dropped);
 }
+
+/// One step of an inbox equivalence trace: a fact of a peer, or a read.
+#[derive(Clone, Copy, Debug)]
+enum Step {
+    /// `SwarmEvent::PeerAdmitted` of peer `0` or `1`.
+    Admit(usize),
+    /// `SwarmEvent::PeerRetired` of the peer.
+    Retire(usize),
+    /// `SwarmEvent::MessageDropped` of the peer.
+    Drop(usize),
+    /// The application reads one item.
+    Take,
+}
+
+/// The facts as the queue scanned them before #938: the reference the indexed queue must equal.
+#[derive(Default)]
+struct ScannedFacts(std::collections::VecDeque<SwarmEvent>);
+
+impl ScannedFacts {
+    /// The position of `peer`'s last queued admission or retirement, by a scan.
+    fn last_lifecycle(&self, peer: Did) -> Option<usize> {
+        self.0.iter().rposition(|event| match event {
+            SwarmEvent::PeerAdmitted { peer: fact } | SwarmEvent::PeerRetired { peer: fact } => {
+                *fact == peer
+            }
+            SwarmEvent::MessageDropped { .. } => false,
+        })
+    }
+
+    /// Record `event` by scanning the queue.
+    fn record(&mut self, event: SwarmEvent) {
+        match event {
+            SwarmEvent::PeerRetired { peer } => {
+                let unread = self
+                    .last_lifecycle(peer)
+                    .filter(|at| matches!(self.0[*at], SwarmEvent::PeerAdmitted { .. }));
+                if let Some(at) = unread {
+                    let dropped = SwarmEvent::MessageDropped { peer };
+                    let after = self.0.split_off(at);
+                    self.0
+                        .extend(after.into_iter().skip(1).filter(|fact| *fact != dropped));
+                    return;
+                }
+            }
+            SwarmEvent::MessageDropped { peer } => {
+                let since = self.last_lifecycle(peer).map_or(0, |at| at + 1);
+                if self.0.iter().skip(since).any(|fact| *fact == event) {
+                    return;
+                }
+            }
+            SwarmEvent::PeerAdmitted { .. } => {}
+        }
+        self.0.push_back(event);
+    }
+}
+
+/// Run `steps` on a fresh inbox and on the scanning reference, asserting every read and the
+/// final contents equal.
+fn assert_equivalent(steps: &[Step], peers: [Did; 2]) {
+    let outlet = ApplicationOutlet::new();
+    let inbox = outlet.claim().unwrap();
+    let mut reference = ScannedFacts::default();
+    let read = |delivery: Option<ApplicationDelivery>| match delivery {
+        Some(ApplicationDelivery::Event(event)) => Some(event),
+        Some(ApplicationDelivery::Message(_)) => panic!("{steps:?} queued no message"),
+        None => None,
+    };
+    for step in steps {
+        let event = match *step {
+            Step::Admit(peer) => SwarmEvent::PeerAdmitted { peer: peers[peer] },
+            Step::Retire(peer) => SwarmEvent::PeerRetired { peer: peers[peer] },
+            Step::Drop(peer) => SwarmEvent::MessageDropped { peer: peers[peer] },
+            Step::Take => {
+                assert_eq!(read(inbox.try_next()), reference.0.pop_front(), "{steps:?}");
+                continue;
+            }
+        };
+        outlet.announce(event);
+        reference.record(event);
+    }
+    let rest = std::iter::from_fn(|| read(inbox.try_next())).collect::<Vec<_>>();
+    assert_eq!(rest, Vec::from(reference.0), "{steps:?}");
+}
+
+/// The indexed queue records facts exactly as the scanning queue did, over every trace of up
+/// to six steps of two peers: indexing changed the cost, not one delivery.
+#[test]
+fn test_indexed_facts_equal_the_scanning_reference() {
+    const STEPS: [Step; 7] = [
+        Step::Admit(0),
+        Step::Admit(1),
+        Step::Retire(0),
+        Step::Retire(1),
+        Step::Drop(0),
+        Step::Drop(1),
+        Step::Take,
+    ];
+    let peers = [peer(), peer()];
+    let mut traces = vec![Vec::new()];
+    for _ in 0..6 {
+        traces = traces
+            .into_iter()
+            .flat_map(|trace: Vec<Step>| {
+                STEPS.iter().map(move |step| {
+                    let mut longer = trace.clone();
+                    longer.push(*step);
+                    longer
+                })
+            })
+            .collect();
+        traces
+            .iter()
+            .for_each(|trace| assert_equivalent(trace, peers));
+    }
+}

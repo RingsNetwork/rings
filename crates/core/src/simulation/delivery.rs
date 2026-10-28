@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use rings_transport::connections::dummy_controlled;
 use rings_transport::connections::dummy_controlled::QueuedDeliveryKind;
+use rings_transport::core::pool::ChannelLane;
 
 use super::with_runtime_mut;
 use super::SimulationRuntimeError;
@@ -77,8 +78,20 @@ pub(crate) struct ScheduledDelivery {
     pub(crate) enqueued_virtual_ms: u64,
     /// Virtual deadline for control delivery, when this class has one.
     pub(crate) deadline_virtual_ms: Option<u64>,
+    /// The transport lane a message travels on; `None` for a lifecycle event.
+    #[serde(skip)]
+    pub(crate) lane: Option<ChannelLane>,
 }
 
+/// Admit the controlled events queued since the last inspection into the runtime's view.
+///
+/// Law (lane order). The transport delivers one lane's messages in their send order
+/// (`rings_transport::core::pool`), so a schedule may select a message only at the head of its
+/// connection's lane; a lifecycle event belongs to no lane and is always selectable:
+///
+/// ```text
+/// selectable(d) ⟺ lane(d) = ⊥ ∨ d = min { e pending | conn(e) = conn(d) ∧ lane(e) = lane(d) }
+/// ```
 pub(super) fn refresh_delivery_cache(
     runtime: &mut SimulationRuntimeState,
 ) -> Result<Vec<u64>, SimulationRuntimeError> {
@@ -86,16 +99,36 @@ pub(super) fn refresh_delivery_cache(
     let mut added = Vec::with_capacity(queued.len());
     for queued in queued {
         let delivery = inspect_delivery(queued, &runtime.outbound_submission_ms)?;
-        runtime.last_inspected_delivery = Some(delivery.sequence);
-        runtime.delivery_order.insert(delivery.sequence);
-        if delivery.class != ScheduledDeliveryClass::Control {
-            runtime.non_control_delivery_order.insert(delivery.sequence);
+        let sequence = delivery.sequence;
+        runtime.last_inspected_delivery = Some(sequence);
+        runtime.delivery_order.insert(sequence);
+        runtime.unreported_deliveries.insert(sequence);
+        added.push(sequence);
+        let head = delivery.lane.is_none_or(|lane| {
+            let queue = runtime
+                .lane_queues
+                .entry((delivery.connection_generation.clone(), lane))
+                .or_default();
+            queue.insert(sequence);
+            queue.len() == 1
+        });
+        if head {
+            mark_selectable(runtime, &delivery);
         }
-        runtime.unreported_deliveries.insert(delivery.sequence);
-        added.push(delivery.sequence);
-        runtime.delivery_cache.insert(delivery.sequence, delivery);
+        runtime.delivery_cache.insert(sequence, delivery);
     }
     Ok(added)
+}
+
+/// Make `delivery` selectable by every strategy, and by the non-control ones unless it is
+/// control.
+fn mark_selectable(runtime: &mut SimulationRuntimeState, delivery: &ScheduledDelivery) {
+    runtime.selectable_order.insert(delivery.sequence);
+    if delivery.class != ScheduledDeliveryClass::Control {
+        runtime
+            .non_control_selectable_order
+            .insert(delivery.sequence);
+    }
 }
 
 pub(super) fn remove_cached_delivery(
@@ -108,11 +141,25 @@ pub(super) fn remove_cached_delivery(
                 sequence: delivery.sequence,
             });
         }
+        runtime.selectable_order.remove(&delivery.sequence);
         runtime
-            .non_control_delivery_order
+            .non_control_selectable_order
             .remove(&delivery.sequence);
         runtime.unreported_deliveries.remove(&delivery.sequence);
         runtime.delivery_cache.remove(&delivery.sequence);
+        if let Some(lane) = delivery.lane {
+            let key = (delivery.connection_generation.clone(), lane);
+            let next = runtime.lane_queues.get_mut(&key).and_then(|queue| {
+                queue.remove(&delivery.sequence);
+                queue.first().copied()
+            });
+            match next.and_then(|next| runtime.delivery_cache.get(&next).cloned()) {
+                Some(next) => mark_selectable(runtime, &next),
+                None => {
+                    runtime.lane_queues.remove(&key);
+                }
+            }
+        }
         Ok(())
     })?
 }
@@ -121,13 +168,15 @@ fn inspect_delivery(
     queued: rings_transport::connections::dummy_controlled::QueuedDelivery,
     outbound_submission_ms: &BTreeMap<uuid::Uuid, u64>,
 ) -> Result<ScheduledDelivery, SimulationRuntimeError> {
-    let (class, bytes, transaction_id) = match queued.kind() {
+    let (class, bytes, transaction_id, lane) = match queued.kind() {
         QueuedDeliveryKind::PeerConnectionStateChange(_)
         | QueuedDeliveryKind::DataChannelOpen
-        | QueuedDeliveryKind::DataChannelClose => (ScheduledDeliveryClass::Lifecycle, 0, None),
-        QueuedDeliveryKind::Message(bytes) => {
+        | QueuedDeliveryKind::DataChannelClose => {
+            (ScheduledDeliveryClass::Lifecycle, 0, None, None)
+        }
+        QueuedDeliveryKind::Message(bytes, lane) => {
             let (class, transaction_id) = inspect_message(queued.sequence(), bytes)?;
-            (class, bytes.len(), transaction_id)
+            (class, bytes.len(), transaction_id, Some(*lane))
         }
     };
     let enqueued_virtual_ms = transaction_id
@@ -142,6 +191,7 @@ fn inspect_delivery(
         enqueued_virtual_ms,
         deadline_virtual_ms: (class == ScheduledDeliveryClass::Control)
             .then(|| enqueued_virtual_ms.saturating_add(CONTROL_DEADLINE_MS)),
+        lane,
     })
 }
 

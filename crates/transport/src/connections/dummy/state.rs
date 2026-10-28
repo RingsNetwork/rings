@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::Weak;
 use std::thread::LocalKey;
 
 use tokio::sync::watch;
@@ -18,6 +19,7 @@ use super::controlled;
 use super::DeliveryGate;
 use super::Event;
 use super::HeldDeliveries;
+use crate::callback::link_credit::LinkCredit;
 
 thread_local! {
     /// Per-(test-)thread controlled-delivery state. Thread-local on purpose: a
@@ -78,6 +80,10 @@ thread_local! {
     pub(super) static CONTROLLED_RNG_STATE: Cell<Option<u64>> = const { Cell::new(None) };
     /// Virtual enqueue timestamp attached to this thread's controlled events.
     pub(super) static CONTROLLED_VIRTUAL_MS: Cell<u64> = const { Cell::new(0) };
+    /// The credit of every connection this thread's controlled scheduler created, in creation
+    /// order, whose idle checks its virtual clock drives.
+    pub(super) static CONTROLLED_LINKS: RefCell<Vec<Weak<LinkCredit>>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 /// Record whether a send is parked at the gate whose parked state is `gate`, waking the tests

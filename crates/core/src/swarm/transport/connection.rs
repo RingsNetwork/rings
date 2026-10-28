@@ -7,6 +7,8 @@ use futures::future::join_all;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
+use rings_transport::core::pool::ChannelLane;
+use rings_transport::core::pool::DATA_CHANNEL_POOL_SIZE;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -168,7 +170,28 @@ impl PeerRemovalOutcome {
     }
 }
 
+/// The credit a peer holds unused on each channel lane of one connection, indexed by lane.
+pub(crate) type LaneCredit = [u64; DATA_CHANNEL_POOL_SIZE as usize];
+
 impl SwarmTransport {
+    /// The credit the peer of `attempt` holds unused on each channel lane of its connection, as
+    /// the transport counts it (load-bounds paper, Def. 7): advertised by this end and not yet
+    /// used. A generation that is not the peer's active one reads none on every lane, since
+    /// its sender can send nothing more on it.
+    pub(crate) fn peer_unused_credit(&self, attempt: PendingConnectionAttempt) -> LaneCredit {
+        let connection = self
+            .is_active_connection_attempt(attempt)
+            .then(|| self.get_raw_connection(attempt.peer()))
+            .flatten();
+        std::array::from_fn(|index| {
+            let lane = ChannelLane::new(u8::try_from(index).unwrap_or(u8::MAX));
+            connection
+                .as_ref()
+                .and_then(|connection| connection.send_credit_view(lane).peer_unused())
+                .unwrap_or(0)
+        })
+    }
+
     /// Get an active, routable connection by DID.
     ///
     /// Pending and non-ready physical transports are intentionally invisible here.

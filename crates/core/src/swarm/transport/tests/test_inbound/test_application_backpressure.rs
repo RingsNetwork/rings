@@ -152,7 +152,7 @@ async fn test_full_inbox_drops_a_reassembled_message_without_stalling_storage() 
     // flight while the storage frame arrives behind it.
     let (final_delivery, chunk_count) = deliver_chunked(
         callback,
-        &cid,
+        (&cid, None),
         &peer.session,
         local,
         Message::custom(b"reassembled-and-dropped")?,

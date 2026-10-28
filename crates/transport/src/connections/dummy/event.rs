@@ -21,8 +21,8 @@ impl Event {
             }
             Self::DataChannelOpen(_) => controlled::QueuedDeliveryKind::DataChannelOpen,
             Self::DataChannelClose(_) => controlled::QueuedDeliveryKind::DataChannelClose,
-            Self::Message(frame, _) => {
-                controlled::QueuedDeliveryKind::Message(frame.payload().clone())
+            Self::Message(frame, lane) => {
+                controlled::QueuedDeliveryKind::Message(frame.payload().clone(), *lane)
             }
         }
     }
