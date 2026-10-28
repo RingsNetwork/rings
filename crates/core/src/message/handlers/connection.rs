@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::dht::types::Chord;
+use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
@@ -36,6 +37,20 @@ fn drop_unlinked_return(result: Result<()>, context: &'static str) -> Result<()>
     match result {
         Err(Error::RelayPathHopUnlinked { hop }) => {
             tracing::debug!(%hop, context, "connect signaling reply dropped: return hop unlinked");
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// `result` of answering `peer`'s offer with the refusal of the peer's slot (#1152) logged at
+/// debug and absorbed: `AlreadyConnected` is the slot's answer, an admitted connection or a
+/// handshake with `peer` still under way (`Law (Crossing offer)`), so no reply is owed; that
+/// handshake settles the edge, or the peer's next offer does once it ends.
+fn absorb_refused_offer(result: Result<()>, peer: Did) -> Result<()> {
+    match result {
+        Err(Error::AlreadyConnected) => {
+            tracing::debug!(%peer, "CONNECT_NODE offer refused: a handshake with the peer holds the slot");
             Ok(())
         }
         other => other,
@@ -110,7 +125,10 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 .transport
                 .answer_signaled_offer(self.inner_callback(), ctx, msg)
                 .await;
-            match drop_unlinked_return(answered, "CONNECT_NODE offer reply") {
+            match absorb_refused_offer(
+                drop_unlinked_return(answered, "CONNECT_NODE offer reply"),
+                peer,
+            ) {
                 Ok(()) => {
                     tracing::trace!(
                         local = %self.dht.did,
