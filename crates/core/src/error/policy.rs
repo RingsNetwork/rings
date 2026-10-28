@@ -28,6 +28,21 @@ impl Error {
         matches!(self.send_class(), SendClass::Deferrable(_))
     }
 
+    /// Whether this error is a view refusal (#1151): a node declines a relay operation its own
+    /// view does not assign it, or a report from a node its view makes no member of the key.
+    /// Views converge (`Law (Convergence)` of `dht::relay_holder`) and the sender acts again on
+    /// its next pass, so a view refusal is the protocol's answer, not a fault.
+    pub(crate) const fn is_view_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::RelayHolderUnavailable
+                | Self::RelayCarrierNotHeldHere
+                | Self::RelayMessageHolderNotResponsible
+                | Self::RelayStorageUnavailable
+                | Self::RelayInboxReportFromNonMember(_)
+        )
+    }
+
     /// Whether this error should degrade peer quality through `FailedToSend`.
     pub(crate) const fn records_peer_send_failure(&self) -> bool {
         if self.is_local_send_backpressure() {

@@ -254,6 +254,10 @@ impl LogicalInbound {
     /// Record the observation of a handled message of `kind`, finish the lookup it completes,
     /// and surface a handler's error, so a message whose handler failed is never handed to
     /// the application as a successful inbound message.
+    ///
+    /// The error is not logged here: its caller reports it once (#1151), the inbound actor's
+    /// completion for a frame from a connection, the inbox pass for a delivery from relay
+    /// custody.
     fn record_handling(
         &self,
         payload: &MessagePayload,
@@ -281,7 +285,7 @@ impl LogicalInbound {
                 );
             }
         }
-        result.inspect_err(|error| tracing::error!(error = ?error, "failed to handle a payload"))
+        result
     }
 
     pub(super) fn is_local_destination(&self, payload: &MessagePayload) -> bool {
