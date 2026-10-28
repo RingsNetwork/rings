@@ -135,6 +135,9 @@ The recipient library (`rings_node::mail::recipient`) builds for native and brow
   mailbox example's INBOX).
 * **At least once.** It files a mail before it records it, so a crash between the two files the
   mail again on restart. A crash never loses a mail; at worst it files it twice.
+* **Two keys.** An opened or unreadable verdict belongs to the delegatee key that tried to open
+  the mail. Tabs sharing a store cannot hide mail from a tab that holds its key. Filed
+  `Message-ID` records stay shared, so a resend encrypted to another key is still a duplicate.
 * **One key.** Mail opens only under the node's current delegatee key. Mail sealed to a key the
   node no longer holds is lost, like mail not fetched within its lifetime. A browser node takes
   a new key at every load, so mail that a gateway accepted under the old key, within the
@@ -149,6 +152,62 @@ let inbox = KvInbox::new(mail_store);
 let recipient = Recipient::start(processor, inbox, records, DEFAULT_MAIL_POLL_INTERVAL)?;
 recipient.run(stop).await; // or `recipient.poll().await?` on a schedule of your own
 ```
+
+## Receiving in a browser
+
+Receiving is off in the existing provider constructors. Choose it before the processor is
+built with `Provider.new_provider_with_mail`:
+
+```javascript
+const provider = await Provider.new_provider_with_mail(
+  config,
+  "my-rings-node",
+  new BrowserMailOptions(),
+  (id) => console.info("Mail filed:", id),
+);
+const listener = provider.listen();
+await listener.started();
+
+const messages = await provider.list_mail();
+for (const { id, message, filed_at_ms } of messages) {
+  // message is a Uint8Array of raw RFC 5322 bytes; filed_at_ms is a bigint.
+  const stored = await provider.read_mail(id); // the same fields, or null
+  await provider.remove_mail(id);
+}
+```
+
+`config` is the existing `ProcessorConfig`; neither its shape nor the existing constructors
+changes. `new BrowserMailOptions()` uses a 30-second heartbeat and a 90-second descriptor TTL.
+For another schedule, pass heartbeat and TTL in milliseconds, for example
+`new BrowserMailOptions(15000, 60000)`. Each supplied schedule is checked by `MailOffer::new`.
+The Rust browser constructor is `Provider::new_browser_provider_with_mail(config,
+storage_name, options, on_mail)`.
+
+The provider polls at construction and every 60 seconds. Listening publishes the descriptor;
+the usual overlay connection setup still applies. The poll runs as a node task, so
+`Provider::close` stops it. The optional callback receives the mail id after the inbox write
+commits, without the embedder polling IndexedDB. A thrown callback error is logged and does
+not undo the filed mail. A crash or a failed recipient-record write can repeat a notification
+on retry, so callback handlers should be idempotent by mail id.
+
+The inbox is a `KvInbox<IdbStorage>` under `<storage_name>/mail-inbox`; its recipient records
+are under `<storage_name>/mail-records`. Both stores use `RecordAuthority::Retained`: opening
+them must succeed, a full store fails the poll for a later retry, and neither store evicts a
+row. Closing and reopening with the same storage name preserves filed mail and deduplication
+records. Removing mail removes only its inbox row; its deduplication record stays until its
+retention expires.
+
+Polls of one recipient are serialized. Separate tabs share the records but do not atomically
+file and remember together: simultaneous polls can both file before seeing the other's record,
+consistent with the recipient's at-least-once behavior.
+
+**One-key loss:** a browser takes a new delegatee key on every load. Mail accepted under the
+previous key during the descriptor's freshness window around a reload never opens under the
+new key. This accepted loss window is at most 93 seconds with the default offer (`TTL + 3 s`
+clock tolerance), or the configured TTL plus 3 seconds. Already filed mail remains readable
+after reload. Two open tabs may share the stores: each key's unreadable verdict is separate,
+while filed `Message-ID` records remain shared. This API receives mail; browser sending is
+not implemented.
 
 ## Example: a mailbox through gateways
 
@@ -172,5 +231,3 @@ its INBOX, which a mail client reads over IMAP as before. Its recipient records 
   owner. The topics of different recipients lie at different owners, so the load spreads.
 * **Sending from `did@domain`.** This needs an outbound relay with SPF, DKIM and reverse DNS
   for the domain, and port 25 egress. It is a later phase.
-* **Browser bindings.** The recipient library builds for the browser, but the JavaScript
-  provider does not expose it yet.

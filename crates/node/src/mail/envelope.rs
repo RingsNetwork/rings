@@ -36,6 +36,7 @@ use sha2::Sha256;
 use thiserror::Error;
 
 use super::descriptor::MailRecipient;
+use super::write_lowercase_hex;
 
 /// The most chunks one mail is cut into, `N_max`.
 pub const MAIL_CHUNKS_MAX: usize = 32;
@@ -76,7 +77,7 @@ impl MailDigest {
 impl std::fmt::Display for MailDigest {
     /// The digest in lowercase hex.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+        write_lowercase_hex(f, &self.0)
     }
 }
 

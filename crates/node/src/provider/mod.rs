@@ -25,6 +25,7 @@ use crate::extension::Backend;
 use crate::extension::BackendObserver;
 use crate::extension::DispatchDropCounters;
 use crate::extension::DispatchDrops;
+use crate::mail::registration::MailOffer;
 use crate::measure::EvidenceCollectorIdentity;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
@@ -62,6 +63,10 @@ pub struct Provider {
     onion_runtime: Arc<Mutex<Option<OnionRuntime>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_directory_endpoint: Arc<Mutex<Option<RemoteRpcEndpoint>>>,
+    /// The retained browser inbox and its recipient, shared by provider clones. Law: only a
+    /// constructor that opts in before processor build installs this state.
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
+    browser_mail: Option<std::rc::Rc<browser::provider::mail::BrowserMail>>,
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -123,6 +128,8 @@ impl Provider {
             onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
+            browser_mail: None,
         }
     }
 
@@ -302,10 +309,12 @@ impl Provider {
             onion_runtime,
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint,
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
+            browser_mail,
         } = self;
         drop((handler, extensions, dispatch_drops, onion_runtime));
         #[cfg(all(feature = "browser", target_family = "wasm"))]
-        drop(onion_directory_endpoint);
+        drop((onion_directory_endpoint, browser_mail));
         // Atomic: `Some` only for the last strong clone, which a `Weak` upgrade cannot race.
         match Arc::into_inner(processor) {
             Some(processor) => {
@@ -326,6 +335,16 @@ impl Provider {
     pub(crate) async fn new_provider_with_storage_internal(
         config: ProcessorConfig,
         stores: ProviderStores,
+    ) -> Result<Provider> {
+        Self::new_provider_with_storage_and_mail_internal(config, stores, None).await
+    }
+
+    /// Build over `stores`, installing the chosen mail heartbeat before the processor exists.
+    /// Law: `None` publishes no mail descriptor; an offer is already schedule-validated.
+    async fn new_provider_with_storage_and_mail_internal(
+        config: ProcessorConfig,
+        stores: ProviderStores,
+        mail_offer: Option<MailOffer>,
     ) -> Result<Provider> {
         let ProviderStores {
             entry: entry_storage,
@@ -372,6 +391,10 @@ impl Provider {
             Some(removal_storage) => processor_builder.removal_storage(removal_storage),
             None => processor_builder,
         };
+        let processor_builder = match mail_offer {
+            Some(offer) => processor_builder.receive_mail(offer),
+            None => processor_builder,
+        };
 
         let processor = Arc::new(processor_builder.build()?);
 
@@ -385,6 +408,8 @@ impl Provider {
             onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
+            browser_mail: None,
         })
     }
 
