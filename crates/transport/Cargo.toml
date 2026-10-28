@@ -30,7 +30,8 @@ webrtc = { workspace = true, optional = true }
 # The SCTP crate `webrtc` 0.17.1 builds against, pinned: webrtc-sctp 0.17.2 added a field to
 # `association::Config` that `webrtc` 0.17.1 does not set, so a published rings-transport would
 # resolve 0.17.2 and fail to compile. In the workspace, `[patch.crates-io]` still replaces it
-# with `vendor/webrtc-sctp`, which is 0.17.1 too. Drop the pin with the patch, at #1071.
+# with `vendor/webrtc-sctp`, which is 0.17.1 too. `webrtc` is pinned to =0.17.1 with it (the
+# workspace manifest). Drop both pins with the patch, at #1071.
 webrtc-sctp = { version = "=0.17.1", optional = true }
 
 # Dependencies for dummy feature
