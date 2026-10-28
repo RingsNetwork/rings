@@ -20,15 +20,16 @@ use rings_core::storage::idb::IdbStorage;
 use rings_core::storage::RecordAuthority;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
-use rings_rpc::protos::rings_node::*;
-use wasm_bindgen;
-use wasm_bindgen::prelude::*;
+use rings_rpc::protos::rings_node::ConnectPeerViaHttpRequest;
+use wasm_bindgen::JsError;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
 use crate::error::Result as NodeResult;
+use crate::mail::registration::MailOffer;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
 use crate::onion::https::OnionHttpsClient;
@@ -46,9 +47,13 @@ use crate::release::StoresReleased;
 
 /// Browser listener lifecycle handle and serialized `listen` entrypoint.
 mod listener;
+/// Browser mail construction, retained inbox access, and filing notifications.
+pub(crate) mod mail;
 /// Browser onion-proxy helpers exposed by the provider API.
 mod onion_proxy;
 pub use listener::ProviderListener;
+pub use mail::BrowserMailError;
+pub use mail::BrowserMailOptions;
 pub use onion_proxy::BrowserOnionProxy;
 pub use onion_proxy::BrowserOnionProxyResponse;
 
@@ -256,6 +261,16 @@ impl Provider {
         config: ProcessorConfig,
         storage_name: String,
     ) -> NodeResult<Self> {
+        Self::new_browser_provider_with_mail_offer(config, storage_name, None).await
+    }
+
+    /// Open the provider stores and build with the optional mail heartbeat. Law: the offer is
+    /// installed before build, and existing constructors pass `None`.
+    async fn new_browser_provider_with_mail_offer(
+        config: ProcessorConfig,
+        storage_name: String,
+        mail_offer: Option<MailOffer>,
+    ) -> NodeResult<Self> {
         config.validate_onion_role()?;
         let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
         let relay_storage =
@@ -272,16 +287,20 @@ impl Provider {
         let replay_storage =
             open_browser_replay_storage(&format!("{storage_name}/transaction-replay")).await?;
 
-        let provider = Self::new_provider_with_storage_internal(config, ProviderStores {
-            entry: entry_storage,
-            relay: relay_storage,
-            removals: removal_storage,
-            measure: measure_storage,
-            evidence: evidence_storage,
-            guards: onion_entry_guard_storage,
-            replay: Some(replay_storage),
-            released: StoresReleased::default(),
-        })
+        let provider = Self::new_provider_with_storage_and_mail_internal(
+            config,
+            ProviderStores {
+                entry: entry_storage,
+                relay: relay_storage,
+                removals: removal_storage,
+                measure: measure_storage,
+                evidence: evidence_storage,
+                guards: onion_entry_guard_storage,
+                replay: Some(replay_storage),
+                released: StoresReleased::default(),
+            },
+            mail_offer,
+        )
         .await?;
         provider.install_relay_onion_runtime()?;
         provider.set_backend()?;

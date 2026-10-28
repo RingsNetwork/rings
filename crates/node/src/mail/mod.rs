@@ -42,6 +42,14 @@ pub mod registration;
 
 use crate::prelude::rings_core::dht::Did;
 
+/// Write bytes in lowercase hexadecimal. Law: each byte contributes exactly two digits in
+/// input order, preserving leading zeroes in every mail digest and record-name key.
+fn write_lowercase_hex(formatter: &mut std::fmt::Formatter<'_>, bytes: &[u8]) -> std::fmt::Result {
+    bytes
+        .iter()
+        .try_for_each(|byte| write!(formatter, "{byte:02x}"))
+}
+
 /// The data topic a recipient's mail is written to: `"mail:" ‖ d`.
 ///
 /// Law: injective in `did`, and disjoint from [`descriptor::descriptor_topic`] and from every

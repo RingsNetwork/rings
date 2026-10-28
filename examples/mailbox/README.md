@@ -87,6 +87,13 @@ cargo run -p rings-mailbox-example --bin rings-mail-gateway -- \
   --config ~/.rings/config.yaml --host mx.example.net --tls-cert mx.pem --tls-key mx.key
 ```
 
+## Browser recipients
+
+A browser node can receive at `<did>@<domain>` through the same gateway by opting in with
+`Provider.new_provider_with_mail`. See
+[Receiving in a browser](../../docs/src/mail-gateway.md#receiving-in-a-browser) for setup,
+the API, storage, and reload-loss semantics.
+
 ## Module layout
 
 - `store`: the mailboxes, their model and its disk shell.
