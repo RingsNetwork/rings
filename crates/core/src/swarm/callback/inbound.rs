@@ -862,7 +862,18 @@ async fn process_logical_message(
 
 /// Report an event's logical `result` as its `completion` asks: to the awaiting drainer, or to
 /// the log for a message released from the pre-admission hold, which nobody awaits.
+///
+/// A view refusal is the protocol's answer, not a failure (#1151): it is logged here once, at
+/// debug, and reported as done, so neither the drainer's transport nor the hold logs it again.
 fn finish_completion(completion: InboundCompletion, result: Result<()>) {
+    let result = result.or_else(|error| {
+        if error.is_view_refusal() {
+            tracing::debug!(error = ?error, "refused a message this node's view does not assign it");
+            Ok(())
+        } else {
+            Err(error)
+        }
+    });
     match completion {
         InboundCompletion::Await(reply) => {
             let _ = reply.send(result);
