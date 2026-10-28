@@ -241,15 +241,12 @@ pub(crate) fn in_arc(from: Did, key: Did, to: Did) -> bool {
 /// whose view does not make it the holder or does not admit the writer, a target without a relay
 /// store, or a send refused before acceptance. Views disagree only until they converge
 /// (`Law (Convergence)`), so a kept hold reaches its holder unless its sender proof expires first.
+///
+/// ```text
+/// Law: is_unplaced_hold(e) ⟺ e.is_view_refusal() ∨ e = SingleAttemptRefused
+/// ```
 pub(crate) fn is_unplaced_hold(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::RelayHolderUnavailable
-            | Error::RelayCarrierNotHeldHere
-            | Error::RelayMessageHolderNotResponsible
-            | Error::RelayStorageUnavailable
-            | Error::SingleAttemptRefused { .. }
-    )
+    error.is_view_refusal() || matches!(error, Error::SingleAttemptRefused { .. })
 }
 
 /// The holder a view names for a relay key.

@@ -349,6 +349,11 @@ pub enum Error {
     #[error("This node does not hold the relay carrier the operation was sent to")]
     RelayCarrierNotHeldHere,
 
+    /// A relay inbox report came from a node this node's view makes no member of its own inbox
+    /// key; the views disagree until they converge, and the next pass fetches again
+    #[error("Relay inbox report from {0}, which this view makes no member of this inbox")]
+    RelayInboxReportFromNonMember(crate::dht::Did),
+
     /// This node keeps as many unacknowledged relay holds as it may
     /// (`UNACKNOWLEDGED_RELAY_HOLDS_MAX`), so it refuses another to its local sender rather than
     /// forget an earlier one
